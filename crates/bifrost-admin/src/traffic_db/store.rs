@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
+use parking_lot::Condvar;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::broadcast;
@@ -42,6 +43,12 @@ const BODY_INDEX_SCHED_TICK_MS: u64 = 200;
 const BODY_INDEX_RETRY_BACKOFF_MS: u64 = 500;
 const BODY_INDEX_BUDGET_BYTES_PER_SEC: usize = 2 * 1024 * 1024;
 const BODY_INDEX_MAX_JOBS_PER_TICK: usize = 2;
+const BODY_INDEX_PENDING_MIN_CAP: usize = 2000;
+const BODY_INDEX_PENDING_MAX_CAP: usize = 100_000;
+const BODY_INDEX_SQLITE_BATCH_SIZE: usize = 25;
+const BODY_INDEX_UPSERT_SQL: &str = "INSERT OR REPLACE INTO traffic_body_index_v1 \
+                             (id, kind, algo_version, block_size, bitset_bits, body_path, range_offset, body_size, block_count, bitsets) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
 pub type SharedTrafficDbStore = Arc<TrafficDbStore>;
 type CleanupNotifier = Arc<dyn Fn(&[String]) + Send + Sync>;
@@ -74,6 +81,15 @@ pub struct TrafficDbStore {
     body_index_scheduler_cancel: Arc<AtomicBool>,
     body_index_scheduler_handle: Mutex<Option<JoinHandle<()>>>,
     body_index_worker_handle: Mutex<Option<JoinHandle<()>>>,
+
+    // Scheduler wake-up (avoid polling when disabled)
+    body_index_wake: Arc<BodyIndexWake>,
+}
+
+#[derive(Debug)]
+struct BodyIndexWake {
+    seq: Mutex<u64>,
+    cv: Condvar,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +241,11 @@ impl TrafficDbStore {
             body_index_scheduler_cancel: Arc::new(AtomicBool::new(false)),
             body_index_scheduler_handle: Mutex::new(None),
             body_index_worker_handle: Mutex::new(None),
+
+            body_index_wake: Arc::new(BodyIndexWake {
+                seq: Mutex::new(0),
+                cv: Condvar::new(),
+            }),
         })
     }
 
@@ -238,6 +259,8 @@ impl TrafficDbStore {
             // 关闭时清理候选任务，避免之后重新开启时立刻集中跑一波。
             self.body_index_pending.lock().clear();
         }
+
+        self.body_index_notify_scheduler();
     }
 
     pub fn is_body_index_enabled(&self) -> bool {
@@ -246,6 +269,18 @@ impl TrafficDbStore {
 
     fn pending_body_index_len(&self) -> usize {
         self.body_index_pending.lock().len()
+    }
+
+    fn body_index_notify_scheduler(&self) {
+        let mut seq = self.body_index_wake.seq.lock();
+        *seq = seq.wrapping_add(1);
+        self.body_index_wake.cv.notify_all();
+    }
+
+    fn body_index_pending_cap(&self) -> usize {
+        let mr = self.max_records.load(Ordering::Relaxed);
+        let cap = mr.saturating_mul(2).max(BODY_INDEX_PENDING_MIN_CAP);
+        cap.min(BODY_INDEX_PENDING_MAX_CAP)
     }
 
     fn hash_body_ref_fingerprint(path: &str, offset: u64, size: usize) -> u64 {
@@ -273,6 +308,8 @@ impl TrafficDbStore {
             return;
         }
 
+        let wake = self.body_index_wake.clone();
+
         // NOTE: 这里使用指针地址（usize）绕过 `Send` 约束；scheduler 线程只做后台调度。
         // `TrafficDbStore` 在进程生命周期内通常由 `Arc` 持有直到退出，因此该引用是稳定的。
         let this = self as *const TrafficDbStore as usize;
@@ -281,6 +318,8 @@ impl TrafficDbStore {
             // Token bucket for budget
             let mut tokens: usize = BODY_INDEX_BUDGET_BYTES_PER_SEC;
             let mut last_refill = Instant::now();
+
+            let mut observed_seq: u64 = *wake.seq.lock();
 
             loop {
                 if cancel.load(Ordering::Relaxed) {
@@ -366,9 +405,17 @@ impl TrafficDbStore {
                     }
                 }
 
-                // idle sleep
+                // idle sleep / wait
                 if !enabled {
-                    std::thread::sleep(Duration::from_millis(500));
+                    // Wait until re-enabled or cancelled; no polling.
+                    let mut guard = wake.seq.lock();
+                    while !cancel.load(Ordering::Relaxed)
+                        && !unsafe { (&*(this as *const TrafficDbStore)).is_body_index_enabled() }
+                        && *guard == observed_seq
+                    {
+                        wake.cv.wait(&mut guard);
+                    }
+                    observed_seq = *guard;
                 } else {
                     std::thread::sleep(Duration::from_millis(BODY_INDEX_SCHED_TICK_MS));
                 }
@@ -451,7 +498,7 @@ impl TrafficDbStore {
         mut rx: mpsc::Receiver<BodyIndexJob>,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
-            let conn = match Connection::open(&db_path) {
+            let mut conn = match Connection::open(&db_path) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(error = %e, db_path = %db_path.display(), "[BODY_INDEX] Failed to open index connection");
@@ -528,27 +575,50 @@ impl TrafficDbStore {
                     && sz == size
             }
 
-            while let Some(job) = rx.blocking_recv() {
-                let (path, offset, size) = match fetch_body_ref_info(&conn, &job.id, job.kind) {
-                    Some(v) => v,
-                    None => continue,
+            while let Some(first) = rx.blocking_recv() {
+                let mut batch = vec![first];
+                while batch.len() < BODY_INDEX_SQLITE_BATCH_SIZE {
+                    match rx.try_recv() {
+                        Ok(j) => batch.push(j),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                let tx = match conn.transaction() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "[BODY_INDEX] Failed to start transaction");
+                        continue;
+                    }
                 };
 
-                if size < BODY_INDEX_MIN_BODY_SIZE {
-                    continue;
-                }
+                let mut stmt = match tx.prepare_cached(BODY_INDEX_UPSERT_SQL) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "[BODY_INDEX] Failed to prepare upsert statement");
+                        continue;
+                    }
+                };
 
-                if is_index_row_up_to_date(&conn, &job.id, job.kind, &path, offset, size) {
-                    continue;
-                }
+                let mut wrote_any = false;
+                for job in batch {
+                    let (path, offset, size) = match fetch_body_ref_info(&tx, &job.id, job.kind) {
+                        Some(v) => v,
+                        None => continue,
+                    };
 
-                match build_body_index_v1(&path, offset, size) {
-                    Ok((block_count, bitsets)) => {
-                        let result = conn.execute(
-                            "INSERT OR REPLACE INTO traffic_body_index_v1 \
-                             (id, kind, algo_version, block_size, bitset_bits, body_path, range_offset, body_size, block_count, bitsets) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                            params![
+                    if size < BODY_INDEX_MIN_BODY_SIZE {
+                        continue;
+                    }
+
+                    if is_index_row_up_to_date(&tx, &job.id, job.kind, &path, offset, size) {
+                        continue;
+                    }
+
+                    match build_body_index_v1(&path, offset, size) {
+                        Ok((block_count, bitsets)) => {
+                            let result = stmt.execute(params![
                                 job.id,
                                 job.kind,
                                 BODY_INDEX_ALGO_VERSION,
@@ -559,14 +629,23 @@ impl TrafficDbStore {
                                 size as i64,
                                 block_count as i64,
                                 bitsets,
-                            ],
-                        );
-                        if let Err(e) = result {
-                            tracing::warn!(error = %e, "[BODY_INDEX] Failed to upsert index row");
+                            ]);
+                            if let Err(e) = result {
+                                tracing::warn!(error = %e, "[BODY_INDEX] Failed to upsert index row");
+                            } else {
+                                wrote_any = true;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, path = %path, "[BODY_INDEX] Skip index build");
                         }
                     }
-                    Err(e) => {
-                        tracing::debug!(error = %e, path = %path, "[BODY_INDEX] Skip index build");
+                }
+
+                drop(stmt);
+                if wrote_any {
+                    if let Err(e) = tx.commit() {
+                        tracing::warn!(error = %e, "[BODY_INDEX] Failed to commit transaction");
                     }
                 }
             }
@@ -939,9 +1018,21 @@ impl TrafficDbStore {
                 if changed {
                     p.last_change_ms = now;
                     p.next_attempt_ms = 0;
+                    self.body_index_notify_scheduler();
                 }
             }
             None => {
+                // Hard cap: avoid unbounded growth under extreme long-lived streaming workloads.
+                // Keep the write path O(1): if cap reached, drop new candidates.
+                let cap = self.body_index_pending_cap();
+                if pending.len() >= cap {
+                    tracing::debug!(
+                        pending = pending.len(),
+                        cap = cap,
+                        "[BODY_INDEX] Pending cap reached; drop candidate"
+                    );
+                    return;
+                }
                 pending.insert(
                     dedupe_key,
                     PendingBodyIndexJob {
@@ -951,6 +1042,7 @@ impl TrafficDbStore {
                         next_attempt_ms: 0,
                     },
                 );
+                self.body_index_notify_scheduler();
             }
         }
 
@@ -1941,6 +2033,7 @@ impl Drop for TrafficDbStore {
         // Stop scheduler first (it owns a clone of body_index_tx).
         self.body_index_scheduler_cancel
             .store(true, Ordering::SeqCst);
+        self.body_index_wake.cv.notify_all();
         if let Some(handle) = self.body_index_scheduler_handle.lock().take() {
             let _ = handle.join();
         }
