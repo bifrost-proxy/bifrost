@@ -105,9 +105,17 @@ function abortLoadMore() {
 }
 
 function isAbortError(err: unknown): boolean {
-  return (
-    err instanceof DOMException && err.name === 'AbortError'
-  ) || ((err as any)?.name === 'AbortError');
+  if (err instanceof DOMException && err.name === 'AbortError') {
+    return true;
+  }
+  if (typeof err !== 'object' || err === null) {
+    return false;
+  }
+  if (!('name' in err)) {
+    return false;
+  }
+  const name = (err as { name?: unknown }).name;
+  return name === 'AbortError';
 }
 
 interface SearchState {
@@ -347,8 +355,8 @@ export const useSearchStore = create<SearchState>()(
       const ct = streamResp.headers.get('content-type') || '';
       if (streamResp.ok && ct.includes('text/event-stream') && streamResp.body) {
         let accResults: SearchResultItem[] = results;
-        let baseSearched = get().totalSearched;
-        let baseMatched = get().totalMatched;
+        const baseSearched = get().totalSearched;
+        const baseMatched = get().totalMatched;
 
         for await (const ev of parseSseStream(streamResp.body)) {
           if (ev.event === 'result') {

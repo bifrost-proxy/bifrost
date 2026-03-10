@@ -44,6 +44,7 @@ export interface TrafficConfig {
   max_body_memory_size: number;
   max_body_buffer_size: number;
   max_body_probe_size: number;
+  enable_body_index: boolean;
   file_retention_days: number;
 }
 
@@ -96,6 +97,7 @@ export interface UpdateTrafficConfigRequest {
   max_body_memory_size?: number;
   max_body_buffer_size?: number;
   max_body_probe_size?: number;
+  enable_body_index?: boolean;
   file_retention_days?: number;
 }
 

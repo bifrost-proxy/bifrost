@@ -561,6 +561,7 @@ pub fn run_foreground(
             )
             .expect("Failed to create traffic database"),
         );
+        traffic_db_store.set_body_index_enabled(stored_config.traffic.enable_body_index);
 
         let (async_traffic_writer, async_traffic_rx) =
             AsyncTrafficWriter::new(ASYNC_TRAFFIC_BUFFER_SIZE);
@@ -927,6 +928,7 @@ pub fn run_daemon(
                     )
                     .expect("Failed to create traffic database"),
                 );
+                traffic_db_store.set_body_index_enabled(stored_config.traffic.enable_body_index);
 
                 let (async_traffic_writer, async_traffic_rx) =
                     AsyncTrafficWriter::new(ASYNC_TRAFFIC_BUFFER_SIZE);

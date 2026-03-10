@@ -1,4 +1,16 @@
-import { Card, Col, Row, Space, Typography, Slider, Divider, Button, Popconfirm, theme } from "antd";
+import {
+  Card,
+  Col,
+  Row,
+  Space,
+  Typography,
+  Slider,
+  Divider,
+  Button,
+  Popconfirm,
+  theme,
+  Switch,
+} from "antd";
 import {
   ThunderboltOutlined,
   FolderOutlined,
@@ -29,6 +41,7 @@ export interface PerformanceTabProps {
   handleMaxBodyMemorySizeChange: (value: number) => void;
   handleMaxBodyBufferSizeChange: (value: number) => void;
   handleMaxBodyProbeSizeChange: (value: number) => void;
+  handleEnableBodyIndexChange: (enabled: boolean) => void;
   handleFileRetentionDaysChange: (value: number) => void;
   handleClearBodyCache: () => void;
   formatBytes: (bytes: number) => string;
@@ -52,6 +65,7 @@ export default function PerformanceTab({
   handleMaxBodyMemorySizeChange,
   handleMaxBodyBufferSizeChange,
   handleMaxBodyProbeSizeChange,
+  handleEnableBodyIndexChange,
   handleFileRetentionDaysChange,
   handleClearBodyCache,
   formatBytes,
@@ -233,6 +247,32 @@ export default function PerformanceTab({
                       ? "Off"
                       : formatBytes(trafficDraft?.max_body_probe_size || 0)}
                   </Text>
+                </Col>
+              </Row>
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <Row justify="space-between" align="middle">
+                <Col flex="1" style={{ marginRight: 16 }}>
+                  <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                    <Text>Body Index (Search)</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Builds a lightweight index for request/response bodies to speed up search.
+                      May increase CPU usage; recommended to keep off unless needed.
+                    </Text>
+                  </Space>
+                </Col>
+                <Col>
+                  <Space>
+                    <Switch
+                      checked={trafficDraft?.enable_body_index ?? false}
+                      onChange={handleEnableBodyIndexChange}
+                      disabled={!trafficDraft}
+                    />
+                    <Text code>
+                      {(trafficDraft?.enable_body_index ?? false) ? "On" : "Off"}
+                    </Text>
+                  </Space>
                 </Col>
               </Row>
 

@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -126,6 +126,24 @@ CREATE INDEX IF NOT EXISTS idx_flags ON traffic_records(flags);
 CREATE INDEX IF NOT EXISTS idx_seq_desc ON traffic_records(sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_host_seq ON traffic_records(host, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_status_seq ON traffic_records(status, sequence DESC);
+
+-- Body index for fast negative filtering in search (v1)
+-- Note: project rule says no backwards compatibility; bump schema_version and recreate DB.
+CREATE TABLE IF NOT EXISTS traffic_body_index_v1 (
+    id TEXT NOT NULL,
+    kind INTEGER NOT NULL, -- 0=req_body, 1=res_body
+    algo_version INTEGER NOT NULL,
+    block_size INTEGER NOT NULL,
+    bitset_bits INTEGER NOT NULL,
+    body_path TEXT NOT NULL,
+    range_offset INTEGER NOT NULL DEFAULT 0,
+    body_size INTEGER NOT NULL,
+    block_count INTEGER NOT NULL,
+    bitsets BLOB NOT NULL,
+    PRIMARY KEY (id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_body_index_id ON traffic_body_index_v1(id);
 
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY NOT NULL,

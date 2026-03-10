@@ -9,7 +9,7 @@ use crate::body_store::{BodyRef, SharedBodyStore};
 use crate::connection_monitor::SharedConnectionMonitor;
 use crate::frame_store::SharedFrameStore;
 use crate::traffic_db::{
-    QueryParams, SharedTrafficDbStore, TrafficSearchFields, TrafficSummaryCompact,
+    BodyIndexRow, QueryParams, SharedTrafficDbStore, TrafficSearchFields, TrafficSummaryCompact,
 };
 
 const MAX_PREVIEW_CONTEXT: usize = 50;
@@ -17,6 +17,9 @@ const DEFAULT_BATCH_SIZE: usize = 50;
 const SEARCH_BATCH_SIZE: usize = 200;
 const MAX_SEARCH_ITERATIONS: usize = 50;
 const MAX_TOTAL_SEARCHED: usize = 10000;
+const BODY_INDEX_BLOCK_SIZE: usize = 64 * 1024;
+const BODY_INDEX_BITSET_BITS: usize = 32 * 1024;
+const BODY_INDEX_BITSET_BYTES: usize = BODY_INDEX_BITSET_BITS / 8;
 
 pub struct SearchEngine {
     traffic_db: SharedTrafficDbStore,
@@ -75,6 +78,13 @@ impl SearchEngine {
         let search_id = generate_search_id();
         let batch_size = request.limit.unwrap_or(DEFAULT_BATCH_SIZE);
         let keyword_lower = request.keyword.to_lowercase();
+        let keyword_bytes_len = keyword_lower.len();
+
+        // Only enable body index when case-folding won't cause false negatives for non-ASCII.
+        // - ASCII: safe
+        // - Non-ASCII: only safe when lowercase transform is identity (e.g. Chinese)
+        let can_use_body_index =
+            request.keyword.is_ascii() || request.keyword.to_lowercase() == request.keyword;
 
         // search scope / filters 计算一次，避免循环里反复判断
         let scope = &request.scope;
@@ -87,7 +97,10 @@ impl SearchEngine {
         let need_request_headers = scope.should_search_request_headers();
         let need_response_headers = scope.should_search_response_headers();
         let need_request_body_ref = scope.should_search_request_body();
-        let need_response_body_ref = scope.should_search_response_body();
+        // SSE events 在 proxy 侧以 `sse_raw` response body 的形式落盘，并不作为 frames 持久化。
+        // 因此 sse_events 搜索需要拿到 response_body_ref。
+        let need_response_body_ref =
+            scope.should_search_response_body() || scope.should_search_sse_events();
 
         debug!(
             keyword = %request.keyword,
@@ -148,6 +161,26 @@ impl SearchEngine {
                 )
             };
 
+            let req_body_index_map = if self.traffic_db.is_body_index_enabled()
+                && can_use_body_index
+                && need_request_body_ref
+                && keyword_bytes_len >= 3
+            {
+                self.traffic_db.get_body_indexes_by_ids(&candidate_ids, 0)
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            let res_body_index_map = if self.traffic_db.is_body_index_enabled()
+                && can_use_body_index
+                && need_response_body_ref
+                && keyword_bytes_len >= 3
+            {
+                self.traffic_db.get_body_indexes_by_ids(&candidate_ids, 1)
+            } else {
+                std::collections::HashMap::new()
+            };
+
             for compact in &query_result.records {
                 total_searched += 1;
                 current_cursor = Some(compact.seq);
@@ -174,7 +207,14 @@ impl SearchEngine {
                     continue;
                 }
 
-                if let Some(result) = self.search_compact(scope, &keyword_lower, compact, fields) {
+                if let Some(result) = self.search_compact(
+                    scope,
+                    &keyword_lower,
+                    compact,
+                    fields,
+                    req_body_index_map.get(&compact.id),
+                    res_body_index_map.get(&compact.id),
+                ) {
                     results.push(result);
                     if let Some(last) = results.last() {
                         on_result(last);
@@ -226,6 +266,8 @@ impl SearchEngine {
         keyword: &str,
         compact: &TrafficSummaryCompact,
         fields: Option<&TrafficSearchFields>,
+        request_body_index: Option<&BodyIndexRow>,
+        response_body_index: Option<&BodyIndexRow>,
     ) -> Option<SearchResultItem> {
         // 搜索目标是尽快返回结果：一条 record 只要命中一次就足够展示。
         // 因此这里按“便宜 -> 昂贵”的顺序，并在首次命中后立即返回。
@@ -273,7 +315,14 @@ impl SearchEngine {
 
         if scope.should_search_request_body() {
             if let Some(body_ref) = fields.and_then(|f| f.request_body_ref.as_ref()) {
-                if let Some(m) = self.search_body(body_ref, keyword, "request_body") {
+                if let Some(m) = self.search_body_indexed(
+                    &compact.id,
+                    0,
+                    body_ref,
+                    keyword,
+                    "request_body",
+                    request_body_index,
+                ) {
                     return Some(SearchResultItem {
                         record: compact.clone(),
                         matches: vec![m],
@@ -284,7 +333,14 @@ impl SearchEngine {
 
         if scope.should_search_response_body() {
             if let Some(body_ref) = fields.and_then(|f| f.response_body_ref.as_ref()) {
-                if let Some(m) = self.search_body(body_ref, keyword, "response_body") {
+                if let Some(m) = self.search_body_indexed(
+                    &compact.id,
+                    1,
+                    body_ref,
+                    keyword,
+                    "response_body",
+                    response_body_index,
+                ) {
                     return Some(SearchResultItem {
                         record: compact.clone(),
                         matches: vec![m],
@@ -311,7 +367,25 @@ impl SearchEngine {
         }
 
         if is_sse && scope.should_search_sse_events() {
-            if let Some(frame_matches) = self.search_frames(&compact.id, keyword, "sse_event") {
+            // SSE messages 默认以 raw body (sse_raw) 形式存储在 response_body_ref。
+            // 这里直接在 body 上做搜索，字段名仍用 sse_event，保持前端/UI 的一致性。
+            if let Some(body_ref) = fields.and_then(|f| f.response_body_ref.as_ref()) {
+                if let Some(m) = self.search_body_indexed(
+                    &compact.id,
+                    1,
+                    body_ref,
+                    keyword,
+                    "sse_event",
+                    response_body_index,
+                ) {
+                    return Some(SearchResultItem {
+                        record: compact.clone(),
+                        matches: vec![m],
+                    });
+                }
+            } else if let Some(frame_matches) =
+                self.search_frames(&compact.id, keyword, "sse_event")
+            {
                 if let Some(first) = frame_matches.into_iter().next() {
                     return Some(SearchResultItem {
                         record: compact.clone(),
@@ -479,6 +553,81 @@ impl SearchEngine {
                         return self.search_text(&content, keyword, field);
                     }
                 }
+                None
+            }
+        }
+    }
+
+    fn search_body_indexed(
+        &self,
+        traffic_id: &str,
+        kind: i32,
+        body_ref: &BodyRef,
+        keyword_lower: &str,
+        field: &str,
+        body_index: Option<&BodyIndexRow>,
+    ) -> Option<MatchLocation> {
+        match body_ref {
+            BodyRef::Inline { data } => self.search_text(data, keyword_lower, field),
+            BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+                let Some(idx) = body_index else {
+                    // No index available, fallback to existing load path.
+                    return self.search_body(body_ref, keyword_lower, field);
+                };
+
+                if idx.kind != kind || idx.id != traffic_id {
+                    return self.search_body(body_ref, keyword_lower, field);
+                }
+
+                let kw_bytes = keyword_lower.as_bytes();
+                if kw_bytes.len() < 3 {
+                    // k=2 not supported by design
+                    return self.search_body(body_ref, keyword_lower, field);
+                }
+
+                if idx.block_count == 0 {
+                    // Index row is unusable; never allow false negatives.
+                    return self.search_body(body_ref, keyword_lower, field);
+                }
+                if idx.bitsets.len() != idx.block_count.saturating_mul(BODY_INDEX_BITSET_BYTES) {
+                    return self.search_body(body_ref, keyword_lower, field);
+                }
+
+                let gram_idxs = build_keyword_trigram_indexes(kw_bytes);
+                if gram_idxs.is_empty() {
+                    return self.search_body(body_ref, keyword_lower, field);
+                }
+
+                let window_len = compute_window_blocks(kw_bytes.len());
+
+                for start_block in 0..idx.block_count {
+                    let end_block = (start_block + window_len).min(idx.block_count);
+                    if !window_may_match(&idx.bitsets, start_block, end_block, &gram_idxs) {
+                        continue;
+                    }
+
+                    let rel_start = start_block * BODY_INDEX_BLOCK_SIZE;
+                    if rel_start >= idx.size {
+                        break;
+                    }
+                    let rel_available = idx.size - rel_start;
+                    let need = (end_block - start_block) * BODY_INDEX_BLOCK_SIZE + kw_bytes.len();
+                    let read_len = rel_available.min(need);
+
+                    let Some(bytes) =
+                        read_file_range(&idx.path, idx.offset + rel_start as u64, read_len)
+                    else {
+                        // IO failure: fall back to the existing body loading path.
+                        return self.search_body(body_ref, keyword_lower, field);
+                    };
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if let Some(m) =
+                        search_text_with_base_offset(&text, keyword_lower, field, rel_start)
+                    {
+                        return Some(m);
+                    }
+                }
+
                 None
             }
         }
@@ -769,6 +918,131 @@ fn build_compact_url(compact: &TrafficSummaryCompact) -> String {
     }
 }
 
+#[inline]
+fn compute_window_blocks(keyword_len_bytes: usize) -> usize {
+    // keyword may span multiple blocks; choose a conservative window size.
+    // For most cases (keyword <= 64KB), window_len = 2.
+    let blocks = keyword_len_bytes.div_ceil(BODY_INDEX_BLOCK_SIZE);
+    (blocks + 1).max(2)
+}
+
+fn build_keyword_trigram_indexes(keyword_bytes: &[u8]) -> Vec<usize> {
+    if keyword_bytes.len() < 3 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(keyword_bytes.len().saturating_sub(2));
+    let mask = (BODY_INDEX_BITSET_BITS - 1) as u32;
+    for i in 0..(keyword_bytes.len() - 2) {
+        let b0 = fold_ascii_lower(keyword_bytes[i]);
+        let b1 = fold_ascii_lower(keyword_bytes[i + 1]);
+        let b2 = fold_ascii_lower(keyword_bytes[i + 2]);
+        let idx = (hash_trigram_u32(b0, b1, b2) & mask) as usize;
+        out.push(idx);
+    }
+    out
+}
+
+#[inline]
+fn window_may_match(
+    bitsets: &[u8],
+    start_block: usize,
+    end_block: usize,
+    trigram_idxs: &[usize],
+) -> bool {
+    // Important: we index trigrams *within* each block only. Trigrams that cross block boundaries
+    // will not be present in any single block's bitset.
+    //
+    // To avoid false negatives, allow up to 2 missing trigrams per boundary in the window.
+    let window_blocks = end_block.saturating_sub(start_block).max(1);
+    let max_missing = window_blocks.saturating_sub(1) * 2;
+    let mut missing = 0usize;
+
+    for &idx in trigram_idxs {
+        let byte = idx >> 3;
+        let bit = 1u8 << (idx & 7);
+        let mut ok = false;
+        for b in start_block..end_block {
+            let base = b * BODY_INDEX_BITSET_BYTES;
+            if (bitsets[base + byte] & bit) != 0 {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            missing += 1;
+            if missing > max_missing {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn read_file_range(path: &str, start: u64, len: usize) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = vec![0u8; len];
+    let n = f.read(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    buf.truncate(n);
+    Some(buf)
+}
+
+fn search_text_with_base_offset(
+    text: &str,
+    keyword_lower: &str,
+    field: &str,
+    base_offset: usize,
+) -> Option<MatchLocation> {
+    let text_lower = text.to_lowercase();
+    if let Some(pos) = text_lower.find(keyword_lower) {
+        let start = find_char_boundary(text, pos.saturating_sub(MAX_PREVIEW_CONTEXT), false);
+        let end = find_char_boundary(
+            text,
+            (pos + keyword_lower.len() + MAX_PREVIEW_CONTEXT).min(text.len()),
+            true,
+        );
+
+        let preview = if start > 0 || end < text.len() {
+            let prefix = if start > 0 { "..." } else { "" };
+            let suffix = if end < text.len() { "..." } else { "" };
+            format!("{}{}{}", prefix, &text[start..end], suffix)
+        } else {
+            text[start..end].to_string()
+        };
+
+        Some(MatchLocation {
+            field: field.to_string(),
+            preview,
+            offset: base_offset.saturating_add(pos),
+        })
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn fold_ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
+}
+
+#[inline]
+fn hash_trigram_u32(b0: u8, b1: u8, b2: u8) -> u32 {
+    let mut x = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}
+
 fn generate_search_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now()
@@ -801,5 +1075,101 @@ fn find_char_boundary(s: &str, byte_index: usize, search_forward: bool) -> usize
             }
         }
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traffic_db::TrafficDbStore;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn create_test_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost_search_engine_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[inline]
+    fn index_block_bytes_v1(block: &[u8], bitset: &mut [u8]) {
+        if block.len() < 3 {
+            return;
+        }
+        let mask = (BODY_INDEX_BITSET_BITS - 1) as u32;
+        for i in 0..(block.len() - 2) {
+            let b0 = fold_ascii_lower(block[i]);
+            let b1 = fold_ascii_lower(block[i + 1]);
+            let b2 = fold_ascii_lower(block[i + 2]);
+            let idx = (hash_trigram_u32(b0, b1, b2) & mask) as usize;
+            let byte = idx >> 3;
+            let bit = 1u8 << (idx & 7);
+            bitset[byte] |= bit;
+        }
+    }
+
+    #[test]
+    fn test_window_may_match_allows_boundary_missing_trigrams() {
+        // Build a body where the keyword crosses the block boundary.
+        // Without boundary-missing allowance, this would be a false negative.
+        let dir = create_test_dir();
+        let traffic_db = Arc::new(TrafficDbStore::new(dir.clone(), 10, 0, None).unwrap());
+        let engine = SearchEngine::new(traffic_db, None);
+
+        let keyword = "abcde";
+        let insert_at = BODY_INDEX_BLOCK_SIZE - 2;
+
+        let mut body = vec![b'x'; BODY_INDEX_BLOCK_SIZE * 2];
+        body[insert_at..insert_at + keyword.len()].copy_from_slice(keyword.as_bytes());
+
+        let body_path = dir.join("body.bin");
+        fs::write(&body_path, &body).unwrap();
+
+        let mut bitsets = vec![0u8; BODY_INDEX_BITSET_BYTES * 2];
+        index_block_bytes_v1(
+            &body[..BODY_INDEX_BLOCK_SIZE],
+            &mut bitsets[..BODY_INDEX_BITSET_BYTES],
+        );
+        index_block_bytes_v1(
+            &body[BODY_INDEX_BLOCK_SIZE..],
+            &mut bitsets[BODY_INDEX_BITSET_BYTES..],
+        );
+
+        let idx = BodyIndexRow {
+            id: "t1".to_string(),
+            kind: 0,
+            path: body_path.display().to_string(),
+            offset: 0,
+            size: body.len(),
+            block_count: 2,
+            bitsets,
+        };
+
+        let body_ref = BodyRef::File {
+            path: idx.path.clone(),
+            size: idx.size,
+        };
+
+        let m = engine.search_body_indexed("t1", 0, &body_ref, keyword, "request_body", Some(&idx));
+
+        assert!(m.is_some());
+        assert!(m.unwrap().offset >= insert_at);
+    }
+
+    #[test]
+    fn test_window_may_match_rejects_when_too_many_missing_trigrams() {
+        // Empty bitsets should reject keywords with >2 trigrams in a 2-block window.
+        // keyword len=6 => 4 trigrams, max_missing=2 (one boundary).
+        let trigram_idxs = build_keyword_trigram_indexes(b"abcdef");
+        let bitsets = vec![0u8; BODY_INDEX_BITSET_BYTES * 2];
+        assert!(!window_may_match(&bitsets, 0, 2, &trigram_idxs));
     }
 }

@@ -1,13 +1,19 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 use super::query::{Direction, QueryParams, QueryResult};
 use super::schema::{get_insert_sql, get_update_sql, init_database, InitError};
@@ -17,6 +23,25 @@ use crate::traffic::{SocketStatus, TrafficRecord};
 
 const DEFAULT_CACHE_SIZE: usize = 500;
 const CLEANUP_CHECK_INTERVAL: u64 = 100;
+
+// Body index v1 parameters (no compression)
+const BODY_INDEX_ALGO_VERSION: i32 = 1;
+const BODY_INDEX_BLOCK_SIZE: usize = 64 * 1024;
+const BODY_INDEX_BITSET_BITS: usize = 32 * 1024;
+const BODY_INDEX_BITSET_BYTES: usize = BODY_INDEX_BITSET_BITS / 8;
+const BODY_INDEX_MIN_BODY_SIZE: usize = 64 * 1024;
+const BODY_INDEX_QUEUE_CAPACITY: usize = 128;
+const BODY_INDEX_DEDUPE_CACHE_SIZE: usize = 2048;
+
+// Body index scheduler (debounce + budget)
+// 目的：不影响主链路代理性能。
+// - debounce: body 仍在增长时不重复构建；只在稳定一段时间后构建一次
+// - budget: 后台每秒最多处理一定字节量，避免吃满 CPU
+const BODY_INDEX_IDLE_DEBOUNCE_MS: u64 = 3_000;
+const BODY_INDEX_SCHED_TICK_MS: u64 = 200;
+const BODY_INDEX_RETRY_BACKOFF_MS: u64 = 500;
+const BODY_INDEX_BUDGET_BYTES_PER_SEC: usize = 2 * 1024 * 1024;
+const BODY_INDEX_MAX_JOBS_PER_TICK: usize = 2;
 
 pub type SharedTrafficDbStore = Arc<TrafficDbStore>;
 type CleanupNotifier = Arc<dyn Fn(&[String]) + Send + Sync>;
@@ -33,6 +58,54 @@ pub struct TrafficDbStore {
     recent_cache: RwLock<LruCache<String, TrafficRecord>>,
     write_count: AtomicU64,
     cleanup_notifier: RwLock<Option<CleanupNotifier>>,
+
+    // Best-effort background body indexer (must not block main write path)
+    body_index_enabled: AtomicBool,
+    body_index_tx: Option<mpsc::Sender<BodyIndexJob>>,
+    body_index_rx: Mutex<Option<mpsc::Receiver<BodyIndexJob>>>,
+    body_index_dedupe: RwLock<LruCache<String, BodyIndexDedupeKey>>,
+
+    // Debounced candidates; keyed by "{id}:{kind}".
+    // IMPORTANT: must be cheap to update (main write path).
+    body_index_pending: Mutex<HashMap<String, PendingBodyIndexJob>>,
+    body_index_scheduler_started: AtomicBool,
+
+    // Scheduler/worker lifetime management (important for tests / drop safety)
+    body_index_scheduler_cancel: Arc<AtomicBool>,
+    body_index_scheduler_handle: Mutex<Option<JoinHandle<()>>>,
+    body_index_worker_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Debug, Clone)]
+struct BodyIndexDedupeKey {
+    fingerprint: u64,
+    size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BodyIndexJob {
+    id: String,
+    kind: i32, // 0=req, 1=res
+    approx_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PendingBodyIndexJob {
+    id: String,
+    kind: i32,
+    last_change_ms: u64,
+    next_attempt_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BodyIndexRow {
+    pub id: String,
+    pub kind: i32,
+    pub path: String,
+    pub offset: u64,
+    pub size: usize,
+    pub block_count: usize,
+    pub bitsets: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +188,12 @@ impl TrafficDbStore {
 
         let cache_size = std::num::NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap();
 
+        let (body_index_tx, body_index_rx) =
+            mpsc::channel::<BodyIndexJob>(BODY_INDEX_QUEUE_CAPACITY);
+        // Lazy-start index worker on first enqueue to avoid any startup impact.
+
+        let dedupe_cap = std::num::NonZeroUsize::new(BODY_INDEX_DEDUPE_CACHE_SIZE).unwrap();
+
         tracing::info!(
             current_sequence = current_seq,
             "[TRAFFIC_DB] SQLite traffic store initialized"
@@ -132,6 +211,367 @@ impl TrafficDbStore {
             recent_cache: RwLock::new(LruCache::new(cache_size)),
             write_count: AtomicU64::new(0),
             cleanup_notifier: RwLock::new(None),
+
+            body_index_tx: Some(body_index_tx),
+            body_index_rx: Mutex::new(Some(body_index_rx)),
+            body_index_dedupe: RwLock::new(LruCache::new(dedupe_cap)),
+            // 默认关闭：body_index 计算对长连接/流式 body 场景会显著增加 CPU。
+            // 如需开启，请通过 performance config 显式打开。
+            body_index_enabled: AtomicBool::new(false),
+
+            body_index_pending: Mutex::new(HashMap::new()),
+            body_index_scheduler_started: AtomicBool::new(false),
+
+            body_index_scheduler_cancel: Arc::new(AtomicBool::new(false)),
+            body_index_scheduler_handle: Mutex::new(None),
+            body_index_worker_handle: Mutex::new(None),
+        })
+    }
+
+    pub fn set_body_index_enabled(&self, enabled: bool) {
+        let old = self.body_index_enabled.swap(enabled, Ordering::SeqCst);
+        if old != enabled {
+            tracing::info!(enabled = enabled, "[BODY_INDEX] Body index feature toggled");
+        }
+
+        if !enabled {
+            // 关闭时清理候选任务，避免之后重新开启时立刻集中跑一波。
+            self.body_index_pending.lock().clear();
+        }
+    }
+
+    pub fn is_body_index_enabled(&self) -> bool {
+        self.body_index_enabled.load(Ordering::Relaxed)
+    }
+
+    fn pending_body_index_len(&self) -> usize {
+        self.body_index_pending.lock().len()
+    }
+
+    fn hash_body_ref_fingerprint(path: &str, offset: u64, size: usize) -> u64 {
+        let mut h = DefaultHasher::new();
+        path.hash(&mut h);
+        offset.hash(&mut h);
+        size.hash(&mut h);
+        h.finish()
+    }
+
+    fn get_body_index_seen(&self, key: &str) -> Option<BodyIndexDedupeKey> {
+        self.body_index_dedupe.read().peek(key).cloned()
+    }
+
+    fn ensure_body_index_scheduler_started(&self) {
+        if self
+            .body_index_scheduler_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let tx = self.body_index_tx.clone();
+        if tx.is_none() {
+            return;
+        }
+
+        // NOTE: 这里使用指针地址（usize）绕过 `Send` 约束；scheduler 线程只做后台调度。
+        // `TrafficDbStore` 在进程生命周期内通常由 `Arc` 持有直到退出，因此该引用是稳定的。
+        let this = self as *const TrafficDbStore as usize;
+        let cancel = self.body_index_scheduler_cancel.clone();
+        let handle = std::thread::spawn(move || {
+            // Token bucket for budget
+            let mut tokens: usize = BODY_INDEX_BUDGET_BYTES_PER_SEC;
+            let mut last_refill = Instant::now();
+
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                // refill
+                let elapsed_ms = last_refill.elapsed().as_millis() as u64;
+                if elapsed_ms > 0 {
+                    let add = (BODY_INDEX_BUDGET_BYTES_PER_SEC as u64)
+                        .saturating_mul(elapsed_ms)
+                        .saturating_div(1000) as usize;
+                    tokens = tokens
+                        .saturating_add(add)
+                        .min(BODY_INDEX_BUDGET_BYTES_PER_SEC);
+                    last_refill = Instant::now();
+                }
+
+                let (enabled, jobs) = unsafe {
+                    let store = &*(this as *const TrafficDbStore);
+                    if !store.is_body_index_enabled() {
+                        (false, Vec::new())
+                    } else {
+                        (
+                            true,
+                            store.drain_ready_body_index_jobs(TrafficDbStore::now_ms()),
+                        )
+                    }
+                };
+
+                if enabled && !jobs.is_empty() {
+                    let pending_left =
+                        unsafe { (&*(this as *const TrafficDbStore)).pending_body_index_len() };
+                    tracing::debug!(
+                        ready = jobs.len(),
+                        pending_left = pending_left,
+                        tokens = tokens,
+                        "[BODY_INDEX] Scheduler tick"
+                    );
+                }
+
+                if enabled {
+                    if let Some(ref tx) = tx {
+                        let mut sent = 0usize;
+                        for job in jobs {
+                            if sent >= BODY_INDEX_MAX_JOBS_PER_TICK {
+                                unsafe {
+                                    (&*(this as *const TrafficDbStore))
+                                        .requeue_body_index_job(job, BODY_INDEX_RETRY_BACKOFF_MS);
+                                }
+                                continue;
+                            }
+
+                            // Budget: approximate cost by body size
+                            if tokens < job.approx_size {
+                                unsafe {
+                                    (&*(this as *const TrafficDbStore))
+                                        .requeue_body_index_job(job, BODY_INDEX_RETRY_BACKOFF_MS);
+                                }
+                                continue;
+                            }
+
+                            // Ensure worker started (lazy)
+                            unsafe {
+                                (&*(this as *const TrafficDbStore))
+                                    .ensure_body_index_worker_started()
+                            };
+
+                            match tx.try_send(job.clone()) {
+                                Ok(()) => {
+                                    tokens = tokens.saturating_sub(job.approx_size);
+                                    sent += 1;
+                                }
+                                Err(mpsc::error::TrySendError::Full(_)) => unsafe {
+                                    (&*(this as *const TrafficDbStore))
+                                        .requeue_body_index_job(job, BODY_INDEX_RETRY_BACKOFF_MS)
+                                },
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    // worker closed; drop tasks
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // idle sleep
+                if !enabled {
+                    std::thread::sleep(Duration::from_millis(500));
+                } else {
+                    std::thread::sleep(Duration::from_millis(BODY_INDEX_SCHED_TICK_MS));
+                }
+            }
+
+            tracing::info!("[BODY_INDEX] Scheduler stopped");
+        });
+
+        *self.body_index_scheduler_handle.lock() = Some(handle);
+
+        tracing::info!("[BODY_INDEX] Scheduler started");
+    }
+
+    fn drain_ready_body_index_jobs(&self, now: u64) -> Vec<BodyIndexJob> {
+        let mut out = Vec::new();
+        let mut pending = self.body_index_pending.lock();
+
+        // Collect keys first to avoid holding borrow across removals.
+        let mut ready_keys: Vec<String> = Vec::new();
+        for (k, v) in pending.iter() {
+            if v.next_attempt_ms > now {
+                continue;
+            }
+            if now.saturating_sub(v.last_change_ms) < BODY_INDEX_IDLE_DEBOUNCE_MS {
+                continue;
+            }
+            ready_keys.push(k.clone());
+        }
+
+        for k in ready_keys {
+            if let Some(v) = pending.remove(&k) {
+                let approx_size = self
+                    .get_body_index_seen(&k)
+                    .map(|s| s.size)
+                    .unwrap_or(BODY_INDEX_MIN_BODY_SIZE);
+                out.push(BodyIndexJob {
+                    id: v.id,
+                    kind: v.kind,
+                    approx_size,
+                });
+            }
+        }
+        out
+    }
+
+    fn requeue_body_index_job(&self, job: BodyIndexJob, backoff_ms: u64) {
+        let now = Self::now_ms();
+        let key = format!("{}:{}", job.id, job.kind);
+        let mut pending = self.body_index_pending.lock();
+        pending.insert(
+            key.clone(),
+            PendingBodyIndexJob {
+                id: job.id,
+                kind: job.kind,
+                // 已经稳定过一次了，重试不需要重新 debounce
+                last_change_ms: now.saturating_sub(BODY_INDEX_IDLE_DEBOUNCE_MS + 1),
+                next_attempt_ms: now.saturating_add(backoff_ms),
+            },
+        );
+
+        tracing::trace!(
+            id = %key,
+            approx_size = job.approx_size,
+            backoff_ms = backoff_ms,
+            "[BODY_INDEX] Requeued job"
+        );
+    }
+
+    fn ensure_body_index_worker_started(&self) {
+        let rx = self.body_index_rx.lock().take();
+        let Some(rx) = rx else {
+            return;
+        };
+        let handle = Self::start_body_index_worker(self.db_path.clone(), rx);
+        *self.body_index_worker_handle.lock() = Some(handle);
+    }
+
+    fn start_body_index_worker(
+        db_path: PathBuf,
+        mut rx: mpsc::Receiver<BodyIndexJob>,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let conn = match Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, db_path = %db_path.display(), "[BODY_INDEX] Failed to open index connection");
+                    return;
+                }
+            };
+
+            if let Err(e) = conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=2000;",
+            ) {
+                tracing::warn!(error = %e, "[BODY_INDEX] Failed to set PRAGMA");
+            }
+
+            tracing::info!("[BODY_INDEX] Worker started");
+
+            fn fetch_body_ref_info(
+                conn: &Connection,
+                id: &str,
+                kind: i32,
+            ) -> Option<(String, u64, usize)> {
+                let (req_blob, res_blob): (Option<Vec<u8>>, Option<Vec<u8>>) = conn
+                    .query_row(
+                        "SELECT request_body_ref_blob, response_body_ref_blob FROM traffic_records WHERE id = ?1",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok()?;
+
+                let blob = if kind == 0 { req_blob } else { res_blob }?;
+                let body_ref: BodyRef = bincode::deserialize(&blob).ok()?;
+                match body_ref {
+                    BodyRef::File { path, size } => Some((path, 0u64, size)),
+                    BodyRef::FileRange { path, offset, size } => Some((path, offset, size)),
+                    BodyRef::Inline { .. } => None,
+                }
+            }
+
+            fn is_index_row_up_to_date(
+                conn: &Connection,
+                id: &str,
+                kind: i32,
+                path: &str,
+                offset: u64,
+                size: usize,
+            ) -> bool {
+                let row: Option<(String, u64, usize, i32, i64, i64)> = conn
+                    .query_row(
+                        "SELECT body_path, range_offset, body_size, algo_version, block_size, bitset_bits \
+                         FROM traffic_body_index_v1 WHERE id = ?1 AND kind = ?2",
+                        params![id, kind],
+                        |r| {
+                            Ok((
+                                r.get(0)?,
+                                r.get::<_, i64>(1)? as u64,
+                                r.get::<_, i64>(2)? as usize,
+                                r.get(3)?,
+                                r.get::<_, i64>(4)?,
+                                r.get::<_, i64>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+
+                let Some((p, off, sz, algo, block, bits)) = row else {
+                    return false;
+                };
+                algo == BODY_INDEX_ALGO_VERSION
+                    && block == BODY_INDEX_BLOCK_SIZE as i64
+                    && bits == BODY_INDEX_BITSET_BITS as i64
+                    && p == path
+                    && off == offset
+                    && sz == size
+            }
+
+            while let Some(job) = rx.blocking_recv() {
+                let (path, offset, size) = match fetch_body_ref_info(&conn, &job.id, job.kind) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                if size < BODY_INDEX_MIN_BODY_SIZE {
+                    continue;
+                }
+
+                if is_index_row_up_to_date(&conn, &job.id, job.kind, &path, offset, size) {
+                    continue;
+                }
+
+                match build_body_index_v1(&path, offset, size) {
+                    Ok((block_count, bitsets)) => {
+                        let result = conn.execute(
+                            "INSERT OR REPLACE INTO traffic_body_index_v1 \
+                             (id, kind, algo_version, block_size, bitset_bits, body_path, range_offset, body_size, block_count, bitsets) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            params![
+                                job.id,
+                                job.kind,
+                                BODY_INDEX_ALGO_VERSION,
+                                BODY_INDEX_BLOCK_SIZE as i64,
+                                BODY_INDEX_BITSET_BITS as i64,
+                                path,
+                                offset as i64,
+                                size as i64,
+                                block_count as i64,
+                                bitsets,
+                            ],
+                        );
+                        if let Err(e) = result {
+                            tracing::warn!(error = %e, "[BODY_INDEX] Failed to upsert index row");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, path = %path, "[BODY_INDEX] Skip index build");
+                    }
+                }
+            }
+
+            tracing::info!("[BODY_INDEX] Worker stopped");
         })
     }
 
@@ -285,6 +725,12 @@ impl TrafficDbStore {
         } else if Self::should_keep_in_cache(&record) {
             let mut cache = self.recent_cache.write();
             cache.put(record.id.clone(), record.clone());
+
+            // Enqueue body index jobs (best-effort, must not block)
+            self.enqueue_body_index_jobs(&record);
+        } else {
+            // Enqueue body index jobs even if not cached
+            self.enqueue_body_index_jobs(&record);
         }
 
         let count = self.write_count.fetch_add(1, Ordering::Relaxed);
@@ -432,7 +878,142 @@ impl TrafficDbStore {
 
         if let Err(e) = result {
             tracing::error!(error = %e, id = %record.id, "[TRAFFIC_DB] Failed to update record");
+        } else {
+            // Body refs can be updated after initial insert (e.g. streaming)
+            self.enqueue_body_index_jobs(record);
         }
+    }
+
+    fn enqueue_body_index_jobs(&self, record: &TrafficRecord) {
+        if !self.is_body_index_enabled() {
+            return;
+        }
+        let Some(_tx) = &self.body_index_tx else {
+            return;
+        };
+
+        // Ensure scheduler started (lazy). Must not block.
+        self.ensure_body_index_scheduler_started();
+
+        if let Some(ref r) = record.request_body_ref {
+            self.register_body_index_candidate(&record.id, 0, r);
+        }
+        if let Some(ref r) = record.response_body_ref {
+            self.register_body_index_candidate(&record.id, 1, r);
+        }
+    }
+
+    fn register_body_index_candidate(&self, id: &str, kind: i32, body_ref: &BodyRef) {
+        let (path, offset, size) = match body_ref {
+            BodyRef::File { path, size } => (path.clone(), 0u64, *size),
+            BodyRef::FileRange { path, offset, size } => (path.clone(), *offset, *size),
+            BodyRef::Inline { .. } => return,
+        };
+
+        if size < BODY_INDEX_MIN_BODY_SIZE {
+            return;
+        }
+
+        // 只缓存轻量 fingerprint/size，避免在 pending 队列里保存 path 等大对象。
+        let dedupe_key = format!("{}:{}", id, kind);
+        let fingerprint = Self::hash_body_ref_fingerprint(&path, offset, size);
+        let now = Self::now_ms();
+
+        let mut changed = true;
+        {
+            let mut cache = self.body_index_dedupe.write();
+            if let Some(prev) = cache.get(&dedupe_key) {
+                if prev.fingerprint == fingerprint && prev.size == size {
+                    changed = false;
+                }
+            }
+            // refresh LRU even if unchanged
+            cache.put(dedupe_key.clone(), BodyIndexDedupeKey { fingerprint, size });
+        }
+
+        // Update pending candidate (debounced). Must not block.
+        let mut pending = self.body_index_pending.lock();
+        match pending.get_mut(&dedupe_key) {
+            Some(p) => {
+                // 只有观察到 body 变化时才刷新稳定窗口；否则会导致持续更新的请求永远无法进入 idle。
+                if changed {
+                    p.last_change_ms = now;
+                    p.next_attempt_ms = 0;
+                }
+            }
+            None => {
+                pending.insert(
+                    dedupe_key,
+                    PendingBodyIndexJob {
+                        id: id.to_string(),
+                        kind,
+                        last_change_ms: now,
+                        next_attempt_ms: 0,
+                    },
+                );
+            }
+        }
+
+        // NOTE: 不在这里直接 try_send，避免把索引构建压力注入写路径。
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub fn get_body_indexes_by_ids(
+        &self,
+        ids: &[&str],
+        kind: i32,
+    ) -> std::collections::HashMap<String, BodyIndexRow> {
+        use std::collections::HashMap;
+
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+
+        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id, kind, body_path, range_offset, body_size, block_count, bitsets \
+             FROM traffic_body_index_v1 WHERE kind = ? AND id IN ({})",
+            placeholders.join(",")
+        );
+
+        let conn = self.read_conn.lock();
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
+        params.push(&kind);
+        for id in ids {
+            params.push(id);
+        }
+
+        let mut out = HashMap::new();
+        let iter = match stmt.query_map(params.as_slice(), |row| {
+            Ok(BodyIndexRow {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                offset: row.get::<_, i64>(3)? as u64,
+                size: row.get::<_, i64>(4)? as usize,
+                block_count: row.get::<_, i64>(5)? as usize,
+                bitsets: row.get(6)?,
+            })
+        }) {
+            Ok(i) => i,
+            Err(_) => return HashMap::new(),
+        };
+
+        for r in iter.flatten() {
+            out.insert(r.id.clone(), r);
+        }
+        out
     }
 
     pub fn query(&self, params: &QueryParams) -> QueryResult {
@@ -1261,6 +1842,12 @@ impl TrafficDbStore {
             if let Ok(count) = conn.execute(&sql, rusqlite::params_from_iter(chunk.iter())) {
                 deleted += count;
             }
+
+            let index_sql = format!(
+                "DELETE FROM traffic_body_index_v1 WHERE id IN ({})",
+                placeholders
+            );
+            let _ = conn.execute(&index_sql, rusqlite::params_from_iter(chunk.iter()));
         }
         self.remove_from_cache(ids);
         deleted
@@ -1349,6 +1936,27 @@ impl TrafficDbStore {
     }
 }
 
+impl Drop for TrafficDbStore {
+    fn drop(&mut self) {
+        // Stop scheduler first (it owns a clone of body_index_tx).
+        self.body_index_scheduler_cancel
+            .store(true, Ordering::SeqCst);
+        if let Some(handle) = self.body_index_scheduler_handle.lock().take() {
+            let _ = handle.join();
+        }
+
+        // Close channel so worker can exit.
+        self.body_index_tx.take();
+
+        if let Some(handle) = self.body_index_worker_handle.lock().take() {
+            let _ = handle.join();
+        }
+
+        // Best-effort: release pending jobs to keep drop lightweight in tests.
+        self.body_index_pending.lock().clear();
+    }
+}
+
 fn format_timestamp_ms(timestamp_ms: u64) -> String {
     use chrono::{Local, TimeZone};
     let secs = (timestamp_ms / 1000) as i64;
@@ -1373,11 +1981,85 @@ pub fn start_db_cleanup_task(store: SharedTrafficDbStore) {
     });
 }
 
+fn build_body_index_v1(
+    path: &str,
+    offset: u64,
+    size: usize,
+) -> Result<(usize, Vec<u8>), std::io::Error> {
+    if size == 0 {
+        return Ok((0, Vec::new()));
+    }
+
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+
+    let block_count = size.div_ceil(BODY_INDEX_BLOCK_SIZE);
+    let mut bitsets = vec![0u8; block_count.saturating_mul(BODY_INDEX_BITSET_BYTES)];
+
+    let mut remaining = size;
+    let mut buf = vec![0u8; BODY_INDEX_BLOCK_SIZE];
+
+    for block_idx in 0..block_count {
+        let to_read = remaining.min(BODY_INDEX_BLOCK_SIZE);
+        if to_read == 0 {
+            break;
+        }
+
+        file.read_exact(&mut buf[..to_read])?;
+        remaining = remaining.saturating_sub(to_read);
+
+        let base = block_idx * BODY_INDEX_BITSET_BYTES;
+        let bits = &mut bitsets[base..base + BODY_INDEX_BITSET_BYTES];
+        index_block_bytes_v1(&buf[..to_read], bits);
+    }
+
+    Ok((block_count, bitsets))
+}
+
+#[inline]
+fn index_block_bytes_v1(block: &[u8], bitset: &mut [u8]) {
+    if block.len() < 3 {
+        return;
+    }
+
+    let mask = (BODY_INDEX_BITSET_BITS - 1) as u32;
+    for i in 0..(block.len() - 2) {
+        let b0 = fold_ascii_lower(block[i]);
+        let b1 = fold_ascii_lower(block[i + 1]);
+        let b2 = fold_ascii_lower(block[i + 2]);
+        let idx = (hash_trigram_u32(b0, b1, b2) & mask) as usize;
+        let byte = idx >> 3;
+        let bit = 1u8 << (idx & 7);
+        bitset[byte] |= bit;
+    }
+}
+
+#[inline]
+fn fold_ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
+}
+
+#[inline]
+fn hash_trigram_u32(b0: u8, b1: u8, b2: u8) -> u32 {
+    // Cheap mixing for 3-byte key; bitset_bits is power-of-two so we use mask.
+    let mut x = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::body_store::BodyRef;
     use std::env;
+    use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1399,6 +2081,76 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_body_index_threads_stop_on_drop() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+        store.set_body_index_enabled(true);
+
+        let body_path = dir.join("body.bin");
+        let size = BODY_INDEX_MIN_BODY_SIZE + 1024;
+        let mut f = fs::File::create(&body_path).unwrap();
+        f.write_all(&vec![b'A'; size]).unwrap();
+
+        let mut record = TrafficRecord::new(
+            "req-1".to_string(),
+            "GET".to_string(),
+            "https://a.com/p1".to_string(),
+        );
+        record.response_body_ref = Some(BodyRef::File {
+            path: body_path.to_string_lossy().to_string(),
+            size,
+        });
+
+        // Start scheduler (lazy) and make job ready immediately (avoid 3s debounce in tests).
+        store.enqueue_body_index_jobs(&record);
+        let key = format!("{}:{}", record.id, 1);
+        let now = TrafficDbStore::now_ms();
+        {
+            let mut pending = store.body_index_pending.lock();
+            if let Some(p) = pending.get_mut(&key) {
+                p.last_change_ms = now.saturating_sub(BODY_INDEX_IDLE_DEBOUNCE_MS + 1000);
+            }
+        }
+
+        // Give scheduler a chance to tick and start worker.
+        std::thread::sleep(std::time::Duration::from_millis(
+            BODY_INDEX_SCHED_TICK_MS * 2,
+        ));
+
+        drop(store);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_body_index_requeue_does_not_wait_full_debounce() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        // Requeued jobs should become eligible after backoff without waiting another debounce window.
+        store.requeue_body_index_job(
+            BodyIndexJob {
+                id: "req-1".to_string(),
+                kind: 1,
+                approx_size: BODY_INDEX_MIN_BODY_SIZE,
+            },
+            10,
+        );
+
+        // Not ready before backoff.
+        assert!(store
+            .drain_ready_body_index_jobs(TrafficDbStore::now_ms())
+            .is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let ready = store.drain_ready_body_index_jobs(TrafficDbStore::now_ms());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "req-1");
+        assert_eq!(ready[0].kind, 1);
+
+        cleanup_test_dir(&dir);
     }
 
     #[test]

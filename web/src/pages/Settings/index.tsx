@@ -513,6 +513,16 @@ export default function Settings() {
     );
   };
 
+  const handleEnableBodyIndexChange = (enabled: boolean) => {
+    updatePerfDraft({ enable_body_index: enabled });
+    schedulePerformanceUpdate(
+      "enable_body_index",
+      { enable_body_index: enabled },
+      enabled ? "Body index enabled" : "Body index disabled",
+      "Failed to update body index setting",
+    );
+  };
+
   const handleFileRetentionDaysChange = (value: number) => {
     updatePerfDraft({ file_retention_days: value });
     schedulePerformanceUpdate(
@@ -874,6 +884,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           handleMaxBodyMemorySizeChange={handleMaxBodyMemorySizeChange}
           handleMaxBodyBufferSizeChange={handleMaxBodyBufferSizeChange}
           handleMaxBodyProbeSizeChange={handleMaxBodyProbeSizeChange}
+          handleEnableBodyIndexChange={handleEnableBodyIndexChange}
           handleFileRetentionDaysChange={handleFileRetentionDaysChange}
           handleClearBodyCache={handleClearBodyCache}
           formatBytes={formatBytes}

@@ -881,12 +881,21 @@ impl ProxyInstance {
         ));
         start_traffic_cleanup_task(traffic_store.clone());
 
+        let traffic_db_dir = temp_dir.join("traffic_db");
+        let traffic_db_store = Arc::new(
+            bifrost_admin::TrafficDbStore::new(traffic_db_dir, 1000, 0, Some(24))
+                .map_err(|e| format!("Failed to init traffic db: {}", e))?,
+        );
+
         let frame_store = Arc::new(bifrost_admin::FrameStore::new(temp_dir, Some(24)));
         start_frame_cleanup_task(frame_store.clone());
 
         let (async_traffic_writer, async_traffic_rx) = AsyncTrafficWriter::new(10000);
-        let _async_traffic_task =
-            start_async_traffic_processor(async_traffic_rx, None, Some(traffic_store.clone()));
+        let _async_traffic_task = start_async_traffic_processor(
+            async_traffic_rx,
+            Some(traffic_db_store.clone()),
+            Some(traffic_store.clone()),
+        );
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -894,6 +903,7 @@ impl ProxyInstance {
             .with_body_store(body_store)
             .with_ws_payload_store(ws_payload_store)
             .with_traffic_store_shared(traffic_store)
+            .with_traffic_db_store_shared(traffic_db_store)
             .with_async_traffic_writer(async_traffic_writer)
             .with_frame_store_shared(frame_store);
         start_connection_cleanup_task(admin_state.connection_monitor.clone());

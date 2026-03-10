@@ -13,6 +13,7 @@ pub mod response;
 pub mod response_modification;
 pub mod routing;
 pub mod rule_priority;
+pub mod search;
 pub mod status_redirect;
 pub mod template;
 pub mod tls_config_disconnect;
@@ -41,6 +42,7 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(body_manipulation::get_all_tests());
     tests.extend(url_manipulation::get_all_tests());
     tests.extend(status_redirect::get_all_tests());
+    tests.extend(search::get_all_tests());
     tests.extend(filters::get_all_tests());
     tests.extend(dns::get_all_tests());
     tests.extend(tls_intercept_mode::get_all_tests());
