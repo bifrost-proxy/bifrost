@@ -236,40 +236,16 @@ test_ws_overview_push() {
 test_ws_max_channels() {
     log_info "Testing WebSocket max client channels (MAX=3)..."
 
-    if ! ensure_websocat; then
+    local probe_output
+    probe_output=$(node "$SCRIPT_DIR/../test_utils/ws_channel_limit_probe.js" "$WS_PUSH_URL" 4 3000)
+
+    log_debug "Max channels probe: $probe_output"
+
+    if echo "$probe_output" | jq -e '.oldest_disconnect == true' >/dev/null 2>&1; then
         return 0
     fi
 
-    local log1
-    log1=$(mktemp)
-
-    local pid1 pid2 pid3
-    (while true; do echo '{"need_overview":true}'; sleep 1; done | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_chan_1_$$_$RANDOM" >"$log1" 2>&1) &
-    pid1=$!
-    (while true; do echo '{"need_overview":true}'; sleep 1; done | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_chan_2_$$_$RANDOM" >/dev/null 2>&1) &
-    pid2=$!
-    (while true; do echo '{"need_overview":true}'; sleep 1; done | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_chan_3_$$_$RANDOM" >/dev/null 2>&1) &
-    pid3=$!
-
-    sleep 2
-
-    echo '{"need_overview":true}' | websocat -t --one-message "${WS_PUSH_URL}?x_client_id=e2e_chan_4_$$_$RANDOM" >/dev/null 2>&1 || true
-
-    sleep 3
-
-    kill "$pid1" "$pid2" "$pid3" 2>/dev/null || true
-    wait "$pid1" 2>/dev/null || true
-    wait "$pid2" 2>/dev/null || true
-    wait "$pid3" 2>/dev/null || true
-
-    local out
-    out=$(cat "$log1")
-    rm -f "$log1"
-
-    if echo "$out" | grep -q '"type":"disconnect"'; then
-        return 0
-    fi
-
+    log_warn "Oldest channel messages: $(echo "$probe_output" | jq -c '.oldest_messages')"
     log_fail "Disconnect message not received on oldest channel"
     return 1
 }
