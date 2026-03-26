@@ -132,6 +132,78 @@ test("Settings TLS 与证书页支持开关、模式和只读展示", async ({
   }
 });
 
+test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载与二维码真实状态", async ({
+  page,
+  request,
+}) => {
+  const systemProxyRes = await request.get(`${apiBase}/proxy/system`);
+  const systemProxy = (await systemProxyRes.json()) as {
+    supported: boolean;
+    enabled: boolean;
+  };
+  const cliProxyRes = await request.get(`${apiBase}/proxy/cli`);
+  const cliProxy = (await cliProxyRes.json()) as {
+    enabled: boolean;
+    shell: string;
+    config_files: string[];
+  };
+  const certRes = await request.get(`${apiBase}/cert`);
+  const certInfo = (await certRes.json()) as {
+    available?: boolean;
+  };
+  const proxyAddressRes = await request.get(`${apiBase}/proxy/address`);
+  const proxyAddressInfo = (await proxyAddressRes.json()) as {
+    addresses?: Array<{ ip: string }>;
+  };
+
+  await openPage(page, "settings");
+  await page.getByRole("tab", { name: /Proxy/ }).click();
+  await expect(page.locator("body")).toContainText("System Proxy");
+
+  if (systemProxy.supported) {
+    await expect(page.getByTestId("settings-system-proxy-switch")).toBeVisible();
+    await expect(page.getByTestId("settings-system-proxy-switch")).toHaveAttribute(
+      "aria-checked",
+      String(systemProxy.enabled),
+    );
+  } else {
+    await expect(page.locator("body")).toContainText("Not Supported");
+  }
+
+  await expect(page.getByTestId("settings-cli-proxy-tag")).toHaveText(
+    cliProxy.enabled ? "Enabled" : "Disabled",
+  );
+  await expect(page.getByTestId("settings-cli-proxy-detail")).toContainText(
+    `Shell: ${cliProxy.shell || "-"}`,
+  );
+
+  const proxyQrSrc = await page.getByTestId("settings-proxy-qrcode").getAttribute("src");
+  expect(proxyQrSrc).toContain("/_bifrost/public/proxy/qrcode");
+  if (proxyAddressInfo.addresses && proxyAddressInfo.addresses.length > 0) {
+    expect(proxyQrSrc).toContain(encodeURIComponent(proxyAddressInfo.addresses[0].ip));
+  }
+
+  await page.getByRole("tab", { name: /Certificate/ }).click();
+  await expect(page.getByTestId("settings-certificate-tab")).toBeVisible();
+
+  const downloadButton = page.getByTestId("settings-certificate-download");
+  await expect(downloadButton).toBeVisible();
+
+  if (certInfo.available) {
+    const href = await downloadButton.getAttribute("href");
+    if (!href) {
+      throw new Error("Expected certificate download href to be present");
+    }
+    const downloadResponse = await request.get(new URL(href, page.url()).toString());
+    expect(downloadResponse.ok()).toBeTruthy();
+    const certQrSrc = await page.getByTestId("settings-certificate-qrcode").getAttribute("src");
+    expect(certQrSrc).toContain("/_bifrost/public/cert/qrcode");
+  } else {
+    await expect(downloadButton).toHaveClass(/ant-btn-disabled/);
+    await expect(page.locator("body")).toContainText("QR code not available");
+  }
+});
+
 test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", async ({
   page,
   request,

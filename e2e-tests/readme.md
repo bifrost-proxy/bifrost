@@ -79,28 +79,28 @@ rules/                      # 规则测试用例 (按类别组织)
 ## 快速开始
 
 ```bash
-# 列出所有可用测试
-./run_all_tests.sh --list
+# 运行真正的统一 E2E 入口（规则 + shell + bifrost-e2e runner + Playwright）
+bash ../scripts/run_all_e2e.sh
 
-# 运行所有测试
-./run_all_tests.sh
+# CI 全量入口
+bash ../scripts/run_all_e2e.sh --ci
 
-# 只运行转发测试
-./run_all_tests.sh -c forwarding
+# 只跑规则夹具套件
+./run_all_tests_parallel.sh -c forwarding
 
-# 运行单个测试文件
+# 运行单个规则文件
 ./test_rules.sh rules/forwarding/http_to_http.txt
 
-# 详细输出模式
-./run_all_tests.sh -v
-
-# 运行 Admin API 测试
+# 运行单个 shell Admin API 测试
 ./tests/test_rules_admin_api.sh      # 运行 Rules API 测试
 ./tests/test_values_admin_api.sh     # 运行 Values API 测试
 ./tests/test_whitelist_admin_api.sh  # 运行 Whitelist API 测试
 
-# 运行所有 Admin API 测试
-for test in ./tests/test_*_admin_api.sh; do $test || exit 1; done
+# 运行 bifrost-e2e 自定义 runner
+cargo run -p bifrost-e2e -- --list
+
+# 运行 Web Playwright E2E
+pnpm --dir ../web run test:ui
 ```
 
 ## test_rules.sh - 单文件测试
@@ -133,38 +133,31 @@ for test in ./tests/test_*_admin_api.sh; do $test || exit 1; done
 | `--no-build`      | 跳过编译步骤              |
 | `--keep-proxy`    | 测试完成后保持代理运行    |
 
-## run_all_tests.sh - 批量测试
+## run_all_tests_parallel.sh - 规则批量测试
 
 ```bash
-# 运行所有测试
-./run_all_tests.sh
+# 运行所有规则文件
+./run_all_tests_parallel.sh
 
 # 只运行指定分类
-./run_all_tests.sh -c forwarding
-./run_all_tests.sh -c request_modify
-./run_all_tests.sh -c response_modify
-
-# 运行指定文件
-./run_all_tests.sh rules/forwarding/http_to_http.txt rules/redirect/redirect.txt
-
-# 首次失败后停止
-./run_all_tests.sh --fail-fast
+./run_all_tests_parallel.sh -c forwarding
+./run_all_tests_parallel.sh -c request_modify
+./run_all_tests_parallel.sh -c response_modify
 
 # 详细输出
-./run_all_tests.sh -v
+./run_all_tests_parallel.sh -v
 ```
 
 ### 选项
 
-| 选项                 | 说明                      |
-| -------------------- | ------------------------- |
-| `-h, --help`         | 显示帮助信息              |
-| `-l, --list`         | 列出所有可用的测试文件    |
-| `-p, --port PORT`    | 指定代理端口 (默认: 8080) |
-| `-c, --category CAT` | 只运行指定分类的测试      |
-| `--no-build`         | 跳过编译步骤              |
-| `--fail-fast`        | 首次失败后停止            |
-| `-v, --verbose`      | 详细输出                  |
+| 选项                 | 说明                               |
+| -------------------- | ---------------------------------- |
+| `-h, --help`         | 显示帮助信息                       |
+| `-j, --jobs N`       | 并行任务数                         |
+| `-c, --category CAT` | 只运行指定分类的规则文件           |
+| `--no-build`         | 跳过 release 二进制编译            |
+| `--base-port PORT`   | 并行执行时的起始代理端口           |
+| `-v, --verbose`      | 详细输出                           |
 
 ### 可用分类
 
@@ -195,17 +188,42 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 ### 运行 Admin API 测试
 
 ```bash
-cd rust/scripts
+cd e2e-tests
 
 # 运行单个测试脚本
 ./tests/test_rules_admin_api.sh
 
-# 运行所有 Admin API 测试
-for test in ./tests/test_*_admin_api.sh; do
-    echo "Running $test..."
-    $test || exit 1
-done
+# 运行 CI shell 套件（由统一入口代管）
+bash ../scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui
 ```
+
+## 统一入口
+
+仓库当前存在 4 类端到端资产：
+
+- `e2e-tests/rules/**`：规则夹具，通过 `test_rules.sh` / `run_all_tests_parallel.sh` 执行
+- `e2e-tests/tests/test_*.sh`：shell 端到端与 Admin API 场景
+- `crates/bifrost-e2e`：Rust 自定义 E2E runner
+- `web/tests/ui/*.spec.ts`：Playwright UI E2E
+
+建议统一使用仓库根目录的脚本：
+
+```bash
+# 本地默认：规则 + 稳定 shell + bifrost-e2e + Playwright
+bash scripts/run_all_e2e.sh
+
+# CI 模式：规则 + 全量 shell（按平台跳过不适用脚本）+ bifrost-e2e + Playwright
+bash scripts/run_all_e2e.sh --ci
+
+# 本地扩展 shell 覆盖
+bash scripts/run_all_e2e.sh --full-shell
+```
+
+说明：
+
+- `--ci` 会在流水线中执行规则夹具、shell 套件、`bifrost-e2e` runner 和 Playwright；shell 脚本会按平台跳过明确不适用的场景，例如 macOS 专属系统代理脚本
+- `--full-shell` 会在本地尝试更广的 shell 套件；默认本地入口仍保留稳定 shell 集合作为更快的日常回归
+- 旧文档中的 `run_all_tests.sh` 已废弃，实际可执行入口为 `run_all_tests_parallel.sh` 和 `scripts/run_all_e2e.sh`
 
 ### Admin API 客户端工具
 
@@ -451,8 +469,8 @@ cat > rules/my_category/test.txt << 'EOF'
 test.local http://127.0.0.1:3000
 EOF
 
-# 运行该分类的所有测试
-./run_all_tests.sh -c my_category
+# 运行该分类的所有规则测试
+./run_all_tests_parallel.sh -c my_category
 ```
 
 ## 故障排查

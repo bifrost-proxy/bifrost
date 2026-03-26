@@ -1,0 +1,31 @@
+{
+  "name": "GitHub Actions",
+  "url": "https://github.com/bifrost-proxy/bifrost/actions/workflows/ci.yml",
+  "domain": "github.com",
+  "outputFile": ".env/.cookie.github.com",
+  "timeout": 600000,
+  "requiredCookies": [
+    "user_session",
+    "logged_in"
+  ],
+  "verify": {
+    "url": "https://github.com/settings/profile",
+    "method": "GET",
+    "headers": {
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Referer": "https://github.com/bifrost-proxy/bifrost/actions/workflows/ci.yml",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    },
+    "successStatuses": [
+      200
+    ],
+    "rejectBodyIncludes": [
+      "Sign in to GitHub",
+      "Create your account"
+    ],
+    "successBodyIncludes": [
+      "Public profile",
+      "Account"
+    ]
+  }
+}

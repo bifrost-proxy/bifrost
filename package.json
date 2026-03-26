@@ -3,6 +3,8 @@
   "packageManager": "pnpm@10.30.3",
   "scripts": {
     "cli:build": "cargo build -p bifrost-cli --release",
+    "e2e:all": "bash scripts/run_all_e2e.sh",
+    "e2e:ci": "bash scripts/run_all_e2e.sh --ci",
     "site:dev": "pnpm --dir site dev",
     "site:build": "pnpm --dir site build",
     "site:preview": "pnpm --dir site preview",

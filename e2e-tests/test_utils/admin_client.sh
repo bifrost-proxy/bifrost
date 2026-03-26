@@ -27,6 +27,9 @@ ADMIN_CLIENT_STARTED_BIFROST=0
 ADMIN_CLIENT_BIFROST_PID=""
 ADMIN_CLIENT_BIFROST_DATA_DIR=""
 ADMIN_CLIENT_BIFROST_LOG_FILE=""
+ADMIN_CLIENT_HOME_DIR=""
+ADMIN_CLIENT_XDG_CONFIG_HOME=""
+ADMIN_CLIENT_XDG_DATA_HOME=""
 
 admin_log_info() { echo "[INFO] $*"; }
 admin_log_fail() { echo "[FAIL] $*"; }
@@ -64,17 +67,33 @@ admin_start_bifrost() {
         ADMIN_CLIENT_BIFROST_DATA_DIR="${BIFROST_DATA_DIR}"
     fi
 
+    ADMIN_CLIENT_HOME_DIR="${ADMIN_CLIENT_BIFROST_DATA_DIR}/home"
+    ADMIN_CLIENT_XDG_CONFIG_HOME="${ADMIN_CLIENT_BIFROST_DATA_DIR}/xdg-config"
+    ADMIN_CLIENT_XDG_DATA_HOME="${ADMIN_CLIENT_BIFROST_DATA_DIR}/xdg-data"
+    mkdir -p \
+        "$ADMIN_CLIENT_HOME_DIR" \
+        "$ADMIN_CLIENT_XDG_CONFIG_HOME" \
+        "$ADMIN_CLIENT_XDG_DATA_HOME"
+
     ADMIN_CLIENT_BIFROST_LOG_FILE="$(mktemp)"
 
     local bifrost_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost"
     if [[ -x "$bifrost_bin" ]]; then
-        SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-            "$bifrost_bin" -p "$ADMIN_PORT" start --skip-cert-check --unsafe-ssl \
+        SKIP_FRONTEND_BUILD=1 \
+            HOME="$ADMIN_CLIENT_HOME_DIR" \
+            XDG_CONFIG_HOME="$ADMIN_CLIENT_XDG_CONFIG_HOME" \
+            XDG_DATA_HOME="$ADMIN_CLIENT_XDG_DATA_HOME" \
+            BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
+            "$bifrost_bin" -H "$ADMIN_HOST" -p "$ADMIN_PORT" start --skip-cert-check --unsafe-ssl \
             >"$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>&1 &
     else
         (cd "$ADMIN_CLIENT_REPO_DIR" && \
-            SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-            cargo run --release --bin bifrost -- -p "$ADMIN_PORT" start --skip-cert-check --unsafe-ssl \
+            SKIP_FRONTEND_BUILD=1 \
+            HOME="$ADMIN_CLIENT_HOME_DIR" \
+            XDG_CONFIG_HOME="$ADMIN_CLIENT_XDG_CONFIG_HOME" \
+            XDG_DATA_HOME="$ADMIN_CLIENT_XDG_DATA_HOME" \
+            BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
+            cargo run --release --bin bifrost -- -H "$ADMIN_HOST" -p "$ADMIN_PORT" start --skip-cert-check --unsafe-ssl \
         ) >"$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>&1 &
     fi
 
@@ -118,6 +137,9 @@ admin_stop_bifrost() {
     ADMIN_CLIENT_BIFROST_PID=""
     ADMIN_CLIENT_BIFROST_LOG_FILE=""
     ADMIN_CLIENT_BIFROST_DATA_DIR=""
+    ADMIN_CLIENT_HOME_DIR=""
+    ADMIN_CLIENT_XDG_CONFIG_HOME=""
+    ADMIN_CLIENT_XDG_DATA_HOME=""
     ADMIN_CLIENT_STARTED_BIFROST=0
 }
 

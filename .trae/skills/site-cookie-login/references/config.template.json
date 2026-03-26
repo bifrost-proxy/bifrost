@@ -1,0 +1,25 @@
+{
+  "name": "<site-display-name>",
+  "url": "<login-page-url>",
+  "domain": "<target-cookie-domain>",
+  "outputFile": ".env/.cookie.<site_identifier>",
+  "timeout": 300000,
+  "requiredCookies": [
+    "<required-cookie-name>"
+  ],
+  "mergeCookieFiles": [
+    ".env/.cookie.<other_site_1>",
+    ".env/.cookie.<other_site_2>"
+  ],
+  "verify": {
+    "url": "<api-endpoint-that-requires-auth>",
+    "method": "GET",
+    "headers": {
+      "Accept": "application/json"
+    },
+    "body": null,
+    "successStatuses": [200],
+    "rejectBodyIncludes": ["not login", "unauthorized"],
+    "successBodyIncludes": []
+  }
+}

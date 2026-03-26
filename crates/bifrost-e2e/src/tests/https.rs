@@ -1,5 +1,5 @@
 use crate::curl::CurlCommand;
-use crate::mock::EnhancedMockServer;
+use crate::mock::{EnhancedMockServer, HttpsMockServer};
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use std::time::Duration;
@@ -112,23 +112,37 @@ async fn test_https_tunnel_with_host_rule() -> Result<(), String> {
 }
 
 async fn test_https_curl_insecure_flag() -> Result<(), String> {
+    let mock = HttpsMockServer::start("insecure-flag.test").await;
+    mock.set_response(200, "insecure_flag_ok");
+
     let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(port, vec![])
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "insecure-flag.test host://127.0.0.1:{}",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
-        "https://httpbin.org/headers",
+        "https://insecure-flag.test/headers",
     )
     .insecure()
+    .connect_timeout(10)
+    .max_time(30)
     .execute()
     .await
     .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_success()?;
+    result.assert_body_contains("insecure_flag_ok")?;
+
+    mock.assert_request_received()?;
 
     Ok(())
 }

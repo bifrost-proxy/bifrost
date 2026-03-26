@@ -874,6 +874,7 @@ function ScriptListPanel({
             buttonText=""
             buttonType="text"
             size="small"
+            testId="scripts-import-button"
           />
         </div>
       </div>

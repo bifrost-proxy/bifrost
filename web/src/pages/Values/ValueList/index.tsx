@@ -338,6 +338,7 @@ export default function ValueList() {
             buttonText=""
             buttonType="text"
             size="small"
+            testId="value-import-button"
           />
           <Tooltip title="Export All">
             <Button

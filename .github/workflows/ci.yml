@@ -65,32 +65,11 @@ jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test
-        run: cargo test --workspace --all-features
-
-  e2e:
-    name: E2E
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
@@ -107,19 +86,28 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: e2e-ubuntu
-      - name: Install Playwright browser
+      - name: Install jq (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: choco install jq -y
+      - name: Install Playwright browser (Linux)
+        if: runner.os == 'Linux'
         run: pnpm exec playwright install --with-deps chromium
         working-directory: web
-      - name: Run end-to-end suites
+      - name: Install Playwright browser (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright install chromium
+        working-directory: web
+      - name: Unit and integration tests
+        run: cargo test --workspace --all-features
+      - name: End-to-end tests
         shell: bash
         run: bash scripts/ci/run-e2e.sh
       - name: Upload Playwright artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-artifacts
+          name: playwright-artifacts-${{ matrix.os }}
           path: |
             web/playwright-report
             web/test-results

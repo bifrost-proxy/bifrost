@@ -14,6 +14,7 @@ interface ImportBifrostButtonProps {
   buttonType?: ButtonProps['type'];
   size?: ButtonProps['size'];
   icon?: React.ReactNode;
+  testId?: string;
 }
 
 export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
@@ -23,6 +24,7 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
   buttonType = 'default',
   size = 'middle',
   icon = <ImportOutlined />,
+  testId,
 }) => {
   const handleBeforeUpload: UploadProps['beforeUpload'] = useCallback(
     async (file: RcFile) => {
@@ -71,8 +73,14 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
   );
 
   return (
-    <Upload accept=".bifrost" showUploadList={false} beforeUpload={handleBeforeUpload} multiple>
-      <Button type={buttonType} size={size} icon={icon}>
+    <Upload
+      accept=".bifrost"
+      showUploadList={false}
+      beforeUpload={handleBeforeUpload}
+      multiple
+      data-testid={testId}
+    >
+      <Button type={buttonType} size={size} icon={icon} data-testid={testId ? `${testId}-button` : undefined}>
         {buttonText}
       </Button>
     </Upload>

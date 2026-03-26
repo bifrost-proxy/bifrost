@@ -1,0 +1,12 @@
+{
+  "name": "site-cookie-login",
+  "version": "1.0.0",
+  "description": "Generic site login check and cookie persistence helper",
+  "main": "site-login.js",
+  "scripts": {
+    "login": "node site-login.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

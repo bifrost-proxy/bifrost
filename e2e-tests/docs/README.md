@@ -16,36 +16,40 @@ docs/
 ### 运行所有测试
 
 ```bash
-cd rust/crates/bifrost-e2e
-cargo run
+# 仓库统一入口（推荐）
+cd /path/to/bifrost
+bash scripts/run_all_e2e.sh
+
+# 仅运行 bifrost-e2e 自定义 runner
+cargo run -p bifrost-e2e
 ```
 
 ### 按类别运行测试
 
 ```bash
 # 运行路由相关测试
-cargo run -- --category routing
+cargo run -p bifrost-e2e -- --category routing
 
 # 运行协议相关测试
-cargo run -- --category protocols
+cargo run -p bifrost-e2e -- --category protocols
 ```
 
 ### 运行特定测试
 
 ```bash
-cargo run -- --test host_redirect
+cargo run -p bifrost-e2e -- --test host_redirect
 ```
 
 ### 列出所有测试
 
 ```bash
-cargo run -- --list
+cargo run -p bifrost-e2e -- --list
 ```
 
 ### 生成测试报告
 
 ```bash
-cargo run -- --output report.json
+cargo run -p bifrost-e2e -- --output report.json
 ```
 
 ## 测试框架架构

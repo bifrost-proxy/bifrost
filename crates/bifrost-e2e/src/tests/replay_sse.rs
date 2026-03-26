@@ -178,11 +178,6 @@ async fn start_proxy_sse_request(
     }))
 }
 
-async fn collect_detail_sse_events(admin_base: &str, traffic_id: &str) -> Result<usize, String> {
-    let body = collect_detail_sse_body(admin_base, traffic_id).await?;
-    Ok(count_sse_frames(&body))
-}
-
 async fn collect_detail_sse_body(admin_base: &str, traffic_id: &str) -> Result<String, String> {
     let client = admin_http_client()?;
     let response = client
@@ -222,6 +217,38 @@ fn count_raw_data_events(text: &str) -> usize {
     text.lines()
         .filter(|line| line.trim_start().starts_with("data: "))
         .count()
+}
+
+fn count_live_detail_events_by_data_prefix(text: &str, prefix: &str) -> usize {
+    let normalized = text.replace("\r\n", "\n");
+    normalized
+        .split("\n\n")
+        .filter_map(|chunk| {
+            chunk
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("data: "))
+        })
+        .filter_map(|json| serde_json::from_str::<Value>(json).ok())
+        .filter(|event| {
+            event["data"]
+                .as_str()
+                .map(|data| data.starts_with(prefix))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+fn live_detail_contains_finish_event(text: &str) -> bool {
+    let normalized = text.replace("\r\n", "\n");
+    normalized
+        .split("\n\n")
+        .filter_map(|chunk| {
+            chunk
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("data: "))
+        })
+        .filter_map(|json| serde_json::from_str::<Value>(json).ok())
+        .any(|event| event["event"].as_str() == Some("finish"))
 }
 
 async fn wait_for_sse_record_id(admin_state: &Arc<AdminState>) -> Result<String, String> {
@@ -316,7 +343,8 @@ async fn test_replay_sse_live_stream_keeps_tail_events() -> Result<(), String> {
             ));
         }
     };
-    let live_detail_count = collect_detail_sse_events(&admin_base, &traffic_id).await?;
+    let live_detail_body = collect_detail_sse_body(&admin_base, &traffic_id).await?;
+    let live_detail_count = count_live_detail_events_by_data_prefix(&live_detail_body, "msg-");
     let replay_count = proxied_request_handle
         .await
         .map_err(|e| format!("Proxy SSE task join failed: {}", e))??;
@@ -358,6 +386,14 @@ async fn test_replay_sse_live_stream_keeps_tail_events() -> Result<(), String> {
         return Err(format!(
             "Detail live SSE stream lost tail events: live={}, persisted={}, traffic_id={}",
             live_detail_count, persisted_count, traffic_id
+        ));
+    }
+
+    if !live_detail_contains_finish_event(&live_detail_body) {
+        return Err(format!(
+            "Detail live SSE stream missing synthetic finish event: traffic_id={}, body_tail={}",
+            traffic_id,
+            &live_detail_body[live_detail_body.len().saturating_sub(400)..]
         ));
     }
 

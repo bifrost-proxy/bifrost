@@ -730,7 +730,12 @@ export default function ProxyTab({
                 </Col>
                 <Col>
                   {cliProxyDisplay.tag ? (
-                    <Tag color={cliProxyDisplay.tag.color}>{cliProxyDisplay.tag.text}</Tag>
+                    <Tag
+                      color={cliProxyDisplay.tag.color}
+                      data-testid="settings-cli-proxy-tag"
+                    >
+                      {cliProxyDisplay.tag.text}
+                    </Tag>
                   ) : (
                     <Text type="secondary">Loading...</Text>
                   )}
@@ -747,7 +752,11 @@ export default function ProxyTab({
                     : undefined
                 }
               >
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text
+                  type="secondary"
+                  style={{ fontSize: 12 }}
+                  data-testid="settings-cli-proxy-detail"
+                >
                   {cliProxyDisplay.detail}
                 </Text>
               </Tooltip>

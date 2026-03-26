@@ -453,6 +453,7 @@ export default function RuleList() {
             buttonText=""
             buttonType="text"
             size="small"
+            testId="rule-import-button"
           />
         </div>
       </div>

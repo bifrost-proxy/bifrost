@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { test, expect } from "@playwright/test";
 import {
   apiBase,
@@ -22,6 +23,46 @@ test.beforeEach(async ({ request }) => {
   await clearTraffic(request);
   await clearRules(request);
   await clearValues(request);
+});
+
+test("Rules 页面会主动拉取 syntax 信息，并包含动态脚本与协议别名", async ({
+  page,
+  request,
+}) => {
+  const requestScriptName = uniqueName("syntax-request-script");
+  const createScriptRes = await request.put(
+    `${apiBase}/scripts/request/${encodeURIComponent(requestScriptName)}`,
+    {
+      data: { content: 'request.headers["x-syntax-check"] = "ok";' },
+    },
+  );
+  if (!createScriptRes.ok()) {
+    throw new Error(await createScriptRes.text());
+  }
+
+  const syntaxResponsePromise = page.waitForResponse((response) =>
+    response.url().includes("/_bifrost/api/syntax"),
+  );
+
+  await openPage(page, "rules");
+  await expect(page.getByTestId("rules-list")).toBeVisible();
+
+  const syntaxResponse = await syntaxResponsePromise;
+  expect(syntaxResponse.ok()).toBeTruthy();
+  const syntaxPayload = (await syntaxResponse.json()) as {
+    protocol_aliases: Record<string, string>;
+    protocols: Array<{ name: string }>;
+    scripts: { request_scripts: Array<{ name: string }> };
+  };
+
+  expect(syntaxPayload.protocol_aliases.pathReplace).toBe("urlReplace");
+  expect(syntaxPayload.protocols.some((protocol) => protocol.name === "reqHeaders")).toBeTruthy();
+  expect(
+    syntaxPayload.scripts.request_scripts.some((script) => script.name === requestScriptName),
+  ).toBeTruthy();
+
+  await page.getByTestId("rule-new-button").click();
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
 });
 
 test("Values 页面完成 CRUD、支持多种排序，并通过 push 自动同步外部写入", async ({
@@ -116,6 +157,51 @@ test("Values 页面完成 CRUD、支持多种排序，并通过 push 自动同�
   ).toHaveCount(0);
 
   await syncPage.close();
+});
+
+test("Values 页面支持 bifrost-file 导出后再导入恢复数据", async ({
+  page,
+}) => {
+  const valueName = uniqueName("bifrost-file-value");
+
+  await openPage(page, "values");
+  await expect(page.getByTestId("values-list")).toBeVisible();
+
+  await page.getByTestId("value-new-button").click();
+  await page
+    .getByRole("dialog")
+    .getByPlaceholder("Value name (e.g., api_key, auth_token)")
+    .fill(valueName);
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByTestId("value-item").filter({ hasText: valueName }).first()).toBeVisible();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByTestId("value-export-all-button").click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  if (!downloadPath) {
+    throw new Error("Expected exported bifrost file to be written to disk");
+  }
+  const exportedContent = await fs.readFile(downloadPath, "utf8");
+  expect(exportedContent).toContain("01 values");
+  expect(exportedContent).toContain(valueName);
+
+  const valueItem = page.getByTestId("value-item").filter({ hasText: valueName }).first();
+  await valueItem.getByTestId("value-item-menu").click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  await page.getByRole("dialog", { name: "Delete Value" }).getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByTestId("value-item").filter({ hasText: valueName })).toHaveCount(0);
+
+  await page
+    .getByTestId("value-import-button")
+    .locator('input[type="file"]')
+    .setInputFiles({
+      name: `${valueName}.bifrost`,
+      mimeType: "text/plain",
+      buffer: Buffer.from(exportedContent, "utf8"),
+    });
+  await waitForToast(page, "导入成功");
+  await expect(page.getByTestId("value-item").filter({ hasText: valueName }).first()).toBeVisible();
 });
 
 test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", async ({
