@@ -86,7 +86,13 @@ macos_find_services() {
 
 windows_proxy_field() {
     local field="$1"
-    reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings' /v "$field" 2>/dev/null
+    local key='HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+
+    if command -v reg >/dev/null 2>&1; then
+        reg query "$key" /v "$field" 2>/dev/null && return 0
+    fi
+
+    cmd.exe //c "reg query \"$key\" /v $field" 2>/dev/null | tr -d '\r'
 }
 
 windows_proxy_enabled() {
@@ -95,6 +101,40 @@ windows_proxy_enabled() {
 
 windows_proxy_server() {
     windows_proxy_field "ProxyServer" | tr -d '\r' | awk '/ProxyServer/ {print $NF}'
+}
+
+windows_proxy_matches() {
+    local raw="$1"
+    local expected="$2"
+    local http_proxy=""
+    local https_proxy=""
+    local part=""
+
+    if [[ "$raw" == "$expected" ]]; then
+        return 0
+    fi
+
+    IFS=';' read -r -a parts <<< "$raw"
+    for part in "${parts[@]}"; do
+        case "$part" in
+            http=*)
+                http_proxy="${part#http=}"
+                ;;
+            https=*)
+                https_proxy="${part#https=}"
+                ;;
+        esac
+    done
+
+    if [[ -n "$http_proxy" && "$http_proxy" != "$expected" ]]; then
+        return 1
+    fi
+
+    if [[ -n "$https_proxy" && "$https_proxy" != "$expected" ]]; then
+        return 1
+    fi
+
+    [[ -n "$http_proxy" || -n "$https_proxy" ]]
 }
 
 macos_check_proxy_enabled_for_any_service() {
@@ -144,7 +184,7 @@ test_enable_on_startup() {
         MINGW*|MSYS*|CYGWIN*)
             local server
             server="$(windows_proxy_server)"
-            if windows_proxy_enabled && [[ "$server" == "127.0.0.1:${PROXY_PORT}" ]]; then
+            if windows_proxy_enabled && windows_proxy_matches "$server" "127.0.0.1:${PROXY_PORT}"; then
                 _log_pass "Windows: 系统代理设置正确"
                 ((passed++))
             else
@@ -224,7 +264,7 @@ test_crash_recovery() {
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            if windows_proxy_enabled && [[ "$(windows_proxy_server)" == "127.0.0.1:${PROXY_PORT}" ]]; then
+            if windows_proxy_enabled && windows_proxy_matches "$(windows_proxy_server)" "127.0.0.1:${PROXY_PORT}"; then
                 _log_pass "Windows: 崩溃后系统代理仍保持启用（符合预期）"
                 ((passed++))
             else
