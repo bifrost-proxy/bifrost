@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_cmd_helper.sh"
+
+if real_cmd="$(find_real_cmd pkill)"; then
+  exec "$real_cmd" "$@"
+fi
+
+if [[ "${1:-}" != "-f" || "$#" -lt 2 ]]; then
+  echo "shim pkill only supports: pkill -f pattern" >&2
+  exit 2
+fi
+
+pattern="$2"
+export BIFROST_PKILL_PATTERN="$pattern"
+
+powershell.exe -NoProfile -Command '
+$pattern = $env:BIFROST_PKILL_PATTERN
+$currentPid = $PID
+$procs = Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and $_.ProcessId -ne $currentPid -and $_.CommandLine -like ("*" + $pattern + "*")
+}
+foreach ($proc in $procs) {
+  try {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+  } catch {
+  }
+}
+' >/dev/null 2>&1 || true

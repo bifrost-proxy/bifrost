@@ -1,0 +1,82 @@
+#!/usr/bin/env node
+
+const { createInterface } = require("node:readline");
+const path = require("node:path");
+const process = require("node:process");
+const { pathToFileURL } = require("node:url");
+
+(async () => {
+  const rootDir = process.env.BIFROST_E2E_ROOT || process.cwd();
+  const wsModulePath = path.join(rootDir, "web", "node_modules", "ws", "wrapper.mjs");
+  const { default: WebSocket } = await import(pathToFileURL(wsModulePath).href);
+
+  const args = process.argv.slice(2);
+  let url = "";
+  let oneMessage = false;
+
+  for (const arg of args) {
+    if (arg === "-t" || arg === "-v") {
+      continue;
+    }
+    if (arg === "-1" || arg === "--one-message") {
+      oneMessage = true;
+      continue;
+    }
+    if (!arg.startsWith("-")) {
+      url = arg;
+    }
+  }
+
+  if (!url) {
+    console.error("usage: websocat [-t] [-1|--one-message] <url>");
+    process.exit(2);
+  }
+
+  const ws = new WebSocket(url);
+  let receivedOnce = false;
+
+  ws.on("message", (data) => {
+    process.stdout.write(data.toString());
+    process.stdout.write("\n");
+    if (oneMessage && !receivedOnce) {
+      receivedOnce = true;
+      ws.close();
+    }
+  });
+
+  ws.on("error", (error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+
+  ws.on("close", () => {
+    process.exit(process.exitCode ?? 0);
+  });
+
+  await new Promise((resolve, reject) => {
+    ws.once("open", resolve);
+    ws.once("error", reject);
+  });
+
+  const rl = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+    terminal: false,
+  });
+
+  let sentAny = false;
+
+  rl.on("line", (line) => {
+    sentAny = true;
+    ws.send(line);
+  });
+
+  rl.on("close", () => {
+    if (!sentAny && oneMessage) {
+      ws.close();
+    }
+  });
+})().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});

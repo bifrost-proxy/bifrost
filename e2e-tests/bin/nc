@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_cmd_helper.sh"
+
+if real_cmd="$(find_real_cmd nc)"; then
+  exec "$real_cmd" "$@"
+fi
+
+if [[ "${1:-}" != "-z" || "$#" -lt 3 ]]; then
+  echo "shim nc only supports: nc -z host port" >&2
+  exit 2
+fi
+
+host="$2"
+port="$3"
+
+python3 - "$host" "$port" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(1.0)
+try:
+    sock.connect((host, port))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+sys.exit(0)
+PY

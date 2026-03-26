@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_cmd_helper.sh"
+
+if real_cmd="$(find_real_cmd timeout)"; then
+  exec "$real_cmd" "$@"
+fi
+
+if [[ "$#" -lt 2 ]]; then
+  echo "usage: timeout <seconds> <command> [args...]" >&2
+  exit 2
+fi
+
+seconds="$1"
+shift
+
+python3 - "$seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout_s = float(sys.argv[1])
+cmd = sys.argv[2:]
+
+try:
+    completed = subprocess.run(cmd, timeout=timeout_s)
+    sys.exit(completed.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY

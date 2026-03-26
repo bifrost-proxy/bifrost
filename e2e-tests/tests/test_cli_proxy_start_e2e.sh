@@ -11,6 +11,8 @@ BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
 TEST_DATA_DIR=""
 TEST_HOME=""
 PROXY_PID=""
+PLATFORM="$(uname -s)"
+ADMIN_API_BASE="http://127.0.0.1:${PROXY_PORT}/_bifrost/api/proxy/cli"
 
 cleanup() {
     if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
@@ -88,13 +90,40 @@ assert_marker_removed() {
     fi
 }
 
+assert_windows_cli_proxy_status() {
+    local response
+    response="$(curl -fsS "$ADMIN_API_BASE")" || {
+        _log_fail "cli proxy status endpoint" "reachable" "unreachable"
+        return 1
+    }
+
+    local shell config_count enabled proxy_url
+    shell="$(printf '%s' "$response" | jq -r '.shell')"
+    config_count="$(printf '%s' "$response" | jq -r '.config_files | length')"
+    enabled="$(printf '%s' "$response" | jq -r '.enabled')"
+    proxy_url="$(printf '%s' "$response" | jq -r '.proxy_url')"
+
+    if [[ "$shell" != "cmd" && "$shell" != "powershell" ]]; then
+        _log_fail "windows shell detection" "cmd or powershell" "$shell"
+        return 1
+    fi
+
+    assert_equals "0" "$config_count" "windows cli proxy should not write shell config files" || return 1
+    assert_equals "false" "$enabled" "windows cli proxy persistent config should remain disabled" || return 1
+    assert_equals "http://127.0.0.1:${PROXY_PORT}" "$proxy_url" "windows cli proxy status should expose proxy url" || return 1
+}
+
 main() {
     build_bifrost || { echo "编译失败"; exit 1; }
 
     TEST_DATA_DIR="$(mktemp -d)"
     TEST_HOME="$(mktemp -d)"
     export HOME="$TEST_HOME"
-    export SHELL="/bin/zsh"
+    if [[ "$PLATFORM" == MINGW* || "$PLATFORM" == MSYS* || "$PLATFORM" == CYGWIN* ]]; then
+        unset SHELL
+    else
+        export SHELL="/bin/zsh"
+    fi
 
     start_proxy
     if [[ "${PROXY_PID}" == "" ]]; then
@@ -102,13 +131,19 @@ main() {
         return 1
     fi
 
-    assert_marker_present "${TEST_HOME}/.zshrc"
-    assert_marker_present "${TEST_HOME}/.zprofile"
+    if [[ "$PLATFORM" == MINGW* || "$PLATFORM" == MSYS* || "$PLATFORM" == CYGWIN* ]]; then
+        assert_windows_cli_proxy_status || { print_test_summary || exit 1; return 1; }
+    else
+        assert_marker_present "${TEST_HOME}/.zshrc"
+        assert_marker_present "${TEST_HOME}/.zprofile"
+    fi
 
     stop_proxy
 
-    assert_marker_removed "${TEST_HOME}/.zshrc"
-    assert_marker_removed "${TEST_HOME}/.zprofile"
+    if [[ "$PLATFORM" != MINGW* && "$PLATFORM" != MSYS* && "$PLATFORM" != CYGWIN* ]]; then
+        assert_marker_removed "${TEST_HOME}/.zshrc"
+        assert_marker_removed "${TEST_HOME}/.zprofile"
+    fi
 
     print_test_summary || exit 1
 }

@@ -18,6 +18,7 @@ TEST_DATA_DIR=""
 RULES_TEMPLATE="${PROJECT_DIR}/e2e-tests/rules/system_proxy/basic_forwarding.txt"
 PROXY_PID=""
 ECHO_PID=""
+PLATFORM="$(uname -s)"
 
 passed=0
 failed=0
@@ -83,6 +84,19 @@ macos_find_services() {
     networksetup -listallnetworkservices 2>/dev/null | sed '1d' | sed '/^\*/d'
 }
 
+windows_proxy_field() {
+    local field="$1"
+    reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings' /v "$field" 2>/dev/null
+}
+
+windows_proxy_enabled() {
+    windows_proxy_field "ProxyEnable" | tr -d '\r' | grep -q "0x1"
+}
+
+windows_proxy_server() {
+    windows_proxy_field "ProxyServer" | tr -d '\r' | awk '/ProxyServer/ {print $NF}'
+}
+
 macos_check_proxy_enabled_for_any_service() {
     local expected_host="$1"
     local expected_port="$2"
@@ -117,24 +131,52 @@ macos_check_proxy_disabled_for_all_services() {
 
 test_enable_on_startup() {
     start_proxy_with_system_proxy
-    if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
-        _log_pass "macOS: 系统代理设置正确"
-        ((passed++))
-    else
-        _log_fail "macOS: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "networksetup 状态不匹配"
-        ((failed++))
-    fi
+    case "$PLATFORM" in
+        Darwin)
+            if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 系统代理设置正确"
+                ((passed++))
+            else
+                _log_fail "macOS: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "networksetup 状态不匹配"
+                ((failed++))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            local server
+            server="$(windows_proxy_server)"
+            if windows_proxy_enabled && [[ "$server" == "127.0.0.1:${PROXY_PORT}" ]]; then
+                _log_pass "Windows: 系统代理设置正确"
+                ((passed++))
+            else
+                _log_fail "Windows: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "${server:-disabled}"
+                ((failed++))
+            fi
+            ;;
+    esac
 }
 
 test_disable_on_startup() {
     start_proxy_without_system_proxy
-    if macos_check_proxy_disabled_for_all_services; then
-        _log_pass "macOS: 未启用系统代理（符合预期）"
-        ((passed++))
-    else
-        _log_fail "macOS: 未启用系统代理检查失败" "Disabled" "存在 Enabled=Yes"
-        ((failed++))
-    fi
+    case "$PLATFORM" in
+        Darwin)
+            if macos_check_proxy_disabled_for_all_services; then
+                _log_pass "macOS: 未启用系统代理（符合预期）"
+                ((passed++))
+            else
+                _log_fail "macOS: 未启用系统代理检查失败" "Disabled" "存在 Enabled=Yes"
+                ((failed++))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if ! windows_proxy_enabled; then
+                _log_pass "Windows: 未启用系统代理（符合预期）"
+                ((passed++))
+            else
+                _log_fail "Windows: 未启用系统代理检查失败" "Disabled" "$(windows_proxy_server)"
+                ((failed++))
+            fi
+            ;;
+    esac
 }
 
 test_restore_on_exit() {
@@ -143,13 +185,26 @@ test_restore_on_exit() {
         wait "$PROXY_PID" 2>/dev/null || true
     fi
     sleep 2
-    if macos_check_proxy_disabled_for_all_services; then
-        _log_pass "macOS: 代理退出后系统代理已恢复"
-        ((passed++))
-    else
-        _log_fail "macOS: 代理退出后系统代理未恢复" "全部服务 Disabled" "存在 Enabled=Yes"
-        ((failed++))
-    fi
+    case "$PLATFORM" in
+        Darwin)
+            if macos_check_proxy_disabled_for_all_services; then
+                _log_pass "macOS: 代理退出后系统代理已恢复"
+                ((passed++))
+            else
+                _log_fail "macOS: 代理退出后系统代理未恢复" "全部服务 Disabled" "存在 Enabled=Yes"
+                ((failed++))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if ! windows_proxy_enabled; then
+                _log_pass "Windows: 代理退出后系统代理已恢复"
+                ((passed++))
+            else
+                _log_fail "Windows: 代理退出后系统代理未恢复" "Disabled" "$(windows_proxy_server)"
+                ((failed++))
+            fi
+            ;;
+    esac
 }
 
 test_crash_recovery() {
@@ -158,27 +213,62 @@ test_crash_recovery() {
         kill -9 "$PROXY_PID" 2>/dev/null || true
     fi
     sleep 2
-    if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
-        _log_pass "macOS: 崩溃后系统代理仍保持启用（符合预期）"
-        ((passed++))
-    else
-        _log_fail "macOS: 崩溃后系统代理未保持启用" "保持启用" "未启用或端口不匹配"
-        ((failed++))
-    fi
+    case "$PLATFORM" in
+        Darwin)
+            if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 崩溃后系统代理仍保持启用（符合预期）"
+                ((passed++))
+            else
+                _log_fail "macOS: 崩溃后系统代理未保持启用" "保持启用" "未启用或端口不匹配"
+                ((failed++))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if windows_proxy_enabled && [[ "$(windows_proxy_server)" == "127.0.0.1:${PROXY_PORT}" ]]; then
+                _log_pass "Windows: 崩溃后系统代理仍保持启用（符合预期）"
+                ((passed++))
+            else
+                _log_fail "Windows: 崩溃后系统代理未保持启用" "127.0.0.1:${PROXY_PORT}" "$(windows_proxy_server)"
+                ((failed++))
+            fi
+            ;;
+    esac
     start_proxy_without_system_proxy
-    if macos_check_proxy_disabled_for_all_services; then
-        _log_pass "macOS: 再次启动未启用系统代理，崩溃恢复生效"
-        ((passed++))
-    else
-        _log_fail "macOS: 崩溃恢复未生效" "Disabled" "存在 Enabled=Yes"
-        ((failed++))
-    fi
+    case "$PLATFORM" in
+        Darwin)
+            if macos_check_proxy_disabled_for_all_services; then
+                _log_pass "macOS: 再次启动未启用系统代理，崩溃恢复生效"
+                ((passed++))
+            else
+                _log_fail "macOS: 崩溃恢复未生效" "Disabled" "存在 Enabled=Yes"
+                ((failed++))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if ! windows_proxy_enabled; then
+                _log_pass "Windows: 再次启动未启用系统代理，崩溃恢复生效"
+                ((passed++))
+            else
+                _log_fail "Windows: 崩溃恢复未生效" "Disabled" "$(windows_proxy_server)"
+                ((failed++))
+            fi
+            ;;
+    esac
 }
 
 main() {
     build_bifrost || { echo "编译失败"; exit 1; }
     setup_env
     start_echo
+
+    case "$PLATFORM" in
+        Darwin|MINGW*|MSYS*|CYGWIN*)
+            ;;
+        *)
+            echo "Skipping system proxy E2E on unsupported platform: $PLATFORM"
+            exit 0
+            ;;
+    esac
 
     test_enable_on_startup
     test_disable_on_startup

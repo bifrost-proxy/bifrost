@@ -103,11 +103,6 @@ should_skip_full_shell_test() {
       return
       ;;
     MINGW*|MSYS*|CYGWIN*)
-      case "$script_name" in
-        test_cli_proxy_start_e2e.sh|test_system_proxy_e2e.sh)
-          return 0
-          ;;
-      esac
       return 1
       ;;
     *)
@@ -140,9 +135,11 @@ export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"
 export BIFROST_UI_TEST_RUNNER_PORT="${BIFROST_UI_TEST_RUNNER_PORT:-18080}"
+export BIFROST_E2E_ROOT="$ROOT_DIR"
 export HOME="${HOME:-$ROOT_DIR/.bifrost-e2e-home}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-data}"
+export PATH="$ROOT_DIR/e2e-tests/bin:$PATH"
 
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 

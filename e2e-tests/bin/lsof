@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_cmd_helper.sh"
+
+if real_cmd="$(find_real_cmd lsof)"; then
+  exec "$real_cmd" "$@"
+fi
+
+port=""
+for arg in "$@"; do
+  if [[ "$arg" =~ ^-i(TCP:)?:(.+)$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$arg" =~ ^:(.+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  fi
+done
+
+if [[ -z "$port" ]]; then
+  echo "shim lsof only supports port checks" >&2
+  exit 2
+fi
+
+python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("127.0.0.1", port))
+except OSError:
+    print(f"LISTEN {port}")
+    sys.exit(0)
+finally:
+    try:
+        sock.close()
+    except OSError:
+        pass
+sys.exit(1)
+PY
