@@ -87,6 +87,44 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-ubuntu
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: web
+      - name: Run end-to-end suites
+        shell: bash
+        run: bash scripts/ci/run-e2e.sh
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
+
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
