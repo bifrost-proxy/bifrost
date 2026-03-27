@@ -2,6 +2,7 @@
   "private": true,
   "packageManager": "pnpm@10.30.3",
   "scripts": {
+    "ci:watch-fix": "python3 scripts/ci/watch_and_fix_ci.py --workflow ci.yml --fix-with-codex --push-after-fix",
     "cli:build": "cargo build -p bifrost-cli --release",
     "e2e:all": "bash scripts/run_all_e2e.sh",
     "e2e:ci": "bash scripts/run_all_e2e.sh --ci",
