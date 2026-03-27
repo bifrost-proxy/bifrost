@@ -19,6 +19,8 @@ import zipfile
 from typing import Any
 
 UNAUTHENTICATED_MIN_POLL_INTERVAL = 75
+COOKIE_INSPECTOR = ".trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js"
+COOKIE_FILE = ".env/.cookie.github.com"
 
 
 def eprint(*args: object) -> None:
@@ -47,6 +49,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-url", help="Specific workflow run url to watch first")
     parser.add_argument("--poll-interval", type=int, default=20, help="Polling interval in seconds")
     parser.add_argument("--max-cycles", type=int, default=10, help="Maximum fix/retry cycles")
+    parser.add_argument(
+        "--cookie-inspector",
+        default=COOKIE_INSPECTOR,
+        help="Cookie-based GitHub Actions inspector script",
+    )
+    parser.add_argument(
+        "--cookie-file",
+        default=COOKIE_FILE,
+        help="Cookie file used by the GitHub Actions inspector",
+    )
     parser.add_argument(
         "--state-dir",
         default=".git/ci-watch",
@@ -80,6 +92,111 @@ def parse_run_id_from_url(run_url: str) -> int:
     if not match:
         raise ValueError(f"Unable to parse run id from url: {run_url}")
     return int(match.group(1))
+
+
+def run_cookie_inspector(
+    repo_dir: pathlib.Path,
+    inspector_script: pathlib.Path,
+    cookie_file: pathlib.Path,
+    repo: str,
+    workflow: str,
+    run: str | int,
+    failed_only: bool = False,
+    fetch_logs: bool = False,
+) -> dict[str, Any]:
+    cmd = [
+        "node",
+        str(inspector_script),
+        "--repo",
+        repo,
+        "--workflow",
+        workflow,
+        "--run",
+        str(run),
+        "--format",
+        "json",
+        "--cookie-file",
+        str(cookie_file),
+    ]
+    if failed_only:
+        cmd.append("--failed-only")
+    if fetch_logs:
+        cmd.append("--fetch-logs")
+
+    result = subprocess.run(
+        cmd,
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def cookie_run_status(cookie_data: dict[str, Any]) -> tuple[str, str | None]:
+    status_text = str(cookie_data.get("run", {}).get("status") or "").lower()
+    failed_jobs_count = sum(
+        1
+        for job in cookie_data.get("jobs", [])
+        if job.get("failedSteps")
+        or "failed" in str(job.get("status", "")).lower()
+        or "failed" in str(job.get("jobStatus", "")).lower()
+    )
+    if "success" in status_text:
+        return "completed", "success"
+    if any(token in status_text for token in ["failure", "failed", "timed out", "cancelled"]):
+        return "completed", "failure"
+    if failed_jobs_count > 0:
+        return "completed", "failure"
+    if "queued" in status_text or "waiting" in status_text:
+        return "queued", None
+    if "in progress" in status_text or "running" in status_text or "pending" in status_text:
+        return "in_progress", None
+    return "unknown", None
+
+
+def cookie_jobs_to_watch(cookie_data: dict[str, Any], run_id: int) -> list[dict[str, Any]]:
+    jobs = []
+    for job in cookie_data.get("jobs", []):
+        status = "completed"
+        conclusion = "success"
+        if job.get("failedSteps") or "failed" in str(job.get("status", "")).lower() or "failed" in str(job.get("jobStatus", "")).lower():
+            conclusion = "failure"
+        elif "running" in str(job.get("status", "")).lower() or "in_progress" in str(job.get("jobStatus", "")).lower():
+            status = "in_progress"
+            conclusion = None
+
+        steps = []
+        for step in job.get("steps", []):
+            step_conclusion = step.get("conclusion")
+            step_status = "completed" if step_conclusion not in (None, "", "in_progress") else "in_progress"
+            steps.append(
+                {
+                    "number": step.get("number"),
+                    "name": step.get("name"),
+                    "status": step_status,
+                    "conclusion": step_conclusion,
+                    "logPath": step.get("logPath"),
+                }
+            )
+
+        jobs.append(
+            {
+                "id": int(job["jobId"]),
+                "run_id": run_id,
+                "name": job["name"],
+                "status": status,
+                "conclusion": conclusion,
+                "html_url": f"https://github.com{job['jobPath']}",
+                "steps": steps,
+                "annotations": job.get("annotations", []),
+                "relatedRunAnnotations": job.get("relatedRunAnnotations", []),
+                "failureSummary": job.get("failureSummary"),
+                "context": job.get("context", {}),
+                "stepLogs": job.get("stepLogs", {}),
+            }
+        )
+    return jobs
 
 
 class GitHubClient:
@@ -309,6 +426,53 @@ def collect_failure_bundle(
     return bundle_dir
 
 
+def collect_cookie_failure_bundle(
+    cookie_data: dict[str, Any],
+    head_sha: str,
+    run_id: int,
+    state_dir: pathlib.Path,
+) -> pathlib.Path:
+    run_number = cookie_data["run"]["runId"]
+    bundle_dir = ensure_dir(state_dir / f"run-{run_number}-{head_sha[:7]}")
+    write_json(bundle_dir / "cookie-run.json", cookie_data)
+
+    summary_lines = [
+        "# CI Failure Summary",
+        "",
+        f"- workflow run: #{run_number}",
+        f"- run id: {run_id}",
+        f"- status: {cookie_data['run'].get('status')}",
+        f"- head sha: {head_sha}",
+        f"- url: https://github.com{cookie_data['run'].get('runPath')}",
+        "",
+    ]
+    for job in cookie_data.get("jobs", []):
+        job_failed = (
+            job.get("failedSteps")
+            or "failed" in str(job.get("status", "")).lower()
+            or "failed" in str(job.get("jobStatus", "")).lower()
+        )
+        if not job_failed:
+            continue
+        job_dir = ensure_dir(bundle_dir / f"job-{job['jobId']}")
+        write_json(job_dir / "job.json", job)
+        summary_lines.append(f"## {job['name']}")
+        summary_lines.append(f"- job id: {job['jobId']}")
+        summary_lines.append(f"- url: https://github.com{job['jobPath']}")
+        if job.get("failureSummary"):
+            summary_lines.append(f"- summary: {job['failureSummary']}")
+        for failed_step in job.get("failedSteps", []):
+            summary_lines.append(
+                f"- step {failed_step.get('number')}: {failed_step.get('name')} ({failed_step.get('conclusion')})"
+            )
+        for number, log in job.get("stepLogs", {}).items():
+            write_json(job_dir / f"step-{number}.log.json", log)
+        summary_lines.append("")
+
+    (bundle_dir / "summary.md").write_text("\n".join(summary_lines).rstrip() + "\n", encoding="utf-8")
+    return bundle_dir
+
+
 def run_codex_fix(
     repo_dir: pathlib.Path,
     branch: str,
@@ -395,6 +559,42 @@ def maybe_push_current_head(repo_dir: pathlib.Path) -> None:
     subprocess.run(["git", "push", "origin", "HEAD"], cwd=repo_dir, check=True)
 
 
+def monitor_run_with_cookie(
+    repo_dir: pathlib.Path,
+    inspector_script: pathlib.Path,
+    cookie_file: pathlib.Path,
+    repo: str,
+    workflow: str,
+    run_id: int,
+    poll_interval: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    last_seen: dict[int, tuple[str, str | None, str]] = {}
+    while True:
+        cookie_data = run_cookie_inspector(
+            repo_dir=repo_dir,
+            inspector_script=inspector_script,
+            cookie_file=cookie_file,
+            repo=repo,
+            workflow=workflow,
+            run=run_id,
+            fetch_logs=True,
+        )
+        status, conclusion = cookie_run_status(cookie_data)
+        run = {
+            "id": run_id,
+            "run_number": int(cookie_data["run"]["runId"]),
+            "status": status,
+            "conclusion": conclusion,
+            "head_sha": git(["rev-parse", "HEAD"], repo_dir),
+            "html_url": f"https://github.com{cookie_data['run']['runPath']}",
+        }
+        jobs = cookie_jobs_to_watch(cookie_data, run_id)
+        last_seen = print_job_progress(jobs, last_seen)
+        if status == "completed":
+            return run, jobs, cookie_data
+        time.sleep(poll_interval)
+
+
 def main() -> int:
     args = parse_args()
     repo_dir = pathlib.Path.cwd()
@@ -403,12 +603,17 @@ def main() -> int:
     state_dir = ensure_dir(repo_dir / args.state_dir)
 
     client = GitHubClient(args.repo, token)
+    inspector_script = repo_dir / args.cookie_inspector
+    cookie_file = repo_dir / args.cookie_file
+    use_cookie_inspector = inspector_script.exists() and cookie_file.exists()
     if not client.authenticated and args.poll_interval < UNAUTHENTICATED_MIN_POLL_INTERVAL:
         eprint(
             f"[warn] no GITHUB_TOKEN/GH_TOKEN detected; raising poll interval to "
             f"{UNAUTHENTICATED_MIN_POLL_INTERVAL}s to stay within GitHub public API limits"
         )
         args.poll_interval = UNAUTHENTICATED_MIN_POLL_INTERVAL
+    if use_cookie_inspector:
+        print(f"[ci] using cookie inspector: {inspector_script}", flush=True)
 
     if args.run_url:
         run_id = parse_run_id_from_url(args.run_url)
@@ -423,19 +628,39 @@ def main() -> int:
 
     for cycle in range(1, args.max_cycles + 1):
         print(f"[ci] cycle {cycle}: watching run {run_id}", flush=True)
-        run, jobs = monitor_run(client, run_id, args.poll_interval)
+        cookie_data = None
+        if use_cookie_inspector:
+            run, jobs, cookie_data = monitor_run_with_cookie(
+                repo_dir=repo_dir,
+                inspector_script=inspector_script,
+                cookie_file=cookie_file,
+                repo=args.repo,
+                workflow=args.workflow,
+                run_id=run_id,
+                poll_interval=args.poll_interval,
+            )
+        else:
+            run, jobs = monitor_run(client, run_id, args.poll_interval)
         if run.get("conclusion") == "success":
             print(f"[ci] workflow #{run['run_number']} succeeded", flush=True)
             return 0
 
         failed = failed_jobs(jobs)
-        bundle_dir = collect_failure_bundle(
-            client,
-            run,
-            jobs,
-            state_dir,
-            download_artifacts=args.download_artifacts,
-        )
+        if use_cookie_inspector and cookie_data is not None:
+            bundle_dir = collect_cookie_failure_bundle(
+                cookie_data=cookie_data,
+                head_sha=run["head_sha"],
+                run_id=run["id"],
+                state_dir=state_dir,
+            )
+        else:
+            bundle_dir = collect_failure_bundle(
+                client,
+                run,
+                jobs,
+                state_dir,
+                download_artifacts=args.download_artifacts,
+            )
         print(f"[ci] failure bundle saved to {bundle_dir}", flush=True)
 
         if not args.fix_with_codex:
