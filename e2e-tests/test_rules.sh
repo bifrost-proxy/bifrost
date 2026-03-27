@@ -527,6 +527,25 @@ show_rules() {
     echo ""
 }
 
+log_http_debug_snapshot() {
+    local label="$1"
+    local elapsed="${2:-}"
+
+    warn "${label} (status=${HTTP_STATUS:-<empty>}${elapsed:+, elapsed=${elapsed}ms})"
+
+    if [[ -n "${HTTP_HEADERS:-}" ]]; then
+        local header_preview
+        header_preview=$(printf '%s' "$HTTP_HEADERS" | tr '\r' '\n' | sed '/^[[:space:]]*$/d' | head -10 | tr '\n' '|' | sed 's/|$//')
+        [[ -n "$header_preview" ]] && echo "      headers: $header_preview"
+    fi
+
+    if [[ -n "${HTTP_BODY:-}" ]]; then
+        local body_preview="${HTTP_BODY:0:240}"
+        body_preview="${body_preview//$'\n'/\\n}"
+        echo "      body: ${body_preview}"
+    fi
+}
+
 pattern_to_test_host() {
     local pattern="$1"
     local host="$pattern"
@@ -2120,12 +2139,16 @@ PY
         fi
 
         if [[ "$attempt" -lt "$max_attempts" ]]; then
-            warn "请求速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
+            log_http_debug_snapshot "请求速度测试第 ${attempt}/${max_attempts} 次失败，准备重试" "$((end_ms - start_ms))"
             TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
             sleep 2
         fi
         attempt=$((attempt + 1))
     done
+
+    if [[ ! "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
+        log_http_debug_snapshot "请求速度测试最终失败" "$((end_ms - start_ms))"
+    fi
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
@@ -2181,12 +2204,16 @@ PY
         fi
 
         if [[ "$attempt" -lt "$max_attempts" ]]; then
-            warn "响应速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
+            log_http_debug_snapshot "响应速度测试第 ${attempt}/${max_attempts} 次失败，准备重试" "$((end_ms - start_ms))"
             TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
             sleep 2
         fi
         attempt=$((attempt + 1))
     done
+
+    if [[ ! "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
+        log_http_debug_snapshot "响应速度测试最终失败" "$((end_ms - start_ms))"
+    fi
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 

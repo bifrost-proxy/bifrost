@@ -240,6 +240,44 @@ print_progress() {
     printf "${CYAN}] %3d%% (%d/%d)${NC}" "$percent" "$completed" "$total"
 }
 
+print_failure_diagnostics() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || return 0
+
+    local clean_log
+    clean_log=$(mktemp)
+    perl -pe 's/\e\[[0-9;]*m//g' "$log_file" > "$clean_log"
+
+    local failure_excerpt
+    failure_excerpt=$(awk '
+        /│ 规则:/ { current_rule=$0; next }
+        /【测试】/ { current_test=$0; next }
+        /^✗ / {
+            if (current_rule != "") print current_rule;
+            if (current_test != "") print current_test;
+            print $0;
+            for (i = 0; i < 2; i++) {
+                if (getline line) print line;
+            }
+            print "";
+        }
+    ' "$clean_log")
+
+    if [[ -n "$failure_excerpt" ]]; then
+        echo -e "    ${YELLOW}失败断言摘录:${NC}"
+        printf '%s\n' "$failure_excerpt" | tail -60 | sed 's/^/      /'
+    fi
+
+    local warning_excerpt
+    warning_excerpt=$(rg -n "请求速度测试第|响应速度测试第|超时: " "$clean_log" -S 2>/dev/null || true)
+    if [[ -n "$warning_excerpt" ]]; then
+        echo -e "    ${YELLOW}测速诊断摘录:${NC}"
+        printf '%s\n' "$warning_excerpt" | tail -20 | sed 's/^/      /'
+    fi
+
+    rm -f "$clean_log"
+}
+
 aggregate_results() {
     local total_passed=0
     local total_failed=0
@@ -293,6 +331,7 @@ aggregate_results() {
                         idx="${idx%.txt}"
                         local log_file="${RESULTS_DIR}/log_${idx}.txt"
                         if [[ -f "$log_file" ]]; then
+                            print_failure_diagnostics "$log_file"
                             echo -e "    ${YELLOW}最后 20 行日志:${NC}"
                             tail -20 "$log_file" | sed 's/^/      /'
                         fi
@@ -380,6 +419,7 @@ retry_failed_suites_once() {
         else
             warn "重试仍失败: ${rule_rel}"
             if [[ -f "$log_file" ]]; then
+                print_failure_diagnostics "$log_file"
                 echo -e "    ${YELLOW}最后 20 行日志:${NC}"
                 tail -20 "$log_file" | sed 's/^/      /'
             fi
