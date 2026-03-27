@@ -197,6 +197,7 @@ pub fn needs_response_override(rules: &ResolvedRules) -> bool {
 enum BodyMode {
     Known(usize),
     Stream,
+    StreamWithLength(usize),
     StreamWithTrailers,
 }
 
@@ -255,6 +256,14 @@ fn normalize_req_headers(parts: &mut hyper::http::request::Parts, mode: BodyMode
             parts.headers.remove(hyper::header::TRANSFER_ENCODING);
             parts.headers.remove(hyper::header::CONTENT_LENGTH);
         }
+        BodyMode::StreamWithLength(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&len.to_string()).unwrap(),
+            );
+        }
     }
 }
 
@@ -276,6 +285,14 @@ fn normalize_res_headers(parts: &mut ResponseParts, mode: BodyMode, method: &str
         BodyMode::Stream | BodyMode::StreamWithTrailers => {
             parts.headers.remove(hyper::header::TRANSFER_ENCODING);
             parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        }
+        BodyMode::StreamWithLength(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&len.to_string()).unwrap(),
+            );
         }
     }
 }
@@ -812,7 +829,11 @@ pub async fn handle_http_request(
     };
 
     let req_body_mode = if streaming_body.is_some() {
-        BodyMode::Stream
+        if let Some(len) = content_length {
+            BodyMode::StreamWithLength(len)
+        } else {
+            BodyMode::Stream
+        }
     } else {
         BodyMode::Known(final_body.len())
     };

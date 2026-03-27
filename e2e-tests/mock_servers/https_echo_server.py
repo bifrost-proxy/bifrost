@@ -23,6 +23,17 @@ import tempfile
 import urllib.parse
 from datetime import datetime, timezone
 
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 
 def print_banner(unicode_banner, ascii_banner):
     """在不支持 Unicode 输出的终端中回退到 ASCII banner。"""

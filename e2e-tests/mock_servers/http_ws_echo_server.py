@@ -21,6 +21,17 @@ import struct
 import sys
 from datetime import datetime
 
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 
 WS_MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 

@@ -25,6 +25,23 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 
+def configure_console_output():
+    """
+    避免在 Windows 非 UTF-8 终端中因为中文输出导致脚本崩溃。
+
+    保留原有编码，仅把错误策略改为 backslashreplace，这样即使控制台
+    无法编码中文，也会输出 \\uXXXX 转义序列而不是抛出 UnicodeEncodeError。
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except Exception:
+            continue
+
+
 class RuleError:
     def __init__(self, file_path: str, line_num: int, line_content: str,
                  operator: str, value: str, message: str):
@@ -312,6 +329,8 @@ def print_error(error: RuleError, base_path: str):
 
 
 def main():
+    configure_console_output()
+
     parser = argparse.ArgumentParser(
         description='检查规则文件中操作符后的值是否包含空格'
     )
