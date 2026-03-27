@@ -4,7 +4,7 @@ use bifrost_core::{DomainMatcher, MatchResult, Matcher, RegexMatcher, WildcardMa
 
 #[test]
 fn test_all_protocols() {
-    assert_eq!(ALL_PROTOCOLS.len(), 67, "Should have exactly 67 protocols");
+    assert_eq!(ALL_PROTOCOLS.len(), 72, "Should have exactly 72 protocols");
 
     let protocol_names = [
         "host",
@@ -45,6 +45,8 @@ fn test_all_protocols() {
         "resCharset",
         "reqCookies",
         "resCookies",
+        "forwardedFor",
+        "responseFor",
         "reqCors",
         "resCors",
         "reqHeaders",
@@ -71,7 +73,10 @@ fn test_all_protocols() {
         "dns",
         "tlsIntercept",
         "tlsPassthrough",
+        "tlsOptions",
+        "sniCallback",
         "passthrough",
+        "tunnel",
         "delete",
         "reqScript",
     ];
@@ -87,8 +92,8 @@ fn test_all_protocols() {
 
     assert_eq!(
         protocol_names.len(),
-        67,
-        "Test should cover all 67 protocols"
+        72,
+        "Test should cover all 72 protocols"
     );
 }
 
