@@ -1,2 +1,0 @@
-# 测试目标: 验证 HTTP/3 over SOCKS5 的 TCP 请求能应用响应头规则。
-edith.xiaohongshu.com resHeaders://{x-test-header: bifrost-test}

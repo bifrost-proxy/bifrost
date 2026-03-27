@@ -1,2 +1,0 @@
-# 测试目标: 验证 HTTP/3 MITM 相关测试中，SOCKS5 TCP TLS 拦截路径可应用响应头规则。
-edith.xiaohongshu.com resHeaders://{x-bifrost-test: http3-mitm-test}

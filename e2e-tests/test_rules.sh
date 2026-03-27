@@ -499,7 +499,7 @@ start_proxy() {
                 port_ready="false"
             fi
         fi
-        if [[ "$port_ready" == "true" ]] && curl -s --proxy "$PROXY" --connect-timeout 1 http://example.com >/dev/null 2>&1; then
+        if [[ "$port_ready" == "true" ]] && curl -s --proxy "$PROXY" --connect-timeout 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/health" 2>/dev/null | grep -q '^[23]'; then
             echo -e "${GREEN}✓${NC} 代理服务器已启动 (PID: $PROXY_PID)"
             echo -e "${GREEN}✓${NC} 规则已从文件加载: ${RULE_FILE}"
             return 0
@@ -2117,6 +2117,8 @@ PY
 
     # 速度测试在 CI 上更容易被首次连接建立、路由预热和 100-continue 抖动影响。
     TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
+    sleep 1
+    TIMEOUT=10 http_post "$test_url" "warmup" $'Content-Type: text/plain\nExpect:' >/dev/null 2>&1 || true
 
     local start_ms=0
     local end_ms=0
@@ -2182,6 +2184,8 @@ test_res_speed_rule() {
     echo "    超时: ${request_timeout}s, 重试: ${max_attempts}"
 
     TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
+    sleep 1
+    TIMEOUT=10 http_get "$test_url" >/dev/null 2>&1 || true
 
     local start_ms=0
     local end_ms=0
@@ -3078,7 +3082,7 @@ wait_for_admin_ready() {
             fi
         fi
         if [[ "$port_ready" == "true" ]]; then
-            if curl -s --proxy "$PROXY" --connect-timeout 1 http://example.com >/dev/null 2>&1; then
+            if curl -s --proxy "$PROXY" --connect-timeout 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:3000/health" 2>/dev/null | grep -q '^[23]'; then
                 return 0
             fi
         fi

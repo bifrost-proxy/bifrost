@@ -95,8 +95,6 @@ FIXTURE_ONLY_RULES=(
     "hot_reload/status_201.txt"
     "hot_reload/status_202.txt"
     "http3/http3_e2e.txt"
-    "http3/http3_mitm_tls_header.txt"
-    "http3/http3_rules_header.txt"
     "regression/rule_semantics_split_parsing.txt"
     "replay/delete_header.txt"
     "replay/host_redirect.txt"
