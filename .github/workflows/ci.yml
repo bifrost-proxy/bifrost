@@ -113,34 +113,9 @@ jobs:
             web/test-results
           if-no-files-found: ignore
 
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            cross: true
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            cross: false
-          - os: macos-15
-            target: aarch64-apple-darwin
-            cross: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            cross: false
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            cross: false
+  build-linux:
+    name: Build Linux Targets
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -154,24 +129,25 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,armv7-unknown-linux-gnueabihf
       - name: Install cross
-        if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - name: Build
-        if: ${{ !matrix.cross }}
-        run: cargo build --workspace --release --target ${{ matrix.target }}
-      - name: Build (cross)
-        if: matrix.cross
+          key: linux-target-builds
+      - name: Build Linux workspace
+        run: cargo build --workspace --release --target x86_64-unknown-linux-gnu
+      - name: Build Linux CLI (aarch64)
         env:
           SKIP_FRONTEND_BUILD: "1"
-        run: cross build -p bifrost-cli --release --target ${{ matrix.target }}
+        run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
+      - name: Build Linux CLI (armv7)
+        env:
+          SKIP_FRONTEND_BUILD: "1"
+        run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
-  desktop-check:
-    name: Desktop Check (${{ matrix.target }})
+  build-desktop-platform:
+    name: Build Desktop Platform (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -207,11 +183,11 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-${{ matrix.target }}
+          key: desktop-platform-${{ matrix.target }}
+      - name: Build workspace
+        run: cargo build --workspace --release --target ${{ matrix.target }}
       - name: Build desktop frontend
         run: pnpm --dir web run build:desktop
-      - name: Build bundled CLI backend
-        run: cargo build -p bifrost-cli --release --target ${{ matrix.target }}
       - name: Prepare desktop sidecar
         run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
       - name: Resolve macOS signing mode
