@@ -322,6 +322,7 @@ impl CurlResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::EnhancedMockServer;
 
     #[tokio::test]
     async fn test_curl_command_build_args() {
@@ -341,7 +342,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_curl_basic_request() {
-        let result = CurlCommand::new("https://httpbin.org/get")
+        let mock = EnhancedMockServer::start().await;
+        let result = CurlCommand::new(&mock.url("/get"))
             .verbose(false)
             .execute()
             .await;

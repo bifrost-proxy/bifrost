@@ -21,6 +21,9 @@ import ssl
 import sys
 import tempfile
 import urllib.parse
+import gzip
+import io
+import time
 from datetime import datetime, timezone
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -254,6 +257,150 @@ body {{ color: #333; }}
                 return None
         return None
 
+    def _query_params(self):
+        parsed_path = urllib.parse.urlparse(self.path)
+        return parsed_path, urllib.parse.parse_qs(parsed_path.query)
+
+    def _httpbin_headers(self):
+        return {k.title(): v for k, v in self.headers.items()}
+
+    def _httpbin_url(self, parsed_path):
+        host = self.headers.get('Host', f'127.0.0.1:{self.server.server_address[1]}')
+        if parsed_path.query:
+            return f"https://{host}{parsed_path.path}?{parsed_path.query}"
+        return f"https://{host}{parsed_path.path}"
+
+    def _httpbin_cookies(self):
+        cookies = {}
+        cookie_header = self.headers.get('Cookie', '')
+        for part in cookie_header.split(';'):
+            part = part.strip()
+            if '=' in part:
+                key, value = part.split('=', 1)
+                cookies[key.strip()] = value.strip()
+        return cookies
+
+    def _send_bytes_response(self, status_code, content_type, body_bytes, extra_headers=None):
+        self.send_response(status_code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body_bytes)))
+        self.send_header('X-Echo-Server', 'bifrost-test-https')
+        self.send_header('X-Protocol', 'https')
+        self.send_header('Connection', 'keep-alive')
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def _send_json_bytes(self, payload, status_code=200, extra_headers=None):
+        self._send_bytes_response(
+            status_code,
+            'application/json; charset=utf-8',
+            json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+            extra_headers=extra_headers,
+        )
+
+    def _handle_httpbin_common(self, method, body=None):
+        parsed_path, query_params = self._query_params()
+        path = parsed_path.path
+        url = self._httpbin_url(parsed_path)
+        headers = self._httpbin_headers()
+
+        if path == '/ip':
+            self._send_json_bytes({"origin": "127.0.0.1"})
+            return True
+        if path == '/headers':
+            self._send_json_bytes({"headers": headers})
+            return True
+        if path == '/user-agent':
+            self._send_json_bytes({"user-agent": self.headers.get('User-Agent', '')})
+            return True
+        if path == '/cookies':
+            self._send_json_bytes({"cookies": self._httpbin_cookies()})
+            return True
+        if path.startswith('/status/'):
+            status_segment = path[len('/status/'):].split('/', 1)[0] or '200'
+            status_code = int(status_segment)
+            self._send_bytes_response(status_code, 'application/json; charset=utf-8', b'{}')
+            return True
+        if path.startswith('/bytes/'):
+            size = max(0, int(path.split('/')[-1] or '0'))
+            payload = ('0123456789abcdef' * ((size // 16) + 1)).encode('utf-8')[:size]
+            self._send_bytes_response(200, 'application/octet-stream', payload)
+            return True
+        if path.startswith('/redirect/'):
+            remaining = max(0, int(path.split('/')[-1] or '0'))
+            location = '/get' if remaining <= 1 else f'/redirect/{remaining - 1}'
+            self._send_bytes_response(302, 'text/plain; charset=utf-8', b'', extra_headers={'Location': location})
+            return True
+        if path == '/drip':
+            duration = float(query_params.get('duration', ['0'])[0])
+            numbytes = max(0, int(query_params.get('numbytes', ['0'])[0]))
+            delay = float(query_params.get('delay', ['0'])[0])
+            if delay > 0:
+                time.sleep(delay)
+            if duration > 0:
+                time.sleep(duration)
+            payload = (b'd' * numbytes) or b'drip'
+            self._send_bytes_response(200, 'application/octet-stream', payload)
+            return True
+        if path == '/sse':
+            count = max(1, int(query_params.get('count', ['3'])[0]))
+            delay = float(query_params.get('delay', ['0'])[0])
+            chunks = []
+            for idx in range(count):
+                chunks.append(f"event: message\ndata: {{\"id\": {idx}, \"host\": \"httpbin.org\"}}\n\n")
+            if delay > 0:
+                time.sleep(delay * count)
+            self._send_bytes_response(200, 'text/event-stream; charset=utf-8', ''.join(chunks).encode('utf-8'))
+            return True
+        if path == '/gzip':
+            payload = json.dumps({
+                "gzipped": True,
+                "headers": headers,
+                "method": method,
+            }, ensure_ascii=False).encode('utf-8')
+            buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
+                gz.write(payload)
+            self._send_bytes_response(
+                200,
+                'application/json; charset=utf-8',
+                buf.getvalue(),
+                extra_headers={'Content-Encoding': 'gzip'},
+            )
+            return True
+        if path == '/html':
+            html = "<html><body><h1>httpbin mock html</h1><p>forwarded</p></body></html>"
+            self._send_bytes_response(200, 'text/html; charset=utf-8', html.encode('utf-8'))
+            return True
+        if path == '/get' or path == '/anything':
+            self._send_json_bytes({
+                "args": {k: v[-1] for k, v in query_params.items()},
+                "headers": headers,
+                "origin": "127.0.0.1",
+                "url": url,
+            })
+            return True
+        if path in ('/post', '/put', '/patch', '/delete'):
+            text_body = body.decode('utf-8', errors='replace') if body else ""
+            try:
+                json_body = json.loads(text_body) if text_body else None
+            except json.JSONDecodeError:
+                json_body = None
+            self._send_json_bytes({
+                "args": {k: v[-1] for k, v in query_params.items()},
+                "data": text_body,
+                "headers": headers,
+                "json": json_body,
+                "method": method,
+                "origin": "127.0.0.1",
+                "url": url,
+            })
+            return True
+        return False
+
     def _handle_large_response(self):
         parsed_path = urllib.parse.urlparse(self.path)
         query_params = urllib.parse.parse_qs(parsed_path.query)
@@ -294,6 +441,8 @@ body {{ color: #333; }}
             self.end_headers()
             self.wfile.write(body.encode('utf-8'))
             return
+        if self._handle_httpbin_common("GET"):
+            return
         if parsed_path.path == '/large-response':
             self._handle_large_response()
         else:
@@ -302,6 +451,8 @@ body {{ color: #333; }}
     def do_POST(self):
         self._log_request_start("POST")
         body = self._read_body()
+        if self._handle_httpbin_common("POST", body):
+            return
         parsed_path = urllib.parse.urlparse(self.path)
         if parsed_path.path == '/large-response':
             self._handle_large_response()
@@ -311,15 +462,21 @@ body {{ color: #333; }}
     def do_PUT(self):
         self._log_request_start("PUT")
         body = self._read_body()
+        if self._handle_httpbin_common("PUT", body):
+            return
         self._send_response(body_content=body)
 
     def do_DELETE(self):
         self._log_request_start("DELETE")
+        if self._handle_httpbin_common("DELETE"):
+            return
         self._send_response()
 
     def do_PATCH(self):
         self._log_request_start("PATCH")
         body = self._read_body()
+        if self._handle_httpbin_common("PATCH", body):
+            return
         self._send_response(body_content=body)
 
     def do_HEAD(self):

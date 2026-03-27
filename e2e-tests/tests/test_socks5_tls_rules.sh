@@ -24,6 +24,9 @@ rules_from_fixture() {
 cleanup() {
     echo "Cleaning up..."
     pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
     sleep 1
     rm -rf "$DATA_DIR"
 }
@@ -32,20 +35,29 @@ trap cleanup EXIT
 
 start_proxy_with_rules() {
     local rules="$1"
+    local combined_rules
+    combined_rules="$(httpbin_mock_rules "${ECHO_HTTP_PORT:-3000}" "${ECHO_HTTPS_PORT:-3443}")"
+    if [ -n "$rules" ]; then
+        combined_rules="${combined_rules}"$'\n'"${rules}"
+    fi
+
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
-    echo "Rules: $rules"
+    echo "Rules: $combined_rules"
     
     pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
     sleep 1
     
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR/rules"
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$E2E_DIR/mock_servers/start_servers.sh" start-bg >/dev/null
     
     export BIFROST_DATA_DIR="$DATA_DIR"
     
-    if [ -n "$rules" ]; then
+    if [ -n "$combined_rules" ]; then
         RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
-            --unsafe-ssl --skip-cert-check --rules "$rules" 2>&1 &
+            --unsafe-ssl --skip-cert-check --rules "$combined_rules" 2>&1 &
     else
         RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
             --unsafe-ssl --skip-cert-check 2>&1 &

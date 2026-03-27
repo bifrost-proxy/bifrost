@@ -34,3 +34,13 @@ custom_rule_config_from_fixture() {
     content=$(rule_fixture_content "$fixture_path" "$@")
     jq -Rn --arg rules "$content" '{mode:"custom",custom_rules:$rules}'
 }
+
+httpbin_mock_rules() {
+    local http_port="${1:-3000}"
+    local https_port="${2:-3443}"
+
+    cat <<EOF
+http://httpbin.org/ http://127.0.0.1:${http_port}
+https://httpbin.org/ https://127.0.0.1:${https_port}
+EOF
+}

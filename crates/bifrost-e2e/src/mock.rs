@@ -8,6 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -273,6 +274,33 @@ pub struct HttpsMockServer {
     response: Arc<RwLock<MockResponse>>,
 }
 
+pub struct HttpbinMockServer {
+    pub http_port: u16,
+    pub https_port: u16,
+}
+
+impl HttpbinMockServer {
+    pub async fn start() -> Self {
+        let http_port = spawn_httpbin_http_server().await;
+        let https_port = spawn_httpbin_https_server("httpbin.org").await;
+
+        Self {
+            http_port,
+            https_port,
+        }
+    }
+
+    pub fn http_rules(&self) -> Vec<String> {
+        vec![
+            format!("http://httpbin.org/ http://127.0.0.1:{}", self.http_port),
+            format!(
+                "https://httpbin.org/ tlsIntercept:// https://127.0.0.1:{}",
+                self.https_port
+            ),
+        ]
+    }
+}
+
 impl HttpsMockServer {
     pub async fn start(domain: &str) -> Self {
         init_crypto_provider();
@@ -485,6 +513,245 @@ impl MockDnsServer {
     pub fn records_len(&self) -> usize {
         self.records.len()
     }
+}
+
+async fn spawn_httpbin_http_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((stream, _)) = listener.accept().await {
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(handle_httpbin_request);
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        }
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    port
+}
+
+async fn spawn_httpbin_https_server(domain: &str) -> u16 {
+    init_crypto_provider();
+    let ca = Arc::new(generate_root_ca().expect("failed to generate test CA"));
+    let cert_generator = DynamicCertGenerator::new(ca);
+    let cert = cert_generator
+        .generate_for_domain(domain)
+        .expect("failed to generate httpbin mock certificate");
+    let server_config = BifrostTlsConfig::build_server_config(&cert)
+        .expect("failed to build httpbin mock TLS config");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let acceptor = TlsAcceptor::from(server_config);
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(handle_httpbin_request);
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        }
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    port
+}
+
+async fn handle_httpbin_request(
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let headers = collect_headers(req.headers());
+    let host = headers
+        .get("host")
+        .cloned()
+        .unwrap_or_else(|| "httpbin.org".to_string());
+    let scheme = if headers
+        .get("x-forwarded-proto")
+        .map(|value| value.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+    {
+        "https"
+    } else {
+        "http"
+    };
+
+    let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => Bytes::new(),
+    };
+
+    let response =
+        build_httpbin_response(scheme, &host, &method, &path, &query, &headers, &body_bytes);
+
+    Ok(response)
+}
+
+fn build_httpbin_response(
+    scheme: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> Response<Full<Bytes>> {
+    let full_url = if query.is_empty() {
+        format!("{scheme}://{host}{path}")
+    } else {
+        format!("{scheme}://{host}{path}?{query}")
+    };
+
+    let query_json = parse_query_json(query);
+    let body_text = String::from_utf8_lossy(body).to_string();
+
+    let (status, extra_headers, payload): (u16, HashMap<String, String>, Value) = if path == "/ip" {
+        (200, HashMap::new(), json!({ "origin": "127.0.0.1" }))
+    } else if path == "/headers" {
+        (
+            200,
+            HashMap::new(),
+            json!({ "headers": normalize_httpbin_headers(headers) }),
+        )
+    } else if path == "/user-agent" {
+        (
+            200,
+            HashMap::new(),
+            json!({
+                "user-agent": headers.get("user-agent").cloned().unwrap_or_default()
+            }),
+        )
+    } else if path == "/cookies" {
+        (
+            200,
+            HashMap::new(),
+            json!({
+                "cookies": parse_cookie_map(headers.get("cookie").map(String::as_str)),
+            }),
+        )
+    } else if path.starts_with("/status/") {
+        let status = path
+            .trim_start_matches("/status/")
+            .parse::<u16>()
+            .unwrap_or(200);
+        (status, HashMap::new(), json!({}))
+    } else if path == "/get" || path == "/anything" {
+        (
+            200,
+            HashMap::new(),
+            json!({
+                "args": query_json,
+                "headers": normalize_httpbin_headers(headers),
+                "origin": "127.0.0.1",
+                "url": full_url,
+            }),
+        )
+    } else if matches!(path, "/post" | "/put" | "/patch" | "/delete") {
+        (
+            200,
+            HashMap::new(),
+            json!({
+                "args": query_json,
+                "data": body_text,
+                "headers": normalize_httpbin_headers(headers),
+                "json": serde_json::from_slice::<Value>(body).ok(),
+                "method": method,
+                "origin": "127.0.0.1",
+                "url": full_url,
+            }),
+        )
+    } else {
+        (
+            200,
+            HashMap::new(),
+            json!({
+                "args": query_json,
+                "data": body_text,
+                "headers": normalize_httpbin_headers(headers),
+                "method": method,
+                "origin": "127.0.0.1",
+                "url": full_url,
+            }),
+        )
+    };
+
+    let mut builder = Response::builder().status(status);
+    builder = builder.header("Content-Type", "application/json");
+    for (key, value) in extra_headers {
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+
+    builder
+        .body(Full::new(Bytes::from(payload.to_string())))
+        .unwrap()
+}
+
+fn collect_headers(headers: &hyper::HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))
+        .collect()
+}
+
+fn normalize_httpbin_headers(headers: &HashMap<String, String>) -> Value {
+    let mut map = Map::new();
+    for (key, value) in headers {
+        map.insert(canonical_header_name(key), Value::String(value.clone()));
+    }
+    Value::Object(map)
+}
+
+fn canonical_header_name(key: &str) -> String {
+    key.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn parse_cookie_map(cookie_header: Option<&str>) -> Value {
+    let mut map = Map::new();
+    if let Some(cookie_header) = cookie_header {
+        for part in cookie_header.split(';') {
+            if let Some((key, value)) = part.trim().split_once('=') {
+                map.insert(
+                    key.trim().to_string(),
+                    Value::String(value.trim().to_string()),
+                );
+            }
+        }
+    }
+    Value::Object(map)
+}
+
+fn parse_query_json(query: &str) -> Value {
+    let mut map = Map::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        map.insert(key.into_owned(), Value::String(value.into_owned()));
+    }
+    Value::Object(map)
 }
 
 fn parse_dns_question(packet: &[u8]) -> Option<(String, u16, usize)> {

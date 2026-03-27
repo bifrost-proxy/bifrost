@@ -106,12 +106,16 @@ cleanup() {
         wait "$PROXY_PID" 2>/dev/null || true
     fi
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT
 
 create_test_rules() {
     render_rule_fixture_to_file "$RULES_TEMPLATE" "$RULES_FILE"
+    printf '\n%s\n' "$(httpbin_mock_rules "${ECHO_HTTP_PORT:-3000}" "${ECHO_HTTPS_PORT:-3443}")" >> "$RULES_FILE"
     echo "Test rules created at $RULES_FILE"
 }
 
@@ -119,6 +123,9 @@ start_proxy() {
     echo "Starting Bifrost proxy with HTTP/3 support..."
     
     mkdir -p "$DATA_DIR"
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" start-bg >/dev/null
     create_test_rules
     
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
@@ -192,7 +199,7 @@ test_http_proxy_basic() {
     
     if ! check_httpbin_reachable; then
         skip_pass "HTTP proxy GET request"
-        skip_pass "Response contains httpbin.org"
+        skip_pass "Response preserves forwarded query parameter"
         return
     fi
     
@@ -204,7 +211,7 @@ test_http_proxy_basic() {
         ((failed++))
     fi
     
-    if assert_body_contains "httpbin.org" "$HTTP_BODY" "Response contains httpbin.org"; then
+    if assert_body_contains "\"test\": \"http3\"" "$HTTP_BODY" "Response preserves forwarded query parameter"; then
         ((passed++))
     else
         ((failed++))

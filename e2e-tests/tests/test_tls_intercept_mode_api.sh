@@ -8,6 +8,8 @@ ADMIN_PORT="${ADMIN_PORT:-9900}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 export ADMIN_PATH_PREFIX
 
+trap admin_cleanup_bifrost EXIT
+
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -154,6 +156,11 @@ cleanup_tls_config() {
 }
 
 main() {
+    if ! admin_ensure_bifrost; then
+        log_fail "Failed to start Bifrost admin server"
+        exit 1
+    fi
+
     echo "=============================================="
     echo "TLS Intercept Mode API Tests"
     echo "=============================================="

@@ -184,6 +184,35 @@ wait_for_traffic() {
     return 1
 }
 
+run_curl_capture_with_retries() {
+    local body_file="$1"
+    local headers_file="$2"
+    shift 2
+
+    local attempts=0
+    local max_attempts=3
+    local status=""
+    local curl_exit=0
+
+    while [[ $attempts -lt $max_attempts ]]; do
+        : > "$body_file"
+        : > "$headers_file"
+        curl_exit=0
+        status=$(curl -sS -o "$body_file" -D "$headers_file" "$@" -w '%{http_code}') || curl_exit=$?
+        if [[ $curl_exit -eq 0 && "$status" != "000" ]]; then
+            printf '%s\n' "$status"
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        if [[ $attempts -lt $max_attempts ]]; then
+            sleep 1
+        fi
+    done
+
+    printf '%s\n' "${status:-000}"
+    return "$curl_exit"
+}
+
 test_http_proxy_attribution() {
     log_section "HTTP proxy client attribution"
     clear_traffic >/dev/null 2>&1 || true
@@ -245,13 +274,12 @@ test_socks5_tls_attribution() {
     body_file=$(mktemp)
 
     local status
-    status=$(curl -sS -o "$body_file" -D "$headers_file" \
+    status=$(run_curl_capture_with_retries "$body_file" "$headers_file" \
         --socks5-hostname "${PROXY_HOST}:${SOCKS5_PORT}" \
         --connect-timeout 5 \
         --max-time 20 \
         -k \
-        "https://httpbin.org/headers" \
-        -w '%{http_code}')
+        "https://httpbin.org/headers")
     local body
     body=$(cat "$body_file")
     local headers

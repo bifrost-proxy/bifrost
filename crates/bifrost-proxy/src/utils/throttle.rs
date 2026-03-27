@@ -63,7 +63,7 @@ impl ThrottledBoxBody {
 
     fn poll_pending_data(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
         let Some(mut data) = self.pending_data.take() else {
             return Poll::Pending;
@@ -73,6 +73,9 @@ impl ThrottledBoxBody {
         if budget == 0 {
             self.pending_data = Some(data);
             self.schedule_sleep_if_needed();
+            if let Some(ref mut sleep) = self.sleep {
+                let _ = sleep.as_mut().poll(cx);
+            }
             return Poll::Pending;
         }
 
@@ -83,7 +86,13 @@ impl ThrottledBoxBody {
         }
 
         self.bytes_sent_this_window += chunk_len as u64;
-        self.schedule_sleep_if_needed();
+        let has_more_buffered_or_upstream_data =
+            self.pending_data.is_some() || !self.inner.is_end_stream();
+        if has_more_buffered_or_upstream_data {
+            self.schedule_sleep_if_needed();
+        } else {
+            self.sleep = None;
+        }
         Poll::Ready(Some(Ok(Frame::data(chunk))))
     }
 }
@@ -211,5 +220,66 @@ mod tests {
             !body.is_end_stream(),
             "body should not report end-of-stream while throttled data is still buffered"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttled_body_does_not_wait_an_extra_window_after_last_exact_chunk() {
+        let mut body = Box::pin(ThrottledBoxBody::new(
+            full_body(Bytes::from(vec![b'a'; 8])),
+            4,
+        ));
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let first = match body.as_mut().poll_frame(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => frame.into_data().expect("data frame"),
+            other => panic!("unexpected first poll result: {:?}", other),
+        };
+        assert_eq!(first.len(), 4);
+        assert!(matches!(body.as_mut().poll_frame(&mut cx), Poll::Pending));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let second = match body.as_mut().poll_frame(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => frame.into_data().expect("data frame"),
+            other => panic!("unexpected second poll result: {:?}", other),
+        };
+        assert_eq!(second.len(), 4);
+        assert!(
+            body.is_end_stream(),
+            "exact final chunk should finish the stream immediately"
+        );
+        assert!(matches!(
+            body.as_mut().poll_frame(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttled_body_registers_a_waker_when_waiting_for_next_window() {
+        let body = wrap_throttled_body(full_body(Bytes::from(vec![b'a'; 8])), Some(4));
+        let handle = tokio::spawn(async move {
+            body.collect()
+                .await
+                .expect("body should collect")
+                .to_bytes()
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "body should still be throttled before the next window opens"
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            handle.is_finished(),
+            "scheduled sleep should wake the body task once the next window opens"
+        );
+
+        let bytes = handle.await.expect("join should succeed");
+        assert_eq!(bytes.len(), 8);
     }
 }

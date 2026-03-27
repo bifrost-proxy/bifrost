@@ -10,6 +10,7 @@ const backendPort = env.backendPort;
 export default defineConfig({
   testDir: "./tests/ui",
   timeout: 120000,
+  workers: 1,
   expect: {
     timeout: 15000,
   },

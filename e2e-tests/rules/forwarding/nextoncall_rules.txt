@@ -5,8 +5,9 @@
 # 3. WSS 请求 - 转发到 ws://localhost:8000/
 
 # 规则1: /api/ 路径排除，让其直接访问原始服务
-# 使用 excludeFilter 排除 /api/ 路径，其他路径转发到本地服务
-www.qq.com host://127.0.0.1:8000 excludeFilter:///api/
+# 使用 excludeFilter 排除 /api/ 路径，其他路径显式转发到本地 HTTP 服务。
+# 这里使用 http:// 前缀，确保 HTTPS->HTTP 重写会触发 TLS interception。
+www.qq.com http://127.0.0.1:8000/ excludeFilter:///api/
 
 # 规则2: WebSocket 请求转发到本地 WS 服务
 # 使用 wss:// 前缀明确指定协议匹配，排除/api/路径

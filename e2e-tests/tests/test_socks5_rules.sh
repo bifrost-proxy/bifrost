@@ -19,6 +19,9 @@ RULES_DIR="$E2E_DIR/rules/socks5"
 cleanup() {
     echo "Cleaning up..."
     pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
     sleep 1
     rm -rf "$DATA_DIR"
 }
@@ -33,6 +36,9 @@ start_proxy() {
     
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR/rules"
+    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    "$E2E_DIR/mock_servers/start_servers.sh" start-bg >/dev/null
     
     export BIFROST_DATA_DIR="$DATA_DIR"
     
@@ -154,6 +160,8 @@ start_proxy
 
 echo ""
 echo "=== Adding test rules ==="
+add_rule "httpbin-mock-http" "http://httpbin.org/ http://127.0.0.1:${ECHO_HTTP_PORT:-3000}"
+add_rule "httpbin-mock-https" "https://httpbin.org/ tlsIntercept:// https://127.0.0.1:${ECHO_HTTPS_PORT:-3443}"
 add_rule_from_fixture "host-redirect" "host_redirect.txt"
 add_rule_from_fixture "block-domain" "block_domain.txt"
 

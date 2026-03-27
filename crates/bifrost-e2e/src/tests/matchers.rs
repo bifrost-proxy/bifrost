@@ -437,6 +437,8 @@ async fn test_matcher_priority_exact_over_wildcard() -> Result<(), String> {
 async fn test_matcher_no_match_passthrough() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "should_not_reach");
+    let origin = EnhancedMockServer::start().await;
+    origin.set_response(200, "passthrough_ok");
 
     let port = portpicker::pick_unused_port().unwrap();
     let _proxy = ProxyInstance::start(
@@ -448,18 +450,16 @@ async fn test_matcher_no_match_passthrough() -> Result<(), String> {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let result = CurlCommand::with_proxy(
-        &format!("http://127.0.0.1:{}", port),
-        "http://httpbin.org/get",
-    )
-    .connect_timeout(10)
-    .max_time(30)
-    .execute()
-    .await
-    .map_err(|e| format!("curl failed: {}", e))?;
+    let result =
+        CurlCommand::with_proxy(&format!("http://127.0.0.1:{}", port), &origin.url("/get"))
+            .connect_timeout(10)
+            .max_time(30)
+            .execute()
+            .await
+            .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_success()?;
-    result.assert_body_contains("httpbin.org")?;
+    result.assert_body_contains("passthrough_ok")?;
 
     if mock.request_count() > 0 {
         return Err("Request should not have reached mock server".to_string());

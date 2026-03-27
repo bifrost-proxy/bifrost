@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 E2E_DIR="$ROOT_DIR/e2e-tests"
@@ -12,6 +12,13 @@ RUN_SHELL=1
 RUN_RUNNER=1
 RUN_UI=1
 PLATFORM="$(uname -s)"
+REPORT_DIR=""
+
+declare -a SUITE_NAMES=()
+declare -a SUITE_STATUSES=()
+declare -a SUITE_LOGS=()
+declare -a SUITE_REASONS=()
+declare -a SUITE_DURATIONS=()
 
 STABLE_SHELL_TESTS=(
   "test_rules_admin_api.sh"
@@ -29,6 +36,37 @@ STABLE_SHELL_TESTS=(
 header() {
   echo
   echo "==> $1"
+}
+
+print_section() {
+  echo
+  echo "------------------------------------------------------------"
+  echo "$1"
+  echo "------------------------------------------------------------"
+}
+
+log_info() {
+  echo "[INFO] $1"
+}
+
+log_warn() {
+  echo "[WARN] $1"
+}
+
+resolve_non_shim_command() {
+  local command_name="$1"
+  local candidate
+
+  while IFS= read -r candidate; do
+    candidate="$(trim_line "$candidate")"
+    [[ -n "$candidate" ]] || continue
+    if [[ "$candidate" != *"/mise/shims/"* ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(which -a "$command_name" 2>/dev/null)
+
+  command -v "$command_name" 2>/dev/null || printf '%s\n' "$command_name"
 }
 
 usage() {
@@ -91,6 +129,304 @@ run_shell_test() {
   bash "$E2E_DIR/tests/$script_name"
 }
 
+register_suite() {
+  local name="$1"
+  local status="$2"
+  local log_file="$3"
+  local reason="$4"
+  local duration="$5"
+
+  SUITE_NAMES+=("$name")
+  SUITE_STATUSES+=("$status")
+  SUITE_LOGS+=("$log_file")
+  SUITE_REASONS+=("$reason")
+  SUITE_DURATIONS+=("$duration")
+}
+
+trim_line() {
+  local text="$1"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s\n' "$text"
+}
+
+format_command() {
+  local formatted=""
+  local arg
+
+  for arg in "$@"; do
+    if [[ -n "$formatted" ]]; then
+      formatted+=" "
+    fi
+    printf -v arg '%q' "$arg"
+    formatted+="$arg"
+  done
+
+  printf '%s\n' "$formatted"
+}
+
+print_runtime_context() {
+  print_section "E2E Runtime Context"
+  echo "Mode         : $MODE"
+  echo "Shell mode   : $SHELL_MODE"
+  echo "Platform     : $PLATFORM"
+  echo "Root dir     : $ROOT_DIR"
+  echo "E2E dir      : $E2E_DIR"
+  echo "Report dir   : $REPORT_DIR"
+  echo "Cargo bin    : $CARGO_BIN"
+  echo "Runner port  : $BIFROST_UI_TEST_RUNNER_PORT"
+  echo "UI target dir: $BIFROST_UI_TEST_TARGET_DIR"
+  echo "Run rules    : $RUN_RULES"
+  echo "Run shell    : $RUN_SHELL"
+  echo "Run runner   : $RUN_RUNNER"
+  echo "Run UI       : $RUN_UI"
+}
+
+stream_command_output() {
+  local name="$1"
+  local pipe_path="$2"
+  local log_file="$3"
+
+  : >"$log_file"
+  tee "$log_file" <"$pipe_path" | sed "s/^/[$name] /"
+}
+
+heartbeat_while_running() {
+  local name="$1"
+  local command_pid="$2"
+  local log_file="$3"
+  local start_ts="$4"
+  local tick=0
+
+  while kill -0 "$command_pid" 2>/dev/null; do
+    sleep 1
+    kill -0 "$command_pid" 2>/dev/null || break
+    tick=$((tick + 1))
+
+    if (( tick < 30 )); then
+      continue
+    fi
+    tick=0
+
+    local now_ts
+    local elapsed
+    local last_line=""
+    now_ts="$(date +%s)"
+    elapsed="$((now_ts - start_ts))"
+
+    if [[ -f "$log_file" ]]; then
+      last_line="$(awk 'NF { line=$0 } END { print line }' "$log_file")"
+      last_line="$(trim_line "$last_line")"
+    fi
+
+    if [[ -n "$last_line" ]]; then
+      echo "[INFO] $name still running (${elapsed}s), last log: $last_line"
+    else
+      echo "[INFO] $name still running (${elapsed}s)"
+    fi
+  done
+}
+
+extract_failure_reason() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+
+  python3 - "$log_file" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+ansi = re.compile(r"\x1b\[[0-9;]*m")
+patterns = [
+    re.compile(r"^✗\s*(.+)"),
+    re.compile(r"^Error:\s*(.+)", re.IGNORECASE),
+    re.compile(r"^ERROR:\s*(.+)"),
+    re.compile(r"^Failed:\s*(.+)"),
+    re.compile(r"^Caused by:\s*(.+)"),
+    re.compile(r"^panic:?\s*(.+)", re.IGNORECASE),
+]
+ignore_prefixes = (
+    "running ",
+    "finished ",
+    "compiling ",
+    "building ",
+    "downloaded ",
+)
+
+with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+    lines = [ansi.sub("", line.rstrip("\n")) for line in fh]
+
+for line in lines:
+    stripped = line.strip()
+    if not stripped:
+        continue
+    lowered = stripped.lower()
+    if lowered.startswith(ignore_prefixes):
+        continue
+    for pattern in patterns:
+        match = pattern.match(stripped)
+        if match:
+            msg = match.group(1).strip() or stripped
+            print(msg[:400])
+            sys.exit(0)
+
+for line in reversed(lines):
+    stripped = line.strip()
+    if not stripped:
+        continue
+    lowered = stripped.lower()
+    if lowered.startswith(ignore_prefixes):
+        continue
+    print(stripped[:400])
+    sys.exit(0)
+PY
+}
+
+run_and_capture() {
+  local name="$1"
+  shift
+
+  local log_slug
+  log_slug="$(printf '%s' "$name" | tr ' /:' '___' | tr -cd '[:alnum:]_.-')"
+  local log_file="$REPORT_DIR/${log_slug}.log"
+  local start_ts
+  local end_ts
+  local duration
+  local status
+  local reason=""
+  local command_pid
+  local stream_pid=""
+  local heartbeat_pid=""
+  local command_status
+  local pipe_path="$REPORT_DIR/${log_slug}.pipe"
+
+  start_ts="$(date +%s)"
+  rm -f "$pipe_path"
+  mkfifo "$pipe_path"
+  print_section "Starting ${name}"
+  echo "Command : $(format_command "$@")"
+  echo "Log file: $log_file"
+
+  stream_command_output "$name" "$pipe_path" "$log_file" &
+  stream_pid=$!
+
+  "$@" >"$pipe_path" 2>&1 &
+  command_pid=$!
+  log_info "${name} started with pid ${command_pid}"
+
+  heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
+  heartbeat_pid=$!
+
+  if wait "$command_pid"; then
+    status="passed"
+  else
+    command_status=$?
+    status="failed"
+    reason="$(extract_failure_reason "$log_file")"
+    reason="$(trim_line "${reason:-unknown failure}")"
+  fi
+
+  wait "$stream_pid" 2>/dev/null || true
+  rm -f "$pipe_path"
+
+  if [[ -n "$heartbeat_pid" ]]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+  fi
+
+  end_ts="$(date +%s)"
+  duration="$((end_ts - start_ts))"
+
+  register_suite "$name" "$status" "$log_file" "$reason" "$duration"
+
+  if [[ "$status" == "passed" ]]; then
+    echo "[PASS] $name (${duration}s)"
+  else
+    echo "[FAIL] $name (${duration}s)"
+    if [[ -n "$reason" ]]; then
+      echo "       reason: $reason"
+    fi
+    echo "       log: $log_file"
+  fi
+
+  if [[ "$status" == "passed" ]]; then
+    return 0
+  fi
+
+  return "${command_status:-1}"
+}
+
+collect_shell_tests() {
+  if [[ "$SHELL_MODE" == "full" ]]; then
+    find "$E2E_DIR/tests" -maxdepth 1 -type f -name 'test_*.sh' -print \
+      | sort \
+      | while IFS= read -r script_path; do
+          basename "$script_path"
+        done
+  else
+    printf '%s\n' "${STABLE_SHELL_TESTS[@]}"
+  fi
+}
+
+skip_suite() {
+  local name="$1"
+  local reason="$2"
+  register_suite "$name" "skipped" "" "$reason" "0"
+  echo "[SKIP] $name"
+  echo "       reason: $reason"
+}
+
+print_log_tail() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 0
+  tail -20 "$log_file" | sed 's/^/    /'
+}
+
+print_final_report() {
+  local passed=0
+  local failed=0
+  local skipped=0
+  local i
+
+  print_section "E2E Final Report"
+
+  for i in "${!SUITE_NAMES[@]}"; do
+    case "${SUITE_STATUSES[$i]}" in
+      passed) ((passed += 1)) ;;
+      failed) ((failed += 1)) ;;
+      skipped) ((skipped += 1)) ;;
+    esac
+  done
+
+  echo "Total suites : ${#SUITE_NAMES[@]}"
+  echo "Passed       : $passed"
+  echo "Failed       : $failed"
+  echo "Skipped      : $skipped"
+  echo "Report dir   : $REPORT_DIR"
+
+  if (( failed > 0 )); then
+    print_section "Failed Suites"
+    for i in "${!SUITE_NAMES[@]}"; do
+      [[ "${SUITE_STATUSES[$i]}" == "failed" ]] || continue
+      echo "- ${SUITE_NAMES[$i]} (${SUITE_DURATIONS[$i]}s)"
+      echo "  reason: ${SUITE_REASONS[$i]:-unknown failure}"
+      if [[ -n "${SUITE_LOGS[$i]}" ]]; then
+        echo "  log: ${SUITE_LOGS[$i]}"
+        print_log_tail "${SUITE_LOGS[$i]}"
+      fi
+    done
+  fi
+
+  if (( skipped > 0 )); then
+    print_section "Skipped Suites"
+    for i in "${!SUITE_NAMES[@]}"; do
+      [[ "${SUITE_STATUSES[$i]}" == "skipped" ]] || continue
+      echo "- ${SUITE_NAMES[$i]}"
+      echo "  reason: ${SUITE_REASONS[$i]}"
+    done
+  fi
+}
+
 should_skip_full_shell_test() {
   local script_name="$1"
 
@@ -134,58 +470,137 @@ cd "$ROOT_DIR"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+export NODE_BIN="${NODE_BIN:-$(resolve_non_shim_command node)}"
+export PNPM_BIN="${PNPM_BIN:-$(resolve_non_shim_command pnpm)}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"
 export BIFROST_UI_TEST_RUNNER_PORT="${BIFROST_UI_TEST_RUNNER_PORT:-18080}"
 export BIFROST_E2E_ROOT="$ROOT_DIR"
 export HOME="${HOME:-$ROOT_DIR/.bifrost-e2e-home}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-data}"
-export PATH="$ROOT_DIR/e2e-tests/bin:$(dirname "$CARGO_BIN"):$PATH"
+export PATH="$ROOT_DIR/e2e-tests/bin:$(dirname "$CARGO_BIN"):$(dirname "$NODE_BIN"):$(dirname "$PNPM_BIN"):$PATH"
 
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+REPORT_DIR="${BIFROST_E2E_REPORT_DIR:-$ROOT_DIR/.e2e-reports/run-all-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$REPORT_DIR"
+print_runtime_context
+
+release_build_ok=1
+debug_build_ok=1
+ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   header "Building release bifrost for rule and shell E2E suites"
-  SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost
-  ensure_bifrost_shell_shim "release"
+  if run_and_capture \
+    "build:release-bifrost" \
+    env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost; then
+    ensure_bifrost_shell_shim "release"
+  else
+    release_build_ok=0
+  fi
 fi
 
 if [[ "$RUN_SHELL" -eq 1 && "$SHELL_MODE" == "full" ]]; then
   header "Building debug bifrost for shell E2E compatibility"
-  SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --bin bifrost
-  ensure_bifrost_shell_shim "debug"
+  if run_and_capture \
+    "build:debug-bifrost" \
+    env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --bin bifrost; then
+    ensure_bifrost_shell_shim "debug"
+  else
+    debug_build_ok=0
+  fi
 fi
 
 if [[ "$RUN_RULES" -eq 1 ]]; then
   header "Running rule fixture E2E suite"
-  bash "$E2E_DIR/run_all_tests_parallel.sh"
+  if [[ "$release_build_ok" -eq 1 ]]; then
+    log_info "Invoking rule suite entrypoint: $E2E_DIR/run_all_tests_parallel.sh"
+    run_and_capture \
+      "rules:parallel-fixtures" \
+      bash "$E2E_DIR/run_all_tests_parallel.sh"
+  else
+    skip_suite "rules:parallel-fixtures" "release build failed"
+  fi
 fi
 
 if [[ "$RUN_SHELL" -eq 1 ]]; then
+  shell_tests=()
+  while IFS= read -r script_name; do
+    [[ -n "$script_name" ]] && shell_tests+=("$script_name")
+  done < <(collect_shell_tests)
+  log_info "Shell test count: ${#shell_tests[@]}"
+
+  shell_build_ok="$release_build_ok"
   if [[ "$SHELL_MODE" == "full" ]]; then
-    while IFS= read -r script_path; do
-      script_name="$(basename "$script_path")"
-      if should_skip_full_shell_test "$script_name"; then
+    shell_build_ok="$debug_build_ok"
+  fi
+
+  if [[ "$shell_build_ok" -eq 1 ]]; then
+    for script_name in "${shell_tests[@]}"; do
+      log_info "Queue shell test: $script_name"
+      if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
+        skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
         continue
       fi
-      run_shell_test "$script_name"
-    done < <(find "$E2E_DIR/tests" -maxdepth 1 -type f -name 'test_*.sh' | sort)
+      run_and_capture "shell:${script_name}" bash "$E2E_DIR/tests/$script_name"
+    done
   else
-    for script_name in "${STABLE_SHELL_TESTS[@]}"; do
-      run_shell_test "$script_name"
+    for script_name in "${shell_tests[@]}"; do
+      log_info "Skip shell test without execution: $script_name"
+      if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
+        skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
+        continue
+      fi
+        skip_suite "shell:${script_name}" "required bifrost build failed"
     done
   fi
 fi
 
 if [[ "$RUN_RUNNER" -eq 1 ]]; then
   header "Running bifrost-e2e custom runner"
-  "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT"
+  run_and_capture \
+    "runner:bifrost-e2e" \
+    "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT"
 fi
 
 if [[ "$RUN_UI" -eq 1 ]]; then
+  header "Building frontend assets for Playwright E2E"
+  if run_and_capture \
+    "build:ui-frontend" \
+    "$PNPM_BIN" --dir web run build; then
+    ui_build_ok=1
+  else
+    ui_build_ok=0
+  fi
+
   header "Building debug bifrost for Playwright E2E"
-  CARGO_TARGET_DIR="$BIFROST_UI_TEST_TARGET_DIR" "$CARGO_BIN" build --bin bifrost
+  if [[ "$ui_build_ok" -eq 1 ]]; then
+    if run_and_capture \
+      "build:ui-debug-bifrost" \
+      env SKIP_FRONTEND_BUILD=1 CARGO_TARGET_DIR="$BIFROST_UI_TEST_TARGET_DIR" "$CARGO_BIN" build --bin bifrost; then
+      ui_build_ok=1
+    else
+      ui_build_ok=0
+    fi
+  else
+    ui_build_ok=0
+    skip_suite "build:ui-debug-bifrost" "ui frontend build failed"
+  fi
 
   header "Running Playwright UI E2E suite"
-  pnpm --dir web run test:ui
+  if [[ "$ui_build_ok" -eq 1 ]]; then
+    run_and_capture "ui:playwright" "$PNPM_BIN" --dir web run test:ui
+  else
+    skip_suite "ui:playwright" "ui debug build failed"
+  fi
+fi
+
+print_final_report
+
+if (( ${#SUITE_STATUSES[@]} > 0 )); then
+  for status in "${SUITE_STATUSES[@]}"; do
+    if [[ "$status" == "failed" ]]; then
+      exit 1
+    fi
+  done
 fi

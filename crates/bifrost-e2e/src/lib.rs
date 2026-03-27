@@ -12,7 +12,7 @@ pub use assertions::*;
 pub use client::ProxyClient;
 pub use curl::{CurlCommand, CurlResult};
 pub use log_capture::{LogCapture, RuleExecutionLog};
-pub use mock::{EnhancedMockServer, RecordedRequest};
+pub use mock::{EnhancedMockServer, HttpbinMockServer, RecordedRequest};
 pub use proxy::ProxyInstance;
 pub use reporter::Reporter;
 pub use runner::{TestCase, TestResult, TestRunner, TestStatus};

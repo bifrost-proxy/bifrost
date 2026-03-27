@@ -10,6 +10,7 @@ TEST_DATA_DIR="${BIFROST_DATA_DIR:-${PROJECT_DIR}/.bifrost-test}"
 
 source "$SCRIPT_DIR/test_utils/assert.sh"
 source "$SCRIPT_DIR/test_utils/http_client.sh"
+source "$SCRIPT_DIR/test_utils/rule_fixture.sh"
 
 PROXY_PORT="${PROXY_PORT:-8080}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -317,6 +318,7 @@ start_echo_servers() {
 preprocess_rules_file() {
     local original_file="$1"
     local processed_file="${TEST_DATA_DIR}/processed_rules.txt"
+    local replaced_file="${TEST_DATA_DIR}/processed_rules.replaced.txt"
 
     mkdir -p "${TEST_DATA_DIR}"
 
@@ -334,7 +336,13 @@ preprocess_rules_file() {
         -e "s|localhost:3003|localhost:${ECHO_SSE_PORT}|g" \
         -e "s|127.0.0.1:9999|127.0.0.1:${ECHO_PROXY_PORT}|g" \
         -e "s|localhost:9999|localhost:${ECHO_PROXY_PORT}|g" \
-        "$original_file" > "$processed_file"
+        "$original_file" > "$replaced_file"
+
+    {
+        httpbin_mock_rules "$ECHO_HTTP_PORT" "$ECHO_HTTPS_PORT"
+        echo
+        cat "$replaced_file"
+    } > "$processed_file"
 
     echo "$processed_file"
 }
@@ -2511,6 +2519,8 @@ resolve_code_block_var() {
     local content=""
 
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+
         if [[ "$line" == '```'* ]] && [[ "$line" != '```' ]]; then
             in_block=true
             block_name="${line#\`\`\`}"

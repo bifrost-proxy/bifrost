@@ -11,6 +11,7 @@ ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
 ECHO_HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}"
 REQUESTS="${REQUESTS:-10000}"
 CONCURRENCY="${CONCURRENCY:-20}"
+WS_CONCURRENCY="${WS_CONCURRENCY:-10}"
 REQ_SIZE="${REQ_SIZE:-262144}"
 RES_SIZE="${RES_SIZE:-524288}"
 TIMEOUT="${TIMEOUT:-60}"
@@ -220,7 +221,7 @@ run_ws_load() {
     rss_before=$(get_rss_kb)
     local start_ts
     start_ts=$(date +%s)
-    seq 1 "$WS_CONNECTIONS" | xargs -P "$CONCURRENCY" -I{} bash -c \
+    seq 1 "$WS_CONNECTIONS" | xargs -P "$WS_CONCURRENCY" -I{} bash -c \
         "python3 '$E2E_DIR/test_utils/ws_stress_client.py' --proxy-host '${PROXY_HOST}' --proxy-port '${PROXY_PORT}' --host-header 'stress-ws.local' --path '/ws' --messages '${WS_MESSAGES}' --timeout '${TIMEOUT}' >/dev/null 2>&1 && echo 200 || echo 500" \
         >> "$result_file"
     local end_ts

@@ -52,6 +52,21 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
+run_with_timeout() {
+    local seconds="$1"
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    elif [[ -x "$E2E_DIR/bin/timeout" ]]; then
+        "$E2E_DIR/bin/timeout" "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 cleanup() {
     log_info "Cleaning up..."
 
@@ -96,10 +111,17 @@ check_deps() {
     if command -v websocat &> /dev/null; then
         log_info "websocat found, WebSocket tests will be enabled"
         HAS_WEBSOCAT=true
+        if websocat --help 2>/dev/null | grep -q -- "--proxy"; then
+            HAS_WEBSOCAT_HTTP_PROXY=true
+        else
+            HAS_WEBSOCAT_HTTP_PROXY=false
+            log_warn "websocat is installed but does not support --proxy; WSS proxy test will be skipped"
+        fi
     else
         log_warn "websocat not found, WebSocket tests will be skipped"
         log_warn "Install with: brew install websocat"
         HAS_WEBSOCAT=false
+        HAS_WEBSOCAT_HTTP_PROXY=false
     fi
 
     log_success "Dependencies check passed"
@@ -260,11 +282,16 @@ test_websocket_forward() {
         return 0
     fi
 
+    if [[ "$HAS_WEBSOCAT_HTTP_PROXY" != "true" ]]; then
+        log_warn "Skipping WebSocket test (installed websocat has no HTTP proxy support)"
+        return 0
+    fi
+
     log_info "Testing: websocat wss://www.qq.com/ via proxy"
     log_info "Expected: WebSocket connection forwarded to mock server"
 
     local response
-    response=$(echo '{"test": "hello"}' | timeout 10 websocat -v \
+    response=$(echo '{"test": "hello"}' | run_with_timeout 10 websocat -v \
         --ws-c-uri "wss://www.qq.com/" \
         --proxy "http://$PROXY_HOST:$PROXY_PORT" \
         -k \

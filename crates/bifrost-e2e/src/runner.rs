@@ -1,4 +1,5 @@
 use crate::client::ProxyClient;
+use crate::mock::HttpbinMockServer;
 use crate::proxy::ProxyInstance;
 use crate::reporter::Reporter;
 use crate::tests;
@@ -195,7 +196,18 @@ impl TestRunner {
 
         match &test.test_type {
             TestCaseType::Standard { rules, test_fn } => {
-                let rules: Vec<&str> = rules.iter().map(|s| s.as_str()).collect();
+                let mut owned_rules = rules.clone();
+                let _httpbin = if rules.iter().any(|rule| rule.contains("httpbin.org")) {
+                    let mock = HttpbinMockServer::start().await;
+                    let mut injected = mock.http_rules();
+                    injected.append(&mut owned_rules);
+                    owned_rules = injected;
+                    Some(mock)
+                } else {
+                    None
+                };
+
+                let rules: Vec<&str> = owned_rules.iter().map(|s| s.as_str()).collect();
 
                 let proxy = match ProxyInstance::start(port, rules).await {
                     Ok(p) => p,

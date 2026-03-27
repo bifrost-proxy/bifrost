@@ -10,6 +10,13 @@ ADMIN_PORT="${ADMIN_PORT:-9900}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 export ADMIN_PATH_PREFIX
 
+trap admin_cleanup_bifrost EXIT
+
+if ! admin_ensure_bifrost; then
+    echo "[FAIL] Failed to start Bifrost admin server"
+    exit 1
+fi
+
 response=$(admin_get "/api/config/performance")
 
 assert_json_field_exists ".traffic.max_db_size_bytes" "$response" "max_db_size_bytes should exist"

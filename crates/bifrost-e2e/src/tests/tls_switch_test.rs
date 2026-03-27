@@ -1,3 +1,4 @@
+use crate::mock::HttpbinMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use serde_json::Value;
@@ -109,7 +110,10 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
     let port = portpicker::pick_unused_port().unwrap();
     println!("[SETUP] Proxy will run on port {}", port);
 
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], true, true)
+    let mock = HttpbinMockServer::start().await;
+    let rules = mock.http_rules();
+    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, true, true)
         .await
         .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
@@ -198,7 +202,10 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
     let port = portpicker::pick_unused_port().unwrap();
     println!("[SETUP] Proxy will run on port {}", port);
 
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], false, true)
+    let mock = HttpbinMockServer::start().await;
+    let rules = mock.http_rules();
+    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, false, true)
         .await
         .map_err(|e| format!("Failed to start proxy: {}", e))?;
 

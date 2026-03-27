@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::client::DirectClient;
+use crate::mock::HttpbinMockServer;
 use crate::{ProxyClient, ProxyInstance, TestCase};
 
 use bifrost_cli::commands::{
@@ -14,9 +15,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
         "traffic",
         || async move {
             let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
-            let (_proxy, _admin_state) = ProxyInstance::start_with_admin(port, vec![], false, true)
-                .await
-                .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+            let mock = HttpbinMockServer::start().await;
+            let rules = mock.http_rules();
+            let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+            let (_proxy, _admin_state) =
+                ProxyInstance::start_with_admin(port, rule_refs, false, true)
+                    .await
+                    .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
 
             let proxy_url = format!("http://127.0.0.1:{}", port);
             let client = ProxyClient::new(&proxy_url).map_err(|e| e.to_string())?;

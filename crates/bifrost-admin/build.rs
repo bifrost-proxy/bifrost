@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -53,17 +54,19 @@ fn main() {
             println!("cargo:warning=node_modules not found but pre-built frontend exists, skipping install");
         } else {
             println!("cargo:warning=Installing frontend dependencies with pnpm...");
-            let pnpm_cmd = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
-            let output = Command::new(pnpm_cmd)
+            let pnpm_cmd = resolve_command(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
+            let output = Command::new(&pnpm_cmd)
                 .args(["install", "--frozen-lockfile"])
                 .current_dir(&web_dir)
                 .env("COREPACK_ENABLE_STRICT", "0")
+                .env("PATH", frontend_command_path())
                 .output()
                 .or_else(|_| {
-                    Command::new(pnpm_cmd)
+                    Command::new(&pnpm_cmd)
                         .arg("install")
                         .current_dir(&web_dir)
                         .env("COREPACK_ENABLE_STRICT", "0")
+                        .env("PATH", frontend_command_path())
                         .output()
                 });
 
@@ -98,11 +101,12 @@ fn main() {
         "cargo:warning=Building frontend at {}...",
         web_dir.display()
     );
-    let pnpm_cmd = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
-    let output = match Command::new(pnpm_cmd)
+    let pnpm_cmd = resolve_command(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
+    let output = match Command::new(&pnpm_cmd)
         .args(["run", "build"])
         .current_dir(&web_dir)
         .env("COREPACK_ENABLE_STRICT", "0")
+        .env("PATH", frontend_command_path())
         .output()
     {
         Ok(output) => output,
@@ -171,4 +175,35 @@ fn ensure_dist_exists(dist_dir: &Path) {
         )
         .expect("Failed to create placeholder index.html");
     }
+}
+
+fn resolve_command(command: &str) -> String {
+    let Ok(output) = Command::new("which").arg("-a").arg(command).output() else {
+        return command.to_string();
+    };
+    if !output.status.success() {
+        return command.to_string();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|path| !path.is_empty() && !path.contains("/mise/shims/"))
+        .or_else(|| stdout.lines().map(str::trim).find(|path| !path.is_empty()))
+        .unwrap_or(command)
+        .to_string()
+}
+
+fn frontend_command_path() -> OsString {
+    let mut paths = vec![];
+    let node_path = resolve_command(if cfg!(windows) { "node.exe" } else { "node" });
+    if let Some(parent) = Path::new(&node_path).parent() {
+        paths.push(parent.to_path_buf());
+    }
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+
+    env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
 }
