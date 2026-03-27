@@ -668,7 +668,8 @@ mod tests {
 
     #[test]
     fn test_delete_rule_supports_reqheaders_and_resheaders_prefixes() {
-        let parsed = parse_delete_value("reqHeaders.X-Debug|resHeaders.X-Echo-Server|urlParams.trace");
+        let parsed =
+            parse_delete_value("reqHeaders.X-Debug|resHeaders.X-Echo-Server|urlParams.trace");
 
         assert_eq!(parsed.req_headers, vec!["X-Debug"]);
         assert_eq!(parsed.res_headers, vec!["X-Echo-Server"]);
