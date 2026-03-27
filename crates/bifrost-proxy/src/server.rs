@@ -431,6 +431,8 @@ pub struct ResolvedRules {
     pub dns_servers: Vec<String>,
 
     pub tls_intercept: Option<bool>,
+    pub tls_options: Option<String>,
+    pub sni_callback: Option<String>,
 
     pub req_scripts: Vec<String>,
     pub res_scripts: Vec<String>,

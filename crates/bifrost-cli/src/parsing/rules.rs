@@ -19,6 +19,69 @@ fn extract_inline_content(value: &str) -> &str {
     }
 }
 
+fn insert_merge_leaf(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &str,
+) {
+    target.insert(
+        key.trim().to_string(),
+        serde_json::Value::String(value.trim().to_string()),
+    );
+}
+
+fn parse_merge_value(value: &str) -> Option<serde_json::Value> {
+    if let Ok(json_value) = serde_json::from_str(value) {
+        return Some(json_value);
+    }
+
+    let trimmed = value.trim();
+    let form_candidate = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    if form_candidate.contains('=') {
+        let mut object = serde_json::Map::new();
+        for pair in form_candidate.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                insert_merge_leaf(&mut object, k, v);
+            }
+        }
+        if !object.is_empty() {
+            return Some(serde_json::Value::Object(object));
+        }
+    }
+
+    if let Some(params) = parse_header_value(value) {
+        let mut object = serde_json::Map::new();
+        for (k, v) in params {
+            insert_merge_leaf(&mut object, &k, &v);
+        }
+        if !object.is_empty() {
+            return Some(serde_json::Value::Object(object));
+        }
+    }
+
+    let mut object = serde_json::Map::new();
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((key, raw_value)) = trimmed.split_once(':') {
+            insert_merge_leaf(&mut object, key, raw_value);
+        }
+    }
+
+    if object.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(object))
+    }
+}
+
 fn parse_redirect_target(value: &str) -> (Option<u16>, String) {
     if let Some((status_part, location)) = value.split_once(':') {
         if status_part.len() == 3 && status_part.chars().all(|c| c.is_ascii_digit()) {
@@ -386,9 +449,19 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                     }
                 }
             }
+            Protocol::ForwardedFor => {
+                result
+                    .req_headers
+                    .push(("x-forwarded-for".to_string(), value.to_string()));
+            }
             Protocol::ResCookies => {
                 let parsed_cookies = parse_res_cookies_value(value);
                 result.res_cookies.extend(parsed_cookies);
+            }
+            Protocol::ResponseFor => {
+                result
+                    .res_headers
+                    .push(("x-whistle-response-for".to_string(), value.to_string()));
             }
             Protocol::ReqPrepend => {
                 let content = extract_inline_content(value);
@@ -417,12 +490,12 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.res_replace_regex.extend(parsed.regex_rules);
             }
             Protocol::Params => {
-                if let Ok(json_value) = serde_json::from_str(value) {
+                if let Some(json_value) = parse_merge_value(value) {
                     result.req_merge = Some(json_value);
                 }
             }
             Protocol::ResMerge => {
-                if let Ok(json_value) = serde_json::from_str(value) {
+                if let Some(json_value) = parse_merge_value(value) {
                     result.res_merge = Some(json_value);
                 }
             }
@@ -513,8 +586,18 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             Protocol::TlsPassthrough => {
                 result.tls_intercept = Some(false);
             }
+            Protocol::TlsOptions => {
+                result.tls_options = Some(value.to_string());
+            }
+            Protocol::SniCallback => {
+                result.sni_callback = Some(value.to_string());
+            }
             Protocol::Passthrough => {
                 result.ignored.host = true;
+            }
+            Protocol::Tunnel => {
+                result.host = Some(value.to_string());
+                result.host_protocol = Some(Protocol::Tunnel);
             }
             Protocol::ReqScript => {
                 result.req_scripts.push(value.to_string());

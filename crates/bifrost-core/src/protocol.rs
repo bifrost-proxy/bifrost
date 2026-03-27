@@ -32,6 +32,7 @@ pub enum Protocol {
     ReqType,
     ReqCharset,
     ReqReplace,
+    ForwardedFor,
     Method,
     Auth,
     Ua,
@@ -55,6 +56,7 @@ pub enum Protocol {
     StatusCode,
     Cache,
     Attachment,
+    ResponseFor,
     Trailers,
     ResMerge,
     HeaderReplace,
@@ -84,9 +86,12 @@ pub enum Protocol {
     // TLS 拦截控制
     TlsIntercept,
     TlsPassthrough,
+    TlsOptions,
+    SniCallback,
 
     // 直连/透传
     Passthrough,
+    Tunnel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +320,8 @@ impl Protocol {
             "resCharset" => Some(Protocol::ResCharset),
             "reqCookies" => Some(Protocol::ReqCookies),
             "resCookies" => Some(Protocol::ResCookies),
+            "forwardedFor" => Some(Protocol::ForwardedFor),
+            "responseFor" => Some(Protocol::ResponseFor),
             "reqCors" => Some(Protocol::ReqCors),
             "resCors" => Some(Protocol::ResCors),
             "reqHeaders" => Some(Protocol::ReqHeaders),
@@ -341,7 +348,10 @@ impl Protocol {
             "dns" => Some(Protocol::Dns),
             "tlsIntercept" => Some(Protocol::TlsIntercept),
             "tlsPassthrough" => Some(Protocol::TlsPassthrough),
+            "tlsOptions" => Some(Protocol::TlsOptions),
+            "sniCallback" => Some(Protocol::SniCallback),
             "passthrough" => Some(Protocol::Passthrough),
+            "tunnel" => Some(Protocol::Tunnel),
             _ => None,
         }
     }
@@ -388,6 +398,8 @@ impl Protocol {
             Protocol::ResCharset => "resCharset",
             Protocol::ReqCookies => "reqCookies",
             Protocol::ResCookies => "resCookies",
+            Protocol::ForwardedFor => "forwardedFor",
+            Protocol::ResponseFor => "responseFor",
             Protocol::ReqCors => "reqCors",
             Protocol::ResCors => "resCors",
             Protocol::ReqHeaders => "reqHeaders",
@@ -414,7 +426,10 @@ impl Protocol {
             Protocol::Dns => "dns",
             Protocol::TlsIntercept => "tlsIntercept",
             Protocol::TlsPassthrough => "tlsPassthrough",
+            Protocol::TlsOptions => "tlsOptions",
+            Protocol::SniCallback => "sniCallback",
             Protocol::Passthrough => "passthrough",
+            Protocol::Tunnel => "tunnel",
         }
     }
 
@@ -422,13 +437,17 @@ impl Protocol {
         match self {
             Protocol::TlsIntercept
             | Protocol::TlsPassthrough
+            | Protocol::TlsOptions
+            | Protocol::SniCallback
             | Protocol::Passthrough
+            | Protocol::Tunnel
             | Protocol::Skip => ProtocolCategory::Control,
 
             Protocol::ReplaceStatus
             | Protocol::StatusCode
             | Protocol::Cache
             | Protocol::Attachment
+            | Protocol::ResponseFor
             | Protocol::ResMerge
             | Protocol::ResDelay
             | Protocol::ResSpeed
@@ -464,6 +483,7 @@ impl Protocol {
             | Protocol::ReqType
             | Protocol::ReqCharset
             | Protocol::ReqReplace
+            | Protocol::ForwardedFor
             | Protocol::Method
             | Protocol::Auth
             | Protocol::Ua
@@ -528,7 +548,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 67] = [
+pub const ALL_PROTOCOLS: [Protocol; 72] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -569,6 +589,8 @@ pub const ALL_PROTOCOLS: [Protocol; 67] = [
     Protocol::ResCharset,
     Protocol::ReqCookies,
     Protocol::ResCookies,
+    Protocol::ForwardedFor,
+    Protocol::ResponseFor,
     Protocol::ReqCors,
     Protocol::ResCors,
     Protocol::ReqHeaders,
@@ -595,7 +617,10 @@ pub const ALL_PROTOCOLS: [Protocol; 67] = [
     Protocol::Dns,
     Protocol::TlsIntercept,
     Protocol::TlsPassthrough,
+    Protocol::TlsOptions,
+    Protocol::SniCallback,
     Protocol::Passthrough,
+    Protocol::Tunnel,
 ];
 
 #[cfg(test)]
@@ -604,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 67);
+        assert_eq!(ALL_PROTOCOLS.len(), 72);
     }
 
     #[test]
@@ -676,7 +701,10 @@ mod tests {
             "dns",
             "tlsIntercept",
             "tlsPassthrough",
+            "tlsOptions",
+            "sniCallback",
             "passthrough",
+            "tunnel",
         ];
 
         for name in &protocol_names {
@@ -684,7 +712,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 67);
+        assert_eq!(protocol_names.len(), 72);
     }
 
     #[test]

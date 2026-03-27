@@ -28,6 +28,46 @@ type ParsedPatternResult = (
     LineProps,
 );
 
+fn normalize_line_block_tokens(content: &str) -> String {
+    let tokens: Vec<&str> = content.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return content.to_string();
+    }
+
+    let mut patterns = Vec::new();
+    let mut operations = Vec::new();
+
+    for token in tokens {
+        if token.starts_with(INCLUDE_FILTER_PREFIX)
+            || token.starts_with(EXCLUDE_FILTER_PREFIX)
+            || token.starts_with(LINE_PROPS_PREFIX)
+        {
+            operations.push(token);
+            continue;
+        }
+
+        if let Some(caps) = PROTOCOL_REGEX.captures(token) {
+            let proto_name = caps.get(1).unwrap().as_str();
+            if Protocol::parse(proto_name).is_some()
+                || Protocol::parse(Protocol::resolve_alias(proto_name)).is_some()
+            {
+                operations.push(token);
+                continue;
+            }
+        }
+
+        patterns.push(token);
+    }
+
+    if patterns.is_empty() || operations.is_empty() {
+        return content.to_string();
+    }
+
+    let normalized = patterns.into_iter().chain(operations).collect::<Vec<_>>();
+
+    normalized.join(" ")
+}
+
 lazy_static::lazy_static! {
     static ref PROTOCOL_REGEX: Regex = Regex::new(r"^([a-zA-Z][a-zA-Z0-9\-]*)://(.*)$").unwrap();
     static ref INLINE_VALUES_REGEX: Regex = Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_.\-]*)\}").unwrap();
@@ -770,7 +810,8 @@ fn parse_rules_with_values(text: &str, values: &HashMap<String, String>) -> Resu
         if in_line_block {
             if trimmed == "`" {
                 in_line_block = false;
-                let block_line = line_block_content.trim().replace('\n', " ");
+                let block_line =
+                    normalize_line_block_tokens(&line_block_content.trim().replace('\n', " "));
                 let parsed = parse_line_with_values(&block_line, &merged_values)?;
                 for mut rule in parsed {
                     rule.line = Some(line_block_start);
@@ -830,7 +871,7 @@ fn parse_rules_with_values(text: &str, values: &HashMap<String, String>) -> Resu
     }
 
     if in_line_block && !line_block_content.is_empty() {
-        let block_line = line_block_content.trim().replace('\n', " ");
+        let block_line = normalize_line_block_tokens(&line_block_content.trim().replace('\n', " "));
         let parsed = parse_line_with_values(&block_line, &merged_values)?;
         for mut rule in parsed {
             rule.line = Some(line_block_start);
@@ -877,7 +918,8 @@ fn parse_rules_tolerant_with_values(text: &str, values: &HashMap<String, String>
         if in_line_block {
             if trimmed == "`" {
                 in_line_block = false;
-                let block_line = line_block_content.trim().replace('\n', " ");
+                let block_line =
+                    normalize_line_block_tokens(&line_block_content.trim().replace('\n', " "));
                 try_parse_line(&block_line, line_block_start, &mut result);
                 line_block_content.clear();
             } else {
@@ -921,7 +963,7 @@ fn parse_rules_tolerant_with_values(text: &str, values: &HashMap<String, String>
     }
 
     if in_line_block && !line_block_content.is_empty() {
-        let block_line = line_block_content.trim().replace('\n', " ");
+        let block_line = normalize_line_block_tokens(&line_block_content.trim().replace('\n', " "));
         try_parse_line(&block_line, line_block_start, &mut result);
     }
 
@@ -1409,7 +1451,8 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 if (protocol == Protocol::Http
                     || protocol == Protocol::Https
                     || protocol == Protocol::Ws
-                    || protocol == Protocol::Wss)
+                    || protocol == Protocol::Wss
+                    || protocol == Protocol::Tunnel)
                     && !is_target_address(&value)
                 {
                     let reconstructed_url = format!("{}://{}", proto_name.to_lowercase(), value);
@@ -1435,7 +1478,8 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 } else if (protocol == Protocol::Http
                     || protocol == Protocol::Https
                     || protocol == Protocol::Ws
-                    || protocol == Protocol::Wss)
+                    || protocol == Protocol::Wss
+                    || protocol == Protocol::Tunnel)
                     && patterns.is_empty()
                 {
                     patterns.push(part.clone());

@@ -95,6 +95,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::ReqType => "Set request Content-Type",
         Protocol::ReqCharset => "Set request charset",
         Protocol::ReqReplace => "Replace content in request body",
+        Protocol::ForwardedFor => "Set X-Forwarded-For header",
         Protocol::Method => "Change request method",
         Protocol::Auth => "Set Authorization header",
         Protocol::Ua => "Set User-Agent header",
@@ -116,6 +117,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::StatusCode => "Return status code directly",
         Protocol::Cache => "Set cache control (seconds)",
         Protocol::Attachment => "Set Content-Disposition for download",
+        Protocol::ResponseFor => "Set x-whistle-response-for response header",
         Protocol::Trailers => "Set response trailers",
         Protocol::ResMerge => "Merge JSON into response",
         Protocol::HeaderReplace => "Replace header content",
@@ -135,7 +137,10 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::Dns => "Custom DNS resolution",
         Protocol::TlsIntercept => "Enable TLS interception",
         Protocol::TlsPassthrough => "Disable TLS interception",
+        Protocol::TlsOptions => "Configure CONNECT upstream TLS options",
+        Protocol::SniCallback => "Configure SNI callback metadata for CONNECT requests",
         Protocol::Passthrough => "Pass through without modification",
+        Protocol::Tunnel => "Redirect CONNECT tunnel target",
     }
 }
 
@@ -159,6 +164,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::StatusCode | Protocol::ReplaceStatus => "status_code",
         Protocol::Cache => "seconds",
         Protocol::UrlParams | Protocol::Params => "key=value",
+        Protocol::ForwardedFor | Protocol::ResponseFor => "string",
         Protocol::ReqReplace
         | Protocol::ResReplace
         | Protocol::UrlReplace
@@ -170,6 +176,8 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::ReqCharset | Protocol::ResCharset => "charset",
         Protocol::Attachment => "filename",
         Protocol::Dns => "dns_server",
+        Protocol::TlsOptions => "tls_options",
+        Protocol::SniCallback => "callback_spec",
         Protocol::Delete
         | Protocol::Skip
         | Protocol::ReqCors
@@ -178,6 +186,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         | Protocol::TlsIntercept
         | Protocol::TlsPassthrough
         | Protocol::Passthrough => "empty",
+        Protocol::Tunnel => "host:port",
         Protocol::HtmlAppend
         | Protocol::HtmlPrepend
         | Protocol::HtmlBody
@@ -221,6 +230,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::ReqType => "reqType://application/json",
         Protocol::ReqCharset => "reqCharset://utf-8",
         Protocol::ReqReplace => "reqReplace://old/new/",
+        Protocol::ForwardedFor => "forwardedFor://1.2.3.4",
         Protocol::Method => "method://POST",
         Protocol::Auth => "auth://user:password",
         Protocol::Ua => "ua://CustomAgent/1.0",
@@ -242,6 +252,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::StatusCode => "statusCode://404",
         Protocol::Cache => "cache://3600",
         Protocol::Attachment => "attachment://filename.zip",
+        Protocol::ResponseFor => "responseFor://1.1.1.1",
         Protocol::Trailers => "trailers://(X-Checksum: abc123)",
         Protocol::ResMerge => "resMerge://{\"extra\": \"data\"}",
         Protocol::HeaderReplace => "headerReplace://OldHeader/NewHeader/",
@@ -261,7 +272,10 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::Dns => "dns://8.8.8.8",
         Protocol::TlsIntercept => "tlsIntercept://",
         Protocol::TlsPassthrough => "tlsPassthrough://",
+        Protocol::TlsOptions => "tlsOptions://minVersion=TLSv1.2&maxVersion=TLSv1.3",
+        Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
         Protocol::Passthrough => "passthrough://",
+        Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }
 }
 
@@ -340,6 +354,9 @@ pub fn get_all_protocols() -> Vec<ProtocolInfo> {
         Protocol::Dns,
         Protocol::TlsIntercept,
         Protocol::TlsPassthrough,
+        Protocol::TlsOptions,
+        Protocol::SniCallback,
+        Protocol::Tunnel,
         Protocol::Passthrough,
     ];
 

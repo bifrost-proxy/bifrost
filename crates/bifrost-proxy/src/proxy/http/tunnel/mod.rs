@@ -235,6 +235,42 @@ fn build_upstream_pool_partition(
     )
 }
 
+fn merge_connect_resolved_rules(
+    mut base: ResolvedRules,
+    tunnel_specific: ResolvedRules,
+) -> ResolvedRules {
+    if tunnel_specific.host.is_some() && !base.ignored.host {
+        base.host = tunnel_specific.host;
+        base.host_protocol = tunnel_specific.host_protocol;
+    }
+
+    if tunnel_specific.tls_intercept.is_some() {
+        base.tls_intercept = tunnel_specific.tls_intercept;
+    }
+    if tunnel_specific.tls_options.is_some() {
+        base.tls_options = tunnel_specific.tls_options;
+    }
+    if tunnel_specific.sni_callback.is_some() {
+        base.sni_callback = tunnel_specific.sni_callback;
+    }
+
+    if !tunnel_specific.rules.is_empty() {
+        base.rules.extend(tunnel_specific.rules);
+    }
+
+    base
+}
+
+fn parse_sni_callback_spec(value: &str) -> (&str, Option<&str>) {
+    if let Some((plugin, raw_arg)) = value.split_once('(') {
+        let plugin = plugin.trim();
+        let arg = raw_arg.trim_end_matches(')').trim();
+        return (plugin, (!arg.is_empty()).then_some(arg));
+    }
+
+    (value.trim(), None)
+}
+
 #[cfg(feature = "http3")]
 async fn try_send_http3_upstream(
     host: &str,
@@ -305,7 +341,37 @@ pub async fn handle_connect(
     }
 
     let url = format!("https://{}:{}", host, port);
-    let resolved_rules = rules.resolve(&url, "CONNECT");
+    let tunnel_url = format!("tunnel://{}:{}", host, port);
+    let mut resolved_rules = rules.resolve(&url, "CONNECT");
+    let tunnel_rules = rules.resolve(&tunnel_url, "CONNECT");
+    if tunnel_rules.host.is_some()
+        || tunnel_rules.tls_options.is_some()
+        || tunnel_rules.sni_callback.is_some()
+        || !tunnel_rules.rules.is_empty()
+    {
+        resolved_rules = merge_connect_resolved_rules(resolved_rules, tunnel_rules);
+    }
+
+    if let Some(ref tls_options) = resolved_rules.tls_options {
+        info!(
+            "[{}] CONNECT TLS options matched for {}:{} => {}",
+            ctx.id_str(),
+            host,
+            port,
+            tls_options
+        );
+    }
+    if let Some(ref sni_callback) = resolved_rules.sni_callback {
+        let (plugin, sni_value) = parse_sni_callback_spec(sni_callback);
+        info!(
+            "[{}] CONNECT SNI callback matched for {}:{} => plugin={}, sniValue={}",
+            ctx.id_str(),
+            host,
+            port,
+            plugin,
+            sni_value.unwrap_or("<none>")
+        );
+    }
     let is_local_client = ctx
         .client_ip
         .parse::<std::net::IpAddr>()
@@ -442,7 +508,7 @@ pub async fn handle_connect(
 
         let p = parsed_port.unwrap_or(match resolved_rules.host_protocol {
             Some(Protocol::Http) | Some(Protocol::Ws) => 80,
-            Some(Protocol::Https) | Some(Protocol::Wss) => 443,
+            Some(Protocol::Https) | Some(Protocol::Wss) | Some(Protocol::Tunnel) => 443,
             _ => port,
         });
         debug!(

@@ -69,7 +69,7 @@ pub fn apply_body_rules(
                 override_body.len()
             );
         }
-        return override_body.clone();
+        result = override_body.clone();
     }
 
     if let Some(prepend_data) = prepend {
@@ -151,7 +151,15 @@ pub fn apply_body_rules(
     }
 
     if let Some(merge_value) = merge {
-        if let Ok(original) = serde_json::from_slice::<Value>(&result) {
+        let content_type_lower = content_type.unwrap_or_default().to_ascii_lowercase();
+        if content_type_lower.starts_with("application/x-www-form-urlencoded") {
+            if let Some(merged_form) = merge_form_urlencoded(&result, merge_value) {
+                result = merged_form;
+                if verbose_logging {
+                    debug!("[{}] [{:?}_MERGE] merged form body", ctx.id_str(), phase);
+                }
+            }
+        } else if let Ok(original) = serde_json::from_slice::<Value>(&result) {
             let merged = merge_json(original, merge_value.clone());
             if let Ok(merged_str) = serde_json::to_string(&merged) {
                 result = merged_str.into_bytes().into();
@@ -188,6 +196,46 @@ fn merge_json(base: Value, patch: Value) -> Value {
         }
         (_, patch) => patch,
     }
+}
+
+fn merge_form_urlencoded(body: &[u8], patch: &Value) -> Option<Bytes> {
+    let Value::Object(patch_map) = patch else {
+        return None;
+    };
+
+    let mut pairs: Vec<(String, String)> = url::form_urlencoded::parse(body).into_owned().collect();
+
+    for (key, value) in patch_map {
+        let merged_value = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(v) => v.to_string(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+
+        if let Some(existing) = pairs
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == key)
+        {
+            existing.1 = merged_value;
+        } else {
+            pairs.push((key.clone(), merged_value));
+        }
+    }
+
+    let encoded = pairs
+        .into_iter()
+        .fold(
+            url::form_urlencoded::Serializer::new(String::new()),
+            |mut serializer, (k, v)| {
+                serializer.append_pair(&k, &v);
+                serializer
+            },
+        )
+        .finish();
+
+    Some(Bytes::from(encoded))
 }
 
 pub fn apply_content_injection(

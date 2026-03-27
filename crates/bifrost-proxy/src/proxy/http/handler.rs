@@ -726,7 +726,19 @@ pub async fn handle_http_request(
                 break;
             }
         }
-        (Bytes::new(), new_body.clone())
+        let req_content_type = parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        let processed = apply_body_rules(
+            new_body.clone(),
+            &resolved_rules,
+            Phase::Request,
+            req_content_type,
+            verbose_logging,
+            ctx,
+        );
+        (Bytes::new(), processed)
     } else if content_length.unwrap_or(0) == 0 && !has_transfer_encoding {
         (Bytes::new(), Bytes::new())
     } else {

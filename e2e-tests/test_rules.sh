@@ -40,12 +40,12 @@ SUPPORTED_PROTOCOL_NAMES=(
     host xhost http https ws wss proxy http3 pac redirect file tpl rawfile delete skip
     filter includeFilter excludeFilter lineProps
     reqHeaders reqBody reqPrepend reqAppend reqCookies reqCors reqDelay reqSpeed reqType
-    reqCharset reqReplace method auth ua referer urlParams params
+    reqCharset reqReplace forwardedFor method auth ua referer urlParams params tunnel
     resHeaders resBody resPrepend resAppend resCookies resCors resDelay resSpeed resType
-    resCharset resReplace replaceStatus statusCode cache attachment trailers resMerge
+    resCharset resReplace responseFor replaceStatus statusCode cache attachment trailers resMerge
     headerReplace htmlAppend htmlPrepend htmlBody jsAppend jsPrepend jsBody cssAppend
     cssPrepend cssBody urlReplace reqScript resScript decode dns tlsIntercept
-    tlsPassthrough passthrough
+    tlsPassthrough passthrough tlsOptions sniCallback
 )
 
 SUPPORTED_PROTOCOL_ALIASES=(
@@ -921,6 +921,47 @@ test_req_cookies() {
         local actual_cookie=$(echo "$HTTP_BODY" | jq -r ".request.cookies[\"$cookie_name\"]" 2>/dev/null)
         assert_equals "$cookie_value" "$actual_cookie" "后端应收到 Cookie $cookie_name=$cookie_value"
     fi
+}
+
+test_forwarded_for_rule() {
+    local pattern="$1"
+    local expected="$2"
+    local test_url="http://${pattern}/test"
+
+    echo ""
+    echo -e "  ${CYAN}【测试】forwardedFor${NC}"
+    echo "    请求: $test_url"
+
+    http_get "$test_url"
+    assert_status_2xx "$HTTP_STATUS" "请求应成功"
+
+    if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
+        local actual_value
+        actual_value=$(echo "$HTTP_BODY" | jq -r '.request.headers["x-forwarded-for"] // .request.headers["X-Forwarded-For"] // empty' 2>/dev/null)
+        if [[ "$expected" == *'${clientIp}'* ]]; then
+            if [[ -n "$actual_value" && "$actual_value" != "null" ]]; then
+                _log_pass "x-forwarded-for 已透传客户端 IP: $actual_value"
+            else
+                _log_fail "x-forwarded-for 应为非空" "非空" "${actual_value:-空}"
+            fi
+        else
+            assert_equals "$expected" "$actual_value" "x-forwarded-for 应被改写"
+        fi
+    fi
+}
+
+test_response_for_rule() {
+    local pattern="$1"
+    local expected="$2"
+    local test_url="http://${pattern}/test"
+
+    echo ""
+    echo -e "  ${CYAN}【测试】responseFor${NC}"
+    echo "    请求: $test_url"
+
+    http_get "$test_url"
+    assert_status_2xx "$HTTP_STATUS" "请求应成功"
+    assert_header_value "X-Whistle-Response-For" "$expected" "$HTTP_HEADERS" "响应应返回 x-whistle-response-for"
 }
 
 test_res_cookies() {
@@ -2200,10 +2241,14 @@ detect_rule_type() {
         echo "reqType"
     elif [[ "$line" == *"reqCharset://"* ]]; then
         echo "reqCharset"
+    elif [[ "$line" == *"forwardedFor://"* ]]; then
+        echo "forwardedFor"
     elif [[ "$line" == *"resType://"* ]]; then
         echo "resType"
     elif [[ "$line" == *"resCharset://"* ]]; then
         echo "resCharset"
+    elif [[ "$line" == *"responseFor://"* ]]; then
+        echo "responseFor"
     elif [[ "$line" == *"urlParams://"* ]] || [[ "$line" == *"params://"* ]]; then
         echo "urlParams"
     elif [[ "$line" == *"urlReplace://"* ]] || [[ "$line" == *"pathReplace://"* ]]; then
@@ -2258,6 +2303,8 @@ detect_rule_type() {
         echo "pac"
     elif [[ "$line" == *"proxy://"* ]] || [[ "$line" == *"http-proxy://"* ]]; then
         echo "proxy"
+    elif [[ "$line" == *" tunnel://"* ]]; then
+        echo "tunnel"
     elif [[ "$line" == *" ws://"* ]]; then
         echo "websocket"
     elif [[ "$line" == *" wss://"* ]]; then
@@ -2861,6 +2908,202 @@ run_req_merge_tests() {
     assert_body_contains "\"profile.level\":\"3\"" "$json_body" "json body 应包含 profile.level"
 }
 
+wait_for_local_port() {
+    local port="$1"
+    local timeout="${2:-20}"
+    local waited=0
+
+    while [[ $waited -lt $timeout ]]; do
+        if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+wait_for_admin_ready() {
+    local timeout="${1:-30}"
+    local waited=0
+
+    while [[ $waited -lt $timeout ]]; do
+        local bound_pid
+        bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
+        if [[ -n "$bound_pid" && "$bound_pid" == "$PROXY_PID" ]]; then
+            return 0
+        fi
+        if [[ -n "$PROXY_PID" ]] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+start_specialized_proxy() {
+    local rules_file="$1"
+    local proxy_log="$2"
+    local rust_log_value="${3:-}"
+
+    mkdir -p "${TEST_DATA_DIR}"
+    export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
+    cd "$PROJECT_DIR"
+
+    local bifrost_bin="${PROJECT_DIR}/target/release/bifrost"
+    if [[ ! -x "$bifrost_bin" ]]; then
+        echo -e "${RED}✗${NC} 二进制文件不存在或不可执行: $bifrost_bin"
+        exit 1
+    fi
+
+    local home_dir="${TEST_DATA_DIR}/home"
+    local xdg_config_home="${TEST_DATA_DIR}/xdg-config"
+    local xdg_data_home="${TEST_DATA_DIR}/xdg-data"
+    mkdir -p "$home_dir" "$xdg_config_home" "$xdg_data_home"
+
+    if [[ -n "$rust_log_value" ]]; then
+        env \
+            HOME="${home_dir}" \
+            XDG_CONFIG_HOME="${xdg_config_home}" \
+            XDG_DATA_HOME="${xdg_data_home}" \
+            BIFROST_DATA_DIR="${TEST_DATA_DIR}" \
+            RUST_LOG="${rust_log_value}" \
+            "$bifrost_bin" --port "${PROXY_PORT}" start --skip-cert-check --unsafe-ssl --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
+    else
+        env \
+            HOME="${home_dir}" \
+            XDG_CONFIG_HOME="${xdg_config_home}" \
+            XDG_DATA_HOME="${xdg_data_home}" \
+            BIFROST_DATA_DIR="${TEST_DATA_DIR}" \
+            "$bifrost_bin" --port "${PROXY_PORT}" start --skip-cert-check --unsafe-ssl --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
+    fi
+    PROXY_PID=$!
+
+    if wait_for_admin_ready 60; then
+        echo -e "${GREEN}✓${NC} 专项测试代理已启动 (PID: $PROXY_PID)"
+        return 0
+    fi
+
+    echo -e "${RED}✗${NC} 专项测试代理启动失败"
+    if [[ -f "$proxy_log" ]]; then
+        tail -120 "$proxy_log" || true
+    fi
+    exit 1
+}
+
+run_tunnel_specialized_tests() {
+    header "执行 tunnel 专项测试"
+
+    local work_dir="${TEST_DATA_DIR}/special-tunnel"
+    mkdir -p "$work_dir"
+
+    local tls_port=19443
+    local tls_key="${work_dir}/upstream.key"
+    local tls_cert="${work_dir}/upstream.crt"
+    local tls_log="${work_dir}/upstream.log"
+    local proxy_log="${work_dir}/proxy.log"
+    local rules_file="${work_dir}/rules.txt"
+
+    openssl req -x509 -newkey rsa:2048 -keyout "$tls_key" -out "$tls_cert" -days 1 -nodes -subj "/CN=127.0.0.1" >/dev/null 2>&1
+    openssl s_server -accept "$tls_port" -cert "$tls_cert" -key "$tls_key" -www >"$tls_log" 2>&1 &
+    local tls_pid=$!
+
+    if ! wait_for_local_port "$tls_port" 20; then
+        _log_fail "临时 TLS 上游启动失败" "监听 ${tls_port}" "未监听"
+        kill "$tls_pid" 2>/dev/null || true
+        return 1
+    fi
+
+    cat > "$rules_file" <<EOF
+tunnel://origin-tunnel.local tunnel://127.0.0.1:${tls_port}
+tunnel://origin-default.local:8080 tunnel://127.0.0.1
+EOF
+
+    start_specialized_proxy "$rules_file" "$proxy_log" "bifrost_proxy::proxy::http::tunnel=debug,bifrost_proxy::rules=info"
+
+    curl -sk --proxy "$PROXY" "https://origin-tunnel.local/" --max-time 10 >/dev/null 2>&1 || true
+    curl -sk --proxy "$PROXY" "https://origin-default.local:8080/" --max-time 5 >/dev/null 2>&1 || true
+    sleep 1
+
+    if grep -F "CONNECT tunnel target redirected: origin-tunnel.local:443 -> 127.0.0.1:${tls_port}" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "tunnel 显式端口重定向生效"
+    else
+        _log_fail "tunnel 显式端口重定向应生效" "代理日志包含 127.0.0.1:${tls_port}" "未找到对应日志"
+    fi
+
+    if grep -F "CONNECT tunnel target redirected: origin-default.local:8080 -> 127.0.0.1:443" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "tunnel 默认端口 443 生效"
+    else
+        _log_fail "tunnel 默认端口应为 443" "代理日志包含 127.0.0.1:443" "未找到对应日志"
+    fi
+
+    kill "$tls_pid" 2>/dev/null || true
+    wait "$tls_pid" 2>/dev/null || true
+}
+
+run_tls_options_specialized_tests() {
+    header "执行 tlsOptions 专项测试"
+
+    local work_dir="${TEST_DATA_DIR}/special-tls-options"
+    mkdir -p "$work_dir"
+    local proxy_log="${work_dir}/proxy.log"
+
+    start_specialized_proxy "$RULE_FILE" "$proxy_log" "bifrost_proxy::proxy::http::tunnel=info,bifrost_proxy::rules=info"
+
+    curl -sk --proxy "$PROXY" "https://tls-cipher.local/" --max-time 5 >/dev/null 2>&1 || true
+    curl -sk --proxy "$PROXY" "https://tls-cert.local/" --max-time 5 >/dev/null 2>&1 || true
+    curl -sk --proxy "$PROXY" "https://tls-ref.local/" --max-time 5 >/dev/null 2>&1 || true
+    sleep 1
+
+    if grep -F "CONNECT TLS options matched for tls-cipher.local:443 => ciphers=ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "tlsOptions inline ciphers 已匹配"
+    else
+        _log_fail "tlsOptions inline ciphers 应被解析" "包含 ciphers 配置" "未找到对应日志"
+    fi
+
+    if grep -F "CONNECT TLS options matched for tls-cert.local:443 => key=/tmp/client.key&cert=/tmp/client.crt" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "tlsOptions key/cert 参数已匹配"
+    else
+        _log_fail "tlsOptions key/cert 应被解析" "包含 key=/tmp/client.key&cert=/tmp/client.crt" "未找到对应日志"
+    fi
+
+    if grep -F "CONNECT TLS options matched for tls-ref.local:443 => minVersion: TLSv1.2" "$proxy_log" >/dev/null 2>&1 \
+        && grep -F "maxVersion: TLSv1.3" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "tlsOptions value 引用已展开"
+    else
+        _log_fail "tlsOptions value 引用应被展开" "minVersion/maxVersion 都存在" "未找到完整日志"
+    fi
+}
+
+run_sni_callback_specialized_tests() {
+    header "执行 sniCallback 专项测试"
+
+    local work_dir="${TEST_DATA_DIR}/special-sni-callback"
+    mkdir -p "$work_dir"
+    local proxy_log="${work_dir}/proxy.log"
+
+    start_specialized_proxy "$RULE_FILE" "$proxy_log" "bifrost_proxy::proxy::http::tunnel=info,bifrost_proxy::rules=info"
+
+    curl -sk --proxy "$PROXY" "https://sni-basic.local/" --max-time 5 >/dev/null 2>&1 || true
+    curl -sk --proxy "$PROXY" "https://sni-arg.local/" --max-time 5 >/dev/null 2>&1 || true
+    sleep 1
+
+    if grep -F "CONNECT SNI callback matched for sni-basic.local:443 => plugin=test-plugin, sniValue=<none>" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "sniCallback 无参形式已匹配"
+    else
+        _log_fail "sniCallback 无参形式应被解析" "plugin=test-plugin, sniValue=<none>" "未找到对应日志"
+    fi
+
+    if grep -F "CONNECT SNI callback matched for sni-arg.local:443 => plugin=test-plugin, sniValue=custom-sni" "$proxy_log" >/dev/null 2>&1; then
+        _log_pass "sniCallback 参数形式已匹配"
+    else
+        _log_fail "sniCallback 参数形式应被解析" "plugin=test-plugin, sniValue=custom-sni" "未找到对应日志"
+    fi
+}
+
 is_pattern_rule_file() {
     local file="$1"
     [[ "$file" == *"/pattern/"* ]] && return 0
@@ -2975,6 +3218,31 @@ run_specialized_tests() {
                     return 0
                     ;;
             esac
+            ;;
+    esac
+
+    return 1
+}
+
+run_standalone_specialized_tests() {
+    local rule_file="$1"
+    local basename
+    basename=$(basename "$rule_file")
+    local category
+    category=$(basename "$(dirname "$rule_file")")
+
+    case "$category/$basename" in
+        forwarding/tunnel.txt)
+            run_tunnel_specialized_tests
+            return 0
+            ;;
+        tls/tls_options.txt)
+            run_tls_options_specialized_tests
+            return 0
+            ;;
+        tls/sni_callback.txt)
+            run_sni_callback_specialized_tests
+            return 0
             ;;
     esac
 
@@ -3209,6 +3477,10 @@ run_tests() {
                 local charset=$(extract_value "$protocols" "reqCharset")
                 test_content_type "$pattern" "charset=${charset}" "request"
                 ;;
+            forwardedFor)
+                local forwarded_for=$(extract_value "$protocols" "forwardedFor")
+                test_forwarded_for_rule "$pattern" "$forwarded_for"
+                ;;
             resType)
                 local content_type=$(extract_value "$protocols" "resType")
                 test_content_type "$pattern" "$content_type" "response"
@@ -3216,6 +3488,10 @@ run_tests() {
             resCharset)
                 local charset=$(extract_value "$protocols" "resCharset")
                 test_content_type "$pattern" "charset=${charset}" "response"
+                ;;
+            responseFor)
+                local response_for=$(extract_value "$protocols" "responseFor")
+                test_response_for_rule "$pattern" "$response_for"
                 ;;
             urlReplace)
                 local replace_rule=$(extract_value "$protocols" "urlReplace")
@@ -3364,6 +3640,12 @@ main() {
     fi
     if ! validate_rule_file_capabilities; then
         exit 1
+    fi
+
+    if run_standalone_specialized_tests "$RULE_FILE"; then
+        ensure_assertions_executed
+        print_test_summary
+        exit $?
     fi
 
     build_proxy
