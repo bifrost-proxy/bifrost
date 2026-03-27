@@ -20,7 +20,7 @@ warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 
 truthy() {
     local value="${1:-}"
-    value="${value,,}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
     [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 

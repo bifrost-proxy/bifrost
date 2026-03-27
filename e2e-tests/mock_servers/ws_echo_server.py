@@ -38,6 +38,17 @@ from datetime import datetime
 WS_MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
+def print_banner(unicode_banner, ascii_banner):
+    """在不支持 Unicode 输出的终端中回退到 ASCII banner。"""
+    encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    try:
+        unicode_banner.encode(encoding)
+    except UnicodeEncodeError:
+        print(ascii_banner)
+    else:
+        print(unicode_banner)
+
+
 def log(message):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
     print(f"[{timestamp}] {message}")
@@ -552,7 +563,7 @@ async def start_server(host, port, use_ssl=False):
         ssl=ssl_context
     )
 
-    print(f"""
+    unicode_banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║         WebSocket Echo Server - Bifrost E2E Testing          ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -565,7 +576,19 @@ async def start_server(host, port, use_ssl=False):
 ║    - Return connection headers info                          ║
 ║    - Ping/Pong support                                       ║
 ╚══════════════════════════════════════════════════════════════╝
-""")
+"""
+    ascii_banner = (
+        "+------------------------------------------------------------+\n"
+        "|         WebSocket Echo Server - Bifrost E2E Testing       |\n"
+        "+------------------------------------------------------------+\n"
+        f"|  Address: {protocol}://{host}:{port:<5}                              |\n"
+        f"|  Protocol: {protocol.upper():<4}                                        |\n"
+        "|  Purpose: Test WebSocket forwarding                      |\n"
+        "|                                                            |\n"
+        "|  Features: Echo messages, headers info, and ping/pong     |\n"
+        "+------------------------------------------------------------+"
+    )
+    print_banner(unicode_banner, ascii_banner)
 
     log(f"Starting WebSocket Echo Server on {protocol}://{host}:{port}...")
     log("Press Ctrl+C to stop\n")

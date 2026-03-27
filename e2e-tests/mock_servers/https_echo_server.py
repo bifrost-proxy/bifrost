@@ -24,6 +24,17 @@ import urllib.parse
 from datetime import datetime
 
 
+def print_banner(unicode_banner, ascii_banner):
+    """在不支持 Unicode 输出的终端中回退到 ASCII banner。"""
+    encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    try:
+        unicode_banner.encode(encoding)
+    except UnicodeEncodeError:
+        print(ascii_banner)
+    else:
+        print(unicode_banner)
+
+
 def generate_self_signed_cert():
     """生成临时自签名证书"""
     cert_dir = tempfile.mkdtemp(prefix='bifrost_test_')
@@ -316,7 +327,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3443
     host = '127.0.0.1'
 
-    print(f"""
+    unicode_banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║          HTTPS Echo Server - Bifrost E2E Testing             ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -325,7 +336,18 @@ def main():
 ║                                                              ║
 ║  Note: Uses self-signed certificate                          ║
 ╚══════════════════════════════════════════════════════════════╝
-""")
+"""
+    ascii_banner = (
+        "+------------------------------------------------------------+\n"
+        "|          HTTPS Echo Server - Bifrost E2E Testing          |\n"
+        "+------------------------------------------------------------+\n"
+        f"|  Address: https://{host}:{port:<5}                            |\n"
+        "|  Purpose: Test TLS termination and https forwarding       |\n"
+        "|                                                            |\n"
+        "|  Note: Uses self-signed certificate                        |\n"
+        "+------------------------------------------------------------+"
+    )
+    print_banner(unicode_banner, ascii_banner)
 
     print("Generating self-signed certificate...")
     cert_path, key_path, cert_dir = generate_self_signed_cert()

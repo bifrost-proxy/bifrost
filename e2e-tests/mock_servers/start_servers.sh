@@ -16,6 +16,10 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
+run_python_server() {
+    PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python3 -X utf8 "$@"
+}
+
 cleanup() {
     log "Stopping all servers..."
     for pid in "${PIDS[@]}"; do
@@ -31,37 +35,37 @@ trap cleanup SIGINT SIGTERM
 
 start_http() {
     log "Starting HTTP Echo Server on port $HTTP_PORT..."
-    python3 "$SCRIPT_DIR/http_echo_server.py" "$HTTP_PORT" &
+    run_python_server "$SCRIPT_DIR/http_echo_server.py" "$HTTP_PORT" &
     PIDS+=($!)
 }
 
 start_https() {
     log "Starting HTTPS Echo Server on port $HTTPS_PORT..."
-    python3 "$SCRIPT_DIR/https_echo_server.py" "$HTTPS_PORT" &
+    run_python_server "$SCRIPT_DIR/https_echo_server.py" "$HTTPS_PORT" &
     PIDS+=($!)
 }
 
 start_ws() {
     log "Starting WebSocket Echo Server on port $WS_PORT..."
-    python3 "$SCRIPT_DIR/ws_echo_server.py" "$WS_PORT" &
+    run_python_server "$SCRIPT_DIR/ws_echo_server.py" "$WS_PORT" &
     PIDS+=($!)
 }
 
 start_wss() {
     log "Starting WebSocket Secure Echo Server on port $WSS_PORT..."
-    python3 "$SCRIPT_DIR/ws_echo_server.py" "$WSS_PORT" --ssl &
+    run_python_server "$SCRIPT_DIR/ws_echo_server.py" "$WSS_PORT" --ssl &
     PIDS+=($!)
 }
 
 start_sse() {
     log "Starting SSE Echo Server on port $SSE_PORT..."
-    python3 "$SCRIPT_DIR/sse_echo_server.py" --port "$SSE_PORT" &
+    run_python_server "$SCRIPT_DIR/sse_echo_server.py" --port "$SSE_PORT" &
     PIDS+=($!)
 }
 
 start_proxy() {
     log "Starting HTTP Proxy Echo Server on port $PROXY_PORT..."
-    python3 "$SCRIPT_DIR/http_echo_server.py" "$PROXY_PORT" &
+    run_python_server "$SCRIPT_DIR/http_echo_server.py" "$PROXY_PORT" &
     PIDS+=($!)
 }
 

@@ -23,6 +23,17 @@ import io
 from datetime import datetime
 
 
+def print_banner(unicode_banner, ascii_banner):
+    """在不支持 Unicode 输出的终端中回退到 ASCII banner。"""
+    encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    try:
+        unicode_banner.encode(encoding)
+    except UnicodeEncodeError:
+        print(ascii_banner)
+    else:
+        print(unicode_banner)
+
+
 class EchoHandler(http.server.BaseHTTPRequestHandler):
     """回显所有请求信息的 Handler"""
 
@@ -320,7 +331,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
     host = '127.0.0.1'
 
-    print(f"""
+    unicode_banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║           HTTP Echo Server - Bifrost E2E Testing             ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -330,7 +341,19 @@ def main():
 ║  Response format: JSON with complete request info            ║
 ║  Supported methods: GET, POST, PUT, DELETE, PATCH, OPTIONS   ║
 ╚══════════════════════════════════════════════════════════════╝
-""")
+"""
+    ascii_banner = (
+        "+------------------------------------------------------------+\n"
+        "|           HTTP Echo Server - Bifrost E2E Testing          |\n"
+        "+------------------------------------------------------------+\n"
+        f"|  Address: http://{host}:{port:<5}                             |\n"
+        "|  Purpose: Echo all request details for verification       |\n"
+        "|                                                            |\n"
+        "|  Response format: JSON with complete request info         |\n"
+        "|  Supported methods: GET, POST, PUT, DELETE, PATCH, OPTIONS|\n"
+        "+------------------------------------------------------------+"
+    )
+    print_banner(unicode_banner, ascii_banner)
 
     with ThreadedHTTPServer((host, port), EchoHandler) as httpd:
         print(f"Starting HTTP Echo Server on {host}:{port}...")

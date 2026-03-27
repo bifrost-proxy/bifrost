@@ -9,6 +9,7 @@ PROXY_PORT=${PROXY_PORT:-8080}
 SOCKS5_PORT=${SOCKS5_PORT:-}
 PROXY_MODE=${PROXY_MODE:-http}
 TIMEOUT=${TIMEOUT:-10}
+BIFROST_E2E_HTTP_RETRIES=${BIFROST_E2E_HTTP_RETRIES:-0}
 
 _temp_headers_file=""
 _temp_body_file=""
@@ -16,6 +17,68 @@ _temp_body_file=""
 _cleanup_temp() {
     [ -f "$_temp_headers_file" ] && rm -f "$_temp_headers_file"
     [ -f "$_temp_body_file" ] && rm -f "$_temp_body_file"
+}
+
+http_retry_count() {
+    if [[ "$BIFROST_E2E_HTTP_RETRIES" =~ ^[0-9]+$ ]]; then
+        echo "$BIFROST_E2E_HTTP_RETRIES"
+    else
+        echo "0"
+    fi
+}
+
+should_retry_request() {
+    local curl_exit=$1
+    local http_status=$2
+    local attempt=$3
+    local max_retries=$4
+
+    if [ "$attempt" -ge "$max_retries" ]; then
+        return 1
+    fi
+
+    if [ "$curl_exit" -ne 0 ]; then
+        return 0
+    fi
+
+    case "$http_status" in
+        000|408|429|500|502|503|504)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+perform_curl_with_retries() {
+    local attempt=0
+    local max_retries
+    local curl_exit
+
+    max_retries=$(http_retry_count)
+
+    while true; do
+        : > "$_temp_headers_file"
+        : > "$_temp_body_file"
+
+        curl_exit=0
+        HTTP_STATUS=$(curl "$@" 2>/dev/null) || curl_exit=$?
+        if [ -z "$HTTP_STATUS" ] && [ "$curl_exit" -ne 0 ]; then
+            HTTP_STATUS="000"
+        fi
+
+        HTTP_HEADERS=$(cat "$_temp_headers_file")
+        HTTP_BODY=$(cat "$_temp_body_file")
+
+        if ! should_retry_request "$curl_exit" "$HTTP_STATUS" "$attempt" "$max_retries"; then
+            return 0
+        fi
+
+        attempt=$((attempt + 1))
+        echo "[http_client] transient failure status=${HTTP_STATUS:-empty} curl_exit=${curl_exit} retry=${attempt}/${max_retries}" >&2
+        sleep 1
+    done
 }
 
 http_request() {
@@ -60,9 +123,7 @@ http_request() {
 
     curl_args+=("$url")
 
-    HTTP_STATUS=$(curl "${curl_args[@]}")
-    HTTP_HEADERS=$(cat "$_temp_headers_file")
-    HTTP_BODY=$(cat "$_temp_body_file")
+    perform_curl_with_retries "${curl_args[@]}"
 
     _cleanup_temp
 }
@@ -132,9 +193,7 @@ http_request_no_proxy() {
 
     curl_args+=("$url")
 
-    HTTP_STATUS=$(curl "${curl_args[@]}")
-    HTTP_HEADERS=$(cat "$_temp_headers_file")
-    HTTP_BODY=$(cat "$_temp_body_file")
+    perform_curl_with_retries "${curl_args[@]}"
 
     _cleanup_temp
 }
@@ -182,9 +241,7 @@ https_request() {
 
     curl_args+=("$url")
 
-    HTTP_STATUS=$(curl "${curl_args[@]}")
-    HTTP_HEADERS=$(cat "$_temp_headers_file")
-    HTTP_BODY=$(cat "$_temp_body_file")
+    perform_curl_with_retries "${curl_args[@]}"
 
     _cleanup_temp
 }
