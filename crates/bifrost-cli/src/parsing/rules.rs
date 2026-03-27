@@ -565,7 +565,11 @@ fn parse_delete_value(value: &str) -> ParsedDeleteValue {
             continue;
         }
 
-        if let Some(header) = part.strip_prefix("req.") {
+        if let Some(header) = part.strip_prefix("reqHeaders.") {
+            result.req_headers.push(header.to_string());
+        } else if let Some(header) = part.strip_prefix("resHeaders.") {
+            result.res_headers.push(header.to_string());
+        } else if let Some(header) = part.strip_prefix("req.") {
             result.req_headers.push(header.to_string());
         } else if let Some(header) = part.strip_prefix("res.") {
             result.res_headers.push(header.to_string());
@@ -660,5 +664,14 @@ mod tests {
         );
 
         assert!(resolved.upstream_http3);
+    }
+
+    #[test]
+    fn test_delete_rule_supports_reqheaders_and_resheaders_prefixes() {
+        let parsed = parse_delete_value("reqHeaders.X-Debug|resHeaders.X-Echo-Server|urlParams.trace");
+
+        assert_eq!(parsed.req_headers, vec!["X-Debug"]);
+        assert_eq!(parsed.res_headers, vec!["X-Echo-Server"]);
+        assert_eq!(parsed.url_params, vec!["trace"]);
     }
 }

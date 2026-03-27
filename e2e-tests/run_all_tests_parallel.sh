@@ -48,18 +48,89 @@ detect_cpu_count() {
     fi
 }
 
+FIXTURE_ONLY_RULES=(
+    "admin_api/create_proxy_rule.txt"
+    "admin_api/list_contains_created_rule.txt"
+    "admin_api/rule_count_multiline.txt"
+    "admin_api/update_mock_file_rule.txt"
+    "advanced/body_replace.txt"
+    "advanced/body_size_strategy.txt"
+    "advanced/header_replace.txt"
+    "advanced/large_body.txt"
+    "forwarding/nextoncall_rules.txt"
+    "hot_reload/status_201.txt"
+    "hot_reload/status_202.txt"
+    "http3/http3_e2e.txt"
+    "http3/http3_mitm_tls_header.txt"
+    "http3/http3_rules_header.txt"
+    "regression/rule_semantics_split_parsing.txt"
+    "replay/delete_header.txt"
+    "replay/host_redirect.txt"
+    "replay/method_post.txt"
+    "replay/multiple_rules.txt"
+    "replay/referer.txt"
+    "replay/req_body.txt"
+    "replay/req_cookies.txt"
+    "replay/req_headers.txt"
+    "replay/response_modification.txt"
+    "replay/sse_req_headers.txt"
+    "replay/url_params.txt"
+    "replay/user_agent.txt"
+    "replay/websocket_req_headers.txt"
+    "request_modify/req_res_script.txt"
+    "runtime/client_process_transport_attribution.txt"
+    "socks5/block_domain.txt"
+    "socks5/host_redirect.txt"
+    "socks5_tls/compare_header_mode.txt"
+    "socks5_tls/host_redirect.txt"
+    "socks5_tls/mock_response.txt"
+    "socks5_tls/res_header.txt"
+    "socks5_udp/dns_redirect_domain.txt"
+    "socks5_udp/dns_redirect_ip.txt"
+    "system_proxy/basic_forwarding.txt"
+    "tls/intercept_header_injection.txt"
+    "tls/passthrough_localhost.txt"
+    "values/status_code_value.txt"
+    "websocket/decode_utf8_searchable.txt"
+)
+
+should_skip_rule_fixture() {
+    local rel_path="$1"
+    local fixture
+
+    for fixture in "${FIXTURE_ONLY_RULES[@]}"; do
+        if [[ "$rel_path" == "$fixture" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 collect_test_files() {
     local category="$1"
 
     if [[ -n "$category" ]]; then
         if [[ -d "${RULES_DIR}/${category}" ]]; then
-            find "${RULES_DIR}/${category}" -name "*.txt" -type f 2>/dev/null | sort
+            find "${RULES_DIR}/${category}" -name "*.txt" -type f 2>/dev/null | sort | while read -r rule_file; do
+                local rel_path="${rule_file#$RULES_DIR/}"
+                if should_skip_rule_fixture "$rel_path"; then
+                    continue
+                fi
+                echo "$rule_file"
+            done
         else
             echo -e "${RED}✗${NC} 分类不存在: $category" >&2
             exit 1
         fi
     else
-        find "$RULES_DIR" -name "*.txt" -type f 2>/dev/null | sort
+        find "$RULES_DIR" -name "*.txt" -type f 2>/dev/null | sort | while read -r rule_file; do
+            local rel_path="${rule_file#$RULES_DIR/}"
+            if should_skip_rule_fixture "$rel_path"; then
+                continue
+            fi
+            echo "$rule_file"
+        done
     fi
 }
 

@@ -38,6 +38,7 @@ RULE_FILE=""
 
 SUPPORTED_PROTOCOL_NAMES=(
     host xhost http https ws wss proxy http3 pac redirect file tpl rawfile delete skip
+    filter includeFilter excludeFilter lineProps
     reqHeaders reqBody reqPrepend reqAppend reqCookies reqCors reqDelay reqSpeed reqType
     reqCharset reqReplace method auth ua referer urlParams params
     resHeaders resBody resPrepend resAppend resCookies resCors resDelay resSpeed resType
