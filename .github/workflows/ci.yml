@@ -32,7 +32,7 @@ env:
 
 jobs:
   fmt:
-    name: Format Check
+    name: Rust Format Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
 
   clippy:
-    name: Clippy
+    name: Rust Clippy Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,13 +63,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: Test
+    name: Linux Test Suite
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
@@ -114,7 +114,7 @@ jobs:
           if-no-files-found: ignore
 
   build-linux:
-    name: Build Linux Targets
+    name: Linux Build Matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,8 +147,9 @@ jobs:
         run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
   build-desktop-platform:
-    name: Build Desktop Platform (${{ matrix.target }})
+    name: Desktop Platform Pipeline (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -163,6 +164,9 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -184,6 +188,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-platform-${{ matrix.target }}
+      - name: Install jq (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: choco install jq -y
+      - name: Install Playwright browser
+        run: pnpm exec playwright install chromium
+        working-directory: web
+      - name: Unit and integration tests
+        run: cargo test --workspace --all-features
+      - name: End-to-end tests
+        shell: bash
+        run: bash scripts/ci/run-e2e.sh
       - name: Build workspace
         run: cargo build --workspace --release --target ${{ matrix.target }}
       - name: Build desktop frontend
@@ -255,3 +271,12 @@ jobs:
       - name: Check desktop client
         if: runner.os != 'macOS'
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts-${{ matrix.target }}
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
