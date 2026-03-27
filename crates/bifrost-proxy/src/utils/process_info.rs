@@ -1168,7 +1168,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::macos::describe_process_tcp_sockets;
     use super::*;
+    #[cfg(target_os = "macos")]
+    use std::env;
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(target_os = "macos")]
+    use std::path::PathBuf;
 
     #[cfg(target_os = "macos")]
     use std::process::Stdio;
@@ -1264,6 +1268,32 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn find_test_program(program: &str) -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+
+        if program.contains(std::path::MAIN_SEPARATOR) {
+            candidates.push(PathBuf::from(program));
+        } else {
+            if let Some(path) = env::var_os("PATH") {
+                candidates.extend(env::split_paths(&path).map(|entry| entry.join(program)));
+            }
+
+            if let Some(home) = env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                candidates.push(home.join(".local/share/mise/shims").join(program));
+                candidates.push(home.join(".mise/shims").join(program));
+                candidates.push(home.join(".asdf/shims").join(program));
+            }
+
+            candidates.push(PathBuf::from("/opt/homebrew/bin").join(program));
+            candidates.push(PathBuf::from("/usr/local/bin").join(program));
+            candidates.push(PathBuf::from("/usr/bin").join(program));
+        }
+
+        candidates.into_iter().find(|candidate| candidate.is_file())
+    }
+
+    #[cfg(target_os = "macos")]
     async fn resolve_process_from_external_client(
         program: &str,
         args: &[&str],
@@ -1276,8 +1306,10 @@ mod tests {
             .local_addr()
             .map_err(|error| format!("listener local_addr: {error}"))?;
         let url = format!("http://{local_addr}/resolver-test");
+        let resolved_program = find_test_program(program)
+            .ok_or_else(|| format!("unable to locate executable for test program {program}"))?;
 
-        let mut command = Command::new(program);
+        let mut command = Command::new(&resolved_program);
         command.args(args.iter().map(|arg| arg.replace("{url}", &url)));
         command.stdout(Stdio::null());
         command.stderr(Stdio::piped());

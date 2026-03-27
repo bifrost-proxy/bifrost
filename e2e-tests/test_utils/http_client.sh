@@ -4,12 +4,12 @@
 
 _HTTP_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PROXY_HOST=${PROXY_HOST:-127.0.0.1}
-PROXY_PORT=${PROXY_PORT:-8080}
-SOCKS5_PORT=${SOCKS5_PORT:-}
-PROXY_MODE=${PROXY_MODE:-http}
-TIMEOUT=${TIMEOUT:-10}
-BIFROST_E2E_HTTP_RETRIES=${BIFROST_E2E_HTTP_RETRIES:-0}
+PROXY_HOST=${PROXY_HOST-}
+PROXY_PORT=${PROXY_PORT-}
+SOCKS5_PORT=${SOCKS5_PORT-}
+PROXY_MODE=${PROXY_MODE-}
+TIMEOUT=${TIMEOUT-}
+BIFROST_E2E_HTTP_RETRIES=${BIFROST_E2E_HTTP_RETRIES-}
 
 _temp_headers_file=""
 _temp_body_file=""
@@ -19,9 +19,30 @@ _cleanup_temp() {
     [ -f "$_temp_body_file" ] && rm -f "$_temp_body_file"
 }
 
+http_proxy_host() {
+    echo "${PROXY_HOST:-127.0.0.1}"
+}
+
+http_proxy_port() {
+    echo "${PROXY_PORT:-8080}"
+}
+
+http_socks5_port() {
+    echo "${SOCKS5_PORT:-}"
+}
+
+http_proxy_mode() {
+    echo "${PROXY_MODE:-http}"
+}
+
+http_timeout() {
+    echo "${TIMEOUT:-10}"
+}
+
 http_retry_count() {
-    if [[ "$BIFROST_E2E_HTTP_RETRIES" =~ ^[0-9]+$ ]]; then
-        echo "$BIFROST_E2E_HTTP_RETRIES"
+    local retries="${BIFROST_E2E_HTTP_RETRIES:-0}"
+    if [[ "$retries" =~ ^[0-9]+$ ]]; then
+        echo "$retries"
     else
         echo "0"
     fi
@@ -72,6 +93,9 @@ perform_curl_with_retries() {
         HTTP_BODY=$(cat "$_temp_body_file")
 
         if ! should_retry_request "$curl_exit" "$HTTP_STATUS" "$attempt" "$max_retries"; then
+            if [ "$curl_exit" -ne 0 ]; then
+                return "$curl_exit"
+            fi
             return 0
         fi
 
@@ -93,7 +117,7 @@ http_request() {
     local curl_args=(
         -s
         -X "$method"
-        --max-time "$TIMEOUT"
+        --max-time "$(http_timeout)"
         -D "$_temp_headers_file"
         -o "$_temp_body_file"
         -w '%{http_code}'
@@ -103,11 +127,17 @@ http_request() {
         curl_args+=(-H "X-Test-ID: $TEST_ID")
     fi
 
-    if [ -n "$PROXY_HOST" ] && [ -n "$PROXY_PORT" ]; then
-        if [ "$PROXY_MODE" = "socks5" ] && [ -n "$SOCKS5_PORT" ]; then
-            curl_args+=(--socks5-hostname "${PROXY_HOST}:${SOCKS5_PORT}")
+    local proxy_host proxy_port proxy_mode socks5_port
+    proxy_host="$(http_proxy_host)"
+    proxy_port="$(http_proxy_port)"
+    proxy_mode="$(http_proxy_mode)"
+    socks5_port="$(http_socks5_port)"
+
+    if [ -n "$proxy_host" ] && [ -n "$proxy_port" ]; then
+        if [ "$proxy_mode" = "socks5" ] && [ -n "$socks5_port" ]; then
+            curl_args+=(--socks5-hostname "${proxy_host}:${socks5_port}")
         else
-            curl_args+=(--proxy "http://${PROXY_HOST}:${PROXY_PORT}")
+            curl_args+=(--proxy "http://${proxy_host}:${proxy_port}")
         fi
     fi
 
@@ -166,18 +196,24 @@ http_request_no_proxy() {
     local curl_args=(
         -s
         -X "$method"
-        --max-time "$TIMEOUT"
+        --max-time "$(http_timeout)"
         -D "$_temp_headers_file"
         -o "$_temp_body_file"
         -w '%{http_code}'
         --noproxy '*'
     )
 
-    if [ -n "$PROXY_HOST" ] && [ -n "$PROXY_PORT" ]; then
-        if [ "$PROXY_MODE" = "socks5" ] && [ -n "$SOCKS5_PORT" ]; then
-            curl_args+=(--socks5-hostname "${PROXY_HOST}:${SOCKS5_PORT}")
+    local proxy_host proxy_port proxy_mode socks5_port
+    proxy_host="$(http_proxy_host)"
+    proxy_port="$(http_proxy_port)"
+    proxy_mode="$(http_proxy_mode)"
+    socks5_port="$(http_socks5_port)"
+
+    if [ -n "$proxy_host" ] && [ -n "$proxy_port" ]; then
+        if [ "$proxy_mode" = "socks5" ] && [ -n "$socks5_port" ]; then
+            curl_args+=(--socks5-hostname "${proxy_host}:${socks5_port}")
         else
-            curl_args+=(--proxy "http://${PROXY_HOST}:${PROXY_PORT}")
+            curl_args+=(--proxy "http://${proxy_host}:${proxy_port}")
         fi
     fi
 
@@ -201,8 +237,8 @@ http_request_no_proxy() {
 https_request() {
     local url=$1
     local method=${2:-GET}
-    local data=$3
-    local extra_headers=$4
+    local data=${3:-}
+    local extra_headers=${4:-}
 
     _temp_headers_file=$(mktemp)
     _temp_body_file=$(mktemp)
@@ -211,7 +247,7 @@ https_request() {
         -s
         -k  # 允许自签名证书
         -X "$method"
-        --max-time "$TIMEOUT"
+        --max-time "$(http_timeout)"
         -D "$_temp_headers_file"
         -o "$_temp_body_file"
         -w '%{http_code}'
@@ -221,11 +257,17 @@ https_request() {
         curl_args+=(-H "X-Test-ID: $TEST_ID")
     fi
 
-    if [ -n "$PROXY_HOST" ] && [ -n "$PROXY_PORT" ]; then
-        if [ "$PROXY_MODE" = "socks5" ] && [ -n "$SOCKS5_PORT" ]; then
-            curl_args+=(--socks5-hostname "${PROXY_HOST}:${SOCKS5_PORT}")
+    local proxy_host proxy_port proxy_mode socks5_port
+    proxy_host="$(http_proxy_host)"
+    proxy_port="$(http_proxy_port)"
+    proxy_mode="$(http_proxy_mode)"
+    socks5_port="$(http_socks5_port)"
+
+    if [ -n "$proxy_host" ] && [ -n "$proxy_port" ]; then
+        if [ "$proxy_mode" = "socks5" ] && [ -n "$socks5_port" ]; then
+            curl_args+=(--socks5-hostname "${proxy_host}:${socks5_port}")
         else
-            curl_args+=(--proxy "http://${PROXY_HOST}:${PROXY_PORT}")
+            curl_args+=(--proxy "http://${proxy_host}:${proxy_port}")
         fi
     fi
 

@@ -10,7 +10,9 @@ HTTP_PORT="${HTTP_PORT:-3000}"
 PROXY_PORT="${PROXY_PORT:-9910}"
 ADMIN_PORT="${ADMIN_PORT:-9910}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
+ADMIN_PROXY_READY_URL="${ADMIN_PROXY_READY_URL:-http://127.0.0.1:${HTTP_PORT}/health}"
 export ADMIN_PATH_PREFIX
+export ADMIN_PROXY_READY_URL
 TEST_ID=""
 
 python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$HTTP_PORT" >/tmp/bifrost_echo.log 2>&1 &

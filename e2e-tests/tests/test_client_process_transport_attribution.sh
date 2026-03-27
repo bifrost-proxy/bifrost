@@ -26,6 +26,7 @@ ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 export ADMIN_BASE_URL
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
 TEST_DATA_DIR="$ROOT_DIR/.bifrost-e2e-client-attribution-${PROXY_PORT}-$$"
 RULES_FILE="$TEST_DATA_DIR/rules.txt"
 RULES_TEMPLATE="$ROOT_DIR/e2e-tests/rules/runtime/client_process_transport_attribution.txt"
@@ -119,7 +120,10 @@ start_mock_servers() {
 
 build_bifrost() {
     log_section "Building bifrost"
-    (cd "$ROOT_DIR" && cargo build --release --bin bifrost)
+    (cd "$ROOT_DIR" && "$CARGO_BIN" build --release --bin bifrost) || {
+        echo "Failed to build bifrost with $CARGO_BIN" >&2
+        exit 1
+    }
 }
 
 write_rules() {

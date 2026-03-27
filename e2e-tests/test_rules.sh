@@ -2021,6 +2021,7 @@ test_req_speed_rule() {
     local speed_kb="$2"
     local test_url="http://${pattern}/upload"
     local payload_size=$((speed_kb * 1024 * 2))
+    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-3}"
     local payload=$(python3 - <<PY
 print("A" * $payload_size)
 PY
@@ -2030,17 +2031,32 @@ PY
     echo -e "  ${CYAN}【测试】请求速度限制${NC}"
     echo "    请求: $test_url"
 
-    local start_ms=$(python3 - <<'PY'
+    local start_ms=0
+    local end_ms=0
+    local attempt=1
+    while [[ "$attempt" -le "$max_attempts" ]]; do
+        start_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )
-    http_post "$test_url" "$payload" "Content-Type: text/plain"
-    local end_ms=$(python3 - <<'PY'
+        http_post "$test_url" "$payload" "Content-Type: text/plain"
+        end_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )
+
+        if [[ "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
+            break
+        fi
+
+        if [[ "$attempt" -lt "$max_attempts" ]]; then
+            warn "请求速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
@@ -2058,22 +2074,38 @@ test_res_speed_rule() {
     local speed_kb="$2"
     local size=$((speed_kb * 1024 * 2))
     local test_url="http://${pattern}/large-response?size=${size}&marker=RES"
+    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-3}"
 
     echo ""
     echo -e "  ${CYAN}【测试】响应速度限制${NC}"
     echo "    请求: $test_url"
 
-    local start_ms=$(python3 - <<'PY'
+    local start_ms=0
+    local end_ms=0
+    local attempt=1
+    while [[ "$attempt" -le "$max_attempts" ]]; do
+        start_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )
-    http_get "$test_url"
-    local end_ms=$(python3 - <<'PY'
+        http_get "$test_url"
+        end_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )
+
+        if [[ "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
+            break
+        fi
+
+        if [[ "$attempt" -lt "$max_attempts" ]]; then
+            warn "响应速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 

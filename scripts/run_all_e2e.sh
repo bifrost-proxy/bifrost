@@ -133,25 +133,26 @@ cd "$ROOT_DIR"
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"
 export BIFROST_UI_TEST_RUNNER_PORT="${BIFROST_UI_TEST_RUNNER_PORT:-18080}"
 export BIFROST_E2E_ROOT="$ROOT_DIR"
 export HOME="${HOME:-$ROOT_DIR/.bifrost-e2e-home}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-data}"
-export PATH="$ROOT_DIR/e2e-tests/bin:$PATH"
+export PATH="$ROOT_DIR/e2e-tests/bin:$(dirname "$CARGO_BIN"):$PATH"
 
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   header "Building release bifrost for rule and shell E2E suites"
-  SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+  SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost
   ensure_bifrost_shell_shim "release"
 fi
 
 if [[ "$RUN_SHELL" -eq 1 && "$SHELL_MODE" == "full" ]]; then
   header "Building debug bifrost for shell E2E compatibility"
-  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+  SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --bin bifrost
   ensure_bifrost_shell_shim "debug"
 fi
 
@@ -178,12 +179,12 @@ fi
 
 if [[ "$RUN_RUNNER" -eq 1 ]]; then
   header "Running bifrost-e2e custom runner"
-  cargo run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT"
+  "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT"
 fi
 
 if [[ "$RUN_UI" -eq 1 ]]; then
   header "Building debug bifrost for Playwright E2E"
-  CARGO_TARGET_DIR="$BIFROST_UI_TEST_TARGET_DIR" cargo build --bin bifrost
+  CARGO_TARGET_DIR="$BIFROST_UI_TEST_TARGET_DIR" "$CARGO_BIN" build --bin bifrost
 
   header "Running Playwright UI E2E suite"
   pnpm --dir web run test:ui
