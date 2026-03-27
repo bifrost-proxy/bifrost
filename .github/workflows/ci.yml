@@ -140,10 +140,12 @@ jobs:
       - name: Build Linux CLI (aarch64)
         env:
           SKIP_FRONTEND_BUILD: "1"
+          CARGO_TARGET_DIR: target/cross-aarch64
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
       - name: Build Linux CLI (armv7)
         env:
           SKIP_FRONTEND_BUILD: "1"
+          CARGO_TARGET_DIR: target/cross-armv7
         run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
   build-desktop-platform:

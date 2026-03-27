@@ -675,6 +675,8 @@ mod tests {
             "resCharset",
             "reqCookies",
             "resCookies",
+            "forwardedFor",
+            "responseFor",
             "reqCors",
             "resCors",
             "reqHeaders",

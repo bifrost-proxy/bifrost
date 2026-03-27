@@ -28,22 +28,22 @@ node .trae/skills/github-actions-cookie-login/scripts/github-login.js
 默认查询 `bifrost-proxy/bifrost` 的 `ci.yml`：
 
 ```bash
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci
 ```
 
 常用参数：
 
 ```bash
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js --run latest --fetch-logs
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js --run latest --fetch-logs --failed-only
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js --run 23605768124 --format json
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js --repo owner/repo --workflow ci.yml
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs --failed-only
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run 23605768124 --format json
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --repo owner/repo --workflow ci.yml
 ```
 
 推荐在排查 CI-only 问题时使用：
 
 ```bash
-node .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js --run latest --fetch-logs --failed-only
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs --failed-only
 ```
 
 这会优先输出：

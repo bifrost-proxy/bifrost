@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+NODE_BIN="${NODE_BIN:-}"
+
+if [[ -z "${NODE_BIN}" ]]; then
+  for candidate in \
+    "${HOME}/.local/share/mise/installs/node/22.22.0/bin/node" \
+    "${HOME}/.local/share/mise/installs/node/22/bin/node" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node"
+  do
+    if [[ -x "${candidate}" ]]; then
+      NODE_BIN="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${NODE_BIN}" ]] && [[ -x "${HOME}/.local/bin/mise" ]]; then
+  exec "${HOME}/.local/bin/mise" x node@22.22.0 -- node "${SCRIPT_DIR}/github-actions-ci.js" "$@"
+fi
+
+if [[ -z "${NODE_BIN}" ]] && [[ -x "/opt/homebrew/bin/mise" ]]; then
+  exec "/opt/homebrew/bin/mise" x node@22.22.0 -- node "${SCRIPT_DIR}/github-actions-ci.js" "$@"
+fi
+
+if [[ -z "${NODE_BIN}" ]]; then
+  echo "❌ 未找到可用的 Node.js，也没有可用的 mise；请先安装或暴露 node@22.22.0" >&2
+  exit 1
+fi
+
+exec "${NODE_BIN}" "${SCRIPT_DIR}/github-actions-ci.js" "$@"

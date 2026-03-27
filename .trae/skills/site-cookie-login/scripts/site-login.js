@@ -3,10 +3,50 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const { spawnSync } = require("child_process");
+
+function resolveNpmCliPath() {
+  const npmCliPath = path.resolve(
+    path.dirname(process.execPath),
+    "../lib/node_modules/npm/bin/npm-cli.js",
+  );
+  return fs.existsSync(npmCliPath) ? npmCliPath : null;
+}
+
+function ensureSiteLoginDependencies() {
+  const marker = path.resolve(__dirname, "node_modules/puppeteer");
+  if (fs.existsSync(marker)) {
+    return;
+  }
+
+  const npmCliPath = resolveNpmCliPath();
+  if (!npmCliPath) {
+    throw new Error("未找到 npm-cli.js，无法自动安装 puppeteer 依赖");
+  }
+
+  console.log("📦 未检测到 puppeteer，正在为 site-cookie-login 自动安装依赖...");
+  const install = spawnSync(process.execPath, [npmCliPath, "ci"], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}`,
+    },
+    stdio: "inherit",
+  });
+  if (install.status !== 0) {
+    throw new Error(`依赖安装失败，退出码: ${install.status ?? "unknown"}`);
+  }
+}
 
 function loadPuppeteer() {
   try {
     return require("puppeteer");
+  } catch {}
+
+  ensureSiteLoginDependencies();
+
+  try {
+    return require(path.resolve(__dirname, "node_modules/puppeteer"));
   } catch {}
 
   throw new Error("未找到 puppeteer，请先执行 npm install 安装依赖");

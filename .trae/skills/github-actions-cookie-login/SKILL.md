@@ -24,7 +24,7 @@ description: "为 github.com 的 Actions 页面获取登录 Cookie 并保存到 
 先确保 `site-cookie-login` 依赖可用，再运行：
 
 ```bash
-node .trae/skills/github-actions-cookie-login/scripts/github-login.js --config .env/github-actions-login.json
+bash .trae/skills/github-actions-cookie-login/scripts/github-login --config .env/github-actions-login.json
 ```
 
 如果要改站点或仓库，复制并修改：
