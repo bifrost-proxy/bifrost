@@ -124,7 +124,7 @@ impl Body for ThrottledBoxBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.pending_data.is_none() && self.sleep.is_none() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
@@ -191,5 +191,25 @@ mod tests {
             body.as_mut().poll_frame(&mut cx),
             Poll::Ready(None)
         ));
+    }
+
+    #[tokio::test]
+    async fn throttled_body_is_not_end_stream_while_data_is_buffered() {
+        let mut body = Box::pin(ThrottledBoxBody::new(
+            full_body(Bytes::from(vec![b'a'; 10])),
+            4,
+        ));
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let first = match body.as_mut().poll_frame(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => frame.into_data().expect("data frame"),
+            other => panic!("unexpected first poll result: {:?}", other),
+        };
+        assert_eq!(first.len(), 4);
+        assert!(
+            !body.is_end_stream(),
+            "body should not report end-of-stream while throttled data is still buffered"
+        );
     }
 }
