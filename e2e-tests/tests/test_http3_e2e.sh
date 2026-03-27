@@ -18,6 +18,10 @@ BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
 CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
 TEST_ID=""
 
+# External HTTPS requests to httpbin can occasionally time out under proxy/H3
+# verification, so give this suite a small retry budget by default.
+export BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-2}"
+
 resolve_bifrost_bin() {
     if [[ -x "${ROOT_DIR}/target/release/bifrost" ]]; then
         printf '%s\n' "${ROOT_DIR}/target/release/bifrost"
