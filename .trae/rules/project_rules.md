@@ -5,7 +5,7 @@
 2. 设计技术方案：在 `design/` 下新增或更新对应模块文档（文件名：`功能模块名.md`）
 3. 实现功能与必要测试：新增功能或修复 bug 后按“E2E 测试要求”执行
 4. 更新文档：如涉及新功能 / API / 配置变更，同步更新相关文档（见下）
-5. 项目校验：提交前必须执行 rust-project-validate
+5. 项目校验：提交前必须执行 rust-project-validate，并在开发完成后至少执行一次 `cargo test --workspace --all-features`，避免 CI 才暴露工作区级失败
 6. 收尾清理：清理临时数据目录，避免资源膨胀
 
 ## 技术方案（design 目录）
@@ -40,6 +40,12 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 - 添加新功能或修复 bug 后需要创建/执行端到端测试进行验证
 - 使用技能：e2e-test
+
+## 工作区测试要求
+
+- 开发完成后，提交前必须至少执行一次 `cargo test --workspace --all-features`
+- 目的：提前发现仅在工作区聚合、全 feature 组合或 CI 路径下出现的失败，避免代码提交后才在 CI 暴露问题
+- 如果该命令失败，需要先定位并处理，或在提交说明中明确标注阻塞原因与影响范围
 
 ## 日志配置规范
 

@@ -22,6 +22,7 @@ description: "运行 cargo fmt/clippy/build/e2e/test 验证项目规范；在每
 3. 执行端到端用例，按本次任务的测试范围执行
 4. 运行测试：优先按修改范围执行 `cargo test`，避免无差别跑完整套耗时用例
 5. 完整构建：`cargo build --all-targets --all-features`（避免无差别构建，应该按改动范围构建）
+6. 工作区兜底测试：开发完成后必须至少执行一次 `cargo test --workspace --all-features`，避免提交后才在 CI 中暴露失败
 
 如果任一步失败，立即停止并返回失败报告。
 
@@ -37,6 +38,7 @@ description: "运行 cargo fmt/clippy/build/e2e/test 验证项目规范；在每
 - 当 `fmt --check` 失败时提示可使用以下命令自动修复：
   - `cargo fmt --all`
   - `cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all`
+- 当 `cargo test --workspace --all-features` 失败时，必须在报告里明确指出这是 CI 风险，不能默默跳过
 
 ## 前置条件
 
