@@ -19,7 +19,7 @@ import zipfile
 from typing import Any
 
 UNAUTHENTICATED_MIN_POLL_INTERVAL = 75
-COOKIE_INSPECTOR = ".trae/skills/github-actions-ci-inspect/scripts/github-actions-ci.js"
+COOKIE_INSPECTOR = ".trae/skills/github-actions-ci-inspect/scripts/github-actions-ci"
 COOKIE_FILE = ".env/.cookie.github.com"
 
 
@@ -105,7 +105,7 @@ def run_cookie_inspector(
     fetch_logs: bool = False,
 ) -> dict[str, Any]:
     cmd = [
-        "node",
+        "bash",
         str(inspector_script),
         "--repo",
         repo,
@@ -541,6 +541,39 @@ def wait_for_new_run(
     raise TimeoutError("Timed out waiting for a new workflow run after repair")
 
 
+def wait_for_new_run_with_cookie(
+    repo_dir: pathlib.Path,
+    inspector_script: pathlib.Path,
+    cookie_file: pathlib.Path,
+    repo: str,
+    workflow: str,
+    previous_run_id: int,
+    expected_head_sha: str,
+    poll_interval: int,
+    timeout_seconds: int = 900,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        run = latest_run_with_cookie(
+            repo_dir=repo_dir,
+            inspector_script=inspector_script,
+            cookie_file=cookie_file,
+            repo=repo,
+            workflow=workflow,
+        )
+        if run["id"] != previous_run_id:
+            current_head = git(["rev-parse", "HEAD"], repo_dir)
+            if current_head != expected_head_sha:
+                eprint(
+                    f"[warn] current HEAD {current_head} differs from expected {expected_head_sha}; "
+                    "continuing to watch the newest CI run"
+                )
+            print(f"[ci] detected new workflow run #{run['run_number']} ({run['id']})", flush=True)
+            return run
+        time.sleep(poll_interval)
+    raise TimeoutError("Timed out waiting for a new workflow run after repair")
+
+
 def monitor_run(client: GitHubClient, run_id: int, poll_interval: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     last_seen: dict[int, tuple[str, str | None, str]] = {}
     while True:
@@ -634,7 +667,11 @@ def main() -> int:
     inspector_script = repo_dir / args.cookie_inspector
     cookie_file = repo_dir / args.cookie_file
     use_cookie_inspector = inspector_script.exists() and cookie_file.exists()
-    if not client.authenticated and args.poll_interval < UNAUTHENTICATED_MIN_POLL_INTERVAL:
+    if (
+        not use_cookie_inspector
+        and not client.authenticated
+        and args.poll_interval < UNAUTHENTICATED_MIN_POLL_INTERVAL
+    ):
         eprint(
             f"[warn] no GITHUB_TOKEN/GH_TOKEN detected; raising poll interval to "
             f"{UNAUTHENTICATED_MIN_POLL_INTERVAL}s to stay within GitHub public API limits"
@@ -719,14 +756,26 @@ def main() -> int:
         if args.push_after_fix and after_head != before_head:
             maybe_push_current_head(repo_dir)
 
-        run_id = wait_for_new_run(
-            client,
-            workflow=args.workflow,
-            branch=branch,
-            previous_run_id=run["id"],
-            expected_head_sha=after_head,
-            poll_interval=args.poll_interval,
-        )["id"]
+        if use_cookie_inspector:
+            run_id = wait_for_new_run_with_cookie(
+                repo_dir=repo_dir,
+                inspector_script=inspector_script,
+                cookie_file=cookie_file,
+                repo=args.repo,
+                workflow=args.workflow,
+                previous_run_id=run["id"],
+                expected_head_sha=after_head,
+                poll_interval=args.poll_interval,
+            )["id"]
+        else:
+            run_id = wait_for_new_run(
+                client,
+                workflow=args.workflow,
+                branch=branch,
+                previous_run_id=run["id"],
+                expected_head_sha=after_head,
+                poll_interval=args.poll_interval,
+            )["id"]
 
     eprint(f"[ci] exhausted max cycles ({args.max_cycles}) without success")
     return 1

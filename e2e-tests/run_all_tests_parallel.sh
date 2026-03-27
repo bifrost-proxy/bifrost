@@ -18,6 +18,12 @@ header() { echo -e "\n${CYAN}═════════════════
 info() { echo -e "${BLUE}ℹ${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 
+truthy() {
+    local value="${1:-}"
+    value="${value,,}"
+    [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
 usage() {
     echo "用法: $0 [选项]"
     echo ""
@@ -45,6 +51,16 @@ detect_cpu_count() {
         sysctl -n hw.ncpu
     else
         echo 4
+    fi
+}
+
+ensure_cargo_on_path() {
+    if command -v cargo >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
+        export PATH="${HOME}/.cargo/bin:${PATH}"
     fi
 }
 
@@ -288,15 +304,83 @@ cleanup() {
     "$SCRIPT_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 }
 
+collect_failed_result_indices() {
+    local result_file
+
+    for result_file in "${RESULTS_DIR}"/result_*.txt; do
+        [[ -f "$result_file" ]] || continue
+
+        local status=""
+        status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        if [[ "$status" != "failed" ]]; then
+            continue
+        fi
+
+        local idx="${result_file##*result_}"
+        idx="${idx%.txt}"
+        printf '%s\n' "$idx"
+    done
+}
+
+retry_failed_suites_once() {
+    local failed_indices=()
+    while IFS= read -r idx; do
+        [[ -n "$idx" ]] && failed_indices+=("$idx")
+    done < <(collect_failed_result_indices)
+
+    if [[ ${#failed_indices[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    header "串行重试失败套件"
+    info "首次运行失败 ${#failed_indices[@]} 个套件，按原端口逐个重试"
+
+    local idx
+    for idx in "${failed_indices[@]}"; do
+        local result_file="${RESULTS_DIR}/result_${idx}.txt"
+        local log_file="${RESULTS_DIR}/log_${idx}.txt"
+        local data_dir="${RESULTS_DIR}/data_${idx}"
+        local rule_rel=""
+        local rule_file=""
+
+        rule_rel=$(grep '^TEST_FILE=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        rule_file="${RULES_DIR}/${rule_rel}"
+
+        if [[ -z "$rule_rel" || ! -f "$rule_file" ]]; then
+            warn "无法定位失败套件 ${idx} 对应的规则文件，跳过重试"
+            continue
+        fi
+
+        info "重试 ${rule_rel} (proxy_port=$((BASE_PORT + idx)))"
+        rm -rf "$data_dir" "$log_file" "$result_file"
+        run_single_test "$rule_file" "$idx"
+
+        local status=""
+        status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        if [[ "$status" == "passed" ]]; then
+            echo -e "${GREEN}✓${NC} 重试通过: ${rule_rel}"
+        else
+            warn "重试仍失败: ${rule_rel}"
+            if [[ -f "$log_file" ]]; then
+                echo -e "    ${YELLOW}最后 20 行日志:${NC}"
+                tail -20 "$log_file" | sed 's/^/      /'
+            fi
+        fi
+    done
+}
+
 is_http_echo_ready() {
     curl -sf "http://127.0.0.1:3000/health" >/dev/null 2>&1
 }
 
-JOBS=$(detect_cpu_count)
+ensure_cargo_on_path
+
+JOBS="${BIFROST_E2E_RULE_JOBS:-$(detect_cpu_count)}"
 CATEGORY=""
 SKIP_BUILD="false"
 VERBOSE="false"
 BASE_PORT=9000
+RETRY_FAILED_ONCE="false"
 
 pick_available_base_port() {
     local requested_base_port="$1"
@@ -350,6 +434,10 @@ parse_args() {
                 BASE_PORT="$2"
                 shift 2
                 ;;
+            --retry-failed-once)
+                RETRY_FAILED_ONCE="true"
+                shift
+                ;;
             -v|--verbose)
                 VERBOSE="true"
                 shift
@@ -364,12 +452,18 @@ parse_args() {
 
 main() {
     parse_args "$@"
+    if truthy "${BIFROST_E2E_RETRY_FAILED_ONCE:-false}"; then
+        RETRY_FAILED_ONCE="true"
+    fi
 
     header "Bifrost 并行端到端测试运行器"
     echo "并行任务数: $JOBS"
     echo "起始端口: $BASE_PORT"
     if [[ -n "$CATEGORY" ]]; then
         echo "测试分类: $CATEGORY"
+    fi
+    if [[ "$RETRY_FAILED_ONCE" == "true" ]]; then
+        echo "失败重试: 开启（串行重试一次）"
     fi
     echo ""
 
@@ -449,7 +543,15 @@ main() {
     echo ""
     echo ""
 
-    aggregate_results
+    if ! aggregate_results; then
+        if [[ "$RETRY_FAILED_ONCE" == "true" ]]; then
+            retry_failed_suites_once
+            echo ""
+            aggregate_results
+        else
+            return 1
+        fi
+    fi
 }
 
 main "$@"

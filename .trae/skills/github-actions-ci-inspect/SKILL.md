@@ -20,7 +20,7 @@ description: "读取 github.com 登录 Cookie，查询指定仓库 workflow 的�
 先用 `github-actions-cookie-login` 拿到 Cookie：
 
 ```bash
-node .trae/skills/github-actions-cookie-login/scripts/github-login.js
+bash .trae/skills/github-actions-cookie-login/scripts/github-login
 ```
 
 ## 直接查询 CI
