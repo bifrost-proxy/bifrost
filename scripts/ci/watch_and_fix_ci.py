@@ -595,6 +595,34 @@ def monitor_run_with_cookie(
         time.sleep(poll_interval)
 
 
+def latest_run_with_cookie(
+    repo_dir: pathlib.Path,
+    inspector_script: pathlib.Path,
+    cookie_file: pathlib.Path,
+    repo: str,
+    workflow: str,
+) -> dict[str, Any]:
+    cookie_data = run_cookie_inspector(
+        repo_dir=repo_dir,
+        inspector_script=inspector_script,
+        cookie_file=cookie_file,
+        repo=repo,
+        workflow=workflow,
+        run="latest",
+        fetch_logs=False,
+    )
+    run_id = int(cookie_data["run"]["runId"])
+    status, conclusion = cookie_run_status(cookie_data)
+    return {
+        "id": run_id,
+        "run_number": run_id,
+        "status": status,
+        "conclusion": conclusion,
+        "head_sha": git(["rev-parse", "HEAD"], repo_dir),
+        "html_url": f"https://github.com{cookie_data['run']['runPath']}",
+    }
+
+
 def main() -> int:
     args = parse_args()
     repo_dir = pathlib.Path.cwd()
@@ -620,11 +648,21 @@ def main() -> int:
     elif args.run_id:
         run_id = args.run_id
     else:
-        run = latest_run(client, args.workflow, branch)
-        if not run:
-            eprint(f"No workflow runs found for {args.workflow} on branch {branch}")
-            return 1
-        run_id = int(run["id"])
+        if use_cookie_inspector:
+            run = latest_run_with_cookie(
+                repo_dir=repo_dir,
+                inspector_script=inspector_script,
+                cookie_file=cookie_file,
+                repo=args.repo,
+                workflow=args.workflow,
+            )
+            run_id = int(run["id"])
+        else:
+            run = latest_run(client, args.workflow, branch)
+            if not run:
+                eprint(f"No workflow runs found for {args.workflow} on branch {branch}")
+                return 1
+            run_id = int(run["id"])
 
     for cycle in range(1, args.max_cycles + 1):
         print(f"[ci] cycle {cycle}: watching run {run_id}", flush=True)
