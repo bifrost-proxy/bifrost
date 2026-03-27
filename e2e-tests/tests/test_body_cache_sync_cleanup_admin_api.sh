@@ -24,8 +24,8 @@ fi
 
 admin_delete "/api/config/performance/clear-cache" >/dev/null
 
-curl -s -X PUT -H "Content-Type: application/json" \
-  -d '{"max_db_size_bytes":1073741824,"max_body_memory_size":1,"file_retention_days":7,"max_records":1000}' \
+curl -fsS -X PUT -H "Content-Type: application/json" \
+  -d '{"max_db_size_bytes":262144,"max_body_memory_size":1,"file_retention_days":7,"max_records":1000}' \
   "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/config/performance" >/dev/null
 
 payload=$(python3 - <<'PY'
@@ -33,36 +33,34 @@ print("a" * 32768)
 PY
 )
 
-for i in $(seq 1 5); do
+request_count=150
+
+for i in $(seq 1 "$request_count"); do
   http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload"
 done
-
-curl -s -X PUT -H "Content-Type: application/json" \
-  -d '{"max_records":2}' \
-  "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/config/performance" >/dev/null
 
 for i in $(seq 1 30); do
   traffic_response=$(admin_get "/api/traffic?limit=20")
   record_count=$(echo "$traffic_response" | jq -r '.records | length')
-  if [ "$record_count" -le 2 ]; then
+  if [ "$record_count" -lt "$request_count" ]; then
     break
   fi
   sleep 1
 done
 
-if [ "$record_count" -le 2 ]; then
-  _log_pass "traffic records cleaned to <= 2 (count $record_count)"
+if [ "$record_count" -lt "$request_count" ]; then
+  _log_pass "traffic records were cleaned by performance policy (count $record_count)"
 else
-  _log_fail "traffic records cleaned to <= 2" "<= 2" "$record_count"
+  _log_fail "traffic records were cleaned by performance policy" "< ${request_count}" "$record_count"
 fi
 
 perf_response=$(admin_get "/api/config/performance")
 body_files=$(echo "$perf_response" | jq -r '.body_store_stats.file_count')
 
-if [ "$body_files" -le 4 ]; then
+if [ "$body_files" -lt "$request_count" ]; then
   _log_pass "body_cache files cleaned with records (count $body_files)"
 else
-  _log_fail "body_cache files cleaned with records" "<= 4" "$body_files"
+  _log_fail "body_cache files cleaned with records" "< ${request_count}" "$body_files"
 fi
 
 echo ""

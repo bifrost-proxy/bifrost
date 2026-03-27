@@ -67,6 +67,25 @@ assert_equals() {
   return 1
 }
 
+wait_for_request_script_in_syntax() {
+  local attempts="${1:-10}"
+  local response=""
+  local has_request_script="false"
+
+  for _ in $(seq 1 "$attempts"); do
+    response=$(curl -sS "${ADMIN_BASE_URL}/api/syntax") || return 1
+    has_request_script=$(echo "$response" | jq -r --arg name "$SCRIPT_NAME" '[.scripts.request_scripts[].name] | index($name) != null')
+    if [[ "$has_request_script" == "true" ]]; then
+      printf '%s' "$response"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  printf '%s' "$response"
+  return 1
+}
+
 cleanup_resources() {
   curl -s -X DELETE "${ADMIN_BASE_URL}/api/rules/${RULE_NAME}" >/dev/null 2>&1 || true
   curl -s -X DELETE "${ADMIN_BASE_URL}/api/values/${VALUE_NAME}" >/dev/null 2>&1 || true
@@ -97,26 +116,31 @@ EOF
 
   local script_payload
   script_payload=$(cat <<EOF
-{"content":"request.headers[\\\"x-syntax-script\\\"] = \\\"enabled\\\";"}
+{"content":"request.headers[\"x-syntax-script\"] = \"enabled\";"}
 EOF
 )
 
-  curl -sS -X POST -H "Content-Type: application/json" \
+  curl -fsS -X POST -H "Content-Type: application/json" \
     -d "$rule_payload" \
     "${ADMIN_BASE_URL}/api/rules" >/dev/null || return 1
 
-  curl -sS -X POST -H "Content-Type: application/json" \
+  curl -fsS -X POST -H "Content-Type: application/json" \
     -d "$value_payload" \
     "${ADMIN_BASE_URL}/api/values" >/dev/null || return 1
 
-  curl -sS -X PUT -H "Content-Type: application/json" \
+  curl -fsS -X PUT -H "Content-Type: application/json" \
     -d "$script_payload" \
     "${ADMIN_BASE_URL}/api/scripts/request/${SCRIPT_NAME}" >/dev/null || return 1
 }
 
 test_syntax_endpoint_exposes_dynamic_data() {
   local response
-  response=$(curl -sS "${ADMIN_BASE_URL}/api/syntax") || return 1
+  response=$(wait_for_request_script_in_syntax) || {
+    local scripts_response
+    scripts_response=$(curl -sS "${ADMIN_BASE_URL}/api/scripts" 2>/dev/null || true)
+    log_fail "syntax endpoint should expose newly created request script" "${SCRIPT_NAME}" "${scripts_response:-unavailable}"
+    return 1
+  }
 
   local req_headers_alias
   req_headers_alias=$(echo "$response" | jq -r '.protocol_aliases.pathReplace')
