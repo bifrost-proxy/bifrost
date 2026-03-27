@@ -105,15 +105,15 @@ test_upgrade_help() {
 
     local checks=0
 
-    if echo "$result" | grep -q "Upgrade project version"; then
+    if echo "$result" | grep -qi "Upgrade bifrost to the latest version"; then
         ((checks++))
     fi
 
-    if echo "$result" | grep -q "\-\-bump"; then
+    if echo "$result" | grep -q "\-\-yes\|\-y"; then
         ((checks++))
     fi
 
-    if echo "$result" | grep -q "\-\-dry-run"; then
+    if echo "$result" | grep -q "\-\-help\|\-h"; then
         ((checks++))
     fi
 
@@ -124,107 +124,49 @@ test_upgrade_help() {
     fi
 }
 
-test_upgrade_dry_run_patch() {
-    header "测试 upgrade --bump patch --dry-run"
+test_upgrade_check_output() {
+    header "测试 upgrade 检查更新输出"
 
     cd "$PROJECT_DIR"
 
     local result
-    result=$("$BIFROST_BIN" upgrade --bump patch --dry-run 2>&1 || true)
+    result=$(echo "n" | "$BIFROST_BIN" upgrade 2>&1 || true)
 
-    local checks=0
-
-    if echo "$result" | grep -q "Current version\|Upgrading"; then
-        ((checks++))
-    fi
-
-    if echo "$result" | grep -qE "0\.[0-9]+\.[0-9]+"; then
-        ((checks++))
-    fi
-
-    if echo "$result" | grep -q "\[Dry run\]"; then
-        ((checks++))
-    fi
-
-    if [[ $checks -eq 3 ]]; then
-        pass "upgrade --bump patch --dry-run 正确执行"
+    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check"; then
+        pass "upgrade 命令正确检查更新"
     else
-        fail "upgrade --bump patch --dry-run 输出不完整 ($checks/3): $result"
+        fail "upgrade 命令输出异常: $result"
     fi
 }
 
-test_upgrade_dry_run_minor() {
-    header "测试 upgrade --bump minor --dry-run"
+test_upgrade_yes_flag_recognized() {
+    header "测试 upgrade -y 参数被识别"
 
     cd "$PROJECT_DIR"
 
     local result
-    result=$("$BIFROST_BIN" upgrade --bump minor --dry-run 2>&1 || true)
+    result=$("$BIFROST_BIN" upgrade -y 2>&1 || true)
 
-    if echo "$result" | grep -q "\[Dry run\]" && echo "$result" | grep -q "Upgrading"; then
-        pass "upgrade --bump minor --dry-run 正确执行"
+    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check\|upgrade completed"; then
+        pass "upgrade -y 参数被正确识别"
     else
-        fail "upgrade --bump minor --dry-run 输出异常: $result"
+        fail "upgrade -y 参数输出异常: $result"
     fi
 }
 
-test_upgrade_dry_run_major() {
-    header "测试 upgrade --bump major --dry-run"
+test_upgrade_invalid_flag() {
+    header "测试 upgrade --invalid-flag"
 
     cd "$PROJECT_DIR"
 
     local result
-    result=$("$BIFROST_BIN" upgrade --bump major --dry-run 2>&1 || true)
-
-    if echo "$result" | grep -q "\[Dry run\]" && echo "$result" | grep -q "Upgrading"; then
-        pass "upgrade --bump major --dry-run 正确执行"
-    else
-        fail "upgrade --bump major --dry-run 输出异常: $result"
-    fi
-}
-
-test_upgrade_invalid_bump_type() {
-    header "测试 upgrade --bump invalid"
-
-    cd "$PROJECT_DIR"
-
-    local result
-    result=$("$BIFROST_BIN" upgrade --bump invalid --dry-run 2>&1 || true)
+    result=$("$BIFROST_BIN" upgrade --invalid-flag 2>&1 || true)
     local exit_code=$?
 
-    if echo "$result" | grep -qi "invalid\|error\|expected"; then
-        pass "无效的 bump 类型返回错误信息"
+    if echo "$result" | grep -qi "error\|unexpected\|unknown\|unrecognized"; then
+        pass "无效参数返回错误信息"
     else
-        fail "无效的 bump 类型未返回错误: exit_code=$exit_code, result=$result"
-    fi
-}
-
-test_upgrade_interactive_simulation() {
-    header "测试 upgrade 交互式模式 (模拟输入 1)"
-
-    cd "$PROJECT_DIR"
-
-    local result
-    result=$(echo "1" | "$BIFROST_BIN" upgrade --dry-run 2>&1 || true)
-
-    local checks=0
-
-    if echo "$result" | grep -q "Select upgrade strategy\|Enter choice"; then
-        ((checks++))
-    fi
-
-    if echo "$result" | grep -q "patch\|minor\|major"; then
-        ((checks++))
-    fi
-
-    if echo "$result" | grep -q "\[Dry run\]"; then
-        ((checks++))
-    fi
-
-    if [[ $checks -ge 2 ]]; then
-        pass "upgrade 交互式模式正确显示选项"
-    else
-        fail "upgrade 交互式模式输出异常 ($checks/3): $result"
+        fail "无效参数未返回错误: exit_code=$exit_code, result=$result"
     fi
 }
 
@@ -265,6 +207,7 @@ test_version_cache_content() {
     cat > "$cache_file" << 'EOF'
 {
   "latest_version": "99.0.0",
+  "release_highlights": [],
   "checked_at": "2099-12-31T23:59:59Z"
 }
 EOF
@@ -293,6 +236,7 @@ test_new_version_notice() {
     cat > "$cache_file" << 'EOF'
 {
   "latest_version": "99.0.0",
+  "release_highlights": [],
   "checked_at": "2099-12-31T23:59:59Z"
 }
 EOF
@@ -338,6 +282,7 @@ test_no_notice_when_current() {
     cat > "$cache_file" << EOF
 {
   "latest_version": "${current_version}",
+  "release_highlights": [],
   "checked_at": "2099-12-31T23:59:59Z"
 }
 EOF
@@ -431,11 +376,9 @@ main() {
     build_bifrost
 
     test_upgrade_help
-    test_upgrade_dry_run_patch
-    test_upgrade_dry_run_minor
-    test_upgrade_dry_run_major
-    test_upgrade_invalid_bump_type
-    test_upgrade_interactive_simulation
+    test_upgrade_check_output
+    test_upgrade_yes_flag_recognized
+    test_upgrade_invalid_flag
 
     test_version_cache_creation
     test_version_cache_content

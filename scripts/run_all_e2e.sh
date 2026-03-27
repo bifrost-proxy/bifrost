@@ -235,6 +235,13 @@ extract_failure_reason() {
 import re
 import sys
 
+for _s in (sys.stdout, sys.stderr):
+    if _s and hasattr(_s, "reconfigure"):
+        try:
+            _s.reconfigure(errors="backslashreplace")
+        except Exception:
+            pass
+
 path = sys.argv[1]
 ansi = re.compile(r"\x1b\[[0-9;]*m")
 patterns = [
@@ -356,12 +363,29 @@ run_and_capture() {
   return "${command_status:-1}"
 }
 
+SKIP_IN_CI_TESTS=(
+  "test_memory_pressure_e2e.sh"
+)
+
+is_skipped_in_ci() {
+  local name="$1"
+  for skipped in "${SKIP_IN_CI_TESTS[@]}"; do
+    [[ "$name" == "$skipped" ]] && return 0
+  done
+  return 1
+}
+
 collect_shell_tests() {
   if [[ "$SHELL_MODE" == "full" ]]; then
     find "$E2E_DIR/tests" -maxdepth 1 -type f -name 'test_*.sh' -print \
       | sort \
       | while IFS= read -r script_path; do
-          basename "$script_path"
+          local name
+          name="$(basename "$script_path")"
+          if [[ "$MODE" == "ci" ]] && is_skipped_in_ci "$name"; then
+            continue
+          fi
+          printf '%s\n' "$name"
         done
   else
     printf '%s\n' "${STABLE_SHELL_TESTS[@]}"

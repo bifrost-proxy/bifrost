@@ -324,7 +324,7 @@ test_ws_binary_payload_decode_and_search() {
     fi
 
     local search_response
-    search_response=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"keyword\":\"$msg\"}" "${ADMIN_BASE_URL}/api/search")
+    search_response=$(admin_post "/api/search" "{\"keyword\":\"$msg\"}")
     if ! echo "$search_response" | jq -e --arg id "$traffic_id" '.results[].record.id | select(. == $id)' >/dev/null 2>&1; then
         fail "Search should find traffic by decoded ws payload"
         return 1

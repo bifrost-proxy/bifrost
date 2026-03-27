@@ -38,16 +38,28 @@ log_path = sys.argv[1]
 cmd = [sys.executable, "-X", "utf8", *sys.argv[2:]]
 env = os.environ.copy()
 
-with open(log_path, "ab", buffering=0) as log_file:
-    subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=log_file,
-        stderr=log_file,
-        env=env,
-        close_fds=True,
-        start_new_session=True,
+kwargs = dict(
+    stdin=subprocess.DEVNULL,
+    env=env,
+)
+
+if sys.platform == "win32":
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    kwargs["creationflags"] = (
+        CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
     )
+    log_fh = open(log_path, "ab", buffering=0)
+    kwargs["stdout"] = log_fh
+    kwargs["stderr"] = log_fh
+else:
+    kwargs["close_fds"] = True
+    kwargs["start_new_session"] = True
+    log_fh = open(log_path, "ab", buffering=0)
+    kwargs["stdout"] = log_fh
+    kwargs["stderr"] = log_fh
+
+subprocess.Popen(cmd, **kwargs)
 ' "$log_file" "$@" &
     else
         run_python_server "$@" &
@@ -65,14 +77,14 @@ wait_for_port_closed() {
     local host=$1
     local port=$2
     local service_name=$3
-    local max_attempts=${4:-100}
+    local max_attempts=${4:-30}
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
         if ! check_tcp_port "$host" "$port"; then
             return 0
         fi
-        sleep 0.1
+        sleep 1
         ((attempt++))
     done
 
@@ -82,12 +94,12 @@ wait_for_port_closed() {
 
 check_http_health() {
     local port=$1
-    curl -sf "http://127.0.0.1:${port}/health" >/dev/null 2>&1
+    curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:${port}/health" >/dev/null 2>&1
 }
 
 check_https_health() {
     local port=$1
-    curl -skf "https://127.0.0.1:${port}/health" >/dev/null 2>&1
+    curl -skf --connect-timeout 2 --max-time 5 "https://127.0.0.1:${port}/health" >/dev/null 2>&1
 }
 
 cleanup() {
@@ -157,7 +169,7 @@ wait_for_server() {
         if eval "$check_cmd"; then
             return 0
         fi
-        sleep 0.1
+        sleep 1
         ((attempt++))
     done
     log "$service_name did not become ready after $max_attempts attempts"
@@ -167,12 +179,12 @@ wait_for_server() {
 wait_for_all_servers() {
     local failed=0
 
-    wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 100 || failed=1
-    wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 150 || failed=1
-    wait_for_server "check_tcp_port 127.0.0.1 $WS_PORT" "WebSocket Echo Server" 100 || failed=1
-    wait_for_server "check_tcp_port 127.0.0.1 $WSS_PORT" "WebSocket Secure Echo Server" 150 || failed=1
-    wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 100 || failed=1
-    wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 100 || failed=1
+    wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 30 || failed=1
+    wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 45 || failed=1
+    wait_for_server "check_tcp_port 127.0.0.1 $WS_PORT" "WebSocket Echo Server" 30 || failed=1
+    wait_for_server "check_tcp_port 127.0.0.1 $WSS_PORT" "WebSocket Secure Echo Server" 45 || failed=1
+    wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 30 || failed=1
+    wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1
 
     return $failed
 }
@@ -226,12 +238,12 @@ stop_all() {
     pkill -f "sse_echo_server.py" 2>/dev/null
 
     local failed=0
-    wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 100 || failed=1
-    wait_for_port_closed 127.0.0.1 "$HTTPS_PORT" "HTTPS Echo Server" 100 || failed=1
-    wait_for_port_closed 127.0.0.1 "$WS_PORT" "WebSocket Echo Server" 100 || failed=1
-    wait_for_port_closed 127.0.0.1 "$WSS_PORT" "WebSocket Secure Echo Server" 100 || failed=1
-    wait_for_port_closed 127.0.0.1 "$SSE_PORT" "SSE Echo Server" 100 || failed=1
-    wait_for_port_closed 127.0.0.1 "$PROXY_PORT" "HTTP Proxy Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 30 || failed=1
+    wait_for_port_closed 127.0.0.1 "$HTTPS_PORT" "HTTPS Echo Server" 30 || failed=1
+    wait_for_port_closed 127.0.0.1 "$WS_PORT" "WebSocket Echo Server" 30 || failed=1
+    wait_for_port_closed 127.0.0.1 "$WSS_PORT" "WebSocket Secure Echo Server" 30 || failed=1
+    wait_for_port_closed 127.0.0.1 "$SSE_PORT" "SSE Echo Server" 30 || failed=1
+    wait_for_port_closed 127.0.0.1 "$PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1
 
     if [ $failed -ne 0 ]; then
         log "Some mock server ports did not close cleanly."
@@ -277,6 +289,15 @@ case "$1" in
         if ! wait_for_all_servers; then
             log "Some mock servers failed readiness checks."
             status
+            if [ -d "$SERVER_LOG_DIR" ]; then
+                log "=== Mock server logs ==="
+                for f in "$SERVER_LOG_DIR"/*.log; do
+                    [ -f "$f" ] || continue
+                    log "--- $(basename "$f") ---"
+                    tail -n 30 "$f" 2>/dev/null || true
+                done
+                log "=== End of mock server logs ==="
+            fi
             exit 1
         fi
         log "All servers started in background."

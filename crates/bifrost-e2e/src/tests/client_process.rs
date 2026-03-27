@@ -108,7 +108,9 @@ async fn run_external_client(kind: &str, proxy_url: &str, target_url: &str) -> R
         .spawn()
         .map_err(|error| format!("failed to start {kind} client: {error}"))?;
     let output = match timeout(Duration::from_secs(15), child.wait_with_output()).await {
-        Ok(result) => result.map_err(|error| format!("failed to wait for {kind} client: {error}"))?,
+        Ok(result) => {
+            result.map_err(|error| format!("failed to wait for {kind} client: {error}"))?
+        }
         Err(_) => {
             return Err(format!(
                 "{kind} client timed out after 15s via {:?}",

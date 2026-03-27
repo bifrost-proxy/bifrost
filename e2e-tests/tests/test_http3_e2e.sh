@@ -115,7 +115,9 @@ trap cleanup EXIT
 
 create_test_rules() {
     render_rule_fixture_to_file "$RULES_TEMPLATE" "$RULES_FILE"
-    printf '\n%s\n' "$(httpbin_mock_rules "${ECHO_HTTP_PORT:-3000}" "${ECHO_HTTPS_PORT:-3443}")" >> "$RULES_FILE"
+    local http_port="${ECHO_HTTP_PORT:-3000}"
+    printf '\nhttp://httpbin.org/ http://127.0.0.1:%s\n' "$http_port" >> "$RULES_FILE"
+    printf 'https://httpbin.org/ http://127.0.0.1:%s\n' "$http_port" >> "$RULES_FILE"
     echo "Test rules created at $RULES_FILE"
 }
 
@@ -123,9 +125,12 @@ start_proxy() {
     echo "Starting Bifrost proxy with HTTP/3 support..."
     
     mkdir -p "$DATA_DIR"
-    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
-    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
-    "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" start-bg >/dev/null
+    if ! HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
+         HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+         "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" start-bg; then
+        echo "ERROR: Mock servers failed to start"
+        return 1
+    fi
     create_test_rules
     
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true

@@ -253,8 +253,10 @@ main() {
     echo "  HTTPS Mock: https://127.0.0.1:${HTTPS_MOCK_PORT}"
     echo ""
     
-    trap cleanup EXIT
+    trap 'cleanup; admin_cleanup_bifrost' EXIT
     
+    admin_ensure_bifrost || { echo "ERROR: Could not start Bifrost"; exit 1; }
+
     if ! check_proxy_available; then
         echo ""
         echo "ERROR: Proxy server is not available. Please start it first."

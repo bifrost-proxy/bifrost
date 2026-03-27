@@ -394,6 +394,9 @@ main() {
     echo "Proxy Port: ${PROXY_PORT}"
     echo "=========================================="
 
+    trap admin_cleanup_bifrost EXIT
+    admin_ensure_bifrost || { log_fail "Could not start Bifrost"; exit 1; }
+
     local connectivity
     connectivity=$(curl -sS -o /dev/null -w "%{http_code}" "${ADMIN_BASE_URL}/api/traffic?limit=1" 2>/dev/null || echo "000")
     

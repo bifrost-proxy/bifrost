@@ -33,6 +33,41 @@ cleanup() {
 
 trap cleanup EXIT
 
+start_mock_servers() {
+    local http_port="${ECHO_HTTP_PORT:-3000}"
+    local https_port="${ECHO_HTTPS_PORT:-3443}"
+
+    echo "Starting mock HTTP ($http_port) and HTTPS ($https_port) servers..."
+    HTTP_PORT="$http_port" \
+    HTTPS_PORT="$https_port" \
+    "$E2E_DIR/mock_servers/start_servers.sh" start-bg 2>&1 || true
+
+    local waited=0
+    while [ $waited -lt 30 ]; do
+        if curl -sf --connect-timeout 2 --max-time 3 "http://127.0.0.1:${http_port}/health" >/dev/null 2>&1; then
+            echo "Mock servers ready"
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    echo "WARNING: Mock servers may not be fully ready"
+}
+
+wait_for_proxy_ready() {
+    local max_wait=30
+    local waited=0
+    while [ $waited -lt $max_wait ]; do
+        if curl -sf --connect-timeout 2 --max-time 3 \
+            "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/system" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 start_proxy_with_rules() {
     local rules="$1"
     local combined_rules
@@ -49,9 +84,11 @@ start_proxy_with_rules() {
     
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR/rules"
-    HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
-    HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
-    "$E2E_DIR/mock_servers/start_servers.sh" start-bg >/dev/null
+    
+    if [ -z "${MOCK_SERVERS_STARTED:-}" ]; then
+        start_mock_servers
+        MOCK_SERVERS_STARTED=1
+    fi
     
     export BIFROST_DATA_DIR="$DATA_DIR"
     
@@ -64,11 +101,12 @@ start_proxy_with_rules() {
     fi
     PROXY_PID=$!
     
-    sleep 5
-    
-    if ! kill -0 $PROXY_PID 2>/dev/null; then
-        echo "ERROR: Proxy failed to start"
-        exit 1
+    if ! wait_for_proxy_ready; then
+        if ! kill -0 $PROXY_PID 2>/dev/null; then
+            echo "ERROR: Proxy process died"
+            exit 1
+        fi
+        echo "WARNING: Proxy admin API not reachable, but process is alive"
     fi
     
     echo "Proxy started (PID: $PROXY_PID)"
@@ -77,12 +115,14 @@ start_proxy_with_rules() {
 restart_proxy_with_rules() {
     local rules="$1"
     echo "Restarting proxy with new rules..."
-    pkill -f "bifrost" 2>/dev/null || true
-    sleep 3
+    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    sleep 2
     
-    while lsof -i :$PROXY_PORT >/dev/null 2>&1 || lsof -i :$SOCKS5_PORT >/dev/null 2>&1; do
+    local wait_count=0
+    while [ $wait_count -lt 30 ] && (lsof -i :$PROXY_PORT >/dev/null 2>&1 || lsof -i :$SOCKS5_PORT >/dev/null 2>&1); do
         echo "  Waiting for ports to be released..."
         sleep 1
+        wait_count=$((wait_count + 1))
     done
     
     start_proxy_with_rules "$rules"

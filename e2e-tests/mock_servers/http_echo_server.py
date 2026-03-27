@@ -15,7 +15,6 @@ HTTP Echo Server - 用于验证代理服务对请求的处理
 
 import http.server
 import base64
-import cgi
 import json
 import socketserver
 import subprocess
@@ -281,32 +280,60 @@ body {{ color: #333; }}
         if not body or 'multipart/form-data' not in content_type:
             return {}, {}
 
-        environ = {
-            'REQUEST_METHOD': self.command,
-            'CONTENT_TYPE': content_type,
-            'CONTENT_LENGTH': str(len(body)),
-        }
-        form = cgi.FieldStorage(
-            fp=io.BytesIO(body),
-            headers=self.headers,
-            environ=environ,
-            keep_blank_values=True,
-        )
+        boundary = None
+        for part in content_type.split(';'):
+            part = part.strip()
+            if part.startswith('boundary='):
+                boundary = part[len('boundary='):].strip().strip('"')
+                break
+        if not boundary:
+            return {}, {}
 
         fields = {}
         files = {}
-        if not getattr(form, 'list', None):
-            return fields, files
+        delimiter = ('--' + boundary).encode('utf-8')
+        end_delimiter = ('--' + boundary + '--').encode('utf-8')
 
-        for field in form.list:
-            if field.filename:
-                file_body = field.file.read()
+        parts = body.split(delimiter)
+        for raw_part in parts:
+            if not raw_part or raw_part.strip() == b'--' or raw_part == b'\r\n':
+                continue
+            if raw_part.startswith(end_delimiter) or raw_part.strip() == b'':
+                continue
+
+            if raw_part.startswith(b'\r\n'):
+                raw_part = raw_part[2:]
+            if raw_part.endswith(b'\r\n'):
+                raw_part = raw_part[:-2]
+
+            header_end = raw_part.find(b'\r\n\r\n')
+            if header_end == -1:
+                continue
+            header_block = raw_part[:header_end].decode('utf-8', errors='replace')
+            part_body = raw_part[header_end + 4:]
+
+            name = None
+            filename = None
+            for line in header_block.split('\r\n'):
+                lower_line = line.lower()
+                if lower_line.startswith('content-disposition:'):
+                    for param in line.split(';'):
+                        param = param.strip()
+                        if param.startswith('name='):
+                            name = param[len('name='):].strip().strip('"')
+                        elif param.startswith('filename='):
+                            filename = param[len('filename='):].strip().strip('"')
+
+            if name is None:
+                continue
+
+            if filename is not None:
                 try:
-                    files[field.name] = file_body.decode('utf-8')
+                    files[name] = part_body.decode('utf-8')
                 except UnicodeDecodeError:
-                    files[field.name] = base64.b64encode(file_body).decode('ascii')
+                    files[name] = base64.b64encode(part_body).decode('ascii')
             else:
-                fields[field.name] = field.value
+                fields[name] = part_body.decode('utf-8', errors='replace')
         return fields, files
 
     def _parse_authorization(self):
