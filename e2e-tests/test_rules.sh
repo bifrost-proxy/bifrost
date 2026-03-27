@@ -3026,7 +3026,9 @@ wait_for_admin_ready() {
             fi
         fi
         if [[ "$port_ready" == "true" ]]; then
-            return 0
+            if curl -s --proxy "$PROXY" --connect-timeout 1 http://example.com >/dev/null 2>&1; then
+                return 0
+            fi
         fi
         if [[ -n "$PROXY_PID" ]] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
             return 1

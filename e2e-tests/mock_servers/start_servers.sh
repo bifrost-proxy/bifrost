@@ -61,6 +61,25 @@ check_tcp_port() {
     nc -z "$host" "$port" >/dev/null 2>&1
 }
 
+wait_for_port_closed() {
+    local host=$1
+    local port=$2
+    local service_name=$3
+    local max_attempts=${4:-100}
+    local attempt=0
+
+    while [ $attempt -lt $max_attempts ]; do
+        if ! check_tcp_port "$host" "$port"; then
+            return 0
+        fi
+        sleep 0.1
+        ((attempt++))
+    done
+
+    log "$service_name port $port is still busy after $max_attempts attempts"
+    return 1
+}
+
 check_http_health() {
     local port=$1
     curl -sf "http://127.0.0.1:${port}/health" >/dev/null 2>&1
@@ -205,6 +224,20 @@ stop_all() {
     pkill -f "https_echo_server.py" 2>/dev/null
     pkill -f "ws_echo_server.py" 2>/dev/null
     pkill -f "sse_echo_server.py" 2>/dev/null
+
+    local failed=0
+    wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$HTTPS_PORT" "HTTPS Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$WS_PORT" "WebSocket Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$WSS_PORT" "WebSocket Secure Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$SSE_PORT" "SSE Echo Server" 100 || failed=1
+    wait_for_port_closed 127.0.0.1 "$PROXY_PORT" "HTTP Proxy Echo Server" 100 || failed=1
+
+    if [ $failed -ne 0 ]; then
+        log "Some mock server ports did not close cleanly."
+        return 1
+    fi
+
     log "All servers stopped"
 }
 
