@@ -108,8 +108,8 @@ perform_curl_with_retries() {
 http_request() {
     local url=$1
     local method=${2:-GET}
-    local data=$3
-    local extra_headers=$4
+    local data=${3:-}
+    local extra_headers=${4:-}
 
     _temp_headers_file=$(mktemp)
     _temp_body_file=$(mktemp)
@@ -187,8 +187,8 @@ http_delete() {
 http_request_no_proxy() {
     local url=$1
     local method=${2:-GET}
-    local data=$3
-    local extra_headers=$4
+    local data=${3:-}
+    local extra_headers=${4:-}
 
     _temp_headers_file=$(mktemp)
     _temp_body_file=$(mktemp)

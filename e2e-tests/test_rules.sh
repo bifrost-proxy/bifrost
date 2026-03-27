@@ -78,6 +78,34 @@ array_contains() {
     return 1
 }
 
+resolve_bifrost_release_bin() {
+    local release_dir="${PROJECT_DIR}/target/release"
+    local unix_bin="${release_dir}/bifrost"
+    local windows_bin="${release_dir}/bifrost.exe"
+
+    if [[ -x "$unix_bin" ]]; then
+        printf '%s\n' "$unix_bin"
+        return 0
+    fi
+
+    if [[ -f "$windows_bin" ]]; then
+        printf '%s\n' "$windows_bin"
+        return 0
+    fi
+
+    return 1
+}
+
+have_lsof() {
+    command -v lsof >/dev/null 2>&1
+}
+
+lsof_supports_pid_output() {
+    local lsof_cmd=""
+    lsof_cmd="$(command -v lsof 2>/dev/null || true)"
+    [[ -n "$lsof_cmd" && "$lsof_cmd" != "${SCRIPT_DIR}/bin/lsof" ]]
+}
+
 usage() {
     echo "用法: $0 [选项] <规则文件>"
     echo ""
@@ -205,8 +233,10 @@ build_proxy() {
 
     header "检查代理服务器"
 
-    if [[ -f "${PROJECT_DIR}/target/release/bifrost" ]]; then
-        local mod_time=$(stat -f %m "${PROJECT_DIR}/target/release/bifrost" 2>/dev/null || stat -c %Y "${PROJECT_DIR}/target/release/bifrost" 2>/dev/null)
+    local existing_bin=""
+    existing_bin=$(resolve_bifrost_release_bin 2>/dev/null || true)
+    if [[ -n "$existing_bin" ]]; then
+        local mod_time=$(stat -f %m "$existing_bin" 2>/dev/null || stat -c %Y "$existing_bin" 2>/dev/null)
         local now=$(date +%s)
         local age=$((now - mod_time))
 
@@ -231,9 +261,24 @@ is_http_echo_ready() {
     curl -sf "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1
 }
 
+wait_for_http_echo_ready() {
+    local timeout="${1:-15}"
+    local waited=0
+
+    while [[ $waited -lt $timeout ]]; do
+        if is_http_echo_ready; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
 start_echo_servers() {
     if [[ "$SKIP_MOCK_SERVERS" == "true" ]]; then
-        if is_http_echo_ready; then
+        if wait_for_http_echo_ready 15; then
             return 0
         else
             echo -e "${RED}✗${NC} Mock 服务器未运行，但指定了 --skip-mock-servers"
@@ -357,9 +402,13 @@ start_proxy() {
 
     # 端口可能被前一次测试遗留进程占用；如果不确保端口释放，
     # 后续的健康检查可能会连到“旧进程”，导致用例误判。
-    if lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
+    if have_lsof && lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
         local pids
-        pids=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | sort -u | tr '\n' ' ' | xargs echo -n 2>/dev/null || true)
+        if lsof_supports_pid_output; then
+            pids=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | sort -u | tr '\n' ' ' | xargs echo -n 2>/dev/null || true)
+        else
+            pids=""
+        fi
         warn "端口 ${PROXY_PORT} 已被占用 (PID: ${pids:-unknown})"
         info "尝试终止现有进程..."
         if [[ -n "$pids" ]]; then
@@ -375,8 +424,10 @@ start_proxy() {
 
         if lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
             info "端口仍被占用，强制终止..."
-            local pids_force
-            pids_force=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | sort -u | tr '\n' ' ' | xargs echo -n 2>/dev/null || true)
+            local pids_force=""
+            if lsof_supports_pid_output; then
+                pids_force=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | sort -u | tr '\n' ' ' | xargs echo -n 2>/dev/null || true)
+            fi
             if [[ -n "$pids_force" ]]; then
                 kill -9 $pids_force 2>/dev/null || true
             fi
@@ -417,8 +468,9 @@ start_proxy() {
     fi
 
     if [[ "$USE_BINARY" == "true" ]]; then
-        local BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
-        if [[ ! -x "$BIFROST_BIN" ]]; then
+        local BIFROST_BIN=""
+        BIFROST_BIN=$(resolve_bifrost_release_bin 2>/dev/null || true)
+        if [[ -z "$BIFROST_BIN" ]]; then
             echo -e "${RED}✗${NC} 二进制文件不存在或不可执行: $BIFROST_BIN"
             exit 1
         fi
@@ -439,14 +491,18 @@ start_proxy() {
         fi
 
         # 确认监听端口的 PID 就是我们刚启动的进程，避免误连到旧服务。
-        local bound_pid
-        bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
-        if [[ -n "$bound_pid" && "$bound_pid" == "$PROXY_PID" ]]; then
-            if curl -s --proxy "$PROXY" --connect-timeout 1 http://example.com >/dev/null 2>&1; then
-                echo -e "${GREEN}✓${NC} 代理服务器已启动 (PID: $PROXY_PID)"
-                echo -e "${GREEN}✓${NC} 规则已从文件加载: ${RULE_FILE}"
-                return 0
+        local port_ready="true"
+        if have_lsof && lsof_supports_pid_output; then
+            local bound_pid
+            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
+            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
+                port_ready="false"
             fi
+        fi
+        if [[ "$port_ready" == "true" ]] && curl -s --proxy "$PROXY" --connect-timeout 1 http://example.com >/dev/null 2>&1; then
+            echo -e "${GREEN}✓${NC} 代理服务器已启动 (PID: $PROXY_PID)"
+            echo -e "${GREEN}✓${NC} 规则已从文件加载: ${RULE_FILE}"
+            return 0
         fi
         sleep 1
         waited=$((waited + 1))
@@ -2961,13 +3017,36 @@ wait_for_admin_ready() {
     local waited=0
 
     while [[ $waited -lt $timeout ]]; do
-        local bound_pid
-        bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
-        if [[ -n "$bound_pid" && "$bound_pid" == "$PROXY_PID" ]]; then
+        local port_ready="true"
+        if have_lsof && lsof_supports_pid_output; then
+            local bound_pid
+            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
+            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
+                port_ready="false"
+            fi
+        fi
+        if [[ "$port_ready" == "true" ]]; then
             return 0
         fi
         if [[ -n "$PROXY_PID" ]] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
             return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+wait_for_log_contains() {
+    local log_file="$1"
+    local needle="$2"
+    local timeout="${3:-10}"
+    local waited=0
+
+    while [[ $waited -lt $timeout ]]; do
+        if grep -F "$needle" "$log_file" >/dev/null 2>&1; then
+            return 0
         fi
         sleep 1
         waited=$((waited + 1))
@@ -2985,8 +3064,9 @@ start_specialized_proxy() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
     cd "$PROJECT_DIR"
 
-    local bifrost_bin="${PROJECT_DIR}/target/release/bifrost"
-    if [[ ! -x "$bifrost_bin" ]]; then
+    local bifrost_bin=""
+    bifrost_bin=$(resolve_bifrost_release_bin 2>/dev/null || true)
+    if [[ -z "$bifrost_bin" ]]; then
         echo -e "${RED}✗${NC} 二进制文件不存在或不可执行: $bifrost_bin"
         exit 1
     fi
@@ -3058,15 +3138,14 @@ EOF
 
     curl -sk --proxy "$PROXY" "https://origin-tunnel.local/" --max-time 10 >/dev/null 2>&1 || true
     curl -sk --proxy "$PROXY" "https://origin-default.local:8080/" --max-time 5 >/dev/null 2>&1 || true
-    sleep 1
 
-    if grep -F "CONNECT tunnel target redirected: origin-tunnel.local:443 -> 127.0.0.1:${tls_port}" "$proxy_log" >/dev/null 2>&1; then
+    if wait_for_log_contains "$proxy_log" "CONNECT tunnel target redirected: origin-tunnel.local:443 -> 127.0.0.1:${tls_port}" 10; then
         _log_pass "tunnel 显式端口重定向生效"
     else
         _log_fail "tunnel 显式端口重定向应生效" "代理日志包含 127.0.0.1:${tls_port}" "未找到对应日志"
     fi
 
-    if grep -F "CONNECT tunnel target redirected: origin-default.local:8080 -> 127.0.0.1:443" "$proxy_log" >/dev/null 2>&1; then
+    if wait_for_log_contains "$proxy_log" "CONNECT tunnel target redirected: origin-default.local:8080 -> 127.0.0.1:443" 10; then
         _log_pass "tunnel 默认端口 443 生效"
     else
         _log_fail "tunnel 默认端口应为 443" "代理日志包含 127.0.0.1:443" "未找到对应日志"

@@ -32,7 +32,7 @@ import sys
 import tempfile
 import urllib.parse
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 WS_MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -82,8 +82,8 @@ def generate_self_signed_cert():
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=365))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
             .add_extension(
                 x509.SubjectAlternativeName([
                     x509.DNSName("localhost"),

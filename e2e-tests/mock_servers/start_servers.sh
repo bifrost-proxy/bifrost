@@ -9,6 +9,8 @@ WS_PORT=${WS_PORT:-3020}
 WSS_PORT=${WSS_PORT:-3021}
 SSE_PORT=${SSE_PORT:-3003}
 PROXY_PORT=${PROXY_PORT:-9999}
+SERVER_LOG_DIR=${SERVER_LOG_DIR:-"$SCRIPT_DIR/.logs"}
+DETACHED_MODE=false
 
 declare -a PIDS=()
 
@@ -18,6 +20,55 @@ log() {
 
 run_python_server() {
     PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python3 -X utf8 "$@"
+}
+
+start_server_process() {
+    local log_name=$1
+    shift
+
+    if [ "$DETACHED_MODE" = true ]; then
+        mkdir -p "$SERVER_LOG_DIR"
+        local log_file="$SERVER_LOG_DIR/${log_name}.log"
+        PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python3 -c '
+import os
+import subprocess
+import sys
+
+log_path = sys.argv[1]
+cmd = [sys.executable, "-X", "utf8", *sys.argv[2:]]
+env = os.environ.copy()
+
+with open(log_path, "ab", buffering=0) as log_file:
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
+        env=env,
+        close_fds=True,
+        start_new_session=True,
+    )
+' "$log_file" "$@" &
+    else
+        run_python_server "$@" &
+    fi
+    PIDS+=($!)
+}
+
+check_tcp_port() {
+    local host=$1
+    local port=$2
+    nc -z "$host" "$port" >/dev/null 2>&1
+}
+
+check_http_health() {
+    local port=$1
+    curl -sf "http://127.0.0.1:${port}/health" >/dev/null 2>&1
+}
+
+check_https_health() {
+    local port=$1
+    curl -skf "https://127.0.0.1:${port}/health" >/dev/null 2>&1
 }
 
 cleanup() {
@@ -35,38 +86,32 @@ trap cleanup SIGINT SIGTERM
 
 start_http() {
     log "Starting HTTP Echo Server on port $HTTP_PORT..."
-    run_python_server "$SCRIPT_DIR/http_echo_server.py" "$HTTP_PORT" &
-    PIDS+=($!)
+    start_server_process "http_echo_server" "$SCRIPT_DIR/http_echo_server.py" "$HTTP_PORT"
 }
 
 start_https() {
     log "Starting HTTPS Echo Server on port $HTTPS_PORT..."
-    run_python_server "$SCRIPT_DIR/https_echo_server.py" "$HTTPS_PORT" &
-    PIDS+=($!)
+    start_server_process "https_echo_server" "$SCRIPT_DIR/https_echo_server.py" "$HTTPS_PORT"
 }
 
 start_ws() {
     log "Starting WebSocket Echo Server on port $WS_PORT..."
-    run_python_server "$SCRIPT_DIR/ws_echo_server.py" "$WS_PORT" &
-    PIDS+=($!)
+    start_server_process "ws_echo_server" "$SCRIPT_DIR/ws_echo_server.py" "$WS_PORT"
 }
 
 start_wss() {
     log "Starting WebSocket Secure Echo Server on port $WSS_PORT..."
-    run_python_server "$SCRIPT_DIR/ws_echo_server.py" "$WSS_PORT" --ssl &
-    PIDS+=($!)
+    start_server_process "wss_echo_server" "$SCRIPT_DIR/ws_echo_server.py" "$WSS_PORT" --ssl
 }
 
 start_sse() {
     log "Starting SSE Echo Server on port $SSE_PORT..."
-    run_python_server "$SCRIPT_DIR/sse_echo_server.py" --port "$SSE_PORT" &
-    PIDS+=($!)
+    start_server_process "sse_echo_server" "$SCRIPT_DIR/sse_echo_server.py" --port "$SSE_PORT"
 }
 
 start_proxy() {
     log "Starting HTTP Proxy Echo Server on port $PROXY_PORT..."
-    run_python_server "$SCRIPT_DIR/http_echo_server.py" "$PROXY_PORT" &
-    PIDS+=($!)
+    start_server_process "proxy_echo_server" "$SCRIPT_DIR/http_echo_server.py" "$PROXY_PORT"
 }
 
 start_all() {
@@ -84,56 +129,70 @@ start_all() {
 }
 
 wait_for_server() {
-    local host=$1
-    local port=$2
+    local check_cmd=$1
+    local service_name=$2
     local max_attempts=${3:-30}
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if nc -z "$host" "$port" 2>/dev/null; then
+        if eval "$check_cmd"; then
             return 0
         fi
         sleep 0.1
         ((attempt++))
     done
+    log "$service_name did not become ready after $max_attempts attempts"
     return 1
+}
+
+wait_for_all_servers() {
+    local failed=0
+
+    wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 100 || failed=1
+    wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 150 || failed=1
+    wait_for_server "check_tcp_port 127.0.0.1 $WS_PORT" "WebSocket Echo Server" 100 || failed=1
+    wait_for_server "check_tcp_port 127.0.0.1 $WSS_PORT" "WebSocket Secure Echo Server" 150 || failed=1
+    wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 100 || failed=1
+    wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 100 || failed=1
+
+    return $failed
 }
 
 status() {
     echo "Mock Server Status:"
     echo "==================="
 
-    if nc -z 127.0.0.1 "$HTTP_PORT" 2>/dev/null; then
+    if check_http_health "$HTTP_PORT"; then
         echo "HTTP   (port $HTTP_PORT): ✅ Running"
     else
         echo "HTTP   (port $HTTP_PORT): ❌ Not running"
     fi
 
-    if nc -z 127.0.0.1 "$HTTPS_PORT" 2>/dev/null; then
+    if check_https_health "$HTTPS_PORT"; then
         echo "HTTPS  (port $HTTPS_PORT): ✅ Running"
     else
         echo "HTTPS  (port $HTTPS_PORT): ❌ Not running"
     fi
 
-    if nc -z 127.0.0.1 "$WS_PORT" 2>/dev/null; then
+    if check_tcp_port 127.0.0.1 "$WS_PORT"; then
         echo "WS     (port $WS_PORT): ✅ Running"
     else
         echo "WS     (port $WS_PORT): ❌ Not running"
     fi
 
-    if nc -z 127.0.0.1 "$WSS_PORT" 2>/dev/null; then
+    if check_tcp_port 127.0.0.1 "$WSS_PORT"; then
         echo "WSS    (port $WSS_PORT): ✅ Running"
     else
         echo "WSS    (port $WSS_PORT): ❌ Not running"
     fi
 
-    if nc -z 127.0.0.1 "$SSE_PORT" 2>/dev/null; then
+    if check_http_health "$SSE_PORT"; then
         echo "SSE    (port $SSE_PORT): ✅ Running"
     else
         echo "SSE    (port $SSE_PORT): ❌ Not running"
     fi
 
-    if nc -z 127.0.0.1 "$PROXY_PORT" 2>/dev/null; then
+    if check_http_health "$PROXY_PORT"; then
         echo "PROXY  (port $PROXY_PORT): ✅ Running"
     else
         echo "PROXY  (port $PROXY_PORT): ❌ Not running"
@@ -179,9 +238,15 @@ case "$1" in
         wait
         ;;
     start-bg)
+        DETACHED_MODE=true
         start_all
+        log "Waiting for mock servers to become ready..."
+        if ! wait_for_all_servers; then
+            log "Some mock servers failed readiness checks."
+            status
+            exit 1
+        fi
         log "All servers started in background."
-        sleep 2
         status
         ;;
     stop)

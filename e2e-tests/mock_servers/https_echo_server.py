@@ -21,7 +21,7 @@ import ssl
 import sys
 import tempfile
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def print_banner(unicode_banner, ascii_banner):
@@ -65,8 +65,8 @@ def generate_self_signed_cert():
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=365))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
             .add_extension(
                 x509.SubjectAlternativeName([
                     x509.DNSName("localhost"),
@@ -273,6 +273,16 @@ body {{ color: #333; }}
         for key, value in self.headers.items():
             print(f"  {key}: {value}")
         parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path == '/health':
+            body = "ok"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('X-Echo-Server', 'bifrost-test-https')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(body.encode('utf-8'))
+            return
         if parsed_path.path == '/large-response':
             self._handle_large_response()
         else:

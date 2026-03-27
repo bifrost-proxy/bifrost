@@ -18,6 +18,20 @@ BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
 CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
 TEST_ID=""
 
+resolve_bifrost_bin() {
+    if [[ -x "${ROOT_DIR}/target/release/bifrost" ]]; then
+        printf '%s\n' "${ROOT_DIR}/target/release/bifrost"
+        return 0
+    fi
+
+    if [[ -f "${ROOT_DIR}/target/release/bifrost.exe" ]]; then
+        printf '%s\n' "${ROOT_DIR}/target/release/bifrost.exe"
+        return 0
+    fi
+
+    return 1
+}
+
 passed=0
 failed=0
 
@@ -86,7 +100,7 @@ start_proxy() {
     
     BIFROST_DATA_DIR="$DATA_DIR" \
     RUST_LOG=info,bifrost_proxy::http3=debug \
-    "$ROOT_DIR/target/release/bifrost" \
+    "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         start \
         --unsafe-ssl \
@@ -624,12 +638,20 @@ print_proxy_logs() {
 }
 
 main() {
+    BIFROST_BIN="$(resolve_bifrost_bin || true)"
+
     echo "Building Bifrost with HTTP/3 support..."
-    if [[ "${SKIP_BUILD:-false}" != "true" || ! -x "$BIFROST_BIN" ]]; then
+    if [[ "${SKIP_BUILD:-false}" != "true" || -z "$BIFROST_BIN" ]]; then
         if ! SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --all-features 2>/dev/null; then
             echo "ERROR: Build failed"
             exit 1
         fi
+        BIFROST_BIN="$(resolve_bifrost_bin || true)"
+    fi
+
+    if [[ -z "$BIFROST_BIN" ]]; then
+        echo "ERROR: Release bifrost binary not found"
+        exit 1
     fi
     
     if ! start_proxy; then

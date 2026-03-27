@@ -26,3 +26,4 @@ desktop/src-tauri/resources/bin/
 .codex-target*/
 old_doc/
 .tmp-*/
+e2e-tests/mock_servers/.logs/

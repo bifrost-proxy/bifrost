@@ -64,6 +64,24 @@ ensure_cargo_on_path() {
     fi
 }
 
+resolve_bifrost_release_bin() {
+    local release_dir="${PROJECT_DIR}/target/release"
+    local unix_bin="${release_dir}/bifrost"
+    local windows_bin="${release_dir}/bifrost.exe"
+
+    if [[ -x "$unix_bin" ]]; then
+        printf '%s\n' "$unix_bin"
+        return 0
+    fi
+
+    if [[ -f "$windows_bin" ]]; then
+        printf '%s\n' "$windows_bin"
+        return 0
+    fi
+
+    return 1
+}
+
 FIXTURE_ONLY_RULES=(
     "admin_api/create_proxy_rule.txt"
     "admin_api/list_contains_created_rule.txt"
@@ -152,7 +170,7 @@ collect_test_files() {
 
 build_proxy_once() {
     if [[ "$SKIP_BUILD" == "true" ]]; then
-        if [[ ! -x "${PROJECT_DIR}/target/release/bifrost" ]]; then
+        if ! resolve_bifrost_release_bin >/dev/null 2>&1; then
             echo -e "${RED}✗${NC} 跳过编译但二进制文件不存在，请先编译"
             exit 1
         fi
