@@ -2077,15 +2077,27 @@ test_req_speed_rule() {
     local speed_kb="$2"
     local test_url="http://${pattern}/upload"
     local payload_size=$((speed_kb * 1024 * 2))
-    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-3}"
+    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-5}"
+    local expected_seconds=$(((payload_size + (speed_kb * 1024) - 1) / (speed_kb * 1024)))
+    local base_timeout="${TIMEOUT:-10}"
+    local request_timeout=$((expected_seconds + 20))
+    local warmup_url="http://${pattern}/health"
     local payload=$(python3 - <<PY
 print("A" * $payload_size)
 PY
 )
 
+    if (( base_timeout > request_timeout )); then
+        request_timeout=$base_timeout
+    fi
+
     echo ""
     echo -e "  ${CYAN}【测试】请求速度限制${NC}"
     echo "    请求: $test_url"
+    echo "    超时: ${request_timeout}s, 重试: ${max_attempts}"
+
+    # 速度测试在 CI 上更容易被首次连接建立、路由预热和 100-continue 抖动影响。
+    TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
 
     local start_ms=0
     local end_ms=0
@@ -2096,7 +2108,7 @@ import time
 print(int(time.time() * 1000))
 PY
 )
-        http_post "$test_url" "$payload" "Content-Type: text/plain"
+        TIMEOUT="$request_timeout" http_post "$test_url" "$payload" $'Content-Type: text/plain\nExpect:'
         end_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
@@ -2109,7 +2121,8 @@ PY
 
         if [[ "$attempt" -lt "$max_attempts" ]]; then
             warn "请求速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
-            sleep 1
+            TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
+            sleep 2
         fi
         attempt=$((attempt + 1))
     done
@@ -2130,11 +2143,22 @@ test_res_speed_rule() {
     local speed_kb="$2"
     local size=$((speed_kb * 1024 * 2))
     local test_url="http://${pattern}/large-response?size=${size}&marker=RES"
-    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-3}"
+    local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-5}"
+    local expected_seconds=$(((size + (speed_kb * 1024) - 1) / (speed_kb * 1024)))
+    local base_timeout="${TIMEOUT:-10}"
+    local request_timeout=$((expected_seconds + 20))
+    local warmup_url="http://${pattern}/health"
+
+    if (( base_timeout > request_timeout )); then
+        request_timeout=$base_timeout
+    fi
 
     echo ""
     echo -e "  ${CYAN}【测试】响应速度限制${NC}"
     echo "    请求: $test_url"
+    echo "    超时: ${request_timeout}s, 重试: ${max_attempts}"
+
+    TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
 
     local start_ms=0
     local end_ms=0
@@ -2145,7 +2169,7 @@ import time
 print(int(time.time() * 1000))
 PY
 )
-        http_get "$test_url"
+        TIMEOUT="$request_timeout" http_get "$test_url"
         end_ms=$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
@@ -2158,7 +2182,8 @@ PY
 
         if [[ "$attempt" -lt "$max_attempts" ]]; then
             warn "响应速度测试第 ${attempt}/${max_attempts} 次返回 ${HTTP_STATUS}，准备重试"
-            sleep 1
+            TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
+            sleep 2
         fi
         attempt=$((attempt + 1))
     done
