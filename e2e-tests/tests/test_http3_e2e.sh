@@ -14,6 +14,8 @@ RULES_FILE="${DATA_DIR}/rules.txt"
 RULES_TEMPLATE="${ROOT_DIR}/e2e-tests/rules/http3/http3_e2e.txt"
 PROXY_LOG="${DATA_DIR}/proxy.log"
 PROXY_PID=""
+BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+TEST_ID=""
 
 passed=0
 failed=0
@@ -80,19 +82,19 @@ test_http3_client_direct() {
     echo "----------------------------------------"
     
     local output
-    output=$(cd "$ROOT_DIR/crates/bifrost-proxy" && \
-        cargo run --example http3_test --features http3 --release 2>&1)
+    output=$(cd "$ROOT_DIR" && \
+        cargo test -p bifrost-proxy --test upstream_http3_e2e --release test_http_proxy_to_h3_origin_enabled_by_rule -- --exact --nocapture 2>&1)
     
-    if echo "$output" | grep -q "HTTP/3 connection successful"; then
-        _log_pass "HTTP/3 client successfully connected to xiaohongshu via QUIC"
+    if echo "$output" | grep -q "test test_http_proxy_to_h3_origin_enabled_by_rule ... ok"; then
+        _log_pass "HTTP/3 upstream integration test passed"
         ((passed++))
     else
         echo "Output: $output"
-        _log_fail "HTTP/3 client connection test" "Connection successful" "Connection failed"
+        _log_fail "HTTP/3 upstream integration test" "test ... ok" "test failed"
         ((failed++))
     fi
     
-    if echo "$output" | grep -q "QUIC connection established"; then
+    if echo "$output" | grep -q "HTTP/3 Client] QUIC connection established"; then
         _log_pass "QUIC connection established"
         ((passed++))
     else
@@ -100,7 +102,7 @@ test_http3_client_direct() {
         ((failed++))
     fi
     
-    if echo "$output" | grep -q "HTTP/3 connection ready"; then
+    if echo "$output" | grep -q "HTTP/3 Client] HTTP/3 connection ready"; then
         _log_pass "HTTP/3 handshake completed"
         ((passed++))
     else
@@ -570,9 +572,11 @@ print_proxy_logs() {
 
 main() {
     echo "Building Bifrost with HTTP/3 support..."
-    if ! cargo build --release --all-features 2>/dev/null; then
-        echo "ERROR: Build failed"
-        exit 1
+    if [[ "${SKIP_BUILD:-false}" != "true" || ! -x "$BIFROST_BIN" ]]; then
+        if ! SKIP_FRONTEND_BUILD=1 cargo build --release --all-features 2>/dev/null; then
+            echo "ERROR: Build failed"
+            exit 1
+        fi
     fi
     
     if ! start_proxy; then

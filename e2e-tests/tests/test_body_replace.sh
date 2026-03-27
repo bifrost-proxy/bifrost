@@ -45,6 +45,7 @@ TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-body-replace"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
 MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
 PROXY_PID=""
+BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 
 log_info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 log_debug()   { [[ "$VERBOSE" == "true" ]] && echo -e "${CYAN}[DEBUG]${NC} $*"; }
@@ -131,9 +132,21 @@ start_proxy() {
     log_debug "代理端口: $PROXY_PORT"
     log_debug "数据目录: $TEST_DATA_DIR"
     
+    if [[ ! -x "$BIFROST_BIN" ]]; then
+        log_info "构建 release bifrost 二进制..."
+        (
+            cd "$PROJECT_DIR" && \
+            SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+        ) > "$PROXY_LOG_FILE" 2>&1 || {
+            log_error "构建 bifrost 失败"
+            cat "$PROXY_LOG_FILE"
+            exit 1
+        }
+    fi
+
     RUST_LOG=info,bifrost_proxy=debug \
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
-    cargo run --bin bifrost --manifest-path "$PROJECT_DIR/Cargo.toml" -- \
+    "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         start \
         --unsafe-ssl \
