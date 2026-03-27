@@ -961,7 +961,7 @@ test_response_for_rule() {
 
     http_get "$test_url"
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
-    assert_header_value "X-Whistle-Response-For" "$expected" "$HTTP_HEADERS" "响应应返回 x-whistle-response-for"
+    assert_header_value "X-Bifrost-Response-For" "$expected" "$HTTP_HEADERS" "响应应返回 x-bifrost-response-for"
 }
 
 test_res_cookies() {

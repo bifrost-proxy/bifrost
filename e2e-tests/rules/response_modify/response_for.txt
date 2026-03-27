@@ -1,4 +1,4 @@
-# 测试目标: 验证 responseFor 会写入 x-whistle-response-for，并支持多 IP 显示值。
+# 测试目标: 验证 responseFor 会写入 x-bifrost-response-for，并支持多 IP 显示值。
 
 # RF-01: 单 IP
 response-for-single.local http://127.0.0.1:3000 responseFor://1.1.1.1
@@ -7,5 +7,5 @@ response-for-single.local http://127.0.0.1:3000 responseFor://1.1.1.1
 response-for-multi.local http://127.0.0.1:3000 responseFor://1.1.1.1,2.2.2.2
 
 # 测试用例:
-# 1. response-for-single.local 应返回 x-whistle-response-for: 1.1.1.1
-# 2. response-for-multi.local 应返回 x-whistle-response-for: 1.1.1.1,2.2.2.2
+# 1. response-for-single.local 应返回 x-bifrost-response-for: 1.1.1.1
+# 2. response-for-multi.local 应返回 x-bifrost-response-for: 1.1.1.1,2.2.2.2

@@ -76,7 +76,7 @@
 | `resCharset`    | ✅   | `advanced/content_type.txt`                                                                         | 已覆盖                                   |
 | `resMerge`      | ✅   | `advanced/body_size_strategy.txt`                                                                   | 已覆盖                                   |
 | `resScript`     | ✅   | `request_modify/req_res_script.txt`                                                                 | 已有专项脚本驱动                         |
-| `responseFor`   | 🔄   | `response_modify/response_for.txt`                                                                  | 本轮补 `x-whistle-response-for` 语义     |
+| `responseFor`   | 🔄   | `response_modify/response_for.txt`                                                                  | 本轮补 `x-bifrost-response-for` 语义     |
 | `statusCode`    | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |
 | `replaceStatus` | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |
 | `trailers`      | ✅   | `response_modify/trailers.txt`                                                                      | 已覆盖                                   |

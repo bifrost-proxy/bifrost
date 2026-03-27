@@ -461,7 +461,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             Protocol::ResponseFor => {
                 result
                     .res_headers
-                    .push(("x-whistle-response-for".to_string(), value.to_string()));
+                    .push(("x-bifrost-response-for".to_string(), value.to_string()));
             }
             Protocol::ReqPrepend => {
                 let content = extract_inline_content(value);

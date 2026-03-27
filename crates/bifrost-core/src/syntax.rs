@@ -117,7 +117,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::StatusCode => "Return status code directly",
         Protocol::Cache => "Set cache control (seconds)",
         Protocol::Attachment => "Set Content-Disposition for download",
-        Protocol::ResponseFor => "Set x-whistle-response-for response header",
+        Protocol::ResponseFor => "Set x-bifrost-response-for response header",
         Protocol::Trailers => "Set response trailers",
         Protocol::ResMerge => "Merge JSON into response",
         Protocol::HeaderReplace => "Replace header content",
