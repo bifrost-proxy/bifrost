@@ -18,6 +18,8 @@ import urllib.request
 import zipfile
 from typing import Any
 
+UNAUTHENTICATED_MIN_POLL_INTERVAL = 75
+
 
 def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
@@ -84,6 +86,7 @@ class GitHubClient:
     def __init__(self, repo: str, token: str | None) -> None:
         self.repo = repo
         self.token = token
+        self.authenticated = bool(token)
 
     def api_url(self, path: str, params: dict[str, Any] | None = None) -> str:
         base = f"https://api.github.com/repos/{self.repo}{path}"
@@ -98,7 +101,7 @@ class GitHubClient:
             url,
             headers=self._headers(),
         )
-        with urllib.request.urlopen(req) as resp:
+        with self._open_with_retry(req) as resp:
             return json.load(resp)
 
     def request_bytes(self, path: str, params: dict[str, Any] | None = None) -> bytes:
@@ -107,8 +110,36 @@ class GitHubClient:
             url,
             headers=self._headers(),
         )
-        with urllib.request.urlopen(req) as resp:
+        with self._open_with_retry(req) as resp:
             return resp.read()
+
+    def _open_with_retry(self, req: urllib.request.Request):
+        while True:
+            try:
+                return urllib.request.urlopen(req)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 403 and self._is_rate_limited(exc):
+                    wait_seconds = self._rate_limit_wait_seconds(exc)
+                    eprint(f"[warn] GitHub API rate limited; sleeping {wait_seconds}s before retry")
+                    time.sleep(wait_seconds)
+                    continue
+                raise
+
+    def _is_rate_limited(self, exc: urllib.error.HTTPError) -> bool:
+        remaining = exc.headers.get("X-RateLimit-Remaining")
+        if remaining == "0":
+            return True
+        try:
+            body = exc.read().decode("utf-8", errors="ignore").lower()
+        except Exception:
+            body = ""
+        return "rate limit" in body
+
+    def _rate_limit_wait_seconds(self, exc: urllib.error.HTTPError) -> int:
+        reset = exc.headers.get("X-RateLimit-Reset")
+        if reset and reset.isdigit():
+            return max(5, int(reset) - int(time.time()) + 5)
+        return 60
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -372,6 +403,12 @@ def main() -> int:
     state_dir = ensure_dir(repo_dir / args.state_dir)
 
     client = GitHubClient(args.repo, token)
+    if not client.authenticated and args.poll_interval < UNAUTHENTICATED_MIN_POLL_INTERVAL:
+        eprint(
+            f"[warn] no GITHUB_TOKEN/GH_TOKEN detected; raising poll interval to "
+            f"{UNAUTHENTICATED_MIN_POLL_INTERVAL}s to stay within GitHub public API limits"
+        )
+        args.poll_interval = UNAUTHENTICATED_MIN_POLL_INTERVAL
 
     if args.run_url:
         run_id = parse_run_id_from_url(args.run_url)
