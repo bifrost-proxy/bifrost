@@ -510,7 +510,6 @@ mkdir -p "$REPORT_DIR"
 print_runtime_context
 
 release_build_ok=1
-debug_build_ok=1
 ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
@@ -521,17 +520,6 @@ if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
     ensure_bifrost_shell_shim "release"
   else
     release_build_ok=0
-  fi
-fi
-
-if [[ "$RUN_SHELL" -eq 1 && "$SHELL_MODE" == "full" ]]; then
-  header "Building debug bifrost for shell E2E compatibility"
-  if run_and_capture \
-    "build:debug-bifrost" \
-    env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --bin bifrost; then
-    ensure_bifrost_shell_shim "debug"
-  else
-    debug_build_ok=0
   fi
 fi
 
@@ -555,9 +543,6 @@ if [[ "$RUN_SHELL" -eq 1 ]]; then
   log_info "Shell test count: ${#shell_tests[@]}"
 
   shell_build_ok="$release_build_ok"
-  if [[ "$SHELL_MODE" == "full" ]]; then
-    shell_build_ok="$debug_build_ok"
-  fi
 
   if [[ "$shell_build_ok" -eq 1 ]]; then
     for script_name in "${shell_tests[@]}"; do
