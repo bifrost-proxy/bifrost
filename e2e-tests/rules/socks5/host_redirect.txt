@@ -1,2 +1,0 @@
-# 测试目标: 验证 SOCKS5/HTTP 双模式下的 host 重定向规则。
-httpbin.org host://example.com

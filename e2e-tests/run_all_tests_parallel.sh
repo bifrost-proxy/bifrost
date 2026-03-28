@@ -111,8 +111,6 @@ FIXTURE_ONLY_RULES=(
     "replay/websocket_req_headers.txt"
     "request_modify/req_res_script.txt"
     "runtime/client_process_transport_attribution.txt"
-    "socks5/block_domain.txt"
-    "socks5/host_redirect.txt"
     "socks5_tls/compare_header_mode.txt"
     "socks5_tls/host_redirect.txt"
     "socks5_tls/mock_response.txt"

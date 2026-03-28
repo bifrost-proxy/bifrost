@@ -1,2 +1,0 @@
-# 测试目标: 验证 SOCKS5/HTTP 双模式下的阻断规则。
-blocked-domain.test block://
