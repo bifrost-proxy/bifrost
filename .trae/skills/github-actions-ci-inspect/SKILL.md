@@ -25,25 +25,64 @@ bash .trae/skills/github-actions-cookie-login/scripts/github-login
 
 ## 直接查询 CI
 
-默认查询 `bifrost-proxy/bifrost` 的 `ci.yml`：
+默认查询 `bifrost-proxy/bifrost` 的 `ci.yml`。
+
+### Watch 模式（默认）
+
+启动后自动进入 **watch 模式**，持续输出正在运行的第一个 job 的日志，直到 job 完成或手动终止（Ctrl+C）：
 
 ```bash
 bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci
 ```
 
-常用参数：
+指定某个 job（支持 job ID 或名称模糊匹配）：
 
 ```bash
-bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs
-bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs --failed-only
-bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run 23605768124 --format json
-bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --repo owner/repo --workflow ci.yml
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --job 69012632349
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --job "Linux Test"
 ```
+
+输出所有失败 job 的日志：
+
+```bash
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --failed-only
+```
+
+调整轮询间隔（默认 5000ms）：
+
+```bash
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --poll-interval 3000
+```
+
+### 经典模式（一次性输出）
+
+使用 `--no-watch` 回退到原来的一次性汇总输出：
+
+```bash
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --no-watch
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --no-watch --fetch-logs --failed-only
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --no-watch --run 23605768124 --format json
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --no-watch --repo owner/repo --workflow ci.yml
+```
+
+### 参数一览
+
+| 参数 | 说明 |
+|---|---|
+| `--job <id\|name>` | 指定要 watch 的 job（ID 或名称模糊匹配） |
+| `--failed-only` | 仅输出失败的 job 日志 |
+| `--no-watch` | 禁用 watch 模式，使用经典一次性输出 |
+| `--poll-interval <ms>` | watch 模式轮询间隔（默认 5000ms） |
+| `--run <id\|latest>` | 指定 run ID，默认 latest |
+| `--fetch-logs` | 经典模式下拉取 step 日志 |
+| `--format <text\|json>` | 经典模式输出格式 |
+| `--repo <owner/repo>` | 仓库 |
+| `--workflow <file>` | workflow 文件名 |
 
 推荐在排查 CI-only 问题时使用：
 
 ```bash
-bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --run latest --fetch-logs --failed-only
+bash .trae/skills/github-actions-ci-inspect/scripts/github-actions-ci --failed-only
 ```
 
 这会优先输出：

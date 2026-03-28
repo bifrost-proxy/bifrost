@@ -15,6 +15,9 @@ const DEFAULT_CONFIG = {
   maxLogLines: 80,
   logExcerptLines: 40,
   logContextLines: 50,
+  watch: true,
+  job: null,
+  pollInterval: 5000,
 };
 
 function parseArgs(argv) {
@@ -112,6 +115,15 @@ function mergeConfig(args) {
   }
   if (args["log-context-lines"]) {
     config.logContextLines = Number(args["log-context-lines"]);
+  }
+  if (args["no-watch"]) {
+    config.watch = false;
+  }
+  if (args.job) {
+    config.job = String(args.job);
+  }
+  if (args["poll-interval"]) {
+    config.pollInterval = Number(args["poll-interval"]);
   }
   config.configPath = configPath;
   config.cookieFile = path.resolve(repoRoot, config.cookieFile);
@@ -216,13 +228,113 @@ function parseMatrixExpansionUrls(html) {
   );
 }
 
-async function parseAllJobsForRun(runHtml, cookie) {
+function parseWorkflowJobKeys(workflowFile) {
+  const localPath = path.resolve(process.cwd(), `.github/workflows/${workflowFile}`);
+  if (!fs.existsSync(localPath)) {
+    return [];
+  }
+  const text = fs.readFileSync(localPath, "utf8");
+  const jobsIdx = text.indexOf("\njobs:");
+  if (jobsIdx < 0) {
+    return [];
+  }
+  const afterJobs = text.slice(jobsIdx);
+  const pattern = /\n  ([a-zA-Z_][\w-]*):/g;
+  const keys = [];
+  let match;
+  while ((match = pattern.exec(afterJobs)) !== null) {
+    if (!keys.includes(match[1])) {
+      keys.push(match[1]);
+    }
+  }
+  return keys;
+}
+
+function parseWorkflowMatrixOrder(workflowFile) {
+  const localPath = path.resolve(process.cwd(), `.github/workflows/${workflowFile}`);
+  if (!fs.existsSync(localPath)) {
+    return new Map();
+  }
+  const text = fs.readFileSync(localPath, "utf8");
+  const result = new Map();
+  const jobPattern = /\n  ([a-zA-Z_][\w-]*):/g;
+  let jobMatch;
+  const jobPositions = [];
+  while ((jobMatch = jobPattern.exec(text)) !== null) {
+    jobPositions.push({ key: jobMatch[1], start: jobMatch.index });
+  }
+  for (let i = 0; i < jobPositions.length; i++) {
+    const jobKey = jobPositions[i].key;
+    const start = jobPositions[i].start;
+    const end = i + 1 < jobPositions.length ? jobPositions[i + 1].start : text.length;
+    const jobBlock = text.slice(start, end);
+    const includeIdx = jobBlock.indexOf("include:");
+    if (includeIdx < 0) {
+      const osMatch = jobBlock.match(/os:\s*\[([^\]]+)\]/);
+      if (osMatch) {
+        const entries = osMatch[1].split(",").map((s) => s.trim().replace(/['"]/g, ""));
+        result.set(jobKey, entries);
+      }
+      continue;
+    }
+    const afterInclude = jobBlock.slice(includeIdx);
+    const entryBlocks = afterInclude.split(/\n\s+-\s+(?=\w+:)/).slice(1);
+    const entries = [];
+    for (const block of entryBlocks) {
+      const targetMatch = block.match(/target:\s*(.+)/);
+      const osMatch = block.match(/os:\s*(.+)/);
+      const value = targetMatch ? targetMatch[1] : osMatch ? osMatch[1] : null;
+      if (value) {
+        entries.push(value.trim().replace(/['"]/g, ""));
+      }
+    }
+    if (entries.length > 0) {
+      result.set(jobKey, entries);
+    }
+  }
+  return result;
+}
+
+function parseJobWorkflowKeys(html) {
+  const keyToJobIds = new Map();
+  const directPattern = /id="workflow-job-name-([^"]+)"[\s\S]*?href="[^"]*\/job\/(\d+)"/g;
+  let match;
+  while ((match = directPattern.exec(html)) !== null) {
+    const key = match[1];
+    if (!keyToJobIds.has(key)) {
+      keyToJobIds.set(key, []);
+    }
+    keyToJobIds.get(key).push(match[2]);
+  }
+  return keyToJobIds;
+}
+
+function parseMatrixGroupKeys(html) {
+  const urlToKey = new Map();
+  const pattern = /data-update-url="([^"]*graph\/matrix\/([^?]+)\?[^"]*expanded=true)"/g;
+  let match;
+  while ((match = pattern.exec(html)) !== null) {
+    const url = decodeHtml(match[1]);
+    const token = match[2];
+    try {
+      const decoded = Buffer.from(token, "base64").toString("utf8");
+      const keyMatch = decoded.match(/^\|-([\w-]+)-\|$/);
+      if (keyMatch) {
+        urlToKey.set(url, keyMatch[1]);
+      }
+    } catch (_) {}
+  }
+  return urlToKey;
+}
+
+async function parseAllJobsForRun(runHtml, cookie, workflowFile) {
   const jobs = new Map();
   for (const job of parseJobCards(runHtml)) {
     jobs.set(job.jobId, job);
   }
 
   const matrixUrls = parseMatrixExpansionUrls(runHtml);
+  const matrixJobsByUrl = new Map();
   for (const matrixUrl of matrixUrls) {
     const response = await fetchText(matrixUrl, {
       headers: makeHeaders(cookie, {
@@ -232,12 +344,72 @@ async function parseAllJobsForRun(runHtml, cookie) {
     if (response.status >= 400) {
       continue;
     }
-    for (const job of parseJobCards(response.text)) {
+    const expanded = parseJobCards(response.text);
+    matrixJobsByUrl.set(matrixUrl, expanded);
+    for (const job of expanded) {
       jobs.set(job.jobId, job);
     }
   }
 
-  return Array.from(jobs.values());
+  const yamlKeys = parseWorkflowJobKeys(workflowFile);
+  if (yamlKeys.length === 0) {
+    return Array.from(jobs.values());
+  }
+
+  const directKeyMap = parseJobWorkflowKeys(runHtml);
+  const matrixKeyMap = parseMatrixGroupKeys(runHtml);
+  const matrixOrder = parseWorkflowMatrixOrder(workflowFile);
+
+  const keyToJobIds = new Map();
+  for (const [key, jobIds] of directKeyMap) {
+    keyToJobIds.set(key, jobIds);
+  }
+  for (const [url, key] of matrixKeyMap) {
+    const expanded = matrixJobsByUrl.get(url);
+    if (expanded) {
+      const ids = keyToJobIds.get(key) || [];
+      const matrixEntries = matrixOrder.get(key) || [];
+      if (matrixEntries.length > 0) {
+        const sorted = [...expanded].sort((a, b) => {
+          const aIdx = matrixEntries.findIndex((e) => a.name.includes(e));
+          const bIdx = matrixEntries.findIndex((e) => b.name.includes(e));
+          const ai = aIdx >= 0 ? aIdx : Number.MAX_SAFE_INTEGER;
+          const bi = bIdx >= 0 ? bIdx : Number.MAX_SAFE_INTEGER;
+          return ai - bi;
+        });
+        for (const job of sorted) {
+          ids.push(job.jobId);
+        }
+      } else {
+        for (const job of expanded) {
+          ids.push(job.jobId);
+        }
+      }
+      keyToJobIds.set(key, ids);
+    }
+  }
+
+  const ordered = [];
+  const placed = new Set();
+  for (const yamlKey of yamlKeys) {
+    const jobIds = keyToJobIds.get(yamlKey);
+    if (!jobIds) {
+      continue;
+    }
+    for (const jobId of jobIds) {
+      const job = jobs.get(jobId);
+      if (job && !placed.has(jobId)) {
+        ordered.push(job);
+        placed.add(jobId);
+      }
+    }
+  }
+  for (const job of jobs.values()) {
+    if (!placed.has(job.jobId)) {
+      ordered.push(job);
+    }
+  }
+  return ordered;
 }
 
 function extractAttrMap(tagSource) {
@@ -586,7 +758,7 @@ async function loadWorkflowRun(config, cookie) {
   });
   ensureAuthenticated(runResponse);
 
-  const jobs = await parseAllJobsForRun(runResponse.text, cookie);
+  const jobs = await parseAllJobsForRun(runResponse.text, cookie, config.workflow);
   const runAnnotations = parseRunAnnotations(runResponse.text, config.repo, selectedRun.runId);
 
   return {
@@ -783,9 +955,251 @@ function formatText(result) {
   return lines.join("\n").trim();
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  const config = mergeConfig(args);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isJobTerminal(status) {
+  const lower = String(status || "").toLowerCase();
+  return (
+    lower.includes("completed") ||
+    lower.includes("success") ||
+    lower.includes("failed") ||
+    lower.includes("failure") ||
+    lower.includes("cancelled") ||
+    lower.includes("skipped") ||
+    lower.includes("timed_out")
+  );
+}
+
+function isJobInProgress(status) {
+  const lower = String(status || "").toLowerCase();
+  return (
+    lower.includes("in_progress") ||
+    lower.includes("running") ||
+    lower.includes("queued") ||
+    lower.includes("waiting") ||
+    lower.includes("pending") ||
+    lower.includes("currently running")
+  );
+}
+
+function formatTimestamp() {
+  return new Date().toLocaleTimeString("en-US", { hour12: false });
+}
+
+function selectWatchTarget(jobs, config) {
+  if (config.job) {
+    const match = jobs.find((j) => j.jobId === config.job);
+    if (!match) {
+      const byName = jobs.find(
+        (j) => j.name.toLowerCase().includes(config.job.toLowerCase()),
+      );
+      if (byName) {
+        return [byName];
+      }
+      throw new Error(
+        `未找到 job "${config.job}"，可用 jobs:\n${jobs.map((j) => `  ${j.jobId}: ${j.name} [${j.status}]`).join("\n")}`,
+      );
+    }
+    return [match];
+  }
+
+  if (config.failedOnly) {
+    const failed = jobs.filter(
+      (j) =>
+        String(j.status || "").toLowerCase().includes("failed") ||
+        String(j.status || "").toLowerCase().includes("failure"),
+    );
+    if (failed.length > 0) {
+      return failed;
+    }
+    console.log("⚠️  未找到失败的 job，将输出第一个运行中/等待中的 job");
+  }
+
+  const running = jobs.find((j) => isJobInProgress(j.status));
+  if (running) {
+    return [running];
+  }
+
+  const firstNonSuccess = jobs.find(
+    (j) =>
+      String(j.status || "").toLowerCase().includes("failed") ||
+      String(j.status || "").toLowerCase().includes("failure"),
+  );
+  if (firstNonSuccess) {
+    return [firstNonSuccess];
+  }
+
+  return jobs.length > 0 ? [jobs[0]] : [];
+}
+
+async function fetchAllStepLogs(steps, cookie) {
+  const allLines = [];
+  for (const step of steps) {
+    if (!step.logPath) {
+      continue;
+    }
+    const response = await fetchText(step.logPath, {
+      headers: makeHeaders(cookie, {
+        Accept: "text/plain,*/*",
+        "X-Requested-With": "XMLHttpRequest",
+      }),
+    });
+    if (response.status >= 400 || response.url.includes("/login")) {
+      continue;
+    }
+    const lines = response.text.split(/\r?\n/);
+    for (const line of lines) {
+      allLines.push(trimAnsi(line));
+    }
+  }
+  return allLines;
+}
+
+async function watchJobLogs(job, config, cookie) {
+  let lastLineCount = 0;
+  let consecutiveEmpty = 0;
+  const maxConsecutiveEmpty = 3;
+
+  console.log(`\n${"─".repeat(60)}`);
+  console.log(`📋 Job: ${job.name}`);
+  console.log(`🔗 ${GITHUB_BASE}${job.jobPath}`);
+  console.log(`📊 Status: ${job.status}`);
+  console.log(`${"─".repeat(60)}\n`);
+
+  if (isJobTerminal(job.status) && !config.failedOnly) {
+    const response = await fetchText(job.jobPath, {
+      headers: makeHeaders(cookie),
+    });
+    ensureAuthenticated(response);
+    const steps = parseJobSteps(response.text);
+    const completedSteps = steps.filter((s) => s.conclusion && s.conclusion !== "in_progress");
+    const allLines = await fetchAllStepLogs(completedSteps, cookie);
+    if (allLines.length > 0) {
+      for (const line of allLines) {
+        console.log(line);
+      }
+    } else {
+      console.log("(no log content available)");
+    }
+    console.log(`\n✅ Job "${job.name}" already ${job.status}`);
+    return;
+  }
+
+  const seenLines = new Set();
+
+  while (true) {
+    try {
+      const response = await fetchText(job.jobPath, {
+        headers: makeHeaders(cookie),
+      });
+      ensureAuthenticated(response);
+
+      const steps = parseJobSteps(response.text);
+      const jobStatus = parseJobStatus(response.text);
+      const activeSteps = steps.filter(
+        (s) => s.conclusion === "in_progress" || (s.conclusion && s.conclusion !== "pending" && s.conclusion !== "queued"),
+      );
+
+      const allLines = await fetchAllStepLogs(activeSteps, cookie);
+
+      let newLines = 0;
+      for (let i = 0; i < allLines.length; i++) {
+        const lineKey = `${i}:${allLines[i]}`;
+        if (!seenLines.has(lineKey)) {
+          seenLines.add(lineKey);
+          console.log(allLines[i]);
+          newLines++;
+        }
+      }
+
+      if (newLines === 0) {
+        consecutiveEmpty++;
+      } else {
+        consecutiveEmpty = 0;
+      }
+
+      lastLineCount = allLines.length;
+
+      if (isJobTerminal(jobStatus)) {
+        const finalSteps = parseJobSteps(response.text);
+        const remainingSteps = finalSteps.filter(
+          (s) => s.conclusion && s.conclusion !== "in_progress" && s.conclusion !== "pending" && s.conclusion !== "queued",
+        );
+        const finalLines = await fetchAllStepLogs(remainingSteps, cookie);
+        for (let i = 0; i < finalLines.length; i++) {
+          const lineKey = `${i}:${finalLines[i]}`;
+          if (!seenLines.has(lineKey)) {
+            seenLines.add(lineKey);
+            console.log(finalLines[i]);
+          }
+        }
+
+        const failedSteps = finalSteps.filter((s) =>
+          ["failure", "failed", "timed_out", "cancelled"].includes(
+            String(s.conclusion || "").toLowerCase(),
+          ),
+        );
+
+        console.log(`\n${"─".repeat(60)}`);
+        if (failedSteps.length > 0) {
+          console.log(`❌ Job "${job.name}" finished with status: ${jobStatus}`);
+          console.log(`   Failed steps:`);
+          for (const step of failedSteps) {
+            console.log(`     - #${step.number} ${step.name} [${step.conclusion}]`);
+          }
+        } else {
+          console.log(`✅ Job "${job.name}" finished with status: ${jobStatus}`);
+        }
+        console.log(`${"─".repeat(60)}`);
+        break;
+      }
+
+      if (consecutiveEmpty >= maxConsecutiveEmpty) {
+        process.stderr.write(`[${formatTimestamp()}] ⏳ waiting for new output...\r`);
+      }
+    } catch (error) {
+      console.error(`\n⚠️  [${formatTimestamp()}] poll error: ${error.message}`);
+    }
+
+    await sleep(config.pollInterval);
+  }
+}
+
+async function runWatchMode(config) {
+  const cookie = readCookieFile(config.cookieFile);
+  const runData = await loadWorkflowRun(config, cookie);
+
+  console.log(`🔍 Repo: ${config.repo}`);
+  console.log(`🔄 Workflow: ${config.workflow}`);
+  console.log(`🏃 Run: #${runData.selectedRun.runId} [${runData.selectedRun.status}]`);
+  console.log(`🔗 ${GITHUB_BASE}${runData.selectedRun.runPath}`);
+
+  const allJobs = runData.jobs;
+  if (allJobs.length === 0) {
+    console.log("⚠️  No jobs found in this run.");
+    return;
+  }
+
+  console.log(`\n📦 Jobs (${allJobs.length} total):`);
+  for (const job of allJobs) {
+    const icon = isJobInProgress(job.status) ? "🔵" : isJobTerminal(job.status) && job.status.toLowerCase().includes("success") ? "🟢" : isJobTerminal(job.status) ? "🔴" : "⚪";
+    console.log(`  ${icon} ${job.jobId}: ${job.name} [${job.status}] ${job.duration}`);
+  }
+
+  const targets = selectWatchTarget(allJobs, config);
+  if (targets.length === 0) {
+    console.log("⚠️  No matching jobs to watch.");
+    return;
+  }
+
+  for (const target of targets) {
+    await watchJobLogs(target, config, cookie);
+  }
+}
+
+async function runClassicMode(config) {
   const cookie = readCookieFile(config.cookieFile);
   const runData = await loadWorkflowRun(config, cookie);
 
@@ -821,6 +1235,7 @@ async function main() {
     availableRuns: runData.runs,
     runAnnotations: runData.runAnnotations,
     jobs: inspectedJobs,
+    failedOnly: config.failedOnly,
   };
 
   if (config.format === "json") {
@@ -829,6 +1244,17 @@ async function main() {
   }
 
   console.log(formatText(result));
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  const config = mergeConfig(args);
+
+  if (config.watch) {
+    await runWatchMode(config);
+  } else {
+    await runClassicMode(config);
+  }
 }
 
 main().catch((error) => {
