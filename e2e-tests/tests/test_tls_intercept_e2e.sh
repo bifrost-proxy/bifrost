@@ -7,8 +7,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$PROJECT_ROOT/e2e-tests/test_utils/rule_fixture.sh"
 
 PROXY_PORT=19900
-MOCK_HTTP_PORT=18080
-MOCK_HTTPS_PORT=18443
+MOCK_HTTP_PORT=19080
+MOCK_HTTPS_PORT=19443
 ADMIN_PORT=$PROXY_PORT
 
 # External E2E (optional):

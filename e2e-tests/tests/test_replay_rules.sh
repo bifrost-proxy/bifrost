@@ -149,9 +149,15 @@ start_bifrost() {
         "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --skip-cert-check > /tmp/bifrost_e2e.log 2>&1 &
     BIFROST_PID=$!
     
-    local timeout=580
+    local timeout=120
     local waited=0
     while [ $waited -lt $timeout ]; do
+        if ! kill -0 "$BIFROST_PID" 2>/dev/null; then
+            echo "Bifrost process exited unexpectedly (PID: $BIFROST_PID)"
+            echo "Last log:"
+            tail -30 /tmp/bifrost_e2e.log
+            exit 1
+        fi
         if curl -s "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system" >/dev/null 2>&1; then
             echo "  Bifrost proxy started (PID: $BIFROST_PID)"
             return 0
@@ -162,7 +168,7 @@ start_bifrost() {
     
     echo "Failed to start Bifrost proxy within ${timeout}s"
     echo "Last log:"
-    tail -20 /tmp/bifrost_e2e.log
+    tail -30 /tmp/bifrost_e2e.log
     exit 1
 }
 

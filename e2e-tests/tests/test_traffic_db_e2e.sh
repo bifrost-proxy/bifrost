@@ -14,6 +14,8 @@ ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3197}"
 MOCK_PID=""
 
+export ADMIN_HOST ADMIN_PORT ADMIN_PATH_PREFIX
+
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -556,6 +558,8 @@ main() {
     echo "Proxy Port: ${PROXY_PORT}"
     echo "=========================================="
 
+    admin_ensure_bifrost
+
     local connectivity
     connectivity=$(curl -sS -o /dev/null -w "%{http_code}" "${ADMIN_BASE_URL}/api/traffic?limit=1" 2>/dev/null || echo "000")
     
@@ -567,7 +571,7 @@ main() {
     
     log_info "Connected to Bifrost admin API"
 
-    trap stop_mock_server EXIT
+    trap 'stop_mock_server; admin_cleanup_bifrost' EXIT
     start_mock_server || { log_fail "Could not start mock server"; exit 1; }
 
     run_test "Traffic Query API" test_traffic_query_api

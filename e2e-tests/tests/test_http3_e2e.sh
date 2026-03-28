@@ -149,6 +149,11 @@ start_proxy() {
     echo "Proxy started with PID: $PROXY_PID"
     
     for i in {1..30}; do
+        if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            echo "ERROR: Proxy process exited unexpectedly (PID: $PROXY_PID)"
+            cat "$PROXY_LOG"
+            return 1
+        fi
         if curl -s "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/health" > /dev/null 2>&1; then
             echo "Proxy is ready!"
             return 0

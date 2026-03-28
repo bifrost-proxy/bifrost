@@ -38,28 +38,27 @@ log_path = sys.argv[1]
 cmd = [sys.executable, "-X", "utf8", *sys.argv[2:]]
 env = os.environ.copy()
 
+log_fh = open(log_path, "ab", buffering=0)
 kwargs = dict(
     stdin=subprocess.DEVNULL,
+    stdout=log_fh,
+    stderr=log_fh,
     env=env,
 )
 
 if sys.platform == "win32":
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-    kwargs["creationflags"] = (
-        CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
-    )
-    log_fh = open(log_path, "ab", buffering=0)
-    kwargs["stdout"] = log_fh
-    kwargs["stderr"] = log_fh
+    try:
+        kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+        subprocess.Popen(cmd, **kwargs)
+    except PermissionError:
+        kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(cmd, **kwargs)
 else:
     kwargs["close_fds"] = True
     kwargs["start_new_session"] = True
-    log_fh = open(log_path, "ab", buffering=0)
-    kwargs["stdout"] = log_fh
-    kwargs["stderr"] = log_fh
-
-subprocess.Popen(cmd, **kwargs)
+    subprocess.Popen(cmd, **kwargs)
 ' "$log_file" "$@" &
     else
         run_python_server "$@" &

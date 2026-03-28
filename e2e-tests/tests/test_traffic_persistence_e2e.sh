@@ -101,6 +101,11 @@ start_proxy() {
     local max_wait=30
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
+        if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            log_fail "Proxy process exited unexpectedly (PID: $PROXY_PID)"
+            cat "$TEST_DATA_DIR/proxy.log" || true
+            return 1
+        fi
         if curl -sS -o /dev/null -w "" "${ADMIN_BASE_URL}/api/traffic?limit=1" 2>/dev/null; then
             log_info "Proxy started successfully (PID: $PROXY_PID)"
             return 0
@@ -135,6 +140,11 @@ restart_proxy() {
     local max_wait=30
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
+        if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            log_fail "Proxy process exited unexpectedly during restart (PID: $PROXY_PID)"
+            cat "$TEST_DATA_DIR/proxy.log" || true
+            return 1
+        fi
         if curl -sS -o /dev/null -w "" "${ADMIN_BASE_URL}/api/traffic?limit=1" 2>/dev/null; then
             log_info "Proxy restarted successfully (PID: $PROXY_PID)"
             return 0

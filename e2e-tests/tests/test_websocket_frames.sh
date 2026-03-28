@@ -113,6 +113,11 @@ start_bifrost() {
     local max_wait=60
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
+        if ! kill -0 "$BIFROST_PID" 2>/dev/null; then
+            echo "Bifrost process exited during startup (PID: $BIFROST_PID)"
+            tail -n 120 "$log_file" || true
+            return 1
+        fi
         if curl -sf "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1; then
             return 0
         fi

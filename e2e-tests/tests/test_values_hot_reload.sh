@@ -88,6 +88,11 @@ start_proxy() {
     local max_wait=30
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
+        if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            log_fail "Proxy process exited during startup (PID: $PROXY_PID)"
+            cat "$DATA_DIR/proxy.log"
+            return 1
+        fi
         if curl -s "http://${PROXY_HOST}:${PROXY_PORT}${ADMIN_PATH_PREFIX}/api/system/status" >/dev/null 2>&1; then
             log_info "Proxy server is ready"
             return 0
