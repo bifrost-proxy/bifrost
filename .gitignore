@@ -28,3 +28,4 @@ old_doc/
 .tmp-*/
 e2e-tests/mock_servers/.logs/
 .e2e-reports/*
+/tmp-*/

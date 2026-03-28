@@ -171,6 +171,55 @@ http_post() {
     http_request "$url" "POST" "$data" "$extra_headers"
 }
 
+http_post_file() {
+    local url=$1
+    local file_path=$2
+    local extra_headers=${3:-}
+
+    _temp_headers_file=$(mktemp)
+    _temp_body_file=$(mktemp)
+
+    local curl_args=(
+        -s
+        -X "POST"
+        --max-time "$(http_timeout)"
+        -D "$_temp_headers_file"
+        -o "$_temp_body_file"
+        -w '%{http_code}'
+        --data-binary "@$file_path"
+    )
+
+    if [ -n "$TEST_ID" ]; then
+        curl_args+=(-H "X-Test-ID: $TEST_ID")
+    fi
+
+    local proxy_host proxy_port proxy_mode socks5_port
+    proxy_host="$(http_proxy_host)"
+    proxy_port="$(http_proxy_port)"
+    proxy_mode="$(http_proxy_mode)"
+    socks5_port="$(http_socks5_port)"
+
+    if [ -n "$proxy_host" ] && [ -n "$proxy_port" ]; then
+        if [ "$proxy_mode" = "socks5" ] && [ -n "$socks5_port" ]; then
+            curl_args+=(--socks5-hostname "${proxy_host}:${socks5_port}")
+        else
+            curl_args+=(--proxy "http://${proxy_host}:${proxy_port}")
+        fi
+    fi
+
+    if [ -n "$extra_headers" ]; then
+        while IFS= read -r header; do
+            [ -n "$header" ] && curl_args+=(-H "$header")
+        done <<< "$extra_headers"
+    fi
+
+    curl_args+=("$url")
+
+    perform_curl_with_retries "${curl_args[@]}"
+
+    _cleanup_temp
+}
+
 http_put() {
     local url=$1
     local data=${2:-}

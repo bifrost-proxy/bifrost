@@ -2109,10 +2109,10 @@ test_req_speed_rule() {
     local base_timeout="${TIMEOUT:-10}"
     local request_timeout=$((expected_seconds + 20))
     local warmup_url="http://${pattern}/health"
-    local payload=$(python3 - <<PY
-print("A" * $payload_size)
-PY
-)
+
+    local payload_file
+    payload_file=$(mktemp)
+    python3 -c "import sys; sys.stdout.buffer.write(b'A' * $payload_size)" > "$payload_file"
 
     if (( base_timeout > request_timeout )); then
         request_timeout=$base_timeout
@@ -2123,7 +2123,6 @@ PY
     echo "    请求: $test_url"
     echo "    超时: ${request_timeout}s, 重试: ${max_attempts}"
 
-    # 速度测试在 CI 上更容易被首次连接建立、路由预热和 100-continue 抖动影响。
     TIMEOUT=10 http_get "$warmup_url" >/dev/null 2>&1 || true
     sleep 1
     TIMEOUT=10 http_post "$test_url" "warmup" $'Content-Type: text/plain\nExpect:' >/dev/null 2>&1 || true
@@ -2132,17 +2131,9 @@ PY
     local end_ms=0
     local attempt=1
     while [[ "$attempt" -le "$max_attempts" ]]; do
-        start_ms=$(python3 - <<'PY'
-import time
-print(int(time.time() * 1000))
-PY
-)
-        TIMEOUT="$request_timeout" http_post "$test_url" "$payload" $'Content-Type: text/plain\nExpect:'
-        end_ms=$(python3 - <<'PY'
-import time
-print(int(time.time() * 1000))
-PY
-)
+        start_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
+        TIMEOUT="$request_timeout" http_post_file "$test_url" "$payload_file" $'Content-Type: text/plain\nExpect:'
+        end_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
 
         if [[ "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
             break
@@ -2155,6 +2146,8 @@ PY
         fi
         attempt=$((attempt + 1))
     done
+
+    rm -f "$payload_file"
 
     if [[ ! "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
         log_http_debug_snapshot "请求速度测试最终失败" "$((end_ms - start_ms))"
