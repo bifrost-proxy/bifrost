@@ -10,6 +10,7 @@ PROXY_PORT=${PROXY_PORT:-18080}
 SOCKS5_PORT=${SOCKS5_PORT:-11080}
 BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-udp-test"
+PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 
 cleanup() {
     echo "Cleaning up..."
@@ -23,7 +24,7 @@ trap cleanup EXIT
 start_proxy() {
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
     
-    pkill -f "bifrost" 2>/dev/null || true
+    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
     sleep 2
     
     rm -rf "$DATA_DIR"
@@ -32,13 +33,15 @@ start_proxy() {
     export BIFROST_DATA_DIR="$DATA_DIR"
     
     "$BIFROST_BIN" --port "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
-        --unsafe-ssl --skip-cert-check 2>&1 &
+        --unsafe-ssl --skip-cert-check >"$PROXY_LOG_FILE" 2>&1 &
     PROXY_PID=$!
     
     sleep 5
     
     if ! kill -0 $PROXY_PID 2>/dev/null; then
         echo "ERROR: Proxy failed to start"
+        echo "=== Proxy log ==="
+        cat "$PROXY_LOG_FILE" 2>/dev/null || true
         exit 1
     fi
     
