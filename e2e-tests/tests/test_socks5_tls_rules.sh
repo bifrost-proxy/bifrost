@@ -8,6 +8,7 @@ PROJECT_ROOT="$(dirname "$E2E_DIR")"
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
 source "$E2E_DIR/test_utils/rule_fixture.sh"
+source "$E2E_DIR/test_utils/process.sh"
 
 PROXY_HOST=${PROXY_HOST:-127.0.0.1}
 PROXY_PORT=${PROXY_PORT:-18081}
@@ -24,7 +25,10 @@ rules_from_fixture() {
 
 cleanup() {
     echo "Cleaning up..."
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
+    if is_windows; then kill_all_bifrost; fi
     HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
     "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
@@ -80,7 +84,9 @@ start_proxy_with_rules() {
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
     echo "Rules: $combined_rules"
     
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
     sleep 1
     
     rm -rf "$DATA_DIR"
@@ -118,15 +124,21 @@ start_proxy_with_rules() {
 restart_proxy_with_rules() {
     local rules="$1"
     echo "Restarting proxy with new rules..."
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    
+    if [ -n "${PROXY_PID:-}" ]; then
+        kill_pid "$PROXY_PID"
+    fi
     sleep 2
     
     local wait_count=0
-    while [ $wait_count -lt 15 ] && kill -0 $PROXY_PID 2>/dev/null; do
+    while [ $wait_count -lt 15 ] && kill -0 ${PROXY_PID:-0} 2>/dev/null; do
         echo "  Waiting for proxy process to exit..."
         sleep 1
         wait_count=$((wait_count + 1))
     done
+    wait_pid "$PROXY_PID"
+    
+    rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     
     start_proxy_with_rules "$rules"
 }

@@ -5,6 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+source "$SCRIPT_DIR/../test_utils/process.sh"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-9900}"
 ADMIN_HOST="${ADMIN_HOST:-127.0.0.1}"
@@ -36,12 +38,13 @@ cleanup() {
 
     if [[ -n "$MOCK_SERVERS_PID" ]]; then
         log_info "Stopping mock servers..."
-        kill $MOCK_SERVERS_PID 2>/dev/null || true
-        wait $MOCK_SERVERS_PID 2>/dev/null || true
+        for pid in $MOCK_SERVERS_PID; do
+            kill_pid "$pid"
+        done
+        for pid in $MOCK_SERVERS_PID; do
+            wait_pid "$pid"
+        done
     fi
-
-    pkill -f "ws_echo_server.py" 2>/dev/null || true
-    pkill -f "sse_echo_server.py" 2>/dev/null || true
 
     log_info "Cleanup complete"
 }

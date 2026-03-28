@@ -10,6 +10,7 @@ ADMIN_PORT="$PROXY_PORT"
 ADMIN_BASE_URL="http://127.0.0.1:${ADMIN_PORT}/_bifrost"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 BIFROST_PID=""
 passed=0
@@ -19,12 +20,12 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
 
-    if [ -n "$BIFROST_PID" ] && kill -0 "$BIFROST_PID" 2>/dev/null; then
+    if [ -n "$BIFROST_PID" ]; then
         echo "  Stopping Bifrost proxy (PID: $BIFROST_PID)..."
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$BIFROST_PID"
     fi
 
+    if is_windows; then kill_all_bifrost; fi
     echo "Cleanup complete."
 }
 

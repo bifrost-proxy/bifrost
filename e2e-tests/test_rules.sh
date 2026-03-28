@@ -11,6 +11,7 @@ TEST_DATA_DIR="${BIFROST_DATA_DIR:-${PROJECT_DIR}/.bifrost-test}"
 source "$SCRIPT_DIR/test_utils/assert.sh"
 source "$SCRIPT_DIR/test_utils/http_client.sh"
 source "$SCRIPT_DIR/test_utils/rule_fixture.sh"
+source "$SCRIPT_DIR/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-8080}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -150,8 +151,10 @@ cleanup() {
     if [[ "$KEEP_PROXY" != "true" ]]; then
         if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
             info "正在停止代理服务器 (PID: $PROXY_PID)..."
-            kill "$PROXY_PID" 2>/dev/null || true
-            wait "$PROXY_PID" 2>/dev/null || true
+            safe_cleanup_proxy "$PROXY_PID"
+        fi
+        if is_windows; then
+            kill_all_bifrost
         fi
     fi
 
@@ -410,7 +413,10 @@ start_proxy() {
 
     # 端口可能被前一次测试遗留进程占用；如果不确保端口释放，
     # 后续的健康检查可能会连到“旧进程”，导致用例误判。
-    if have_lsof && lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
+    if is_windows; then
+        kill_bifrost_on_port "${PROXY_PORT}"
+        sleep 0.5
+    elif have_lsof && lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
         local pids
         if lsof_supports_pid_output; then
             pids=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | sort -u | tr '\n' ' ' | xargs echo -n 2>/dev/null || true)
@@ -420,7 +426,6 @@ start_proxy() {
         warn "端口 ${PROXY_PORT} 已被占用 (PID: ${pids:-unknown})"
         info "尝试终止现有进程..."
         if [[ -n "$pids" ]]; then
-            # 优先优雅退出
             kill $pids 2>/dev/null || true
         fi
 
@@ -3212,8 +3217,7 @@ EOF
         _log_fail "tunnel 默认端口应为 443" "代理日志包含 127.0.0.1:443" "未找到对应日志"
     fi
 
-    kill "$tls_pid" 2>/dev/null || true
-    wait "$tls_pid" 2>/dev/null || true
+    safe_cleanup_proxy "$tls_pid"
 }
 
 run_tls_options_specialized_tests() {

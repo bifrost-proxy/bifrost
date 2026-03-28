@@ -7,6 +7,7 @@ PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
+source "$E2E_DIR/test_utils/process.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8080}"
@@ -25,12 +26,13 @@ MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
 PROXY_PID=""
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
 
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
+
+    if is_windows; then kill_all_bifrost; fi
 }
 
 trap cleanup EXIT

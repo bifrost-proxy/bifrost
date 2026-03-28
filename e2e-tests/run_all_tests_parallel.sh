@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RULES_DIR="${SCRIPT_DIR}/rules"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/.test_results"
+source "$SCRIPT_DIR/test_utils/process.sh"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -221,6 +222,10 @@ run_single_test() {
         local failed=$(grep "^Failed:" "$log_file" 2>/dev/null | tail -1 | perl -pe 's/\e\[[0-9;]*m//g' | sed 's/.*: *//' | tr -d '[:space:]' || echo "0")
         echo "PASSED=${passed:-0}"
         echo "FAILED=${failed:-0}"
+
+        if is_windows; then
+            kill_bifrost_on_port "$proxy_port"
+        fi
     } > "$result_file"
 }
 
@@ -356,6 +361,9 @@ aggregate_results() {
 
 cleanup() {
     info "清理资源..."
+    if is_windows; then
+        kill_all_bifrost
+    fi
     "$SCRIPT_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 }
 
@@ -443,18 +451,31 @@ pick_available_base_port() {
     local suite_count="$2"
     local attempt=0
 
-    # 需要保证 [base_port, base_port + suite_count - 1] 这一段端口都空闲，
-    # 否则并行运行时会出现“误连旧进程/绑定失败”等随机用例失败。
     while [[ $attempt -lt 30 ]]; do
         local candidate=$((requested_base_port + attempt * 100))
         local ok=true
 
-        for ((p=candidate; p<candidate + suite_count; p++)); do
-            if lsof -i ":${p}" -t >/dev/null 2>&1; then
-                ok=false
-                break
-            fi
-        done
+        if is_windows; then
+            local used_ports
+            used_ports=$(powershell.exe -NoProfile -Command "
+                \$ports = @()
+                try { \$ports = (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue).LocalPort } catch {}
+                \$ports -join ','
+            " 2>/dev/null | tr -d '\r')
+            for ((p=candidate; p<candidate + suite_count; p++)); do
+                if [[ ",$used_ports," == *",$p,"* ]]; then
+                    ok=false
+                    break
+                fi
+            done
+        else
+            for ((p=candidate; p<candidate + suite_count; p++)); do
+                if lsof -i ":${p}" -t >/dev/null 2>&1; then
+                    ok=false
+                    break
+                fi
+            done
+        fi
 
         if [[ "$ok" == "true" ]]; then
             echo "$candidate"
@@ -464,7 +485,6 @@ pick_available_base_port() {
         attempt=$((attempt + 1))
     done
 
-    # 回退：返回原值，由后续单测自行报错。
     echo "$requested_base_port"
 }
 

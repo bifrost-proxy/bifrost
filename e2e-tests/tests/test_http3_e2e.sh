@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
 source "$SCRIPT_DIR/../test_utils/rule_fixture.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-19999}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -44,16 +45,7 @@ HTTPBIN_CHECK_COUNT=0
 
 kill_process_on_port() {
     local port="$1"
-    local pids
-    pids=$(lsof -ti "TCP:${port}" -sTCP:LISTEN 2>/dev/null || true)
-    if [[ -z "$pids" ]]; then
-        pids=$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)
-    fi
-    if [[ -n "$pids" ]]; then
-        echo "[INFO] Killing existing process(es) on port $port: $pids"
-        echo "$pids" | xargs kill -9 2>/dev/null || true
-        sleep 1
-    fi
+    kill_bifrost_on_port "$port"
 }
 
 check_httpbin_reachable() {
@@ -126,10 +118,13 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     if [ -n "$PROXY_PID" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
     fi
-    pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
+    if is_windows; then
+        kill_all_bifrost
+    else
+        pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
+    fi
     rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \

@@ -34,6 +34,7 @@ WSS_BASE_URL="wss://${WS_HOST}:${WSS_PORT}"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -44,24 +45,25 @@ WS_SERVER_PID=""
 WSS_SERVER_PID=""
 
 cleanup() {
-    if [[ -n "$BIFROST_PID" ]] && kill -0 "$BIFROST_PID" 2>/dev/null; then
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
+    if [[ -n "$BIFROST_PID" ]]; then
+        safe_cleanup_proxy "$BIFROST_PID"
     fi
 
-    if [[ -n "$WS_SERVER_PID" ]] && kill -0 "$WS_SERVER_PID" 2>/dev/null; then
-        kill "$WS_SERVER_PID" 2>/dev/null || true
-        wait "$WS_SERVER_PID" 2>/dev/null || true
+    if [[ -n "$WS_SERVER_PID" ]]; then
+        kill_pid "$WS_SERVER_PID"
+        wait_pid "$WS_SERVER_PID"
     fi
 
-    if [[ -n "$WSS_SERVER_PID" ]] && kill -0 "$WSS_SERVER_PID" 2>/dev/null; then
-        kill "$WSS_SERVER_PID" 2>/dev/null || true
-        wait "$WSS_SERVER_PID" 2>/dev/null || true
+    if [[ -n "$WSS_SERVER_PID" ]]; then
+        kill_pid "$WSS_SERVER_PID"
+        wait_pid "$WSS_SERVER_PID"
     fi
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
         rm -rf "$BIFROST_DATA_DIR"
     fi
+
+    if is_windows; then kill_all_bifrost; fi
 }
 
 trap cleanup EXIT

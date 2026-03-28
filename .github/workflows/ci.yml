@@ -91,6 +91,8 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: always()
       - name: Install jq (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -105,6 +107,8 @@ jobs:
         working-directory: web
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
+      - name: Pre-build release binary for E2E
+        run: SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
       - name: End-to-end tests
         shell: bash
         run: bash scripts/ci/run-e2e.sh
@@ -200,6 +204,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-platform-${{ matrix.target }}
+          save-if: always()
       - name: Install jq (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -209,6 +214,10 @@ jobs:
         working-directory: web
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
+      - name: Pre-build release binary for E2E
+        env:
+          SKIP_FRONTEND_BUILD: "1"
+        run: cargo build --release --bin bifrost
       - name: End-to-end tests
         shell: bash
         run: bash scripts/ci/run-e2e.sh

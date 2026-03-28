@@ -9,10 +9,12 @@ BASE_URL="http://127.0.0.1:${PORT}"
 TMP_DIR="$(mktemp -d)"
 SERVER_PID=""
 
+source "$SCRIPT_DIR/../test_utils/process.sh"
+
 cleanup() {
-    if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-        kill "${SERVER_PID}" 2>/dev/null || true
-        wait "${SERVER_PID}" 2>/dev/null || true
+    if [[ -n "${SERVER_PID}" ]]; then
+        kill_pid "${SERVER_PID}"
+        wait_pid "${SERVER_PID}"
     fi
     rm -rf "${TMP_DIR}"
 }

@@ -20,6 +20,7 @@ source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/rule_fixture.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -29,17 +30,17 @@ PROXY_PID=""
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null
-        wait "$PROXY_PID" 2>/dev/null
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
     if [[ -d "$DATA_DIR" ]]; then
         rm -rf "$DATA_DIR"
     fi
-    if [[ -n "$ECHO_PID" ]] && kill -0 "$ECHO_PID" 2>/dev/null; then
-        kill "$ECHO_PID" 2>/dev/null
-        wait "$ECHO_PID" 2>/dev/null
+    if [[ -n "$ECHO_PID" ]]; then
+        kill_pid "$ECHO_PID"
+        wait_pid "$ECHO_PID"
     fi
+    if is_windows; then kill_all_bifrost; fi
     echo "Cleanup done"
 }
 

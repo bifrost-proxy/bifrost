@@ -10,12 +10,32 @@ if real_cmd="$(find_real_cmd lsof)"; then
 fi
 
 port=""
+terse=0
+next_is_i_value=false
 for arg in "$@"; do
-  if [[ "$arg" =~ ^-i(TCP:)?:(.+)$ ]]; then
-    port="${BASH_REMATCH[2]}"
-  elif [[ "$arg" =~ ^:(.+)$ ]]; then
-    port="${BASH_REMATCH[1]}"
+  if [[ "$next_is_i_value" == true ]]; then
+    next_is_i_value=false
+    if [[ "$arg" =~ ^(TCP:)?:(.+)$ ]]; then
+      port="${BASH_REMATCH[2]}"
+    fi
+    continue
   fi
+  case "$arg" in
+    -t)  terse=1 ;;
+    -ti|-it)  terse=1; next_is_i_value=true ;;
+    -i)  next_is_i_value=true ;;
+    -i*)
+      local_arg="${arg#-i}"
+      if [[ "$local_arg" =~ ^(TCP:)?:(.+)$ ]]; then
+        port="${BASH_REMATCH[2]}"
+      fi
+      ;;
+    -nP|-n|-P) ;;
+    -sTCP:*) ;;
+    :*)
+      port="${arg#:}"
+      ;;
+  esac
 done
 
 if [[ -z "$port" ]]; then
@@ -23,18 +43,38 @@ if [[ -z "$port" ]]; then
   exit 2
 fi
 
-python3 - "$port" <<'PY'
-import socket
+python3 - "$port" "$terse" <<'PY'
 import sys
 
 port = int(sys.argv[1])
+terse = sys.argv[2] == "1"
+
+if sys.platform == "win32":
+    import subprocess
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command",
+         f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"],
+        capture_output=True, text=True, timeout=10
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        for line in result.stdout.strip().splitlines():
+            pid = line.strip()
+            if pid.isdigit():
+                print(pid)
+        sys.exit(0)
+    sys.exit(1)
+
+import socket
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
     sock.bind(("127.0.0.1", port))
 except OSError:
-    print(f"LISTEN {port}")
+    if terse:
+        print("0")
+    else:
+        print(f"LISTEN {port}")
     sys.exit(0)
 finally:
     try:

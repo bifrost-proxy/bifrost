@@ -7,14 +7,15 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BIFROST_BIN="${BIFROST_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost}"
 
 source "${SCRIPT_DIR}/../test_utils/assert.sh"
+source "${SCRIPT_DIR}/../test_utils/process.sh"
 
 TMP_DIR=""
 DUMMY_PID=""
 
 cleanup() {
     if [[ -n "${DUMMY_PID}" ]] && kill -0 "${DUMMY_PID}" 2>/dev/null; then
-        kill "${DUMMY_PID}" 2>/dev/null || true
-        wait "${DUMMY_PID}" 2>/dev/null || true
+        kill_pid "${DUMMY_PID}"
+        wait_pid "${DUMMY_PID}"
     fi
     if [[ -n "${TMP_DIR}" ]] && [[ -d "${TMP_DIR}" ]]; then
         rm -rf "${TMP_DIR}"

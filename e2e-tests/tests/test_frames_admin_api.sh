@@ -5,6 +5,7 @@ BIFROST_BIN="${BIFROST_BIN:-$(cd "$SCRIPT_DIR/../.." && pwd)/target/release/bifr
 source "$SCRIPT_DIR/../test_utils/ws_client.sh"
 source "$SCRIPT_DIR/../test_utils/sse_client.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-9900}"
@@ -268,23 +269,24 @@ start_bifrost() {
 cleanup() {
     log_info "Cleaning up..."
 
-    if [[ "$STARTED_BIFROST" == "1" && -n "$BIFROST_PID" ]] && kill -0 "$BIFROST_PID" 2>/dev/null; then
-        kill "$BIFROST_PID" 2>/dev/null
-        wait "$BIFROST_PID" 2>/dev/null
+    if [[ "$STARTED_BIFROST" == "1" && -n "$BIFROST_PID" ]]; then
+        safe_cleanup_proxy "$BIFROST_PID"
         log_info "Stopped Bifrost proxy"
     fi
 
-    if [[ -n "$WS_SERVER_PID" ]] && kill -0 "$WS_SERVER_PID" 2>/dev/null; then
-        kill "$WS_SERVER_PID" 2>/dev/null
-        wait "$WS_SERVER_PID" 2>/dev/null
+    if [[ -n "$WS_SERVER_PID" ]]; then
+        kill_pid "$WS_SERVER_PID"
+        wait_pid "$WS_SERVER_PID"
         log_info "Stopped WebSocket server"
     fi
 
-    if [[ -n "$SSE_SERVER_PID" ]] && kill -0 "$SSE_SERVER_PID" 2>/dev/null; then
-        kill "$SSE_SERVER_PID" 2>/dev/null
-        wait "$SSE_SERVER_PID" 2>/dev/null
+    if [[ -n "$SSE_SERVER_PID" ]]; then
+        kill_pid "$SSE_SERVER_PID"
+        wait_pid "$SSE_SERVER_PID"
         log_info "Stopped SSE server"
     fi
+
+    if is_windows; then kill_all_bifrost; fi
 
     if [[ "$CREATED_DATA_DIR" == "1" && -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
         rm -rf "$BIFROST_DATA_DIR"

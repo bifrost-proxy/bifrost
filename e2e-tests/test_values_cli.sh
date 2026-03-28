@@ -8,6 +8,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "$SCRIPT_DIR/test_utils/process.sh"
 VALUES_DIR="${SCRIPT_DIR}/values"
 TEST_DATA_DIR="${SCRIPT_DIR}/test_data"
 
@@ -66,10 +67,9 @@ skip() {
 }
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    if [[ -n "$PROXY_PID" ]]; then
         info "Stopping proxy server (PID: $PROXY_PID)..."
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
     fi
 
     if [[ -n "$TEST_VALUES_DIR" ]] && [[ -d "$TEST_VALUES_DIR" ]]; then

@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
+source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18889}"
 BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
@@ -15,10 +16,8 @@ PLATFORM="$(uname -s)"
 ADMIN_API_BASE="http://127.0.0.1:${PROXY_PORT}/_bifrost/api/proxy/cli"
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
-    fi
+    if is_windows; then kill_all_bifrost; fi
+    safe_cleanup_proxy "$PROXY_PID"
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"
     fi

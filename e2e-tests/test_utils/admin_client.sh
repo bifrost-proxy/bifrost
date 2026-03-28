@@ -1,6 +1,9 @@
 #!/bin/bash
 # Bifrost Admin API 客户端工具
 
+_ADMIN_CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_ADMIN_CLIENT_DIR/process.sh"
+
 ADMIN_HOST="${ADMIN_HOST-}"
 ADMIN_PORT="${ADMIN_PORT-}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX-}"
@@ -177,8 +180,10 @@ admin_start_bifrost() {
 
 admin_stop_bifrost() {
     if [[ -n "$ADMIN_CLIENT_BIFROST_PID" ]] && kill -0 "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null; then
-        kill "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null || true
-        wait "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$ADMIN_CLIENT_BIFROST_PID"
+    fi
+    if is_windows; then
+        kill_all_bifrost
     fi
 
     if [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then

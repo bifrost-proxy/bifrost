@@ -8,6 +8,7 @@ export TEST_ID
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-18990}"
@@ -25,14 +26,13 @@ log_pass() { echo "[PASS] $*"; }
 log_fail() { echo "[FAIL] $*"; }
 
 cleanup() {
-    if [[ -n "$BIFROST_PID" ]] && kill -0 "$BIFROST_PID" 2>/dev/null; then
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
-    fi
+    if is_windows; then kill_all_bifrost; fi
+
+    safe_cleanup_proxy "$BIFROST_PID"
 
     if [[ -n "$MOCK_HTTP_PID" ]] && kill -0 "$MOCK_HTTP_PID" 2>/dev/null; then
-        kill "$MOCK_HTTP_PID" 2>/dev/null || true
-        wait "$MOCK_HTTP_PID" 2>/dev/null || true
+        kill_pid "$MOCK_HTTP_PID"
+        wait_pid "$MOCK_HTTP_PID"
     fi
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then

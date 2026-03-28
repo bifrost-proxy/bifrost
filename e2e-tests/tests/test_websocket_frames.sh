@@ -29,6 +29,7 @@ WS_HOST_HEADER="${WS_HOST}:${WS_PORT}"
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 source "$SCRIPT_DIR/../test_utils/rule_fixture.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -39,22 +40,22 @@ WS_SERVER_PID=""
 RULE_FIXTURE="$SCRIPT_DIR/../rules/websocket/decode_utf8_searchable.txt"
 
 cleanup() {
-    if [[ -n "$BIFROST_PID" ]] && kill -0 "$BIFROST_PID" 2>/dev/null; then
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
+    if [[ -n "$BIFROST_PID" ]]; then
+        safe_cleanup_proxy "$BIFROST_PID"
     fi
 
-    if [[ -n "$WS_SERVER_PID" ]] && kill -0 "$WS_SERVER_PID" 2>/dev/null; then
-        kill "$WS_SERVER_PID" 2>/dev/null || true
-        wait "$WS_SERVER_PID" 2>/dev/null || true
+    if [[ -n "$WS_SERVER_PID" ]]; then
+        kill_pid "$WS_SERVER_PID"
+        wait_pid "$WS_SERVER_PID"
     fi
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
-        # 仅清理本测试创建的临时目录，避免误删用户自定义目录
         if [[ "$BIFROST_DATA_DIR" == "$ROOT_DIR/.bifrost-e2e"* ]]; then
             rm -rf "$BIFROST_DATA_DIR"
         fi
     fi
+
+    if is_windows; then kill_all_bifrost; fi
 }
 
 trap cleanup EXIT

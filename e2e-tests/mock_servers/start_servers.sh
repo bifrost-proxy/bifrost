@@ -2,6 +2,7 @@
 # Mock 服务器管理脚本
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 HTTP_PORT=${HTTP_PORT:-3000}
 HTTPS_PORT=${HTTPS_PORT:-3443}
@@ -118,7 +119,7 @@ cleanup() {
     log "Stopping all servers..."
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null
+            safe_cleanup_proxy "$pid"
             log "Stopped server with PID $pid"
         fi
     done
@@ -244,10 +245,24 @@ status() {
 
 stop_all() {
     log "Stopping all mock servers..."
-    pkill -f "http_echo_server.py" 2>/dev/null
-    pkill -f "https_echo_server.py" 2>/dev/null
-    pkill -f "ws_echo_server.py" 2>/dev/null
-    pkill -f "sse_echo_server.py" 2>/dev/null
+    pkill -f "http_echo_server.py" 2>/dev/null || true
+    pkill -f "https_echo_server.py" 2>/dev/null || true
+    pkill -f "ws_echo_server.py" 2>/dev/null || true
+    pkill -f "sse_echo_server.py" 2>/dev/null || true
+    if is_windows; then
+        powershell.exe -NoProfile -Command "
+            Get-CimInstance Win32_Process | Where-Object {
+                \$_.CommandLine -and (
+                    \$_.CommandLine -like '*http_echo_server*' -or
+                    \$_.CommandLine -like '*https_echo_server*' -or
+                    \$_.CommandLine -like '*ws_echo_server*' -or
+                    \$_.CommandLine -like '*sse_echo_server*'
+                )
+            } | ForEach-Object {
+                Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        " 2>/dev/null || true
+    fi
 
     local failed=0
     wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 30 || failed=1

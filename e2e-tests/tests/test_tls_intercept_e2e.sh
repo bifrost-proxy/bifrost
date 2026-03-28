@@ -5,6 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$PROJECT_ROOT/e2e-tests/test_utils/rule_fixture.sh"
+source "$PROJECT_ROOT/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT=19290
 MOCK_HTTP_PORT=${MOCK_HTTP_PORT:-19280}
@@ -35,9 +36,12 @@ log_section() { echo -e "\n${YELLOW}=== $* ===${NC}"; }
 
 cleanup() {
     log_info "Cleaning up..."
-    [[ -n "$PROXY_PID" ]] && kill $PROXY_PID 2>/dev/null || true
-    [[ -n "$MOCK_HTTP_PID" ]] && kill $MOCK_HTTP_PID 2>/dev/null || true
-    [[ -n "$MOCK_HTTPS_PID" ]] && kill $MOCK_HTTPS_PID 2>/dev/null || true
+    [[ -n "$PROXY_PID" ]] && safe_cleanup_proxy "$PROXY_PID"
+    [[ -n "$MOCK_HTTP_PID" ]] && safe_cleanup_proxy "$MOCK_HTTP_PID"
+    [[ -n "$MOCK_HTTPS_PID" ]] && safe_cleanup_proxy "$MOCK_HTTPS_PID"
+    if is_windows; then
+        kill_all_bifrost
+    fi
     rm -f /tmp/mock_server_*.log /tmp/proxy_*.log /tmp/test_cert.* 2>/dev/null || true
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
     rm -rf "$BIFROST_DATA_DIR" 2>/dev/null || true
@@ -46,16 +50,7 @@ trap cleanup EXIT
 
 kill_process_on_port() {
     local port="$1"
-    local pids
-    pids=$(lsof -ti "TCP:${port}" -sTCP:LISTEN 2>/dev/null || true)
-    if [[ -z "$pids" ]]; then
-        pids=$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)
-    fi
-    if [[ -n "$pids" ]]; then
-        log_info "Killing existing process(es) on port $port: $pids"
-        echo "$pids" | xargs kill -9 2>/dev/null || true
-        sleep 1
-    fi
+    kill_bifrost_on_port "$port"
 }
 
 generate_test_cert() {
@@ -243,13 +238,21 @@ rules_from_fixture() {
 
 stop_proxy() {
     if [[ -n "$PROXY_PID" ]]; then
-        kill $PROXY_PID 2>/dev/null || true
-        wait $PROXY_PID 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
         PROXY_PID=""
     fi
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
+    if is_windows; then
+        kill_bifrost_on_port "$PROXY_PORT"
+    fi
     for _ in {1..20}; do
-        if ! lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+        local port_in_use=false
+        if command -v lsof >/dev/null 2>&1; then
+            lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 && port_in_use=true
+        elif command -v ss >/dev/null 2>&1; then
+            ss -tlnp "sport = :$PROXY_PORT" 2>/dev/null | grep -q LISTEN && port_in_use=true
+        fi
+        if ! $port_in_use; then
             break
         fi
         sleep 0.5
@@ -517,9 +520,9 @@ main() {
         case "$ONLY_TEST" in
             external_google)
                 if test_external_google_https; then
-                    ((TESTS_PASSED++))
+                    ((TESTS_PASSED++)) || true
                 else
-                    ((TESTS_FAILED++))
+                    ((TESTS_FAILED++)) || true
                 fi
                 ;;
             *)
@@ -537,14 +540,14 @@ main() {
         exit 0
     fi
     
-    if test_http_basic; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_https_passthrough; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_https_with_rule_intercept; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_https_with_rule_passthrough; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_external_google_https; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_intercept_mode_blacklist; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_intercept_mode_whitelist; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
-    if test_api_update_tls_config; then ((TESTS_PASSED++)); else ((TESTS_FAILED++)); fi
+    if test_http_basic; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_https_passthrough; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_https_with_rule_intercept; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_https_with_rule_passthrough; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_external_google_https; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_intercept_mode_blacklist; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_intercept_mode_whitelist; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
+    if test_api_update_tls_config; then ((TESTS_PASSED++)) || true; else ((TESTS_FAILED++)) || true; fi
     
     show_all_logs
     

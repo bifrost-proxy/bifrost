@@ -6,6 +6,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 source "${SCRIPT_DIR}/../test_utils/assert.sh"
 source "${SCRIPT_DIR}/../test_utils/rule_fixture.sh"
+source "${SCRIPT_DIR}/../test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18889}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-19081}"
@@ -24,14 +25,14 @@ passed=0
 failed=0
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
-    if [[ -n "$ECHO_PID" ]] && kill -0 "$ECHO_PID" 2>/dev/null; then
-        kill "$ECHO_PID" 2>/dev/null || true
-        wait "$ECHO_PID" 2>/dev/null || true
+    if [[ -n "$ECHO_PID" ]]; then
+        kill_pid "$ECHO_PID"
+        wait_pid "$ECHO_PID"
     fi
+    if is_windows; then kill_all_bifrost; fi
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"
     fi
@@ -59,9 +60,8 @@ start_echo() {
 }
 
 stop_proxy() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
@@ -231,9 +231,8 @@ test_disable_on_startup() {
 }
 
 test_restore_on_exit() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
@@ -263,9 +262,9 @@ test_restore_on_exit() {
 test_crash_recovery() {
     stop_proxy
     start_proxy_with_system_proxy
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill -9 "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        kill_pid_force "$PROXY_PID"
+        wait_pid "$PROXY_PID"
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true

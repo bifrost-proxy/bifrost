@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
+source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 pick_free_port() {
     python3 - <<'PY'
@@ -36,14 +37,13 @@ BIFROST_LOG_FILE=""
 VALID_TRAFFIC_ID=""
 
 cleanup() {
-    if [[ -n "$BIFROST_PID" ]] && kill -0 "$BIFROST_PID" 2>/dev/null; then
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
-    fi
+    if is_windows; then kill_all_bifrost; fi
+
+    safe_cleanup_proxy "$BIFROST_PID"
 
     if [[ -n "$SSE_SERVER_PID" ]] && kill -0 "$SSE_SERVER_PID" 2>/dev/null; then
-        kill "$SSE_SERVER_PID" 2>/dev/null || true
-        wait "$SSE_SERVER_PID" 2>/dev/null || true
+        kill_pid "$SSE_SERVER_PID"
+        wait_pid "$SSE_SERVER_PID"
     fi
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then

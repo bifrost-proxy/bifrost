@@ -12,11 +12,15 @@ BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-udp-rules-test"
 PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 source "$E2E_DIR/test_utils/rule_fixture.sh"
+source "$E2E_DIR/test_utils/process.sh"
 RULES_DIR="$E2E_DIR/rules/socks5_udp"
 
 cleanup() {
     echo "Cleaning up..."
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
+    if is_windows; then kill_all_bifrost; fi
     sleep 1
     rm -rf "$DATA_DIR"
 }
@@ -26,7 +30,9 @@ trap cleanup EXIT
 start_proxy() {
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
     
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
     sleep 2
     
     rm -rf "$DATA_DIR"
@@ -65,15 +71,21 @@ add_rule_from_fixture() {
 
 restart_proxy() {
     echo "Restarting proxy to load rules..."
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    
+    if [ -n "${PROXY_PID:-}" ]; then
+        kill_pid "$PROXY_PID"
+    fi
     sleep 2
     
     local wait_count=0
-    while [ $wait_count -lt 15 ] && kill -0 $PROXY_PID 2>/dev/null; do
+    while [ $wait_count -lt 15 ] && kill -0 ${PROXY_PID:-0} 2>/dev/null; do
         echo "  Waiting for proxy process to exit..."
         sleep 1
         wait_count=$((wait_count + 1))
     done
+    wait_pid "$PROXY_PID"
+    
+    rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     
     export BIFROST_DATA_DIR="$DATA_DIR"
     "$BIFROST_BIN" --port "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \

@@ -6,6 +6,8 @@ E2E_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 
+source "$E2E_DIR/test_utils/process.sh"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8080}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
@@ -33,10 +35,8 @@ PROXY_PID=""
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
-    fi
+    if is_windows; then kill_all_bifrost; fi
+    safe_cleanup_proxy "$PROXY_PID"
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 }
 

@@ -6,6 +6,7 @@ RULES_DIR="${SCRIPT_DIR}/rules/pattern"
 
 source "$SCRIPT_DIR/test_utils/assert.sh"
 source "$SCRIPT_DIR/test_utils/http_client.sh"
+source "$SCRIPT_DIR/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18080}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -38,10 +39,9 @@ fail() { echo -e "${RED}✗${NC} $1"; }
 cleanup() {
     info "清理测试环境..."
 
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    if [[ -n "$PROXY_PID" ]]; then
         info "停止测试代理 (PID: $PROXY_PID)..."
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
     fi
 
     "$SCRIPT_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
@@ -146,18 +146,11 @@ start_proxy_with_rules() {
 
     if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
         info "停止现有测试代理..."
-        kill "$PROXY_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
         sleep 1
     fi
 
-    if lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
-local existing_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1)
-        warn "端口 ${PROXY_PORT} 已被占用 (PID: $existing_pid)"
-        info "尝试终止现有进程..."
-        kill "$existing_pid" 2>/dev/null || true
-        sleep 1
-    fi
+    kill_bifrost_on_port "${PROXY_PORT}"
 
     info "启动代理 (端口: ${PROXY_PORT}, 数据目录: ${TEST_DATA_DIR})..."
 

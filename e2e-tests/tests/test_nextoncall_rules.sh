@@ -27,6 +27,8 @@ BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-./.bifrost-nextoncall-test}"
 RULES_FILE="$E2E_DIR/rules/forwarding/nextoncall_rules.txt"
 MOCK_SERVER="$E2E_DIR/mock_servers/http_ws_echo_server.py"
 
+source "$SCRIPT_DIR/../test_utils/process.sh"
+
 PROXY_PID=""
 MOCK_PID=""
 MANUAL_MODE=false
@@ -71,22 +73,22 @@ run_with_timeout() {
 cleanup() {
     log_info "Cleaning up..."
 
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    if [[ -n "$PROXY_PID" ]]; then
         log_info "Stopping proxy server (PID: $PROXY_PID)"
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
     fi
 
-    if [[ -n "$MOCK_PID" ]] && kill -0 "$MOCK_PID" 2>/dev/null; then
+    if [[ -n "$MOCK_PID" ]]; then
         log_info "Stopping mock server (PID: $MOCK_PID)"
-        kill "$MOCK_PID" 2>/dev/null || true
-        wait "$MOCK_PID" 2>/dev/null || true
+        kill_pid "$MOCK_PID"
+        wait_pid "$MOCK_PID"
     fi
 
     if [[ -d "$BIFROST_DATA_DIR" ]]; then
         rm -rf "$BIFROST_DATA_DIR"
     fi
 
+    if is_windows; then kill_all_bifrost; fi
     log_info "Cleanup complete"
 }
 
@@ -204,14 +206,12 @@ test_http_root_forward() {
     log_info "Testing: curl -x http://$PROXY_HOST:$PROXY_PORT https://www.qq.com/"
     log_info "Expected: Request forwarded to mock server at 127.0.0.1:$MOCK_PORT"
 
-    local response
+    local response exit_code=0
     response=$(curl -s -x "http://$PROXY_HOST:$PROXY_PORT" \
         -k \
         --connect-timeout 10 \
         --max-time 30 \
-        "https://www.qq.com/" 2>&1)
-
-    local exit_code=$?
+        "https://www.qq.com/" 2>&1) || exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
         log_error "curl failed with exit code: $exit_code"
@@ -241,14 +241,12 @@ test_http_api_path() {
     log_info "Testing: curl -x http://$PROXY_HOST:$PROXY_PORT https://www.qq.com/api/test"
     log_info "Expected: Request NOT forwarded to mock server (excludeFilter should exclude /api/)"
 
-    local response
+    local response exit_code=0
     response=$(curl -s -x "http://$PROXY_HOST:$PROXY_PORT" \
         -k \
         --connect-timeout 10 \
         --max-time 30 \
-        "https://www.qq.com/api/test" 2>&1)
-
-    local exit_code=$?
+        "https://www.qq.com/api/test" 2>&1) || exit_code=$?
 
     echo "Response (first 500 chars):"
     echo "$response" | head -c 500
@@ -348,21 +346,21 @@ run_tests() {
     echo ""
 
     if test_http_root_forward; then
-        ((passed++))
+        ((passed++)) || true
     else
-        ((failed++))
+        ((failed++)) || true
     fi
 
     if test_http_api_path; then
-        ((passed++))
+        ((passed++)) || true
     else
-        ((failed++))
+        ((failed++)) || true
     fi
 
     if test_websocket_forward; then
-        ((passed++))
+        ((passed++)) || true
     else
-        ((failed++))
+        ((failed++)) || true
     fi
 
     echo ""

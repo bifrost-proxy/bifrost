@@ -13,6 +13,7 @@ export ADMIN_HOST ADMIN_PORT ADMIN_PATH_PREFIX="/_bifrost"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 export ADMIN_BASE_URL
 
@@ -38,10 +39,8 @@ assert_equals() {
 }
 
 cleanup() {
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
-    fi
+    if is_windows; then kill_all_bifrost; fi
+    safe_cleanup_proxy "$PROXY_PID"
     rm -rf "$TEST_DATA_DIR"
 }
 

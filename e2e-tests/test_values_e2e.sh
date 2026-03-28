@@ -16,6 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "$SCRIPT_DIR/test_utils/process.sh"
 VALUES_DIR="${SCRIPT_DIR}/values"
 
 RED='\033[0;31m'
@@ -81,14 +82,12 @@ skip() {
 cleanup() {
     info "清理资源..."
 
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    if [[ -n "$PROXY_PID" ]]; then
+        safe_cleanup_proxy "$PROXY_PID"
     fi
 
-    if [[ -n "$ECHO_PID" ]] && kill -0 "$ECHO_PID" 2>/dev/null; then
-        kill "$ECHO_PID" 2>/dev/null || true
-        wait "$ECHO_PID" 2>/dev/null || true
+    if [[ -n "$ECHO_PID" ]]; then
+        safe_cleanup_proxy "$ECHO_PID"
     fi
 
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
@@ -213,7 +212,7 @@ start_echo_server() {
 
     if lsof -i ":${ECHO_HTTP_PORT}" -t >/dev/null 2>&1; then
         warn "端口 ${ECHO_HTTP_PORT} 已被占用，尝试终止..."
-        lsof -i ":${ECHO_HTTP_PORT}" -t | xargs kill 2>/dev/null || true
+        kill_bifrost_on_port "${ECHO_HTTP_PORT}"
         sleep 1
     fi
 
@@ -239,7 +238,7 @@ start_proxy() {
 
     if lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
         warn "端口 ${PROXY_PORT} 已被占用，尝试终止..."
-        lsof -i ":${PROXY_PORT}" -t | xargs kill 2>/dev/null || true
+        kill_bifrost_on_port "${PROXY_PORT}"
         sleep 1
     fi
 

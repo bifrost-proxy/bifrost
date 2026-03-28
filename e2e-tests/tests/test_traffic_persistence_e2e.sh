@@ -4,6 +4,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 ADMIN_HOST="${ADMIN_HOST:-127.0.0.1}"
 ADMIN_PORT="${ADMIN_PORT:-19900}"
@@ -122,8 +123,7 @@ start_proxy() {
 stop_proxy() {
     if [[ -n "$PROXY_PID" ]]; then
         log_info "Stopping proxy (PID: $PROXY_PID)..."
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$PROXY_PID"
         PROXY_PID=""
         sleep 2
     fi
@@ -161,6 +161,7 @@ restart_proxy() {
 cleanup() {
     stop_mock_server
     stop_proxy
+    if is_windows; then kill_all_bifrost; fi
     log_info "Cleaning up test data directory..."
     rm -rf "$TEST_DATA_DIR"
 }
@@ -183,8 +184,8 @@ start_mock_server() {
 
 stop_mock_server() {
     if [[ -n "$MOCK_PID" ]]; then
-        kill "$MOCK_PID" 2>/dev/null || true
-        wait "$MOCK_PID" 2>/dev/null || true
+        kill_pid "$MOCK_PID"
+        wait_pid "$MOCK_PID"
         MOCK_PID=""
     fi
 }

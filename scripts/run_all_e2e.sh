@@ -333,6 +333,9 @@ run_and_capture() {
       kill -TERM "$command_pid" 2>/dev/null || true
       sleep 5
       kill -9 "$command_pid" 2>/dev/null || true
+      if is_windows; then
+        kill_all_bifrost
+      fi
     fi
   ) &
   watchdog_pid=$!
@@ -360,6 +363,10 @@ run_and_capture() {
   if [[ -n "$heartbeat_pid" ]]; then
     kill "$heartbeat_pid" 2>/dev/null || true
     wait "$heartbeat_pid" 2>/dev/null || true
+  fi
+
+  if is_windows; then
+    kill_all_bifrost
   fi
 
   end_ts="$(date +%s)"
@@ -524,6 +531,7 @@ export HOME="${HOME:-$ROOT_DIR/.bifrost-e2e-home}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$ROOT_DIR/.bifrost-e2e-xdg-data}"
 export PATH="$ROOT_DIR/e2e-tests/bin:$(dirname "$CARGO_BIN"):$(dirname "$NODE_BIN"):$(dirname "$PNPM_BIN"):$PATH"
+source "$E2E_DIR/test_utils/process.sh"
 
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 REPORT_DIR="${BIFROST_E2E_REPORT_DIR:-$ROOT_DIR/.e2e-reports/run-all-$(date +%Y%m%d-%H%M%S)}"

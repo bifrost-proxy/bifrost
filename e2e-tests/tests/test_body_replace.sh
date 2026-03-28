@@ -23,6 +23,7 @@ PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
+source "$E2E_DIR/test_utils/process.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -65,15 +66,13 @@ header() {
 
 cleanup() {
     log_info "清理测试环境..."
-    
-    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        log_debug "停止代理服务器 (PID: $PROXY_PID)"
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
-    fi
-    
+
+    if is_windows; then kill_all_bifrost; fi
+
+    safe_cleanup_proxy "$PROXY_PID"
+
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
-    
+
     log_info "清理完成"
 }
 

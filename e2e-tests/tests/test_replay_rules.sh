@@ -17,6 +17,7 @@ source "$SCRIPT_DIR/../test_utils/http_client.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 source "$SCRIPT_DIR/../test_utils/ws_client.sh"
 source "$SCRIPT_DIR/../test_utils/rule_fixture.sh"
+source "$SCRIPT_DIR/../test_utils/process.sh"
 
 BIFROST_PID=""
 MOCK_HTTP_PID=""
@@ -30,30 +31,30 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     
-    if [ -n "$BIFROST_PID" ] && kill -0 "$BIFROST_PID" 2>/dev/null; then
+    if [ -n "$BIFROST_PID" ]; then
         echo "  Stopping Bifrost proxy (PID: $BIFROST_PID)..."
-        kill "$BIFROST_PID" 2>/dev/null || true
-        wait "$BIFROST_PID" 2>/dev/null || true
+        safe_cleanup_proxy "$BIFROST_PID"
     fi
     
-    if [ -n "$MOCK_HTTP_PID" ] && kill -0 "$MOCK_HTTP_PID" 2>/dev/null; then
+    if [ -n "$MOCK_HTTP_PID" ]; then
         echo "  Stopping Mock HTTP server (PID: $MOCK_HTTP_PID)..."
-        kill "$MOCK_HTTP_PID" 2>/dev/null || true
-        wait "$MOCK_HTTP_PID" 2>/dev/null || true
+        kill_pid "$MOCK_HTTP_PID"
+        wait_pid "$MOCK_HTTP_PID"
     fi
 
-    if [ -n "$MOCK_SSE_PID" ] && kill -0 "$MOCK_SSE_PID" 2>/dev/null; then
+    if [ -n "$MOCK_SSE_PID" ]; then
         echo "  Stopping Mock SSE server (PID: $MOCK_SSE_PID)..."
-        kill "$MOCK_SSE_PID" 2>/dev/null || true
-        wait "$MOCK_SSE_PID" 2>/dev/null || true
+        kill_pid "$MOCK_SSE_PID"
+        wait_pid "$MOCK_SSE_PID"
     fi
 
-    if [ -n "$MOCK_WS_PID" ] && kill -0 "$MOCK_WS_PID" 2>/dev/null; then
+    if [ -n "$MOCK_WS_PID" ]; then
         echo "  Stopping Mock WS server (PID: $MOCK_WS_PID)..."
-        kill "$MOCK_WS_PID" 2>/dev/null || true
-        wait "$MOCK_WS_PID" 2>/dev/null || true
+        kill_pid "$MOCK_WS_PID"
+        wait_pid "$MOCK_WS_PID"
     fi
-    
+
+    if is_windows; then kill_all_bifrost; fi
     echo "Cleanup complete."
 }
 

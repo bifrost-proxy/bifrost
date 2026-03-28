@@ -1,0 +1,149 @@
+#!/bin/bash
+
+is_windows() {
+    local uname_out
+    uname_out="$(uname -s 2>/dev/null)"
+    case "$uname_out" in
+        MINGW*|MSYS*|CYGWIN*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_win_stop_process() {
+    local pid=$1
+    powershell.exe -NoProfile -Command "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+}
+
+_win_find_pid_on_port() {
+    local port=$1
+    powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess" 2>/dev/null | tr -d '\r' | head -n 1
+}
+
+kill_pid() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if is_windows; then
+        kill "$pid" 2>/dev/null || _win_stop_process "$pid"
+    else
+        kill "$pid" 2>/dev/null || true
+    fi
+}
+
+kill_pid_force() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if is_windows; then
+        _win_stop_process "$pid"
+    else
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+kill_process_tree() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if is_windows; then
+        powershell.exe -NoProfile -Command "
+            function Stop-Tree(\$id) {
+                Get-CimInstance Win32_Process | Where-Object { \$_.ParentProcessId -eq \$id } | ForEach-Object { Stop-Tree \$_.ProcessId }
+                Stop-Process -Id \$id -Force -ErrorAction SilentlyContinue
+            }
+            Stop-Tree $pid
+        " 2>/dev/null || true
+    else
+        kill -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+kill_bifrost_on_port() {
+    local port=$1
+    if [ -z "$port" ]; then
+        return 0
+    fi
+    if is_windows; then
+        local win_pid
+        win_pid=$(_win_find_pid_on_port "$port")
+        if [ -n "$win_pid" ]; then
+            _win_stop_process "$win_pid"
+        fi
+    else
+        local target_pid=""
+        if command -v lsof &>/dev/null; then
+            target_pid=$(lsof -ti :"$port" 2>/dev/null | head -n 1)
+        elif command -v fuser &>/dev/null; then
+            target_pid=$(fuser "$port"/tcp 2>/dev/null | awk '{print $1}')
+        fi
+        if [ -n "$target_pid" ]; then
+            kill -9 "$target_pid" 2>/dev/null || true
+        fi
+    fi
+}
+
+kill_all_bifrost() {
+    if is_windows; then
+        powershell.exe -NoProfile -Command "Get-Process -Name bifrost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+    else
+        pkill -f bifrost 2>/dev/null || killall bifrost 2>/dev/null || true
+    fi
+}
+
+wait_pid() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if is_windows; then
+        local timeout=30
+        local elapsed=0
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 0.2
+            elapsed=$((elapsed + 1))
+            if [ "$elapsed" -ge "$((timeout * 5))" ]; then
+                return 1
+            fi
+        done
+        return 0
+    else
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+safe_cleanup_proxy() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+
+    kill_pid "$pid"
+
+    local timeout=5
+    local elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.2
+        elapsed=$((elapsed + 1))
+        if [ "$elapsed" -ge "$((timeout * 5))" ]; then
+            break
+        fi
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill_pid_force "$pid"
+        sleep 0.5
+    fi
+
+    if is_windows; then
+        if kill -0 "$pid" 2>/dev/null; then
+            _win_stop_process "$pid"
+        fi
+    fi
+}

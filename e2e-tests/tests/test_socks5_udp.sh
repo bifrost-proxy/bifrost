@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$E2E_DIR")"
 
+source "$E2E_DIR/test_utils/process.sh"
+
 PROXY_HOST=${PROXY_HOST:-127.0.0.1}
 PROXY_PORT=${PROXY_PORT:-18080}
 SOCKS5_PORT=${SOCKS5_PORT:-11080}
@@ -14,7 +16,10 @@ PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 
 cleanup() {
     echo "Cleaning up..."
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
+    if is_windows; then kill_all_bifrost; fi
     sleep 1
     rm -rf "$DATA_DIR"
 }
@@ -24,7 +29,9 @@ trap cleanup EXIT
 start_proxy() {
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
     
-    pkill -f "bifrost.*${DATA_DIR}" 2>/dev/null || true
+    if [ -n "${PROXY_PID:-}" ]; then
+        safe_cleanup_proxy "$PROXY_PID"
+    fi
     sleep 2
     
     rm -rf "$DATA_DIR"
