@@ -48,6 +48,9 @@ kill_process_on_port() {
     local port="$1"
     local pids
     pids=$(lsof -ti "TCP:${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -z "$pids" ]]; then
+        pids=$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)
+    fi
     if [[ -n "$pids" ]]; then
         log_info "Killing existing process(es) on port $port: $pids"
         echo "$pids" | xargs kill -9 2>/dev/null || true

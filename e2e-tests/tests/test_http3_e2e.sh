@@ -20,7 +20,8 @@ TEST_ID=""
 
 # External HTTPS requests to httpbin can occasionally time out under proxy/H3
 # verification, so give this suite a small retry budget by default.
-export BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-2}"
+export BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-3}"
+export TIMEOUT="${TIMEOUT:-20}"
 
 resolve_bifrost_bin() {
     if [[ -x "${ROOT_DIR}/target/release/bifrost" ]]; then
@@ -39,20 +40,43 @@ resolve_bifrost_bin() {
 passed=0
 failed=0
 HTTPBIN_REACHABLE=""
+HTTPBIN_CHECK_COUNT=0
+
+kill_process_on_port() {
+    local port="$1"
+    local pids
+    pids=$(lsof -ti "TCP:${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -z "$pids" ]]; then
+        pids=$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)
+    fi
+    if [[ -n "$pids" ]]; then
+        echo "[INFO] Killing existing process(es) on port $port: $pids"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+}
 
 check_httpbin_reachable() {
+    ((HTTPBIN_CHECK_COUNT++)) || true
+    if [[ "$HTTPBIN_CHECK_COUNT" -gt 5 ]]; then
+        HTTPBIN_REACHABLE=""
+        HTTPBIN_CHECK_COUNT=1
+    fi
     if [[ -n "$HTTPBIN_REACHABLE" ]]; then
         [[ "$HTTPBIN_REACHABLE" == "true" ]]
         return $?
     fi
-    if curl -s -k --max-time 10 --proxy "http://${PROXY_HOST}:${PROXY_PORT}" "https://httpbin.org/get" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q '^2'; then
-        HTTPBIN_REACHABLE="true"
-        return 0
-    else
-        HTTPBIN_REACHABLE="false"
-        echo "[WARN] httpbin.org is not reachable through proxy; external-dependent tests will be skipped"
-        return 1
-    fi
+    local attempt
+    for attempt in 1 2 3; do
+        if curl -s -k --max-time 15 --proxy "http://${PROXY_HOST}:${PROXY_PORT}" "https://httpbin.org/get" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q '^2'; then
+            HTTPBIN_REACHABLE="true"
+            return 0
+        fi
+        sleep 1
+    done
+    HTTPBIN_REACHABLE="false"
+    echo "[WARN] httpbin.org is not reachable through proxy; external-dependent tests will be skipped"
+    return 1
 }
 
 skip_pass() {
@@ -126,8 +150,12 @@ start_proxy() {
     echo "Starting Bifrost proxy with HTTP/3 support..."
     
     mkdir -p "$DATA_DIR"
-    if ! HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
-         HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
+    local http_port="${ECHO_HTTP_PORT:-3000}"
+    local https_port="${ECHO_HTTPS_PORT:-3443}"
+    kill_process_on_port "$http_port"
+    kill_process_on_port "$https_port"
+    if ! HTTP_PORT="$http_port" \
+         HTTPS_PORT="$https_port" \
          "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" start-bg; then
         echo "ERROR: Mock servers failed to start"
         return 1
@@ -135,6 +163,7 @@ start_proxy() {
     create_test_rules
     
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
+    kill_process_on_port "$PROXY_PORT"
     sleep 1
     rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     
@@ -144,6 +173,7 @@ start_proxy() {
         -p "$PROXY_PORT" \
         start \
         --unsafe-ssl \
+        --skip-cert-check \
         --rules-file "$RULES_FILE" \
         < /dev/null > "$PROXY_LOG" 2>&1 &
     
