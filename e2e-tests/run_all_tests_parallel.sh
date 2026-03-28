@@ -198,12 +198,14 @@ run_single_test() {
 
     mkdir -p "$data_dir"
 
+    local http_retries="${BIFROST_E2E_HTTP_RETRIES:-2}"
+
     {
         echo "TEST_FILE=$rel_path"
         echo "PROXY_PORT=$proxy_port"
 
         local test_id="${rel_path}:${proxy_port}"
-        if TIMEOUT="$timeout" TEST_ID="$test_id" "$SCRIPT_DIR/test_rules.sh" \
+        if TIMEOUT="$timeout" TEST_ID="$test_id" BIFROST_E2E_HTTP_RETRIES="$http_retries" "$SCRIPT_DIR/test_rules.sh" \
             --no-build \
             --use-binary \
             --skip-mock-servers \

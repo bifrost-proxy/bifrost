@@ -151,9 +151,13 @@ GZIP_JSON="${TMP_DIR}/gzip.json"
 curl_json '/gzip' "${GZIP_JSON}" --compressed
 assert_eq "$(json_eval "${GZIP_JSON}" "data['gzipped']")" "True" "/gzip returns compressed JSON payload"
 
-BROTLI_JSON="${TMP_DIR}/brotli.json"
-curl_json '/brotli' "${BROTLI_JSON}" --compressed
-assert_eq "$(json_eval "${BROTLI_JSON}" "data['brotli']")" "True" "/brotli returns compressed JSON payload"
+if curl --version | grep -qi 'brotli'; then
+    BROTLI_JSON="${TMP_DIR}/brotli.json"
+    curl_json '/brotli' "${BROTLI_JSON}" --compressed
+    assert_eq "$(json_eval "${BROTLI_JSON}" "data['brotli']")" "True" "/brotli returns compressed JSON payload"
+else
+    echo "[SKIP] /brotli - curl lacks brotli support"
+fi
 
 DEFLATE_JSON="${TMP_DIR}/deflate.json"
 curl_json '/deflate' "${DEFLATE_JSON}" --compressed

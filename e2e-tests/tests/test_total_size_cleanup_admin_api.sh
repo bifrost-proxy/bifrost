@@ -6,15 +6,16 @@ source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
 
-HTTP_PORT="${HTTP_PORT:-3000}"
+HTTP_PORT="${HTTP_PORT:-3196}"
 PROXY_PORT="${PROXY_PORT:-9900}"
 ADMIN_PORT="${ADMIN_PORT:-9900}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
-export ADMIN_PATH_PREFIX
+export ADMIN_PORT ADMIN_PATH_PREFIX
 TEST_ID=""
 
-admin_ensure_bifrost
 trap 'admin_cleanup_bifrost; kill "$server_pid" 2>/dev/null || true' EXIT
+
+admin_ensure_bifrost || { echo "ERROR: Could not start Bifrost" >&2; exit 1; }
 
 python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$HTTP_PORT" &
 server_pid=$!
@@ -41,15 +42,25 @@ curl -s -X PUT -H "Content-Type: application/json" \
   -d '{"max_db_size_bytes":262144,"max_body_memory_size":1024}' \
   "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/config/performance" >/dev/null
 
+admin_delete "/api/traffic" >/dev/null 2>&1 || true
+sleep 1
+
 for i in $(seq 1 150); do
   http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload"
 done
 
-traffic_response=$(admin_get "/api/traffic?limit=200")
-record_count=$(echo "$traffic_response" | jq -r '.records | length // 0')
-record_count="${record_count:-0}"
+sleep 3
 
-if [ "$record_count" -lt 150 ] 2>/dev/null; then
+traffic_response=$(admin_get "/api/traffic?limit=200")
+record_count=$(echo "$traffic_response" | jq -r '(.records // []) | length')
+record_count="${record_count:-0}"
+if ! [[ "$record_count" =~ ^[0-9]+$ ]]; then
+    record_count=0
+fi
+
+if [ "$record_count" -eq 0 ]; then
+  _log_fail "total size cleanup should have recorded some traffic" "> 0" "$record_count"
+elif [ "$record_count" -lt 150 ]; then
   _log_pass "total size cleanup removed oldest records (count $record_count)"
 else
   _log_fail "total size cleanup removed oldest records" "< 150" "$record_count"

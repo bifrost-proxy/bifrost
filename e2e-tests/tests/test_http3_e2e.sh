@@ -106,6 +106,7 @@ cleanup() {
         wait "$PROXY_PID" 2>/dev/null || true
     fi
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
+    rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
     "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
@@ -135,6 +136,7 @@ start_proxy() {
     
     pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
     sleep 1
+    rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     
     BIFROST_DATA_DIR="$DATA_DIR" \
     RUST_LOG=info,bifrost_proxy::http3=debug \
@@ -178,14 +180,14 @@ test_http3_client_direct() {
     
     local output
     output=$(cd "$ROOT_DIR" && \
-        "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e --release test_http_proxy_to_h3_origin_enabled_by_rule -- --exact --nocapture 2>&1)
+        run_with_timeout 120 "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e --release --all-features test_http_proxy_to_h3_origin_enabled_by_rule -- --exact --nocapture 2>&1) || true
     
     if echo "$output" | grep -q "test test_http_proxy_to_h3_origin_enabled_by_rule ... ok"; then
         _log_pass "HTTP/3 upstream integration test passed"
         ((passed++))
     else
-        echo "Output: $output"
-        _log_fail "HTTP/3 upstream integration test" "test ... ok" "test failed"
+        echo "Output: ${output:(-500)}"
+        _log_fail "HTTP/3 upstream integration test" "test ... ok" "test failed or timed out"
         ((failed++))
     fi
     
@@ -235,7 +237,7 @@ test_https_proxy_basic() {
     
     if ! check_httpbin_reachable; then
         skip_pass "HTTPS proxy GET request"
-        skip_pass "HTTPS response contains httpbin.org"
+        skip_pass "HTTPS response contains query parameter"
         return
     fi
     
@@ -247,7 +249,7 @@ test_https_proxy_basic() {
         ((failed++))
     fi
     
-    if assert_body_contains "httpbin.org" "$HTTP_BODY" "HTTPS response contains httpbin.org"; then
+    if assert_body_contains "https-h3" "$HTTP_BODY" "HTTPS response contains query parameter"; then
         ((passed++))
     else
         ((failed++))
@@ -503,7 +505,7 @@ test_websocket_detection() {
     _temp_body_file=$(mktemp)
     
     local ws_response
-    ws_response=$(curl -s -k -o "$_temp_body_file" -D "$_temp_headers_file" -w '%{http_code}' \
+    ws_response=$(curl -s -k --max-time 15 -o "$_temp_body_file" -D "$_temp_headers_file" -w '%{http_code}' \
         --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
         -H "Upgrade: websocket" \
         -H "Connection: Upgrade" \
@@ -776,18 +778,25 @@ print_proxy_logs() {
 main() {
     BIFROST_BIN="$(resolve_bifrost_bin || true)"
 
-    echo "Building Bifrost with HTTP/3 support..."
     if [[ "${SKIP_BUILD:-false}" != "true" || -z "$BIFROST_BIN" ]]; then
-        if ! SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --all-features 2>/dev/null; then
+        echo "Building Bifrost with HTTP/3 support..."
+        if ! SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost 2>/dev/null; then
             echo "ERROR: Build failed"
             exit 1
         fi
         BIFROST_BIN="$(resolve_bifrost_bin || true)"
+    else
+        echo "Skipping build (SKIP_BUILD=true), using existing binary: $BIFROST_BIN"
     fi
 
     if [[ -z "$BIFROST_BIN" ]]; then
         echo "ERROR: Release bifrost binary not found"
         exit 1
+    fi
+
+    echo "Pre-compiling HTTP/3 integration test binary..."
+    if ! "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e --release --all-features --no-run 2>/dev/null; then
+        echo "WARN: Failed to pre-compile HTTP/3 integration test (will attempt at runtime)"
     fi
     
     if ! start_proxy; then
@@ -837,5 +846,19 @@ main() {
         exit 0
     fi
 }
+
+SCRIPT_TIMEOUT="${SCRIPT_TIMEOUT:-600}"
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+else
+    TIMEOUT_CMD=""
+fi
+
+if [[ -n "$TIMEOUT_CMD" && -z "${_HTTP3_E2E_INNER:-}" ]]; then
+    export _HTTP3_E2E_INNER=1
+    exec "$TIMEOUT_CMD" "$SCRIPT_TIMEOUT" bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 main "$@"

@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$PROJECT_ROOT/e2e-tests/test_utils/rule_fixture.sh"
 
-PROXY_PORT=19900
-MOCK_HTTP_PORT=19080
-MOCK_HTTPS_PORT=19443
+PROXY_PORT=19290
+MOCK_HTTP_PORT=${MOCK_HTTP_PORT:-19280}
+MOCK_HTTPS_PORT=${MOCK_HTTPS_PORT:-19283}
 ADMIN_PORT=$PROXY_PORT
 
 # External E2E (optional):
@@ -39,9 +39,21 @@ cleanup() {
     [[ -n "$MOCK_HTTP_PID" ]] && kill $MOCK_HTTP_PID 2>/dev/null || true
     [[ -n "$MOCK_HTTPS_PID" ]] && kill $MOCK_HTTPS_PID 2>/dev/null || true
     rm -f /tmp/mock_server_*.log /tmp/proxy_*.log /tmp/test_cert.* 2>/dev/null || true
+    rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
     rm -rf "$BIFROST_DATA_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+kill_process_on_port() {
+    local port="$1"
+    local pids
+    pids=$(lsof -ti "TCP:${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        log_info "Killing existing process(es) on port $port: $pids"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+}
 
 generate_test_cert() {
     log_info "Generating test certificate..."
@@ -51,6 +63,7 @@ generate_test_cert() {
 
 start_mock_http_server() {
     log_info "Starting mock HTTP server on port $MOCK_HTTP_PORT..."
+    kill_process_on_port $MOCK_HTTP_PORT
     
     cat > /tmp/mock_http_server.py << 'EOF'
 import http.server
@@ -90,6 +103,7 @@ class LoggingHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("", PORT), LoggingHandler) as httpd:
     print(f"Mock HTTP server listening on port {PORT}", flush=True)
     httpd.serve_forever()
@@ -109,6 +123,7 @@ EOF
 
 start_mock_https_server() {
     log_info "Starting mock HTTPS server on port $MOCK_HTTPS_PORT..."
+    kill_process_on_port $MOCK_HTTPS_PORT
     
     cat > /tmp/mock_https_server.py << 'EOF'
 import http.server
@@ -153,6 +168,7 @@ class LoggingHandler(http.server.SimpleHTTPRequestHandler):
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(CERT_FILE, KEY_FILE)
 
+socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("", PORT), LoggingHandler) as httpd:
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
     print(f"Mock HTTPS server listening on port {PORT}", flush=True)
@@ -179,6 +195,9 @@ start_proxy() {
     log_info "Rules: $rules"
     log_info "Extra args: $extra_args"
     
+    kill_process_on_port "$PROXY_PORT"
+    rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
+
     local cmd="$PROJECT_ROOT/target/release/bifrost --port $PROXY_PORT --log-level debug start --skip-cert-check --unsafe-ssl"
     
     if [[ -n "$rules" ]]; then
@@ -225,7 +244,7 @@ stop_proxy() {
         wait $PROXY_PID 2>/dev/null || true
         PROXY_PID=""
     fi
-    rm -f "$BIFROST_DATA_DIR/bifrost.pid" 2>/dev/null || true
+    rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
     for _ in {1..20}; do
         if ! lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
             break

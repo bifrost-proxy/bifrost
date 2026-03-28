@@ -53,9 +53,19 @@ setup_env() {
 }
 
 start_echo() {
-    python3 "${PROJECT_DIR}/scripts/mock_servers/http_echo_server.py" "${ECHO_HTTP_PORT}" &
+    python3 "${PROJECT_DIR}/e2e-tests/mock_servers/http_echo_server.py" "${ECHO_HTTP_PORT}" &
     ECHO_PID=$!
     sleep 1
+}
+
+stop_proxy() {
+    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+        kill "$PROXY_PID" 2>/dev/null || true
+        wait "$PROXY_PID" 2>/dev/null || true
+    fi
+    PROXY_PID=""
+    rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+    sleep 2
 }
 
 start_proxy_with_system_proxy() {
@@ -196,6 +206,7 @@ test_enable_on_startup() {
 }
 
 test_disable_on_startup() {
+    stop_proxy
     start_proxy_without_system_proxy
     case "$PLATFORM" in
         Darwin)
@@ -224,6 +235,8 @@ test_restore_on_exit() {
         kill "$PROXY_PID" 2>/dev/null || true
         wait "$PROXY_PID" 2>/dev/null || true
     fi
+    PROXY_PID=""
+    rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
     sleep 2
     case "$PLATFORM" in
         Darwin)
@@ -248,10 +261,14 @@ test_restore_on_exit() {
 }
 
 test_crash_recovery() {
+    stop_proxy
     start_proxy_with_system_proxy
     if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
         kill -9 "$PROXY_PID" 2>/dev/null || true
+        wait "$PROXY_PID" 2>/dev/null || true
     fi
+    PROXY_PID=""
+    rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
     sleep 2
     case "$PLATFORM" in
         Darwin)

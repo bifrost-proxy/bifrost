@@ -558,20 +558,11 @@ main() {
     echo "Proxy Port: ${PROXY_PORT}"
     echo "=========================================="
 
-    admin_ensure_bifrost
-
-    local connectivity
-    connectivity=$(curl -sS -o /dev/null -w "%{http_code}" "${ADMIN_BASE_URL}/api/traffic?limit=1" 2>/dev/null || echo "000")
-    
-    if [[ "$connectivity" != "200" ]]; then
-        log_fail "Cannot connect to Bifrost admin API at ${ADMIN_BASE_URL}"
-        log_info "Make sure Bifrost proxy is running on port ${ADMIN_PORT}"
-        exit 1
-    fi
-    
-    log_info "Connected to Bifrost admin API"
-
     trap 'stop_mock_server; admin_cleanup_bifrost' EXIT
+
+    admin_ensure_bifrost || { log_fail "Could not start Bifrost"; exit 1; }
+
+    log_info "Connected to Bifrost admin API"
     start_mock_server || { log_fail "Could not start mock server"; exit 1; }
 
     run_test "Traffic Query API" test_traffic_query_api

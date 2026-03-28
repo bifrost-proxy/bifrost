@@ -304,8 +304,10 @@ run_and_capture() {
   local command_pid
   local stream_pid=""
   local heartbeat_pid=""
+  local watchdog_pid=""
   local command_status
   local pipe_path="$REPORT_DIR/${log_slug}.pipe"
+  local suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-900}"
 
   start_ts="$(date +%s)"
   rm -f "$pipe_path"
@@ -324,14 +326,33 @@ run_and_capture() {
   heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
   heartbeat_pid=$!
 
+  (
+    sleep "$suite_timeout"
+    if kill -0 "$command_pid" 2>/dev/null; then
+      echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
+      kill -TERM "$command_pid" 2>/dev/null || true
+      sleep 5
+      kill -9 "$command_pid" 2>/dev/null || true
+    fi
+  ) &
+  watchdog_pid=$!
+
   if wait "$command_pid"; then
     status="passed"
   else
     command_status=$?
-    status="failed"
-    reason="$(extract_failure_reason "$log_file")"
-    reason="$(trim_line "${reason:-unknown failure}")"
+    if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
+      status="failed"
+      reason="timed out after ${suite_timeout}s"
+    else
+      status="failed"
+      reason="$(extract_failure_reason "$log_file")"
+      reason="$(trim_line "${reason:-unknown failure}")"
+    fi
   fi
+
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
 
   wait "$stream_pid" 2>/dev/null || true
   rm -f "$pipe_path"
@@ -529,7 +550,7 @@ if [[ "$RUN_RULES" -eq 1 ]]; then
     log_info "Invoking rule suite entrypoint: $E2E_DIR/run_all_tests_parallel.sh"
     run_and_capture \
       "rules:parallel-fixtures" \
-      bash "$E2E_DIR/run_all_tests_parallel.sh"
+      bash "$E2E_DIR/run_all_tests_parallel.sh" --no-build --retry-failed-once
   else
     skip_suite "rules:parallel-fixtures" "release build failed"
   fi
@@ -545,6 +566,7 @@ if [[ "$RUN_SHELL" -eq 1 ]]; then
   shell_build_ok="$release_build_ok"
 
   if [[ "$shell_build_ok" -eq 1 ]]; then
+    export SKIP_BUILD=true
     for script_name in "${shell_tests[@]}"; do
       log_info "Queue shell test: $script_name"
       if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then

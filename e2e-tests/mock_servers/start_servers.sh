@@ -49,12 +49,25 @@ kwargs = dict(
 if sys.platform == "win32":
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-    try:
-        kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
-        subprocess.Popen(cmd, **kwargs)
-    except PermissionError:
-        kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(cmd, **kwargs)
+    flags_attempts = [
+        CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+        CREATE_NEW_PROCESS_GROUP,
+        0,
+    ]
+    last_err = None
+    for flags in flags_attempts:
+        try:
+            kw = dict(kwargs)
+            if flags:
+                kw["creationflags"] = flags
+            subprocess.Popen(cmd, **kw)
+            last_err = None
+            break
+        except (PermissionError, OSError) as exc:
+            last_err = exc
+    if last_err is not None:
+        sys.stderr.write(f"Failed to spawn {cmd}: {last_err}\n")
+        sys.exit(1)
 else:
     kwargs["close_fds"] = True
     kwargs["start_new_session"] = True

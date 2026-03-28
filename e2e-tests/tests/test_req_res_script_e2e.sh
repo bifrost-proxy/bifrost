@@ -8,14 +8,13 @@ PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
 
-# Admin API is served on the same port as proxy (path prefix /_bifrost)
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
+PROXY_PORT="${PROXY_PORT:-8080}"
+
 export ADMIN_HOST="${ADMIN_HOST:-$PROXY_HOST}"
 export ADMIN_PORT="${ADMIN_PORT:-$PROXY_PORT}"
 export ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 source "$E2E_DIR/test_utils/admin_client.sh"
-
-PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-PROXY_PORT="${PROXY_PORT:-8080}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
 TEST_ID="${TEST_ID:-req_res_script}"
 export TEST_ID
