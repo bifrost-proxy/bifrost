@@ -12,6 +12,8 @@ ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 WS_URL="ws://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/ws"
 WS_PUSH_URL="ws://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/push"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3199}"
+MOCK_PID=""
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -104,19 +106,44 @@ ensure_websocat() {
     return 0
 }
 
+start_mock_server() {
+    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" >/dev/null 2>&1 &
+    MOCK_PID=$!
+    local waited=0
+    while [[ $waited -lt 10 ]]; do
+        if curl -sS -o /dev/null -w "" "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+    return 1
+}
+
+stop_mock_server() {
+    if [[ -n "$MOCK_PID" ]]; then
+        kill "$MOCK_PID" 2>/dev/null || true
+        wait "$MOCK_PID" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+}
+
 generate_traffic() {
     local count="${1:-3}"
-    local host="${2:-httpbin.org}"
+    local pids=()
     
     log_info "Generating $count traffic records via proxy ${PROXY_PORT}..."
     
     for i in $(seq 1 "$count"); do
         curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
-            --connect-timeout 10 --max-time 30 \
-            "https://${host}/get?test_id=push_test_$$_${i}" \
+            --connect-timeout 5 --max-time 10 \
+            "http://127.0.0.1:${MOCK_HTTP_PORT}/get?test_id=push_test_$$_${i}" \
             -o /dev/null -w "" 2>/dev/null &
+        pids+=($!)
     done
-    wait
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
     sleep 1
 }
 
@@ -394,7 +421,7 @@ main() {
     echo "Proxy Port: ${PROXY_PORT}"
     echo "=========================================="
 
-    trap admin_cleanup_bifrost EXIT
+    trap 'stop_mock_server; admin_cleanup_bifrost' EXIT
     admin_ensure_bifrost || { log_fail "Could not start Bifrost"; exit 1; }
 
     local connectivity
@@ -407,6 +434,8 @@ main() {
     fi
     
     log_info "Connected to Bifrost admin API"
+
+    start_mock_server || { log_fail "Could not start mock server"; exit 1; }
 
     local has_websocat=true
     if ! ensure_websocat; then

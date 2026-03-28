@@ -11,6 +11,8 @@ ADMIN_PORT="${ADMIN_PORT:-9900}"
 PROXY_PORT="${PROXY_PORT:-9900}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3197}"
+MOCK_PID=""
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -111,19 +113,44 @@ run_test() {
     fi
 }
 
+start_mock_server() {
+    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" >/dev/null 2>&1 &
+    MOCK_PID=$!
+    local waited=0
+    while [[ $waited -lt 10 ]]; do
+        if curl -sS -o /dev/null -w "" "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+    return 1
+}
+
+stop_mock_server() {
+    if [[ -n "$MOCK_PID" ]]; then
+        kill "$MOCK_PID" 2>/dev/null || true
+        wait "$MOCK_PID" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+}
+
 generate_traffic() {
     local count="${1:-5}"
-    local host="${2:-httpbin.org}"
+    local pids=()
     
     log_info "Generating $count traffic records via proxy ${PROXY_PORT}..."
     
     for i in $(seq 1 "$count"); do
         curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
-            --connect-timeout 10 --max-time 30 \
-            "https://${host}/get?test_id=traffic_db_test_$$_${i}" \
+            --connect-timeout 5 --max-time 10 \
+            "http://127.0.0.1:${MOCK_HTTP_PORT}/get?test_id=traffic_db_test_$$_${i}" \
             -o /dev/null -w "" 2>/dev/null &
+        pids+=($!)
     done
-    wait
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
     sleep 2
 }
 
@@ -320,8 +347,8 @@ test_traffic_clear() {
 print("x" * 4096)
 PY
     curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
-        --connect-timeout 10 --max-time 30 \
-        -X POST "https://httpbin.org/post" \
+        --connect-timeout 5 --max-time 10 \
+        -X POST "http://127.0.0.1:${MOCK_HTTP_PORT}/post" \
         -H "Content-Type: text/plain" \
         --data-binary "@${payload_file}" \
         -o /dev/null 2>/dev/null
@@ -493,7 +520,7 @@ test_filter_by_method() {
 test_body_retrieval() {
     log_info "Testing request/response body retrieval..."
     
-    generate_traffic 1 "httpbin.org"
+    generate_traffic 1
     sleep 1
     
     local list_response
@@ -539,6 +566,9 @@ main() {
     fi
     
     log_info "Connected to Bifrost admin API"
+
+    trap stop_mock_server EXIT
+    start_mock_server || { log_fail "Could not start mock server"; exit 1; }
 
     run_test "Traffic Query API" test_traffic_query_api
     run_test "Traffic Updates API" test_traffic_updates_api

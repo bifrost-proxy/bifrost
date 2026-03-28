@@ -12,6 +12,7 @@ ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 
 TEST_DATA_DIR="${TEST_DATA_DIR:-./.bifrost-persistence-test}"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3198}"
 BIFROST_BIN="${BIFROST_BIN:-cargo run --bin bifrost --}"
 
 TESTS_RUN=0
@@ -85,6 +86,7 @@ run_test() {
 }
 
 PROXY_PID=""
+MOCK_PID=""
 
 start_proxy() {
     log_info "Starting Bifrost proxy on port ${PROXY_PORT}..."
@@ -146,6 +148,7 @@ restart_proxy() {
 }
 
 cleanup() {
+    stop_mock_server
     stop_proxy
     log_info "Cleaning up test data directory..."
     rm -rf "$TEST_DATA_DIR"
@@ -153,19 +156,44 @@ cleanup() {
 
 trap cleanup EXIT
 
+start_mock_server() {
+    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" >/dev/null 2>&1 &
+    MOCK_PID=$!
+    local waited=0
+    while [[ $waited -lt 10 ]]; do
+        if curl -sS -o /dev/null -w "" "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+    return 1
+}
+
+stop_mock_server() {
+    if [[ -n "$MOCK_PID" ]]; then
+        kill "$MOCK_PID" 2>/dev/null || true
+        wait "$MOCK_PID" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+}
+
 generate_traffic() {
     local count="${1:-3}"
-    local host="${2:-httpbin.org}"
+    local pids=()
     
     log_info "Generating $count traffic records..."
     
     for i in $(seq 1 "$count"); do
         curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
-            --connect-timeout 10 --max-time 30 \
-            "https://${host}/get?test_id=persistence_test_$$_${i}" \
+            --connect-timeout 5 --max-time 10 \
+            "http://127.0.0.1:${MOCK_HTTP_PORT}/get?test_id=persistence_test_$$_${i}" \
             -o /dev/null 2>/dev/null &
+        pids+=($!)
     done
-    wait
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
     sleep 2
 }
 
@@ -378,6 +406,7 @@ main() {
     echo "=========================================="
 
     start_proxy || exit 1
+    start_mock_server || { log_fail "Could not start mock server"; exit 1; }
 
     run_test "Data Persistence After Restart" test_data_persistence_after_restart
     run_test "Sequence Continuity" test_sequence_continuity
