@@ -14,6 +14,7 @@ PROXY_PORT=${PROXY_PORT:-18081}
 SOCKS5_PORT=${SOCKS5_PORT:-18082}
 BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-tls-rules-test"
+PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 RULES_DIR="$E2E_DIR/rules/socks5_tls"
 
 rules_from_fixture() {
@@ -94,16 +95,18 @@ start_proxy_with_rules() {
     
     if [ -n "$combined_rules" ]; then
         RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
-            --unsafe-ssl --skip-cert-check --rules "$combined_rules" 2>&1 &
+            --unsafe-ssl --skip-cert-check --rules "$combined_rules" >"$PROXY_LOG_FILE" 2>&1 &
     else
         RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
-            --unsafe-ssl --skip-cert-check 2>&1 &
+            --unsafe-ssl --skip-cert-check >"$PROXY_LOG_FILE" 2>&1 &
     fi
     PROXY_PID=$!
     
     if ! wait_for_proxy_ready; then
         if ! kill -0 $PROXY_PID 2>/dev/null; then
             echo "ERROR: Proxy process died"
+            echo "=== Proxy log ==="
+            cat "$PROXY_LOG_FILE" 2>/dev/null || true
             exit 1
         fi
         echo "WARNING: Proxy admin API not reachable, but process is alive"
@@ -119,8 +122,8 @@ restart_proxy_with_rules() {
     sleep 2
     
     local wait_count=0
-    while [ $wait_count -lt 30 ] && (lsof -i :$PROXY_PORT >/dev/null 2>&1 || lsof -i :$SOCKS5_PORT >/dev/null 2>&1); do
-        echo "  Waiting for ports to be released..."
+    while [ $wait_count -lt 15 ] && kill -0 $PROXY_PID 2>/dev/null; do
+        echo "  Waiting for proxy process to exit..."
         sleep 1
         wait_count=$((wait_count + 1))
     done
