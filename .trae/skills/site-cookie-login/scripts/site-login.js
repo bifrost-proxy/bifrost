@@ -3,7 +3,8 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
-const { spawnSync } = require("child_process");
+const http = require("http");
+const { spawn, spawnSync } = require("child_process");
 
 function resolveNpmCliPath() {
   const npmCliPath = path.resolve(
@@ -219,13 +220,102 @@ function startManualVerifier(prompt, onTrigger) {
   };
 }
 
-async function getCookiesFromBrowser(page, domain) {
-  const client = await page.target().createCDPSession();
-  const { cookies } = await client.send("Network.getAllCookies");
-  return cookies
-    .filter((cookie) => cookie.domain.includes(domain) || domain.includes(cookie.domain.replace(/^\./, "")))
-    .map((cookie) => `${cookie.name}=${cookie.value}`)
-    .join("; ");
+function findSystemChrome() {
+  const candidates =
+    process.platform === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+      : process.platform === "win32"
+        ? [
+            `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env["PROGRAMFILES(X86)"]}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+          ]
+        : [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+          ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    http
+      .get(url, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      })
+      .on("error", reject);
+  });
+}
+
+async function waitForDebugEndpoint(port, timeout = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const data = await fetchJson(`http://127.0.0.1:${port}/json/version`);
+      if (data.webSocketDebuggerUrl) {
+        return data.webSocketDebuggerUrl;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`Chrome 远程调试端口 ${port} 未在 ${timeout}ms 内就绪`);
+}
+
+async function launchBrowser(puppeteer, config) {
+  const chromePath = findSystemChrome();
+  if (!chromePath) {
+    throw new Error("未找到系统 Chrome 浏览器，请安装 Google Chrome");
+  }
+
+  const repoRoot = process.cwd();
+  const userDataDir = path.resolve(repoRoot, ".env/.chrome-profile");
+  fs.mkdirSync(userDataDir, { recursive: true });
+  const debugPort = 19222 + Math.floor(Math.random() * 1000);
+
+  console.log(`🌐 启动 Chrome (端口 ${debugPort})...`);
+  const chromeProcess = spawn(
+    chromePath,
+    [
+      `--remote-debugging-port=${debugPort}`,
+      `--user-data-dir=${userDataDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      config.url,
+    ],
+    { stdio: "ignore", detached: false },
+  );
+
+  chromeProcess.on("error", (err) => {
+    throw new Error(`Chrome 启动失败: ${err.message}`);
+  });
+
+  const wsUrl = await waitForDebugEndpoint(debugPort);
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: wsUrl,
+    defaultViewport: null,
+  });
+
+  browser._chromeProcess = chromeProcess;
+  return browser;
 }
 
 function loadMergedCookieString(config) {
@@ -233,101 +323,151 @@ function loadMergedCookieString(config) {
   return mergeCookieSources(files.map((filePath) => readTextIfExists(filePath)));
 }
 
-async function verifyLoginWithCookie(cookieString, config) {
-  const normalized = normalizeCookieString(cookieString);
-  if (!normalized) {
-    return { valid: false, reason: "no_cookie" };
-  }
-
-  const requiredCheck = validateRequiredCookies(normalized, config.requiredCookies || []);
-  if (!requiredCheck.valid) {
-    return {
-      valid: false,
-      reason: `missing_cookie:${requiredCheck.missing.join(",")}`,
-    };
-  }
-
+async function verifyWithFetch(cookieString, config) {
   if (!config.verify || !config.verify.url) {
     return { valid: true, reason: "no_verify_config" };
   }
 
-  const headers = {
-    ...(config.verify.headers || {}),
-    Cookie: normalized,
-  };
-
-  const requestConfig = {
-    method: config.verify.method || "GET",
-    headers,
-  };
-
-  if (config.verify.body !== undefined) {
-    requestConfig.body = JSON.stringify(config.verify.body);
-  }
-
   try {
-    const response = await fetch(config.verify.url, requestConfig);
+    const response = await fetch(config.verify.url, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Cookie: cookieString,
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      },
+    });
     const text = await response.text();
-    const bodyLower = text.toLowerCase();
-    const successStatuses = config.verify.successStatuses || [200];
+    const finalUrl = response.url || "";
+
+    const rejectUrlIncludes = config.verify.rejectUrlIncludes || [];
+    if (rejectUrlIncludes.some((item) => finalUrl.includes(String(item)))) {
+      return { valid: false, reason: `redirect_to:${finalUrl}` };
+    }
+
     const rejectBodyIncludes = config.verify.rejectBodyIncludes || [];
-    const successBodyIncludes = config.verify.successBodyIncludes || [];
+    if (rejectBodyIncludes.some((item) => text.toLowerCase().includes(String(item).toLowerCase()))) {
+      return { valid: false, reason: "reject_body_matched" };
+    }
 
-    const statusOk = successStatuses.includes(response.status);
-    const rejectMatched = rejectBodyIncludes.some((item) => bodyLower.includes(String(item).toLowerCase()));
-    const successMatched =
-      successBodyIncludes.length === 0 ||
-      successBodyIncludes.some((item) => bodyLower.includes(String(item).toLowerCase()));
-
-    return {
-      valid: statusOk && !rejectMatched && successMatched,
-      reason: statusOk && !rejectMatched && successMatched ? "ok" : `http_${response.status}`,
-      bodyPreview: text.slice(0, 200),
-    };
+    return { valid: true, reason: "ok" };
   } catch (error) {
-    return {
-      valid: false,
-      reason: error.message,
-    };
+    return { valid: false, reason: `fetch_error:${error.message}` };
   }
 }
 
-async function waitForLogin(page, config) {
-  let success = false;
+function startCookieListener(browser, config) {
+  let latestCookie = "";
+  const sessions = [];
+
+  async function attachToPage(page) {
+    try {
+      const client = await page.createCDPSession();
+      await client.send("Network.enable");
+      sessions.push(client);
+
+      client.on("Network.requestWillBeSentExtraInfo", (params) => {
+        const cookie = (params.headers || {})["cookie"] || (params.headers || {})["Cookie"] || "";
+        if (cookie && cookie.includes("user_session")) {
+          latestCookie = cookie;
+        }
+      });
+
+      client.on("Network.requestWillBeSent", (params) => {
+        const url = params.request.url || "";
+        if (url.includes(config.domain)) {
+          const cookie =
+            (params.request.headers || {})["cookie"] ||
+            (params.request.headers || {})["Cookie"] ||
+            "";
+          if (cookie && cookie.includes("user_session")) {
+            latestCookie = cookie;
+          }
+        }
+      });
+    } catch {}
+  }
+
+  (async () => {
+    try {
+      const pages = await browser.pages();
+      for (const p of pages) {
+        await attachToPage(p);
+      }
+    } catch {}
+  })();
+
+  browser.on("targetcreated", async (target) => {
+    if (target.type() === "page") {
+      try {
+        const p = await target.page();
+        if (p) await attachToPage(p);
+      } catch {}
+    }
+  });
+
+  return {
+    getCookie() {
+      return latestCookie;
+    },
+    async stop() {
+      for (const s of sessions) {
+        await s.detach().catch(() => {});
+      }
+    },
+  };
+}
+
+async function waitForValidCookie(browser, config, listener) {
   const startedAt = Date.now();
   const timeout = Number(config.timeout || 300000);
 
   const checkOnce = async () => {
-    const browserCookies = await getCookiesFromBrowser(page, config.domain);
-    const mergedCookies = mergeCookieSources([browserCookies, loadMergedCookieString(config)]);
-    const result = await verifyLoginWithCookie(mergedCookies, config);
-    console.log(`   检测结果: ${result.reason}`);
-    if (result.valid) {
-      success = true;
+    const cookie = listener.getCookie();
+    if (!cookie) {
+      return { valid: false, reason: "no_cookie_captured" };
     }
+    return await verifyWithFetch(cookie, config);
   };
 
   const manualVerifier = startManualVerifier(`[${config.domain}] 按 Enter 立即检测登录态 > `, async () => {
     console.log("\n🔍 手动触发检测...");
-    await checkOnce();
+    const result = await checkOnce();
+    console.log(`   检测结果: ${result.reason}`);
   });
 
   try {
-    while (!success && Date.now() - startedAt < timeout) {
-      if (page.isClosed()) {
-        throw new Error("浏览器页面已关闭，无法继续等待登录");
+    while (Date.now() - startedAt < timeout) {
+      let browserAlive = true;
+      try {
+        const pages = await browser.pages();
+        if (pages.length === 0) {
+          browserAlive = false;
+        }
+      } catch {
+        browserAlive = false;
       }
-      await checkOnce();
-      if (success) {
-        return true;
+
+      const result = await checkOnce();
+      console.log(`   检测结果: ${result.reason}`);
+      if (result.valid) {
+        return listener.getCookie();
       }
+
+      if (!browserAlive) {
+        console.log("⚠️  浏览器已关闭，最终 Cookie 验证未通过");
+        return null;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   } finally {
     manualVerifier.stop();
   }
 
-  return success;
+  return null;
 }
 
 async function main() {
@@ -348,63 +488,75 @@ async function main() {
   console.log("");
 
   let browser;
+  let listener;
   try {
-    browser = await puppeteer.launch({
-      headless: false,
-      defaultViewport: null,
-      args: ["--start-maximized", "--no-sandbox", "--disable-setuid-sandbox"],
-    });
+    browser = await launchBrowser(puppeteer, config);
 
-    const page = await browser.newPage();
-    page.on("framenavigated", (frame) => {
-      if (frame === page.mainFrame()) {
-        console.log(`📍 ${frame.url()}`);
+    listener = startCookieListener(browser, config);
+
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const pages = await browser.pages();
+    const page =
+      pages.find((p) => {
+        try {
+          return p.url().includes(config.domain);
+        } catch {
+          return false;
+        }
+      }) || pages[0];
+    if (page) {
+      page.on("framenavigated", (frame) => {
+        if (frame === page.mainFrame()) {
+          console.log(`📍 ${frame.url()}`);
+        }
+      });
+    }
+
+    const initialCookie = listener.getCookie();
+    let finalCookies = null;
+
+    if (initialCookie) {
+      const check = await verifyWithFetch(initialCookie, config);
+      console.log(`   初始检测: ${check.reason}`);
+      if (check.valid) {
+        console.log("✅ 当前浏览器已有可用登录态");
+        finalCookies = initialCookie;
       }
-    });
+    }
 
-    await page.goto(config.url, { waitUntil: "networkidle2", timeout: 60000 });
-
-    const immediateCookies = mergeCookieSources([
-      await getCookiesFromBrowser(page, config.domain),
-      loadMergedCookieString(config),
-    ]);
-    const immediateCheck = await verifyLoginWithCookie(immediateCookies, config);
-
-    if (!immediateCheck.valid) {
+    if (!finalCookies) {
       console.log("\n🔐 请在浏览器中完成登录...");
-      const loggedIn = await waitForLogin(page, config);
-      if (!loggedIn) {
+      finalCookies = await waitForValidCookie(browser, config, listener);
+      if (!finalCookies) {
         throw new Error("等待登录超时");
       }
-    } else {
-      console.log("✅ 当前浏览器已有可用登录态");
     }
 
-    const finalCookies = normalizeCookieString(
-      mergeCookieSources([
-        await getCookiesFromBrowser(page, config.domain),
-        loadMergedCookieString(config),
-      ]),
-    );
-    const finalCheck = await verifyLoginWithCookie(finalCookies, config);
-    if (!finalCheck.valid) {
-      throw new Error(`登录完成后校验失败: ${finalCheck.reason}`);
-    }
+    finalCookies = normalizeCookieString(finalCookies);
 
     printCookieSummary(finalCookies, config);
     ensureDir(config.outputFile);
     fs.writeFileSync(config.outputFile, finalCookies);
     console.log(`\n✅ Cookie 已保存到 ${config.outputFile}`);
   } finally {
+    if (listener) {
+      await listener.stop();
+    }
     if (browser) {
+      const chromeProcess = browser._chromeProcess;
       try {
-        const browserProcess = browser.process();
-        if (browserProcess) {
-          browserProcess.kill("SIGKILL");
-        } else {
-          await browser.close();
-        }
+        await browser.disconnect();
       } catch {}
+      if (chromeProcess) {
+        try {
+          chromeProcess.kill("SIGTERM");
+        } catch {}
+        await new Promise((r) => setTimeout(r, 500));
+        try {
+          chromeProcess.kill("SIGKILL");
+        } catch {}
+      }
     }
   }
 }
