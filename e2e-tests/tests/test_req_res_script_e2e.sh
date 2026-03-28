@@ -121,9 +121,6 @@ start_proxy() {
         exit 1
     fi
 
-    echo "[e2e] Building bifrost (release)..." >>"$PROXY_LOG_FILE"
-    (cd "$PROJECT_DIR" && cargo build --release --bin bifrost) >>"$PROXY_LOG_FILE" 2>&1
-
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
         exit 1

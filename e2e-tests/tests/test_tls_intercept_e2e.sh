@@ -175,10 +175,6 @@ start_proxy() {
     local rules="$1"
     local extra_args="$2"
     
-    log_info "Building proxy..."
-    cd "$PROJECT_ROOT"
-    cargo build --release --bin bifrost 2>/dev/null
-    
     log_info "Starting proxy on port $PROXY_PORT..."
     log_info "Rules: $rules"
     log_info "Extra args: $extra_args"

@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ID="${TEST_ID:-}"
 export TEST_ID
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -66,7 +68,7 @@ start_bifrost() {
     cd "$repo_dir" || return 1
 
     SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-        cargo run --bin bifrost -- -p "$PROXY_PORT" start --skip-cert-check >"$BIFROST_LOG_FILE" 2>&1 &
+        "$BIFROST_BIN" -p "$PROXY_PORT" start --skip-cert-check >"$BIFROST_LOG_FILE" 2>&1 &
     BIFROST_PID=$!
 
     local max_wait=180

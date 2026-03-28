@@ -17,6 +17,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 E2E_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BIFROST_BIN="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/target/release/bifrost"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-9900}"
@@ -128,15 +129,7 @@ check_deps() {
 }
 
 build_proxy() {
-    log_info "Building bifrost proxy..."
-    cd "$ROOT_DIR"
-
-    if ! cargo build --bin bifrost --release 2>&1; then
-        log_error "Failed to build bifrost"
-        exit 1
-    fi
-
-    log_success "Build completed"
+    :
 }
 
 start_mock_server() {
@@ -167,11 +160,9 @@ start_mock_server() {
 start_proxy() {
     log_info "Starting bifrost proxy on port $PROXY_PORT with debug logging..."
 
-    cd "$ROOT_DIR"
-
     BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
     RUST_LOG=debug \
-    cargo run --bin bifrost --release -- \
+    "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         -l debug \
         start \

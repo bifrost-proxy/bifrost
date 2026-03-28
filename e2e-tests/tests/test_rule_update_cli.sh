@@ -20,8 +20,7 @@ build_bifrost() {
         return 0
     fi
 
-    cd "${PROJECT_DIR}"
-    cargo build --release --bin bifrost
+    return 0
 }
 
 assert_contains() {

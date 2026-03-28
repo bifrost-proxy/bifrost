@@ -42,7 +42,7 @@ build_bifrost() {
     if [[ -f "$BIFROST_BIN" ]] && [[ "${SKIP_BUILD:-false}" == "true" ]]; then
         return 0
     fi
-    (cd "$PROJECT_DIR" && cargo build --release --bin bifrost) || return 1
+    return 0
 }
 
 setup_env() {

@@ -2,6 +2,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_DIR="$SCRIPT_DIR/.."
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 
 PROXY_PORT="${PROXY_PORT:-18889}"
 PROXY_HOST="127.0.0.1"
@@ -82,14 +84,7 @@ start_proxy() {
         return 1
     fi
 
-    log_info "Building bifrost binary (may take a while on first run)..."
-    RUST_LOG=info cargo build --bin bifrost > "$DATA_DIR/build.log" 2>&1 || {
-        log_fail "Failed to build bifrost"
-        cat "$DATA_DIR/build.log"
-        return 1
-    }
-
-    RUST_LOG=info cargo run --bin bifrost -- \
+    RUST_LOG=info "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         start --unsafe-ssl \
         > "$DATA_DIR/proxy.log" 2>&1 &

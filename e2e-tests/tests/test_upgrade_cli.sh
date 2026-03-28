@@ -77,17 +77,12 @@ check_dependencies() {
 }
 
 build_bifrost() {
-    header "编译 Bifrost"
+    header "检查 Bifrost 二进制"
 
-    if [[ -f "$BIFROST_BIN" ]] && [[ "$SKIP_BUILD" == "true" ]]; then
-        info "跳过编译 (--no-build)"
-        return
+    if [[ ! -f "$BIFROST_BIN" ]]; then
+        error "二进制文件不存在: $BIFROST_BIN"
+        exit 1
     fi
-
-    info "编译 bifrost..."
-    cd "$PROJECT_DIR"
-    cargo build --release --bin bifrost 2>&1 | tail -5
-    echo -e "${GREEN}✓${NC} 编译完成"
 }
 
 setup_test_data_dir() {

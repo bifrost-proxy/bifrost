@@ -56,14 +56,6 @@ record_result() {
 }
 
 start_bifrost() {
-    if [[ ! -x "$BIFROST_BIN" ]]; then
-        echo "[INFO] Building bifrost (release)..."
-        (cd "$ROOT_DIR" && SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost) || {
-            echo "[FAIL] Failed to build bifrost"
-            exit 1
-        }
-    fi
-
     mkdir -p "$TEST_DATA_DIR"
 
     echo "[INFO] Starting bifrost on port $PROXY_PORT with data dir $TEST_DATA_DIR"

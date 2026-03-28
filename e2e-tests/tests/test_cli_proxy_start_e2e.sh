@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 
 PROXY_PORT="${PROXY_PORT:-18889}"
-BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
+BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 TEST_DATA_DIR=""
 TEST_HOME=""
 PROXY_PID=""
@@ -32,7 +32,7 @@ build_bifrost() {
     if [[ -f "$BIFROST_BIN" ]] && [[ "${SKIP_BUILD:-false}" == "true" ]]; then
         return 0
     fi
-    (cd "$PROJECT_DIR" && cargo build --bin bifrost) || return 1
+    return 0
 }
 
 start_proxy() {

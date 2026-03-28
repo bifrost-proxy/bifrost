@@ -3,6 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-}"
@@ -108,13 +109,11 @@ start_wss_server() {
 }
 
 start_bifrost() {
-    (cd "$ROOT_DIR" && SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost)
-
     BIFROST_DATA_DIR="$(mktemp -d)"
     export BIFROST_DATA_DIR
 
     local log_file="$BIFROST_DATA_DIR/proxy.log"
-    (cd "$ROOT_DIR" && SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- -p "$PROXY_PORT" start --skip-cert-check --unsafe-ssl > "$log_file" 2>&1) &
+    BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" start --skip-cert-check --unsafe-ssl > "$log_file" 2>&1 &
     BIFROST_PID=$!
     sleep 1
     if ! kill -0 "$BIFROST_PID" 2>/dev/null; then

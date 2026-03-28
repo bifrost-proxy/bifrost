@@ -28,7 +28,7 @@ ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 SSE_PROXY="http://${PROXY_HOST}:${PROXY_PORT}"
 SSE_TARGET="http://${SSE_HOST}:${SSE_PORT}"
-BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
+BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 BIFROST_DATA_DIR=""
 BIFROST_PID=""
 SSE_SERVER_PID=""
@@ -92,8 +92,6 @@ start_sse_server() {
 }
 
 start_bifrost() {
-    (cd "$PROJECT_DIR" && cargo build --bin bifrost >/dev/null) || return 1
-
     BIFROST_DATA_DIR="$(mktemp -d "${PROJECT_DIR}/.bifrost-e2e-openai-search.XXXXXX")"
     BIFROST_LOG_FILE="$(mktemp)"
     export BIFROST_DATA_DIR

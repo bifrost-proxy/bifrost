@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
+BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8080}"
@@ -78,7 +79,7 @@ EOF
     local rules_file="$E2E_DIR/test_data/memory_pressure_load_rules.txt"
     RUST_LOG=info,bifrost_proxy=info \
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
-    cargo run --bin bifrost --manifest-path "$PROJECT_DIR/Cargo.toml" -- \
+    "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         start \
         --intercept \

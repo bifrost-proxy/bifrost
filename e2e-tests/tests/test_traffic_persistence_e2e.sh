@@ -13,7 +13,8 @@ ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 
 TEST_DATA_DIR="${TEST_DATA_DIR:-./.bifrost-persistence-test}"
 MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3198}"
-BIFROST_BIN="${BIFROST_BIN:-cargo run --bin bifrost --}"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 
 TESTS_RUN=0
 TESTS_PASSED=0

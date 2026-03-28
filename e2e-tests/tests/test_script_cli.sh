@@ -60,12 +60,6 @@ build_bifrost() {
         return
     fi
 
-    info "编译 bifrost..."
-    cd "$PROJECT_DIR"
-    cargo build --release --bin bifrost >/tmp/bifrost-script-cli-build.log 2>&1 || {
-        tail -50 /tmp/bifrost-script-cli-build.log
-        exit 1
-    }
     echo -e "${GREEN}✓${NC} 编译完成"
 }
 

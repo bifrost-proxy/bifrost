@@ -20,6 +20,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
+BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
@@ -141,7 +142,7 @@ start_proxy() {
     
     RUST_LOG=info,bifrost_proxy=debug \
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
-    cargo run --bin bifrost --manifest-path "$PROJECT_DIR/Cargo.toml" -- \
+    "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
         start \
         --unsafe-ssl \

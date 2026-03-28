@@ -3,6 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIFROST_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 pick_free_port() {
@@ -102,17 +103,11 @@ start_sse_server() {
 }
 
 start_bifrost() {
-    log_info "Building bifrost binary..."
-    (cd "$SCRIPT_DIR/../.." && cargo build --bin bifrost) || {
-        log_fail "Failed to build bifrost"
-        return 1
-    }
-
     log_info "Starting Bifrost proxy on port $PROXY_PORT..."
     BIFROST_DATA_DIR="$(mktemp -d)"
     export BIFROST_DATA_DIR
 
-    (cd "$SCRIPT_DIR/../.." && BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p "$PROXY_PORT" --skip-cert-check --unsafe-ssl > /dev/null 2>&1) &
+    BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" start -p "$PROXY_PORT" --skip-cert-check --unsafe-ssl > /dev/null 2>&1 &
     BIFROST_PID=$!
 
     local max_wait=60

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIFROST_BIN="${BIFROST_BIN:-$(cd "$SCRIPT_DIR/../.." && pwd)/target/release/bifrost}"
 source "$SCRIPT_DIR/../test_utils/ws_client.sh"
 source "$SCRIPT_DIR/../test_utils/sse_client.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
@@ -231,7 +232,7 @@ start_bifrost() {
     cd "$rust_dir" || return 1
 
     SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-        cargo run --bin bifrost -- start -p "$PROXY_PORT" --skip-cert-check --unsafe-ssl \
+        "$BIFROST_BIN" start -p "$PROXY_PORT" --skip-cert-check --unsafe-ssl \
         >"$BIFROST_LOG_FILE" 2>&1 &
     BIFROST_PID=$!
     STARTED_BIFROST=1

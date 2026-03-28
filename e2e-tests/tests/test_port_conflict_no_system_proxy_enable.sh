@@ -4,6 +4,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+BIFROST_BIN="${BIFROST_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost}"
 
 source "${SCRIPT_DIR}/../test_utils/assert.sh"
 
@@ -43,10 +44,9 @@ main() {
     local output
     set +e
     output=$(
-        cd "${PROJECT_DIR}" && \
         BIFROST_DATA_DIR="${TMP_DIR}" \
         RUST_LOG=info \
-        cargo run --quiet --bin bifrost -- start -p "${port}" --system-proxy --skip-cert-check --unsafe-ssl 2>&1
+        "$BIFROST_BIN" start -p "${port}" --system-proxy --skip-cert-check --unsafe-ssl 2>&1
     )
     local exit_code=$?
     set -e

@@ -3,6 +3,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 
 PROXY_PORT="${PROXY_PORT:-18888}"
 ADMIN_PORT="$PROXY_PORT"
@@ -33,7 +34,7 @@ start_bifrost() {
     echo "Starting Bifrost proxy on port $PROXY_PORT..."
     cd "$ROOT_DIR"
 
-    BIFROST_DATA_DIR="./.bifrost-e2e-test" cargo run --release --bin bifrost -- start -p "$PROXY_PORT" --unsafe-ssl --skip-cert-check > /tmp/bifrost_e2e.log 2>&1 &
+    BIFROST_DATA_DIR="./.bifrost-e2e-test" "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --skip-cert-check > /tmp/bifrost_e2e.log 2>&1 &
     BIFROST_PID=$!
 
     local timeout=420
