@@ -19,7 +19,7 @@ EXTERNAL_TEST_URL=${EXTERNAL_TEST_URL:-"https://www.google.com/"}
 ONLY_TEST=${ONLY_TEST:-""}
 CURL_COMMON_ARGS=(--connect-timeout 5 --max-time 15)
 
-export BIFROST_DATA_DIR="$PROJECT_ROOT/.bifrost_test"
+export BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-$PROJECT_ROOT/.bifrost_test}"
 mkdir -p "$BIFROST_DATA_DIR"
 RULES_DIR="$PROJECT_ROOT/e2e-tests/rules/tls"
 

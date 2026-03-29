@@ -78,9 +78,24 @@ start_proxy() {
     log_info "Starting HTTP echo server on port $ECHO_PORT..."
     python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$ECHO_PORT" > "$DATA_DIR/echo.log" 2>&1 &
     ECHO_PID=$!
-    sleep 1
-    if ! kill -0 "$ECHO_PID" 2>/dev/null; then
-        log_fail "Failed to start HTTP echo server"
+
+    local echo_wait=0
+    local echo_max_wait=30
+    while [[ $echo_wait -lt $echo_max_wait ]]; do
+        if ! kill -0 "$ECHO_PID" 2>/dev/null; then
+            log_fail "Echo server process exited during startup"
+            cat "$DATA_DIR/echo.log"
+            return 1
+        fi
+        if curl -sf --connect-timeout 2 --max-time 5 "http://127.0.0.1:${ECHO_PORT}/health" >/dev/null 2>&1; then
+            log_info "Echo server is ready on port $ECHO_PORT"
+            break
+        fi
+        sleep 1
+        echo_wait=$((echo_wait + 1))
+    done
+    if [[ $echo_wait -ge $echo_max_wait ]]; then
+        log_fail "Echo server not responding after ${echo_max_wait}s"
         cat "$DATA_DIR/echo.log"
         return 1
     fi

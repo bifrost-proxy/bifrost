@@ -146,7 +146,7 @@ start_bifrost() {
     echo "Starting Bifrost proxy on port $PROXY_PORT..."
     cd "$ROOT_DIR"
 
-    BIFROST_DATA_DIR="./.bifrost-e2e-test" \
+    BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-./.bifrost-e2e-test}" \
         "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --skip-cert-check > /tmp/bifrost_e2e.log 2>&1 &
     BIFROST_PID=$!
     

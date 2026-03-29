@@ -499,6 +499,147 @@ should_skip_full_shell_test() {
   esac
 }
 
+run_shell_tests_parallel() {
+  local max_jobs="$1"
+  local shell_base_port="${BIFROST_E2E_SHELL_BASE_PORT:-15000}"
+  local port_step=10
+
+  local serial_tests=()
+  local parallel_tests=()
+
+  local MOCK_MANAGING_TESTS=(
+    "test_header_replace.sh"
+    "test_res_body_override_large.sh"
+    "test_body_replace.sh"
+    "test_large_body_protection.sh"
+    "test_memory_pressure_e2e.sh"
+    "test_req_res_script_e2e.sh"
+    "test_socks5_tls_rules.sh"
+    "test_http3_e2e.sh"
+    "test_client_process_transport_attribution.sh"
+    "test_rule_semantics_regressions.sh"
+    "test_metrics_hosts_apps_admin_api.sh"
+  )
+
+  for script_name in "${shell_tests[@]}"; do
+    if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
+      skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
+      continue
+    fi
+
+    local is_mock_managing=0
+    for mm in "${MOCK_MANAGING_TESTS[@]}"; do
+      if [[ "$script_name" == "$mm" ]]; then
+        is_mock_managing=1
+        break
+      fi
+    done
+
+    if [[ "$is_mock_managing" -eq 1 ]]; then
+      serial_tests+=("$script_name")
+    else
+      parallel_tests+=("$script_name")
+    fi
+  done
+
+  if [[ ${#parallel_tests[@]} -gt 0 ]]; then
+    header "Running ${#parallel_tests[@]} safe shell tests in parallel (jobs=$max_jobs)"
+    _SHELL_BATCH_LIST=("${parallel_tests[@]}")
+    run_shell_batch_parallel "$max_jobs" "$shell_base_port" "$port_step"
+  fi
+
+  if [[ ${#serial_tests[@]} -gt 0 ]]; then
+    header "Running ${#serial_tests[@]} mock-managing shell tests serially"
+    for script_name in "${serial_tests[@]}"; do
+      log_info "Queue serial shell test: $script_name"
+      run_and_capture "shell:${script_name}" bash "$E2E_DIR/tests/$script_name"
+    done
+  fi
+}
+
+run_shell_batch_parallel() {
+  local max_jobs="$1"
+  local base_port="$2"
+  local port_step="$3"
+
+  local pids=()
+  local pid_scripts=()
+  local pid_logs=()
+  local pid_starts=()
+  local running=0
+  local completed=0
+  local next_index=0
+  local total=${#_SHELL_BATCH_LIST[@]}
+
+  while [[ $completed -lt $total ]]; do
+    while [[ $running -lt $max_jobs && $next_index -lt $total ]]; do
+      local script_name="${_SHELL_BATCH_LIST[$next_index]}"
+
+      local shell_port=$((base_port + next_index * port_step))
+      local shell_admin_port="$shell_port"
+      local shell_data_dir
+      shell_data_dir="$(mktemp -d)"
+      local log_slug
+      log_slug="$(printf 'shell_%s' "$script_name" | tr ' /:.' '____' | tr -cd '[:alnum:]_.-')"
+      local log_file="$REPORT_DIR/${log_slug}.log"
+      local start_ts
+      start_ts="$(date +%s)"
+
+      log_info "Starting shell test $script_name (port=$shell_port, index=$next_index)"
+
+      (
+        ADMIN_PORT="$shell_admin_port" \
+        ADMIN_HOST="127.0.0.1" \
+        PROXY_PORT="$shell_port" \
+        PROXY_HOST="127.0.0.1" \
+        BIFROST_DATA_DIR="$shell_data_dir" \
+        SKIP_BUILD=true \
+        bash "$E2E_DIR/tests/$script_name"
+      ) > "$log_file" 2>&1 &
+
+      pids[$next_index]=$!
+      pid_scripts[$next_index]="$script_name"
+      pid_logs[$next_index]="$log_file"
+      pid_starts[$next_index]="$start_ts"
+      running=$((running + 1))
+      next_index=$((next_index + 1))
+    done
+
+    for i in "${!pids[@]}"; do
+      if [[ -n "${pids[$i]:-}" ]] && ! kill -0 "${pids[$i]}" 2>/dev/null; then
+        local exit_code=0
+        wait "${pids[$i]}" 2>/dev/null || exit_code=$?
+        local end_ts
+        end_ts="$(date +%s)"
+        local dur=$((end_ts - pid_starts[$i]))
+        local sname="${pid_scripts[$i]}"
+        local slog="${pid_logs[$i]}"
+
+        if [[ "$exit_code" -eq 0 ]]; then
+          register_suite "shell:${sname}" "passed" "$slog" "" "$dur"
+          echo "[PASS] shell:${sname} (${dur}s)"
+        else
+          local reason
+          reason="$(extract_failure_reason "$slog")"
+          reason="$(trim_line "${reason:-unknown failure}")"
+          register_suite "shell:${sname}" "failed" "$slog" "$reason" "$dur"
+          echo "[FAIL] shell:${sname} (${dur}s)"
+          echo "       reason: $reason"
+          echo "       log: $slog"
+        fi
+
+        unset 'pids[i]'
+        completed=$((completed + 1))
+        running=$((running - 1))
+      fi
+    done
+
+    if [[ $running -gt 0 ]]; then
+      sleep 0.2
+    fi
+  done
+}
+
 ensure_bifrost_shell_shim() {
   local profile_dir="$1"
   local binary_dir="$ROOT_DIR/target/$profile_dir"
@@ -552,6 +693,26 @@ if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   fi
 fi
 
+RUNNER_BG_PID=""
+RUNNER_LOG_FILE=""
+RUNNER_STATUS_FILE=""
+RUNNER_START_TS=""
+if [[ "$RUN_RUNNER" -eq 1 ]]; then
+  header "Starting bifrost-e2e custom runner (background)"
+  RUNNER_JOBS="${BIFROST_E2E_RUNNER_JOBS:-1}"
+  RUNNER_LOG_FILE="$REPORT_DIR/runner__bifrost-e2e.log"
+  RUNNER_STATUS_FILE="$REPORT_DIR/runner__bifrost-e2e.status"
+  RUNNER_START_TS="$(date +%s)"
+  (
+    set +e
+    "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" \
+      > "$RUNNER_LOG_FILE" 2>&1
+    echo "$?" > "$RUNNER_STATUS_FILE"
+  ) &
+  RUNNER_BG_PID=$!
+  log_info "bifrost-e2e runner started in background (PID: $RUNNER_BG_PID, jobs: $RUNNER_JOBS)"
+fi
+
 if [[ "$RUN_RULES" -eq 1 ]]; then
   header "Running rule fixture E2E suite"
   if [[ "$release_build_ok" -eq 1 ]]; then
@@ -575,14 +736,20 @@ if [[ "$RUN_SHELL" -eq 1 ]]; then
 
   if [[ "$shell_build_ok" -eq 1 ]]; then
     export SKIP_BUILD=true
-    for script_name in "${shell_tests[@]}"; do
-      log_info "Queue shell test: $script_name"
-      if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
-        skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
-        continue
-      fi
-      run_and_capture "shell:${script_name}" bash "$E2E_DIR/tests/$script_name"
-    done
+    SHELL_JOBS="${BIFROST_E2E_SHELL_JOBS:-1}"
+
+    if [[ "$SHELL_JOBS" -gt 1 ]]; then
+      run_shell_tests_parallel "$SHELL_JOBS"
+    else
+      for script_name in "${shell_tests[@]}"; do
+        log_info "Queue shell test: $script_name"
+        if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
+          skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
+          continue
+        fi
+        run_and_capture "shell:${script_name}" bash "$E2E_DIR/tests/$script_name"
+      done
+    fi
   else
     for script_name in "${shell_tests[@]}"; do
       log_info "Skip shell test without execution: $script_name"
@@ -595,11 +762,25 @@ if [[ "$RUN_SHELL" -eq 1 ]]; then
   fi
 fi
 
-if [[ "$RUN_RUNNER" -eq 1 ]]; then
-  header "Running bifrost-e2e custom runner"
-  run_and_capture \
-    "runner:bifrost-e2e" \
-    "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT"
+if [[ -n "$RUNNER_BG_PID" ]]; then
+  header "Waiting for bifrost-e2e runner to complete"
+  RUNNER_END_TS=""
+  if wait "$RUNNER_BG_PID" 2>/dev/null; then
+    RUNNER_END_TS="$(date +%s)"
+    RUNNER_DURATION=$((RUNNER_END_TS - RUNNER_START_TS))
+    register_suite "runner:bifrost-e2e" "passed" "$RUNNER_LOG_FILE" "" "$RUNNER_DURATION"
+    echo "[PASS] runner:bifrost-e2e (${RUNNER_DURATION}s)"
+  else
+    RUNNER_END_TS="$(date +%s)"
+    RUNNER_DURATION=$((RUNNER_END_TS - RUNNER_START_TS))
+    RUNNER_REASON="$(extract_failure_reason "$RUNNER_LOG_FILE")"
+    RUNNER_REASON="$(trim_line "${RUNNER_REASON:-unknown failure}")"
+    register_suite "runner:bifrost-e2e" "failed" "$RUNNER_LOG_FILE" "$RUNNER_REASON" "$RUNNER_DURATION"
+    echo "[FAIL] runner:bifrost-e2e (${RUNNER_DURATION}s)"
+    echo "       reason: $RUNNER_REASON"
+    echo "       log: $RUNNER_LOG_FILE"
+  fi
+  RUNNER_BG_PID=""
 fi
 
 if [[ "$RUN_UI" -eq 1 ]]; then

@@ -30,6 +30,13 @@ struct Args {
     )]
     port: u16,
 
+    #[arg(
+        short,
+        long,
+        help = "Number of concurrent test workers (default: 1, set >1 for parallel execution)"
+    )]
+    jobs: Option<usize>,
+
     #[arg(short, long, help = "Verbose output")]
     verbose: bool,
 }
@@ -43,8 +50,18 @@ async fn main() -> ExitCode {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let concurrency = args
+        .jobs
+        .or_else(|| {
+            std::env::var("BIFROST_E2E_RUNNER_JOBS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(1);
+
     let reporter = Reporter::new(args.verbose);
-    let mut runner = TestRunner::new(args.port, reporter);
+    let mut runner = TestRunner::new(args.port, reporter).with_concurrency(concurrency);
 
     runner.load_all_tests();
 
@@ -71,6 +88,10 @@ async fn main() -> ExitCode {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║           Bifrost E2E Test Runner                            ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+    if concurrency > 1 {
+        println!("  Concurrency: {} workers\n", concurrency);
+    }
 
     let results = runner.run_all().await;
 

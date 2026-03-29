@@ -6,14 +6,16 @@ use crate::tests;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
-pub type TestFn = Box<
+pub type TestFn = Arc<
     dyn Fn(ProxyClient) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
 pub type StandaloneTestFn =
-    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TestStatus {
@@ -73,11 +75,13 @@ impl From<Result<(), String>> for TestResult {
     }
 }
 
+#[derive(Clone)]
 pub enum TestCaseType {
     Standard { rules: Vec<String>, test_fn: TestFn },
     Standalone { test_fn: StandaloneTestFn },
 }
 
+#[derive(Clone)]
 pub struct TestCase {
     pub name: String,
     pub description: String,
@@ -97,7 +101,7 @@ impl TestCase {
             category: category.to_string(),
             test_type: TestCaseType::Standard {
                 rules: rules.iter().map(|s| s.to_string()).collect(),
-                test_fn: Box::new(move |client| Box::pin(test_fn(client))),
+                test_fn: Arc::new(move |client| Box::pin(test_fn(client))),
             },
         }
     }
@@ -112,7 +116,7 @@ impl TestCase {
             description: description.to_string(),
             category: category.to_string(),
             test_type: TestCaseType::Standalone {
-                test_fn: Box::new(move || Box::pin(test_fn())),
+                test_fn: Arc::new(move || Box::pin(test_fn())),
             },
         }
     }
@@ -128,6 +132,7 @@ impl TestCase {
 pub struct TestRunner {
     tests: Vec<TestCase>,
     base_port: u16,
+    concurrency: usize,
     reporter: Reporter,
 }
 
@@ -136,8 +141,14 @@ impl TestRunner {
         Self {
             tests: Vec::new(),
             base_port,
+            concurrency: 1,
             reporter,
         }
+    }
+
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
     }
 
     pub fn load_all_tests(&mut self) {
@@ -175,14 +186,23 @@ impl TestRunner {
     }
 
     pub async fn run_all(&mut self) -> Vec<TestResult> {
+        let total = self.tests.len();
+        self.reporter.start(total);
+
+        if self.concurrency <= 1 {
+            return self.run_all_serial().await;
+        }
+
+        self.run_all_parallel(total).await
+    }
+
+    async fn run_all_serial(&mut self) -> Vec<TestResult> {
         let mut results = Vec::new();
         let total = self.tests.len();
 
-        self.reporter.start(total);
-
         for (i, test) in self.tests.iter().enumerate() {
             let port = self.base_port + (i as u16);
-            let result = self.run_single_test(test, port).await;
+            let result = run_single_test(test, port).await;
             self.reporter.report_test(&result, i + 1, total);
             results.push(result);
         }
@@ -191,81 +211,143 @@ impl TestRunner {
         results
     }
 
-    async fn run_single_test(&self, test: &TestCase, port: u16) -> TestResult {
-        let start = Instant::now();
+    async fn run_all_parallel(&mut self, total: usize) -> Vec<TestResult> {
+        let semaphore = Arc::new(Semaphore::new(self.concurrency));
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        match &test.test_type {
-            TestCaseType::Standard { rules, test_fn } => {
-                let mut owned_rules = rules.clone();
-                let _httpbin = if rules.iter().any(|rule| rule.contains("httpbin.org")) {
-                    let mock = HttpbinMockServer::start().await;
-                    let mut injected = mock.http_rules();
-                    injected.append(&mut owned_rules);
-                    owned_rules = injected;
-                    Some(mock)
-                } else {
-                    None
-                };
+        let mut handles = Vec::with_capacity(total);
 
-                let rules: Vec<&str> = owned_rules.iter().map(|s| s.as_str()).collect();
+        for (i, test) in self.tests.iter().enumerate() {
+            let port = self.base_port + (i as u16);
+            let sem = semaphore.clone();
+            let completed = completed.clone();
+            let test = test.clone();
 
-                let proxy = match ProxyInstance::start(port, rules).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return TestResult {
-                            name: test.name.clone(),
-                            category: test.category.clone(),
-                            status: TestStatus::Failed,
-                            duration: start.elapsed(),
-                            error: Some(format!("Failed to start proxy: {}", e)),
-                        };
+            let handle = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let result = run_single_test(&test, port).await;
+
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                tracing::info!(
+                    "[{}/{}] {} {} ({}ms)",
+                    done,
+                    total,
+                    match result.status {
+                        TestStatus::Passed => "✓",
+                        TestStatus::Failed => "✗",
+                        TestStatus::Skipped => "○",
+                    },
+                    result.name,
+                    result.duration.as_millis()
+                );
+                if result.status == TestStatus::Failed {
+                    if let Some(ref error) = result.error {
+                        tracing::error!("  FAIL: {} - {}", result.name, error);
                     }
-                };
-
-                let client = match ProxyClient::new(&proxy.proxy_url()) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return TestResult {
-                            name: test.name.clone(),
-                            category: test.category.clone(),
-                            status: TestStatus::Failed,
-                            duration: start.elapsed(),
-                            error: Some(format!("Failed to create client: {}", e)),
-                        };
-                    }
-                };
-
-                let result = (test_fn)(client).await;
-                let duration = start.elapsed();
-                let status = match &result {
-                    Ok(()) => TestStatus::Passed,
-                    Err(error) if error.starts_with("SKIPPED:") => TestStatus::Skipped,
-                    Err(_) => TestStatus::Failed,
-                };
-
-                TestResult {
-                    name: test.name.clone(),
-                    category: test.category.clone(),
-                    status,
-                    duration,
-                    error: result.err(),
                 }
+
+                result
+            });
+
+            handles.push(handle);
+        }
+
+        let mut results = Vec::with_capacity(total);
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => results.push(TestResult {
+                    name: "unknown".to_string(),
+                    category: "unknown".to_string(),
+                    status: TestStatus::Failed,
+                    duration: Duration::ZERO,
+                    error: Some(format!("Task panicked: {}", e)),
+                }),
             }
-            TestCaseType::Standalone { test_fn } => {
-                let result = (test_fn)().await;
-                let duration = start.elapsed();
-                let status = match &result {
-                    Ok(()) => TestStatus::Passed,
-                    Err(error) if error.starts_with("SKIPPED:") => TestStatus::Skipped,
-                    Err(_) => TestStatus::Failed,
-                };
-                TestResult {
-                    name: test.name.clone(),
-                    category: test.category.clone(),
-                    status,
-                    duration,
-                    error: result.err(),
+        }
+
+        for (i, result) in results.iter().enumerate() {
+            self.reporter.report_test(result, i + 1, total);
+        }
+        self.reporter.summary(&results);
+        results
+    }
+}
+
+async fn run_single_test(test: &TestCase, port: u16) -> TestResult {
+    let start = Instant::now();
+
+    match &test.test_type {
+        TestCaseType::Standard { rules, test_fn } => {
+            let mut owned_rules = rules.clone();
+            let _httpbin = if rules.iter().any(|rule| rule.contains("httpbin.org")) {
+                let mock = HttpbinMockServer::start().await;
+                let mut injected = mock.http_rules();
+                injected.append(&mut owned_rules);
+                owned_rules = injected;
+                Some(mock)
+            } else {
+                None
+            };
+
+            let rule_refs: Vec<&str> = owned_rules.iter().map(|s| s.as_str()).collect();
+
+            let proxy = match ProxyInstance::start(port, rule_refs).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return TestResult {
+                        name: test.name.clone(),
+                        category: test.category.clone(),
+                        status: TestStatus::Failed,
+                        duration: start.elapsed(),
+                        error: Some(format!("Failed to start proxy: {}", e)),
+                    };
                 }
+            };
+
+            let client = match ProxyClient::new(&proxy.proxy_url()) {
+                Ok(c) => c,
+                Err(e) => {
+                    return TestResult {
+                        name: test.name.clone(),
+                        category: test.category.clone(),
+                        status: TestStatus::Failed,
+                        duration: start.elapsed(),
+                        error: Some(format!("Failed to create client: {}", e)),
+                    };
+                }
+            };
+
+            let result = (test_fn)(client).await;
+            let duration = start.elapsed();
+            let status = match &result {
+                Ok(()) => TestStatus::Passed,
+                Err(error) if error.starts_with("SKIPPED:") => TestStatus::Skipped,
+                Err(_) => TestStatus::Failed,
+            };
+
+            TestResult {
+                name: test.name.clone(),
+                category: test.category.clone(),
+                status,
+                duration,
+                error: result.err(),
+            }
+        }
+        TestCaseType::Standalone { test_fn } => {
+            let result = (test_fn)().await;
+            let duration = start.elapsed();
+            let status = match &result {
+                Ok(()) => TestStatus::Passed,
+                Err(error) if error.starts_with("SKIPPED:") => TestStatus::Skipped,
+                Err(_) => TestStatus::Failed,
+            };
+            TestResult {
+                name: test.name.clone(),
+                category: test.category.clone(),
+                status,
+                duration,
+                error: result.err(),
             }
         }
     }
