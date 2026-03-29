@@ -318,46 +318,79 @@ run_and_capture() {
 
   start_ts="$(date +%s)"
   rm -f "$pipe_path"
-  mkfifo "$pipe_path"
   print_section "Starting ${name}"
   echo "Command : $(format_command "$@")"
   echo "Log file: $log_file"
 
-  stream_command_output "$name" "$pipe_path" "$log_file" &
-  stream_pid=$!
+  if is_windows; then
+    "$@" 2>&1 | tee "$log_file" | sed "s/^/[$name] /" &
+    command_pid=$!
+    log_info "${name} started with pid ${command_pid}"
 
-  "$@" >"$pipe_path" 2>&1 &
-  command_pid=$!
-  log_info "${name} started with pid ${command_pid}"
+    heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
+    heartbeat_pid=$!
 
-  heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
-  heartbeat_pid=$!
-
-  (
-    sleep "$suite_timeout"
-    if kill -0 "$command_pid" 2>/dev/null; then
-      echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
-      kill -TERM "$command_pid" 2>/dev/null || true
-      sleep 5
-      kill -9 "$command_pid" 2>/dev/null || true
-      if is_windows; then
+    (
+      sleep "$suite_timeout"
+      if kill -0 "$command_pid" 2>/dev/null; then
+        echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
+        kill -TERM "$command_pid" 2>/dev/null || true
+        sleep 5
+        kill -9 "$command_pid" 2>/dev/null || true
         kill_all_bifrost
       fi
-    fi
-  ) &
-  watchdog_pid=$!
+    ) &
+    watchdog_pid=$!
 
-  if wait "$command_pid"; then
-    status="passed"
-  else
-    command_status=$?
-    if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
-      status="failed"
-      reason="timed out after ${suite_timeout}s"
+    if wait "$command_pid"; then
+      status="passed"
     else
-      status="failed"
-      reason="$(extract_failure_reason "$log_file")"
-      reason="$(trim_line "${reason:-unknown failure}")"
+      command_status=$?
+      if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
+        status="failed"
+        reason="timed out after ${suite_timeout}s"
+      else
+        status="failed"
+        reason="$(extract_failure_reason "$log_file")"
+        reason="$(trim_line "${reason:-unknown failure}")"
+      fi
+    fi
+  else
+    mkfifo "$pipe_path"
+
+    stream_command_output "$name" "$pipe_path" "$log_file" &
+    stream_pid=$!
+
+    "$@" >"$pipe_path" 2>&1 &
+    command_pid=$!
+    log_info "${name} started with pid ${command_pid}"
+
+    heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
+    heartbeat_pid=$!
+
+    (
+      sleep "$suite_timeout"
+      if kill -0 "$command_pid" 2>/dev/null; then
+        echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
+        kill -TERM "$command_pid" 2>/dev/null || true
+        sleep 5
+        kill -9 "$command_pid" 2>/dev/null || true
+      fi
+    ) &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+      status="passed"
+    else
+      command_status=$?
+      if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
+        status="failed"
+        reason="timed out after ${suite_timeout}s"
+      else
+        status="failed"
+        reason="$(extract_failure_reason "$log_file")"
+        reason="$(trim_line "${reason:-unknown failure}")"
+      fi
     fi
   fi
 

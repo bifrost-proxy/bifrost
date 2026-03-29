@@ -83,7 +83,11 @@ else:
 check_tcp_port() {
     local host=$1
     local port=$2
-    nc -z "$host" "$port" >/dev/null 2>&1
+    if command -v nc &>/dev/null; then
+        nc -z "$host" "$port" >/dev/null 2>&1
+    else
+        (echo > /dev/tcp/"$host"/"$port") >/dev/null 2>&1
+    fi
 }
 
 wait_for_port_closed() {

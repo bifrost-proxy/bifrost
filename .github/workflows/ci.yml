@@ -382,6 +382,35 @@ jobs:
       - name: End-to-end tests
         shell: bash
         run: bash scripts/ci/run-e2e-platform.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo ""
+          for logfile in $(find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $logfile ==="
+            tail -100 "$logfile"
+            echo ""
+          done
+          echo "=== Reports Directory ==="
+          find e2e-tests/reports -type f 2>/dev/null | head -20
+          for report in $(find e2e-tests/reports -type f -name "*.txt" -o -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $report ==="
+            cat "$report"
+            echo ""
+          done
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.target }}
+          path: |
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+            e2e-tests/reports/
+          retention-days: 7
+          if-no-files-found: ignore
 
   bundle-desktop-macos:
     name: Bundle macOS (${{ matrix.target }})
@@ -539,7 +568,7 @@ jobs:
     name: E2E (${{ matrix.target }})
     needs: [build-desktop-windows]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -555,6 +584,7 @@ jobs:
       BIFROST_E2E_HTTP_RETRIES: "1"
       BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_RUNNER_JOBS: "8"
+      BIFROST_E2E_SUITE_TIMEOUT: "2700"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
@@ -580,6 +610,42 @@ jobs:
         with:
           name: bifrost-release-${{ matrix.target }}
           path: target/release
+      - name: Verify binary
+        shell: bash
+        run: |
+          echo "=== Downloaded files ==="
+          ls -la target/release/ || true
+          echo "=== Version check ==="
+          target/release/bifrost.exe --version 2>&1 || echo "bifrost.exe --version failed"
       - name: End-to-end tests
         shell: bash
         run: bash scripts/ci/run-e2e-platform.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo ""
+          for logfile in $(find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $logfile ==="
+            tail -100 "$logfile"
+            echo ""
+          done
+          echo "=== Reports Directory ==="
+          find e2e-tests/reports -type f 2>/dev/null | head -20
+          for report in $(find e2e-tests/reports -type f -name "*.txt" -o -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $report ==="
+            cat "$report"
+            echo ""
+          done
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.target }}
+          path: |
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+            e2e-tests/reports/
+          retention-days: 7
+          if-no-files-found: ignore

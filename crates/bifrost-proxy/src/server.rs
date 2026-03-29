@@ -963,6 +963,26 @@ async fn handle_http_connection(
     let io = TokioIo::new(stream);
     let client_process_cache = Arc::new(Mutex::new(None::<ClientProcess>));
     let client_process_resolution_started = Arc::new(AtomicBool::new(false));
+
+    if peer_addr.ip().is_loopback() {
+        let cache = Arc::clone(&client_process_cache);
+        let started = Arc::clone(&client_process_resolution_started);
+        tokio::spawn(async move {
+            let result = resolve_client_process_async_for_connection_with_retry(
+                &peer_addr,
+                &local_addr,
+                20,
+                50,
+            )
+            .await;
+            if let Some(process) = result {
+                started.store(true, Ordering::Release);
+                if let Ok(mut guard) = cache.lock() {
+                    *guard = Some(process);
+                }
+            }
+        });
+    }
     let http1_max_header_size = if let Some(ref state) = admin_state {
         if let Some(ref config_manager) = state.config_manager {
             config_manager.config().await.server.http1_max_header_size
@@ -1144,6 +1164,23 @@ async fn handle_request(
         if let Some(ref client_process) = client_process {
             if let Ok(mut cache) = client_process_cache.lock() {
                 *cache = Some(client_process.clone());
+            }
+        } else if let Some(state) = admin_state.clone() {
+            let should_spawn = !client_process_resolution_started.swap(true, Ordering::AcqRel);
+            if should_spawn {
+                let record_id = ctx.id_str();
+                let client_process_cache = Arc::clone(&client_process_cache);
+                spawn_async_process_resolver(
+                    peer_addr,
+                    local_addr,
+                    record_id.to_string(),
+                    move |id, process| {
+                        if let Ok(mut cache) = client_process_cache.lock() {
+                            *cache = Some(process.clone());
+                        }
+                        state.update_client_process(&id, process.name, process.pid, process.path);
+                    },
+                );
             }
         }
         client_process

@@ -36,7 +36,12 @@ http_proxy_mode() {
 }
 
 http_timeout() {
-    echo "${TIMEOUT:-10}"
+    local base="${TIMEOUT:-10}"
+    if command -v is_windows &>/dev/null && is_windows && [[ "$base" -lt 15 ]]; then
+        echo "15"
+    else
+        echo "$base"
+    fi
 }
 
 http_retry_count() {
@@ -89,7 +94,7 @@ perform_curl_with_retries() {
             HTTP_STATUS="000"
         fi
 
-        HTTP_HEADERS=$(cat "$_temp_headers_file")
+        HTTP_HEADERS=$(cat "$_temp_headers_file" | tr -d '\r')
         HTTP_BODY=$(cat "$_temp_body_file")
 
         if ! should_retry_request "$curl_exit" "$HTTP_STATUS" "$attempt" "$max_retries"; then

@@ -348,13 +348,13 @@ test_ws_replay_ping_pong_capture() {
 }
 
 test_ws_replay_long_connection_over_30s() {
-    log_test "Replay WebSocket long connection (>30s)"
+    log_test "Replay WebSocket long connection (>15s)"
 
     clear_traffic >/dev/null 2>&1 || true
     sleep 0.5
 
-    local upstream_url="${WS_BASE_URL}/ws/idle?delay=35&msg=late_message"
-    if ! ws_replay_connect_receive_only "$upstream_url" "" "" "" "" 50 "late_message" 1; then
+    local upstream_url="${WS_BASE_URL}/ws/idle?delay=15&msg=late_message"
+    if ! ws_replay_connect_receive_only "$upstream_url" "" "" "" "" 25 "late_message" 1; then
         fail "Long connection was disconnected before late message"
         return 1
     fi

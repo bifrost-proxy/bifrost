@@ -213,7 +213,8 @@ async fn load_file_response(
     verbose_logging: bool,
     ctx: &RequestContext,
 ) -> Option<Response<BoxBody>> {
-    let path = Path::new(file_path);
+    let normalized = normalize_file_path(file_path);
+    let path = Path::new(&normalized);
 
     match tokio::fs::read(path).await {
         Ok(content) => {
@@ -370,7 +371,8 @@ async fn load_rawfile_response(
     verbose_logging: bool,
     ctx: &RequestContext,
 ) -> Option<Response<BoxBody>> {
-    let path = Path::new(file_path);
+    let normalized = normalize_file_path(file_path);
+    let path = Path::new(&normalized);
 
     match tokio::fs::read(path).await {
         Ok(content) => {
@@ -560,6 +562,28 @@ fn guess_content_type(file_path: &str) -> &'static str {
         .unwrap_or("");
 
     ext_to_content_type(ext)
+}
+
+fn normalize_file_path(file_path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path = file_path.replace('/', "\\");
+        if path.len() >= 3 && path.as_bytes()[0] == b'\\' && path.as_bytes()[2] == b'\\' {
+            let drive = path.as_bytes()[1];
+            if drive.is_ascii_alphabetic() {
+                return format!(
+                    "{}:{}",
+                    (drive as char).to_uppercase().next().unwrap(),
+                    &path[2..]
+                );
+            }
+        }
+        path
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        file_path.to_string()
+    }
 }
 
 fn guess_content_type_from_url(url: &str) -> &'static str {

@@ -326,6 +326,7 @@ aggregate_results() {
         local failed=0
 
         while IFS='=' read -r key value; do
+            value="${value%$'\r'}"
             case "$key" in
                 TEST_FILE) test_file="$value" ;;
                 STATUS) status="$value" ;;
@@ -433,6 +434,12 @@ retry_failed_suites_once() {
     header "串行重试失败套件"
     info "首次运行失败 ${#failed_indices[@]} 个套件，按原端口逐个重试 (时间预算: ${retry_budget}s)"
 
+    if is_windows; then
+        info "Windows: 重试前清理残留 bifrost 进程..."
+        kill_all_bifrost
+        sleep 3
+    fi
+
     local idx
     for idx in "${failed_indices[@]}"; do
         local elapsed=$(( SECONDS - retry_start ))
@@ -459,6 +466,9 @@ retry_failed_suites_once() {
 
         info "重试 ${rule_rel} (proxy_port=$((BASE_PORT + idx))) [${elapsed}s/${retry_budget}s]"
         rm -rf "$data_dir" "$log_file" "$result_file"
+        if is_windows; then
+            kill_bifrost_on_port "$((BASE_PORT + idx))"
+        fi
         run_single_test "$rule_file" "$idx"
         retried=$((retried + 1))
 

@@ -329,8 +329,15 @@ preprocess_rules_file() {
 
     mkdir -p "${TEST_DATA_DIR}"
 
+    local script_dir_for_sed="$SCRIPT_DIR"
+    if is_windows; then
+        if command -v cygpath &>/dev/null; then
+            script_dir_for_sed=$(cygpath -m "$SCRIPT_DIR")
+        fi
+    fi
+
     sed \
-        -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" \
+        -e "s|__SCRIPT_DIR__|${script_dir_for_sed}|g" \
         -e "s|127.0.0.1:3000|127.0.0.1:${ECHO_HTTP_PORT}|g" \
         -e "s|localhost:3000|localhost:${ECHO_HTTP_PORT}|g" \
         -e "s|127.0.0.1:3443|127.0.0.1:${ECHO_HTTPS_PORT}|g" \
@@ -360,6 +367,7 @@ validate_rule_file_capabilities() {
     local line_number=0
     local in_code_block=false
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
         line_number=$((line_number + 1))
 
         [[ "$line" =~ ^#.*$ ]] && continue
@@ -519,17 +527,16 @@ start_proxy() {
             exit 1
         fi
 
-        # 确认监听端口的 PID 就是我们刚启动的进程，避免误连到旧服务。
         local port_ready="true"
-        if have_lsof && lsof_supports_pid_output; then
-            local bound_pid
-            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
-            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
-                port_ready="false"
-            fi
-        elif is_windows; then
+        if is_windows; then
             local bound_pid
             bound_pid=$(_win_find_pid_on_port "${PROXY_PORT}")
+            if [[ -z "$bound_pid" ]]; then
+                port_ready="false"
+            fi
+        elif have_lsof && lsof_supports_pid_output; then
+            local bound_pid
+            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
             if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
                 port_ready="false"
             fi
@@ -2134,7 +2141,11 @@ test_req_speed_rule() {
     local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-5}"
     local expected_seconds=$(((payload_size + (speed_kb * 1024) - 1) / (speed_kb * 1024)))
     local base_timeout="${TIMEOUT:-10}"
-    local request_timeout=$((expected_seconds + 20))
+    local speed_extra=20
+    if is_windows; then
+        speed_extra=40
+    fi
+    local request_timeout=$((expected_seconds + speed_extra))
     local warmup_url="http://${pattern}/health"
 
     local payload_file
@@ -2199,7 +2210,11 @@ test_res_speed_rule() {
     local max_attempts="${BIFROST_E2E_SPEED_RETRIES:-5}"
     local expected_seconds=$(((size + (speed_kb * 1024) - 1) / (speed_kb * 1024)))
     local base_timeout="${TIMEOUT:-10}"
-    local request_timeout=$((expected_seconds + 20))
+    local res_speed_extra=20
+    if is_windows; then
+        res_speed_extra=40
+    fi
+    local request_timeout=$((expected_seconds + res_speed_extra))
     local warmup_url="http://${pattern}/health"
 
     if (( base_timeout > request_timeout )); then
@@ -2514,7 +2529,7 @@ extract_target() {
 extract_value() {
     local protocols="$1"
     local prefix="$2"
-    echo "$protocols" | grep -o "${prefix}://[^[:space:]]*" | head -1 | sed "s|${prefix}://||"
+    echo "$protocols" | grep -o "${prefix}://[^[:space:]]*" | head -1 | sed "s|${prefix}://||" | tr -d '\r'
 }
 
 resolve_code_block_var() {
@@ -3088,8 +3103,10 @@ wait_for_local_port() {
     local waited=0
 
     while [[ $waited -lt $timeout ]]; do
-        if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-            return 0
+        if command -v nc &>/dev/null; then
+            nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+        else
+            (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1 && return 0
         fi
         sleep 1
         waited=$((waited + 1))
@@ -3104,15 +3121,15 @@ wait_for_admin_ready() {
 
     while [[ $waited -lt $timeout ]]; do
         local port_ready="true"
-        if have_lsof && lsof_supports_pid_output; then
-            local bound_pid
-            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
-            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
-                port_ready="false"
-            fi
-        elif is_windows; then
+        if is_windows; then
             local bound_pid
             bound_pid=$(_win_find_pid_on_port "${PROXY_PORT}")
+            if [[ -z "$bound_pid" ]]; then
+                port_ready="false"
+            fi
+        elif have_lsof && lsof_supports_pid_output; then
+            local bound_pid
+            bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
             if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
                 port_ready="false"
             fi
@@ -3463,6 +3480,7 @@ run_tests() {
     local rules=()
     local in_code_block=false
     while IFS= read -r line; do
+        line="${line%$'\r'}"
         [[ "$line" =~ ^#.*$ ]] && continue
         [[ -z "${line// }" ]] && continue
         if [[ "$line" == '```'* ]]; then

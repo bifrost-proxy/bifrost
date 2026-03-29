@@ -72,10 +72,13 @@ kill_bifrost_on_port() {
         if [ -n "$win_pid" ]; then
             _win_stop_process "$win_pid"
             local wait_count=0
-            while [[ $wait_count -lt 10 ]]; do
+            while [[ $wait_count -lt 30 ]]; do
                 win_pid=$(_win_find_pid_on_port "$port")
                 if [[ -z "$win_pid" ]]; then
                     break
+                fi
+                if [[ $((wait_count % 10)) -eq 9 ]]; then
+                    _win_stop_process "$win_pid"
                 fi
                 sleep 0.5
                 wait_count=$((wait_count + 1))
@@ -117,6 +120,7 @@ win_find_pid_on_port() {
 kill_all_bifrost() {
     if is_windows; then
         taskkill.exe //F //IM bifrost.exe >/dev/null 2>&1 || true
+        sleep 2
     else
         pkill -f bifrost 2>/dev/null || killall bifrost 2>/dev/null || true
     fi
