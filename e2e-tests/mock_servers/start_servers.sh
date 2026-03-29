@@ -160,13 +160,9 @@ start_proxy() {
 
 start_all() {
     start_http
-    sleep 0.5
     start_https
-    sleep 0.5
     start_ws
-    sleep 0.5
     start_wss
-    sleep 0.5
     start_sse
     sleep 0.5
     start_proxy
@@ -180,6 +176,7 @@ wait_for_server() {
 
     while [ $attempt -lt $max_attempts ]; do
         if eval "$check_cmd"; then
+            log "$service_name ready (${attempt}s)"
             return 0
         fi
         sleep 1
@@ -250,19 +247,14 @@ stop_all() {
     pkill -f "ws_echo_server.py" 2>/dev/null || true
     pkill -f "sse_echo_server.py" 2>/dev/null || true
     if is_windows; then
-        local srv pids p
-        for srv in http_echo_server https_echo_server ws_echo_server sse_echo_server; do
-            pids=$(wmic process where "CommandLine like '%%${srv}%%'" get ProcessId 2>/dev/null \
-                | grep -oE '[0-9]+' | tr -d '\r' || true)
-            if [[ -z "$pids" ]]; then
-                pids=$(powershell.exe -NoProfile -Command "
-                    Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine -like '*${srv}*' } |
-                    Select-Object -ExpandProperty ProcessId
-                " 2>/dev/null | tr -d '\r' || true)
+        local port pid
+        for port in "$HTTP_PORT" "$HTTPS_PORT" "$WS_PORT" "$WSS_PORT" "$SSE_PORT" "$PROXY_PORT"; do
+            pid=$(netstat.exe -ano 2>/dev/null \
+                | awk -v p=":${port}" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' \
+                | tr -d '\r')
+            if [[ -n "$pid" && "$pid" != "0" ]]; then
+                taskkill.exe //F //PID "$pid" >/dev/null 2>&1 || true
             fi
-            for p in $pids; do
-                [[ -n "$p" ]] && taskkill.exe //F //PID "$p" >/dev/null 2>&1 || true
-            done
         done
     fi
 

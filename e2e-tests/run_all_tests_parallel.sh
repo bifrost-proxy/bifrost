@@ -564,9 +564,12 @@ main() {
     build_proxy_once
 
     header "启动共享 Mock 服务器"
+    info "停止可能存在的旧 Mock 服务器..."
     "$SCRIPT_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
     sleep 1
+    info "启动 Mock 服务器 (后台模式)..."
     "$SCRIPT_DIR/mock_servers/start_servers.sh" start-bg
+    info "等待 Mock 服务器就绪..."
     sleep 2
 
     if is_http_echo_ready; then
@@ -589,8 +592,9 @@ main() {
         exit 0
     fi
 
-    # 如果默认端口段被占用（例如本机已有 bifrost 或其它服务占用 9000），
-    # 自动选择一个可用的连续端口段，避免并行测试误连旧进程/绑定失败。
+    info "找到 $total_suites 个测试套件"
+
+    info "选择可用端口段..."
     local selected_base_port
     selected_base_port=$(pick_available_base_port "$BASE_PORT" "$total_suites")
     if [[ "$selected_base_port" != "$BASE_PORT" ]]; then
