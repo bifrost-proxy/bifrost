@@ -193,9 +193,8 @@ run_single_test() {
     local log_file="${RESULTS_DIR}/log_${test_index}.txt"
     local data_dir="${RESULTS_DIR}/data_${test_index}"
 
-    # 并行场景下，首次 HTTPS 请求可能因为证书/密钥生成 + CPU 竞争导致耗时显著增加。
-    # test_utils/http_client.sh 默认 TIMEOUT=10s，容易在高并发下触发 curl 000。
     local timeout="${TIMEOUT:-60}"
+    local fixture_timeout="${BIFROST_E2E_FIXTURE_TIMEOUT:-180}"
 
     mkdir -p "$data_dir"
 
@@ -206,17 +205,36 @@ run_single_test() {
         echo "PROXY_PORT=$proxy_port"
 
         local test_id="${rel_path}:${proxy_port}"
-        if TIMEOUT="$timeout" TEST_ID="$test_id" BIFROST_E2E_HTTP_RETRIES="$http_retries" "$SCRIPT_DIR/test_rules.sh" \
+        local test_pid
+        TIMEOUT="$timeout" TEST_ID="$test_id" BIFROST_E2E_HTTP_RETRIES="$http_retries" "$SCRIPT_DIR/test_rules.sh" \
             --no-build \
             --use-binary \
             --skip-mock-servers \
             -p "$proxy_port" \
             -d "$data_dir" \
-            "$rule_file" > "$log_file" 2>&1; then
+            "$rule_file" > "$log_file" 2>&1 &
+        test_pid=$!
+
+        local watchdog_pid=""
+        (
+            sleep "$fixture_timeout"
+            if kill -0 "$test_pid" 2>/dev/null; then
+                echo "[TIMEOUT] fixture ${rel_path} exceeded ${fixture_timeout}s on port ${proxy_port}" >> "$log_file"
+                kill -TERM "$test_pid" 2>/dev/null || true
+                sleep 3
+                kill -9 "$test_pid" 2>/dev/null || true
+            fi
+        ) &
+        watchdog_pid=$!
+
+        if wait "$test_pid" 2>/dev/null; then
             echo "STATUS=passed"
         else
             echo "STATUS=failed"
         fi
+
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
 
         local passed=$(grep "^Passed:" "$log_file" 2>/dev/null | tail -1 | perl -pe 's/\e\[[0-9;]*m//g' | sed 's/.*: *//' | tr -d '[:space:]' || echo "0")
         local failed=$(grep "^Failed:" "$log_file" 2>/dev/null | tail -1 | perl -pe 's/\e\[[0-9;]*m//g' | sed 's/.*: *//' | tr -d '[:space:]' || echo "0")
@@ -232,15 +250,27 @@ run_single_test() {
 print_progress() {
     local completed="$1"
     local total="$2"
+    local fixture_name="${3:-}"
     local width=50
     local percent=$((completed * 100 / total))
     local filled=$((completed * width / total))
     local empty=$((width - filled))
 
-    printf "\r${CYAN}进度: [${NC}"
-    printf "%${filled}s" | tr ' ' '█'
-    printf "%${empty}s" | tr ' ' '░'
-    printf "${CYAN}] %3d%% (%d/%d)${NC}" "$percent" "$completed" "$total"
+    if [[ -t 1 ]]; then
+        printf "\r${CYAN}进度: [${NC}"
+        printf "%${filled}s" | tr ' ' '█'
+        printf "%${empty}s" | tr ' ' '░'
+        printf "${CYAN}] %3d%% (%d/%d)${NC}" "$percent" "$completed" "$total"
+    else
+        local bar=""
+        bar+=$(printf "%${filled}s" | tr ' ' '█')
+        bar+=$(printf "%${empty}s" | tr ' ' '░')
+        if [[ -n "$fixture_name" ]]; then
+            printf "进度: [%s] %3d%% (%d/%d) %s\n" "$bar" "$percent" "$completed" "$total" "$fixture_name"
+        else
+            printf "进度: [%s] %3d%% (%d/%d)\n" "$bar" "$percent" "$completed" "$total"
+        fi
+    fi
 }
 
 print_failure_diagnostics() {
@@ -625,7 +655,19 @@ main() {
                 unset 'pids[i]'
                 completed=$((completed + 1))
                 running=$((running - 1))
-                print_progress "$completed" "$total_suites"
+                local fixture_rel="${test_files[$i]#$RULES_DIR/}"
+                local result_status=""
+                local rf="${RESULTS_DIR}/result_${i}.txt"
+                if [[ -f "$rf" ]]; then
+                    result_status=$(grep "^STATUS=" "$rf" 2>/dev/null | head -1 | cut -d= -f2)
+                fi
+                local label="${fixture_rel}"
+                if [[ "$result_status" == "passed" ]]; then
+                    label="✓ ${fixture_rel}"
+                elif [[ "$result_status" == "failed" ]]; then
+                    label="✗ ${fixture_rel}"
+                fi
+                print_progress "$completed" "$total_suites" "$label"
             fi
         done
 
