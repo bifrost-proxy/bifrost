@@ -691,7 +691,7 @@ ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   if [[ "$SKIP_RELEASE_BUILD" -eq 1 ]]; then
-    local _prebuilt="$ROOT_DIR/target/release/bifrost"
+    _prebuilt="$ROOT_DIR/target/release/bifrost"
     if is_windows; then
       _prebuilt="$ROOT_DIR/target/release/bifrost.exe"
     fi

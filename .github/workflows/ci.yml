@@ -522,6 +522,8 @@ jobs:
           save-if: always()
       - name: Build workspace
         run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Prepare desktop sidecar
+        run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
       - name: Check desktop client
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Upload release binary
