@@ -522,6 +522,8 @@ jobs:
           save-if: always()
       - name: Build workspace
         run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Build desktop frontend
+        run: pnpm --dir web run build:desktop
       - name: Prepare desktop sidecar
         run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
       - name: Check desktop client
