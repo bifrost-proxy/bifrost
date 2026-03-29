@@ -73,9 +73,11 @@ jobs:
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
-      BIFROST_E2E_RULE_JOBS: "2"
+      BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
+      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_RUNNER_JOBS: "8"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
@@ -178,9 +180,11 @@ jobs:
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
-      BIFROST_E2E_RULE_JOBS: "2"
+      BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
+      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_RUNNER_JOBS: "8"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
