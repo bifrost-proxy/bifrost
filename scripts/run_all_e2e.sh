@@ -734,7 +734,9 @@ if [[ "$RUN_RUNNER" -eq 1 ]]; then
     set +e
     "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" \
       > "$RUNNER_LOG_FILE" 2>&1
-    echo "$?" > "$RUNNER_STATUS_FILE"
+    rc=$?
+    echo "$rc" > "$RUNNER_STATUS_FILE"
+    exit "$rc"
   ) &
   RUNNER_BG_PID=$!
   log_info "bifrost-e2e runner started in background (PID: $RUNNER_BG_PID, jobs: $RUNNER_JOBS)"
