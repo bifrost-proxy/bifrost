@@ -691,11 +691,15 @@ ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   if [[ "$SKIP_RELEASE_BUILD" -eq 1 ]]; then
-    if [[ -x "$ROOT_DIR/target/release/bifrost" ]]; then
-      log_info "Skipping release build: using pre-built binary at target/release/bifrost"
+    local _prebuilt="$ROOT_DIR/target/release/bifrost"
+    if is_windows; then
+      _prebuilt="$ROOT_DIR/target/release/bifrost.exe"
+    fi
+    if [[ -f "$_prebuilt" ]]; then
+      log_info "Skipping release build: using pre-built binary at $_prebuilt"
       ensure_bifrost_shell_shim "release"
     else
-      log_warn "Pre-built binary not found at target/release/bifrost, falling back to build"
+      log_warn "Pre-built binary not found at $_prebuilt, falling back to build"
       if run_and_capture \
         "build:release-bifrost" \
         env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost; then
@@ -802,6 +806,10 @@ if [[ -n "$RUNNER_BG_PID" ]]; then
     echo "[FAIL] runner:bifrost-e2e (${RUNNER_DURATION}s)"
     echo "       reason: $RUNNER_REASON"
     echo "       log: $RUNNER_LOG_FILE"
+  fi
+  if [[ -f "$RUNNER_LOG_FILE" ]]; then
+    print_section "bifrost-e2e runner output"
+    cat "$RUNNER_LOG_FILE"
   fi
   RUNNER_BG_PID=""
 fi

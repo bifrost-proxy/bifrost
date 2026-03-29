@@ -112,7 +112,7 @@ jobs:
           retention-days: 1
 
   e2e-rules:
-    name: E2E Rules Tests
+    name: E2E Rules (Linux)
     needs: [build-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -148,7 +148,7 @@ jobs:
         run: bash scripts/ci/run-e2e-rules.sh
 
   e2e-shell:
-    name: E2E Shell Tests
+    name: E2E Shell (Linux)
     needs: [build-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -184,7 +184,7 @@ jobs:
         run: bash scripts/ci/run-e2e-shell.sh
 
   e2e-runner:
-    name: E2E Runner Tests
+    name: E2E Runner (Linux)
     needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -212,8 +212,8 @@ jobs:
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
 
-  build-linux:
-    name: Linux Build Matrix
+  build-linux-x86:
+    name: Linux Build (x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -228,39 +228,272 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,armv7-unknown-linux-gnueabihf
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+      - name: Build Linux workspace
+        run: cargo build --workspace --release --target x86_64-unknown-linux-gnu
+
+  build-linux-aarch64:
+    name: Linux Build (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-target-builds
-      - name: Build Linux workspace
-        run: cargo build --workspace --release --target x86_64-unknown-linux-gnu
+          key: linux-aarch64
       - name: Build Linux CLI (aarch64)
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-aarch64
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
+
+  build-linux-armv7:
+    name: Linux Build (armv7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-armv7
       - name: Build Linux CLI (armv7)
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-armv7
         run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
-  build-desktop-platform:
-    name: Desktop Platform Pipeline (${{ matrix.target }})
+  build-desktop-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: [test]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            bundle_ext: dmg
           - os: macos-15
             target: aarch64-apple-darwin
-            bundle_ext: dmg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            web/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-build-${{ matrix.target }}
+          save-if: always()
+      - name: Build workspace
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bifrost
+          retention-days: 1
+
+  e2e-macos:
+    name: E2E (${{ matrix.target }})
+    needs: [build-desktop-macos]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_RULE_JOBS: "4"
+      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
+      BIFROST_E2E_HTTP_RETRIES: "1"
+      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_RUNNER_JOBS: "8"
+      TIMEOUT: "90"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.target }}
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/bifrost
+      - name: End-to-end tests
+        shell: bash
+        run: bash scripts/ci/run-e2e-platform.sh
+
+  bundle-desktop-macos:
+    name: Bundle macOS (${{ matrix.target }})
+    needs: [build-desktop-macos]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            web/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-bundle-${{ matrix.target }}
+      - name: Download workspace binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release
+      - name: Make binary executable
+        run: chmod +x target/${{ matrix.target }}/release/bifrost
+      - name: Build desktop frontend
+        run: pnpm --dir web run build:desktop
+      - name: Prepare desktop sidecar
+        run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
+      - name: Resolve macOS signing mode
+        shell: bash
+        run: |
+          echo "APPLE_SIGNING_IDENTITY=-" >> "${GITHUB_ENV}"
+          echo "Using ad-hoc signing for macOS desktop CI bundle validation."
+      - name: Build macOS desktop bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+        run: pnpm exec tauri build --config desktop/src-tauri/tauri.conf.json --target ${{ matrix.target }} --bundles app
+      - name: Re-sign macOS app bundle
+        shell: bash
+        run: |
+          APP_PATH=$(find "desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
+          if [[ -z "${APP_PATH}" ]]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+
+          bash scripts/resign-macos-app.sh "${APP_PATH}"
+      - name: Package macOS desktop dmg
+        shell: bash
+        run: |
+          APP_PATH=$(find "desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
+          if [[ -z "${APP_PATH}" ]]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+
+          ARCH_SUFFIX=$( [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]] && echo x64 || echo aarch64 )
+          DMG_PATH="desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/Bifrost_ci_${ARCH_SUFFIX}.dmg"
+          bash scripts/package-macos-dmg.sh "${APP_PATH}" "${DMG_PATH}"
+      - name: Validate macOS desktop bundle
+        shell: bash
+        run: |
+          TARGET="${{ matrix.target }}"
+          APP_PATH=$(find "desktop/src-tauri/target/${TARGET}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
+          if [[ -z "${APP_PATH}" ]]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+
+          DMG_PATH=$(find "desktop/src-tauri/target/${TARGET}/release/bundle" -type f -name "*.dmg" | head -n 1)
+          if [[ -z "${DMG_PATH}" ]]; then
+            echo "macOS dmg bundle not found"
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=4 "${APP_PATH}"
+          mkdir -p dist
+          cp "${DMG_PATH}" "dist/bifrost-desktop-${TARGET}.dmg"
+      - name: Upload macOS desktop bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-desktop-${{ matrix.target }}
+          path: dist/bifrost-desktop-${{ matrix.target }}.dmg
+          if-no-files-found: error
+
+  build-desktop-windows:
+    name: Build Windows (${{ matrix.target }})
+    needs: [test]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -285,78 +518,64 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-platform-${{ matrix.target }}
+          key: desktop-windows-${{ matrix.target }}
           save-if: always()
-      - name: Unit and integration tests
-        run: cargo test --workspace --all-features
       - name: Build workspace
         run: cargo build --workspace --release --target ${{ matrix.target }}
-      - name: Build desktop frontend
-        run: pnpm --dir web run build:desktop
-      - name: Prepare desktop sidecar
-        run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
-      - name: Resolve macOS signing mode
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          echo "APPLE_SIGNING_IDENTITY=-" >> "${GITHUB_ENV}"
-          echo "Using ad-hoc signing for macOS desktop CI bundle validation."
-      - name: Build macOS desktop bundle
-        if: runner.os == 'macOS'
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-        run: pnpm exec tauri build --config desktop/src-tauri/tauri.conf.json --target ${{ matrix.target }} --bundles app
-      - name: Re-sign macOS app bundle
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          APP_PATH=$(find "desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
-          if [[ -z "${APP_PATH}" ]]; then
-            echo "macOS app bundle not found"
-            exit 1
-          fi
-
-          bash scripts/resign-macos-app.sh "${APP_PATH}"
-      - name: Package macOS desktop dmg
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          APP_PATH=$(find "desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
-          if [[ -z "${APP_PATH}" ]]; then
-            echo "macOS app bundle not found"
-            exit 1
-          fi
-
-          ARCH_SUFFIX=$( [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]] && echo x64 || echo aarch64 )
-          DMG_PATH="desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/Bifrost_ci_${ARCH_SUFFIX}.dmg"
-          bash scripts/package-macos-dmg.sh "${APP_PATH}" "${DMG_PATH}"
-      - name: Validate macOS desktop bundle
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          TARGET="${{ matrix.target }}"
-          APP_PATH=$(find "desktop/src-tauri/target/${TARGET}/release/bundle/macos" -maxdepth 1 -type d -name "*.app" | head -n 1)
-          if [[ -z "${APP_PATH}" ]]; then
-            echo "macOS app bundle not found"
-            exit 1
-          fi
-
-          DMG_PATH=$(find "desktop/src-tauri/target/${TARGET}/release/bundle" -type f -name "*.dmg" | head -n 1)
-          if [[ -z "${DMG_PATH}" ]]; then
-            echo "macOS dmg bundle not found"
-            exit 1
-          fi
-
-          codesign --verify --deep --strict --verbose=4 "${APP_PATH}"
-          mkdir -p dist
-          cp "${DMG_PATH}" "dist/bifrost-desktop-${TARGET}.dmg"
-      - name: Upload macOS desktop bundle
-        if: runner.os == 'macOS'
+      - name: Check desktop client
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
-          name: bifrost-desktop-${{ matrix.target }}
-          path: dist/bifrost-desktop-${{ matrix.target }}.dmg
-          if-no-files-found: error
-      - name: Check desktop client
-        if: runner.os != 'macOS'
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+          name: bifrost-release-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bifrost.exe
+          retention-days: 1
+
+  e2e-windows:
+    name: E2E (${{ matrix.target }})
+    needs: [build-desktop-windows]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_RULE_JOBS: "4"
+      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
+      BIFROST_E2E_HTTP_RETRIES: "1"
+      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_RUNNER_JOBS: "8"
+      TIMEOUT: "90"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.target }}
+      - name: Install jq
+        shell: powershell
+        run: choco install jq -y
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/release
+      - name: End-to-end tests
+        shell: bash
+        run: bash scripts/ci/run-e2e-platform.sh
