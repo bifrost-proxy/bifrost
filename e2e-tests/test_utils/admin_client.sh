@@ -131,8 +131,15 @@ admin_start_bifrost() {
 
     ADMIN_CLIENT_BIFROST_LOG_FILE="$(mktemp)"
 
-    local bifrost_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost"
-    if [[ -x "$bifrost_bin" ]]; then
+    local bifrost_bin=""
+    local unix_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost"
+    local windows_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost.exe"
+    if [[ -x "$unix_bin" ]]; then
+        bifrost_bin="$unix_bin"
+    elif [[ -f "$windows_bin" ]]; then
+        bifrost_bin="$windows_bin"
+    fi
+    if [[ -n "$bifrost_bin" ]]; then
         SKIP_FRONTEND_BUILD=1 \
             HOME="$ADMIN_CLIENT_HOME_DIR" \
             XDG_CONFIG_HOME="$ADMIN_CLIENT_XDG_CONFIG_HOME" \

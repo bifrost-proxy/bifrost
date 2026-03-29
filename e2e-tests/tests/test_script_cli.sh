@@ -17,6 +17,9 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 TEST_DATA_DIR=""
 SKIP_BUILD="${SKIP_BUILD:-false}"
 

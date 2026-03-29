@@ -3220,6 +3220,12 @@ start_specialized_proxy() {
 run_tunnel_specialized_tests() {
     header "执行 tunnel 专项测试"
 
+    if is_windows; then
+        warn "Windows 环境跳过 tunnel 专项测试 (openssl s_server 不可用)"
+        _log_pass "tunnel 专项测试已跳过 (Windows)"
+        return 0
+    fi
+
     local work_dir="${TEST_DATA_DIR}/special-tunnel"
     mkdir -p "$work_dir"
 

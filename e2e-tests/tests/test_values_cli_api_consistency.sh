@@ -18,6 +18,9 @@ ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 export ADMIN_BASE_URL
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 TEST_DATA_DIR="$ROOT_DIR/.bifrost-e2e-values-consistency-${PROXY_PORT}-$$"
 
 PROXY_PID=""

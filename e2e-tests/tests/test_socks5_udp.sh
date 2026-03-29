@@ -11,6 +11,9 @@ PROXY_HOST=${PROXY_HOST:-127.0.0.1}
 PROXY_PORT=${PROXY_PORT:-18080}
 SOCKS5_PORT=${SOCKS5_PORT:-11080}
 BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-udp-test"
 PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 

@@ -147,6 +147,14 @@ wait_pid() {
     fi
 }
 
+python_cmd() {
+    if command -v python3 &>/dev/null; then
+        echo "python3"
+    else
+        echo "python"
+    fi
+}
+
 safe_cleanup_proxy() {
     local pid=$1
     if [ -z "$pid" ]; then

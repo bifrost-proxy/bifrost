@@ -153,6 +153,9 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
         LazyLock::new(|| Regex::new(r"\$\{reqCookies\.([^}]+)\}").unwrap());
     static RE_QUERY: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\$\{query\.([^}]+)\}").unwrap());
+    static RE_RANDOM_INT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\$\{randomInt\((\d+)(?:-(\d+))?\)\}").unwrap());
+    static RE_ENV: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{env\.([^}]+)\}").unwrap());
 
     let mut result = value.to_string();
 
@@ -188,6 +191,36 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
         })
         .to_string();
 
+    result = RE_RANDOM_INT
+        .replace_all(&result, |caps: &regex::Captures| {
+            let first: u64 = caps[1].parse().unwrap_or(100);
+            if let Some(second) = caps.get(2) {
+                let min = first;
+                let max: u64 = second.as_str().parse().unwrap_or(100);
+                if max > min {
+                    (rand::random::<u64>() % (max - min + 1) + min).to_string()
+                } else {
+                    min.to_string()
+                }
+            } else {
+                (rand::random::<u64>() % (first + 1)).to_string()
+            }
+        })
+        .to_string();
+
+    result = RE_ENV
+        .replace_all(&result, |caps: &regex::Captures| {
+            let var_name = &caps[1];
+            std::env::var(var_name).unwrap_or_default()
+        })
+        .to_string();
+
+    let url_port = url::Url::parse(&ctx.url)
+        .ok()
+        .and_then(|u| u.port())
+        .map(|p| p.to_string())
+        .unwrap_or_default();
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis().to_string())
@@ -200,6 +233,7 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
         .replace("${host}", &ctx.host)
         .replace("${url.host}", &ctx.host)
         .replace("${url.hostname}", &ctx.host)
+        .replace("${url.port}", &url_port)
         .replace("${pathname}", &ctx.pathname)
         .replace("${path}", &ctx.pathname)
         .replace("${url.path}", &ctx.pathname)
@@ -211,7 +245,10 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
         .replace("${reqId}", ctx.id_str())
         .replace("${now}", &now)
         .replace("${timestamp}", &now)
-        .replace("${random}", &random.to_string());
+        .replace("${randomUUID}", &uuid::Uuid::new_v4().to_string())
+        .replace("${random}", &random.to_string())
+        .replace("${version}", env!("CARGO_PKG_VERSION"))
+        .replace("${port}", &ctx.port.to_string());
 
     result = result.replace("\x00ESCAPED_DOLLAR\x00", "${");
 

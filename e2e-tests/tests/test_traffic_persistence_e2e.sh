@@ -16,6 +16,9 @@ TEST_DATA_DIR="${TEST_DATA_DIR:-./.bifrost-persistence-test}"
 MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3198}"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 
 TESTS_RUN=0
 TESTS_PASSED=0

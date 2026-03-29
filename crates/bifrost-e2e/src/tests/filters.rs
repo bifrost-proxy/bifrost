@@ -3,7 +3,6 @@ use crate::mock::EnhancedMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use std::collections::HashMap;
-use std::time::Duration;
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -85,8 +84,6 @@ async fn test_includefilter_method_post() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api",
@@ -117,8 +114,6 @@ async fn test_includefilter_method_get_not_match() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api",
@@ -148,8 +143,6 @@ async fn test_includefilter_status_500() -> Result<(), String> {
     )
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -183,8 +176,6 @@ async fn test_includefilter_header() -> Result<(), String> {
     )
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let result_with_header = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -227,8 +218,6 @@ async fn test_excludefilter_method_get() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api",
@@ -259,8 +248,6 @@ async fn test_excludefilter_method_post_apply() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api",
@@ -290,8 +277,6 @@ async fn test_delete_reqheader() -> Result<(), String> {
     )
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let _result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -342,8 +327,6 @@ async fn test_delete_resheader() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api",
@@ -375,8 +358,6 @@ async fn test_delete_urlparams() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let _result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
         "http://test.local/api?debug=true&keep=yes",
@@ -404,8 +385,6 @@ async fn test_enable_abort() -> Result<(), String> {
     let _proxy = ProxyInstance::start(port, vec!["test.local enable://abort"])
         .await
         .map_err(|e| format!("Failed to start proxy: {}", e))?;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),

@@ -49,6 +49,7 @@ serde_json = "1"
 url = "2"
 mime_guess = "2"
 regex = "1"
+uuid.workspace = true
 chrono = { version = "0.4", features = ["std"] }
 gethostname = "1"
 webpki-roots.workspace = true

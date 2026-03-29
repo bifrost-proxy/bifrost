@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_cmd_helper.sh"
+
+if real_cmd="$(find_real_cmd python3)"; then
+  exec "$real_cmd" "$@"
+fi
+
+if real_cmd="$(find_real_cmd python)"; then
+  exec "$real_cmd" "$@"
+fi
+
+echo "python3 shim: neither python3 nor python found in PATH" >&2
+exit 127

@@ -38,6 +38,7 @@ pub struct RequestContext {
     pub client_app: Option<String>,
     pub client_pid: Option<u32>,
     pub client_path: Option<String>,
+    pub port: u16,
 }
 
 impl RequestContext {
@@ -60,6 +61,7 @@ impl RequestContext {
             client_app: None,
             client_pid: None,
             client_path: None,
+            port: 0,
         }
     }
 
@@ -118,6 +120,11 @@ impl RequestContext {
 
     pub fn with_query_params(mut self, params: HashMap<String, String>) -> Self {
         self.query_params = params;
+        self
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
         self
     }
 }

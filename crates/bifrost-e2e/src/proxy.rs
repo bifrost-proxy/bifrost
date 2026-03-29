@@ -941,10 +941,11 @@ impl ProxyInstance {
         };
 
         let server = ProxyServer::new(config).with_rules(resolver);
+        let listener = server.bind(addr).await?;
 
         tokio::spawn(async move {
             tokio::select! {
-                result = server.run() => {
+                result = server.run_with_listener(listener) => {
                     if let Err(e) = result {
                         tracing::error!("Proxy server error: {}", e);
                     }
@@ -954,8 +955,6 @@ impl ProxyInstance {
                 }
             }
         });
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         Ok(Self {
             addr,
@@ -1010,10 +1009,11 @@ impl ProxyInstance {
         };
 
         let server = ProxyServer::new(config).with_rules(resolver);
+        let listener = server.bind(addr).await?;
 
         tokio::spawn(async move {
             tokio::select! {
-                result = server.run() => {
+                result = server.run_with_listener(listener) => {
                     if let Err(e) = result {
                         tracing::error!("Proxy server error: {}", e);
                     }
@@ -1023,8 +1023,6 @@ impl ProxyInstance {
                 }
             }
         });
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         Ok(Self {
             addr,
@@ -1168,9 +1166,11 @@ impl ProxyInstance {
             .cloned()
             .expect("admin_state should be set");
 
+        let listener = server.bind(addr).await?;
+
         tokio::spawn(async move {
             tokio::select! {
-                result = server.run() => {
+                result = server.run_with_listener(listener) => {
                     if let Err(e) = result {
                         tracing::error!("Proxy server error: {}", e);
                     }
@@ -1180,8 +1180,6 @@ impl ProxyInstance {
                 }
             }
         });
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         Ok((
             Self {

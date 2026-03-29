@@ -19,6 +19,9 @@ ECHO_SSE_PORT="${ECHO_SSE_PORT:-$((13300 + ($$ % 500)))}"
 ECHO_PROXY_PORT="${ECHO_PROXY_PORT:-$((13999 + ($$ % 200)))}"
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 TEST_DATA_DIR="$ROOT_DIR/.bifrost-e2e-rule-semantics-${PROXY_PORT}-$$"
 RULES_FILE="$TEST_DATA_DIR/rules.txt"
 RULES_TEMPLATE="$ROOT_DIR/e2e-tests/rules/regression/rule_semantics_split_parsing.txt"

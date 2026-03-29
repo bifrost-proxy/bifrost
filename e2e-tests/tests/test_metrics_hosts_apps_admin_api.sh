@@ -7,6 +7,9 @@ TEST_ID="${TEST_ID:-}"
 export TEST_ID
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
 source "$SCRIPT_DIR/../test_utils/process.sh"
 

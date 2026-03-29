@@ -1084,7 +1084,9 @@ async fn handle_request(
         None
     };
 
-    let mut ctx = RequestContext::new().with_client_ip(peer_addr.ip().to_string());
+    let mut ctx = RequestContext::new()
+        .with_client_ip(peer_addr.ip().to_string())
+        .with_port(proxy_config.port);
     let cached_client_process = client_process_cache
         .lock()
         .ok()
@@ -1165,24 +1167,50 @@ async fn handle_request(
             if let Ok(mut cache) = client_process_cache.lock() {
                 *cache = Some(client_process.clone());
             }
-        } else if let Some(state) = admin_state.clone() {
-            let should_spawn = !client_process_resolution_started.swap(true, Ordering::AcqRel);
-            if should_spawn {
-                let record_id = ctx.id_str();
-                let client_process_cache = Arc::clone(&client_process_cache);
-                spawn_async_process_resolver(
-                    peer_addr,
-                    local_addr,
-                    record_id.to_string(),
-                    move |id, process| {
-                        if let Ok(mut cache) = client_process_cache.lock() {
-                            *cache = Some(process.clone());
-                        }
-                        state.update_client_process(&id, process.name, process.pid, process.path);
-                    },
-                );
-            }
         }
+        let client_process = if client_process.is_some() {
+            client_process
+        } else if is_local_client {
+            let mut resolved = None;
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if let Ok(guard) = client_process_cache.lock() {
+                    if guard.is_some() {
+                        resolved = guard.clone();
+                        break;
+                    }
+                }
+            }
+            if resolved.is_none() {
+                if let Some(state) = admin_state.clone() {
+                    let should_spawn =
+                        !client_process_resolution_started.swap(true, Ordering::AcqRel);
+                    if should_spawn {
+                        let record_id = ctx.id_str();
+                        let client_process_cache = Arc::clone(&client_process_cache);
+                        spawn_async_process_resolver(
+                            peer_addr,
+                            local_addr,
+                            record_id.to_string(),
+                            move |id, process| {
+                                if let Ok(mut cache) = client_process_cache.lock() {
+                                    *cache = Some(process.clone());
+                                }
+                                state.update_client_process(
+                                    &id,
+                                    process.name,
+                                    process.pid,
+                                    process.path,
+                                );
+                            },
+                        );
+                    }
+                }
+            }
+            resolved
+        } else {
+            None
+        };
         client_process
     };
     let (client_app, client_pid, client_path) = client_process

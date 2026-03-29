@@ -189,11 +189,57 @@ impl TestRunner {
         let total = self.tests.len();
         self.reporter.start(total);
 
-        if self.concurrency <= 1 {
-            return self.run_all_serial().await;
+        let mut results = if self.concurrency <= 1 {
+            self.run_all_serial().await
+        } else {
+            self.run_all_parallel(total).await
+        };
+
+        let retry_enabled = std::env::var("BIFROST_E2E_RETRY_FAILED_ONCE")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+        if !retry_enabled {
+            return results;
         }
 
-        self.run_all_parallel(total).await
+        let failed_indices: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.status == TestStatus::Failed)
+            .map(|(i, _)| i)
+            .collect();
+
+        if failed_indices.is_empty() {
+            return results;
+        }
+
+        tracing::info!("Retrying {} failed test(s) once...", failed_indices.len());
+
+        for &idx in &failed_indices {
+            let test = &self.tests[idx];
+            let port = self.base_port + (idx as u16);
+            tracing::info!("  Retrying: {} (port {})", test.name, port);
+            let result = run_single_test(test, port).await;
+            tracing::info!(
+                "  Retry result: {} {} ({}ms)",
+                match result.status {
+                    TestStatus::Passed => "✓",
+                    TestStatus::Failed => "✗",
+                    TestStatus::Skipped => "○",
+                },
+                result.name,
+                result.duration.as_millis()
+            );
+            if result.status == TestStatus::Failed {
+                if let Some(ref error) = result.error {
+                    tracing::error!("  RETRY FAIL: {} - {}", result.name, error);
+                }
+            }
+            results[idx] = result;
+        }
+
+        results
     }
 
     async fn run_all_serial(&mut self) -> Vec<TestResult> {

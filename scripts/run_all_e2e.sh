@@ -58,14 +58,23 @@ resolve_non_shim_command() {
   local command_name="$1"
   local candidate
 
+  local resolver="which"
+  local resolver_args=("-a")
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      resolver="where.exe"
+      resolver_args=()
+      ;;
+  esac
+
   while IFS= read -r candidate; do
     candidate="$(trim_line "$candidate")"
     [[ -n "$candidate" ]] || continue
-    if [[ "$candidate" != *"/mise/shims/"* ]]; then
+    if [[ "$candidate" != *"/mise/shims/"* && "$candidate" != *"\\mise\\shims\\"* ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
-  done < <(which -a "$command_name" 2>/dev/null)
+  done < <("$resolver" "${resolver_args[@]}" "$command_name" 2>/dev/null)
 
   command -v "$command_name" 2>/dev/null || printf '%s\n' "$command_name"
 }

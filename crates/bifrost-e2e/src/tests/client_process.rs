@@ -35,7 +35,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
 async fn verify_client_process(kind: &str) -> Result<(), String> {
     let proxy_port = portpicker::pick_unused_port().ok_or("Failed to pick proxy port")?;
-    let origin = OriginServer::start().await?;
+    let response_delay = if cfg!(target_os = "macos") {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(500)
+    };
+    let origin = OriginServer::start(response_delay).await?;
     let (_proxy, _admin_state) = ProxyInstance::start_with_admin(proxy_port, vec![], false, true)
         .await
         .map_err(|error| format!("Failed to start proxy with admin: {error}"))?;
@@ -87,7 +92,12 @@ async fn run_external_client(kind: &str, proxy_url: &str, target_url: &str) -> R
             command
         }
         "python" => {
-            let mut command = Command::new(resolve_executable("python3"));
+            let python_cmd = if cfg!(target_os = "windows") {
+                resolve_executable("python")
+            } else {
+                resolve_executable("python3")
+            };
+            let mut command = Command::new(python_cmd);
             command.args([
                 "-c",
                 "import http.client, os, sys, urllib.parse; proxy = urllib.parse.urlparse(os.environ['TEST_PROXY_URL']); target = urllib.parse.urlparse(os.environ['TEST_TARGET_URL']); conn = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=10); conn.request('GET', os.environ['TEST_TARGET_URL'], headers={'Host': target.netloc, 'Connection': 'close'}); resp = conn.getresponse(); resp.read(); conn.close(); sys.exit(0)",
@@ -130,10 +140,13 @@ async fn run_external_client(kind: &str, proxy_url: &str, target_url: &str) -> R
 }
 
 fn resolve_executable(command: &str) -> String {
-    let output = std::process::Command::new("which")
-        .arg("-a")
-        .arg(command)
-        .output();
+    let (resolver, args): (&str, &[&str]) = if cfg!(target_os = "windows") {
+        ("where.exe", &[command])
+    } else {
+        ("which", &["-a", command])
+    };
+
+    let output = std::process::Command::new(resolver).args(args).output();
     let Ok(output) = output else {
         return command.to_string();
     };
@@ -142,10 +155,11 @@ fn resolve_executable(command: &str) -> String {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let is_mise_shim = |p: &str| p.contains("/mise/shims/") || p.contains("\\mise\\shims\\");
     stdout
         .lines()
         .map(str::trim)
-        .find(|path| !path.is_empty() && !path.contains("/mise/shims/"))
+        .find(|path| !path.is_empty() && !is_mise_shim(path))
         .or_else(|| stdout.lines().map(str::trim).find(|path| !path.is_empty()))
         .unwrap_or(command)
         .to_string()
@@ -228,7 +242,7 @@ struct OriginServer {
 }
 
 impl OriginServer {
-    async fn start() -> Result<Self, String> {
+    async fn start(response_delay: Duration) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|error| format!("bind origin listener: {error}"))?;
@@ -247,6 +261,10 @@ impl OriginServer {
                 .read(&mut buffer)
                 .await
                 .map_err(|error| format!("read origin request: {error}"))?;
+
+            if !response_delay.is_zero() {
+                tokio::time::sleep(response_delay).await;
+            }
 
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")

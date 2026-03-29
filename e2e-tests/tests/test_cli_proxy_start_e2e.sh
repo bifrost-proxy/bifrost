@@ -9,6 +9,9 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18889}"
 BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 TEST_DATA_DIR=""
 TEST_HOME=""
 PROXY_PID=""
@@ -42,7 +45,9 @@ start_proxy() {
         --cli-proxy-no-proxy "localhost,127.0.0.1,::1,*.local" \
         > "${TEST_DATA_DIR}/proxy.log" 2>&1 &
     PROXY_PID=$!
-    sleep 2
+    local wait_secs=2
+    if is_windows; then wait_secs=8; fi
+    sleep "$wait_secs"
     if ! kill -0 "$PROXY_PID" 2>/dev/null; then
         _log_fail "proxy started" "running process" "not running"
         cat "${TEST_DATA_DIR}/proxy.log" || true
