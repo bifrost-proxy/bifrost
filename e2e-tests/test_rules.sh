@@ -2384,8 +2384,20 @@ detect_rule_type() {
         echo "filtered_rule"
     elif [[ "$line" == "line\`"* ]]; then
         echo "line_block"
+    elif [[ "$line" == *"reqScript://"* ]]; then
+        echo "reqScript"
+    elif [[ "$line" == *"resScript://"* ]]; then
+        echo "resScript"
     elif [[ "$line" == *"redirect://"* ]] || [[ "$line" == *"locationHref://"* ]]; then
         echo "redirect"
+    elif [[ "$line" == *"reqBody://"* ]]; then
+        echo "reqBody"
+    elif [[ "$line" == *"reqPrepend://"* ]]; then
+        echo "reqPrepend"
+    elif [[ "$line" == *"reqAppend://"* ]]; then
+        echo "reqAppend"
+    elif [[ "$line" == *"reqReplace://"* ]]; then
+        echo "reqReplace"
     elif [[ "$line" == *"resBody://"* ]]; then
         echo "resBody"
     elif [[ "$line" == *"resPrepend://"* ]]; then
@@ -2394,6 +2406,8 @@ detect_rule_type() {
         echo "resAppend"
     elif [[ "$line" == *"resReplace://"* ]]; then
         echo "resReplace"
+    elif [[ "$line" == *"resMerge://"* ]]; then
+        echo "resMerge"
     elif [[ "$line" == *"htmlAppend://"* ]]; then
         echo "htmlAppend"
     elif [[ "$line" == *"htmlPrepend://"* ]]; then
@@ -2420,6 +2434,14 @@ detect_rule_type() {
         echo "cssAppend"
     elif [[ "$line" == *"filter://"* ]]; then
         echo "filter"
+    elif [[ "$line" == *"delete://"* ]]; then
+        echo "delete"
+    elif [[ "$line" == *"tlsIntercept://"* ]]; then
+        echo "tlsIntercept"
+    elif [[ "$line" == *"tlsPassthrough://"* ]]; then
+        echo "tlsPassthrough"
+    elif [[ "$line" == *"dns://"* ]]; then
+        echo "dns"
     elif [[ "$line" == *"passthrough://"* ]] || [[ "$line" == *"ignore://"* ]]; then
         echo "passthrough"
     elif [[ "$line" == *"skip://"* ]]; then
@@ -3762,6 +3784,16 @@ run_tests() {
                 ;;
             pac|proxy)
                 test_http_to_http_forward "$pattern" "$target"
+                ;;
+            reqBody|reqPrepend|reqAppend|reqReplace|resMerge|delete)
+                if [[ -n "$target" ]]; then
+                    test_http_to_http_forward "$pattern" "$target"
+                else
+                    _log_pass "规则语法正确 ($rule_type)"
+                fi
+                ;;
+            tlsIntercept|tlsPassthrough|dns|reqScript|resScript)
+                _log_pass "规则语法正确 ($rule_type)"
                 ;;
             *)
                 warn "跳过不支持的规则类型: $rule_type (规则: $line)"

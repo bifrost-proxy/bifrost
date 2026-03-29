@@ -41,7 +41,7 @@ for i in $(seq 1 "$request_count"); do
   http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload"
 done
 
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   traffic_response=$(admin_get "/api/traffic?limit=20")
   record_count=$(echo "$traffic_response" | jq -r '.records | length')
   if [ "$record_count" -lt "$request_count" ]; then
@@ -56,8 +56,21 @@ else
   _log_fail "traffic records were cleaned by performance policy" "< ${request_count}" "$record_count"
 fi
 
-perf_response=$(admin_get "/api/config/performance")
-body_files=$(echo "$perf_response" | jq -r '.body_store_stats.file_count')
+body_waited=0
+body_files="$request_count"
+while [ "$body_waited" -lt 30 ]; do
+  perf_response=$(admin_get "/api/config/performance")
+  body_files=$(echo "$perf_response" | jq -r '.body_store_stats.file_count')
+  body_files="${body_files:-$request_count}"
+  if ! [[ "$body_files" =~ ^[0-9]+$ ]]; then
+    body_files="$request_count"
+  fi
+  if [ "$body_files" -lt "$request_count" ]; then
+    break
+  fi
+  sleep 1
+  body_waited=$((body_waited + 1))
+done
 
 if [ "$body_files" -lt "$request_count" ]; then
   _log_pass "body_cache files cleaned with records (count $body_files)"

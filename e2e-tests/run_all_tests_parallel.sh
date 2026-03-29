@@ -416,6 +416,26 @@ collect_failed_result_indices() {
     done
 }
 
+ensure_mock_servers_alive() {
+    if is_http_echo_ready; then
+        return 0
+    fi
+
+    warn "Mock 服务器不可用，尝试重启..."
+    "$SCRIPT_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
+    sleep 1
+    "$SCRIPT_DIR/mock_servers/start_servers.sh" start-bg
+    sleep 2
+
+    if is_http_echo_ready; then
+        echo -e "${GREEN}✓${NC} Mock 服务器已重启"
+        return 0
+    fi
+
+    echo -e "${RED}✗${NC} Mock 服务器重启失败"
+    return 1
+}
+
 retry_failed_suites_once() {
     local failed_indices=()
     while IFS= read -r idx; do
@@ -431,6 +451,12 @@ retry_failed_suites_once() {
     local retried=0
     local skipped=0
 
+    local max_retry_suites="${BIFROST_E2E_MAX_RETRY_SUITES:-10}"
+    if [[ ${#failed_indices[@]} -gt $max_retry_suites ]]; then
+        warn "失败套件过多 (${#failed_indices[@]} > ${max_retry_suites})，仅重试前 ${max_retry_suites} 个"
+        failed_indices=("${failed_indices[@]:0:$max_retry_suites}")
+    fi
+
     header "串行重试失败套件"
     info "首次运行失败 ${#failed_indices[@]} 个套件，按原端口逐个重试 (时间预算: ${retry_budget}s)"
 
@@ -440,12 +466,28 @@ retry_failed_suites_once() {
         sleep 3
     fi
 
+    if ! ensure_mock_servers_alive; then
+        warn "Mock 服务器不可用，跳过全部重试"
+        return 0
+    fi
+
+    local retry_fixture_timeout="${BIFROST_E2E_RETRY_FIXTURE_TIMEOUT:-${BIFROST_E2E_FIXTURE_TIMEOUT:-120}}"
+    local saved_fixture_timeout="${BIFROST_E2E_FIXTURE_TIMEOUT:-}"
+    export BIFROST_E2E_FIXTURE_TIMEOUT="$retry_fixture_timeout"
+
     local idx
     for idx in "${failed_indices[@]}"; do
         local elapsed=$(( SECONDS - retry_start ))
         if [[ $elapsed -ge $retry_budget ]]; then
             skipped=$(( ${#failed_indices[@]} - retried ))
             warn "重试时间预算已用尽 (${elapsed}s >= ${retry_budget}s)，跳过剩余 ${skipped} 个套件"
+            break
+        fi
+
+        local remaining=$(( retry_budget - elapsed ))
+        if [[ $remaining -lt 30 ]]; then
+            skipped=$(( ${#failed_indices[@]} - retried ))
+            warn "剩余时间不足 (${remaining}s < 30s)，跳过剩余 ${skipped} 个套件"
             break
         fi
 
@@ -485,6 +527,12 @@ retry_failed_suites_once() {
             fi
         fi
     done
+
+    if [[ -n "$saved_fixture_timeout" ]]; then
+        export BIFROST_E2E_FIXTURE_TIMEOUT="$saved_fixture_timeout"
+    else
+        unset BIFROST_E2E_FIXTURE_TIMEOUT
+    fi
 }
 
 is_http_echo_ready() {

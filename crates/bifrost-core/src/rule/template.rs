@@ -359,7 +359,15 @@ impl TemplateEngine {
 
     fn resolve_env_var(key: Option<&str>) -> String {
         if let Some(k) = key {
-            std::env::var(k).unwrap_or_default()
+            std::env::var(k)
+                .or_else(|_| match k {
+                    "USER" => std::env::var("USERNAME"),
+                    "USERNAME" => std::env::var("USER"),
+                    "HOME" => std::env::var("USERPROFILE"),
+                    "USERPROFILE" => std::env::var("HOME"),
+                    _ => Err(std::env::VarError::NotPresent),
+                })
+                .unwrap_or_default()
         } else {
             String::new()
         }

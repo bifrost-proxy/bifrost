@@ -578,9 +578,16 @@ pub fn run_foreground(
                 cli_proxy_enabled = true;
             }
             Err(e) => {
-                eprintln!("  ✗ Failed to enable CLI proxy: {}", e);
-                remove_pid()?;
-                return Err(e);
+                if shell_proxy_manager.config_paths().is_empty() {
+                    tracing::info!(
+                        "CLI proxy persistent config not available for {} shell (use temporary commands instead)",
+                        shell_proxy_manager.shell_type().as_str()
+                    );
+                } else {
+                    eprintln!("  ✗ Failed to enable CLI proxy: {}", e);
+                    remove_pid()?;
+                    return Err(e);
+                }
             }
         }
     }

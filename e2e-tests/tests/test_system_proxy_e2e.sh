@@ -68,6 +68,10 @@ stop_proxy() {
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+    if is_windows; then
+        kill_bifrost_on_port "$PROXY_PORT"
+        win_wait_port_free "$PROXY_PORT" 30 || true
+    fi
     sleep 2
 }
 
@@ -80,7 +84,17 @@ start_proxy_with_system_proxy() {
         --proxy-bypass "localhost,127.0.0.1,::1,*.local" \
         > "${TEST_DATA_DIR}/proxy.log" 2>&1 &
     PROXY_PID=$!
-    sleep 2
+    local max_wait=30
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1; then
+            sleep 2
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "[WARN] Proxy did not become ready within ${max_wait}s"
 }
 
 start_proxy_without_system_proxy() {
@@ -90,7 +104,17 @@ start_proxy_without_system_proxy() {
         --rules-file "${TEST_DATA_DIR}/.bifrost/rules/test.txt" \
         > "${TEST_DATA_DIR}/proxy.log" 2>&1 &
     PROXY_PID=$!
-    sleep 2
+    local max_wait=30
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1; then
+            sleep 2
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "[WARN] Proxy did not become ready within ${max_wait}s"
 }
 
 macos_find_services() {

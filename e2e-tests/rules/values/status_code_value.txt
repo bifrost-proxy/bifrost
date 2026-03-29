@@ -1,2 +1,2 @@
 # 测试目标: 验证 value 引用热更新时，规则会从 values 中读取状态码覆盖目标请求。
-httpbin.org/status/200 statusCode://{status_code}
+__TARGET_HOST__/status/200 statusCode://{status_code}

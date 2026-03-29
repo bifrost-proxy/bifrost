@@ -33,6 +33,9 @@ if [ $waited -ge 15 ]; then
   exit 1
 fi
 
+http_post "http://127.0.0.1:${HTTP_PORT}/echo" "warmup" >/dev/null 2>&1 || true
+sleep 1
+
 payload=$(python3 - <<'PY'
 print("a" * 32768)
 PY
@@ -49,14 +52,22 @@ for i in $(seq 1 150); do
   http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload"
 done
 
-sleep 3
-
-traffic_response=$(admin_get "/api/traffic?limit=200")
-record_count=$(echo "$traffic_response" | jq -r '(.records // []) | length')
-record_count="${record_count:-0}"
-if ! [[ "$record_count" =~ ^[0-9]+$ ]]; then
+waited=0
+record_count=0
+traffic_response=""
+while [ $waited -lt 30 ]; do
+  traffic_response=$(admin_get "/api/traffic?limit=200")
+  record_count=$(echo "$traffic_response" | jq -r '(.records // []) | length')
+  record_count="${record_count:-0}"
+  if ! [[ "$record_count" =~ ^[0-9]+$ ]]; then
     record_count=0
-fi
+  fi
+  if [ "$record_count" -gt 0 ]; then
+    break
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
 
 if [ "$record_count" -eq 0 ]; then
   _log_fail "total size cleanup should have recorded some traffic" "> 0" "$record_count"

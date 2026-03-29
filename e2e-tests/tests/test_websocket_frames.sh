@@ -94,7 +94,18 @@ check_deps() {
 start_ws_server() {
     python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > /dev/null 2>&1 &
     WS_SERVER_PID=$!
-    sleep 1
+    local max_wait=10
+    if is_windows; then max_wait=20; fi
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if kill -0 "$WS_SERVER_PID" 2>/dev/null; then
+            if curl -s "http://${WS_HOST}:${WS_PORT}/" >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
     kill -0 "$WS_SERVER_PID" 2>/dev/null
 }
 
@@ -108,7 +119,9 @@ start_bifrost() {
     local log_file="$BIFROST_DATA_DIR/proxy.log"
     BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" start --skip-cert-check --unsafe-ssl > "$log_file" 2>&1 &
     BIFROST_PID=$!
-    sleep 1
+    local init_wait=1
+    if is_windows; then init_wait=3; fi
+    sleep "$init_wait"
     if ! kill -0 "$BIFROST_PID" 2>/dev/null; then
         tail -n 120 "$log_file" || true
         return 1
@@ -134,13 +147,15 @@ start_bifrost() {
 
 ws_generate_echo_traffic() {
     local messages="${1:-3}"
+    local timeout=15.0
+    if is_windows; then timeout=30.0; fi
     python3 "$SCRIPT_DIR/../test_utils/ws_stress_client.py" \
         --proxy-host "$PROXY_HOST" \
         --proxy-port "$PROXY_PORT" \
         --host-header "$WS_HOST_HEADER" \
         --path "/ws" \
         --messages "$messages" \
-        --timeout 15.0
+        --timeout "$timeout"
 }
 
 is_ws_record() {

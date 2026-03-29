@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIFROST_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost"
@@ -91,8 +91,10 @@ start_sse_server() {
         return 1
     fi
 
+    local max_wait=50
+    if is_windows; then max_wait=100; fi
     local waited=0
-    while [[ $waited -lt 50 ]]; do
+    while [[ $waited -lt $max_wait ]]; do
         if curl -s "${SSE_TARGET}/health" >/dev/null 2>&1; then
             return 0
         fi
@@ -102,7 +104,6 @@ start_sse_server() {
 
     log_fail "SSE server health check failed"
     return 1
-    return 0
 }
 
 start_bifrost() {

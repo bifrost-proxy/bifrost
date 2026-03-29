@@ -103,6 +103,7 @@ start_proxy() {
     PROXY_PID=$!
     
     local max_wait=30
+    if is_windows; then max_wait=60; fi
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         if ! kill -0 "$PROXY_PID" 2>/dev/null; then
@@ -128,8 +129,12 @@ stop_proxy() {
         log_info "Stopping proxy (PID: $PROXY_PID)..."
         safe_cleanup_proxy "$PROXY_PID"
         PROXY_PID=""
-        sleep 2
     fi
+    if is_windows; then
+        kill_bifrost_on_port "$PROXY_PORT"
+        win_wait_port_free "$PROXY_PORT" 30 || true
+    fi
+    sleep 2
 }
 
 restart_proxy() {
@@ -141,6 +146,7 @@ restart_proxy() {
     PROXY_PID=$!
     
     local max_wait=30
+    if is_windows; then max_wait=60; fi
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         if ! kill -0 "$PROXY_PID" 2>/dev/null; then

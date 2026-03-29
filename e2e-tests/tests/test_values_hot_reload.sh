@@ -11,6 +11,7 @@ fi
 PROXY_PORT="${PROXY_PORT:-18890}"
 PROXY_HOST="127.0.0.1"
 DATA_DIR="./.bifrost-test-values-hot-reload-$$"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-$((PROXY_PORT + 1))}"
 
 export ADMIN_HOST="$PROXY_HOST"
 export ADMIN_PORT="$PROXY_PORT"
@@ -27,6 +28,7 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 PROXY_PID=""
+MOCK_PID=""
 RULE_FIXTURE="$SCRIPT_DIR/../rules/values/status_code_value.txt"
 
 cleanup() {
@@ -34,6 +36,10 @@ cleanup() {
     echo "Cleaning up..."
     if [[ -n "$PROXY_PID" ]]; then
         safe_cleanup_proxy "$PROXY_PID"
+    fi
+    if [[ -n "$MOCK_PID" ]]; then
+        kill_pid "$MOCK_PID"
+        wait_pid "$MOCK_PID"
     fi
     if [[ -d "$DATA_DIR" ]]; then
         rm -rf "$DATA_DIR"
@@ -114,7 +120,7 @@ setup_rule_with_value() {
     log_info "Creating rule that uses a value variable..."
     
     local rule_content
-    rule_content=$(rule_fixture_content "$RULE_FIXTURE")
+    rule_content=$(rule_fixture_content "$RULE_FIXTURE" "TARGET_HOST=${TEST_TARGET_HOST}")
     local response
     response=$(create_rule "value-test-rule" "$rule_content" "true")
     
@@ -139,7 +145,7 @@ setup_rule_with_value() {
 }
 
 TEST_VALUE_NAME="status_code"
-TEST_TARGET_HOST="httpbin.org"
+TEST_TARGET_HOST="127.0.0.1:${MOCK_HTTP_PORT}"
 TEST_URL="http://${TEST_TARGET_HOST}/status/200"
 
 test_initial_without_value() {
@@ -259,6 +265,17 @@ main() {
         echo "Failed to start proxy server"
         exit 1
     fi
+
+    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" >/dev/null 2>&1 &
+    MOCK_PID=$!
+    local mock_waited=0
+    while [[ $mock_waited -lt 15 ]]; do
+        if curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/health" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        mock_waited=$((mock_waited + 1))
+    done
 
     if ! setup_rule_with_value; then
         echo "Failed to setup rule with value variable"

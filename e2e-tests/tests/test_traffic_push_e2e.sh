@@ -156,7 +156,9 @@ test_ws_connection() {
     
     (echo '{"need_overview":true}' | websocat -t --one-message "${WS_PUSH_URL}?x_client_id=e2e_conn_$$_$RANDOM" > "$temp_file" 2>&1) &
     local ws_pid=$!
-    sleep 2
+    local ws_wait=2
+    if is_windows; then ws_wait=5; fi
+    sleep "$ws_wait"
     kill_pid $ws_pid
     
     local response
@@ -192,11 +194,15 @@ test_ws_traffic_delta() {
     (echo "{\"last_sequence\":$initial_seq}" | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_delta_$$_$RANDOM" > "$temp_file" 2>&1) &
     local ws_pid=$!
     
-    sleep 1
+    local ws_settle=1
+    if is_windows; then ws_settle=3; fi
+    sleep "$ws_settle"
     
     generate_traffic 2
     
-    sleep 3
+    local ws_data_wait=3
+    if is_windows; then ws_data_wait=6; fi
+    sleep "$ws_data_wait"
     
     kill_pid $ws_pid
     wait_pid $ws_pid
@@ -238,7 +244,9 @@ test_ws_overview_push() {
     (echo '{"need_overview":true}' | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_overview_$$_$RANDOM" > "$temp_file" 2>&1) &
     local ws_pid=$!
     
-    sleep 3
+    local ws_overview_wait=3
+    if is_windows; then ws_overview_wait=6; fi
+    sleep "$ws_overview_wait"
     
     kill_pid $ws_pid
     wait_pid $ws_pid
@@ -287,7 +295,9 @@ test_ws_metrics_push() {
     (echo '{"need_metrics":true,"metrics_interval_ms":500}' | websocat -t "${WS_PUSH_URL}?x_client_id=e2e_metrics_$$_$RANDOM" > "$temp_file" 2>&1) &
     local ws_pid=$!
     
-    sleep 3
+    local ws_metrics_wait=3
+    if is_windows; then ws_metrics_wait=6; fi
+    sleep "$ws_metrics_wait"
     
     kill_pid $ws_pid
     wait_pid $ws_pid

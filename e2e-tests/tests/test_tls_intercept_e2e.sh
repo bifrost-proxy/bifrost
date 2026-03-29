@@ -1,15 +1,15 @@
 #!/bin/bash
 
-set -e
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$PROJECT_ROOT/e2e-tests/test_utils/rule_fixture.sh"
 source "$PROJECT_ROOT/e2e-tests/test_utils/process.sh"
 
-PROXY_PORT=19290
-MOCK_HTTP_PORT=${MOCK_HTTP_PORT:-19280}
-MOCK_HTTPS_PORT=${MOCK_HTTPS_PORT:-19283}
+PROXY_PORT="${PROXY_PORT:-19290}"
+MOCK_HTTP_PORT=${MOCK_HTTP_PORT:-$((PROXY_PORT + 1))}
+MOCK_HTTPS_PORT=${MOCK_HTTPS_PORT:-$((PROXY_PORT + 3))}
 ADMIN_PORT=$PROXY_PORT
 
 # External E2E (optional):
@@ -18,6 +18,11 @@ ENABLE_EXTERNAL_TESTS=${ENABLE_EXTERNAL_TESTS:-false}
 EXTERNAL_TEST_URL=${EXTERNAL_TEST_URL:-"https://www.google.com/"}
 ONLY_TEST=${ONLY_TEST:-""}
 CURL_COMMON_ARGS=(--connect-timeout 5 --max-time 15)
+
+BIFROST_BIN="$PROJECT_ROOT/target/release/bifrost"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+    BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 
 export BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-$PROJECT_ROOT/.bifrost_test}"
 mkdir -p "$BIFROST_DATA_DIR"
@@ -196,7 +201,7 @@ start_proxy() {
     kill_process_on_port "$PROXY_PORT"
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
 
-    local cmd="$PROJECT_ROOT/target/release/bifrost --port $PROXY_PORT --log-level debug start --skip-cert-check --unsafe-ssl"
+    local cmd="$BIFROST_BIN --port $PROXY_PORT --log-level debug start --skip-cert-check --unsafe-ssl"
     
     if [[ -n "$rules" ]]; then
         cmd="$cmd --rules \"$rules\""
@@ -209,7 +214,9 @@ start_proxy() {
     eval "RUST_LOG=bifrost_proxy=debug $cmd" > /tmp/proxy_server.log 2>&1 &
     PROXY_PID=$!
     
-    for i in {1..20}; do
+    local max_ready=20
+    if is_windows; then max_ready=40; fi
+    for i in $(seq 1 "$max_ready"); do
         if ! kill -0 "$PROXY_PID" 2>/dev/null; then
             log_fail "Proxy exited before becoming ready"
             cat /tmp/proxy_server.log
@@ -244,6 +251,7 @@ stop_proxy() {
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
     if is_windows; then
         kill_bifrost_on_port "$PROXY_PORT"
+        win_wait_port_free "$PROXY_PORT" 30 || true
     fi
     for _ in {1..20}; do
         local port_in_use=false

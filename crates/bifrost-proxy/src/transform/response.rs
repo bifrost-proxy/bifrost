@@ -211,7 +211,15 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
     result = RE_ENV
         .replace_all(&result, |caps: &regex::Captures| {
             let var_name = &caps[1];
-            std::env::var(var_name).unwrap_or_default()
+            std::env::var(var_name)
+                .or_else(|_| match var_name {
+                    "USER" => std::env::var("USERNAME"),
+                    "USERNAME" => std::env::var("USER"),
+                    "HOME" => std::env::var("USERPROFILE"),
+                    "USERPROFILE" => std::env::var("HOME"),
+                    _ => Err(std::env::VarError::NotPresent),
+                })
+                .unwrap_or_default()
         })
         .to_string();
 
