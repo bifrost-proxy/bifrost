@@ -63,23 +63,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: Linux Test Suite
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    env:
-      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
-      PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
-      BIFROST_E2E_RULE_JOBS: "4"
-      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
-      BIFROST_E2E_HTTP_RETRIES: "1"
-      BIFROST_E2E_SHELL_JOBS: "4"
-      BIFROST_E2E_RUNNER_JOBS: "8"
-      TIMEOUT: "90"
-      PYTHONIOENCODING: utf-8
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -95,34 +80,137 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: always()
-      - name: Install jq (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: choco install jq -y
-      - name: Install Playwright browser (Linux)
-        if: runner.os == 'Linux'
-        run: pnpm exec playwright install --with-deps chromium
-        working-directory: web
-      - name: Install Playwright browser (macOS/Windows)
-        if: runner.os != 'Linux'
-        run: pnpm exec playwright install chromium
-        working-directory: web
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
-      - name: Pre-build release binary for E2E
+
+  build-e2e:
+    name: Build E2E Binary
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: always()
+      - name: Build release binary
         run: SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
-      - name: End-to-end tests
-        shell: bash
-        run: bash scripts/ci/run-e2e.sh
-      - name: Upload Playwright artifacts
-        if: failure()
+      - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-artifacts-${{ matrix.os }}
-          path: |
-            web/playwright-report
-            web/test-results
-          if-no-files-found: ignore
+          name: bifrost-release-linux
+          path: target/release/bifrost
+          retention-days: 1
+
+  e2e-rules:
+    name: E2E Rules Tests
+    needs: [build-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_RULE_JOBS: "4"
+      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
+      BIFROST_E2E_HTTP_RETRIES: "1"
+      TIMEOUT: "90"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-linux
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/bifrost
+      - name: E2E rules tests
+        shell: bash
+        run: bash scripts/ci/run-e2e-rules.sh
+
+  e2e-shell:
+    name: E2E Shell Tests
+    needs: [build-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
+      BIFROST_E2E_HTTP_RETRIES: "1"
+      TIMEOUT: "90"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-linux
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/bifrost
+      - name: E2E shell tests
+        shell: bash
+        run: bash scripts/ci/run-e2e-shell.sh
+
+  e2e-runner:
+    name: E2E Runner Tests
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_RUNNER_JOBS: "8"
+      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
+      BIFROST_E2E_HTTP_RETRIES: "1"
+      TIMEOUT: "90"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: E2E runner tests
+        shell: bash
+        run: bash scripts/ci/run-e2e-runner.sh
 
   build-linux:
     name: Linux Build Matrix
@@ -177,16 +265,6 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
-    env:
-      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
-      PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-junit.xml
-      BIFROST_E2E_RULE_JOBS: "4"
-      BIFROST_E2E_RETRY_FAILED_ONCE: "1"
-      BIFROST_E2E_HTTP_RETRIES: "1"
-      BIFROST_E2E_SHELL_JOBS: "4"
-      BIFROST_E2E_RUNNER_JOBS: "8"
-      TIMEOUT: "90"
-      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -209,22 +287,8 @@ jobs:
         with:
           key: desktop-platform-${{ matrix.target }}
           save-if: always()
-      - name: Install jq (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: choco install jq -y
-      - name: Install Playwright browser
-        run: pnpm exec playwright install chromium
-        working-directory: web
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
-      - name: Pre-build release binary for E2E
-        env:
-          SKIP_FRONTEND_BUILD: "1"
-        run: cargo build --release --bin bifrost
-      - name: End-to-end tests
-        shell: bash
-        run: bash scripts/ci/run-e2e.sh
       - name: Build workspace
         run: cargo build --workspace --release --target ${{ matrix.target }}
       - name: Build desktop frontend
@@ -296,12 +360,3 @@ jobs:
       - name: Check desktop client
         if: runner.os != 'macOS'
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
-      - name: Upload Playwright artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-artifacts-${{ matrix.target }}
-          path: |
-            web/playwright-report
-            web/test-results
-          if-no-files-found: ignore

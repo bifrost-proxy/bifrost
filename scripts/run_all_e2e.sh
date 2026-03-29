@@ -11,6 +11,7 @@ RUN_RULES=1
 RUN_SHELL=1
 RUN_RUNNER=1
 RUN_UI=1
+SKIP_RELEASE_BUILD=0
 PLATFORM="$(uname -s)"
 REPORT_DIR=""
 
@@ -80,6 +81,7 @@ Options:
   --skip-shell        Skip shell E2E scripts
   --skip-runner       Skip cargo run -p bifrost-e2e
   --skip-ui           Skip Playwright UI E2E
+  --skip-build        Skip release binary compilation (use pre-built binary)
   -h, --help          Show this help
 EOF
 }
@@ -109,6 +111,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-ui)
       RUN_UI=0
+      shift
+      ;;
+    --skip-build)
+      SKIP_RELEASE_BUILD=1
       shift
       ;;
     -h|--help)
@@ -180,6 +186,7 @@ print_runtime_context() {
   echo "Run shell    : $RUN_SHELL"
   echo "Run runner   : $RUN_RUNNER"
   echo "Run UI       : $RUN_UI"
+  echo "Skip build   : $SKIP_RELEASE_BUILD"
 }
 
 stream_command_output() {
@@ -683,13 +690,29 @@ release_build_ok=1
 ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
-  header "Building release bifrost for rule and shell E2E suites"
-  if run_and_capture \
-    "build:release-bifrost" \
-    env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost; then
-    ensure_bifrost_shell_shim "release"
+  if [[ "$SKIP_RELEASE_BUILD" -eq 1 ]]; then
+    if [[ -x "$ROOT_DIR/target/release/bifrost" ]]; then
+      log_info "Skipping release build: using pre-built binary at target/release/bifrost"
+      ensure_bifrost_shell_shim "release"
+    else
+      log_warn "Pre-built binary not found at target/release/bifrost, falling back to build"
+      if run_and_capture \
+        "build:release-bifrost" \
+        env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost; then
+        ensure_bifrost_shell_shim "release"
+      else
+        release_build_ok=0
+      fi
+    fi
   else
-    release_build_ok=0
+    header "Building release bifrost for rule and shell E2E suites"
+    if run_and_capture \
+      "build:release-bifrost" \
+      env SKIP_FRONTEND_BUILD=1 "$CARGO_BIN" build --release --bin bifrost; then
+      ensure_bifrost_shell_shim "release"
+    else
+      release_build_ok=0
+    fi
   fi
 fi
 
