@@ -395,11 +395,23 @@ retry_failed_suites_once() {
         return 0
     fi
 
+    local retry_budget="${BIFROST_E2E_RETRY_BUDGET_SECS:-300}"
+    local retry_start=$SECONDS
+    local retried=0
+    local skipped=0
+
     header "串行重试失败套件"
-    info "首次运行失败 ${#failed_indices[@]} 个套件，按原端口逐个重试"
+    info "首次运行失败 ${#failed_indices[@]} 个套件，按原端口逐个重试 (时间预算: ${retry_budget}s)"
 
     local idx
     for idx in "${failed_indices[@]}"; do
+        local elapsed=$(( SECONDS - retry_start ))
+        if [[ $elapsed -ge $retry_budget ]]; then
+            skipped=$(( ${#failed_indices[@]} - retried ))
+            warn "重试时间预算已用尽 (${elapsed}s >= ${retry_budget}s)，跳过剩余 ${skipped} 个套件"
+            break
+        fi
+
         local result_file="${RESULTS_DIR}/result_${idx}.txt"
         local log_file="${RESULTS_DIR}/log_${idx}.txt"
         local data_dir="${RESULTS_DIR}/data_${idx}"
@@ -411,12 +423,14 @@ retry_failed_suites_once() {
 
         if [[ -z "$rule_rel" || ! -f "$rule_file" ]]; then
             warn "无法定位失败套件 ${idx} 对应的规则文件，跳过重试"
+            retried=$((retried + 1))
             continue
         fi
 
-        info "重试 ${rule_rel} (proxy_port=$((BASE_PORT + idx)))"
+        info "重试 ${rule_rel} (proxy_port=$((BASE_PORT + idx))) [${elapsed}s/${retry_budget}s]"
         rm -rf "$data_dir" "$log_file" "$result_file"
         run_single_test "$rule_file" "$idx"
+        retried=$((retried + 1))
 
         local status=""
         status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)

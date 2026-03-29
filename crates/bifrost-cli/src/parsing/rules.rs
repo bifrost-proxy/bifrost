@@ -261,6 +261,11 @@ impl ProxyRulesResolverTrait for DynamicRulesResolver {
         let inner = self.inner.read();
         resolve_rules_impl(&inner, url, method, req_headers, req_cookies)
     }
+
+    fn has_response_rules_for_host(&self, host: &str) -> bool {
+        let inner = self.inner.read();
+        inner.has_response_rules_for_host(host)
+    }
 }
 
 fn resolve_rules_impl(

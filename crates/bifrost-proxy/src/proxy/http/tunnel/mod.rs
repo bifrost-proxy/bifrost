@@ -180,6 +180,42 @@ fn requires_tls_interception_for_host_rewrite(resolved_rules: &ResolvedRules) ->
         )
 }
 
+pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bool {
+    !resolved_rules.res_headers.is_empty()
+        || !resolved_rules.req_headers.is_empty()
+        || !resolved_rules.delete_res_headers.is_empty()
+        || !resolved_rules.delete_req_headers.is_empty()
+        || resolved_rules.res_body.is_some()
+        || resolved_rules.req_body.is_some()
+        || resolved_rules.status_code.is_some()
+        || resolved_rules.replace_status.is_some()
+        || resolved_rules.mock_file.is_some()
+        || resolved_rules.mock_rawfile.is_some()
+        || resolved_rules.mock_template.is_some()
+        || !resolved_rules.res_replace.is_empty()
+        || !resolved_rules.res_replace_regex.is_empty()
+        || !resolved_rules.req_replace.is_empty()
+        || !resolved_rules.req_replace_regex.is_empty()
+        || resolved_rules.res_prepend.is_some()
+        || resolved_rules.res_append.is_some()
+        || resolved_rules.req_prepend.is_some()
+        || resolved_rules.req_append.is_some()
+        || !resolved_rules.res_cookies.is_empty()
+        || !resolved_rules.req_cookies.is_empty()
+        || !resolved_rules.header_replace.is_empty()
+        || !resolved_rules.req_scripts.is_empty()
+        || !resolved_rules.res_scripts.is_empty()
+        || resolved_rules.html_append.is_some()
+        || resolved_rules.html_prepend.is_some()
+        || resolved_rules.html_body.is_some()
+        || resolved_rules.js_append.is_some()
+        || resolved_rules.js_prepend.is_some()
+        || resolved_rules.js_body.is_some()
+        || resolved_rules.css_append.is_some()
+        || resolved_rules.css_prepend.is_some()
+        || resolved_rules.css_body.is_some()
+}
+
 pub(super) fn sanitize_upstream_headers(headers: &mut hyper::HeaderMap) {
     client::sanitize_upstream_headers(headers)
 }
@@ -406,6 +442,16 @@ pub async fn handle_connect(
         &tls_config,
         &resolved_rules,
     );
+
+    if !intercept
+        && tls_config.ca_cert.is_some()
+        && !matches!(resolved_rules.tls_intercept, Some(false))
+        && (requires_tls_interception_for_rules(&resolved_rules)
+            || (resolved_rules.host.is_some() && !resolved_rules.ignored.host)
+            || rules.has_response_rules_for_host(&host))
+    {
+        intercept = true;
+    }
 
     if intercept
         && !is_standard_tls_intercept_port(port)

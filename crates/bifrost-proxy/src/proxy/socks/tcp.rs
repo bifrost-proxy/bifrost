@@ -845,6 +845,12 @@ impl SocksHandler {
             SocksAddress::DomainName(domain) => format!("socks5://{}:{}", domain, port),
         };
 
+        let host_str = match &address {
+            SocksAddress::IPv4(ip) => ip.to_string(),
+            SocksAddress::IPv6(ip) => ip.to_string(),
+            SocksAddress::DomainName(domain) => domain.clone(),
+        };
+
         let (target_host, target_port) = if let Some(ref rules) = self.rules {
             debug!("SOCKS5: Resolving rules for URL: {}", url);
             let resolved = rules.resolve(&url, "CONNECT");
@@ -861,18 +867,35 @@ impl SocksHandler {
                 debug!("SOCKS5: Rule applied - {} -> {}:{}", url, h, p);
                 (h, p)
             } else {
-                match &address {
-                    SocksAddress::IPv4(ip) => (ip.to_string(), port),
-                    SocksAddress::IPv6(ip) => (ip.to_string(), port),
-                    SocksAddress::DomainName(domain) => (domain.clone(), port),
+                let scheme = if port == 443 { "https" } else { "http" };
+                let scheme_url = format!("{}://{}:{}", scheme, host_str, port);
+                let scheme_resolved = rules.resolve(&scheme_url, "CONNECT");
+                if let Some(ref host_rule) = scheme_resolved.host {
+                    let host_rule = host_rule.trim_end_matches('/');
+                    let parts: Vec<&str> = host_rule.split(':').collect();
+                    let h = parts[0].to_string();
+                    let p = if parts.len() > 1 {
+                        parts[1].parse().unwrap_or(port)
+                    } else {
+                        match scheme_resolved.host_protocol {
+                            Some(bifrost_core::Protocol::Http)
+                            | Some(bifrost_core::Protocol::Ws) => 80,
+                            Some(bifrost_core::Protocol::Https)
+                            | Some(bifrost_core::Protocol::Wss) => 443,
+                            _ => port,
+                        }
+                    };
+                    debug!(
+                        "SOCKS5: Rule applied via {}:// URL - {} -> {}:{}",
+                        scheme, url, h, p
+                    );
+                    (h, p)
+                } else {
+                    (host_str.clone(), port)
                 }
             }
         } else {
-            match &address {
-                SocksAddress::IPv4(ip) => (ip.to_string(), port),
-                SocksAddress::IPv6(ip) => (ip.to_string(), port),
-                SocksAddress::DomainName(domain) => (domain.clone(), port),
-            }
+            (host_str.clone(), port)
         };
 
         let target_addr = format!("{}:{}", target_host, target_port);
@@ -1009,6 +1032,37 @@ impl SocksHandler {
 
             match protocol {
                 Some(crate::protocol::TransportProtocol::Tls) => {
+                    let original_host_port = original_url
+                        .strip_prefix("socks5://")
+                        .unwrap_or(original_url);
+                    let https_url = format!("https://{}", original_host_port);
+
+                    let tls_resolved_rules = if let Some(ref rules) = self.rules {
+                        let https_resolved = rules.resolve(&https_url, "CONNECT");
+                        debug!(
+                            "SOCKS5: Re-resolved rules via https:// URL {}: host={:?}, tls_intercept={:?}, rules_count={}",
+                            https_url, https_resolved.host, https_resolved.tls_intercept, https_resolved.rules.len()
+                        );
+                        if https_resolved.host.is_some()
+                            || https_resolved.tls_intercept.is_some()
+                            || !https_resolved.rules.is_empty()
+                            || !https_resolved.res_headers.is_empty()
+                            || !https_resolved.req_headers.is_empty()
+                        {
+                            https_resolved
+                        } else {
+                            resolved_rules.clone()
+                        }
+                    } else {
+                        resolved_rules.clone()
+                    };
+
+                    let original_host = original_host_port
+                        .trim_start_matches('[')
+                        .split([']', ':'])
+                        .next()
+                        .unwrap_or(target_host);
+
                     if let Some(ref tls_config) = &self.tls_config {
                         let tls_intercept_config: Option<TlsInterceptConfig> =
                             if let Some(ref state) = self.admin_state {
@@ -1097,22 +1151,26 @@ impl SocksHandler {
                             }
 
                             let do_intercept = crate::proxy::http::should_intercept_tls_for_client(
-                                target_host,
+                                original_host,
                                 client_app,
                                 is_local_client,
                                 tls_intercept_config,
                                 tls_config,
-                                &resolved_rules,
-                            );
+                                &tls_resolved_rules,
+                            ) || (tls_config.ca_cert.is_some()
+                                && !matches!(tls_resolved_rules.tls_intercept, Some(false))
+                                && (crate::proxy::http::requires_tls_interception_for_rules(
+                                    &tls_resolved_rules,
+                                ) || (tls_resolved_rules.host.is_some()
+                                    && !tls_resolved_rules.ignored.host)
+                                    || self.rules.as_ref().is_some_and(|r| {
+                                        r.has_response_rules_for_host(original_host)
+                                    })));
                             if do_intercept {
                                 debug!(
-                                    "SOCKS5: TLS interception enabled for {}:{} (client_app={:?}, rule={:?}, global={})",
-                                    target_host, target_port, client_app, resolved_rules.tls_intercept, tls_intercept_config.enable_tls_interception
+                                    "SOCKS5: TLS interception enabled for {}:{} (original_host={}, client_app={:?}, rule={:?}, global={})",
+                                    target_host, target_port, original_host, client_app, tls_resolved_rules.tls_intercept, tls_intercept_config.enable_tls_interception
                                 );
-                                let original_host = original_url
-                                    .strip_prefix("socks5://")
-                                    .and_then(|s| s.split(':').next())
-                                    .unwrap_or(target_host);
                                 return self
                                     .relay_with_tls_intercept(
                                         target_stream,

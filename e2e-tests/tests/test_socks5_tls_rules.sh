@@ -75,8 +75,13 @@ wait_for_proxy_ready() {
 
 start_proxy_with_rules() {
     local rules="$1"
+    local http_port="${ECHO_HTTP_PORT:-3000}"
     local combined_rules
-    combined_rules="$(httpbin_mock_rules "${ECHO_HTTP_PORT:-3000}" "${ECHO_HTTPS_PORT:-3443}")"
+    combined_rules="$(cat <<EOF
+http://httpbin.org/ http://127.0.0.1:${http_port}
+https://httpbin.org/ http://127.0.0.1:${http_port}
+EOF
+)"
     if [ -n "$rules" ]; then
         combined_rules="${combined_rules}"$'\n'"${rules}"
     fi

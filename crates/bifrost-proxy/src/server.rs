@@ -484,6 +484,10 @@ pub trait RulesResolver: Send + Sync {
         req_headers: &std::collections::HashMap<String, String>,
         req_cookies: &std::collections::HashMap<String, String>,
     ) -> ResolvedRules;
+
+    fn has_response_rules_for_host(&self, _host: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]

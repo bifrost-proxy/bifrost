@@ -42,6 +42,9 @@ impl MatchResult {
 
 pub trait Matcher: Send + Sync {
     fn matches(&self, url: &str, host: &str, path: &str) -> MatchResult;
+    fn matches_host(&self, url: &str, host: &str) -> bool {
+        self.matches(url, host, "/").matched
+    }
     fn is_negated(&self) -> bool;
     fn priority(&self) -> i32;
 }

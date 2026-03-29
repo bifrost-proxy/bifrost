@@ -75,6 +75,15 @@ kill_bifrost_on_port() {
         win_pid=$(_win_find_pid_on_port "$port")
         if [ -n "$win_pid" ]; then
             _win_stop_process "$win_pid"
+            local wait_count=0
+            while [[ $wait_count -lt 10 ]]; do
+                win_pid=$(_win_find_pid_on_port "$port")
+                if [[ -z "$win_pid" ]]; then
+                    break
+                fi
+                sleep 0.5
+                wait_count=$((wait_count + 1))
+            done
         fi
     else
         local target_pid=""
@@ -87,6 +96,26 @@ kill_bifrost_on_port() {
             kill -9 "$target_pid" 2>/dev/null || true
         fi
     fi
+}
+
+win_wait_port_free() {
+    local port=$1
+    local max_wait=${2:-20}
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        local pid
+        pid=$(_win_find_pid_on_port "$port")
+        if [[ -z "$pid" ]]; then
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+win_find_pid_on_port() {
+    _win_find_pid_on_port "$@"
 }
 
 kill_all_bifrost() {

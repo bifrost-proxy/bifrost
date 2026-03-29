@@ -457,8 +457,13 @@ pub async fn handle_http_request(
         })
         .unwrap_or_default();
 
-    let resolved_rules =
-        rules.resolve_with_context(&url, &method, &incoming_headers, &incoming_cookies);
+    let rule_match_url = if ctx.url.is_empty() { &url } else { &ctx.url };
+    let resolved_rules = rules.resolve_with_context(
+        rule_match_url,
+        &method,
+        &incoming_headers,
+        &incoming_cookies,
+    );
 
     // 解压输出上限：用于防御压缩炸弹。优先读取配置，否则使用默认 10MiB。
     let max_decompress_output_bytes = if let Some(ref state) = admin_state {

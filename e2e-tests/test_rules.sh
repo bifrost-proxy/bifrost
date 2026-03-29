@@ -415,7 +415,19 @@ start_proxy() {
     # 后续的健康检查可能会连到“旧进程”，导致用例误判。
     if is_windows; then
         kill_bifrost_on_port "${PROXY_PORT}"
-        sleep 0.5
+        local wait_free=0
+        while [[ $wait_free -lt 20 ]]; do
+            local win_pid
+            win_pid=$(_win_find_pid_on_port "${PROXY_PORT}")
+            if [[ -z "$win_pid" ]]; then
+                break
+            fi
+            sleep 0.5
+            wait_free=$((wait_free + 1))
+        done
+        if [[ $wait_free -ge 20 ]]; then
+            warn "端口 ${PROXY_PORT} 在 Windows 上释放超时"
+        fi
     elif have_lsof && lsof -i ":${PROXY_PORT}" -t >/dev/null 2>&1; then
         local pids
         if lsof_supports_pid_output; then
@@ -508,6 +520,12 @@ start_proxy() {
         if have_lsof && lsof_supports_pid_output; then
             local bound_pid
             bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
+            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
+                port_ready="false"
+            fi
+        elif is_windows; then
+            local bound_pid
+            bound_pid=$(_win_find_pid_on_port "${PROXY_PORT}")
             if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
                 port_ready="false"
             fi
@@ -3085,6 +3103,12 @@ wait_for_admin_ready() {
         if have_lsof && lsof_supports_pid_output; then
             local bound_pid
             bound_pid=$(lsof -i ":${PROXY_PORT}" -t 2>/dev/null | head -1 || true)
+            if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
+                port_ready="false"
+            fi
+        elif is_windows; then
+            local bound_pid
+            bound_pid=$(_win_find_pid_on_port "${PROXY_PORT}")
             if [[ -z "$bound_pid" || "$bound_pid" != "$PROXY_PID" ]]; then
                 port_ready="false"
             fi

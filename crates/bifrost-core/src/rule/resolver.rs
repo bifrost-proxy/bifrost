@@ -1,4 +1,4 @@
-use crate::protocol::Protocol;
+use crate::protocol::{Protocol, ProtocolCategory};
 use crate::rule::filter::Filter;
 use lru::LruCache as LruCacheImpl;
 use parking_lot::RwLock;
@@ -198,6 +198,49 @@ impl RulesResolver {
 
     pub fn clear_cache(&self) {
         self.cache.write().clear();
+    }
+
+    pub fn has_response_rules_for_host(&self, host: &str) -> bool {
+        let url_https = format!("https://{}", host);
+        let url_http = format!("http://{}", host);
+        for rule in &self.rules {
+            if rule.is_disabled() || rule.is_negated() {
+                continue;
+            }
+            let category = rule.protocol.category();
+            if !matches!(
+                category,
+                ProtocolCategory::Response | ProtocolCategory::Both
+            ) {
+                continue;
+            }
+            if matches!(
+                rule.protocol,
+                Protocol::Host
+                    | Protocol::XHost
+                    | Protocol::Http
+                    | Protocol::Https
+                    | Protocol::Ws
+                    | Protocol::Wss
+                    | Protocol::Proxy
+                    | Protocol::Redirect
+                    | Protocol::File
+                    | Protocol::Tpl
+                    | Protocol::RawFile
+                    | Protocol::Delete
+                    | Protocol::Decode
+                    | Protocol::UrlReplace
+                    | Protocol::Pac
+            ) {
+                continue;
+            }
+            if rule.matcher.matches_host(&url_https, host)
+                || rule.matcher.matches_host(&url_http, host)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn resolve(&self, ctx: &RequestContext) -> ResolvedRules {
