@@ -250,18 +250,20 @@ stop_all() {
     pkill -f "ws_echo_server.py" 2>/dev/null || true
     pkill -f "sse_echo_server.py" 2>/dev/null || true
     if is_windows; then
-        powershell.exe -NoProfile -Command "
-            Get-CimInstance Win32_Process | Where-Object {
-                \$_.CommandLine -and (
-                    \$_.CommandLine -like '*http_echo_server*' -or
-                    \$_.CommandLine -like '*https_echo_server*' -or
-                    \$_.CommandLine -like '*ws_echo_server*' -or
-                    \$_.CommandLine -like '*sse_echo_server*'
-                )
-            } | ForEach-Object {
-                Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-        " 2>/dev/null || true
+        local srv pids p
+        for srv in http_echo_server https_echo_server ws_echo_server sse_echo_server; do
+            pids=$(wmic process where "CommandLine like '%%${srv}%%'" get ProcessId 2>/dev/null \
+                | grep -oE '[0-9]+' | tr -d '\r' || true)
+            if [[ -z "$pids" ]]; then
+                pids=$(powershell.exe -NoProfile -Command "
+                    Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine -like '*${srv}*' } |
+                    Select-Object -ExpandProperty ProcessId
+                " 2>/dev/null | tr -d '\r' || true)
+            fi
+            for p in $pids; do
+                [[ -n "$p" ]] && taskkill.exe //F //PID "$p" >/dev/null 2>&1 || true
+            done
+        done
     fi
 
     local failed=0

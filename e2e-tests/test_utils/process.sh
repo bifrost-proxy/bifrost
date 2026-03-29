@@ -15,12 +15,14 @@ is_windows() {
 
 _win_stop_process() {
     local pid=$1
-    powershell.exe -NoProfile -Command "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+    taskkill.exe //F //PID "$pid" >/dev/null 2>&1 || true
 }
 
 _win_find_pid_on_port() {
     local port=$1
-    powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess" 2>/dev/null | tr -d '\r' | head -n 1
+    netstat.exe -ano 2>/dev/null \
+        | awk -v p=":${port}" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' \
+        | tr -d '\r'
 }
 
 kill_pid() {
@@ -53,13 +55,7 @@ kill_process_tree() {
         return 0
     fi
     if is_windows; then
-        powershell.exe -NoProfile -Command "
-            function Stop-Tree(\$id) {
-                Get-CimInstance Win32_Process | Where-Object { \$_.ParentProcessId -eq \$id } | ForEach-Object { Stop-Tree \$_.ProcessId }
-                Stop-Process -Id \$id -Force -ErrorAction SilentlyContinue
-            }
-            Stop-Tree $pid
-        " 2>/dev/null || true
+        taskkill.exe //F //T //PID "$pid" >/dev/null 2>&1 || true
     else
         kill -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
     fi
@@ -120,7 +116,7 @@ win_find_pid_on_port() {
 
 kill_all_bifrost() {
     if is_windows; then
-        powershell.exe -NoProfile -Command "Get-Process -Name bifrost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+        taskkill.exe //F //IM bifrost.exe >/dev/null 2>&1 || true
     else
         pkill -f bifrost 2>/dev/null || killall bifrost 2>/dev/null || true
     fi

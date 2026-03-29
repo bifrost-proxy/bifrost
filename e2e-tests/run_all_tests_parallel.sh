@@ -471,11 +471,9 @@ pick_available_base_port() {
 
         if is_windows; then
             local used_ports
-            used_ports=$(powershell.exe -NoProfile -Command "
-                \$ports = @()
-                try { \$ports = (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue).LocalPort } catch {}
-                \$ports -join ','
-            " 2>/dev/null | tr -d '\r')
+            used_ports=$(netstat.exe -ano 2>/dev/null \
+                | awk '$1 == "TCP" && $4 == "LISTENING" { split($2, a, ":"); print a[length(a)] }' \
+                | tr -d '\r' | sort -un | tr '\n' ',' || true)
             for ((p=candidate; p<candidate + suite_count; p++)); do
                 if [[ ",$used_ports," == *",$p,"* ]]; then
                     ok=false

@@ -447,7 +447,6 @@ pub async fn handle_connect(
         && tls_config.ca_cert.is_some()
         && !matches!(resolved_rules.tls_intercept, Some(false))
         && (requires_tls_interception_for_rules(&resolved_rules)
-            || (resolved_rules.host.is_some() && !resolved_rules.ignored.host)
             || rules.has_response_rules_for_host(&host))
     {
         intercept = true;
