@@ -625,6 +625,26 @@ impl ProxyServer {
     }
 
     pub async fn bind(&self, addr: SocketAddr) -> Result<TcpListener> {
+        let check_addr = if addr.ip().is_unspecified() {
+            SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                addr.port(),
+            )
+        } else {
+            addr
+        };
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect(check_addr),
+        )
+        .await
+        {
+            return Err(BifrostError::Network(format!(
+                "Failed to bind to {}: another process is already listening on this port",
+                addr
+            )));
+        }
+
         TcpListener::bind(addr)
             .await
             .map_err(|e| BifrostError::Network(format!("Failed to bind to {}: {}", addr, e)))

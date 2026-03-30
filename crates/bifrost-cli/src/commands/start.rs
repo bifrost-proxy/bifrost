@@ -150,10 +150,29 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         });
 }
 
+fn is_port_in_use(host: &str, port: u16) -> bool {
+    let check_host = if host == "0.0.0.0" || host == "::" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    std::net::TcpStream::connect_timeout(
+        &format!("{}:{}", check_host, port)
+            .parse()
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+        std::time::Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
 fn find_available_port(host: &str, preferred_port: u16) -> bifrost_core::Result<u16> {
     for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
         let port = preferred_port.saturating_add(offset);
         if port == 0 {
+            continue;
+        }
+
+        if is_port_in_use(host, port) {
             continue;
         }
 
@@ -525,13 +544,6 @@ pub fn run_foreground(
     config_manager: ConfigManager,
 ) -> bifrost_core::Result<()> {
     let pid = std::process::id();
-    let runtime_info = RuntimeInfo {
-        pid,
-        port: config.port,
-        socks5_port: config.socks5_port,
-        host: Some(config.host.clone()),
-    };
-    write_runtime_info(&runtime_info)?;
 
     raise_fd_limit();
 
@@ -542,11 +554,6 @@ pub fn run_foreground(
     println!("════════════════════════════════════════════════════════════════════════");
 
     let tls_config = load_tls_config(&config)?;
-
-    let bind_addr = format!("{}:{}", config.host, config.port);
-    std::net::TcpListener::bind(&bind_addr).map_err(|e| {
-        bifrost_core::BifrostError::Network(format!("Failed to bind to {}: {}", bind_addr, e))
-    })?;
 
     let bifrost_dir = config_manager.data_dir().to_path_buf();
     let system_proxy_manager = std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -726,7 +733,7 @@ pub fn run_foreground(
         bifrost_core::BifrostError::Config(format!("Failed to create runtime: {}", e))
     })?;
 
-    rt.block_on(async {
+    let runtime_result = rt.block_on(async {
         let result: bifrost_core::Result<()> = async {
             let startup_started_at = Instant::now();
             tracing::info!(
@@ -964,6 +971,13 @@ pub fn run_foreground(
                 access_control.clone(),
             )
             .await?;
+            let runtime_info = RuntimeInfo {
+                pid,
+                port: config.port,
+                socks5_port: config.socks5_port,
+                host: Some(config.host.clone()),
+            };
+            write_runtime_info(&runtime_info)?;
             log_startup_phase("proxy_listener.bind", phase_started_at);
             tracing::info!(
                 target: "bifrost_cli::startup",
@@ -1126,9 +1140,10 @@ pub fn run_foreground(
         }
         .await;
 
-        if let Err(e) = result {
+        if let Err(e) = &result {
             eprintln!("Runtime error: {}", e);
         }
+        result
     });
 
     if cli_proxy_enabled {
@@ -1138,6 +1153,9 @@ pub fn run_foreground(
     }
     remove_pid()?;
     println!("Bifrost proxy stopped.");
+
+    runtime_result?;
+
     Ok(())
 }
 
@@ -1282,6 +1300,12 @@ pub fn run_daemon(
             let tls_config = load_tls_config(&config)?;
 
             let bind_addr = format!("{}:{}", config.host, config.port);
+            if is_port_in_use(&config.host, config.port) {
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "Failed to bind to {}: another process is already listening on this port",
+                    bind_addr
+                )));
+            }
             std::net::TcpListener::bind(&bind_addr).map_err(|e| {
                 bifrost_core::BifrostError::Network(format!(
                     "Failed to bind to {}: {}",

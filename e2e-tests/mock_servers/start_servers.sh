@@ -162,14 +162,25 @@ start_proxy() {
     start_server_process "proxy_echo_server" "$SCRIPT_DIR/http_echo_server.py" "$PROXY_PORT"
 }
 
+should_start_server() {
+    local name=$1
+    if [ -z "${MOCK_SERVERS:-}" ]; then
+        return 0
+    fi
+    case ",$MOCK_SERVERS," in
+        *",$name,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 start_all() {
-    start_http
-    start_https
-    start_ws
-    start_wss
-    start_sse
+    ! should_start_server http || start_http
+    ! should_start_server https || start_https
+    ! should_start_server ws || start_ws
+    ! should_start_server wss || start_wss
+    ! should_start_server sse || start_sse
     sleep 0.5
-    start_proxy
+    ! should_start_server proxy || start_proxy
 }
 
 wait_for_server() {
@@ -193,12 +204,12 @@ wait_for_server() {
 wait_for_all_servers() {
     local failed=0
 
-    wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 30 || failed=1
-    wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 45 || failed=1
-    wait_for_server "check_tcp_port 127.0.0.1 $WS_PORT" "WebSocket Echo Server" 30 || failed=1
-    wait_for_server "check_tcp_port 127.0.0.1 $WSS_PORT" "WebSocket Secure Echo Server" 45 || failed=1
-    wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 30 || failed=1
-    wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1
+    ! should_start_server http || { wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 30 || failed=1; }
+    ! should_start_server https || { wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 45 || failed=1; }
+    ! should_start_server ws || { wait_for_server "check_tcp_port 127.0.0.1 $WS_PORT" "WebSocket Echo Server" 30 || failed=1; }
+    ! should_start_server wss || { wait_for_server "check_tcp_port 127.0.0.1 $WSS_PORT" "WebSocket Secure Echo Server" 45 || failed=1; }
+    ! should_start_server sse || { wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 30 || failed=1; }
+    ! should_start_server proxy || { wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1; }
 
     return $failed
 }
@@ -247,7 +258,17 @@ status() {
 stop_all() {
     log "Stopping all mock servers..."
     local port pid
-    for port in "$HTTP_PORT" "$HTTPS_PORT" "$WS_PORT" "$WSS_PORT" "$SSE_PORT" "$PROXY_PORT"; do
+    local ports_to_stop=()
+    local names_to_stop=()
+
+    if should_start_server http; then ports_to_stop+=("$HTTP_PORT"); names_to_stop+=("HTTP Echo Server"); fi
+    if should_start_server https; then ports_to_stop+=("$HTTPS_PORT"); names_to_stop+=("HTTPS Echo Server"); fi
+    if should_start_server ws; then ports_to_stop+=("$WS_PORT"); names_to_stop+=("WebSocket Echo Server"); fi
+    if should_start_server wss; then ports_to_stop+=("$WSS_PORT"); names_to_stop+=("WebSocket Secure Echo Server"); fi
+    if should_start_server sse; then ports_to_stop+=("$SSE_PORT"); names_to_stop+=("SSE Echo Server"); fi
+    if should_start_server proxy; then ports_to_stop+=("$PROXY_PORT"); names_to_stop+=("HTTP Proxy Echo Server"); fi
+
+    for port in "${ports_to_stop[@]}"; do
         if is_windows; then
             pid=$(netstat.exe -ano 2>/dev/null \
                 | awk -v p=":${port}" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' \
@@ -269,12 +290,11 @@ stop_all() {
     done
 
     local failed=0
-    wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 30 || failed=1
-    wait_for_port_closed 127.0.0.1 "$HTTPS_PORT" "HTTPS Echo Server" 30 || failed=1
-    wait_for_port_closed 127.0.0.1 "$WS_PORT" "WebSocket Echo Server" 30 || failed=1
-    wait_for_port_closed 127.0.0.1 "$WSS_PORT" "WebSocket Secure Echo Server" 30 || failed=1
-    wait_for_port_closed 127.0.0.1 "$SSE_PORT" "SSE Echo Server" 30 || failed=1
-    wait_for_port_closed 127.0.0.1 "$PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1
+    local i=0
+    for port in "${ports_to_stop[@]}"; do
+        wait_for_port_closed 127.0.0.1 "$port" "${names_to_stop[$i]}" 30 || failed=1
+        ((i++))
+    done
 
     if [ $failed -ne 0 ]; then
         log "Some mock server ports did not close cleanly."
