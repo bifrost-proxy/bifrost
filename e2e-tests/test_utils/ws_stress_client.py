@@ -23,7 +23,7 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def _read_http_headers(sock: socket.socket, timeout_s: float) -> bytes:
+def _read_http_headers(sock: socket.socket, timeout_s: float) -> tuple:
     sock.settimeout(timeout_s)
     data = bytearray()
     while b"\r\n\r\n" not in data:
@@ -33,7 +33,11 @@ def _read_http_headers(sock: socket.socket, timeout_s: float) -> bytes:
         data.extend(chunk)
         if len(data) > 64 * 1024:
             raise ValueError("http header too large")
-    return bytes(data)
+    full = bytes(data)
+    idx = full.find(b"\r\n\r\n")
+    if idx >= 0:
+        return full[: idx + 4], full[idx + 4 :]
+    return full, b""
 
 
 def _parse_http_response(data: bytes):
@@ -105,21 +109,65 @@ def _ws_make_client_frame(
     return bytes(hdr) + payload
 
 
-def _ws_read_frame(sock: socket.socket, timeout_s: float):
-    sock.settimeout(timeout_s)
-    b1, b2 = _recv_exact(sock, 2)
+class _BufferedSocket:
+    def __init__(self, sock: socket.socket, initial: bytes = b""):
+        self._sock = sock
+        self._buf = bytearray(initial)
+
+    def settimeout(self, t: float):
+        self._sock.settimeout(t)
+
+    def sendall(self, data: bytes):
+        self._sock.sendall(data)
+
+    def recv(self, n: int) -> bytes:
+        if self._buf:
+            chunk = bytes(self._buf[:n])
+            del self._buf[:n]
+            return chunk
+        return self._sock.recv(n)
+
+    def recv_exact(self, n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            if self._buf:
+                take = min(n - len(buf), len(self._buf))
+                buf.extend(self._buf[:take])
+                del self._buf[:take]
+            else:
+                chunk = self._sock.recv(n - len(buf))
+                if not chunk:
+                    raise ConnectionError("unexpected EOF")
+                buf.extend(chunk)
+        return bytes(buf)
+
+    def close(self):
+        self._sock.close()
+
+
+def _ws_read_frame(sock, timeout_s: float):
+    if isinstance(sock, _BufferedSocket):
+        sock.settimeout(timeout_s)
+        b1, b2 = sock.recv_exact(2)
+    else:
+        sock.settimeout(timeout_s)
+        b1, b2 = _recv_exact(sock, 2)
     fin = (b1 & 0x80) != 0
     opcode = b1 & 0x0F
     masked = (b2 & 0x80) != 0
     length = b2 & 0x7F
+    if isinstance(sock, _BufferedSocket):
+        _recv = sock.recv_exact
+    else:
+        _recv = lambda n: _recv_exact(sock, n)
     if length == 126:
-        length = struct.unpack(">H", _recv_exact(sock, 2))[0]
+        length = struct.unpack(">H", _recv(2))[0]
     elif length == 127:
-        length = struct.unpack(">Q", _recv_exact(sock, 8))[0]
+        length = struct.unpack(">Q", _recv(8))[0]
     mask_key = b""
     if masked:
-        mask_key = _recv_exact(sock, 4)
-    payload = _recv_exact(sock, length) if length else b""
+        mask_key = _recv(4)
+    payload = _recv(length) if length else b""
     if masked and payload:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
     return fin, opcode, payload
@@ -169,13 +217,15 @@ def run(
         req_lines.append("\r\n")
         req = "".join(req_lines).encode("utf-8")
         sock.sendall(req)
-        resp = _read_http_headers(sock, timeout_s)
-        code, headers = _parse_http_response(resp)
+        resp_header, leftover = _read_http_headers(sock, timeout_s)
+        code, headers = _parse_http_response(resp_header)
         if code != 101:
             raise RuntimeError(f"handshake failed: status={code}")
         accept = headers.get("sec-websocket-accept", "")
         if accept != expected_accept:
             raise RuntimeError("handshake failed: bad sec-websocket-accept")
+
+        bsock = _BufferedSocket(sock, leftover)
 
         if expect_protocol:
             got = headers.get("sec-websocket-protocol", "")
@@ -195,11 +245,9 @@ def run(
             time.sleep(sleep_before_send_s)
 
         if send_invalid_control_fin0:
-            # RFC 6455: control frame 必须 FIN=1，这里发送 FIN=0 的 ping，期望代理主动断开
-            sock.sendall(_ws_make_client_frame(b"x", opcode=9, fin=False, mask=True))
+            bsock.sendall(_ws_make_client_frame(b"x", opcode=9, fin=False, mask=True))
         elif send_oversize_len > 0:
-            # 只发送 header（带 mask），声明超大 payload_len，触发代理侧防御性关闭
-            sock.sendall(
+            bsock.sendall(
                 _ws_make_client_frame(
                     b"",
                     opcode=1,
@@ -213,7 +261,7 @@ def run(
         payload = message_text.encode("utf-8")
         if not no_send and messages > 0 and not send_invalid_control_fin0 and send_oversize_len <= 0:
             for _ in range(messages):
-                sock.sendall(_ws_make_client_text_frame(payload))
+                bsock.sendall(_ws_make_client_text_frame(payload))
 
         recv_ok = 0
         contains_ok = 0
@@ -231,7 +279,7 @@ def run(
 
         while should_continue() and (time.time() - start) < timeout_s:
             try:
-                _, opcode, _payload = _ws_read_frame(sock, timeout_s)
+                _, opcode, _payload = _ws_read_frame(bsock, timeout_s)
             except (ConnectionError, OSError):
                 if expect_close:
                     return
@@ -251,12 +299,11 @@ def run(
                     return
                 break
             elif opcode == 9:
-                # 自动响应 pong
                 pong = bytearray([0x8A, 0x80 | len(_payload)])
                 mask_key = os.urandom(4)
                 pong.extend(mask_key)
                 pong_payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(_payload))
-                sock.sendall(bytes(pong) + pong_payload)
+                bsock.sendall(bytes(pong) + pong_payload)
 
         if expect_text_contains:
             if contains_ok < max(1, expect_text_count):
@@ -271,7 +318,7 @@ def run(
                 raise RuntimeError(f"expected {messages} messages, got {recv_ok}")
 
         try:
-            sock.sendall(_ws_make_client_close_frame(1000))
+            bsock.sendall(_ws_make_client_close_frame(1000))
         except Exception:
             pass
     finally:
