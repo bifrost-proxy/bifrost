@@ -557,17 +557,7 @@ run_shell_tests_parallel() {
   local parallel_tests=()
 
   local MOCK_MANAGING_TESTS=(
-    "test_header_replace.sh"
-    "test_res_body_override_large.sh"
-    "test_body_replace.sh"
-    "test_large_body_protection.sh"
     "test_memory_pressure_e2e.sh"
-    "test_req_res_script_e2e.sh"
-    "test_socks5_tls_rules.sh"
-    "test_http3_e2e.sh"
-    "test_client_process_transport_attribution.sh"
-    "test_rule_semantics_regressions.sh"
-    "test_metrics_hosts_apps_admin_api.sh"
   )
 
   for script_name in "${shell_tests[@]}"; do
@@ -641,6 +631,16 @@ run_shell_batch_parallel() {
         ADMIN_HOST="127.0.0.1" \
         PROXY_PORT="$shell_port" \
         PROXY_HOST="127.0.0.1" \
+        ECHO_HTTP_PORT="$((shell_port + 1))" \
+        HTTP_PORT="$((shell_port + 1))" \
+        ECHO_HTTPS_PORT="$((shell_port + 2))" \
+        HTTPS_PORT="$((shell_port + 2))" \
+        WS_PORT="$((shell_port + 3))" \
+        WSS_PORT="$((shell_port + 4))" \
+        SSE_PORT="$((shell_port + 5))" \
+        SOCKS5_PORT="$((shell_port + 6))" \
+        MOCK_ECHO_PROXY_PORT="$((shell_port + 7))" \
+        ECHO_PROXY_PORT="$((shell_port + 7))" \
         BIFROST_DATA_DIR="$shell_data_dir" \
         SKIP_BUILD=true \
         bash "$E2E_DIR/tests/$script_name"

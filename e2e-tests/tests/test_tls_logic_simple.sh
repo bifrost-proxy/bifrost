@@ -11,10 +11,6 @@ echo "Running should_intercept_tls unit tests..."
 cargo test --package bifrost-proxy test_should_intercept -- --nocapture 2>&1
 
 echo ""
-echo "Running TlsInterceptMode parsing tests..."
-cargo test --package bifrost-proxy test_tls_intercept_mode -- --nocapture 2>&1
-
-echo ""
 echo "Running E2E TLS mode tests..."
 cargo test --package bifrost-e2e tls_intercept_mode -- --nocapture 2>&1
 

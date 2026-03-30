@@ -18,6 +18,7 @@ PROXY_PORT="${PROXY_PORT:-18990}"
 ADMIN_HOST="${ADMIN_HOST:-127.0.0.1}"
 ADMIN_PORT="${ADMIN_PORT:-$PROXY_PORT}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
+ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
 
 BIFROST_PID=""
 MOCK_HTTP_PID=""
@@ -92,7 +93,7 @@ start_bifrost() {
 }
 
 generate_http_traffic() {
-    local url="http://${PROXY_HOST}:3000/test"
+    local url="http://${PROXY_HOST}:${ECHO_HTTP_PORT}/test"
     for _ in $(seq 1 3); do
         http_get "$url"
     done
@@ -130,7 +131,7 @@ main() {
     fi
 
     log_info "Starting mock HTTP server..."
-    start_mock_http 3000
+    start_mock_http "$ECHO_HTTP_PORT"
 
     log_info "Starting Bifrost..."
     if ! start_bifrost; then

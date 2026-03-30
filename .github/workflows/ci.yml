@@ -154,7 +154,7 @@ jobs:
     timeout-minutes: 60
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
-      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_SHELL_JOBS: "8"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
       TIMEOUT: "90"
@@ -353,7 +353,7 @@ jobs:
       BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
-      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_SHELL_JOBS: "8"
       BIFROST_E2E_RUNNER_JOBS: "8"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
@@ -666,7 +666,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
-      BIFROST_E2E_SHELL_JOBS: "4"
+      BIFROST_E2E_SHELL_JOBS: "8"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
       BIFROST_E2E_SUITE_TIMEOUT: "2700"

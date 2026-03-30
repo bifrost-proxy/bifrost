@@ -9,7 +9,7 @@ HTTPS_PORT=${HTTPS_PORT:-3443}
 WS_PORT=${WS_PORT:-3020}
 WSS_PORT=${WSS_PORT:-3021}
 SSE_PORT=${SSE_PORT:-3003}
-PROXY_PORT=${PROXY_PORT:-9999}
+PROXY_PORT=${MOCK_ECHO_PROXY_PORT:-${PROXY_PORT:-9999}}
 SERVER_LOG_DIR=${SERVER_LOG_DIR:-"$SCRIPT_DIR/.logs"}
 DETACHED_MODE=false
 
@@ -246,21 +246,27 @@ status() {
 
 stop_all() {
     log "Stopping all mock servers..."
-    pkill -f "http_echo_server.py" 2>/dev/null || true
-    pkill -f "https_echo_server.py" 2>/dev/null || true
-    pkill -f "ws_echo_server.py" 2>/dev/null || true
-    pkill -f "sse_echo_server.py" 2>/dev/null || true
-    if is_windows; then
-        local port pid
-        for port in "$HTTP_PORT" "$HTTPS_PORT" "$WS_PORT" "$WSS_PORT" "$SSE_PORT" "$PROXY_PORT"; do
+    local port pid
+    for port in "$HTTP_PORT" "$HTTPS_PORT" "$WS_PORT" "$WSS_PORT" "$SSE_PORT" "$PROXY_PORT"; do
+        if is_windows; then
             pid=$(netstat.exe -ano 2>/dev/null \
                 | awk -v p=":${port}" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' \
                 | tr -d '\r')
             if [[ -n "$pid" && "$pid" != "0" ]]; then
                 taskkill.exe //F //PID "$pid" >/dev/null 2>&1 || true
             fi
-        done
-    fi
+        else
+            local target_pid=""
+            if command -v lsof &>/dev/null; then
+                target_pid=$(lsof -ti :"$port" 2>/dev/null | head -n 1)
+            elif command -v fuser &>/dev/null; then
+                target_pid=$(fuser "$port"/tcp 2>/dev/null | awk '{print $1}')
+            fi
+            if [[ -n "$target_pid" ]]; then
+                kill -9 "$target_pid" 2>/dev/null || true
+            fi
+        fi
+    done
 
     local failed=0
     wait_for_port_closed 127.0.0.1 "$HTTP_PORT" "HTTP Echo Server" 30 || failed=1
