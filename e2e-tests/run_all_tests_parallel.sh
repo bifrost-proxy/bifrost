@@ -84,6 +84,7 @@ resolve_bifrost_release_bin() {
 }
 
 FIXTURE_ONLY_RULES=(
+    "comprehensive_test.txt"
     "admin_api/create_proxy_rule.txt"
     "admin_api/list_contains_created_rule.txt"
     "admin_api/rule_count_multiline.txt"
