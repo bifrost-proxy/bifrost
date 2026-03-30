@@ -57,7 +57,7 @@ cleanup() {
         wait_pid "$MOCK_WS_PID"
     fi
 
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     echo "Cleanup complete."
 }
 

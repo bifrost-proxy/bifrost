@@ -32,7 +32,7 @@ cleanup() {
 
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 
-    if is_windows; then kill_all_bifrost; fi
+    kill_bifrost_on_port "$PROXY_PORT"
 }
 
 trap cleanup EXIT

@@ -120,11 +120,7 @@ cleanup() {
     if [ -n "$PROXY_PID" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
         safe_cleanup_proxy "$PROXY_PID"
     fi
-    if is_windows; then
-        kill_all_bifrost
-    else
-        pkill -f "bifrost.*${PROXY_PORT}" 2>/dev/null || true
-    fi
+    kill_bifrost_on_port "$PROXY_PORT"
     rm -f "$DATA_DIR/bifrost.pid" "$DATA_DIR/runtime.json" 2>/dev/null || true
     HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \

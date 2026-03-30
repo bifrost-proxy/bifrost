@@ -89,7 +89,7 @@ perform_curl_with_retries() {
         : > "$_temp_body_file"
 
         curl_exit=0
-        HTTP_STATUS=$(curl "$@" 2>/dev/null) || curl_exit=$?
+        HTTP_STATUS=$(command curl "$@" 2>/dev/null) || curl_exit=$?
         if [ -z "$HTTP_STATUS" ] && [ "$curl_exit" -ne 0 ]; then
             HTTP_STATUS="000"
         fi
@@ -146,8 +146,15 @@ http_request() {
         fi
     fi
 
+    local _temp_data_file=""
     if [ -n "$data" ]; then
-        curl_args+=(-d "$data")
+        if [ "${#data}" -gt 8000 ]; then
+            _temp_data_file=$(mktemp)
+            printf '%s' "$data" > "$_temp_data_file"
+            curl_args+=(--data-binary "@$_temp_data_file")
+        else
+            curl_args+=(-d "$data")
+        fi
     fi
 
     if [ -n "$extra_headers" ]; then
@@ -160,6 +167,7 @@ http_request() {
 
     perform_curl_with_retries "${curl_args[@]}"
 
+    [ -n "$_temp_data_file" ] && rm -f "$_temp_data_file"
     _cleanup_temp
 }
 
@@ -271,8 +279,15 @@ http_request_no_proxy() {
         fi
     fi
 
+    local _temp_data_file=""
     if [ -n "$data" ]; then
-        curl_args+=(-d "$data")
+        if [ "${#data}" -gt 8000 ]; then
+            _temp_data_file=$(mktemp)
+            printf '%s' "$data" > "$_temp_data_file"
+            curl_args+=(--data-binary "@$_temp_data_file")
+        else
+            curl_args+=(-d "$data")
+        fi
     fi
 
     if [ -n "$extra_headers" ]; then
@@ -285,6 +300,7 @@ http_request_no_proxy() {
 
     perform_curl_with_retries "${curl_args[@]}"
 
+    [ -n "$_temp_data_file" ] && rm -f "$_temp_data_file"
     _cleanup_temp
 }
 
@@ -325,8 +341,15 @@ https_request() {
         fi
     fi
 
+    local _temp_data_file=""
     if [ -n "$data" ]; then
-        curl_args+=(-d "$data")
+        if [ "${#data}" -gt 8000 ]; then
+            _temp_data_file=$(mktemp)
+            printf '%s' "$data" > "$_temp_data_file"
+            curl_args+=(--data-binary "@$_temp_data_file")
+        else
+            curl_args+=(-d "$data")
+        fi
     fi
 
     if [ -n "$extra_headers" ]; then
@@ -339,6 +362,7 @@ https_request() {
 
     perform_curl_with_retries "${curl_args[@]}"
 
+    [ -n "$_temp_data_file" ] && rm -f "$_temp_data_file"
     _cleanup_temp
 }
 

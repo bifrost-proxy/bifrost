@@ -66,7 +66,7 @@ cleanup() {
         rm -rf "$BIFROST_DATA_DIR"
     fi
 
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
 }
 
 trap cleanup EXIT

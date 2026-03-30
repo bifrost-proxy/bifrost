@@ -58,7 +58,7 @@ cleanup() {
         fi
     fi
 
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
 }
 
 trap cleanup EXIT
@@ -99,7 +99,7 @@ start_ws_server() {
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         if kill -0 "$WS_SERVER_PID" 2>/dev/null; then
-            if curl -s "http://${WS_HOST}:${WS_PORT}/" >/dev/null 2>&1; then
+            if python3 -c "import socket; s=socket.create_connection(('${WS_HOST}', ${WS_PORT}), 2); s.close()" 2>/dev/null; then
                 return 0
             fi
         fi
@@ -189,10 +189,18 @@ test_ws_frames_capture() {
     sleep 0.5
 
     ws_generate_echo_traffic 3 >/dev/null 2>&1 || true
-    sleep 1
+    sleep 2
 
-    local traffic_id
-    traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws" 20)
+    local traffic_id=""
+    local find_attempt=0
+    while [[ $find_attempt -lt 5 ]]; do
+        traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws" 20)
+        if [[ -n "$traffic_id" && "$traffic_id" != "null" ]]; then
+            break
+        fi
+        sleep 2
+        find_attempt=$((find_attempt + 1))
+    done
     if [[ -z "$traffic_id" || "$traffic_id" == "null" ]]; then
         fail "No WebSocket traffic recorded"
         return 1
@@ -251,10 +259,18 @@ test_ws_frame_directions() {
     sleep 0.5
 
     ws_generate_echo_traffic 1 >/dev/null 2>&1 || true
-    sleep 1
+    sleep 2
 
-    local traffic_id
-    traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws" 20)
+    local traffic_id=""
+    local find_attempt=0
+    while [[ $find_attempt -lt 5 ]]; do
+        traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws" 20)
+        if [[ -n "$traffic_id" && "$traffic_id" != "null" ]]; then
+            break
+        fi
+        sleep 2
+        find_attempt=$((find_attempt + 1))
+    done
     if [[ -z "$traffic_id" || "$traffic_id" == "null" ]]; then
         fail "No traffic ID found"
         return 1
@@ -310,10 +326,18 @@ test_ws_binary_payload_decode_and_search() {
         --messages 2 \
         --timeout 15.0 \
         --expect-binary >/dev/null 2>&1 || true
-    sleep 1
+    sleep 2
 
-    local traffic_id
-    traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws/binary" 20)
+    local traffic_id=""
+    local find_attempt=0
+    while [[ $find_attempt -lt 5 ]]; do
+        traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws/binary" 20)
+        if [[ -n "$traffic_id" && "$traffic_id" != "null" ]]; then
+            break
+        fi
+        sleep 2
+        find_attempt=$((find_attempt + 1))
+    done
     if [[ -z "$traffic_id" || "$traffic_id" == "null" ]]; then
         fail "No WebSocket binary traffic recorded"
         return 1

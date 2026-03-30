@@ -22,7 +22,7 @@ cleanup() {
     if [ -n "${PROXY_PID:-}" ]; then
         safe_cleanup_proxy "$PROXY_PID"
     fi
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     sleep 1
     rm -rf "$DATA_DIR"
 }

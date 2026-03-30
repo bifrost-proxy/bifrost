@@ -1437,7 +1437,11 @@ pub fn run_daemon(
 
                     let shared_config_manager = Arc::new(config_manager);
 
+                    let access_control =
+                        ProxyServer::new(config.clone()).access_control().clone();
+
                     let admin_state = AdminState::new(config.port)
+                        .with_access_control(access_control.clone())
                         .with_body_store(body_store)
                         .with_ws_payload_store(ws_payload_store)
                         .with_async_traffic_writer_shared(async_traffic_writer)
@@ -1499,6 +1503,7 @@ pub fn run_daemon(
                     };
                     let system_proxy_port = config.port;
                     let server = ProxyServer::new(config)
+                        .with_access_control(access_control)
                         .with_tls_config(tls_config)
                         .with_admin_state(admin_state)
                         .with_rules(resolver.clone());

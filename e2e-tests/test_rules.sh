@@ -154,11 +154,7 @@ cleanup() {
             safe_cleanup_proxy "$PROXY_PID"
         fi
         if is_windows; then
-            if [[ "$SKIP_MOCK_SERVERS" == "true" ]]; then
-                kill_bifrost_on_port "$PROXY_PORT"
-            else
-                kill_all_bifrost
-            fi
+            kill_bifrost_on_port "$PROXY_PORT"
         fi
     fi
 

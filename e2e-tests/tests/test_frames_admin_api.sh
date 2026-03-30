@@ -289,7 +289,7 @@ cleanup() {
         log_info "Stopped SSE server"
     fi
 
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
 
     if [[ "$CREATED_DATA_DIR" == "1" && -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
         rm -rf "$BIFROST_DATA_DIR"

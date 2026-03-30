@@ -45,7 +45,7 @@ cleanup() {
     [[ -n "$MOCK_HTTP_PID" ]] && safe_cleanup_proxy "$MOCK_HTTP_PID"
     [[ -n "$MOCK_HTTPS_PID" ]] && safe_cleanup_proxy "$MOCK_HTTPS_PID"
     if is_windows; then
-        kill_all_bifrost
+        kill_bifrost_on_port "$PROXY_PORT"
     fi
     rm -f /tmp/mock_server_*.log /tmp/proxy_*.log /tmp/test_cert.* 2>/dev/null || true
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
@@ -192,7 +192,7 @@ EOF
 
 start_proxy() {
     local rules="$1"
-    local extra_args="$2"
+    local extra_args="${2:-}"
     
     log_info "Starting proxy on port $PROXY_PORT..."
     log_info "Rules: $rules"

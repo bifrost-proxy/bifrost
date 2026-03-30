@@ -31,7 +31,7 @@ cleanup() {
     if [ -n "${PROXY_PID:-}" ]; then
         safe_cleanup_proxy "$PROXY_PID"
     fi
-    if is_windows; then kill_all_bifrost; fi
+    kill_bifrost_on_port "$PROXY_PORT"
     HTTP_PORT="${ECHO_HTTP_PORT:-3000}" \
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
     "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true

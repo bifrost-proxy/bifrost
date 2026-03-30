@@ -190,7 +190,11 @@ admin_stop_bifrost() {
         safe_cleanup_proxy "$ADMIN_CLIENT_BIFROST_PID"
     fi
     if is_windows; then
-        kill_all_bifrost
+        local _port
+        _port="$(admin_port)"
+        if [[ -n "$_port" ]]; then
+            kill_bifrost_on_port "$_port"
+        fi
     fi
 
     if [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
@@ -245,8 +249,8 @@ admin_delete() {
 }
 
 get_traffic_list() {
-    local arg1="$1"
-    local arg2="$2"
+    local arg1="${1:-}"
+    local arg2="${2:-}"
     local arg3="${3:-100}"
 
     if [[ -n "$arg2" ]]; then
@@ -278,9 +282,9 @@ get_traffic_by_url() {
 }
 
 find_traffic_id_by_url() {
-    local host="$1"
-    local port="$2"
-    local url_pattern="$3"
+    local host="${1:-}"
+    local port="${2:-}"
+    local url_pattern="${3:-}"
     local limit="${4:-50}"
 
     if [[ -z "$url_pattern" ]]; then
@@ -294,7 +298,7 @@ find_traffic_id_by_url() {
 
 get_frames() {
     local arg1="$1"
-    local arg2="$2"
+    local arg2="${2:-}"
     local arg3="${3:-}"
     local arg4="${4:-0}"
     local arg5="${5:-100}"

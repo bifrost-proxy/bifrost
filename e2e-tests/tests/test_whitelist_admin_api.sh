@@ -93,10 +93,25 @@ run_test() {
     fi
 }
 
-TEST_IP="192.168.100.$$"
+TEST_IP="192.168.100.$(($$ % 254 + 1))"
 TEST_CIDR="10.0.0.0/24"
 ORIGINAL_MODE=""
 ORIGINAL_ALLOW_LAN=""
+
+check_admin_alive() {
+    local retries=3
+    local i=0
+    while [[ $i -lt $retries ]]; do
+        if curl -sf "$(admin_base_url)/api/system/status" >/dev/null 2>&1 || \
+           curl -sf "$(admin_base_url)/api/system" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    log_fail "Admin server is not reachable"
+    return 1
+}
 
 save_whitelist_state() {
     local response
@@ -357,6 +372,11 @@ test_temporary_whitelist_add_api() {
 
 test_temporary_whitelist_remove_api() {
     add_temporary_whitelist "$TEST_IP" > /dev/null 2>&1
+    sleep 0.5
+
+    if ! check_admin_alive; then
+        return 1
+    fi
 
     local response
     response=$(remove_temporary_whitelist "$TEST_IP")
@@ -370,6 +390,10 @@ test_temporary_whitelist_remove_api() {
 }
 
 test_pending_authorizations_get_api() {
+    if ! check_admin_alive; then
+        return 1
+    fi
+
     local response
     response=$(get_pending_authorizations)
 
@@ -386,6 +410,10 @@ test_pending_authorizations_get_api() {
 }
 
 test_pending_authorizations_clear_api() {
+    if ! check_admin_alive; then
+        return 1
+    fi
+
     local response
     response=$(clear_pending_authorizations)
 
@@ -398,6 +426,10 @@ test_pending_authorizations_clear_api() {
 }
 
 test_whitelist_structure() {
+    if ! check_admin_alive; then
+        return 1
+    fi
+
     local response
     response=$(get_whitelist)
 

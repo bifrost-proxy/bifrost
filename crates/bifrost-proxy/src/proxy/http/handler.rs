@@ -1346,6 +1346,23 @@ pub async fn handle_http_request(
         );
     }
 
+    if let Some(delay_ms) = resolved_rules.res_delay {
+        if verbose_logging {
+            info!("[{}] [RES_DELAY] Sleeping {}ms", ctx.id_str(), delay_ms);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+
+    if let Some(speed) = resolved_rules.res_speed {
+        if verbose_logging {
+            info!(
+                "[{}] [RES_SPEED] Speed limit: {} bytes/s",
+                ctx.id_str(),
+                speed
+            );
+        }
+    }
+
     if skip_body_processing {
         let is_streaming =
             is_streaming_response(&res_parts, res_content_length, max_body_buffer_size);
@@ -1486,7 +1503,8 @@ pub async fn handle_http_request(
                 sse_stream_writer,
                 max_body_buffer_size,
             );
-            let body = with_trailers(tee_body.boxed(), &resolved_rules);
+            let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);
+            let body = with_trailers(final_body, &resolved_rules);
             return Ok(Response::from_parts(res_parts, body));
         } else {
             let res_body = res_body_stream.take().unwrap();
@@ -1508,7 +1526,8 @@ pub async fn handle_http_request(
                     response_headers_size,
                 )
             };
-            let body = with_trailers(tee_body, &resolved_rules);
+            let final_body = wrap_throttled_body(tee_body, resolved_rules.res_speed);
+            let body = with_trailers(final_body, &resolved_rules);
             return Ok(Response::from_parts(res_parts, body));
         }
     }
@@ -1856,7 +1875,8 @@ pub async fn handle_http_request(
         state.record_traffic(record);
     }
 
-    let body = with_trailers(full_body(final_res_body), &resolved_rules);
+    let response_body = wrap_throttled_body(full_body(final_res_body), resolved_rules.res_speed);
+    let body = with_trailers(response_body, &resolved_rules);
     Ok(Response::from_parts(res_parts, body))
 }
 

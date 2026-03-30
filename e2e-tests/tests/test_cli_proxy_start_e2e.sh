@@ -19,7 +19,7 @@ PLATFORM="$(uname -s)"
 ADMIN_API_BASE="http://127.0.0.1:${PROXY_PORT}/_bifrost/api/proxy/cli"
 
 cleanup() {
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     safe_cleanup_proxy "$PROXY_PID"
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"

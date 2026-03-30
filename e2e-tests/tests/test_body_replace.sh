@@ -70,7 +70,7 @@ header() {
 cleanup() {
     log_info "清理测试环境..."
 
-    if is_windows; then kill_all_bifrost; fi
+    kill_bifrost_on_port "$PROXY_PORT"
 
     safe_cleanup_proxy "$PROXY_PID"
 

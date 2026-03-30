@@ -40,7 +40,7 @@ BIFROST_LOG_FILE=""
 VALID_TRAFFIC_ID=""
 
 cleanup() {
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
 
     safe_cleanup_proxy "$BIFROST_PID"
 

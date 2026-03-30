@@ -33,7 +33,14 @@ if [ $waited -ge 15 ]; then
   exit 1
 fi
 
-http_post "http://127.0.0.1:${HTTP_PORT}/echo" "warmup" >/dev/null 2>&1 || true
+warmup_ok=0
+for warmup_try in 1 2 3; do
+  http_post "http://127.0.0.1:${HTTP_PORT}/echo" "warmup" >/dev/null 2>&1 && { warmup_ok=1; break; }
+  sleep 2
+done
+if [ "$warmup_ok" -eq 0 ]; then
+  echo "WARN: warmup requests failed, proxy may not be forwarding" >&2
+fi
 sleep 1
 
 payload=$(python3 - <<'PY'
@@ -48,9 +55,23 @@ curl -s -X PUT -H "Content-Type: application/json" \
 admin_delete "/api/traffic" >/dev/null 2>&1 || true
 sleep 1
 
+send_ok=0
+send_fail=0
 for i in $(seq 1 150); do
-  http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload"
+  if http_post "http://127.0.0.1:${HTTP_PORT}/echo" "$payload" >/dev/null 2>&1; then
+    send_ok=$((send_ok + 1))
+  else
+    send_fail=$((send_fail + 1))
+    if [ "$send_fail" -ge 10 ] && [ "$send_ok" -eq 0 ]; then
+      echo "WARN: first $send_fail requests all failed, aborting loop early" >&2
+      break
+    fi
+  fi
 done
+
+if [ "$send_ok" -eq 0 ]; then
+  echo "WARN: all http_post requests failed (send_fail=$send_fail)" >&2
+fi
 
 waited=0
 record_count=0

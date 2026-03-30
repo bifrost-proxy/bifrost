@@ -44,7 +44,7 @@ cleanup() {
     if [[ -d "$DATA_DIR" ]]; then
         rm -rf "$DATA_DIR"
     fi
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     echo "Cleanup done"
 }
 

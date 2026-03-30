@@ -170,7 +170,7 @@ restart_proxy() {
 cleanup() {
     stop_mock_server
     stop_proxy
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     log_info "Cleaning up test data directory..."
     rm -rf "$TEST_DATA_DIR"
 }

@@ -40,7 +40,7 @@ cleanup() {
     if [[ -n "$PROXY_PID" ]]; then
         safe_cleanup_proxy "$PROXY_PID"
     fi
-    if is_windows; then kill_all_bifrost; fi
+    kill_bifrost_on_port "$PROXY_PORT"
     "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
     rm -rf "$TEST_DATA_DIR"
 }

@@ -559,7 +559,7 @@ main() {
     echo "Proxy Port: ${PROXY_PORT}"
     echo "=========================================="
 
-    trap 'stop_mock_server; admin_cleanup_bifrost; if is_windows; then kill_all_bifrost; fi' EXIT
+    trap 'stop_mock_server; admin_cleanup_bifrost; if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi' EXIT
 
     admin_ensure_bifrost || { log_fail "Could not start Bifrost"; exit 1; }
 

@@ -42,7 +42,7 @@ assert_equals() {
 }
 
 cleanup() {
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     safe_cleanup_proxy "$PROXY_PID"
     rm -rf "$TEST_DATA_DIR"
 }

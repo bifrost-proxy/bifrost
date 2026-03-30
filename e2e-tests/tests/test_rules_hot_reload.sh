@@ -43,7 +43,7 @@ cleanup() {
         kill_pid "$ECHO_PID"
         wait_pid "$ECHO_PID"
     fi
-    if is_windows; then kill_all_bifrost; fi
+    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     echo "Cleanup done"
 }
 
