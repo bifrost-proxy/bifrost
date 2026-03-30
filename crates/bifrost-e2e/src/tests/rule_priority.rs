@@ -2,7 +2,6 @@ use crate::curl::CurlCommand;
 use crate::mock::EnhancedMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
-use std::time::Duration;
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -99,7 +98,7 @@ async fn test_priority_host_order() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -133,7 +132,7 @@ async fn test_priority_xhost_over_host() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -165,7 +164,7 @@ async fn test_priority_host_vs_proxy() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -196,7 +195,7 @@ async fn test_priority_header_override() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -227,7 +226,7 @@ async fn test_priority_header_merge() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -259,7 +258,7 @@ async fn test_priority_cookie_override() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -297,7 +296,7 @@ async fn test_priority_cookie_merge() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -329,7 +328,7 @@ async fn test_priority_urlparams_override() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -367,7 +366,7 @@ async fn test_priority_urlparams_merge() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -406,7 +405,7 @@ async fn test_priority_resbody_last_wins() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -438,7 +437,7 @@ async fn test_priority_forward_with_modify() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),
@@ -478,7 +477,7 @@ async fn test_priority_mixed_rules() -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    _proxy.wait_for_ready().await?;
 
     let result = CurlCommand::with_proxy(
         &format!("http://127.0.0.1:{}", port),

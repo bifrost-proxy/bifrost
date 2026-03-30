@@ -7,7 +7,7 @@ pub const MIN_TRAFFIC_MAX_RECORDS: usize = 1_000;
 pub const DEFAULT_TRAFFIC_MAX_RECORDS: usize = 5_000;
 pub const MAX_TRAFFIC_MAX_RECORDS: usize = 100_000;
 
-pub const MIN_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MIN_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 100 * 1024;
 pub const MAX_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

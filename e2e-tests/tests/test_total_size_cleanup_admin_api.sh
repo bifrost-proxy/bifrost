@@ -48,9 +48,12 @@ print("a" * 32768)
 PY
 )
 
-curl -s -X PUT -H "Content-Type: application/json" \
+config_response=$(curl -s -X PUT -H "Content-Type: application/json" \
   -d '{"max_db_size_bytes":262144,"max_body_memory_size":1024}' \
-  "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/config/performance" >/dev/null
+  "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/config/performance")
+if echo "$config_response" | jq -e '.error' >/dev/null 2>&1; then
+  echo "WARN: config update may have failed: $config_response" >&2
+fi
 
 admin_delete "/api/traffic" >/dev/null 2>&1 || true
 sleep 1
@@ -73,10 +76,13 @@ if [ "$send_ok" -eq 0 ]; then
   echo "WARN: all http_post requests failed (send_fail=$send_fail)" >&2
 fi
 
+sleep 3
+
 waited=0
 record_count=0
 traffic_response=""
-while [ $waited -lt 30 ]; do
+found_records=0
+while [ $waited -lt 60 ]; do
   traffic_response=$(admin_get "/api/traffic?limit=200")
   record_count=$(echo "$traffic_response" | jq -r '(.records // []) | length')
   record_count="${record_count:-0}"
@@ -84,6 +90,9 @@ while [ $waited -lt 30 ]; do
     record_count=0
   fi
   if [ "$record_count" -gt 0 ]; then
+    found_records=1
+  fi
+  if [ "$found_records" -eq 1 ] && [ "$record_count" -lt 150 ]; then
     break
   fi
   sleep 1

@@ -1198,6 +1198,27 @@ impl ProxyInstance {
         format!("http://{}", self.addr)
     }
 
+    pub async fn wait_for_ready(&self) -> Result<(), String> {
+        let max_attempts = 50;
+        for i in 0..max_attempts {
+            match tokio::net::TcpStream::connect(self.addr).await {
+                Ok(_) => return Ok(()),
+                Err(_) if i < max_attempts - 1 => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Proxy at {} not ready after {}ms: {}",
+                        self.addr,
+                        max_attempts * 50,
+                        e
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn shutdown(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
