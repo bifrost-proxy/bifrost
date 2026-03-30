@@ -8,6 +8,7 @@ PROJECT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 source "$E2E_DIR/test_utils/assert.sh"
 source "$E2E_DIR/test_utils/http_client.sh"
 source "$E2E_DIR/test_utils/process.sh"
+source "$E2E_DIR/test_utils/rule_fixture.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8080}"
@@ -60,7 +61,10 @@ max_body_memory_size = 0
 max_records = 2000
 EOF
 
-    local rules_file="$E2E_DIR/rules/advanced/body_size_strategy.txt"
+    local rules_template="$E2E_DIR/rules/advanced/body_size_strategy.txt"
+    local rules_file="$TEST_DATA_DIR/body_size_strategy.txt"
+    render_rule_fixture_to_file "$rules_template" "$rules_file" \
+        "ECHO_HTTP_PORT=${ECHO_HTTP_PORT}"
     if [[ ! -f "$rules_file" ]]; then
         exit 1
     fi

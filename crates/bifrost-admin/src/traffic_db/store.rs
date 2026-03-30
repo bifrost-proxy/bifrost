@@ -1779,6 +1779,19 @@ impl TrafficDbStore {
         deleted
     }
 
+    pub fn all_ids_set(&self) -> std::collections::HashSet<String> {
+        let conn = self.read_conn.lock();
+        let mut stmt = match conn.prepare("SELECT id FROM traffic_records") {
+            Ok(s) => s,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        let iter = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(i) => i,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        iter.flatten().collect()
+    }
+
     pub fn oldest_ids(&self, limit: usize, offset: usize) -> Vec<String> {
         if limit == 0 {
             return Vec::new();

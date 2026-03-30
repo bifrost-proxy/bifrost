@@ -1,26 +1,26 @@
 # 请求/响应 body 大小策略测试
 # 覆盖请求修改与响应修改在超限时的处理
 
-test-req-body-large.local http://127.0.0.1:3000/echo reqBody://{req_body_override}
-test-req-prepend-large.local http://127.0.0.1:3000/echo reqPrepend://{req_prepend}
-test-req-append-large.local http://127.0.0.1:3000/echo reqAppend://{req_append}
-test-req-replace-large.local http://127.0.0.1:3000/echo reqReplace://REQ_MARKER/REQ_REPLACED
-test-req-merge-large.local http://127.0.0.1:3000/echo reqMerge://{req_merge}
+test-req-body-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo reqBody://{req_body_override}
+test-req-prepend-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo reqPrepend://{req_prepend}
+test-req-append-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo reqAppend://{req_append}
+test-req-replace-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo reqReplace://REQ_MARKER/REQ_REPLACED
+test-req-merge-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo reqMerge://{req_merge}
 
-test-res-body-large.local http://127.0.0.1:3000/large-response?size=2048&marker=RES_MARKER resBody://{res_body_override}
-test-res-prepend-large.local http://127.0.0.1:3000/large-response?size=2048&marker=RES_MARKER resPrepend://{res_prepend}
-test-res-append-large.local http://127.0.0.1:3000/large-response?size=2048&marker=RES_MARKER resAppend://{res_append}
-test-res-replace-large.local http://127.0.0.1:3000/large-response?size=2048&marker=RES_MARKER resReplace://RES_MARKER/RES_REPLACED
-test-res-merge-large.local http://127.0.0.1:3000/echo resMerge://{res_merge}
-test-html-append-large.local http://127.0.0.1:3000/test.html htmlAppend://{html_append}
-test-html-prepend-large.local http://127.0.0.1:3000/test.html htmlPrepend://{html_prepend}
-test-html-body-large.local http://127.0.0.1:3000/test.html htmlBody://{html_body}
-test-js-append-large.local http://127.0.0.1:3000/test.js jsAppend://{js_append}
-test-js-prepend-large.local http://127.0.0.1:3000/test.js jsPrepend://{js_prepend}
-test-js-body-large.local http://127.0.0.1:3000/test.js jsBody://{js_body}
-test-css-append-large.local http://127.0.0.1:3000/test.css cssAppend://{css_append}
-test-css-prepend-large.local http://127.0.0.1:3000/test.css cssPrepend://{css_prepend}
-test-css-body-large.local http://127.0.0.1:3000/test.css cssBody://{css_body}
+test-res-body-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/large-response?size=2048&marker=RES_MARKER resBody://{res_body_override}
+test-res-prepend-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/large-response?size=2048&marker=RES_MARKER resPrepend://{res_prepend}
+test-res-append-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/large-response?size=2048&marker=RES_MARKER resAppend://{res_append}
+test-res-replace-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/large-response?size=2048&marker=RES_MARKER resReplace://RES_MARKER/RES_REPLACED
+test-res-merge-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/echo resMerge://{res_merge}
+test-html-append-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.html htmlAppend://{html_append}
+test-html-prepend-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.html htmlPrepend://{html_prepend}
+test-html-body-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.html htmlBody://{html_body}
+test-js-append-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.js jsAppend://{js_append}
+test-js-prepend-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.js jsPrepend://{js_prepend}
+test-js-body-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.js jsBody://{js_body}
+test-css-append-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.css cssAppend://{css_append}
+test-css-prepend-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.css cssPrepend://{css_prepend}
+test-css-body-large.local http://127.0.0.1:__ECHO_HTTP_PORT__/test.css cssBody://{css_body}
 
 ```req_body_override
 REQ_BODY_OVERRIDE

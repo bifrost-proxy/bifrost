@@ -334,6 +334,12 @@ preprocess_rules_file() {
 
     sed \
         -e "s|__SCRIPT_DIR__|${script_dir_for_sed}|g" \
+        -e "s|__ECHO_HTTP_PORT__|${ECHO_HTTP_PORT}|g" \
+        -e "s|__ECHO_HTTPS_PORT__|${ECHO_HTTPS_PORT}|g" \
+        -e "s|__ECHO_WS_PORT__|${ECHO_WS_PORT}|g" \
+        -e "s|__ECHO_WSS_PORT__|${ECHO_WSS_PORT}|g" \
+        -e "s|__ECHO_SSE_PORT__|${ECHO_SSE_PORT}|g" \
+        -e "s|__ECHO_PROXY_PORT__|${ECHO_PROXY_PORT}|g" \
         -e "s|127.0.0.1:3000|127.0.0.1:${ECHO_HTTP_PORT}|g" \
         -e "s|localhost:3000|localhost:${ECHO_HTTP_PORT}|g" \
         -e "s|127.0.0.1:3443|127.0.0.1:${ECHO_HTTPS_PORT}|g" \

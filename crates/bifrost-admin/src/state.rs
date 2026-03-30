@@ -428,16 +428,71 @@ impl AdminState {
             return;
         }
 
+        let existing_db_ids = traffic_db_store.all_ids_set();
+
+        let orphan_body_ids: Vec<String> = body_sizes
+            .keys()
+            .filter(|id| !existing_db_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let orphan_frame_ids: Vec<String> = frame_sizes
+            .keys()
+            .filter(|id| !existing_db_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let orphan_ws_ids: Vec<String> = ws_payload_sizes
+            .keys()
+            .filter(|id| !existing_db_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+
+        let mut orphan_bytes = 0u64;
+        for id in &orphan_body_ids {
+            orphan_bytes += body_sizes.get(id).copied().unwrap_or(0);
+        }
+        for id in &orphan_frame_ids {
+            orphan_bytes += frame_sizes.get(id).copied().unwrap_or(0);
+        }
+        for id in &orphan_ws_ids {
+            orphan_bytes += ws_payload_sizes.get(id).copied().unwrap_or(0);
+        }
+
+        if orphan_bytes > 0 {
+            if let Some(ref body_store) = self.body_store {
+                let _ = body_store.write().delete_by_ids(&orphan_body_ids);
+            }
+            if let Some(ref frame_store) = self.frame_store {
+                let _ = frame_store.delete_by_ids(&orphan_frame_ids);
+            }
+            if let Some(ref ws_payload_store) = self.ws_payload_store {
+                let _ = ws_payload_store.delete_by_ids(&orphan_ws_ids);
+            }
+            total_size = total_size.saturating_sub(orphan_bytes);
+            tracing::info!(
+                orphan_body = orphan_body_ids.len(),
+                orphan_frame = orphan_frame_ids.len(),
+                orphan_ws = orphan_ws_ids.len(),
+                orphan_bytes = orphan_bytes,
+                "[TRAFFIC] Cleaned up orphaned cache files"
+            );
+        }
+
+        if total_size <= max_db_size_bytes {
+            return;
+        }
+
         let target_size = max_db_size_bytes.saturating_sub(max_db_size_bytes / 4);
         let bytes_to_remove = total_size.saturating_sub(target_size);
         if bytes_to_remove == 0 {
             return;
         }
 
-        let record_count = db_stats.record_count;
+        let record_count = existing_db_ids.len();
         if record_count == 0 {
             return;
         }
+
+        let record_count = db_stats.record_count.max(record_count);
         let avg_db_bytes = (db_stats.db_size / record_count as u64).max(1);
 
         let mut ids_to_delete = Vec::new();
@@ -488,7 +543,6 @@ impl AdminState {
         if let Some(ref ws_payload_store) = self.ws_payload_store {
             let _ = ws_payload_store.delete_by_ids(&ids_to_delete);
         }
-        // Disk-size fallback cleanup is still on the hot path; avoid full VACUUM here.
         traffic_db_store.compact_db(false);
 
         tracing::info!(

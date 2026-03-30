@@ -58,8 +58,7 @@ assert_body_contains_ci() {
 start_mock_servers() {
     mkdir -p "$TEST_DATA_DIR"
 
-    "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
-    "$E2E_DIR/mock_servers/start_servers.sh" start > "$MOCK_LOG_FILE" 2>&1 &
+    HTTP_PORT="$ECHO_HTTP_PORT" "$E2E_DIR/mock_servers/start_servers.sh" start-http > "$MOCK_LOG_FILE" 2>&1 &
 
     local count=0
     while ! curl -s "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1; do
@@ -117,10 +116,13 @@ EOF
 start_proxy() {
     mkdir -p "$TEST_DATA_DIR"
 
-    local rules_file="$E2E_DIR/rules/request_modify/req_res_script.txt"
-    if [[ ! -f "$rules_file" ]]; then
-        exit 1
-    fi
+    local rules_file="$TEST_DATA_DIR/req_res_script.txt"
+    cat > "$rules_file" <<RULES
+script-test.local host://127.0.0.1:${ECHO_HTTP_PORT}
+script-test.local reqScript://req_script
+script-test.local resScript://res_script
+script-test.local decode://decode_script
+RULES
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
