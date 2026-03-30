@@ -13,7 +13,10 @@ use crate::unified_config::{
     TrafficConfig, TrafficConfigUpdate, UiConfig, UiConfigUpdate, UnifiedConfig,
 };
 use crate::values::ValuesStorage;
-use crate::{LegacyBifrostConfig, MAX_TRAFFIC_MAX_RECORDS, MIN_TRAFFIC_MAX_RECORDS};
+use crate::{
+    LegacyBifrostConfig, MAX_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_RECORDS,
+    MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MIN_TRAFFIC_MAX_RECORDS,
+};
 
 pub type SharedConfigManager = Arc<ConfigManager>;
 
@@ -47,8 +50,18 @@ impl ConfigManager {
 
         let mut config = Self::load_config_with_migration(&data_dir)?;
         let original_max_records = config.traffic.max_records;
+        let original_max_db_size_bytes = config.traffic.max_db_size_bytes;
         config.traffic.normalize();
-        if config.traffic.max_records != original_max_records {
+        if config.traffic.max_records != original_max_records
+            || config.traffic.max_db_size_bytes != original_max_db_size_bytes
+        {
+            if config.traffic.max_db_size_bytes != original_max_db_size_bytes {
+                tracing::warn!(
+                    old = original_max_db_size_bytes,
+                    new = config.traffic.max_db_size_bytes,
+                    "[CONFIG] max_db_size_bytes was out of range, normalized"
+                );
+            }
             Self::save_config_to_file(&data_dir.join("config.toml"), &config)?;
         }
         let rules_dir = data_dir.join("rules");
@@ -214,6 +227,14 @@ impl ConfigManager {
             config.traffic.max_records = max_records;
         }
         if let Some(max_db_size_bytes) = update.max_db_size_bytes {
+            if !(MIN_TRAFFIC_MAX_DB_SIZE_BYTES..=MAX_TRAFFIC_MAX_DB_SIZE_BYTES)
+                .contains(&max_db_size_bytes)
+            {
+                return Err(BifrostError::Config(format!(
+                    "traffic.max_db_size_bytes must be between {} and {}",
+                    MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_DB_SIZE_BYTES
+                )));
+            }
             config.traffic.max_db_size_bytes = max_db_size_bytes;
         }
         if let Some(max_body_memory_size) = update.max_body_memory_size {

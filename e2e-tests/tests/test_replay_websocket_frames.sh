@@ -99,18 +99,37 @@ check_deps() {
     fi
 }
 
+wait_for_port() {
+    local port="$1"
+    local max_wait="${2:-10}"
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null || \
+           command -v nc &>/dev/null && nc -z 127.0.0.1 "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 start_ws_server() {
     python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > /dev/null 2>&1 &
     WS_SERVER_PID=$!
-    sleep 1
-    kill -0 "$WS_SERVER_PID" 2>/dev/null
+    if ! wait_for_port "$WS_PORT" 20; then
+        kill -0 "$WS_SERVER_PID" 2>/dev/null
+        return 1
+    fi
 }
 
 start_wss_server() {
     python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WSS_PORT" --ssl > /dev/null 2>&1 &
     WSS_SERVER_PID=$!
-    sleep 1
-    kill -0 "$WSS_SERVER_PID" 2>/dev/null
+    if ! wait_for_port "$WSS_PORT" 20; then
+        kill -0 "$WSS_SERVER_PID" 2>/dev/null
+        return 1
+    fi
 }
 
 start_bifrost() {

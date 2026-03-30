@@ -21,6 +21,7 @@ pub use unified_config::{
     SyncConfig, SyncConfigUpdate, SystemProxyConfig as NewSystemProxyConfig,
     SystemProxyConfigUpdate, TlsConfig, TlsConfigUpdate, TrafficConfig as NewTrafficConfig,
     TrafficConfigUpdate, UiConfig, UiConfigUpdate, UnifiedConfig, DEFAULT_TRAFFIC_MAX_RECORDS,
-    MAX_TRAFFIC_MAX_RECORDS, MIN_TRAFFIC_MAX_RECORDS,
+    MAX_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_RECORDS, MIN_TRAFFIC_MAX_DB_SIZE_BYTES,
+    MIN_TRAFFIC_MAX_RECORDS,
 };
 pub use values::{ValueEntry, ValuesStorage};

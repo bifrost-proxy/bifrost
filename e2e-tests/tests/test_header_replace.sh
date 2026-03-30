@@ -13,7 +13,8 @@ PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8080}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
 TEST_ID="${TEST_ID:-header_replace}"
-export TEST_ID
+BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-2}"
+export TEST_ID BIFROST_E2E_HTTP_RETRIES
 
 TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-header-replace"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
@@ -57,10 +58,11 @@ max_body_memory_size = 0
 max_records = 2000
 EOF
 
-    local rules_file="$E2E_DIR/rules/advanced/header_replace.txt"
-    if [[ ! -f "$rules_file" ]]; then
-        exit 1
-    fi
+    local rules_file="$TEST_DATA_DIR/header_replace_rules.txt"
+    cat > "$rules_file" <<EOF
+test-req-header-replace.local http://127.0.0.1:${ECHO_HTTP_PORT}/echo headerReplace://req.x-trace:abc=xyz
+test-res-header-replace.local http://127.0.0.1:${ECHO_HTTP_PORT}/echo headerReplace://res.x-echo-server:bifrost-test=bifrost-custom
+EOF
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
@@ -107,6 +109,7 @@ test_res_header_replace() {
 main() {
     start_mock_servers
     start_proxy
+    sleep 1
     test_req_header_replace
     test_res_header_replace
 

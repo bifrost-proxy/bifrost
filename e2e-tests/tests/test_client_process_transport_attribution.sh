@@ -123,6 +123,10 @@ start_mock_servers() {
 }
 
 build_bifrost() {
+    if [[ "${SKIP_BUILD:-false}" == "true" ]] && [[ -f "$BIFROST_BIN" ]]; then
+        echo "[INFO] Skipping build (SKIP_BUILD=true), using existing binary: $BIFROST_BIN"
+        return 0
+    fi
     log_section "Building bifrost"
     (cd "$ROOT_DIR" && "$CARGO_BIN" build --release --bin bifrost) || {
         echo "Failed to build bifrost with $CARGO_BIN" >&2

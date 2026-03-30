@@ -467,11 +467,8 @@ impl BodyStore {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() {
-                if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                    let base_id = file_name
-                        .rsplit_once('_')
-                        .map(|(id, _)| id)
-                        .unwrap_or(file_name);
+                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                    let base_id = extract_base_id(file_name);
                     if ids_set.contains(base_id) && fs::remove_file(&path).is_ok() {
                         removed_count += 1;
                     }
@@ -531,17 +528,33 @@ impl BodyStore {
             let path = entry.path();
             if path.is_file() {
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                    let base_id = file_name
-                        .rsplit_once('_')
-                        .map(|(id, _)| id)
-                        .unwrap_or(file_name);
+                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                    let base_id = extract_base_id(file_name);
                     *sizes.entry(base_id.to_string()).or_insert(0) += size;
                 }
             }
         }
         Ok(sizes)
     }
+}
+
+fn extract_base_id(file_name: &str) -> &str {
+    if let Some(prefix_end) = file_name.find('-') {
+        if let Some(second_dash) = file_name[prefix_end + 1..].find('-') {
+            let digits_start = prefix_end + 1 + second_dash + 1;
+            let digits_end = file_name[digits_start..]
+                .find(|c: char| !c.is_ascii_digit())
+                .map(|pos| digits_start + pos)
+                .unwrap_or(file_name.len());
+            if digits_end < file_name.len() && file_name.as_bytes()[digits_end] == b'_' {
+                return &file_name[..digits_end];
+            }
+        }
+    }
+    file_name
+        .rsplit_once('_')
+        .map(|(id, _)| id)
+        .unwrap_or(file_name)
 }
 
 pub type SharedBodyStore = Arc<RwLock<BodyStore>>;
@@ -731,6 +744,80 @@ mod tests {
         let stats = store.stats();
         assert_eq!(stats.active_stream_writers, 0);
         assert!(store.start_stream("test-stream-3", "res").is_ok());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_extract_base_id() {
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165713_req"),
+            "REQ-69c50db8-165713"
+        );
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165713_res"),
+            "REQ-69c50db8-165713"
+        );
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165720_sse_raw"),
+            "REQ-69c50db8-165720"
+        );
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165720_req_raw"),
+            "REQ-69c50db8-165720"
+        );
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165720_res_raw"),
+            "REQ-69c50db8-165720"
+        );
+        assert_eq!(
+            extract_base_id("REQ-69c62cd8-072562_res_openai_like"),
+            "REQ-69c62cd8-072562"
+        );
+        assert_eq!(
+            extract_base_id("REQ-abcdef01-000001_req"),
+            "REQ-abcdef01-000001"
+        );
+        assert_eq!(extract_base_id("some_unknown_file"), "some_unknown");
+    }
+
+    #[test]
+    fn test_delete_by_ids_with_multi_segment_suffixes() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
+
+        let id = "REQ-69c50db8-165720";
+        store.store(id, "req", b"request body").unwrap();
+        store.store(id, "res", b"response body").unwrap();
+        store.store(id, "sse_raw", b"sse raw data").unwrap();
+        store
+            .store(id, "res_openai_like", b"openai like data")
+            .unwrap();
+
+        let stats = store.stats();
+        assert_eq!(stats.file_count, 4);
+
+        let removed = store.delete_by_ids(&[id.to_string()]).unwrap();
+        assert_eq!(removed, 4);
+
+        let stats = store.stats();
+        assert_eq!(stats.file_count, 0);
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_sizes_by_id_with_multi_segment_suffixes() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
+
+        let id = "REQ-69c50db8-165720";
+        store.store(id, "req", b"12345").unwrap();
+        store.store(id, "sse_raw", b"1234567890").unwrap();
+
+        let sizes = store.sizes_by_id().unwrap();
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(*sizes.get(id).unwrap(), 15);
 
         cleanup_test_dir(&dir);
     }

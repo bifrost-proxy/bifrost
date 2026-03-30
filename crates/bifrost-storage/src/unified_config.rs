@@ -7,6 +7,9 @@ pub const MIN_TRAFFIC_MAX_RECORDS: usize = 1_000;
 pub const DEFAULT_TRAFFIC_MAX_RECORDS: usize = 5_000;
 pub const MAX_TRAFFIC_MAX_RECORDS: usize = 100_000;
 
+pub const MIN_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UnifiedConfig {
@@ -334,6 +337,9 @@ impl TrafficConfig {
 
     pub fn normalize(&mut self) {
         self.max_records = normalize_max_records(self.max_records);
+        self.max_db_size_bytes = self
+            .max_db_size_bytes
+            .clamp(MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_DB_SIZE_BYTES);
     }
 }
 

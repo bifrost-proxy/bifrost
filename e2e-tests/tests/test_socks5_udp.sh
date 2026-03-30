@@ -10,6 +10,7 @@ source "$E2E_DIR/test_utils/process.sh"
 PROXY_HOST=${PROXY_HOST:-127.0.0.1}
 PROXY_PORT=${PROXY_PORT:-18080}
 SOCKS5_PORT=${SOCKS5_PORT:-11080}
+export SOCKS5_PORT
 BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
@@ -78,9 +79,10 @@ python3 << 'PYTHON_SCRIPT'
 import socket
 import struct
 import sys
+import os
 
 PROXY_HOST = "127.0.0.1"
-SOCKS5_PORT = 11080
+SOCKS5_PORT = int(os.environ.get('SOCKS5_PORT', '11080'))
 
 try:
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -143,9 +145,10 @@ import socket
 import struct
 import sys
 import time
+import os
 
 PROXY_HOST = "127.0.0.1"
-SOCKS5_PORT = 11080
+SOCKS5_PORT = int(os.environ.get('SOCKS5_PORT', '11080'))
 
 try:
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -251,9 +254,10 @@ python3 << 'PYTHON_SCRIPT'
 import socket
 import struct
 import sys
+import os
 
 PROXY_HOST = "127.0.0.1"
-SOCKS5_PORT = 11080
+SOCKS5_PORT = int(os.environ.get('SOCKS5_PORT', '11080'))
 
 try:
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -327,9 +331,10 @@ import struct
 import sys
 import threading
 import time
+import os
 
 PROXY_HOST = "127.0.0.1"
-SOCKS5_PORT = 11080
+SOCKS5_PORT = int(os.environ.get('SOCKS5_PORT', '11080'))
 
 results = []
 
@@ -421,9 +426,10 @@ import socket
 import struct
 import sys
 import time
+import os
 
 PROXY_HOST = "127.0.0.1"
-SOCKS5_PORT = 11080
+SOCKS5_PORT = int(os.environ.get('SOCKS5_PORT', '11080'))
 
 try:
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

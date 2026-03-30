@@ -540,7 +540,19 @@ should_skip_full_shell_test() {
       return
       ;;
     MINGW*|MSYS*|CYGWIN*)
-      return 1
+      case "$script_name" in
+        test_system_proxy_e2e.sh|\
+        test_http3_e2e.sh|\
+        test_socks5_udp.sh|\
+        test_socks5_udp_rules.sh|\
+        test_sse_frames.sh|\
+        test_websocket_frames.sh)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
       ;;
     *)
       return 1

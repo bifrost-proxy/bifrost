@@ -66,7 +66,10 @@ EOF
     fi
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
-    if [[ ! -x "$bifrost_bin" ]]; then
+    if [[ ! -x "$bifrost_bin" && -f "${bifrost_bin}.exe" ]]; then
+        bifrost_bin="${bifrost_bin}.exe"
+    fi
+    if [[ ! -f "$bifrost_bin" ]]; then
         exit 1
     fi
 
@@ -81,7 +84,10 @@ EOF
     PROXY_PID=$!
 
     local count=0
-    while ! nc -z "$PROXY_HOST" "$PROXY_PORT" 2>/dev/null; do
+    while true; do
+        if curl -s --max-time 2 "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/system" >/dev/null 2>&1; then
+            break
+        fi
         count=$((count + 1))
         if [[ $count -ge 60 ]]; then
             cat "$PROXY_LOG_FILE"

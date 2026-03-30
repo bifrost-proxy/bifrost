@@ -131,12 +131,13 @@ start_proxy() {
     
     mkdir -p "$TEST_DATA_DIR"
     
-    local rules_file="$E2E_DIR/rules/advanced/large_body.txt"
-    
-    if [[ ! -f "$rules_file" ]]; then
-        log_error "规则文件不存在: $rules_file"
-        exit 1
-    fi
+    local rules_file="$TEST_DATA_DIR/large_body_rules.txt"
+    cat > "$rules_file" <<RULES_EOF
+test-large-req-replace.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://REQ_MARKER_12345=REQ_REPLACED
+test-large-res-replace.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace://RES_MARKER_67890=RES_REPLACED
+test-large-both-replace.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://REQ_MARKER_12345=REQ_REPLACED resReplace://RES_MARKER_67890=RES_REPLACED
+test-large-no-rule.local http://127.0.0.1:${ECHO_HTTP_PORT}
+RULES_EOF
     
     log_debug "规则文件: $rules_file"
     log_debug "代理端口: $PROXY_PORT"

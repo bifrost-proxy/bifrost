@@ -37,6 +37,8 @@ PROXY_PORT="${PROXY_PORT:-8080}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
 VERBOSE="${VERBOSE:-false}"
 TIMEOUT="${TIMEOUT:-60}"
+BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-2}"
+export BIFROST_E2E_HTTP_RETRIES
 
 passed=0
 failed=0
@@ -123,12 +125,43 @@ start_proxy() {
     
     mkdir -p "$TEST_DATA_DIR"
     
-    local rules_file="$E2E_DIR/rules/advanced/body_replace.txt"
-    
-    if [[ ! -f "$rules_file" ]]; then
-        log_error "规则文件不存在: $rules_file"
-        exit 1
-    fi
+    local rules_file="$TEST_DATA_DIR/body_replace_rules.txt"
+    cat > "$rules_file" <<EOF
+# Body 替换规则专项测试
+
+# BR-01: 简单字符串替换
+test-req-simple.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://OLD_REQ_MARKER=NEW_REQ_MARKER
+
+# BR-02: 多个替换规则 (& 连接)
+test-req-multi.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://AAA=XXX&BBB=YYY
+
+# BR-03: 删除内容 (替换为空)
+test-req-delete.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://DELETE_ME=
+
+# BR-04: 简单字符串替换
+test-res-simple.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace://OLD_RES_MARKER=NEW_RES_MARKER
+
+# BR-05: 多个替换规则 (& 连接)
+test-res-multi.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace://AAA=XXX&BBB=YYY
+
+# BR-06: 双向替换
+test-both-replace.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://REQ_OLD=REQ_NEW resReplace://RES_OLD=RES_NEW
+
+# BR-07: 正则单次替换 (只替换第一个匹配)
+test-req-regex.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///aaa/=XXX
+
+# BR-08: 正则全局替换 (替换所有匹配)
+test-req-regex-global.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///aaa/g=XXX
+
+# BR-09: 正则忽略大小写
+test-req-regex-case.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///aaa/gi=XXX
+
+# BR-10: 响应 body 正则全局替换
+test-res-regex-global.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace:///OLD/g=NEW
+
+# BR-11: 复杂正则模式 (数字匹配)
+test-req-regex-digits.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///\d+/g=NUM
+EOF
     
     log_debug "规则文件: $rules_file"
     log_debug "代理端口: $PROXY_PORT"

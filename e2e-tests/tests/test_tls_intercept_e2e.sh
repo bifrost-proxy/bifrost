@@ -39,6 +39,10 @@ log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 log_section() { echo -e "\n${YELLOW}=== $* ===${NC}"; }
 
+PROXY_PID=""
+MOCK_HTTP_PID=""
+MOCK_HTTPS_PID=""
+
 cleanup() {
     log_info "Cleaning up..."
     [[ -n "$PROXY_PID" ]] && safe_cleanup_proxy "$PROXY_PID"
