@@ -117,6 +117,7 @@ jobs:
     timeout-minutes: 60
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -145,6 +146,30 @@ jobs:
       - name: E2E rules tests
         shell: bash
         run: bash scripts/ci/run-e2e-rules.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo ""
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $logfile ==="
+            tail -100 "$logfile"
+            echo ""
+          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-rules-logs-linux
+          path: |
+            ${{ github.workspace }}/.e2e-reports/
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+          retention-days: 7
+          if-no-files-found: ignore
 
   e2e-shell:
     name: E2E Shell (Linux)
@@ -153,6 +178,7 @@ jobs:
     timeout-minutes: 60
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "8"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -181,6 +207,30 @@ jobs:
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo ""
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $logfile ==="
+            tail -100 "$logfile"
+            echo ""
+          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-shell-logs-linux
+          path: |
+            ${{ github.workspace }}/.e2e-reports/
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+          retention-days: 7
+          if-no-files-found: ignore
 
   e2e-runner:
     name: E2E Runner (Linux)
@@ -188,6 +238,7 @@ jobs:
     timeout-minutes: 60
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RUNNER_JOBS: "8"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -209,6 +260,30 @@ jobs:
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo ""
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+            echo "=== $logfile ==="
+            tail -100 "$logfile"
+            echo ""
+          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-runner-logs-linux
+          path: |
+            ${{ github.workspace }}/.e2e-reports/
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+          retention-days: 7
+          if-no-files-found: ignore
 
   build-linux-x86:
     name: Linux Build (x86_64)
@@ -347,6 +422,7 @@ jobs:
             target: aarch64-apple-darwin
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -383,29 +459,24 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
           echo ""
-          for logfile in $(find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
-          echo "=== Reports Directory ==="
-          find e2e-tests/reports -type f 2>/dev/null | head -20
-          for report in $(find e2e-tests/reports -type f -name "*.txt" -o -name "*.log" 2>/dev/null | head -10); do
-            echo "=== $report ==="
-            cat "$report"
-            echo ""
-          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs-${{ matrix.target }}
           path: |
+            ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
-            e2e-tests/reports/
           retention-days: 7
           if-no-files-found: ignore
 
@@ -575,6 +646,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RULE_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -621,29 +693,24 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
           echo ""
-          for logfile in $(find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
-          echo "=== Reports Directory ==="
-          find e2e-tests/reports -type f 2>/dev/null | head -20
-          for report in $(find e2e-tests/reports -type f -name "*.txt" -o -name "*.log" 2>/dev/null | head -10); do
-            echo "=== $report ==="
-            cat "$report"
-            echo ""
-          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-rules-logs-${{ matrix.target }}
           path: |
+            ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
-            e2e-tests/reports/
           retention-days: 7
           if-no-files-found: ignore
 
@@ -661,6 +728,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RUNNER_JOBS: "8"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "1"
@@ -688,28 +756,23 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
           echo ""
-          for logfile in $(find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
-          echo "=== Reports Directory ==="
-          find e2e-tests/reports -type f 2>/dev/null | head -20
-          for report in $(find e2e-tests/reports -type f -name "*.txt" -o -name "*.log" 2>/dev/null | head -10); do
-            echo "=== $report ==="
-            cat "$report"
-            echo ""
-          done
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-runner-logs-${{ matrix.target }}
           path: |
+            ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
-            e2e-tests/reports/
           retention-days: 7
           if-no-files-found: ignore

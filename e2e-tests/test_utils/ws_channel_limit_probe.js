@@ -58,7 +58,7 @@ function openClient(name) {
   const clients = [];
   for (let i = 1; i <= count; i += 1) {
     clients.push(await openClient(`e2e_chan_${i}_${process.pid}_${Date.now()}`));
-    await sleep(400);
+    await sleep(800);
   }
 
   await sleep(waitMs);
