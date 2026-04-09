@@ -1,4 +1,4 @@
-import type { RuleFile } from '../../types';
+import type { RuleFile } from '../../../types';
 
 export interface TreeNode {
   name: string;
@@ -21,7 +21,7 @@ export function buildTree(rules: RuleFile[]): TreeNode {
     let currentNode = root;
     let currentPath = '';
 
-    parts.forEach((part, index) => {
+    parts.forEach((part: string, index: number) => {
       const isLastPart = index === parts.length - 1;
       currentPath = currentPath ? `${currentPath}/${part}` : part;
 

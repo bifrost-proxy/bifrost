@@ -2,10 +2,8 @@ import { useMemo, useState, useCallback, useRef, useEffect, type ReactNode } fro
 import {
   Input,
   Button,
-  Dropdown,
   Modal,
   message,
-  Switch,
   Tooltip,
   Spin,
   Select,
@@ -21,7 +19,6 @@ import {
   DeleteOutlined,
   PoweroffOutlined,
   ExportOutlined,
-  HolderOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
 import { useRulesStore } from '../../../stores/useRulesStore';
