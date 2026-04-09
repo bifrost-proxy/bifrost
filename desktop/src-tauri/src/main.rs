@@ -1,4 +1,5 @@
 mod native_launcher;
+mod update;
 
 use bifrost_core::direct_blocking_reqwest_client_builder;
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
@@ -18,11 +19,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(target_os = "macos")]
 use tauri::window::EffectState;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::window::{Effect, EffectsBuilder};
 use tauri::window::{Window, WindowBuilder};
 use tauri::{
     image::Image,
     webview::{Color, WebviewBuilder},
-    window::{Effect, EffectsBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
 };
 
@@ -123,7 +125,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             update_desktop_proxy_port,
-            notify_main_window_ready
+            notify_main_window_ready,
+            check_and_install_update
         ])
         .setup(|app| {
             let host_window = create_host_window(app.handle())?;
@@ -307,6 +310,9 @@ fn load_app_icon() -> tauri::Result<Image<'static>> {
 }
 
 fn apply_window_effects(window: &Window) -> tauri::Result<()> {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = window;
+
     #[cfg(target_os = "macos")]
     window.set_effects(
         EffectsBuilder::new()
@@ -1416,6 +1422,22 @@ fn notify_main_window_ready(app: AppHandle) -> Result<(), String> {
     );
 
     start_main_window_handoff(&app, "frontend ready handshake").map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn check_and_install_update(
+    app: AppHandle,
+    dry_run_install: Option<bool>,
+    platform_override: Option<String>,
+) -> Result<update::UpdateSummary, String> {
+    update::check_and_install_update(
+        app,
+        update::UpdateOptions {
+            dry_run_install: dry_run_install.unwrap_or(false),
+            platform_override,
+            current_version_override: None,
+        },
+    )
 }
 
 fn restart_backend_on_port(

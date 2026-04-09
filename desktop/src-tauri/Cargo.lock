@@ -150,7 +150,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.45-beta"
+version = "0.0.46-beta"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.45-beta"
+version = "0.0.46-beta"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -189,15 +189,17 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "toml 0.8.2",
 ]
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.45-beta"
+version = "0.0.46-beta"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -216,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.45-beta"
+version = "0.0.46-beta"
 dependencies = [
  "bifrost-core",
  "chrono",

@@ -1,6 +1,15 @@
-import { useEffect, useState, useCallback, type CSSProperties } from "react";
+import React, { useEffect, useState, useCallback, type CSSProperties } from "react";
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from "react-router-dom";
-import { ConfigProvider, Modal, Steps, App as AntApp, message, theme, Typography } from "antd";
+import {
+  ConfigProvider,
+  Modal,
+  Steps,
+  App as AntApp,
+  message,
+  theme,
+  Typography,
+  Progress,
+} from "antd";
 import AppLayout from "./components/Layout";
 import BifrostFileDropZone from "./components/BifrostFileDropZone";
 import PendingAuthModal from "./components/PendingAuthModal";
@@ -15,8 +24,11 @@ import Scripts from "./pages/Scripts";
 import Groups from "./pages/Groups";
 import GroupDetail from "./pages/Groups/GroupDetail";
 import {
+  checkAndInstallUpdate,
   DESKTOP_HANDOFF_COMPLETE_EVENT,
+  DESKTOP_UPDATE_STATUS_EVENT,
   listenDesktopEvent,
+  type DesktopUpdateStatusPayload,
 } from "./desktop/tauri";
 import { useThemeStore, initThemeListener } from "./stores/useThemeStore";
 import { useGlobalDataSync } from "./hooks/useGlobalDataSync";
@@ -55,9 +67,74 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
   useGlobalDataSync();
   useEditorCompletion();
 
+  const [desktopUpdateVisible, setDesktopUpdateVisible] = useState(false);
+  const [desktopUpdateStatus, setDesktopUpdateStatus] =
+    useState<DesktopUpdateStatusPayload | null>(null);
+
   useEffect(() => {
     const cleanup = initThemeListener();
     return cleanup;
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktopShell()) {
+      return;
+    }
+
+    let cancelled = false;
+    let detach: (() => void | Promise<void>) | null = null;
+    let closeTimer = 0;
+
+    const scheduleClose = (delayMs: number) => {
+      if (closeTimer) {
+        window.clearTimeout(closeTimer);
+      }
+      closeTimer = window.setTimeout(() => {
+        setDesktopUpdateVisible(false);
+      }, delayMs);
+    };
+
+    void listenDesktopEvent(DESKTOP_UPDATE_STATUS_EVENT, (event) => {
+      if (cancelled) {
+        return;
+      }
+
+      const payload = event.payload as DesktopUpdateStatusPayload | null;
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+
+      setDesktopUpdateStatus(payload);
+      setDesktopUpdateVisible(true);
+
+      if (payload.phase === "up-to-date" || payload.phase === "done") {
+        scheduleClose(1400);
+      }
+    })
+      .then((unlisten) => {
+        if (cancelled) {
+          void unlisten();
+          return;
+        }
+        detach = unlisten;
+      })
+      .catch((error) => {
+        console.error("[desktop-update] Failed to subscribe update status event.", error);
+      });
+
+    void checkAndInstallUpdate().catch((error) => {
+      console.error("[desktop-update] Failed to start update check.", error);
+    });
+
+    return () => {
+      cancelled = true;
+      if (closeTimer) {
+        window.clearTimeout(closeTimer);
+      }
+      if (detach) {
+        void detach();
+      }
+    };
   }, []);
 
   const holderRender = useCallback(
@@ -227,6 +304,82 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
         >
           {desktopCoreDetail}
         </Typography.Paragraph>
+      </Modal>
+      <Modal
+        open={desktopUpdateVisible}
+        title="应用更新"
+        closable={
+          desktopUpdateStatus?.phase === "error" ||
+          desktopUpdateStatus?.phase === "up-to-date" ||
+          desktopUpdateStatus?.phase === "done"
+        }
+        maskClosable={
+          desktopUpdateStatus?.phase === "error" ||
+          desktopUpdateStatus?.phase === "up-to-date" ||
+          desktopUpdateStatus?.phase === "done"
+        }
+        keyboard={
+          desktopUpdateStatus?.phase === "error" ||
+          desktopUpdateStatus?.phase === "up-to-date" ||
+          desktopUpdateStatus?.phase === "done"
+        }
+        okText={desktopUpdateStatus?.phase === "error" ? "关闭" : undefined}
+        cancelButtonProps={{ style: { display: "none" } }}
+        onOk={() => setDesktopUpdateVisible(false)}
+        onCancel={() => setDesktopUpdateVisible(false)}
+        footer={
+          desktopUpdateStatus?.phase === "error" ||
+          desktopUpdateStatus?.phase === "up-to-date" ||
+          desktopUpdateStatus?.phase === "done"
+            ? undefined
+            : null
+        }
+        centered
+        width={Math.min(680, Math.max(520, Math.floor(window.innerWidth * 0.44)))}
+        zIndex={1000}
+        styles={overlayStyles}
+      >
+        <Typography.Paragraph>
+          {desktopUpdateStatus?.message || "正在检查更新"}
+        </Typography.Paragraph>
+        <Steps
+          size="small"
+          current={
+            desktopUpdateStatus?.phase === "installing" || desktopUpdateStatus?.phase === "done"
+              ? 2
+              : desktopUpdateStatus?.phase === "update-available" ||
+                  desktopUpdateStatus?.phase === "downloading" ||
+                  desktopUpdateStatus?.phase === "downloaded"
+                ? 1
+                : 0
+          }
+          status={
+            desktopUpdateStatus?.phase === "error"
+              ? "error"
+              : desktopUpdateStatus?.phase === "up-to-date" ||
+                  desktopUpdateStatus?.phase === "done"
+                ? "finish"
+                : "process"
+          }
+          items={[
+            { title: "检查更新" },
+            { title: "下载" },
+            { title: "安装" },
+          ]}
+        />
+        {desktopUpdateStatus?.progress ? (
+          <div style={{ marginTop: 16 }}>
+            <Progress
+              percent={desktopUpdateStatus.progress.percent ?? undefined}
+              showInfo
+            />
+          </div>
+        ) : null}
+        {desktopUpdateStatus?.downloadUrl ? (
+          <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+            <Typography.Text code>{desktopUpdateStatus.downloadUrl}</Typography.Text>
+          </Typography.Paragraph>
+        ) : null}
       </Modal>
       <Modal
         open={forceRefreshVisible}

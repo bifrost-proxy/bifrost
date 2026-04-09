@@ -6,7 +6,43 @@ export interface DesktopRuntimeInfo {
   startupError: string | null;
 }
 
+export type DesktopUpdatePhase =
+  | "checking"
+  | "up-to-date"
+  | "update-available"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "done"
+  | "error";
+
+export interface DesktopUpdateProgress {
+  downloadedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+}
+
+export interface DesktopUpdateStatusPayload {
+  phase: DesktopUpdatePhase;
+  message: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  downloadUrl: string | null;
+  downloadedPath: string | null;
+  progress: DesktopUpdateProgress | null;
+}
+
+export interface DesktopUpdateSummary {
+  updateAvailable: boolean;
+  currentVersion: string;
+  latestVersion: string | null;
+  downloadUrl: string | null;
+  downloadedPath: string | null;
+  dryRunInstall: boolean;
+}
+
 export const DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete";
+export const DESKTOP_UPDATE_STATUS_EVENT = "desktop://update-status";
 
 type TauriInvoke = <T>(
   cmd: string,
@@ -91,6 +127,21 @@ export async function updateDesktopProxyPort(
 
 export async function notifyMainWindowReady(): Promise<void> {
   await invokeDesktop<void>("notify_main_window_ready");
+}
+
+export async function checkAndInstallUpdate(args?: {
+  dryRunInstall?: boolean;
+  platformOverride?: string;
+}): Promise<DesktopUpdateSummary> {
+  const payload: Record<string, unknown> = {};
+  if (args?.dryRunInstall !== undefined) {
+    payload.dry_run_install = args.dryRunInstall;
+  }
+  if (args?.platformOverride) {
+    payload.platform_override = args.platformOverride;
+  }
+
+  return invokeDesktop<DesktopUpdateSummary>("check_and_install_update", payload);
 }
 
 export async function listenDesktopEvent(
