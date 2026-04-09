@@ -241,10 +241,22 @@ impl Default for AccessConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxySettings {
     pub upstream_proxy: Option<String>,
     pub no_proxy: Vec<String>,
+    pub inject_bifrost_dot: bool,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            upstream_proxy: None,
+            no_proxy: Vec::new(),
+            inject_bifrost_dot: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,6 +404,13 @@ pub struct SystemProxyConfigUpdate {
     pub enabled: Option<bool>,
     pub bypass: Option<String>,
     pub auto_enable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProxySettingsUpdate {
+    pub upstream_proxy: Option<Option<String>>,
+    pub no_proxy: Option<Vec<String>>,
+    pub inject_bifrost_dot: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
