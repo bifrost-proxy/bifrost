@@ -1,4 +1,4 @@
-import { useState, useCallback, type ReactNode } from 'react';
+import { useState, useCallback } from 'react';
 import { Tooltip, Switch, Dropdown } from 'antd';
 import {
   FolderOutlined,
@@ -8,7 +8,6 @@ import {
   HolderOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
-import type { RuleFile } from '../../../types';
 import type { TreeNode } from './treeUtils';
 import styles from './index.module.css';
 
