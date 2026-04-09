@@ -138,6 +138,31 @@
   background-color: #111a2c;
 }
 
+.treeDirectory {
+  display: flex;
+  flex-direction: column;
+}
+
+.directoryItem {
+  font-weight: 500;
+}
+
+.expandIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+  color: #8c8c8c;
+  font-size: 14px;
+}
+
+[data-theme="dark"] .expandIcon {
+  color: #595959;
+}
+
 .itemContent {
   display: flex;
   align-items: center;
