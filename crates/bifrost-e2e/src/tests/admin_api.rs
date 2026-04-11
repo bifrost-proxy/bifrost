@@ -477,6 +477,321 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
+        TestCase::standalone(
+            "admin_api_active_summary_empty",
+            "Validate GET /api/rules/active-summary returns total=0 when no rules exist",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET active-summary failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse active-summary JSON: {}", e))?;
+
+                let total = json
+                    .get("total")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("Missing 'total' field in active-summary response")?;
+                if total != 0 {
+                    return Err(format!("Expected total=0, got {}", total));
+                }
+
+                let rules = json
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'rules' array in active-summary response")?;
+                if !rules.is_empty() {
+                    return Err(format!("Expected empty rules array, got {} items", rules.len()));
+                }
+
+                let conflicts = json
+                    .get("variable_conflicts")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'variable_conflicts' array in active-summary response")?;
+                if !conflicts.is_empty() {
+                    return Err(format!(
+                        "Expected empty variable_conflicts, got {} items",
+                        conflicts.len()
+                    ));
+                }
+
+                let merged = json
+                    .get("merged_content")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing 'merged_content' field in active-summary response")?;
+                if !merged.is_empty() {
+                    return Err(format!(
+                        "Expected empty merged_content, got: {:?}",
+                        merged
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_active_summary_with_rules_and_merged_content",
+            "Validate GET /api/rules/active-summary returns merged_content and correct rule count",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let rule_a = RuleFile::new("rule-a", "example.com host://127.0.0.1:3000");
+                admin_state
+                    .rules_storage
+                    .save(&rule_a)
+                    .map_err(|e| format!("Failed to save rule-a: {}", e))?;
+
+                let rule_b = RuleFile::new("rule-b", "api.test.com host://127.0.0.1:4000");
+                admin_state
+                    .rules_storage
+                    .save(&rule_b)
+                    .map_err(|e| format!("Failed to save rule-b: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET active-summary failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse active-summary JSON: {}", e))?;
+
+                let total = json
+                    .get("total")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("Missing 'total' field in active-summary response")?;
+                if total != 2 {
+                    return Err(format!("Expected total=2, got {}", total));
+                }
+
+                let merged = json
+                    .get("merged_content")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing 'merged_content' field in active-summary response")?;
+                if !merged.contains("example.com") {
+                    return Err(format!(
+                        "Expected merged_content to contain 'example.com', got: {:?}",
+                        merged
+                    ));
+                }
+                if !merged.contains("api.test.com") {
+                    return Err(format!(
+                        "Expected merged_content to contain 'api.test.com', got: {:?}",
+                        merged
+                    ));
+                }
+
+                let rules = json
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'rules' array in active-summary response")?;
+                if rules.len() != 2 {
+                    return Err(format!("Expected 2 rules, got {}", rules.len()));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_active_summary_detects_variable_conflicts",
+            "Validate active-summary detects variable conflicts when same variable name has different values across rule files",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let rule_x = RuleFile::new(
+                    "rule-x",
+                    "example.com reqHeaders://{data}\n\n``` data\nx-env: prod\n```",
+                );
+                admin_state
+                    .rules_storage
+                    .save(&rule_x)
+                    .map_err(|e| format!("Failed to save rule-x: {}", e))?;
+
+                let rule_y = RuleFile::new(
+                    "rule-y",
+                    "example.com reqHeaders://{data}\n\n``` data\nx-env: staging\n```",
+                );
+                admin_state
+                    .rules_storage
+                    .save(&rule_y)
+                    .map_err(|e| format!("Failed to save rule-y: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET active-summary failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse active-summary JSON: {}", e))?;
+
+                let conflicts = json
+                    .get("variable_conflicts")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'variable_conflicts' array in active-summary response")?;
+                if conflicts.is_empty() {
+                    return Err("Expected at least 1 variable conflict, got 0".to_string());
+                }
+
+                let data_conflict = conflicts.iter().find(|c| {
+                    c.get("variable_name").and_then(|v| v.as_str()) == Some("data")
+                });
+                let data_conflict = data_conflict.ok_or(
+                    "Expected a conflict with variable_name='data'".to_string(),
+                )?;
+
+                let definitions = data_conflict
+                    .get("definitions")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'definitions' in variable conflict")?;
+                if definitions.len() != 2 {
+                    return Err(format!(
+                        "Expected 2 definitions for 'data' conflict, got {}",
+                        definitions.len()
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_delete_synced_rule_with_sync_manager_succeeds",
+            "Validate DELETE /api/rules/{name} succeeds for a synced rule even when sync_manager is present but cannot record tombstone",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin+sync: {}", e))?;
+
+                let mut rule =
+                    RuleFile::new("delete-sync-mgr-test", "example.com host://127.0.0.1:3000");
+                rule.mark_synced(
+                    "remote-sync-1",
+                    "user-sync-1",
+                    "2026-04-01T09:00:00Z",
+                    "2026-04-01T10:00:00Z",
+                );
+                admin_state
+                    .rules_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save rule: {}", e))?;
+
+                assert!(
+                    admin_state.rules_storage.exists("delete-sync-mgr-test"),
+                    "Rule should exist before deletion"
+                );
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .delete(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules/delete-sync-mgr-test",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("DELETE request failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+
+                assert!(
+                    !admin_state.rules_storage.exists("delete-sync-mgr-test"),
+                    "Rule should not exist after deletion"
+                );
+
+                let list_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET rules failed: {}", e))?;
+
+                assert_status(&list_response, 200)?;
+                let json: serde_json::Value = list_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+                let rules = json
+                    .as_array()
+                    .ok_or("Expected rules to be an array")?;
+                let found = rules.iter().any(|r| {
+                    r.get("name").and_then(|n| n.as_str()) == Some("delete-sync-mgr-test")
+                });
+                if found {
+                    return Err(
+                        "Deleted rule still appears in the rules list".to_string(),
+                    );
+                }
+
+                Ok(())
+            },
+        ),
     ]
 }
 

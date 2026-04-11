@@ -942,4 +942,74 @@ mod tests {
         assert_eq!(enabled_after.len(), 1);
         assert_eq!(enabled_after[0].name, "other-rule");
     }
+
+    #[test]
+    fn test_load_enabled_with_subdirs_filtered_skips_invalid_dirs() {
+        let (temp_dir, storage) = setup();
+        storage
+            .save(&RuleFile::new("base-rule", "base.com host://127.0.0.1"))
+            .unwrap();
+
+        let valid_storage = RulesStorage::with_dir(temp_dir.path().join("valid-group")).unwrap();
+        valid_storage
+            .save(&RuleFile::new("valid-rule", "valid.com host://127.0.0.1"))
+            .unwrap();
+
+        let orphan_storage = RulesStorage::with_dir(temp_dir.path().join("orphan-group")).unwrap();
+        orphan_storage
+            .save(&RuleFile::new("orphan-rule", "orphan.com host://127.0.0.1"))
+            .unwrap();
+
+        let filter: std::collections::HashSet<String> =
+            vec!["valid-group".to_string()].into_iter().collect();
+        let enabled = storage
+            .load_enabled_with_subdirs_filtered(Some(&filter))
+            .unwrap();
+
+        let names: Vec<&str> = enabled.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"base-rule"));
+        assert!(names.contains(&"valid-rule"));
+        assert!(!names.contains(&"orphan-rule"));
+    }
+
+    #[test]
+    fn test_load_enabled_with_subdirs_filtered_none_returns_all() {
+        let (temp_dir, storage) = setup();
+        storage
+            .save(&RuleFile::new("base-rule", "base.com host://127.0.0.1"))
+            .unwrap();
+
+        let sub1 = RulesStorage::with_dir(temp_dir.path().join("group-a")).unwrap();
+        sub1.save(&RuleFile::new("rule-a", "a.com host://127.0.0.1"))
+            .unwrap();
+
+        let sub2 = RulesStorage::with_dir(temp_dir.path().join("group-b")).unwrap();
+        sub2.save(&RuleFile::new("rule-b", "b.com host://127.0.0.1"))
+            .unwrap();
+
+        let enabled = storage.load_enabled_with_subdirs_filtered(None).unwrap();
+
+        let names: Vec<&str> = enabled.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"base-rule"));
+        assert!(names.contains(&"rule-a"));
+        assert!(names.contains(&"rule-b"));
+        assert_eq!(enabled.len(), 3);
+    }
+
+    #[test]
+    fn test_load_enabled_returns_only_enabled_rules() {
+        let (_temp_dir, storage) = setup();
+        storage
+            .save(&RuleFile::new("enabled-rule", "e.com host://127.0.0.1"))
+            .unwrap();
+        storage
+            .save(&RuleFile::new("disabled-rule", "d.com host://127.0.0.1"))
+            .unwrap();
+        storage.set_enabled("disabled-rule", false).unwrap();
+
+        let enabled = storage.load_enabled().unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].name, "enabled-rule");
+        assert!(enabled[0].enabled);
+    }
 }

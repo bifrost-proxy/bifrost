@@ -170,6 +170,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   return (
     <div
       ref={containerRef}
+      data-testid="rules-dynamic-island"
       style={{
         position: "absolute",
         ...positionStyle,
@@ -232,6 +233,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         {variableConflicts.length > 0 && (
           <Tooltip title={`${variableConflicts.length} variable conflict${variableConflicts.length > 1 ? "s" : ""}`}>
             <WarningOutlined
+              data-testid="island-conflict-icon"
               style={{
                 fontSize: 13,
                 color: token.colorWarning,
@@ -264,6 +266,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         >
           {variableConflicts.length > 0 && (
             <div
+              data-testid="island-variable-conflicts"
               style={{
                 margin: "6px 12px 4px",
                 padding: "8px 12px",
@@ -388,6 +391,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
           {mergedContent.trim() && (
             <div style={{ margin: "4px 12px 8px" }}>
               <div
+                data-testid="island-toggle-merged"
                 onClick={(e) => {
                   e.stopPropagation();
                   setShowMerged((v) => !v);
@@ -410,6 +414,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
               </div>
               {showMerged && (
                 <pre
+                  data-testid="island-merged-content"
                   style={{
                     margin: 0,
                     padding: "8px 10px",

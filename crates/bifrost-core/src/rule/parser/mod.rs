@@ -3438,4 +3438,66 @@ x-custom: value
         let vars = extract_inline_variables(text);
         assert!(vars.is_empty());
     }
+
+    #[test]
+    fn test_extract_inline_variables_empty_input() {
+        let vars = extract_inline_variables("");
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_extract_inline_variables_whitespace_only() {
+        let vars = extract_inline_variables("   \n\t\n  ");
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_extract_inline_variables_unclosed_block() {
+        let text = "``` data\nsome content here\nmore lines";
+        let vars = extract_inline_variables(text);
+        assert!(vars.contains_key("data"));
+        assert!(vars["data"].contains("some content here"));
+    }
+
+    #[test]
+    fn test_extract_inline_variables_special_chars_in_value() {
+        let text = r#"
+``` data
+<div class="test">&amp;</div>
+line2 with "quotes" & <brackets>
+```
+"#;
+        let vars = extract_inline_variables(text);
+        assert_eq!(vars.len(), 1);
+        let value = &vars["data"];
+        assert!(value.contains('<'));
+        assert!(value.contains('>'));
+        assert!(value.contains('&'));
+        assert!(value.contains('"'));
+        assert!(value.contains('\n'));
+    }
+
+    #[test]
+    fn test_extract_inline_variables_duplicate_block_names() {
+        let text = r#"
+``` data
+first_value
+```
+
+``` data
+second_value
+```
+"#;
+        let vars = extract_inline_variables(text);
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars["data"], "second_value");
+    }
+
+    #[test]
+    fn test_extract_inline_variables_block_with_empty_content() {
+        let text = "``` data\n```";
+        let vars = extract_inline_variables(text);
+        assert!(vars.contains_key("data"));
+        assert!(vars["data"].is_empty());
+    }
 }

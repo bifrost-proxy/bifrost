@@ -2369,4 +2369,91 @@ mod tests {
 
         cleanup_test_dir(&dir);
     }
+
+    #[test]
+    fn test_traffic_record_original_vs_modified_response_headers() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        let mut record = TrafficRecord::new(
+            "hdr-both-1".to_string(),
+            "GET".to_string(),
+            "https://a.com/both".to_string(),
+        );
+        record.status = 200;
+        record.original_response_headers =
+            Some(vec![("X-Original".to_string(), "orig".to_string())]);
+        record.response_headers = Some(vec![("X-Modified".to_string(), "mod".to_string())]);
+        store.record(record);
+
+        let loaded = store.get_by_id("hdr-both-1").expect("record should exist");
+        assert_eq!(
+            loaded.original_response_headers,
+            Some(vec![("X-Original".to_string(), "orig".to_string())])
+        );
+        assert_eq!(
+            loaded.response_headers,
+            Some(vec![("X-Modified".to_string(), "mod".to_string())])
+        );
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_traffic_record_only_original_response_headers_set() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        let mut record = TrafficRecord::new(
+            "hdr-orig-only-1".to_string(),
+            "GET".to_string(),
+            "https://a.com/orig-only".to_string(),
+        );
+        record.status = 200;
+        record.original_response_headers =
+            Some(vec![("X-Original".to_string(), "only".to_string())]);
+        store.record(record);
+
+        let loaded = store
+            .get_by_id("hdr-orig-only-1")
+            .expect("record should exist");
+        assert_eq!(
+            loaded.original_response_headers,
+            Some(vec![("X-Original".to_string(), "only".to_string())])
+        );
+        assert!(loaded.response_headers.is_none());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_traffic_record_mock_response_has_original_headers() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        let mut record = TrafficRecord::new(
+            "hdr-mock-1".to_string(),
+            "GET".to_string(),
+            "https://api.example.com/data".to_string(),
+        );
+        record.status = 200;
+        record.original_response_headers = Some(vec![(
+            "content-type".to_string(),
+            "application/json".to_string(),
+        )]);
+        store.record(record);
+
+        let loaded = store.get_by_id("hdr-mock-1").expect("record should exist");
+        assert_eq!(loaded.status, 200);
+        assert_eq!(
+            loaded.original_response_headers,
+            Some(vec![(
+                "content-type".to_string(),
+                "application/json".to_string()
+            )])
+        );
+        assert!(loaded.response_headers.is_none());
+
+        cleanup_test_dir(&dir);
+    }
 }

@@ -1213,3 +1213,227 @@ fn print_body(body: &Value, use_color: bool) {
         println!("    {}", body);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(0), "...");
+    }
+
+    #[test]
+    fn test_format_duration_milliseconds() {
+        assert_eq!(format_duration(1), "1ms");
+        assert_eq!(format_duration(999), "999ms");
+    }
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(1000), "1.00s");
+        assert_eq!(format_duration(1500), "1.50s");
+        assert_eq!(format_duration(59999), "60.00s");
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(1), "1B");
+        assert_eq!(format_size(1023), "1023B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.0KB");
+        assert_eq!(format_size(1536), "1.5KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(format_size(1048576), "1.0MB");
+        assert_eq!(format_size(2 * 1048576), "2.0MB");
+    }
+
+    #[test]
+    fn test_truncate_str_fits() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_truncates() {
+        assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_str_unicode() {
+        let s = "你好世界测试";
+        let result = truncate_str(s, 5);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 5);
+    }
+
+    #[test]
+    fn test_short_start_time_with_space() {
+        assert_eq!(short_start_time("2024-01-01 12:30:00"), "12:30:00");
+    }
+
+    #[test]
+    fn test_short_start_time_no_space() {
+        assert_eq!(short_start_time("12:30:00"), "12:30:00");
+    }
+
+    #[test]
+    fn test_print_traffic_detail_does_not_panic() {
+        let record = serde_json::json!({
+            "id": "test-id-123",
+            "method": "GET",
+            "url": "https://example.com/api",
+            "status": 200,
+            "protocol": "https",
+            "duration_ms": 150,
+            "request_size": 256,
+            "response_size": 1024,
+            "host": "example.com",
+            "client_ip": "127.0.0.1",
+            "has_rule_hit": false
+        });
+        print_traffic_detail(&record, OutputFormat::Table);
+    }
+
+    #[test]
+    fn test_print_traffic_detail_with_headers_and_modifications() {
+        let record = serde_json::json!({
+            "id": "test-id-456",
+            "method": "POST",
+            "url": "https://api.test.com/data",
+            "status": 201,
+            "protocol": "https",
+            "duration_ms": 300,
+            "request_size": 512,
+            "response_size": 2048,
+            "host": "api.test.com",
+            "has_rule_hit": true,
+            "matched_rules": [
+                {"protocol": "host", "value": "127.0.0.1:3000", "rule_name": "dev-proxy"}
+            ],
+            "response_headers": [
+                ["content-type", "application/json"],
+                ["x-custom", "modified-value"]
+            ],
+            "original_response_headers": [
+                ["content-type", "application/json"],
+                ["x-original", "original-value"]
+            ],
+            "request_headers": [
+                ["host", "api.test.com"],
+                ["accept", "application/json"]
+            ]
+        });
+        print_traffic_detail(&record, OutputFormat::Table);
+    }
+
+    #[test]
+    fn test_print_traffic_detail_with_bodies() {
+        let record = serde_json::json!({
+            "id": "test-id-789",
+            "method": "POST",
+            "url": "https://example.com/post",
+            "status": 200,
+            "protocol": "https",
+            "duration_ms": 50,
+            "request_size": 100,
+            "response_size": 500,
+            "host": "example.com",
+            "has_rule_hit": false,
+            "request_body": {"key": "value"},
+            "response_body": "Hello World response text",
+            "timing": {
+                "dns_ms": 5,
+                "connect_ms": 10,
+                "tls_ms": 15,
+                "send_ms": 2,
+                "wait_ms": 30,
+                "first_byte_ms": 62,
+                "receive_ms": 8
+            }
+        });
+        print_traffic_detail(&record, OutputFormat::Compact);
+    }
+
+    #[test]
+    fn test_print_traffic_detail_error_message() {
+        let record = serde_json::json!({
+            "id": "err-id",
+            "method": "GET",
+            "url": "https://fail.com",
+            "status": 502,
+            "protocol": "https",
+            "duration_ms": 5000,
+            "request_size": 0,
+            "response_size": 0,
+            "host": "fail.com",
+            "has_rule_hit": false,
+            "error_message": "Connection timed out"
+        });
+        print_traffic_detail(&record, OutputFormat::Table);
+    }
+
+    #[test]
+    fn test_print_headers_section_no_headers() {
+        let record = serde_json::json!({});
+        print_headers_section(
+            &record,
+            "request_headers",
+            "original_request_headers",
+            "Request Headers",
+            false,
+        );
+    }
+
+    #[test]
+    fn test_print_headers_section_with_diff() {
+        let record = serde_json::json!({
+            "response_headers": [
+                ["content-type", "text/html"],
+                ["x-new-header", "added"]
+            ],
+            "original_response_headers": [
+                ["content-type", "application/json"],
+                ["x-removed", "will-be-gone"]
+            ]
+        });
+        print_headers_section(
+            &record,
+            "response_headers",
+            "original_response_headers",
+            "Response Headers",
+            false,
+        );
+    }
+
+    #[test]
+    fn test_print_body_string() {
+        let body = serde_json::json!("simple string body");
+        print_body(&body, false);
+    }
+
+    #[test]
+    fn test_print_body_long_string() {
+        let long = "x".repeat(3000);
+        let body = serde_json::json!(long);
+        print_body(&body, false);
+    }
+
+    #[test]
+    fn test_print_body_json_object() {
+        let body = serde_json::json!({"key": "value", "nested": {"a": 1}});
+        print_body(&body, false);
+    }
+}

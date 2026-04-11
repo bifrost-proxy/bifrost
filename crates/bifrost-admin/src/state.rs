@@ -1288,4 +1288,144 @@ mod tests {
 
         cleanup_test_dir(&dir);
     }
+
+    #[test]
+    fn test_clear_group_name_cache_removes_data_and_file() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir.clone()).unwrap();
+
+        let mut state = AdminState::new(19910);
+        state.rules_storage = storage;
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "GroupOne".to_string());
+            cache.insert("g2".to_string(), "GroupTwo".to_string());
+        }
+        state.persist_group_name_cache();
+
+        let cache_file = rules_dir.join(".group_cache.json");
+        assert!(cache_file.exists());
+
+        state.clear_group_name_cache();
+
+        assert_eq!(state.group_name_cache().get("g1"), None);
+        assert_eq!(state.group_name_cache().get("g2"), None);
+        assert!(!cache_file.exists());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_group_name_cache_guard_entries_returns_all() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+
+        let mut state = AdminState::new(19911);
+        state.rules_storage = storage;
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("a".to_string(), "Alpha".to_string());
+            cache.insert("b".to_string(), "Beta".to_string());
+            cache.insert("c".to_string(), "Charlie".to_string());
+        }
+
+        let cache = state.group_name_cache();
+        let mut entries = cache.entries();
+        assert_eq!(entries.len(), 3);
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(entries[0], ("a".to_string(), "Alpha".to_string()));
+        assert_eq!(entries[1], ("b".to_string(), "Beta".to_string()));
+        assert_eq!(entries[2], ("c".to_string(), "Charlie".to_string()));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_group_name_cache_guard_remove() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+
+        let mut state = AdminState::new(19912);
+        state.rules_storage = storage;
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "Group1".to_string());
+            cache.insert("g2".to_string(), "Group2".to_string());
+        }
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.remove("g1");
+        }
+
+        let cache = state.group_name_cache();
+        assert_eq!(cache.get("g1"), None);
+        assert_eq!(cache.get("g2"), Some("Group2".to_string()));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_group_name_cache_guard_all_dir_names() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+
+        let mut state = AdminState::new(19913);
+        state.rules_storage = storage;
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "DirAlpha".to_string());
+            cache.insert("g2".to_string(), "DirBeta".to_string());
+            cache.insert("g3".to_string(), "DirGamma".to_string());
+        }
+
+        let cache = state.group_name_cache();
+        let dir_names = cache.all_dir_names();
+        assert_eq!(dir_names.len(), 3);
+        assert!(dir_names.contains("DirAlpha"));
+        assert!(dir_names.contains("DirBeta"));
+        assert!(dir_names.contains("DirGamma"));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_group_name_cache_guard_persist() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir.clone()).unwrap();
+
+        let mut state = AdminState::new(19914);
+        state.rules_storage = storage;
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("x1".to_string(), "Xray".to_string());
+            cache.insert("y1".to_string(), "Yankee".to_string());
+            cache.persist(&rules_dir);
+        }
+
+        let cache_file = rules_dir.join(".group_cache.json");
+        assert!(cache_file.exists());
+
+        let content = fs::read_to_string(&cache_file).unwrap();
+        let parsed: HashMap<String, String> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.get("x1").map(|s| s.as_str()), Some("Xray"));
+        assert_eq!(parsed.get("y1").map(|s| s.as_str()), Some("Yankee"));
+
+        cleanup_test_dir(&dir);
+    }
 }

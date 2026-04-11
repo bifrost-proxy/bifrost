@@ -1011,3 +1011,43 @@ fn traffic_list_all_options_parse() {
         );
     }
 }
+
+#[test]
+fn rule_active_subcommand_parse() {
+    let help = run_help(&["rule"]);
+    assert!(help.contains("active"), "rule help should contain active");
+}
+
+#[test]
+fn rule_active_help_parse() {
+    let help = run_help(&["rule", "active"]);
+    assert!(
+        help.contains("active") || help.contains("summary") || help.contains("enabled"),
+        "rule active help should describe active rules"
+    );
+}
+
+#[test]
+fn traffic_get_all_options_parse() {
+    let help = run_help(&["traffic", "get"]);
+    for opt in &["--request-body", "--response-body", "--format"] {
+        assert!(
+            help.contains(opt),
+            "traffic get help should contain '{}' option",
+            opt
+        );
+    }
+}
+
+#[test]
+fn traffic_get_format_value_completions() {
+    let completions = get_zsh_completions();
+    assert!(
+        completions.contains("table"),
+        "completions should include format value table"
+    );
+    assert!(
+        completions.contains("compact"),
+        "completions should include format value compact"
+    );
+}

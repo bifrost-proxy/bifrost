@@ -1229,4 +1229,39 @@ mod tests {
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("login-token"));
     }
+
+    #[test]
+    fn test_has_session_no_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 19920).unwrap();
+        assert!(!manager.has_session());
+    }
+
+    #[tokio::test]
+    async fn test_has_session_with_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 19921).unwrap();
+        manager.save_token("real-token".to_string()).await.unwrap();
+        assert!(manager.has_session());
+    }
+
+    #[test]
+    fn test_has_session_empty_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 19922).unwrap();
+        manager.state.lock().token = Some("".to_string());
+        assert!(!manager.has_session());
+    }
+
+    #[test]
+    fn test_has_session_whitespace_only_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 19923).unwrap();
+        manager.state.lock().token = Some("   ".to_string());
+        assert!(!manager.has_session());
+    }
 }

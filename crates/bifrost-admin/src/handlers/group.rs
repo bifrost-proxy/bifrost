@@ -244,3 +244,109 @@ pub async fn handle_group(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AdminState;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn create_test_state(rules_dir: &std::path::Path) -> SharedAdminState {
+        let storage = RulesStorage::with_dir(rules_dir.to_path_buf()).unwrap();
+        let mut state = AdminState::new(19950);
+        state.rules_storage = storage;
+        Arc::new(state)
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_empty_cache_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = create_test_state(&rules_dir);
+
+        let response_body = br#"{"code":0,"data":[{"group_id":"g1","name":"Group1"}]}"#;
+        cleanup_orphaned_group_dirs(&state, response_body);
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_removes_missing_group_dir() {
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = create_test_state(&rules_dir);
+
+        let orphan_dir = rules_dir.join("OrphanGroup");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("orphan-id".to_string(), "OrphanGroup".to_string());
+            cache.insert("alive-id".to_string(), "AliveGroup".to_string());
+        }
+
+        let response_body = br#"{"code":0,"data":[{"group_id":"alive-id","name":"AliveGroup"}]}"#;
+        cleanup_orphaned_group_dirs(&state, response_body);
+
+        let cache = state.group_name_cache();
+        assert!(cache.get("orphan-id").is_none());
+        assert!(cache.get("alive-id").is_some());
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_invalid_json_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = create_test_state(&rules_dir);
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "Group1".to_string());
+        }
+
+        cleanup_orphaned_group_dirs(&state, b"not valid json");
+
+        let cache = state.group_name_cache();
+        assert!(cache.get("g1").is_some());
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_no_data_field_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = create_test_state(&rules_dir);
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "Group1".to_string());
+        }
+
+        cleanup_orphaned_group_dirs(&state, br#"{"code":0}"#);
+
+        let cache = state.group_name_cache();
+        assert!(cache.get("g1").is_some());
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_all_groups_alive_no_removal() {
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let state = create_test_state(&rules_dir);
+
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("g1".to_string(), "Group1".to_string());
+            cache.insert("g2".to_string(), "Group2".to_string());
+        }
+
+        let response = br#"{"code":0,"data":[{"group_id":"g1","name":"Group1"},{"group_id":"g2","name":"Group2"}]}"#;
+        cleanup_orphaned_group_dirs(&state, response);
+
+        let cache = state.group_name_cache();
+        assert!(cache.get("g1").is_some());
+        assert!(cache.get("g2").is_some());
+    }
+}

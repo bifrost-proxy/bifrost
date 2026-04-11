@@ -1046,4 +1046,109 @@ mod tests {
             Some("group-123".to_string())
         );
     }
+
+    #[test]
+    fn test_build_variable_conflicts_empty_map() {
+        let var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
+        let conflicts = build_variable_conflicts(var_map);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_build_variable_conflicts_multiple_variables_with_conflicts() {
+        let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
+        var_map
+            .entry("beta".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-1".to_string(),
+                group_id: None,
+                value: "val-a".to_string(),
+            });
+        var_map
+            .entry("beta".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-2".to_string(),
+                group_id: None,
+                value: "val-b".to_string(),
+            });
+        var_map
+            .entry("alpha".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-3".to_string(),
+                group_id: None,
+                value: "x".to_string(),
+            });
+        var_map
+            .entry("alpha".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-4".to_string(),
+                group_id: None,
+                value: "y".to_string(),
+            });
+
+        let conflicts = build_variable_conflicts(var_map);
+        assert_eq!(conflicts.len(), 2);
+        assert_eq!(conflicts[0].variable_name, "alpha");
+        assert_eq!(conflicts[1].variable_name, "beta");
+    }
+
+    #[test]
+    fn test_truncate_preview_exact_boundary() {
+        let exact = "a".repeat(80);
+        let result = truncate_preview(&exact, 80);
+        assert_eq!(result, exact);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_preview_empty_string() {
+        let result = truncate_preview("", 80);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_preview_unicode() {
+        let chinese = "你好世界测试字符串用于验证";
+        let result = truncate_preview(chinese, 5);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 5 + 3);
+    }
+
+    #[test]
+    fn test_build_variable_conflicts_three_rules_two_same_one_different() {
+        let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
+        var_map
+            .entry("env".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-a".to_string(),
+                group_id: None,
+                value: "prod".to_string(),
+            });
+        var_map
+            .entry("env".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-b".to_string(),
+                group_id: None,
+                value: "prod".to_string(),
+            });
+        var_map
+            .entry("env".to_string())
+            .or_default()
+            .push(InlineVarEntry {
+                rule_name: "rule-c".to_string(),
+                group_id: None,
+                value: "staging".to_string(),
+            });
+
+        let conflicts = build_variable_conflicts(var_map);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].variable_name, "env");
+        assert_eq!(conflicts[0].definitions.len(), 3);
+    }
 }
