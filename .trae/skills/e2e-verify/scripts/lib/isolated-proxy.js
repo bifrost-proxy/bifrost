@@ -92,7 +92,7 @@ async function startIsolatedProxy(prefix = "scenario") {
   const hasDebugBinary = await fsp.access(binPath).then(() => true).catch(() => false);
   const command = hasDebugBinary ? binPath : "cargo";
   const args = hasDebugBinary
-    ? ["start", "--host", "127.0.0.1", "--port", String(port), "--skip-cert-check", "--access-mode", "allow_all"]
+    ? ["start", "--host", "127.0.0.1", "--port", String(port), "--skip-cert-check", "--access-mode", "allow_all", "--no-system-proxy"]
     : [
         "run",
         "--bin",
@@ -106,6 +106,7 @@ async function startIsolatedProxy(prefix = "scenario") {
         "--skip-cert-check",
         "--access-mode",
         "allow_all",
+        "--no-system-proxy",
       ];
 
   const child = spawn(command, args, {

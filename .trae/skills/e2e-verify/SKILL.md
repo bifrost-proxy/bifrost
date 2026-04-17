@@ -26,11 +26,12 @@ description: |
   - 在结束后停止该代理进程
 - 前端开发服务器用于手工调试时再单独启动：`pnpm dev`
 - 默认手工调试 UI 入口：`http://localhost:3000/_bifrost/`
-- 若需要手工启动独立管理端，请优先使用“先编译、再启动”的方式：
+- **⛔ 启动时必须加 `--no-system-proxy`**：除非测试目标明确涉及系统代理功能，否则所有启动命令必须携带 `--no-system-proxy`，避免修改系统代理配置导致网络中断。
+- 若需要手工启动独立管理端，请优先使用"先编译、再启动"的方式：
 
 ```bash
 CARGO_TARGET_DIR=./.bifrost-ui-target cargo build --bin bifrost
-BIFROST_DATA_DIR=./.bifrost-e2e-ui ./.bifrost-ui-target/debug/bifrost start -p 9910 --unsafe-ssl
+BIFROST_DATA_DIR=./.bifrost-e2e-ui ./.bifrost-ui-target/debug/bifrost start -p 9910 --unsafe-ssl --no-system-proxy
 ```
 
 - 启动后必须确认：

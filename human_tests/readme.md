@@ -44,6 +44,12 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 
+### 远程调用测试
+
+| 文件 | 功能模块 | 测试用例数 | 说明 |
+|------|---------|-----------|------|
+| [remote-invoke.md](./remote-invoke.md) | Remote Invoke 远程调用 | 52 | 发现模式与一次性授权码、人工授权、授权复用（30m/1h/1d/永久）、授权模式升降级、多客户端管理、有效期调整、移除授权、SSE/HTTP relay、大结果/大输入分片传输、主动取消、续流恢复、断线恢复、白名单命令全覆盖、端到端加密验证、客户端重启稳定性、审计历史与过滤、远端部署（HTTPS/SSO/多用户并发/跨公网稳定性/大结果传输/断线恢复） |
+
 ### Admin API 测试
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
@@ -102,7 +108,7 @@
 
 ---
 
-**总计：55 个测试文件，1053 个测试用例**
+**总计：56 个测试文件，1105 个测试用例**
 
 ## 工作流程
 
