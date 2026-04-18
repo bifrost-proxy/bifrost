@@ -38,6 +38,7 @@ serde.workspace = true
 urlencoding = "2.1"
 regex = "1"
 futures = "0.3"
+reqwest.workspace = true
 ureq.workspace = true
 chrono.workspace = true
 colored = "2"

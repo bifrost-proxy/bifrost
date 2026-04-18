@@ -21,6 +21,7 @@ import {
   getClientStream,
   updateClientDiscovery,
   clearClientDiscovery,
+  consumeClientDiscovery,
   findClientByPairCode,
   pushToPairingWatcher,
   pushToCallerStream,
@@ -105,10 +106,18 @@ export class RemoteInvokeService {
       throw new Error('unsupported_command');
     }
 
-    const clientStream = findClientByPairCode(req.pair_code);
-    if (!clientStream) {
+    const result = findClientByPairCode(req.pair_code);
+    if (!result.found) {
+      if (result.reason === 'consumed') {
+        throw new Error('pair_code_already_consumed');
+      }
+      if (result.reason === 'expired') {
+        throw new Error('pair_code_expired');
+      }
       throw new Error('invalid_pair_code');
     }
+
+    const clientStream = result.client;
 
     if (!constantTimeCompare(clientStream.pairCode ?? '', req.pair_code)) {
       throw new Error('invalid_pair_code');
@@ -116,6 +125,11 @@ export class RemoteInvokeService {
 
     if (req.client_instance_id !== clientStream.clientInstanceId) {
       throw new Error('client_instance_id_mismatch');
+    }
+
+    const pendingCount = await this.storage.remoteInvoke.countPendingPairings(req.client_instance_id);
+    if (pendingCount > 0) {
+      throw new Error('pair_slot_occupied');
     }
 
     const pairingId = nanoid();
@@ -144,7 +158,7 @@ export class RemoteInvokeService {
 
     await this.storage.remoteInvoke.createPairing(pairing);
 
-    clearClientDiscovery(req.client_instance_id);
+    consumeClientDiscovery(req.client_instance_id);
 
     pushToClient(req.client_instance_id, 'pairing_request', {
       pairing_id: pairingId,
@@ -204,6 +218,11 @@ export class RemoteInvokeService {
     const grantId = nanoid();
     const callId = nanoid();
     const relayToken = generateRelayToken();
+
+    const activeGrantCount = await this.storage.remoteInvoke.countActiveGrantsForClient(pairing.client_instance_id);
+    if (activeGrantCount >= this.config.max_grants_per_client) {
+      throw new Error('max_grants_exceeded');
+    }
 
     let grantExpiresAt = '';
     const ttl = grantModeTtlMs(grantMode as any);

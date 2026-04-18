@@ -44,6 +44,7 @@ const DEFAULT_REMOTE_INVOKE_CONFIG: RemoteInvokeConfig = {
   sse_keepalive_ms: 30000,
   pair_code_ttl_secs: 120,
   max_active_calls_per_client: 5,
+  max_grants_per_client: 20,
   retention_days: 90,
   max_records: 10000,
   max_sse_connections_per_client: 2,
@@ -407,9 +408,7 @@ async function handleStartPairing(ctx: RequestContext, storage: IStorage, servic
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'pairing failed';
-    if (msg === 'invalid_pair_code') {
-      sendError(ctx.res, 400, msg);
-    } else if (msg === 'unsupported_command') {
+    if (msg === 'invalid_pair_code' || msg === 'pair_code_already_consumed' || msg === 'pair_code_expired' || msg === 'unsupported_command' || msg === 'pair_slot_occupied') {
       sendError(ctx.res, 400, msg);
     } else {
       sendError(ctx.res, 500, msg);

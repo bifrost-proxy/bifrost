@@ -52,11 +52,13 @@ export interface IRemoteInvokeDao {
   getPairing(pairingId: string): Promise<import('../types').RemoteInvokePairing | undefined>;
   updatePairing(pairingId: string, fields: Partial<import('../types').RemoteInvokePairing>): Promise<void>;
   findPairingByCode(userId: string, clientInstanceId: string, pairCode: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  countPendingPairings(clientInstanceId: string): Promise<number>;
 
   createGrant(grant: import('../types').RemoteInvokeGrant): Promise<import('../types').RemoteInvokeGrant>;
   getGrant(grantId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: import('../types').RemoteInvokeGrant[]; total: number }>;
+  countActiveGrantsForClient(clientInstanceId: string): Promise<number>;
   updateGrant(grantId: string, fields: Partial<import('../types').RemoteInvokeGrant>): Promise<void>;
   deleteGrant(grantId: string): Promise<boolean>;
   touchGrantLastUsed(grantId: string, ts: string): Promise<void>;

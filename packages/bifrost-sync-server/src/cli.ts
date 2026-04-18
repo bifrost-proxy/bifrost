@@ -97,6 +97,7 @@ async function main() {
       sse_keepalive_ms: 30000,
       pair_code_ttl_secs: 120,
       max_active_calls_per_client: 5,
+      max_grants_per_client: 20,
       retention_days: 90,
       max_records: 10000,
       max_sse_connections_per_client: 2,

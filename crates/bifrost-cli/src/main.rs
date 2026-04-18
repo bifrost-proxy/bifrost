@@ -17,7 +17,7 @@ use commands::{
     handle_export_command, handle_group_command, handle_import_command, handle_install_skill,
     handle_metrics_command, handle_rule_command, handle_script_command, handle_sync_command,
     handle_system_proxy_command, handle_upgrade, handle_value_command, handle_whitelist_command,
-    run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_clear,
+    remote, run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_clear,
     run_traffic_get, run_traffic_list, spawn_update_check_notice, OutputFormat, SearchOptions,
     TrafficGetOptions, TrafficListOptions,
 };
@@ -236,6 +236,44 @@ fn main() {
         }
         Some(Commands::VersionCheck) => {
             commands::handle_version_check("127.0.0.1", get_effective_port(cli.port))
+        }
+        Some(Commands::Remote {
+            action,
+            relay_url,
+            token,
+            client_id,
+            pair_code,
+        }) => {
+            let relay_url = match relay_url {
+                Some(url) => url,
+                None => {
+                    let client = commands::config::client::ConfigApiClient::new(
+                        "127.0.0.1",
+                        get_effective_port(cli.port),
+                    );
+                    match client.get_sync_status() {
+                        Ok(status) if !status.remote_base_url.is_empty() => status.remote_base_url,
+                        _ => {
+                            eprintln!("Error: --relay-url is required (could not detect from running proxy)");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
+            let token = match token {
+                Some(t) => t,
+                None => {
+                    eprintln!("Error: --token is required for relay authentication");
+                    std::process::exit(1);
+                }
+            };
+            remote::handle_remote_command(remote::RemoteOptions {
+                relay_url,
+                token,
+                client_id,
+                pair_code,
+                action,
+            })
         }
         Some(Commands::Traffic { action }) => match action {
             TrafficCommands::List {

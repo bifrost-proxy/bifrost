@@ -896,6 +896,386 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+## 补充覆盖用例
+
+以下用例覆盖 gap 分析中发现的设计方案未被测试覆盖的关键场景。
+
+### TC-RI-50：多调用方独立配对与授权
+
+**背景**：设计方案 §多调用方并发支持 要求不同 `caller_fingerprint` 的调用方可独立完成配对和授权。
+
+**前置条件**：Bifrost 客户端已连接 relay
+
+**操作步骤**：
+1. 通过 Admin API 开启发现模式：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/discovery/enter | jq .
+   ```
+2. 获取配对码并以 `caller-fp-multi-A` 身份发起配对：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/pairings/start \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "pair_code": "<pair_code>",
+       "caller_fingerprint": "caller-fp-multi-A",
+       "caller_display_name": "Multi Caller A"
+     }' | jq .
+   ```
+3. 在 Admin API 批准该配对（选择 permanent 模式）：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/grants/<pairing_id>/decision \
+     -H "Content-Type: application/json" \
+     -d '{"decision": "approve", "grant_mode": "permanent"}' | jq .
+   ```
+4. 再次开启发现模式并获取新配对码
+5. 以 `caller-fp-multi-B` 身份发起配对并批准
+
+**预期结果**：
+- 两个调用方各自成功完成独立配对
+- `GET /v4/remote-invoke/grants` 返回两条不同 `caller_fingerprint` 的活跃授权
+- 两条授权的 `grant_id` 不同
+- 两条授权的 `client_instance_id` 相同（同一客户端）
+
+---
+
+### TC-RI-51：多调用方 grant 隔离 — 撤销一方不影响另一方
+
+**背景**：设计方案要求"调用方 A 的 grant 撤销不影响调用方 B"。
+
+**前置条件**：已完成 TC-RI-50，两个调用方均有活跃授权
+
+**操作步骤**：
+1. 查看当前所有 grants：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.list[] | select(.status == "active")'
+   ```
+2. 删除调用方 A 的 grant：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/grants/<grant_id_A>" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq .
+   ```
+3. 使用调用方 B 的 grant 发起调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<grant_id_B>",
+       "command": "status",
+       "args_json": "{}",
+       "caller_fingerprint": "caller-fp-multi-B"
+     }' | jq .
+   ```
+4. 验证调用方 A 的 grant 已失效：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<cid>&caller_fingerprint=caller-fp-multi-A" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq .
+   ```
+
+**预期结果**：
+- 调用方 A 的 grant 状态变为 `removed`
+- 调用方 B 的 grant 仍为 `active`
+- 使用调用方 B 的 grant 发起的调用成功返回
+- 查找调用方 A 的可复用授权返回空
+
+---
+
+### TC-RI-52：多调用方并发 call 执行
+
+**背景**：设计方案要求"同一客户端允许多个调用方同时发起 call，各 call 独立执行"。
+
+**前置条件**：两个调用方各自拥有活跃授权
+
+**操作步骤**：
+1. 使用调用方 A 和调用方 B 的 grant 同时发起 call（在两个终端并行执行，或使用 `&` 后台执行）：
+   ```bash
+   # 终端 1 - 调用方 A
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<grant_id_A>",
+       "command": "status",
+       "args_json": "{}",
+       "caller_fingerprint": "caller-fp-multi-A"
+     }' > /tmp/call_a.json &
+
+   # 终端 2 - 调用方 B
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<grant_id_B>",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":5}",
+       "caller_fingerprint": "caller-fp-multi-B"
+     }' > /tmp/call_b.json &
+   wait
+   ```
+2. 检查两个调用的结果
+
+**预期结果**：
+- 两个调用各自返回有效的 `call_id`
+- 两个 `call_id` 不同
+- 两个调用均成功完成，不会因并发而阻塞或报错
+- Bifrost 客户端状态显示 `active_call_ids` 一度包含两个 call
+
+---
+
+### TC-RI-53：多调用方数据隔离 — 调用记录仅对自身可见
+
+**背景**：设计方案要求"调用方只能通过自己的 relay_token 订阅自己发起的 call 事件流"。
+
+**前置条件**：TC-RI-52 已完成，存在多个调用方的 call 记录
+
+**操作步骤**：
+1. 查看所有 calls 列表：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/calls" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.list | length'
+   ```
+2. 获取调用方 A 发起的 call 详情：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/calls/<call_id_a>" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.caller_fingerprint'
+   ```
+3. 获取调用方 B 发起的 call 详情：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/calls/<call_id_b>" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.caller_fingerprint'
+   ```
+
+**预期结果**：
+- calls 列表中包含两个调用方的记录
+- 每个 call 的 `caller_fingerprint` 字段正确匹配发起者
+- WebUI History 区可看到所有调用方的记录（管理端视角可见全部）
+
+---
+
+### TC-RI-54：配对码超时后自动轮换（发现模式持续开启）
+
+**背景**：设计方案 §六位码只做配对引导 要求"授权码过期后，若发现模式仍然开启，客户端自动生成新的 6 位授权码并向 Relay 重新注册，旧码立即作废"。
+
+**操作步骤**：
+1. 开启发现模式：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/discovery/enter | jq .
+   ```
+2. 记录当前配对码（code_A）和有效期
+3. 等待配对码过期（默认 2 分钟）
+4. 查询发现模式状态，确认是否自动生成新码：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/status | jq .discovery_session
+   ```
+5. 如果生成了新码（code_B），使用旧码 code_A 尝试配对
+6. 使用新码 code_B 尝试配对
+
+**预期结果**：
+- 配对码过期后发现模式仍为开启状态
+- 自动生成新的配对码 code_B，与 code_A 不同
+- WebUI 实时刷新展示新码和重置后的倒计时
+- 使用旧码 code_A 配对失败（返回无效/过期错误）
+- 使用新码 code_B 配对成功进入待授权流程
+
+---
+
+### TC-RI-55：并发配对冲突 — pair_code_already_consumed 和 pair_slot_occupied
+
+**背景**：设计方案 §并发配对冲突处理 描述了配对码被消费后的排他逻辑。
+
+**操作步骤**：
+1. 开启发现模式并获取配对码
+2. 调用方 A 使用配对码成功发起配对（进入 pending_approval）：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/pairings/start \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "pair_code": "<pair_code>",
+       "caller_fingerprint": "caller-fp-conflict-A",
+       "caller_display_name": "Conflict Caller A"
+     }' | jq .
+   ```
+3. 调用方 B 使用同一配对码尝试配对：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/pairings/start \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "pair_code": "<pair_code>",
+       "caller_fingerprint": "caller-fp-conflict-B",
+       "caller_display_name": "Conflict Caller B"
+     }' | jq .
+   ```
+4. 生成新配对码后，调用方 C 使用新码配对（此时调用方 A 仍在 pending_approval）：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/pairings/start \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "pair_code": "<new_pair_code>",
+       "caller_fingerprint": "caller-fp-conflict-C",
+       "caller_display_name": "Conflict Caller C"
+     }' | jq .
+   ```
+
+**预期结果**：
+- 步骤 2：调用方 A 成功进入 pending_approval
+- 步骤 3：调用方 B 收到 `pair_code_already_consumed` 错误
+- 步骤 4：调用方 C 收到 `pair_slot_occupied` 错误（因为调用方 A 的配对仍在等待审批）
+
+---
+
+### TC-RI-56：traffic.clear 命令被明确拒绝
+
+**背景**：设计方案明确规定"traffic.clear 为写操作，不在只读白名单内，远程调用明确拒绝"。
+
+**前置条件**：已有可复用授权
+
+**操作步骤**：
+1. 使用已有授权发起 `traffic.clear` 调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "z57LgwhhAHOY6g8mlCtMZ",
+       "command": "traffic.clear",
+       "args_json": "{}",
+       "caller_fingerprint": "caller-fp-large"
+     }' | jq .
+   ```
+
+**预期结果**：
+- 返回 `unsupported_command` 错误
+- 不执行任何清理操作
+- Bifrost 本地流量数据未受影响
+
+---
+
+### TC-RI-57：traffic.list 多条件参数过滤
+
+**背景**：设计方案详细定义了 `traffic.list` 支持的完整参数表（limit, method, status, host, protocol 等），需验证多条件组合过滤生效。
+
+**前置条件**：已有可复用授权，本地 Bifrost 已有若干流量记录
+
+**操作步骤**：
+1. 基础调用 — 仅指定 limit：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "z57LgwhhAHOY6g8mlCtMZ",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":3}",
+       "caller_fingerprint": "caller-fp-large"
+     }' | jq .
+   ```
+2. 多条件组合 — limit + method 过滤：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "z57LgwhhAHOY6g8mlCtMZ",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":10,\"method\":\"GET\"}",
+       "caller_fingerprint": "caller-fp-large"
+     }' | jq .
+   ```
+3. 多条件组合 — limit + host 模糊匹配：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "z57LgwhhAHOY6g8mlCtMZ",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":10,\"host\":\"127.0.0.1\"}",
+       "caller_fingerprint": "caller-fp-large"
+     }' | jq .
+   ```
+4. 非法参数校验 — limit 超过 100：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "z57LgwhhAHOY6g8mlCtMZ",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":200}",
+       "caller_fingerprint": "caller-fp-large"
+     }' | jq .
+   ```
+
+**预期结果**：
+- 步骤 1：返回最多 3 条流量记录
+- 步骤 2：返回的记录中 method 均为 GET（如果有 GET 记录）
+- 步骤 3：返回的记录中 host 包含 `127.0.0.1`（如果有匹配记录）
+- 步骤 4：limit 被自动截断为 100（或返回 `invalid_args` 错误），不返回 200 条
+
+---
+
+### TC-RI-58：grant 数量上限验证（max_grants_per_client）
+
+**背景**：设计方案规定 `max_grants_per_client` 默认为 20，超出后新配对被拒绝。
+
+**操作步骤**：
+1. 查看当前 grants 数量：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.total'
+   ```
+2. 如果数量接近上限（20），记录当前数量
+3. 持续创建新配对直到达到上限
+4. 尝试超过上限时的配对
+
+**预期结果**：
+- 达到 `max_grants_per_client` 上限后，新配对请求返回 `grant_limit_exceeded` 错误
+- 已有的活跃 grants 不受影响
+- 删除一个旧 grant 后可以再次成功配对
+
+---
+
+### TC-RI-59：once 授权调用完成后状态变为 consumed
+
+**背景**：设计方案要求一次性授权在 call 完成后自动变为已消费状态，不可再复用。
+
+**操作步骤**：
+1. 开启发现模式并获取配对码
+2. 以新的 `caller-fp-once-test` 身份配对
+3. 在 Admin API 批准，选择 `once` 模式
+4. 查看 grant 状态（预期为 `active`）：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants" \
+     -H "x-bifrost-token: $SYNC_TOKEN" | jq '.data.list[] | select(.caller_fingerprint == "caller-fp-once-test")'
+   ```
+5. 使用该 grant 发起一次调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<once_grant_id>",
+       "command": "status",
+       "args_json": "{}",
+       "caller_fingerprint": "caller-fp-once-test"
+     }' | jq .
+   ```
+6. 调用完成后再次查看 grant 状态
+7. 尝试复用该 grant 发起第二次调用
+
+**预期结果**：
+- 步骤 4：grant 状态为 `active`
+- 步骤 5：调用成功返回
+- 步骤 6：grant 状态变为 `consumed`
+- 步骤 7：第二次调用失败，返回授权已消费/已失效错误
+
+---
+
 ## 远端部署场景测试
 
 以下用例覆盖当 relay 服务部署到远端服务器（而非本地 localhost）时的测试场景。
@@ -913,7 +1293,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-50：远端 Relay 连接 — HTTPS 证书验证与安全传输
+### TC-RI-70：远端 Relay 连接 — HTTPS 证书验证与安全传输
 
 **操作步骤**：
 1. 使用 HTTPS 地址连接远端 relay：
@@ -932,7 +1312,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-51：远端 Relay — 客户端 SSE 跨公网长连接稳定性
+### TC-RI-71：远端 Relay — 客户端 SSE 跨公网长连接稳定性
 
 **前置条件**：Bifrost 客户端通过公网与远端 relay 建立 SSE 连接
 
@@ -950,7 +1330,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-52：远端 Relay — 高延迟网络下的超时与错误提示
+### TC-RI-72：远端 Relay — 高延迟网络下的超时与错误提示
 
 **操作步骤**：
 1. 在高延迟或不稳定网络环境下连接远端 relay
@@ -965,7 +1345,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-53：远端 Relay — SSO 集成鉴权
+### TC-RI-73：远端 Relay — SSO 集成鉴权
 
 **前置条件**：远端 relay 已接入 SSO 体系
 
@@ -984,7 +1364,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-54：远端 Relay — 多用户并发访问同一客户端
+### TC-RI-74：远端 Relay — 多用户并发访问同一客户端
 
 **前置条件**：远端 relay 上注册了用户 A 和用户 B，同一 Bifrost 客户端在线
 
@@ -1001,7 +1381,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-55：远端 Relay — Relay 地址切换后客户端重新连接
+### TC-RI-75：远端 Relay — Relay 地址切换后客户端重新连接
 
 **前置条件**：Bifrost 客户端当前连接远端 relay-A
 
@@ -1019,7 +1399,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-56：远端 Relay — 大结果集跨公网流式传输完整性
+### TC-RI-76：远端 Relay — 大结果集跨公网流式传输完整性
 
 **前置条件**：存在一个会产生大结果集的只读查询，且已有可复用授权
 
@@ -1036,7 +1416,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
-### TC-RI-57：远端 Relay — 客户端跨网络断线后的自动恢复
+### TC-RI-77：远端 Relay — 客户端跨网络断线后的自动恢复
 
 **前置条件**：Bifrost 客户端通过公网连接远端 relay 且存在可复用授权
 
@@ -1055,6 +1435,37 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - relay 记录 `client_disconnected` / `client_reconnected` 事件
 
 ---
+
+## 补充覆盖用例测试执行结果（TC-RI-50 ~ TC-RI-59）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 本地 port 8686，`--enable-remote-invoke`
+- 测试日期：2026-04-18
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-50 | 多调用方独立配对与授权 | ✅ PASS | 两个不同 fingerprint 独立配对并获得独立 grant，grant_id 不同 |
+| TC-RI-51 | 多调用方 grant 隔离 — 撤销 A 不影响 B | ✅ PASS | 删除 caller-A grant 后 caller-B 仍可执行，caller-A 返回 `grant_not_active` |
+| TC-RI-52 | 多调用方并发调用执行 | ✅ PASS | 两个调用方同时发起 status 命令，均成功完成，exit_code=0 |
+| TC-RI-53 | 多调用方数据隔离 — 管理端视角 | ✅ PASS | 管理端 calls 列表包含所有调用方记录，每个 call 的 caller_fingerprint 正确匹配 |
+| TC-RI-54 | 配对码超时后自动轮换 | ✅ PASS | worker.rs 后台定时器在 pair_code_ttl 过期后自动轮换配对码（观察到 3 次轮换：587604→867953→180434），旧码被正确拒绝（`invalid_pair_code`），当前码配对成功 |
+| TC-RI-55 | 并发配对冲突 | ✅ PASS | Caller-A 成功配对→pending_approval ✅；Caller-B 复用已消费码→返回 `pair_code_already_consumed` ✅；Caller-C 用新码配对但存在未决配对→返回 `pair_slot_occupied` ✅ |
+| TC-RI-56 | traffic.clear 专项拒绝 & 白名单命令验证 | ✅ PASS | `traffic.clear`/`traffic.delete`/`rule.create`/`config.set`/`system.shutdown` 均返回 400 `unsupported_command`；白名单命令 `status` 正常执行 |
+| TC-RI-57 | traffic.list 多条件参数过滤 | ✅ PASS | limit=2 返回 2 条；method=POST 正确过滤；host_contains=httpbin 正确匹配；limit=200 被截断为 MAX_TRAFFIC_LIST_LIMIT(100) |
+| TC-RI-58 | grant 数量上限（max_grants_per_client） | ✅ PASS | max_grants_per_client=2 时，前 2 个 grant 正常创建，第 3 个被拒绝返回 `max_grants_exceeded`。修复：按 client_instance_id 维度统计而非 user_id 维度 |
+| TC-RI-59 | once 授权调用后 consumed 状态 | ✅ PASS | once 模式 grant 在配对初始调用完成后状态变为 consumed，复用返回 `grant_not_active` |
+
+### 已知设计缺口汇总
+
+所有设计缺口已修复并验证通过：
+
+| 缺口 | 修复方案 | 验证用例 | 状态 |
+|------|---------|---------|------|
+| 配对码自动轮换 | worker.rs 中增加 `pair_code_ticker` 定时器，过期后自动调用 `maybe_refresh_pair_code()` | TC-RI-54 | ✅ 已修复 |
+| `pair_slot_occupied` 冲突检查 | sqlite.ts 新增 `countPendingPairings()`，service.ts 在 `startPairing` 中检查未决配对数 | TC-RI-55 | ✅ 已修复 |
+| `pair_code_already_consumed` 错误码 | sse.ts 新增 `consumeClientDiscovery()` 保留已消费 pairCode，`findClientByPairCode` 返回精确错误 | TC-RI-55 | ✅ 已修复 |
+| `max_grants_per_client` 上限 | sqlite.ts 新增 `countActiveGrantsForClient()`，service.ts 在 `submitGrantDecision` 中按 client_instance_id 维度检查 | TC-RI-58 | ✅ 已修复 |
 
 ## 清理
 

@@ -1,4 +1,4 @@
-import { get, post } from "./client";
+import { get, post, del, patch } from "./client";
 
 export type WorkerState =
   | "disconnected"
@@ -113,4 +113,68 @@ export async function rejectPairing(
   pairingId: string,
 ): Promise<ApproveResponse> {
   return post<ApproveResponse>(`/remote-invoke/pairings/${pairingId}/reject`);
+}
+
+export interface Grant {
+  grant_id: string;
+  client_instance_id: string;
+  caller_fingerprint: string;
+  caller_display_name?: string;
+  grant_mode: GrantMode;
+  status: string;
+  created_at: string;
+  expires_at?: string;
+  last_used_at?: string;
+  use_count: number;
+}
+
+export interface GrantsListResponse {
+  grants: Grant[];
+}
+
+export interface Call {
+  call_id: string;
+  grant_id: string;
+  client_instance_id: string;
+  command: string;
+  status: string;
+  created_at: string;
+  finished_at?: string;
+  exit_code?: number;
+  duration_ms?: number;
+}
+
+export interface CallsListResponse {
+  calls: Call[];
+}
+
+export interface CallDetailResponse {
+  call: Call;
+}
+
+export async function listGrants(): Promise<GrantsListResponse> {
+  return get<GrantsListResponse>("/remote-invoke/grants");
+}
+
+export async function updateGrant(
+  grantId: string,
+  updates: Record<string, unknown>,
+): Promise<{ success: boolean; data: unknown }> {
+  return patch<{ success: boolean; data: unknown }>(`/remote-invoke/grants/${grantId}`, updates);
+}
+
+export async function revokeGrant(
+  grantId: string,
+): Promise<{ success: boolean }> {
+  return del<{ success: boolean }>(`/remote-invoke/grants/${grantId}`);
+}
+
+export async function listCalls(): Promise<CallsListResponse> {
+  return get<CallsListResponse>("/remote-invoke/calls");
+}
+
+export async function getCall(
+  callId: string,
+): Promise<CallDetailResponse> {
+  return get<CallDetailResponse>(`/remote-invoke/calls/${callId}`);
 }

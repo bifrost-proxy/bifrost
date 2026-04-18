@@ -8,6 +8,7 @@ import {
   Descriptions,
   Empty,
   List,
+  Popconfirm,
   Row,
   Space,
   Tag,
@@ -18,8 +19,11 @@ import {
 import {
   ApiOutlined,
   CopyOutlined,
+  DeleteOutlined,
   DisconnectOutlined,
+  HistoryOutlined,
   ReloadOutlined,
+  SafetyOutlined,
   ScanOutlined,
   StopOutlined,
 } from "@ant-design/icons";
@@ -29,9 +33,14 @@ import {
   getClientIdentity,
   getPendingPairings,
   getRemoteInvokeStatus,
+  listCalls,
+  listGrants,
   refreshPairCode,
+  revokeGrant,
+  type Call,
   type ClientIdentity,
   type DiscoverySession,
+  type Grant,
   type PairingRequest,
   type RemoteInvokeStatus,
 } from "../../../api/remoteInvoke";
@@ -82,6 +91,8 @@ export default function RemoteInvokeTab() {
     null,
   );
   const [modalVisible, setModalVisible] = useState(false);
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const [calls, setCalls] = useState<Call[]>([]);
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -108,20 +119,42 @@ export default function RemoteInvokeTab() {
     }
   }, []);
 
+  const refreshGrants = useCallback(async () => {
+    try {
+      const res = await listGrants();
+      setGrants(res.grants ?? []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const refreshCalls = useCallback(async () => {
+    try {
+      const res = await listCalls();
+      setCalls(res.calls ?? []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
     void refreshPairings();
-  }, [refresh, refreshPairings]);
+    void refreshGrants();
+    void refreshCalls();
+  }, [refresh, refreshPairings, refreshGrants, refreshCalls]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
       void refresh();
       void refreshPairings();
+      void refreshGrants();
+      void refreshCalls();
     }, 3000);
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshPairings]);
+  }, [refresh, refreshPairings, refreshGrants, refreshCalls]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -206,6 +239,17 @@ export default function RemoteInvokeTab() {
     setSelectedPairing(null);
     void refresh();
     void refreshPairings();
+    void refreshGrants();
+  };
+
+  const handleRevokeGrant = async (grantId: string) => {
+    try {
+      await revokeGrant(grantId);
+      message.success("Grant revoked");
+      void refreshGrants();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "Failed to revoke grant");
+    }
   };
 
   const discoverySession: DiscoverySession | null =
@@ -432,6 +476,159 @@ export default function RemoteInvokeTab() {
                           {p.caller_info.platform && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               {p.caller_info.platform}
+                            </Text>
+                          )}
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24} md={12}>
+          <Card
+            title={
+              <Space>
+                <SafetyOutlined />
+                <Badge count={grants.length} offset={[8, 0]}>
+                  <span>Active Grants</span>
+                </Badge>
+              </Space>
+            }
+            extra={
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => void refreshGrants()}
+              />
+            }
+            size="small"
+          >
+            {grants.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No active grants"
+              />
+            ) : (
+              <List
+                dataSource={grants}
+                size="small"
+                renderItem={(g) => (
+                  <List.Item
+                    actions={[
+                      <Popconfirm
+                        key="revoke"
+                        title="Revoke this grant?"
+                        description="The caller will need to pair again."
+                        onConfirm={() => void handleRevokeGrant(g.grant_id)}
+                        okText="Revoke"
+                        cancelText="Cancel"
+                      >
+                        <Button
+                          danger
+                          size="small"
+                          icon={<DeleteOutlined />}
+                        >
+                          Revoke
+                        </Button>
+                      </Popconfirm>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <Space>
+                          <Text>{g.caller_display_name || "Unknown"}</Text>
+                          <Tag color={g.status === "active" ? "green" : "default"}>
+                            {g.status}
+                          </Tag>
+                          <Tag>{g.grant_mode}</Tag>
+                        </Space>
+                      }
+                      description={
+                        <Space size={4}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Used {g.use_count}x
+                          </Text>
+                          {g.expires_at && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · expires {new Date(g.expires_at).toLocaleDateString()}
+                            </Text>
+                          )}
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24} md={12}>
+          <Card
+            title={
+              <Space>
+                <HistoryOutlined />
+                <Badge count={calls.length} offset={[8, 0]}>
+                  <span>Recent Calls</span>
+                </Badge>
+              </Space>
+            }
+            extra={
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => void refreshCalls()}
+              />
+            }
+            size="small"
+          >
+            {calls.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No recent calls"
+              />
+            ) : (
+              <List
+                dataSource={calls}
+                size="small"
+                renderItem={(c) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      title={
+                        <Space>
+                          <Text code style={{ fontSize: 11 }}>
+                            {c.command}
+                          </Text>
+                          <Tag
+                            color={
+                              c.status === "completed"
+                                ? c.exit_code === 0
+                                  ? "green"
+                                  : "red"
+                                : c.status === "running"
+                                  ? "processing"
+                                  : "default"
+                            }
+                          >
+                            {c.status}
+                            {c.exit_code !== undefined && c.exit_code !== null
+                              ? ` (${c.exit_code})`
+                              : ""}
+                          </Tag>
+                        </Space>
+                      }
+                      description={
+                        <Space size={4}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {new Date(c.created_at).toLocaleString()}
+                          </Text>
+                          {c.duration_ms !== undefined && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · {c.duration_ms}ms
                             </Text>
                           )}
                         </Space>

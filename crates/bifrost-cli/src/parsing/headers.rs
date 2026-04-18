@@ -102,18 +102,33 @@ pub fn parse_cors_config(value: &str) -> bifrost_proxy::CorsConfig {
             ..Default::default()
         };
 
+        let mut has_known_key = false;
         for (key, raw_value) in entries {
             match key.to_ascii_lowercase().as_str() {
-                "origin" => cors.origin = Some(raw_value),
-                "method" | "methods" => cors.methods = Some(raw_value),
-                "headers" => cors.headers = Some(raw_value),
-                "expose" | "exposeheaders" => cors.expose_headers = Some(raw_value),
+                "origin" => {
+                    has_known_key = true;
+                    cors.origin = Some(raw_value);
+                }
+                "method" | "methods" => {
+                    has_known_key = true;
+                    cors.methods = Some(raw_value);
+                }
+                "headers" => {
+                    has_known_key = true;
+                    cors.headers = Some(raw_value);
+                }
+                "expose" | "exposeheaders" => {
+                    has_known_key = true;
+                    cors.expose_headers = Some(raw_value);
+                }
                 "credentials" => {
+                    has_known_key = true;
                     if let Ok(enabled) = raw_value.parse::<bool>() {
                         cors.credentials = Some(enabled);
                     }
                 }
                 "maxage" | "max_age" => {
+                    has_known_key = true;
                     if let Ok(age) = raw_value.parse::<u64>() {
                         cors.max_age = Some(age);
                     }
@@ -122,10 +137,16 @@ pub fn parse_cors_config(value: &str) -> bifrost_proxy::CorsConfig {
             }
         }
 
-        return cors;
+        if has_known_key {
+            return cors;
+        }
     }
 
-    bifrost_proxy::CorsConfig::enable_all()
+    bifrost_proxy::CorsConfig {
+        enabled: true,
+        origin: Some(value.to_string()),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +177,47 @@ mod tests {
         assert_eq!(config.headers.as_deref(), Some("Content-Type"));
         assert_eq!(config.credentials, Some(true));
         assert_eq!(config.max_age, Some(86400));
+    }
+
+    #[test]
+    fn parse_cors_config_plain_domain_as_origin() {
+        let config = parse_cors_config("www.trae.cn");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("www.trae.cn"));
+    }
+
+    #[test]
+    fn parse_cors_config_plain_domain_without_subdomain() {
+        let config = parse_cors_config("example.com");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn parse_cors_config_domain_with_port_as_origin() {
+        let config = parse_cors_config("localhost:8080");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("localhost:8080"));
+    }
+
+    #[test]
+    fn parse_cors_config_url_as_origin() {
+        let config = parse_cors_config("https://frontend.test");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("https://frontend.test"));
+    }
+
+    #[test]
+    fn parse_cors_config_wildcard_enables_all() {
+        let config = parse_cors_config("*");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("*"));
+    }
+
+    #[test]
+    fn parse_cors_config_empty_enables_all() {
+        let config = parse_cors_config("");
+        assert!(config.enabled);
+        assert_eq!(config.origin.as_deref(), Some("*"));
     }
 }

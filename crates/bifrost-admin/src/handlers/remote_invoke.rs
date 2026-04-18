@@ -52,6 +52,24 @@ pub async fn handle_remote_invoke(
             return handle_pairing_reject(req, &worker, pairing_id).await;
         }
     }
+    if sub == "/grants" || sub == "/grants/" {
+        return handle_grants_list(req, &worker).await;
+    }
+    if let Some(rest) = sub.strip_prefix("/grants/") {
+        let grant_id = rest.trim_end_matches('/');
+        if !grant_id.is_empty() && !grant_id.contains('/') {
+            return handle_grant_action(req, &worker, grant_id).await;
+        }
+    }
+    if sub == "/calls" || sub == "/calls/" {
+        return handle_calls_list(req, &worker).await;
+    }
+    if let Some(rest) = sub.strip_prefix("/calls/") {
+        let call_id = rest.trim_end_matches('/');
+        if !call_id.is_empty() && !call_id.contains('/') {
+            return handle_call_get(req, &worker, call_id).await;
+        }
+    }
 
     error_response(StatusCode::NOT_FOUND, "Remote invoke endpoint not found")
 }
@@ -224,6 +242,120 @@ async fn handle_pairing_reject(
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to reject pairing: {e}"),
+        ),
+    }
+}
+
+async fn handle_grants_list(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+
+    let relay = worker.relay_client();
+    match relay.list_grants().await {
+        Ok(grants) => json_response(&serde_json::json!({
+            "grants": grants,
+        })),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to list grants: {e}"),
+        ),
+    }
+}
+
+async fn handle_grant_action(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+    grant_id: &str,
+) -> Response<BoxBody> {
+    let relay = worker.relay_client();
+
+    match *req.method() {
+        Method::DELETE => match relay.delete_grant(grant_id).await {
+            Ok(()) => json_response(&serde_json::json!({
+                "success": true,
+            })),
+            Err(e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to revoke grant: {e}"),
+            ),
+        },
+        Method::PATCH => {
+            let body = match req.collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {e}"),
+                    );
+                }
+            };
+
+            let updates: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {e}"),
+                    );
+                }
+            };
+
+            match relay.update_grant(grant_id, &updates).await {
+                Ok(result) => json_response(&serde_json::json!({
+                    "success": true,
+                    "data": result,
+                })),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to update grant: {e}"),
+                ),
+            }
+        }
+        _ => method_not_allowed(),
+    }
+}
+
+async fn handle_calls_list(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+
+    let relay = worker.relay_client();
+    match relay.list_calls().await {
+        Ok(calls) => json_response(&serde_json::json!({
+            "calls": calls,
+        })),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to list calls: {e}"),
+        ),
+    }
+}
+
+async fn handle_call_get(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+    call_id: &str,
+) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+
+    let relay = worker.relay_client();
+    match relay.get_call(call_id).await {
+        Ok(call) => json_response(&serde_json::json!({
+            "call": call,
+        })),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to get call: {e}"),
         ),
     }
 }

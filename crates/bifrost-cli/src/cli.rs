@@ -670,6 +670,31 @@ pub enum Commands {
     },
     #[command(about = "Check for new version without upgrading")]
     VersionCheck,
+    #[command(about = "Execute commands on a remote Bifrost instance via relay")]
+    Remote {
+        #[command(subcommand)]
+        action: RemoteCommands,
+        #[arg(
+            long,
+            global = true,
+            help = "Relay server URL (default: read from sync config)"
+        )]
+        relay_url: Option<String>,
+        #[arg(
+            long,
+            global = true,
+            help = "Authentication token for relay server (default: read from sync config)"
+        )]
+        token: Option<String>,
+        #[arg(
+            long,
+            global = true,
+            help = "Target client instance ID (required if multiple clients online)"
+        )]
+        client_id: Option<String>,
+        #[arg(long, global = true, help = "Pair code for first-time connection")]
+        pair_code: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -1322,6 +1347,55 @@ pub enum ExportCommands {
         description: Option<String>,
         #[arg(short, long, value_hint = ValueHint::FilePath, help = "Output file path (default: stdout)")]
         output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteCommands {
+    #[command(about = "Get remote proxy status")]
+    Status,
+    #[command(about = "Search remote traffic records")]
+    Search {
+        #[arg(help = "Search keyword")]
+        keyword: String,
+        #[arg(short, long, default_value = "50", help = "Maximum results")]
+        limit: usize,
+    },
+    #[command(about = "Inspect remote traffic records")]
+    Traffic {
+        #[command(subcommand)]
+        action: RemoteTrafficCommands,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteTrafficCommands {
+    #[command(about = "List remote traffic records")]
+    List {
+        #[arg(short, long, default_value = "50", help = "Maximum records")]
+        limit: usize,
+        #[arg(long, help = "Cursor for pagination")]
+        cursor: Option<u64>,
+        #[arg(long, help = "Filter by HTTP method")]
+        method: Option<String>,
+        #[arg(long, help = "Filter by status code")]
+        status: Option<u16>,
+    },
+    #[command(about = "Get remote traffic record details")]
+    Get {
+        #[arg(help = "Traffic record ID")]
+        id: String,
+        #[arg(long, help = "Include request body")]
+        request_body: bool,
+        #[arg(long, help = "Include response body")]
+        response_body: bool,
+    },
+    #[command(about = "Search remote traffic records")]
+    Search {
+        #[arg(help = "Search keyword")]
+        keyword: String,
+        #[arg(short, long, default_value = "50", help = "Maximum results")]
+        limit: usize,
     },
 }
 

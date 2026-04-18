@@ -23,6 +23,7 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 25;
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
 const MAX_RECONNECT_DELAY_MS: u64 = 60000;
 const PAIR_CODE_DIGITS: u32 = 6;
+const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
 
 pub struct RemoteInvokeWorker {
     config: RemoteInvokeConfig,
@@ -329,6 +330,10 @@ impl RemoteInvokeWorker {
         let mut heartbeat_ticker = tokio::time::interval(heartbeat_interval);
         heartbeat_ticker.tick().await;
 
+        let pair_code_check_interval = Duration::from_secs(PAIR_CODE_REFRESH_CHECK_SECS);
+        let mut pair_code_ticker = tokio::time::interval(pair_code_check_interval);
+        pair_code_ticker.tick().await;
+
         let mut event_name = String::new();
         let mut data_buf = String::new();
 
@@ -346,6 +351,9 @@ impl RemoteInvokeWorker {
                     if let Err(e) = self.send_heartbeat(&stream_id).await {
                         warn!(error = %e, "heartbeat failed");
                     }
+                }
+                _ = pair_code_ticker.tick() => {
+                    self.maybe_refresh_pair_code().await;
                 }
                 chunk = stream.next() => {
                     match chunk {
@@ -402,6 +410,32 @@ impl RemoteInvokeWorker {
         self.relay_client.heartbeat(&req).await?;
         debug!("heartbeat sent");
         Ok(())
+    }
+
+    async fn maybe_refresh_pair_code(&self) {
+        let needs_refresh = {
+            let session = self.discovery_session.read();
+            match session.as_ref() {
+                Some(ds) => ds.expires_at <= now_millis(),
+                None => false,
+            }
+        };
+
+        if needs_refresh {
+            match self.refresh_pair_code().await {
+                Ok(Some(new_session)) => {
+                    info!(
+                        pair_code = %new_session.pair_code,
+                        expires_at = new_session.expires_at,
+                        "auto-refreshed expired pair code"
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = %e, "failed to auto-refresh pair code");
+                }
+            }
+        }
     }
 
     async fn dispatch_sse_event(&self, event_name: &str, data: &str) {

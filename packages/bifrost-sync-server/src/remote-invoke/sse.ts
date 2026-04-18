@@ -146,16 +146,33 @@ export function clearClientDiscovery(clientInstanceId: string): void {
   }
 }
 
-export function findClientByPairCode(pairCode: string): ClientStreamState | undefined {
+export function consumeClientDiscovery(clientInstanceId: string): void {
+  const state = clientStreams.get(clientInstanceId);
+  if (state) {
+    state.discoverable = false;
+    state.pairCodeExpiresAt = undefined;
+    state.discoverySessionId = undefined;
+  }
+}
+
+export type FindPairCodeResult =
+  | { found: true; client: ClientStreamState }
+  | { found: false; reason: 'not_found' | 'expired' | 'consumed' };
+
+export function findClientByPairCode(pairCode: string): FindPairCodeResult {
   for (const state of clientStreams.values()) {
-    if (state.discoverable && state.pairCode === pairCode) {
-      const now = Date.now();
-      if (state.pairCodeExpiresAt && state.pairCodeExpiresAt > now) {
-        return state;
+    if (state.pairCode === pairCode) {
+      if (!state.discoverable) {
+        return { found: false, reason: 'consumed' };
       }
+      const now = Date.now();
+      if (state.pairCodeExpiresAt && state.pairCodeExpiresAt <= now) {
+        return { found: false, reason: 'expired' };
+      }
+      return { found: true, client: state };
     }
   }
-  return undefined;
+  return { found: false, reason: 'not_found' };
 }
 
 export function getOnlineClientCount(): number {

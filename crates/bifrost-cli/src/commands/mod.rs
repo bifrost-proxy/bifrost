@@ -6,6 +6,7 @@ pub(crate) mod config;
 mod group;
 mod install_skill;
 mod metrics;
+pub mod remote;
 mod rule;
 mod script;
 mod search;

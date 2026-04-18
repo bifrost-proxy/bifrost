@@ -165,6 +165,7 @@ export interface RemoteInvokeConfig {
   sse_keepalive_ms: number;
   pair_code_ttl_secs: number;
   max_active_calls_per_client: number;
+  max_grants_per_client: number;
   retention_days: number;
   max_records: number;
   max_sse_connections_per_client: number;
