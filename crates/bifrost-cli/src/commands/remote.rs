@@ -1,4 +1,3 @@
-use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use bifrost_core::{direct_reqwest_client_builder, BifrostError};
@@ -19,7 +18,6 @@ pub struct RemoteOptions {
     pub relay_url: String,
     pub token: String,
     pub client_id: Option<String>,
-    pub pair_code: Option<String>,
     pub action: RemoteCommands,
 }
 
@@ -33,12 +31,8 @@ pub fn handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
 }
 
 async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
-    let (command, args_json) = build_remote_command(&opts.action);
-
     let caller = CallerRelayClient::new(&opts.relay_url, &opts.token);
-
     let client_instance_id = resolve_client_id(&caller, opts.client_id.as_deref()).await?;
-
     let caller_fingerprint = generate_caller_fingerprint();
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
@@ -47,6 +41,11 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         platform: Some(std::env::consts::OS.to_string()),
     };
 
+    if let RemoteCommands::Connect { pair_code } = &opts.action {
+        return handle_connect(&caller, &client_instance_id, pair_code, &caller_info).await;
+    }
+
+    let (command, args_json) = build_remote_command(&opts.action);
     let command_summary = CommandSummary {
         command_preview: command.clone(),
         masked_args_json: args_json.clone(),
@@ -56,111 +55,46 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         .find_reusable_grant(&client_instance_id, &caller_fingerprint)
         .await?;
 
-    let (grant_id, relay_token) = if let Some(g) = grant {
-        info!(grant_id = %g.grant_id, "found reusable grant");
-        println!(
-            "{}",
-            format!(
-                "✓ Using existing authorization (grant: {})",
-                &g.grant_id[..8]
-            )
-            .bright_green()
-        );
-
-        let call_result = caller
-            .open_call(&OpenCallRequest {
-                grant_id: g.grant_id.clone(),
-                client_instance_id: client_instance_id.clone(),
-                command: RemoteCommand {
-                    command: command.clone(),
-                    args_json: args_json.clone(),
-                },
-                command_summary: command_summary.clone(),
-                caller_pubkey: String::new(),
-            })
-            .await?;
-
-        (g.grant_id, call_result.relay_token)
-    } else {
-        let pair_code = match opts.pair_code {
-            Some(code) => code,
-            None => prompt_pair_code()?,
-        };
-
-        println!(
-            "{}",
-            format!(
-                "→ Initiating pairing with code {}...",
-                pair_code.bright_cyan()
-            )
-            .dimmed()
-        );
-
-        let pairing_result = caller
-            .start_pairing(&StartPairingRequest {
-                client_instance_id: client_instance_id.clone(),
-                pair_code,
-                caller_pubkey: String::new(),
-                caller_info: caller_info.clone(),
-                command_summary: command_summary.clone(),
-                command: RemoteCommand {
-                    command: command.clone(),
-                    args_json: args_json.clone(),
-                },
-            })
-            .await?;
-
-        println!(
-            "{}",
-            "⏳ Waiting for approval on the remote device...".bright_yellow()
-        );
-
-        let approval = caller.watch_pairing(&pairing_result.pairing_id).await?;
-
-        match approval.status.as_str() {
-            "approved" => {
-                println!("{}", "✓ Pairing approved!".bright_green());
-            }
-            "rejected" => {
-                println!("{}", "✗ Pairing was rejected.".bright_red());
-                return Err(BifrostError::Config("pairing rejected".to_string()));
-            }
-            other => {
-                println!(
-                    "{}",
-                    format!("✗ Pairing ended with status: {other}").bright_red()
-                );
-                return Err(BifrostError::Config(format!(
-                    "pairing failed with status: {other}"
-                )));
-            }
+    let grant = match grant {
+        Some(g) => g,
+        None => {
+            eprintln!(
+                "{}",
+                "✗ No existing authorization found. Please run `bifrost remote connect <pair-code>` first."
+                    .bright_red()
+            );
+            std::process::exit(1);
         }
-
-        let grant_id = approval
-            .grant_id
-            .ok_or_else(|| BifrostError::Config("approval missing grant_id".to_string()))?;
-
-        let call_result = caller
-            .open_call(&OpenCallRequest {
-                grant_id: grant_id.clone(),
-                client_instance_id: client_instance_id.clone(),
-                command: RemoteCommand {
-                    command: command.clone(),
-                    args_json: args_json.clone(),
-                },
-                command_summary,
-                caller_pubkey: String::new(),
-            })
-            .await?;
-
-        (grant_id, call_result.relay_token)
     };
 
-    debug!(grant_id = %grant_id, "call opened, subscribing to events");
+    info!(grant_id = %grant.grant_id, "found reusable grant");
+    println!(
+        "{}",
+        format!(
+            "✓ Using authorization (grant: {})",
+            &grant.grant_id[..grant.grant_id.len().min(8)]
+        )
+        .bright_green()
+    );
+
+    let call_result = caller
+        .open_call(&OpenCallRequest {
+            grant_id: grant.grant_id.clone(),
+            client_instance_id: client_instance_id.clone(),
+            command: RemoteCommand {
+                command: command.clone(),
+                args_json: args_json.clone(),
+            },
+            command_summary,
+            caller_pubkey: String::new(),
+        })
+        .await?;
+
+    debug!(call_id = %call_result.call_id, grant_id = %grant.grant_id, "call opened, subscribing to events");
     println!("{}", "→ Executing command on remote device...".dimmed());
 
     let result = caller
-        .subscribe_call_events(&grant_id, &relay_token)
+        .subscribe_call_events(&call_result.call_id, &call_result.relay_token)
         .await?;
 
     print_remote_result(&command, &result);
@@ -172,12 +106,87 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     Ok(())
 }
 
+async fn handle_connect(
+    caller: &CallerRelayClient,
+    client_instance_id: &str,
+    pair_code: &str,
+    caller_info: &CallerInfo,
+) -> bifrost_core::Result<()> {
+    let command_summary = CommandSummary {
+        command_preview: "connect".to_string(),
+        masked_args_json: None,
+    };
+
+    println!(
+        "{}",
+        format!(
+            "→ Initiating pairing with code {}...",
+            pair_code.bright_cyan()
+        )
+        .dimmed()
+    );
+
+    let pairing_result = caller
+        .start_pairing(&StartPairingRequest {
+            client_instance_id: client_instance_id.to_string(),
+            pair_code: pair_code.to_string(),
+            caller_pubkey: String::new(),
+            caller_info: caller_info.clone(),
+            command_summary,
+            command: RemoteCommand {
+                command: "connect".to_string(),
+                args_json: None,
+            },
+        })
+        .await?;
+
+    println!(
+        "{}",
+        "⏳ Waiting for approval on the remote device...".bright_yellow()
+    );
+
+    let approval = caller.watch_pairing(&pairing_result.pairing_id).await?;
+
+    match approval.status.as_str() {
+        "approved" => {
+            let grant_id = approval.grant_id.unwrap_or_else(|| "unknown".to_string());
+            println!(
+                "{}",
+                format!(
+                    "✓ Connected! Authorization granted (grant: {})",
+                    &grant_id[..grant_id.len().min(8)]
+                )
+                .bright_green()
+            );
+            println!(
+                "{}",
+                "  You can now run commands like: bifrost remote status".dimmed()
+            );
+            Ok(())
+        }
+        "rejected" => {
+            println!("{}", "✗ Pairing was rejected.".bright_red());
+            Err(BifrostError::Config("pairing rejected".to_string()))
+        }
+        other => {
+            println!(
+                "{}",
+                format!("✗ Pairing ended with status: {other}").bright_red()
+            );
+            Err(BifrostError::Config(format!(
+                "pairing failed with status: {other}"
+            )))
+        }
+    }
+}
+
 fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
     match action {
+        RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
         RemoteCommands::Status => ("status".to_string(), None),
         RemoteCommands::Search { keyword, limit } => {
             let args = serde_json::json!({
-                "keyword": keyword,
+                "query": keyword,
                 "limit": limit,
             });
             ("search.get".to_string(), Some(args.to_string()))
@@ -224,33 +233,6 @@ fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
             }
         },
     }
-}
-
-fn prompt_pair_code() -> bifrost_core::Result<String> {
-    if !io::stdin().is_terminal() {
-        return Err(BifrostError::Config(
-            "pair code is required (use --pair-code in non-interactive mode)".to_string(),
-        ));
-    }
-
-    print!(
-        "{}",
-        "Enter the pair code displayed on the remote device: ".bright_white()
-    );
-    io::stdout().flush().ok();
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| BifrostError::Config(format!("failed to read pair code: {e}")))?;
-
-    let code = input.trim().to_string();
-    if code.is_empty() {
-        return Err(BifrostError::Config(
-            "pair code cannot be empty".to_string(),
-        ));
-    }
-    Ok(code)
 }
 
 fn generate_caller_fingerprint() -> String {
@@ -486,11 +468,13 @@ impl CallerRelayClient {
 
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "x-bifrost-token",
-            reqwest::header::HeaderValue::from_str(&self.token)
-                .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
-        );
+        if !self.token.is_empty() {
+            headers.insert(
+                "x-bifrost-token",
+                reqwest::header::HeaderValue::from_str(&self.token)
+                    .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
+            );
+        }
         headers
     }
 

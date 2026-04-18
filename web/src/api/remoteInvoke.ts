@@ -121,10 +121,14 @@ export interface Grant {
   caller_fingerprint: string;
   caller_display_name?: string;
   grant_mode: GrantMode;
+  grant_scope: string;
   status: string;
-  created_at: string;
-  expires_at?: string;
-  last_used_at?: string;
+  created_at: number;
+  first_authorized_at: number;
+  expires_at: number | null;
+  last_used_at: number | null;
+  max_calls: number;
+  remaining_calls: number;
   use_count: number;
 }
 
@@ -136,12 +140,21 @@ export interface Call {
   call_id: string;
   grant_id: string;
   client_instance_id: string;
+  caller_fingerprint: string;
+  caller_display_name?: string;
   command: string;
+  command_summary: { command_preview: string };
+  command_detail?: Record<string, unknown>;
   status: string;
-  created_at: string;
-  finished_at?: string;
-  exit_code?: number;
-  duration_ms?: number;
+  source_ip?: string;
+  created_at: number;
+  started_at: number;
+  finished_at: number | null;
+  ended_at: number | null;
+  exit_code: number | null;
+  duration_ms: number | null;
+  bytes_in?: number | null;
+  bytes_out?: number | null;
 }
 
 export interface CallsListResponse {

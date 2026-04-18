@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,13 +9,15 @@ use tracing::{debug, info, warn};
 
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 const MIN_SAMPLE_FOR_INFERENCE: u32 = 3;
-const HIGH_UNTRUST_RATIO: f32 = 0.8;
+const HIGH_UNTRUST_RATIO: f32 = 0.7;
+const MIN_DEFINITE_FOR_NOT_TRUSTED: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsAcceptFailureReason {
     ClientDoesNotTrustCa,
     ProbablyClientDoesNotTrustCa,
+    DecryptionError,
     CertificateExpired,
     ProtocolIncompatible,
     ConnectionReset,
@@ -29,6 +31,7 @@ impl std::fmt::Display for TlsAcceptFailureReason {
             Self::ProbablyClientDoesNotTrustCa => {
                 write!(f, "probably_client_does_not_trust_ca")
             }
+            Self::DecryptionError => write!(f, "decryption_error"),
             Self::CertificateExpired => write!(f, "certificate_expired"),
             Self::ProtocolIncompatible => write!(f, "protocol_incompatible"),
             Self::ConnectionReset => write!(f, "connection_reset"),
@@ -42,8 +45,16 @@ impl std::fmt::Display for TlsAcceptFailureReason {
 pub enum ClientTrustStatus {
     Trusted,
     NotTrusted { reason: String },
+    PossiblyNotTrusted { reason: String },
     LikelyUntrusted { confidence: f32, sample_count: u32 },
     Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct DomainFailureDetail {
+    definite_count: u32,
+    probable_count: u32,
+    last_seen: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -53,10 +64,13 @@ pub struct ClientTrustRecord {
     pub last_success_at: Option<u64>,
     pub last_failure_at: Option<u64>,
     pub handshake_success: u32,
-    pub handshake_fail_untrust: u32,
+    pub handshake_fail_definite_untrust: u32,
+    pub handshake_fail_probable_untrust: u32,
     pub handshake_fail_other: u32,
     pub last_failure_reason: Option<TlsAcceptFailureReason>,
     pub last_failure_domain: Option<String>,
+    failed_domains: HashMap<String, DomainFailureDetail>,
+    success_domains: HashSet<String>,
 }
 
 impl ClientTrustRecord {
@@ -67,12 +81,27 @@ impl ClientTrustRecord {
             last_success_at: None,
             last_failure_at: None,
             handshake_success: 0,
-            handshake_fail_untrust: 0,
+            handshake_fail_definite_untrust: 0,
+            handshake_fail_probable_untrust: 0,
             handshake_fail_other: 0,
             last_failure_reason: None,
             last_failure_domain: None,
+            failed_domains: HashMap::new(),
+            success_domains: HashSet::new(),
         }
     }
+
+    fn total_untrust(&self) -> u32 {
+        self.handshake_fail_definite_untrust + self.handshake_fail_probable_untrust
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainFailureSummary {
+    pub domain: String,
+    pub definite_count: u32,
+    pub probable_count: u32,
+    pub has_success: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,11 +111,14 @@ pub struct ClientTrustSummary {
     pub trust_status: ClientTrustStatus,
     pub handshake_success: u32,
     pub handshake_fail_untrust: u32,
+    pub handshake_fail_definite_untrust: u32,
+    pub handshake_fail_probable_untrust: u32,
     pub handshake_fail_other: u32,
     pub first_seen: u64,
     pub last_seen: u64,
     pub last_failure_domain: Option<String>,
     pub last_failure_reason: Option<String>,
+    pub failed_domains: Vec<DomainFailureSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,6 +170,7 @@ impl ClientTlsTrustTracker {
             record.last_seen = now;
             record.last_success_at = Some(now);
             record.handshake_success += 1;
+            record.success_domains.insert(domain.to_string());
             let new_status = evaluate_trust(record);
             self.maybe_emit_event(client_ip, "ip", &old_status, &new_status, ctx.clone());
         }
@@ -152,6 +185,7 @@ impl ClientTlsTrustTracker {
                 record.last_seen = now;
                 record.last_success_at = Some(now);
                 record.handshake_success += 1;
+                record.success_domains.insert(domain.to_string());
                 let new_status = evaluate_trust(record);
                 self.maybe_emit_event(app, "app", &old_status, &new_status, ctx.clone());
             }
@@ -166,11 +200,9 @@ impl ClientTlsTrustTracker {
         reason: &TlsAcceptFailureReason,
     ) {
         let now = current_timestamp();
-        let is_untrust = matches!(
-            reason,
-            TlsAcceptFailureReason::ClientDoesNotTrustCa
-                | TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa
-        );
+        let is_definite_untrust = matches!(reason, TlsAcceptFailureReason::ClientDoesNotTrustCa);
+        let is_probable_untrust =
+            matches!(reason, TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa);
 
         if let Ok(ip) = client_ip.parse::<IpAddr>() {
             let mut map = self.by_ip.write();
@@ -180,11 +212,13 @@ impl ClientTlsTrustTracker {
             record.last_failure_at = Some(now);
             record.last_failure_reason = Some(reason.clone());
             record.last_failure_domain = Some(domain.to_string());
-            if is_untrust {
-                record.handshake_fail_untrust += 1;
-            } else {
-                record.handshake_fail_other += 1;
-            }
+            apply_failure_to_record(
+                record,
+                domain,
+                is_definite_untrust,
+                is_probable_untrust,
+                now,
+            );
             let new_status = evaluate_trust(record);
             self.maybe_emit_event(
                 client_ip,
@@ -206,11 +240,13 @@ impl ClientTlsTrustTracker {
                 record.last_failure_at = Some(now);
                 record.last_failure_reason = Some(reason.clone());
                 record.last_failure_domain = Some(domain.to_string());
-                if is_untrust {
-                    record.handshake_fail_untrust += 1;
-                } else {
-                    record.handshake_fail_other += 1;
-                }
+                apply_failure_to_record(
+                    record,
+                    domain,
+                    is_definite_untrust,
+                    is_probable_untrust,
+                    now,
+                );
                 let new_status = evaluate_trust(record);
                 self.maybe_emit_event(
                     app,
@@ -222,13 +258,21 @@ impl ClientTlsTrustTracker {
             }
         }
 
-        if is_untrust {
+        if is_definite_untrust {
             warn!(
                 client_ip = %client_ip,
                 client_app = ?client_app,
                 domain = %domain,
                 reason = %reason,
-                "TLS trust detection: client does not trust Bifrost CA"
+                "TLS trust: client sent UnknownCA alert — definitively does not trust Bifrost CA"
+            );
+        } else if is_probable_untrust {
+            info!(
+                client_ip = %client_ip,
+                client_app = ?client_app,
+                domain = %domain,
+                reason = %reason,
+                "TLS trust: ambiguous certificate rejection (BadCertificate/CertificateUnknown) — may or may not be CA trust issue"
             );
         } else {
             debug!(
@@ -236,7 +280,7 @@ impl ClientTlsTrustTracker {
                 client_app = ?client_app,
                 domain = %domain,
                 reason = %reason,
-                "TLS handshake failure recorded"
+                "TLS handshake failure (not trust-related)"
             );
         }
     }
@@ -263,36 +307,14 @@ impl ClientTlsTrustTracker {
         {
             let map = self.by_ip.read();
             for (ip, record) in map.iter() {
-                results.push(ClientTrustSummary {
-                    identifier: ip.to_string(),
-                    identifier_type: "ip".to_string(),
-                    trust_status: evaluate_trust(record),
-                    handshake_success: record.handshake_success,
-                    handshake_fail_untrust: record.handshake_fail_untrust,
-                    handshake_fail_other: record.handshake_fail_other,
-                    first_seen: record.first_seen,
-                    last_seen: record.last_seen,
-                    last_failure_domain: record.last_failure_domain.clone(),
-                    last_failure_reason: record.last_failure_reason.as_ref().map(|r| r.to_string()),
-                });
+                results.push(build_summary(ip.to_string(), "ip".to_string(), record));
             }
         }
 
         {
             let map = self.by_app.read();
             for (app, record) in map.iter() {
-                results.push(ClientTrustSummary {
-                    identifier: app.clone(),
-                    identifier_type: "app".to_string(),
-                    trust_status: evaluate_trust(record),
-                    handshake_success: record.handshake_success,
-                    handshake_fail_untrust: record.handshake_fail_untrust,
-                    handshake_fail_other: record.handshake_fail_other,
-                    first_seen: record.first_seen,
-                    last_seen: record.last_seen,
-                    last_failure_domain: record.last_failure_domain.clone(),
-                    last_failure_reason: record.last_failure_reason.as_ref().map(|r| r.to_string()),
-                });
+                results.push(build_summary(app.clone(), "app".to_string(), record));
             }
         }
 
@@ -369,6 +391,77 @@ impl ClientTlsTrustTracker {
     }
 }
 
+fn apply_failure_to_record(
+    record: &mut ClientTrustRecord,
+    domain: &str,
+    is_definite: bool,
+    is_probable: bool,
+    now: u64,
+) {
+    if is_definite {
+        record.handshake_fail_definite_untrust += 1;
+        let entry =
+            record
+                .failed_domains
+                .entry(domain.to_string())
+                .or_insert(DomainFailureDetail {
+                    definite_count: 0,
+                    probable_count: 0,
+                    last_seen: now,
+                });
+        entry.definite_count += 1;
+        entry.last_seen = now;
+    } else if is_probable {
+        record.handshake_fail_probable_untrust += 1;
+        let entry =
+            record
+                .failed_domains
+                .entry(domain.to_string())
+                .or_insert(DomainFailureDetail {
+                    definite_count: 0,
+                    probable_count: 0,
+                    last_seen: now,
+                });
+        entry.probable_count += 1;
+        entry.last_seen = now;
+    } else {
+        record.handshake_fail_other += 1;
+    }
+}
+
+fn build_summary(
+    identifier: String,
+    identifier_type: String,
+    record: &ClientTrustRecord,
+) -> ClientTrustSummary {
+    let failed_domains: Vec<DomainFailureSummary> = record
+        .failed_domains
+        .iter()
+        .map(|(domain, detail)| DomainFailureSummary {
+            domain: domain.clone(),
+            definite_count: detail.definite_count,
+            probable_count: detail.probable_count,
+            has_success: record.success_domains.contains(domain),
+        })
+        .collect();
+
+    ClientTrustSummary {
+        identifier,
+        identifier_type,
+        trust_status: evaluate_trust(record),
+        handshake_success: record.handshake_success,
+        handshake_fail_untrust: record.total_untrust(),
+        handshake_fail_definite_untrust: record.handshake_fail_definite_untrust,
+        handshake_fail_probable_untrust: record.handshake_fail_probable_untrust,
+        handshake_fail_other: record.handshake_fail_other,
+        first_seen: record.first_seen,
+        last_seen: record.last_seen,
+        last_failure_domain: record.last_failure_domain.clone(),
+        last_failure_reason: record.last_failure_reason.as_ref().map(|r| r.to_string()),
+        failed_domains,
+    }
+}
+
 pub fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReason {
     let msg = error.to_string();
     let lower = msg.to_ascii_lowercase();
@@ -376,21 +469,22 @@ pub fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReas
     if lower.contains("unknownca") || lower.contains("unknown_ca") || lower.contains("unknown ca") {
         return TlsAcceptFailureReason::ClientDoesNotTrustCa;
     }
+
     if lower.contains("badcertificate")
         || lower.contains("bad_certificate")
         || lower.contains("bad certificate")
     {
-        return TlsAcceptFailureReason::ClientDoesNotTrustCa;
+        return TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa;
     }
     if lower.contains("certificateunknown")
         || lower.contains("certificate_unknown")
         || lower.contains("certificate unknown")
     {
-        return TlsAcceptFailureReason::ClientDoesNotTrustCa;
+        return TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa;
     }
 
     if lower.contains("decrypt") {
-        return TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa;
+        return TlsAcceptFailureReason::DecryptionError;
     }
 
     if lower.contains("certificateexpired") || lower.contains("certificate expired") {
@@ -412,14 +506,19 @@ pub fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReas
 }
 
 fn evaluate_trust(record: &ClientTrustRecord) -> ClientTrustStatus {
-    let total =
-        record.handshake_success + record.handshake_fail_untrust + record.handshake_fail_other;
+    let total = record.handshake_success
+        + record.handshake_fail_definite_untrust
+        + record.handshake_fail_probable_untrust
+        + record.handshake_fail_other;
 
     if total == 0 {
         return ClientTrustStatus::Unknown;
     }
 
-    if record.handshake_fail_untrust > 0 && record.handshake_success == 0 {
+    let definite = record.handshake_fail_definite_untrust;
+    let total_untrust = record.total_untrust();
+
+    if definite >= MIN_DEFINITE_FOR_NOT_TRUSTED && record.handshake_success == 0 {
         return ClientTrustStatus::NotTrusted {
             reason: record
                 .last_failure_reason
@@ -429,7 +528,17 @@ fn evaluate_trust(record: &ClientTrustRecord) -> ClientTrustStatus {
         };
     }
 
-    if record.handshake_fail_untrust > 0 && record.handshake_success > 0 {
+    if definite >= 1 && record.handshake_success == 0 {
+        return ClientTrustStatus::PossiblyNotTrusted {
+            reason: record
+                .last_failure_reason
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
+    }
+
+    if total_untrust > 0 && record.handshake_success > 0 {
         if let (Some(last_success), Some(last_failure)) =
             (record.last_success_at, record.last_failure_at)
         {
@@ -439,12 +548,12 @@ fn evaluate_trust(record: &ClientTrustRecord) -> ClientTrustStatus {
         }
     }
 
-    if record.handshake_fail_untrust == 0 && record.handshake_success > 0 {
+    if total_untrust == 0 && record.handshake_success > 0 {
         return ClientTrustStatus::Trusted;
     }
 
     if total >= MIN_SAMPLE_FOR_INFERENCE {
-        let fail_ratio = record.handshake_fail_untrust as f32 / total as f32;
+        let fail_ratio = total_untrust as f32 / total as f32;
         if fail_ratio > HIGH_UNTRUST_RATIO {
             return ClientTrustStatus::LikelyUntrusted {
                 confidence: fail_ratio,
@@ -460,6 +569,7 @@ fn status_tag(status: &ClientTrustStatus) -> &'static str {
     match status {
         ClientTrustStatus::Trusted => "trusted",
         ClientTrustStatus::NotTrusted { .. } => "not_trusted",
+        ClientTrustStatus::PossiblyNotTrusted { .. } => "possibly_not_trusted",
         ClientTrustStatus::LikelyUntrusted { .. } => "likely_untrusted",
         ClientTrustStatus::Unknown => "unknown",
     }
@@ -477,7 +587,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_classify_unknown_ca() {
+    fn test_classify_unknown_ca_is_definite() {
         let err = std::io::Error::other("peer sent fatal alert: UnknownCA");
         assert_eq!(
             classify_tls_accept_error(&err),
@@ -486,29 +596,29 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_bad_certificate() {
+    fn test_classify_bad_certificate_is_probable() {
         let err = std::io::Error::other("peer sent fatal alert: BadCertificate");
         assert_eq!(
             classify_tls_accept_error(&err),
-            TlsAcceptFailureReason::ClientDoesNotTrustCa
+            TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa
         );
     }
 
     #[test]
-    fn test_classify_certificate_unknown() {
+    fn test_classify_certificate_unknown_is_probable() {
         let err = std::io::Error::other("peer sent fatal alert: CertificateUnknown");
         assert_eq!(
             classify_tls_accept_error(&err),
-            TlsAcceptFailureReason::ClientDoesNotTrustCa
+            TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa
         );
     }
 
     #[test]
-    fn test_classify_decrypt_error() {
+    fn test_classify_decrypt_is_not_untrust() {
         let err = std::io::Error::other("decrypt error");
         assert_eq!(
             classify_tls_accept_error(&err),
-            TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa
+            TlsAcceptFailureReason::DecryptionError
         );
     }
 
@@ -540,6 +650,24 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_handshake_failure() {
+        let err = std::io::Error::other("HandshakeFailure");
+        assert_eq!(
+            classify_tls_accept_error(&err),
+            TlsAcceptFailureReason::ProtocolIncompatible
+        );
+    }
+
+    #[test]
+    fn test_classify_certificate_expired() {
+        let err = std::io::Error::other("CertificateExpired");
+        assert_eq!(
+            classify_tls_accept_error(&err),
+            TlsAcceptFailureReason::CertificateExpired
+        );
+    }
+
+    #[test]
     fn test_evaluate_trust_no_data() {
         let record = ClientTrustRecord::new(100);
         assert!(matches!(
@@ -559,9 +687,20 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_trust_all_untrust_failure() {
+    fn test_evaluate_single_definite_failure_is_possibly_not_trusted() {
         let mut record = ClientTrustRecord::new(100);
-        record.handshake_fail_untrust = 3;
+        record.handshake_fail_definite_untrust = 1;
+        record.last_failure_reason = Some(TlsAcceptFailureReason::ClientDoesNotTrustCa);
+        assert!(matches!(
+            evaluate_trust(&record),
+            ClientTrustStatus::PossiblyNotTrusted { .. }
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_multiple_definite_failures_is_not_trusted() {
+        let mut record = ClientTrustRecord::new(100);
+        record.handshake_fail_definite_untrust = 2;
         record.last_failure_reason = Some(TlsAcceptFailureReason::ClientDoesNotTrustCa);
         assert!(matches!(
             evaluate_trust(&record),
@@ -570,9 +709,40 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_probable_only_is_not_immediately_untrusted() {
+        let mut record = ClientTrustRecord::new(100);
+        record.handshake_fail_probable_untrust = 2;
+        record.last_failure_reason = Some(TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa);
+        assert!(matches!(
+            evaluate_trust(&record),
+            ClientTrustStatus::Unknown
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_probable_enough_samples_becomes_likely_untrusted() {
+        let mut record = ClientTrustRecord::new(100);
+        record.handshake_fail_probable_untrust = 3;
+        record.last_failure_reason = Some(TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa);
+        let status = evaluate_trust(&record);
+        assert!(matches!(status, ClientTrustStatus::LikelyUntrusted { .. }));
+    }
+
+    #[test]
+    fn test_evaluate_decrypt_error_alone_stays_unknown() {
+        let mut record = ClientTrustRecord::new(100);
+        record.handshake_fail_other = 5;
+        record.last_failure_reason = Some(TlsAcceptFailureReason::DecryptionError);
+        assert!(matches!(
+            evaluate_trust(&record),
+            ClientTrustStatus::Unknown
+        ));
+    }
+
+    #[test]
     fn test_evaluate_trust_recovered() {
         let mut record = ClientTrustRecord::new(100);
-        record.handshake_fail_untrust = 3;
+        record.handshake_fail_definite_untrust = 3;
         record.handshake_success = 2;
         record.last_failure_at = Some(100);
         record.last_success_at = Some(200);
@@ -583,7 +753,42 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_record_and_query() {
+    fn test_evaluate_mixed_below_ratio_threshold() {
+        let mut record = ClientTrustRecord::new(100);
+        record.handshake_fail_probable_untrust = 1;
+        record.handshake_success = 2;
+        record.last_failure_at = Some(200);
+        record.last_success_at = Some(100);
+        assert!(matches!(
+            evaluate_trust(&record),
+            ClientTrustStatus::Unknown
+        ));
+    }
+
+    #[test]
+    fn test_tracker_single_definite_failure() {
+        let tracker = ClientTlsTrustTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.record_handshake_failure(
+            "192.168.1.100",
+            Some("Firefox"),
+            "example.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+
+        let ip: IpAddr = "192.168.1.100".parse().unwrap();
+        assert!(matches!(
+            tracker.get_trust_status_by_ip(&ip),
+            ClientTrustStatus::PossiblyNotTrusted { .. }
+        ));
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.new_status, "possibly_not_trusted");
+    }
+
+    #[test]
+    fn test_tracker_double_definite_failure_promotes_to_not_trusted() {
         let tracker = ClientTlsTrustTracker::new();
 
         tracker.record_handshake_failure(
@@ -615,7 +820,61 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_event_emission() {
+    fn test_tracker_decrypt_error_does_not_trigger_untrust() {
+        let tracker = ClientTlsTrustTracker::new();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "example.com",
+            &TlsAcceptFailureReason::DecryptionError,
+        );
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(matches!(
+            tracker.get_trust_status_by_ip(&ip),
+            ClientTrustStatus::Unknown
+        ));
+        assert_eq!(tracker.get_untrusted_count(), 0);
+    }
+
+    #[test]
+    fn test_tracker_probable_failures_need_samples_for_likely_untrusted() {
+        let tracker = ClientTlsTrustTracker::new();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "a.com",
+            &TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa,
+        );
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "b.com",
+            &TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa,
+        );
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(matches!(
+            tracker.get_trust_status_by_ip(&ip),
+            ClientTrustStatus::Unknown
+        ));
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "c.com",
+            &TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa,
+        );
+        assert!(matches!(
+            tracker.get_trust_status_by_ip(&ip),
+            ClientTrustStatus::LikelyUntrusted { .. }
+        ));
+    }
+
+    #[test]
+    fn test_tracker_event_emission_on_status_change() {
         let tracker = ClientTlsTrustTracker::new();
         let mut rx = tracker.subscribe();
 
@@ -631,6 +890,30 @@ mod tests {
         let event = event.unwrap();
         assert_eq!(event.identifier, "10.0.0.1");
         assert_eq!(event.old_status, "unknown");
+        assert_eq!(event.new_status, "possibly_not_trusted");
+    }
+
+    #[test]
+    fn test_tracker_event_on_promotion_to_not_trusted() {
+        let tracker = ClientTlsTrustTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "a.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+        let _ = rx.try_recv();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "b.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.old_status, "possibly_not_trusted");
         assert_eq!(event.new_status, "not_trusted");
     }
 
@@ -643,5 +926,85 @@ mod tests {
 
         tracker.clear();
         assert_eq!(tracker.get_all_statuses().len(), 0);
+    }
+
+    #[test]
+    fn test_domain_failure_tracking_in_summary() {
+        let tracker = ClientTlsTrustTracker::new();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "pinned.example.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "pinned.example.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+        tracker.record_handshake_success("10.0.0.1", None, "other.example.com");
+
+        let statuses = tracker.get_all_statuses();
+        let ip_summary = statuses
+            .iter()
+            .find(|s| s.identifier == "10.0.0.1")
+            .unwrap();
+
+        assert_eq!(ip_summary.failed_domains.len(), 1);
+        assert_eq!(ip_summary.failed_domains[0].domain, "pinned.example.com");
+        assert_eq!(ip_summary.failed_domains[0].definite_count, 2);
+        assert!(!ip_summary.failed_domains[0].has_success);
+    }
+
+    #[test]
+    fn test_domain_with_both_success_and_failure() {
+        let tracker = ClientTlsTrustTracker::new();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "flaky.com",
+            &TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa,
+        );
+        tracker.record_handshake_success("10.0.0.1", None, "flaky.com");
+
+        let statuses = tracker.get_all_statuses();
+        let ip_summary = statuses
+            .iter()
+            .find(|s| s.identifier == "10.0.0.1")
+            .unwrap();
+
+        assert_eq!(ip_summary.failed_domains.len(), 1);
+        assert!(ip_summary.failed_domains[0].has_success);
+    }
+
+    #[test]
+    fn test_summary_backward_compat_fields() {
+        let tracker = ClientTlsTrustTracker::new();
+
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "a.com",
+            &TlsAcceptFailureReason::ClientDoesNotTrustCa,
+        );
+        tracker.record_handshake_failure(
+            "10.0.0.1",
+            None,
+            "b.com",
+            &TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa,
+        );
+
+        let statuses = tracker.get_all_statuses();
+        let s = statuses
+            .iter()
+            .find(|s| s.identifier == "10.0.0.1")
+            .unwrap();
+
+        assert_eq!(s.handshake_fail_definite_untrust, 1);
+        assert_eq!(s.handshake_fail_probable_untrust, 1);
+        assert_eq!(s.handshake_fail_untrust, 2);
     }
 }

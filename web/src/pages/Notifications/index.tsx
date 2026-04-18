@@ -40,6 +40,12 @@ function trustStatusTag(status: { status: string; reason?: string; confidence?: 
       return <Tag color="success">Trusted</Tag>;
     case 'not_trusted':
       return <Tag color="error">Not Trusted</Tag>;
+    case 'possibly_not_trusted':
+      return (
+        <Tooltip title="Only one definitive failure detected — needs more data to confirm">
+          <Tag color="blue">Possibly Not Trusted</Tag>
+        </Tooltip>
+      );
     case 'likely_untrusted':
       return (
         <Tag color="warning">
@@ -350,10 +356,21 @@ function ClientTrustTable() {
     },
     {
       title: 'Fail (Untrust)',
-      dataIndex: 'handshake_fail_untrust',
       key: 'fail_untrust',
-      width: 110,
-      render: (v: number) => (v > 0 ? <Text type="danger">{v}</Text> : <Text>{v}</Text>),
+      width: 140,
+      render: (_: unknown, record: ClientTrustSummary) => {
+        const total = record.handshake_fail_untrust;
+        const d = record.handshake_fail_definite_untrust;
+        const p = record.handshake_fail_probable_untrust;
+        if (d !== undefined && p !== undefined) {
+          return total > 0 ? (
+            <Tooltip title={`Definite: ${d}, Probable: ${p}`}>
+              <Text type="danger">{total}</Text>
+            </Tooltip>
+          ) : <Text>{total}</Text>;
+        }
+        return total > 0 ? <Text type="danger">{total}</Text> : <Text>{total}</Text>;
+      },
     },
     {
       title: 'Fail (Other)',

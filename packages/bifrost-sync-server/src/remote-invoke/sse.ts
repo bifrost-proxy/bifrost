@@ -71,11 +71,17 @@ export function getAllClientStreams(): Map<string, ClientStreamState> {
 
 export function pushToClient(clientInstanceId: string, event: string, data: unknown, id?: string): boolean {
   const state = clientStreams.get(clientInstanceId);
-  if (!state) return false;
+  if (!state) {
+    console.log(`[pushToClient] NO stream for ${clientInstanceId}, event=${event}, streams=[${[...clientStreams.keys()].join(',')}]`);
+    return false;
+  }
   try {
+    console.log(`[pushToClient] writing event=${event} to client=${clientInstanceId}, streamId=${state.streamId}`);
     writeSseEvent(state.res, event, data, id);
+    console.log(`[pushToClient] SUCCESS event=${event} to client=${clientInstanceId}`);
     return true;
-  } catch {
+  } catch (e) {
+    console.log(`[pushToClient] FAILED event=${event} to client=${clientInstanceId}: ${e}`);
     clientStreams.delete(clientInstanceId);
     return false;
   }

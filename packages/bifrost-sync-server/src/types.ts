@@ -219,6 +219,7 @@ export interface RemoteInvokeGrant {
   user_id: string;
   client_instance_id: string;
   caller_fingerprint: string;
+  caller_display_name: string;
   grant_mode: GrantMode;
   grant_scope: string;
   status: GrantStatus;

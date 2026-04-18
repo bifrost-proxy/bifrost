@@ -51,7 +51,7 @@ pub use body_store::{
 };
 pub use client_trust_tracker::{
     classify_tls_accept_error, ClientTlsTrustTracker, ClientTrustEvent, ClientTrustSummary,
-    TlsAcceptFailureReason,
+    DomainFailureSummary, TlsAcceptFailureReason,
 };
 pub use connection_monitor::{
     start_connection_cleanup_task, ConnectionMonitor, SharedConnectionMonitor, WebSocketFrameRecord,

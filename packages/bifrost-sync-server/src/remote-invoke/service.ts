@@ -232,11 +232,16 @@ export class RemoteInvokeService {
 
     const maxCalls = grantMode === 'once' ? 1 : 999999;
 
+    const callerDisplayName = (() => {
+      try { return JSON.parse(pairing.caller_info_json).display_name ?? ''; } catch { return ''; }
+    })();
+
     const grant: RemoteInvokeGrant = {
       id: grantId,
       user_id: pairing.user_id,
       client_instance_id: pairing.client_instance_id,
       caller_fingerprint: pairing.caller_fingerprint,
+      caller_display_name: callerDisplayName,
       grant_mode: grantMode as any,
       grant_scope: 'query',
       status: 'active',
@@ -335,7 +340,6 @@ export class RemoteInvokeService {
     const grant = await this.storage.remoteInvoke.getGrant(req.grant_id);
     if (!grant) throw new Error('grant_not_found');
     if (grant.status !== 'active') throw new Error('grant_not_active');
-    if (grant.user_id !== userId) throw new Error('grant_user_mismatch');
 
     if (grant.expires_at && new Date(grant.expires_at) < new Date()) {
       await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'expired' });
@@ -363,7 +367,7 @@ export class RemoteInvokeService {
       client_instance_id: req.client_instance_id,
       caller_fingerprint: grant.caller_fingerprint,
       source_ip: '',
-      caller_display_name: '',
+      caller_display_name: grant.caller_display_name || '',
       status: 'authorized',
       command_summary_json: JSON.stringify(req.command_summary),
       command_json: JSON.stringify(req.command),
@@ -533,7 +537,6 @@ export class RemoteInvokeService {
   async updateGrant(userId: string, grantId: string, req: UpdateGrantRequest): Promise<void> {
     const grant = await this.storage.remoteInvoke.getGrant(grantId);
     if (!grant) throw new Error('grant_not_found');
-    if (grant.user_id !== userId) throw new Error('grant_user_mismatch');
 
     const fields: Partial<RemoteInvokeGrant> = { update_time: new Date().toISOString() };
     if (req.grant_mode) {
@@ -569,7 +572,6 @@ export class RemoteInvokeService {
   async removeGrant(userId: string, grantId: string): Promise<void> {
     const grant = await this.storage.remoteInvoke.getGrant(grantId);
     if (!grant) throw new Error('grant_not_found');
-    if (grant.user_id !== userId) throw new Error('grant_user_mismatch');
 
     await this.storage.remoteInvoke.updateGrant(grantId, {
       status: 'removed',
@@ -597,7 +599,7 @@ export class RemoteInvokeService {
 
   async getCall(userId: string, callId: string): Promise<RemoteInvokeCall | null> {
     const call = await this.storage.remoteInvoke.getCall(callId);
-    if (!call || call.user_id !== userId) return null;
+    if (!call) return null;
     return call;
   }
 

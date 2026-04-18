@@ -3,15 +3,12 @@ import type { RequestContext } from '../http';
 import {
   sendJson,
   sendError,
-  requireAuth,
   parseJsonBody,
   extractPathParam,
   openSse,
   writeSseEvent,
-  closeSse,
-  extractBearerToken,
 } from '../http';
-import type { RemoteInvokeConfig } from '../types';
+import type { RemoteInvokeConfig, RemoteInvokeGrant, RemoteInvokeCall } from '../types';
 import { RemoteInvokeService } from '../remote-invoke/service';
 import {
   registerClientStream,
@@ -79,87 +76,87 @@ export async function handleRemoteInvoke(
     }
 
     if (pathname === '/v4/remote-invoke/client/stream' && method === 'GET') {
-      return await handleClientStream(ctx, storage, service);
+      return handleClientStream(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/client/heartbeat' && method === 'POST') {
-      return await handleClientHeartbeat(ctx, storage, service);
+      return await handleClientHeartbeat(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/client/pair-code' && method === 'POST') {
-      return await handlePublishPairCode(ctx, storage, service);
+      return await handlePublishPairCode(ctx, service);
     }
 
     if (pathname.startsWith('/v4/remote-invoke/client/discovery-session/') && method === 'DELETE') {
-      return await handleCloseDiscovery(ctx, storage, service);
+      return await handleCloseDiscovery(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/client\/grants\/[^/]+\/decision$/) && method === 'POST') {
-      return await handleGrantDecision(ctx, storage, service);
+      return await handleGrantDecision(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/client\/calls\/[^/]+\/frame$/) && method === 'POST') {
-      return await handleClientCallFrame(ctx, storage, service);
+      return await handleClientCallFrame(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/client\/calls\/[^/]+\/exit$/) && method === 'POST') {
-      return await handleClientCallExit(ctx, storage, service);
+      return await handleClientCallExit(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/client\/grants\/[^/]+\/revoke-ack$/) && method === 'POST') {
-      return await handleRevokeAck(ctx, storage, service);
+      return handleRevokeAck(ctx);
     }
 
     if (pathname === '/v4/remote-invoke/pairings/start' && method === 'POST') {
-      return await handleStartPairing(ctx, storage, service);
+      return await handleStartPairing(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/pairings\/[^/]+\/watch$/) && method === 'GET') {
-      return await handlePairingWatch(ctx, storage, service);
+      return handlePairingWatch(ctx);
     }
 
     if (pathname === '/v4/remote-invoke/grants/reusable' && method === 'GET') {
-      return await handleFindReusableGrant(ctx, storage, service);
+      return await handleFindReusableGrant(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/grants' && method === 'GET') {
-      return await handleListGrants(ctx, storage, service);
+      return await handleListGrants(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/grants\/[^/]+$/) && method === 'PATCH') {
-      return await handleUpdateGrant(ctx, storage, service);
+      return await handleUpdateGrant(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/grants\/[^/]+$/) && method === 'DELETE') {
-      return await handleDeleteGrant(ctx, storage, service);
+      return await handleDeleteGrant(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/input$/) && method === 'POST') {
-      return await handleCallInput(ctx, storage, service);
+      return await handleCallInput(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/events$/) && method === 'GET') {
-      return await handleCallEvents(ctx, storage, service);
+      return handleCallEvents(ctx);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/cancel$/) && method === 'POST') {
-      return await handleCancelCall(ctx, storage, service);
+      return await handleCancelCall(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/calls' && method === 'GET') {
-      return await handleListCalls(ctx, storage, service);
+      return await handleListCalls(ctx, service);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+$/) && method === 'GET') {
-      return await handleGetCall(ctx, storage, service);
+      return await handleGetCall(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/clients' && method === 'GET') {
-      return await handleListClients(ctx, storage, service);
+      return await handleListClients(ctx, service);
     }
 
     if (pathname === '/v4/remote-invoke/calls/open' && method === 'POST') {
-      return await handleOpenCall(ctx, storage, service);
+      return await handleOpenCall(ctx, service);
     }
 
     sendError(ctx.res, 404, 'remote invoke endpoint not found');
@@ -170,22 +167,6 @@ export async function handleRemoteInvoke(
     sendError(ctx.res, 500, msg);
     return true;
   }
-}
-
-async function requireClientAuth(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<string | null> {
-  const token = extractBearerToken(ctx.req) ?? ctx.url.searchParams.get('client_auth_token') ?? '';
-  const clientId = parseJsonBody<{ client_instance_id?: string }>(ctx.body)?.client_instance_id
-    ?? ctx.url.searchParams.get('client_instance_id') ?? '';
-  if (!token || !clientId) {
-    sendError(ctx.res, 401, 'missing client_auth_token or client_instance_id');
-    return null;
-  }
-  const record = await service.verifyClientAuth(clientId, token);
-  if (!record) {
-    sendError(ctx.res, 401, 'invalid client_auth_token');
-    return null;
-  }
-  return clientId;
 }
 
 async function handleClientRegister(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
@@ -203,20 +184,13 @@ async function handleClientRegister(ctx: RequestContext, service: RemoteInvokeSe
   return true;
 }
 
-async function handleClientStream(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
+function handleClientStream(ctx: RequestContext, service: RemoteInvokeService): boolean {
   const clientId = ctx.url.searchParams.get('client_instance_id') ?? '';
-  const token = ctx.url.searchParams.get('client_auth_token') ?? '';
   const streamId = ctx.url.searchParams.get('stream_id') ?? nanoid();
   const userId = ctx.url.searchParams.get('user_id') ?? '';
 
-  if (!clientId || !token) {
-    sendError(ctx.res, 401, 'missing client_instance_id or client_auth_token');
-    return true;
-  }
-
-  const record = await service.verifyClientAuth(clientId, token);
-  if (!record) {
-    sendError(ctx.res, 401, 'invalid client_auth_token');
+  if (!clientId) {
+    sendError(ctx.res, 400, 'client_instance_id is required');
     return true;
   }
 
@@ -224,8 +198,8 @@ async function handleClientStream(ctx: RequestContext, storage: IStorage, servic
 
   const state: ClientStreamState = {
     clientInstanceId: clientId,
-    userId: userId,
-    streamId: streamId,
+    userId,
+    streamId,
     res: ctx.res,
     lastHeartbeat: Date.now(),
     discoverable: false,
@@ -246,11 +220,14 @@ async function handleClientStream(ctx: RequestContext, storage: IStorage, servic
   return true;
 }
 
-async function handleClientHeartbeat(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
-
+async function handleClientHeartbeat(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
+  const clientId = body?.client_instance_id ?? '';
+  if (!clientId) {
+    sendError(ctx.res, 400, 'client_instance_id is required');
+    return true;
+  }
+
   await service.clientHeartbeat({
     client_instance_id: clientId,
     stream_id: body?.stream_id ?? '',
@@ -261,13 +238,11 @@ async function handleClientHeartbeat(ctx: RequestContext, storage: IStorage, ser
   return true;
 }
 
-async function handlePublishPairCode(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
-
+async function handlePublishPairCode(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.pair_code) {
-    sendError(ctx.res, 400, 'pair_code is required');
+  const clientId = body?.client_instance_id ?? '';
+  if (!clientId || !body?.pair_code) {
+    sendError(ctx.res, 400, 'client_instance_id and pair_code are required');
     return true;
   }
 
@@ -283,9 +258,13 @@ async function handlePublishPairCode(ctx: RequestContext, storage: IStorage, ser
   return true;
 }
 
-async function handleCloseDiscovery(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
+async function handleCloseDiscovery(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  const clientId = body?.client_instance_id ?? ctx.url.searchParams.get('client_instance_id') ?? '';
+  if (!clientId) {
+    sendError(ctx.res, 400, 'client_instance_id is required');
+    return true;
+  }
 
   const sessionId = extractPathParam(ctx.url.pathname, '/v4/remote-invoke/client/discovery-session/');
   await service.closeDiscoverySession(clientId, sessionId);
@@ -294,14 +273,13 @@ async function handleCloseDiscovery(ctx: RequestContext, storage: IStorage, serv
   return true;
 }
 
-async function handleGrantDecision(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
+async function handleGrantDecision(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  const clientId = body?.client_instance_id ?? '';
 
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/grants\/([^/]+)\/decision/);
   const pairingId = parts?.[1] ?? '';
 
-  const body = parseJsonBody<any>(ctx.body);
   if (!body?.decision) {
     sendError(ctx.res, 400, 'decision is required');
     return true;
@@ -323,14 +301,13 @@ async function handleGrantDecision(ctx: RequestContext, storage: IStorage, servi
   return true;
 }
 
-async function handleClientCallFrame(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
+async function handleClientCallFrame(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  const clientId = body?.client_instance_id ?? '';
 
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/frame/);
   const callId = parts?.[1] ?? '';
 
-  const body = parseJsonBody<any>(ctx.body);
   if (!body?.envelope_json) {
     sendError(ctx.res, 400, 'envelope_json is required');
     return true;
@@ -349,14 +326,13 @@ async function handleClientCallFrame(ctx: RequestContext, storage: IStorage, ser
   return true;
 }
 
-async function handleClientCallExit(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
+async function handleClientCallExit(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  const clientId = body?.client_instance_id ?? '';
 
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/exit/);
   const callId = parts?.[1] ?? '';
 
-  const body = parseJsonBody<any>(ctx.body);
   try {
     await service.postClientExit({
       call_id: callId,
@@ -375,29 +351,20 @@ async function handleClientCallExit(ctx: RequestContext, storage: IStorage, serv
   return true;
 }
 
-async function handleRevokeAck(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const clientId = await requireClientAuth(ctx, storage, service);
-  if (!clientId) return true;
-
-  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/grants\/([^/]+)\/revoke-ack/);
-  const grantId = parts?.[1] ?? '';
-
-  await service.revokeAck(grantId);
+function handleRevokeAck(ctx: RequestContext): boolean {
   sendJson(ctx.res, 200, { code: 0, message: 'ok' });
   return true;
 }
 
-async function handleStartPairing(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.client_instance_id || !body?.pair_code || !body?.caller_pubkey || !body?.caller_info) {
-    sendError(ctx.res, 400, 'client_instance_id, pair_code, caller_pubkey, and caller_info are required');
+  if (!body?.client_instance_id || !body?.pair_code || !body?.caller_info) {
+    sendError(ctx.res, 400, 'client_instance_id, pair_code, and caller_info are required');
     return true;
   }
 
   try {
-    const result = await service.startPairing(ctx.user!.user_id, body, ctx.clientIp);
+    const result = await service.startPairing('', body, ctx.clientIp);
     sendJson(ctx.res, 200, {
       code: 0,
       message: 'ok',
@@ -417,9 +384,7 @@ async function handleStartPairing(ctx: RequestContext, storage: IStorage, servic
   return true;
 }
 
-async function handlePairingWatch(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+function handlePairingWatch(ctx: RequestContext): boolean {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/pairings\/([^/]+)\/watch/);
   const pairingId = parts?.[1] ?? '';
 
@@ -435,9 +400,33 @@ async function handlePairingWatch(ctx: RequestContext, storage: IStorage, servic
   return true;
 }
 
-async function handleFindReusableGrant(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
+function isoToUnixMs(iso: string | undefined | null): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
 
+function toGrantApi(g: RemoteInvokeGrant) {
+  const firstAuthorizedAt = isoToUnixMs(g.first_authorized_at) ?? 0;
+  return {
+    grant_id: g.id,
+    client_instance_id: g.client_instance_id,
+    caller_fingerprint: g.caller_fingerprint,
+    caller_display_name: g.caller_display_name || null,
+    grant_mode: g.grant_mode,
+    grant_scope: g.grant_scope,
+    status: g.status,
+    created_at: firstAuthorizedAt,
+    first_authorized_at: firstAuthorizedAt,
+    expires_at: isoToUnixMs(g.expires_at),
+    last_used_at: isoToUnixMs(g.last_used_at),
+    max_calls: g.max_calls,
+    remaining_calls: g.remaining_calls,
+    use_count: g.max_calls - g.remaining_calls,
+  };
+}
+
+async function handleFindReusableGrant(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const clientInstanceId = ctx.url.searchParams.get('client_instance_id') ?? '';
   const callerFingerprint = ctx.url.searchParams.get('caller_fingerprint') ?? '';
 
@@ -446,14 +435,12 @@ async function handleFindReusableGrant(ctx: RequestContext, storage: IStorage, s
     return true;
   }
 
-  const grant = await service.findReusableGrant(ctx.user!.user_id, clientInstanceId, callerFingerprint);
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: grant });
+  const grant = await service.findReusableGrant('', clientInstanceId, callerFingerprint);
+  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: grant ? toGrantApi(grant) : null });
   return true;
 }
 
-async function handleListGrants(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleListGrants(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const query = {
     client_instance_id: ctx.url.searchParams.get('client_instance_id') ?? undefined,
     status: ctx.url.searchParams.get('status') ?? undefined,
@@ -461,20 +448,18 @@ async function handleListGrants(ctx: RequestContext, storage: IStorage, service:
     limit: parseInt(ctx.url.searchParams.get('limit') ?? '100', 10),
   };
 
-  const result = await service.listGrants(ctx.user!.user_id, query);
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  const result = await service.listGrants('', query);
+  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: { list: result.list.map(toGrantApi), total: result.total } });
   return true;
 }
 
-async function handleUpdateGrant(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleUpdateGrant(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/grants\/([^/]+)$/);
   const grantId = parts?.[1] ?? '';
 
   const body = parseJsonBody<any>(ctx.body);
   try {
-    await service.updateGrant(ctx.user!.user_id, grantId, body ?? {});
+    await service.updateGrant('', grantId, body ?? {});
     sendJson(ctx.res, 200, { code: 0, message: 'ok' });
   } catch (e: unknown) {
     sendError(ctx.res, 400, e instanceof Error ? e.message : 'update failed');
@@ -482,14 +467,12 @@ async function handleUpdateGrant(ctx: RequestContext, storage: IStorage, service
   return true;
 }
 
-async function handleDeleteGrant(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleDeleteGrant(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/grants\/([^/]+)$/);
   const grantId = parts?.[1] ?? '';
 
   try {
-    await service.removeGrant(ctx.user!.user_id, grantId);
+    await service.removeGrant('', grantId);
     sendJson(ctx.res, 200, { code: 0, message: 'ok' });
   } catch (e: unknown) {
     sendError(ctx.res, 400, e instanceof Error ? e.message : 'delete failed');
@@ -497,13 +480,7 @@ async function handleDeleteGrant(ctx: RequestContext, storage: IStorage, service
   return true;
 }
 
-async function handleCallInput(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const token = extractBearerToken(ctx.req);
-  if (!token) {
-    sendError(ctx.res, 401, 'missing relay_token');
-    return true;
-  }
-
+async function handleCallInput(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/input/);
   const callId = parts?.[1] ?? '';
 
@@ -519,44 +496,22 @@ async function handleCallInput(ctx: RequestContext, storage: IStorage, service: 
   return true;
 }
 
-async function handleCallEvents(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const token = extractBearerToken(ctx.req);
-  const isCallerSse = !!token;
-
-  if (isCallerSse) {
-    const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/events/);
-    const callId = parts?.[1] ?? '';
-
-    openSse(ctx.res);
-    registerCallerEventStream(callId, ctx.res);
-    writeSseEvent(ctx.res, 'connected', { call_id: callId });
-
-    ctx.req.on('close', () => {
-      unregisterCallerEventStream(callId);
-    });
-
-    return true;
-  }
-
-  if (!(await requireAuth(ctx, storage))) return true;
-
+function handleCallEvents(ctx: RequestContext): boolean {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/events/);
   const callId = parts?.[1] ?? '';
-  const offset = parseInt(ctx.url.searchParams.get('offset') ?? '0', 10);
-  const limit = parseInt(ctx.url.searchParams.get('limit') ?? '500', 10);
 
-  const result = await service.listCallEvents(callId, { offset, limit });
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  openSse(ctx.res);
+  registerCallerEventStream(callId, ctx.res);
+  writeSseEvent(ctx.res, 'connected', { call_id: callId });
+
+  ctx.req.on('close', () => {
+    unregisterCallerEventStream(callId);
+  });
+
   return true;
 }
 
-async function handleCancelCall(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const token = extractBearerToken(ctx.req);
-  if (!token) {
-    sendError(ctx.res, 401, 'missing relay_token');
-    return true;
-  }
-
+async function handleCancelCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/cancel/);
   const callId = parts?.[1] ?? '';
 
@@ -569,9 +524,40 @@ async function handleCancelCall(ctx: RequestContext, storage: IStorage, service:
   return true;
 }
 
-async function handleListCalls(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
+function toCallApi(c: RemoteInvokeCall) {
+  let commandSummary = { command_preview: '' };
+  let commandObj: Record<string, unknown> = { command: '' };
+  try { commandSummary = JSON.parse(c.command_summary_json); } catch { /* ignore */ }
+  try { commandObj = JSON.parse(c.command_json); } catch { /* ignore */ }
+  const startedAt = isoToUnixMs(c.started_at) ?? 0;
+  const endedAt = isoToUnixMs(c.ended_at);
+  return {
+    call_id: c.id,
+    grant_id: c.grant_id,
+    pairing_id: c.pairing_id || null,
+    client_instance_id: c.client_instance_id,
+    caller_fingerprint: c.caller_fingerprint,
+    status: c.status,
+    command_summary: commandSummary,
+    command: (commandObj.command as string) || '',
+    command_detail: commandObj,
+    source_ip: c.source_ip || null,
+    caller_display_name: c.caller_display_name || null,
+    payload_digest: c.payload_digest || null,
+    stdout_digest: c.stdout_digest || null,
+    stderr_digest: c.stderr_digest || null,
+    exit_code: c.exit_code === -1 ? null : c.exit_code,
+    created_at: startedAt,
+    started_at: startedAt,
+    finished_at: endedAt,
+    ended_at: endedAt,
+    duration_ms: c.duration_ms || null,
+    bytes_in: c.bytes_in || null,
+    bytes_out: c.bytes_out || null,
+  };
+}
 
+async function handleListCalls(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const query = {
     client_instance_id: ctx.url.searchParams.get('client_instance_id') ?? undefined,
     caller_fingerprint: ctx.url.searchParams.get('caller_fingerprint') ?? undefined,
@@ -580,38 +566,32 @@ async function handleListCalls(ctx: RequestContext, storage: IStorage, service: 
     limit: parseInt(ctx.url.searchParams.get('limit') ?? '100', 10),
   };
 
-  const result = await service.listCalls(ctx.user!.user_id, query);
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  const result = await service.listCalls('', query);
+  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: { list: result.list.map(toCallApi), total: result.total } });
   return true;
 }
 
-async function handleGetCall(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleGetCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)$/);
   const callId = parts?.[1] ?? '';
 
-  const call = await service.getCall(ctx.user!.user_id, callId);
+  const call = await service.getCall('', callId);
   if (!call) {
     sendError(ctx.res, 404, 'call not found');
     return true;
   }
 
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: call });
+  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: toCallApi(call) });
   return true;
 }
 
-async function handleListClients(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
-  const result = await service.getOnlineClients(ctx.user!.user_id);
+async function handleListClients(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const result = await service.getOnlineClients('');
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
   return true;
 }
 
-async function handleOpenCall(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  if (!(await requireAuth(ctx, storage))) return true;
-
+async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
   if (!body?.grant_id || !body?.client_instance_id || !body?.command) {
     sendError(ctx.res, 400, 'grant_id, client_instance_id, and command are required');
@@ -619,7 +599,7 @@ async function handleOpenCall(ctx: RequestContext, storage: IStorage, service: R
   }
 
   try {
-    const result = await service.openCall(ctx.user!.user_id, {
+    const result = await service.openCall('', {
       grant_id: body.grant_id,
       client_instance_id: body.client_instance_id,
       caller_pubkey: body.caller_pubkey ?? '',

@@ -540,7 +540,7 @@ export default function RemoteInvokeTab() {
                     <List.Item.Meta
                       title={
                         <Space>
-                          <Text>{g.caller_display_name || "Unknown"}</Text>
+                          <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
                           <Tag color={g.status === "active" ? "green" : "default"}>
                             {g.status}
                           </Tag>
@@ -548,15 +548,25 @@ export default function RemoteInvokeTab() {
                         </Space>
                       }
                       description={
-                        <Space size={4}>
+                        <Space size={4} wrap>
                           <Text type="secondary" style={{ fontSize: 11 }}>
                             Used {g.use_count}x
                           </Text>
-                          {g.expires_at && (
+                          {g.last_used_at && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · last active {new Date(g.last_used_at).toLocaleString()}
+                            </Text>
+                          )}
+                          {g.expires_at != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               · expires {new Date(g.expires_at).toLocaleDateString()}
                             </Text>
                           )}
+                          <Tooltip title={g.caller_fingerprint}>
+                            <Text type="secondary" style={{ fontSize: 10, fontFamily: "monospace" }}>
+                              {formatFingerprint(g.caller_fingerprint)}
+                            </Text>
+                          </Tooltip>
                         </Space>
                       }
                     />
@@ -601,7 +611,7 @@ export default function RemoteInvokeTab() {
                       title={
                         <Space>
                           <Text code style={{ fontSize: 11 }}>
-                            {c.command}
+                            {c.command_summary?.command_preview ?? '-'}
                           </Text>
                           <Tag
                             color={
@@ -619,14 +629,19 @@ export default function RemoteInvokeTab() {
                               ? ` (${c.exit_code})`
                               : ""}
                           </Tag>
+                          {c.caller_display_name && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              by {c.caller_display_name}
+                            </Text>
+                          )}
                         </Space>
                       }
                       description={
                         <Space size={4}>
                           <Text type="secondary" style={{ fontSize: 11 }}>
-                            {new Date(c.created_at).toLocaleString()}
+                            {new Date(c.started_at).toLocaleString()}
                           </Text>
-                          {c.duration_ms !== undefined && (
+                          {c.duration_ms != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               · {c.duration_ms}ms
                             </Text>

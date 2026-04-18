@@ -196,8 +196,13 @@ impl RelayClient {
             self.authorized_get(&url).send().await.map_err(|e| {
                 BifrostError::Network(format!("relay list grants request failed: {e}"))
             })?;
-        self.parse_response_with_data::<Vec<serde_json::Value>>(response, "list_grants")
-            .await
+        let wrapper: serde_json::Value = self
+            .parse_response_with_data(response, "list_grants")
+            .await?;
+        match wrapper.get("list").and_then(|v| v.as_array()) {
+            Some(arr) => Ok(arr.clone()),
+            None => Ok(vec![]),
+        }
     }
 
     pub async fn update_grant(
@@ -236,8 +241,13 @@ impl RelayClient {
             self.authorized_get(&url).send().await.map_err(|e| {
                 BifrostError::Network(format!("relay list calls request failed: {e}"))
             })?;
-        self.parse_response_with_data::<Vec<serde_json::Value>>(response, "list_calls")
-            .await
+        let wrapper: serde_json::Value = self
+            .parse_response_with_data(response, "list_calls")
+            .await?;
+        match wrapper.get("list").and_then(|v| v.as_array()) {
+            Some(arr) => Ok(arr.clone()),
+            None => Ok(vec![]),
+        }
     }
 
     pub async fn get_call(&self, call_id: &str) -> Result<serde_json::Value> {

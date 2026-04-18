@@ -20,17 +20,27 @@ export interface NotificationListResponse {
   offset: number;
 }
 
+export interface DomainFailureSummary {
+  domain: string;
+  definite_count: number;
+  probable_count: number;
+  has_success: boolean;
+}
+
 export interface ClientTrustSummary {
   identifier: string;
   identifier_type: string;
   trust_status: { status: string; reason?: string; confidence?: number; sample_count?: number };
   handshake_success: number;
   handshake_fail_untrust: number;
+  handshake_fail_definite_untrust: number;
+  handshake_fail_probable_untrust: number;
   handshake_fail_other: number;
   first_seen: number;
   last_seen: number;
   last_failure_domain: string | null;
   last_failure_reason: string | null;
+  failed_domains: DomainFailureSummary[];
 }
 
 export interface ClientTrustResponse {

@@ -692,8 +692,6 @@ pub enum Commands {
             help = "Target client instance ID (required if multiple clients online)"
         )]
         client_id: Option<String>,
-        #[arg(long, global = true, help = "Pair code for first-time connection")]
-        pair_code: Option<String>,
     },
 }
 
@@ -1352,6 +1350,11 @@ pub enum ExportCommands {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteCommands {
+    #[command(about = "Connect to a remote Bifrost instance (first-time pairing)")]
+    Connect {
+        #[arg(help = "Pair code displayed on the remote device")]
+        pair_code: String,
+    },
     #[command(about = "Get remote proxy status")]
     Status,
     #[command(about = "Search remote traffic records")]

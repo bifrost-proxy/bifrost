@@ -195,6 +195,7 @@ export interface ClientRegistrationRequest {
 }
 
 export const ALLOWED_COMMANDS = new Set([
+  'connect',
   'status',
   'traffic.list',
   'traffic.get',

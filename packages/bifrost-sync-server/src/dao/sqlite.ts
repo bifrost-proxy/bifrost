@@ -451,8 +451,8 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
     return g;
   }
 
@@ -725,6 +725,7 @@ export class SqliteStorage implements IStorage {
         user_id               TEXT NOT NULL,
         client_instance_id    TEXT NOT NULL,
         caller_fingerprint    TEXT NOT NULL DEFAULT '',
+        caller_display_name   TEXT NOT NULL DEFAULT '',
         grant_mode            TEXT NOT NULL DEFAULT 'once',
         grant_scope           TEXT NOT NULL DEFAULT 'query',
         status                TEXT NOT NULL DEFAULT 'active',

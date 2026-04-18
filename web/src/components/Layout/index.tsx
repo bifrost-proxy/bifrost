@@ -1,5 +1,5 @@
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import { theme, Badge, App as AntApp, Button, Space } from "antd";
+import { theme, Badge } from "antd";
 import {
   GlobalOutlined,
   FileTextOutlined,
@@ -13,7 +13,7 @@ import {
   BellOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useRef, useCallback } from "react";
+import { useEffect, useMemo } from "react";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
 import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
 import { useNotificationStore } from "../../stores/useNotificationStore";
@@ -22,11 +22,6 @@ import { setNavigateCallback, type ReferenceLocation } from "../BifrostEditor";
 import { getDesktopPlatform, isDesktopShell } from "../../runtime";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useSyncStore } from "../../stores/useSyncStore";
-import { useTlsConfigStore } from "../../stores/useTlsConfigStore";
-import {
-  getNotifications,
-  updateNotificationStatus,
-} from "../../api/notifications";
 
 interface MenuItem {
   key: string;
@@ -39,7 +34,6 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
-  const { notification } = AntApp.useApp();
   const {
     pendingCount,
     startSSE,
@@ -71,243 +65,12 @@ export default function AppLayout() {
   const showGroups = syncStatus?.enabled ?? false;
 
   const { unreadCount, fetchUnreadCount } = useNotificationStore();
-  const prevUnreadRef = useRef(unreadCount);
-  const shownToastIdsRef = useRef<Set<number>>(new Set());
-  const addDomainToPassthrough = useTlsConfigStore(
-    (s) => s.addDomainToPassthrough,
-  );
-  const fetchTlsConfig = useTlsConfigStore((s) => s.fetchConfig);
 
   useEffect(() => {
     fetchUnreadCount();
     const timer = setInterval(fetchUnreadCount, 5000);
     return () => clearInterval(timer);
   }, [fetchUnreadCount]);
-
-  useEffect(() => {
-    fetchTlsConfig();
-  }, [fetchTlsConfig]);
-
-  const handleNotificationToast = useCallback(() => {
-    if (unreadCount > prevUnreadRef.current) {
-      const diff = unreadCount - prevUnreadRef.current;
-      getNotifications({ status: "unread", limit: 20 })
-        .then((res) => {
-          const newItems = res.items.filter(
-            (n) => !shownToastIdsRef.current.has(n.id),
-          );
-          const tlsItems: { id: number; domain: string }[] = [];
-          let genericCount = 0;
-          for (const item of newItems) {
-            shownToastIdsRef.current.add(item.id);
-            if (
-              item.notification_type === "tls_trust_change" &&
-              item.metadata
-            ) {
-              try {
-                const meta = JSON.parse(item.metadata);
-                if (meta.domain) {
-                  tlsItems.push({
-                    id: item.id,
-                    domain: meta.domain as string,
-                  });
-                  continue;
-                }
-              } catch {
-                // metadata parse failed
-              }
-            }
-            genericCount++;
-          }
-
-          const MAX_TOAST_DOMAINS = 5;
-
-          if (tlsItems.length > 0 && tlsItems.length <= MAX_TOAST_DOMAINS) {
-            for (const { id, domain } of tlsItems) {
-              const key = `tls-toast-${id}`;
-              notification.warning({
-                key,
-                message: "TLS Certificate Not Trusted",
-                description: (
-                  <div>
-                    <div style={{ marginBottom: 8 }}>
-                      Domain <strong>{domain}</strong> is not trusted by the
-                      client.
-                    </div>
-                    <Space>
-                      <Button
-                        size="small"
-                        type="primary"
-                        onClick={async () => {
-                          await addDomainToPassthrough(domain);
-                          await updateNotificationStatus(
-                            id,
-                            "read",
-                            "passthrough",
-                          );
-                          fetchUnreadCount();
-                          notification.destroy(key);
-                        }}
-                      >
-                        Passthrough
-                      </Button>
-                      <Button
-                        size="small"
-                        onClick={async () => {
-                          await updateNotificationStatus(
-                            id,
-                            "dismissed",
-                            "ignored",
-                          );
-                          fetchUnreadCount();
-                          notification.destroy(key);
-                        }}
-                      >
-                        Ignore
-                      </Button>
-                    </Space>
-                  </div>
-                ),
-                placement: "topRight",
-                duration: 0,
-              });
-            }
-
-            if (tlsItems.length > 1) {
-              const batchKey = "tls-toast-batch";
-              notification.info({
-                key: batchKey,
-                message: "Batch Actions",
-                description: (
-                  <Space>
-                    <Button
-                      size="small"
-                      type="primary"
-                      onClick={async () => {
-                        for (const item of tlsItems) {
-                          await addDomainToPassthrough(item.domain);
-                          await updateNotificationStatus(
-                            item.id,
-                            "read",
-                            "passthrough",
-                          );
-                          notification.destroy(`tls-toast-${item.id}`);
-                        }
-                        fetchUnreadCount();
-                        notification.destroy(batchKey);
-                      }}
-                    >
-                      Passthrough All ({tlsItems.length})
-                    </Button>
-                    <Button
-                      size="small"
-                      onClick={async () => {
-                        for (const item of tlsItems) {
-                          await updateNotificationStatus(
-                            item.id,
-                            "dismissed",
-                            "ignored",
-                          );
-                          notification.destroy(`tls-toast-${item.id}`);
-                        }
-                        fetchUnreadCount();
-                        notification.destroy(batchKey);
-                      }}
-                    >
-                      Ignore All ({tlsItems.length})
-                    </Button>
-                  </Space>
-                ),
-                placement: "topRight",
-                duration: 0,
-              });
-            }
-          } else if (tlsItems.length > MAX_TOAST_DOMAINS) {
-            const key = "tls-toast-overflow";
-            notification.warning({
-              key,
-              message: `${tlsItems.length} TLS Certificates Not Trusted`,
-              description: (
-                <div>
-                  <div style={{ marginBottom: 8 }}>
-                    Too many untrusted domains. Manage them in the Notifications
-                    panel.
-                  </div>
-                  <Space>
-                    <Button
-                      size="small"
-                      type="primary"
-                      onClick={() => {
-                        navigate("/notifications?tab=tls_trust_change");
-                        notification.destroy(key);
-                      }}
-                    >
-                      Open Notifications
-                    </Button>
-                    <Button
-                      size="small"
-                      onClick={async () => {
-                        for (const item of tlsItems) {
-                          await updateNotificationStatus(
-                            item.id,
-                            "dismissed",
-                            "ignored",
-                          );
-                        }
-                        fetchUnreadCount();
-                        notification.destroy(key);
-                      }}
-                    >
-                      Ignore All
-                    </Button>
-                  </Space>
-                </div>
-              ),
-              placement: "topRight",
-              duration: 0,
-            });
-          }
-
-          if (genericCount > 0) {
-            notification.warning({
-              message: "New Notifications",
-              description: `${genericCount} new notification${genericCount > 1 ? "s" : ""} received. Check the Notifications panel.`,
-              placement: "topRight",
-              duration: 6,
-              onClick: () => {
-                navigate("/notifications");
-                notification.destroy();
-              },
-              style: { cursor: "pointer" },
-            });
-          }
-        })
-        .catch(() => {
-          notification.warning({
-            message: "New Notifications",
-            description: `${diff} new notification${diff > 1 ? "s" : ""} received.`,
-            placement: "topRight",
-            duration: 6,
-            onClick: () => {
-              navigate("/notifications");
-              notification.destroy();
-            },
-            style: { cursor: "pointer" },
-          });
-        });
-    }
-    prevUnreadRef.current = unreadCount;
-  }, [
-    unreadCount,
-    navigate,
-    notification,
-    addDomainToPassthrough,
-    fetchUnreadCount,
-  ]);
-
-  useEffect(() => {
-    handleNotificationToast();
-  }, [handleNotificationToast]);
 
   const menuItems: MenuItem[] = useMemo(
     () => [
