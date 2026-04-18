@@ -91,11 +91,27 @@ async function main() {
     config.server.trust_forwarded_for = true;
   }
 
+  if (hasFlag('--enable-remote-invoke')) {
+    config.remote_invoke = {
+      enabled: true,
+      sse_keepalive_ms: 30000,
+      pair_code_ttl_secs: 120,
+      max_active_calls_per_client: 5,
+      retention_days: 90,
+      max_records: 10000,
+      max_sse_connections_per_client: 2,
+      max_sse_connections_per_ip: 10,
+      pair_rate_limit_per_ip: 5,
+      pair_rate_limit_global_per_client: 10,
+    };
+  }
+
   console.log(`[bifrost-sync-server] starting...`);
   console.log(`  port:     ${config.server.port}`);
   console.log(`  host:     ${config.server.host}`);
   console.log(`  storage:  ${config.storage.type}`);
   console.log(`  auth:     ${config.auth.mode}`);
+  console.log(`  remote-invoke: ${config.remote_invoke?.enabled ? 'enabled' : 'disabled'}`);
   if (config.server.trust_forwarded_for) {
     console.warn(`\x1b[33m  ⚠ trust-forwarded-for: ENABLED (DANGEROUS — only use behind a trusted reverse proxy)\x1b[0m`);
   }

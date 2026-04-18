@@ -240,6 +240,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures-util",
+ "gethostname",
  "http-body-util",
  "hyper",
  "hyper-util",

@@ -782,6 +782,120 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+## 回归测试用例
+
+以下用例覆盖本轮开发中发现并修复的 Bug，确保修复后不再回归。
+
+### TC-RI-45：回归 — 关闭发现模式 API 不应返回 401
+
+**背景**：`close_discovery_session` 的 DELETE 请求缺少 `client_instance_id` 查询参数导致 relay 返回 401。
+
+**操作步骤**：
+1. 通过 Admin API 开启发现模式：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/discovery/enter | jq .
+   ```
+2. 通过 Admin API 关闭发现模式：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/discovery/exit | jq .
+   ```
+
+**预期结果**：
+- 关闭发现模式请求返回成功（HTTP 200）
+- 不出现 401 Unauthorized 错误
+- 发现模式状态变为关闭
+
+---
+
+### TC-RI-46：回归 — traffic.list 命令被 relay 正确接受
+
+**背景**：relay 端 `ALLOWED_COMMANDS` 白名单缺少 `traffic.list`，导致该命令被拒绝。
+
+**操作步骤**：
+1. 确保已有可复用授权
+2. 通过 relay 的 caller API 发起 `traffic.list` 调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8687/v4/remote-invoke/caller/calls \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<valid_grant_id>",
+       "command": "traffic.list",
+       "args_json": "{\"limit\":5}"
+     }' | jq .
+   ```
+
+**预期结果**：
+- relay 接受 `traffic.list` 命令，不返回 `unsupported_command` 错误
+- 调用成功返回流量列表数据
+
+---
+
+### TC-RI-47：回归 — traffic.get 接受含连字符的 ID
+
+**背景**：executor 的 ID 验证仅允许纯数字，导致 `REQ-xxxxx-nnnnnn` 格式的真实 traffic ID 被拒绝。
+
+**操作步骤**：
+1. 确保已有可复用授权
+2. 获取一个真实的 traffic ID（格式如 `REQ-69e304e7-000033`）
+3. 通过远程调用执行 `traffic.get`：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8687/v4/remote-invoke/caller/calls \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<valid_grant_id>",
+       "command": "traffic.get",
+       "args_json": "{\"id\":\"REQ-69e304e7-000033\"}"
+     }' | jq .
+   ```
+
+**预期结果**：
+- 命令成功执行，不返回"id param must contain only digits"错误
+- 返回对应的 traffic 详情或 not_found 提示
+
+---
+
+### TC-RI-48：回归 — traffic.get 仍拒绝包含特殊字符的 ID
+
+**背景**：修复 ID 验证后，需确保仍拒绝包含注入字符的恶意 ID。
+
+**操作步骤**：
+1. 尝试使用包含分号的恶意 ID：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8687/v4/remote-invoke/caller/calls \
+     -H "Content-Type: application/json" \
+     -H "x-bifrost-token: $SYNC_TOKEN" \
+     -d '{
+       "grant_id": "<valid_grant_id>",
+       "command": "traffic.get",
+       "args_json": "{\"id\":\"abc;DROP TABLE\"}"
+     }' | jq .
+   ```
+
+**预期结果**：
+- 命令被 executor 拒绝
+- 错误信息包含"id param must contain only alphanumeric characters and hyphens"
+- 不执行任何实际查询
+
+---
+
+### TC-RI-49：回归 — revoke_ack 请求包含正确的认证信息
+
+**背景**：`revoke_ack` POST 请求体缺少 `client_instance_id` 导致 relay 认证失败。
+
+**操作步骤**：
+1. 确保存在一个活跃授权
+2. 通过管理端 WebUI 移除该授权
+3. 观察 Bifrost 客户端日志
+
+**预期结果**：
+- 授权移除操作成功完成
+- Bifrost 客户端日志不出现 `revoke_ack` 相关的 401 或认证失败错误
+- relay 端记录 `grant_revoked` 事件
+
+---
+
 ## 远端部署场景测试
 
 以下用例覆盖当 relay 服务部署到远端服务器（而非本地 localhost）时的测试场景。

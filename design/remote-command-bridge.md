@@ -72,6 +72,7 @@
 - 首版仅支持 **Bifrost 查询类命令**，不支持修改配置、不支持写操作、不支持读取其他敏感配置。
 - 支持大流量结果传输与大载荷分片传输，不把协议限制在“小请求/小响应”场景。
 - 支持多个 Bifrost 远端调用客户端同时在线，并在 `Settings -> Remote Invoke` 中统一管理。
+- 支持多个远程调用方（不同 `caller_fingerprint`）对同一 Bifrost 客户端并发发起调用，各调用方授权独立、会话隔离。
 - 支持人工授权策略：
   - 一次调用
   - 多次调用 `30 分钟`
@@ -733,18 +734,33 @@
 - 调用端不是人类交互页面，目标是**程序化接入**。
 - 首版通过新增 `bifrost remote` 指令接入远程调用能力。
 - 命令模型采用“受控查询命令白名单”，而不是透传 shell 字符串。
-- 建议首版协议：
-  - `bifrost remote search <id>`
-  - `bifrost remote traffic get <id>`
-  - `bifrost remote traffic search <query>`
+- 首版协议支持的完整命令列表：
   - `bifrost remote status`
+  - `bifrost remote search <query>`
+  - `bifrost remote traffic list [--limit N] [--cursor C] [--method GET] ...`
+  - `bifrost remote traffic get <id> [--request-body] [--response-body]`
+  - `bifrost remote traffic search <query>`
 - 请求体中不上传原始 shell，而是上传结构化命令：
+
+```json
+{
+  "command": "traffic.list",
+  "args": {
+    "limit": 50,
+    "cursor": 12300,
+    "method": "GET",
+    "host": "api.example.com"
+  }
+}
+```
 
 ```json
 {
   "command": "traffic.get",
   "args": {
-    "id": "57544"
+    "id": "57544",
+    "request_body": true,
+    "response_body": true
   }
 }
 ```
@@ -907,6 +923,8 @@ struct RemoteInvokeClient {
   6: optional i64 discovery_expires_at,
   7: optional i64 last_heartbeat_at,
   8: optional i32 active_grant_count,
+  9: optional i32 active_call_count,
+  10: optional i32 active_caller_count,
 }
 
 struct ReusableGrant {
@@ -1151,7 +1169,9 @@ struct ReusableGrant {
 - 在线状态
 - 发现模式状态
 - 最近心跳
-- 当前活跃授权数
+- 当前活跃授权数（跨所有调用方的 grant 总数）
+- 当前活跃调用数（当前正在执行的并发 call 数）
+- 当前活跃调用方数（当前持有有效 grant 的不同 caller 数）
 - 进入发现模式按钮
 - 退出发现模式按钮
 - 查看该客户端历史按钮
@@ -1166,11 +1186,14 @@ struct ReusableGrant {
 #### Active Grants 区
 
 - 按客户端维度筛选
+- 按调用方指纹分行展示，同一客户端的多个调用方 grant 并列呈现
 - 指纹
+- 调用方显示名
 - 授权模式
 - 首次授权时间
 - 最近使用时间
 - 到期时间
+- 活跃 call 数（该调用方当前正在进行的调用数）
 - 修改有效期按钮
 - 修改授权模式按钮
 - 移除授权按钮
@@ -1324,6 +1347,9 @@ struct ReusableGrant {
   - `remote_invoke.sse_keepalive_ms`（默认 `30000`，即 30 秒）
   - `remote_invoke.pair_code_ttl_secs`（默认 `120`，即 2 分钟）
   - `remote_invoke.max_active_calls_per_client`（默认 `5`）
+  - `remote_invoke.max_active_calls_per_caller_per_client`（默认 `3`）
+  - `remote_invoke.max_grants_per_client`（默认 `20`）
+  - `remote_invoke.call_execution_timeout_secs`（默认 `60`）
   - `remote_invoke.retention_days`（默认 `90`）
   - `remote_invoke.max_records`（默认 `10000`）
   - `remote_invoke.max_sse_connections_per_client`（默认 `2`）
@@ -1861,10 +1887,11 @@ struct ReusableGrant {
 
 ### 命令执行边界
 
-- 首版只允许执行“Bifrost 自己定义的查询命令协议”，不要暴露任意 shell。
-- 首版仅允许只读查询动作，例如：
+- 首版只允许执行"Bifrost 自己定义的查询命令协议"，不要暴露任意 shell。
+- 首版仅允许只读查询动作：
   - `status`
   - `search.get`
+  - `traffic.list`
   - `traffic.get`
   - `traffic.search`
 - 明确禁止：
@@ -1873,8 +1900,107 @@ struct ReusableGrant {
   - values/config/cert/system proxy 等管理操作
   - 任意本地文件访问
   - 脚本执行
+  - `traffic.clear`（写操作，不在只读白名单内）
 - 客户端执行层建议做成 `enum RemoteQueryCommand`，由结构化命令映射到本地只读能力。
 - 即使未来扩展能力，也应继续走白名单扩展，不退回 shell 透传模型。
+
+### 远程 traffic 子命令能力详述
+
+远程调用支持的 traffic 子命令完整列表如下，均为只读查询操作。每个命令通过结构化 JSON 参数传递，由客户端执行器映射到本地 admin API。
+
+#### `traffic.list` — 分页查询流量记录列表
+
+- **用途**：按条件筛选并分页返回流量记录摘要列表。
+- **本地 API**：`GET /_bifrost/api/traffic?<query_string>`
+- **请求参数**（`args_json` 中的字段）：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 | 安全约束 |
+|------|------|------|--------|------|---------|
+| `limit` | number | 否 | `50` | 每页记录数 | 强制上限 `100`，防止单次返回过多数据 |
+| `cursor` | number | 否 | - | 分页游标（从上次响应的 `next_cursor`/`prev_cursor` 获取） | 纯数字 |
+| `direction` | string | 否 | `"backward"` | 翻页方向：`backward`（最新→最旧）/ `forward`（最旧→最新） | 白名单校验 |
+| `method` | string | 否 | - | 按 HTTP 方法筛选 | 白名单：`GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS`/`CONNECT`/`TRACE` |
+| `status` | number | 否 | - | 按状态码精确筛选 | 范围 `100-599` |
+| `status_min` | number | 否 | - | 状态码 >= 该值 | 范围 `100-599` |
+| `status_max` | number | 否 | - | 状态码 <= 该值 | 范围 `100-599` |
+| `protocol` | string | 否 | - | 按协议筛选 | 白名单：`http`/`https`/`ws`/`wss`/`h3` |
+| `host` | string | 否 | - | 按域名包含匹配 | 长度 ≤ 200，字符集 `[a-zA-Z0-9._\-:*]` |
+| `url` | string | 否 | - | 按 URL 包含匹配 | 长度 ≤ 500，字符集 `[a-zA-Z0-9._\-:/？&=%+~#@!$,;]` |
+| `path` | string | 否 | - | 按路径包含匹配 | 长度 ≤ 500，字符集 `[a-zA-Z0-9._\-:/]` |
+| `content_type` | string | 否 | - | 按 Content-Type 筛选 | 长度 ≤ 100 |
+| `client_ip` | string | 否 | - | 按客户端 IP 筛选 | 长度 ≤ 45 |
+| `client_app` | string | 否 | - | 按客户端应用筛选 | 长度 ≤ 200 |
+| `has_rule_hit` | bool | 否 | - | 是否命中规则 | - |
+| `is_websocket` | bool | 否 | - | 仅 WebSocket 请求 | - |
+| `is_sse` | bool | 否 | - | 仅 SSE 请求 | - |
+| `is_tunnel` | bool | 否 | - | 仅 CONNECT 隧道 | - |
+
+- **响应内容**（JSON）：
+
+```json
+{
+  "records": [
+    {
+      "id": "uuid",
+      "seq": 12345,
+      "m": "GET",
+      "h": "api.example.com",
+      "p": "/v1/users",
+      "s": 200,
+      "res_sz": 1024,
+      "dur": 150,
+      "proto": "https",
+      "st": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "next_cursor": 12300,
+  "prev_cursor": 12350,
+  "has_more": true,
+  "total": 500,
+  "server_sequence": 12400
+}
+```
+
+- **安全约束**：
+  - `limit` 强制上限 `100`，客户端发送超过此值时自动截断。
+  - 所有字符串筛选参数均需通过字符集白名单和长度上限校验，校验失败返回 `invalid_args`。
+
+#### `traffic.get` — 获取单条流量记录详情
+
+- **用途**：通过 ID 或 sequence 获取完整的流量记录详情，支持同时获取请求体和响应体。
+- **本地 API**：
+  - 详情：`GET /_bifrost/api/traffic/{id}`
+  - 请求体：`GET /_bifrost/api/traffic/{id}/request-body`
+  - 响应体：`GET /_bifrost/api/traffic/{id}/response-body`
+- **请求参数**（`args_json` 中的字段）：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 | 安全约束 |
+|------|------|------|--------|------|---------|
+| `id` | string | **是** | - | 流量记录 ID 或 sequence 编号 | 纯数字，长度 ≤ 20 |
+| `request_body` | bool | 否 | `false` | 是否包含请求体 | - |
+| `response_body` | bool | 否 | `false` | 是否包含响应体 | - |
+
+- **响应内容**（JSON）：返回完整的流量记录详情，包含请求/响应头、timing 信息、TLS 信息等。当 `request_body=true` 时，响应中额外包含 `request_body` 字段；当 `response_body=true` 时，响应中额外包含 `response_body` 字段。
+- **与本地 CLI 的差异**：远程版完整支持本地 `bifrost traffic get` 的所有能力（`--request-body`、`--response-body`），通过结构化参数传递。
+
+#### `traffic.search` — 按关键词搜索流量记录
+
+- **用途**：按关键词全文搜索流量记录（搜索范围覆盖 URL、headers、body）。
+- **本地 API**：`POST /_bifrost/api/search` body=`{"keyword": query}`
+- **别名**：`search.get`（功能完全等价）
+- **请求参数**（`args_json` 中的字段）：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 | 安全约束 |
+|------|------|------|--------|------|---------|
+| `query` | string | **是** | - | 搜索关键词 | 长度 ≤ 500，字符集 `[a-zA-Z0-9._\-:/]` |
+
+- **响应内容**（JSON）：返回匹配的流量记录列表。
+- **与本地 CLI 的差异**：远程版目前仅支持 keyword 搜索，不支持本地 `bifrost traffic search` 的高级筛选参数（`--url`、`--headers`、`--body`、`--status`、`--method` 等范围限定）。后续可按需扩展。
+
+#### `traffic.clear` — 不支持
+
+- `traffic.clear` 为写操作（删除流量记录），不在只读白名单内，远程调用明确拒绝。
+- 发送 `traffic.clear` 命令会收到 `unsupported_command` 错误。
 
 ## WebUI 设计
 
@@ -2131,6 +2257,70 @@ struct ReusableGrant {
 - Relay 不主动清理因自身重启而断开的 SSE 连接对应的 call，而是等待客户端重连后恢复或等待 TTL 自然过期
 - Relay 应提供 `GET /health` 端点，返回当前在线客户端数、活跃 call 数、Redis 连接状态，方便上游监控
 
+## 多调用方并发支持
+
+### 场景说明
+
+同一个 Bifrost 客户端可能被多个远程调用方（不同的 `caller_fingerprint`）同时使用。例如：
+- 同事 A 和同事 B 各自通过 `bifrost remote` 同时查询同一个 Bifrost 实例的流量
+- 同一个人在不同设备上同时发起远程调用
+- 自动化脚本和人工调用并发进行
+
+方案必须在配对、授权、执行、资源隔离四个层面明确支持多调用方并发。
+
+### 多 caller 配对排队
+
+- 一次性授权码（pair_code）是**一次消费**的：第一个成功验证 pair_code 的调用方获得配对机会，后续调用方对同一 pair_code 的验证请求返回 `pair_code_already_consumed`。
+- **配对是串行的**：同一客户端同一时刻只允许一个活跃配对流程（`pending_approval` 状态）。
+- 当第一个调用方的配对被批准或拒绝后，用户可重新开启发现模式生成新 pair_code，供下一个调用方使用。
+- 调用方在配对被占用时收到明确的错误码 `pair_slot_occupied`，应提示"目标设备当前有其他配对请求正在等待审批，请稍后重试"。
+
+### 多 caller 并发授权（grant）
+
+- 授权（grant）按 `caller_fingerprint` 维度独立管理。
+- **同一客户端可同时存在多个来自不同调用方的活跃 grant**。每个 grant 绑定 `(user_id, client_instance_id, caller_fingerprint)` 三元组。
+- grant 之间完全隔离：调用方 A 的 grant 撤销不影响调用方 B。
+- 可复用授权查询 `findReusableGrant(userId, clientInstanceId, callerFingerprint)` 天然按 caller 隔离。
+- 配置约束：
+  - `remote_invoke.max_grants_per_client`（默认 `20`）— 同一客户端允许的最大活跃 grant 数（跨所有 caller），超出后新配对被拒绝并返回 `grant_limit_exceeded`。
+
+### 多 caller 并发调用（call）
+
+- **同一客户端允许多个调用方同时发起 call**，各 call 独立执行、独立加密、独立回传结果。
+- `max_active_calls_per_client`（默认 `5`）约束的是**同一客户端上所有调用方的并发 call 总数**，而非每个调用方独享。
+- 新增 `remote_invoke.max_active_calls_per_caller_per_client`（默认 `3`）— 约束单个调用方对单个客户端的并发 call 上限，防止单个 caller 独占全部配额。
+- 当并发 call 数达到上限时，新的 call 请求返回 `call_limit_exceeded`，调用方应排队重试。
+
+### 客户端执行器并发
+
+- `RemoteQueryExecutor` 必须支持并发执行多个只读查询命令。
+- 由于首版仅支持只读查询命令（`status`、`traffic.list`、`traffic.get`、`traffic.search`、`search.get`），多命令并发不存在写冲突。
+- 执行器内部使用独立的 task/future 处理每个 call，通过 `call_id` 隔离上下文。
+- 资源保护：
+  - 执行器并发度上限与 `max_active_calls_per_client` 保持一致。
+  - 单个 call 超时 `60s`，超时后执行器强制终止并返回 `execution_timeout`。
+  - 执行器队列满时返回 `executor_busy`，Relay 向调用方转发此错误。
+
+### 客户端 SSE 下行复用
+
+- 多个并发 call 的下行帧（`call_frame`、`call_open`、`call_cancel` 等）共享同一条客户端 SSE 连接。
+- 每个下行事件通过 `call_id` 字段区分归属，客户端按 `call_id` 分发到对应的执行 task。
+- 客户端心跳中上报 `active_call_ids` 列表，Relay 据此恢复断线重连后的未完成调用。
+
+### 调用方之间的隔离性
+
+- **数据隔离**：不同调用方的加密会话密钥完全独立（per-call ephemeral key），调用方 A 无法解密调用方 B 的帧。
+- **授权隔离**：grant 按 `caller_fingerprint` 绑定，一个调用方的 `relay_token` 无法代表另一个调用方发起操作。
+- **可见性隔离**：调用方只能通过自己的 `relay_token` 订阅自己发起的 call 事件流，无法窥探其他调用方的 call。
+- **WebUI 可见性**：Bifrost 客户端的 WebUI（管理端视角）可以看到所有调用方的授权和调用记录，这是运维需要。
+
+### WebUI 多授权请求排队展示
+
+- 当多个调用方先后发起配对请求时，由于配对串行，同一时刻只有一个 `pending_approval`。
+- WebUI 的 `Pending Requests` 区按请求到达顺序展示，用户逐个审批。
+- 审批完一个后，如果发现模式仍开启且有新的配对请求到达，自动展示下一个。
+- 已授权的多个调用方同时出现在 `Active Grants` 区，按 `caller_fingerprint` 分行展示，每行显示调用方设备指纹、授权模式、过期时间和最近使用时间。
+
 ## 并发配对冲突处理
 
 ### 场景
@@ -2146,6 +2336,7 @@ struct ReusableGrant {
 - 如果当前 pair_code 尚未被任何调用方消费（纯等待中）：
   - 新的发现模式请求直接替换旧码，旧码立即失效
 - Relay 侧使用 `client_instance_id` 做排他锁保证同一客户端不会出现两个并行的配对状态
+- **多调用方配对冲突**：当调用方 A 的配对正处于 `pending_approval`，调用方 B 尝试用同一 pair_code 配对时，返回 `pair_code_already_consumed`；如果调用方 B 用新码配对，因为配对槽被占用，返回 `pair_slot_occupied`
 
 ## 监控与告警
 
@@ -2199,6 +2390,9 @@ struct ReusableGrant {
 - 验证 `30m` 授权下多次调用可复用 token
 - 验证客户端断线时 SSE 收到中断事件
 - 验证加密帧经 Relay 转发但服务端日志不出现明文
+- 验证多调用方各自配对授权后可并发 call 同一客户端
+- 验证多调用方之间 grant 隔离：撤销一个不影响另一个
+- 验证并发 call 超过 `max_active_calls_per_client` 时返回 `call_limit_exceeded`
 - 验证 `90` 天和 `10k` 上限清理策略
 
 ### 真实场景测试
@@ -2210,6 +2404,9 @@ struct ReusableGrant {
   - 本次授权
   - `30m/1h/1d/永久` 授权
   - 多客户端在线管理与客户端选择
+  - 多调用方并发授权与独立调用（两个不同 caller 各自配对并同时查询同一 Bifrost 客户端）
+  - 多调用方 grant 隔离（撤销调用方 A 的授权不影响调用方 B）
+  - 并发 call 资源上限验证（超过 `max_active_calls_per_client` 时正确拒绝）
   - 大结果流式传输
   - 历史记录展示
   - 授权撤销后 token 失效
@@ -2241,7 +2438,8 @@ struct ReusableGrant {
 4. `Remote Invoke` 历史与授权管理放在 `Settings` 内，不新增一级导航。
 5. 首版支持大流量传输，调用输入与输出都采用分片流式传输，不限制在中小载荷场景。
 6. 首版支持多个 Bifrost 远端调用客户端同时在线，WebUI 在 `Settings -> Remote Invoke` 中统一管理多个客户端。
-7. 授权流程采用蓝牙式“发现模式”：
+7. 首版支持多个远程调用方（不同 `caller_fingerprint`）同时对同一 Bifrost 客户端发起调用。各调用方的授权独立管理、会话密钥独立派生、执行互不干扰。
+8. 授权流程采用蓝牙式"发现模式"：
    - Bifrost 客户端主动进入发现模式
    - 展示一个一次性授权码
    - `bifrost remote` 端使用该一次性授权码发起配对授权流程

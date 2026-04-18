@@ -1171,6 +1171,41 @@ pub fn run_foreground(
             let admin_state = admin_state
                 .with_client_trust_tracker(bifrost_admin::ClientTlsTrustTracker::new());
 
+            let admin_state = {
+                let relay_url = shared_config_manager
+                    .try_config()
+                    .map(|c| c.sync.remote_base_url.clone())
+                    .unwrap_or_else(|| "https://bifrost.bytedance.net".to_string());
+
+                let data_dir_path = shared_config_manager.data_dir().to_path_buf();
+                match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {
+                    Ok(identity) => {
+                        let admin_host = if config.host == "0.0.0.0" {
+                            "127.0.0.1"
+                        } else {
+                            &config.host
+                        };
+                        let ri_config = bifrost_admin::RemoteInvokeConfig {
+                            relay_url,
+                            ..Default::default()
+                        };
+                        let worker = bifrost_admin::RemoteInvokeWorker::new(
+                            ri_config,
+                            identity,
+                            admin_host,
+                            config.port,
+                        );
+                        worker.start();
+                        info!("remote invoke worker initialized");
+                        admin_state.with_remote_invoke_worker(worker)
+                    }
+                    Err(e) => {
+                        info!(error = %e, "remote invoke identity init failed, feature disabled");
+                        admin_state
+                    }
+                }
+            };
+
             let db_cleanup_task = bifrost_admin::start_db_cleanup_task(traffic_db_store);
             let connection_cleanup_task =
                 bifrost_admin::start_connection_cleanup_task(admin_state.connection_monitor.clone());
@@ -1839,6 +1874,40 @@ pub fn run_daemon(
                         .with_ip_tls_pending_manager(bifrost_admin::IpTlsPendingManager::new());
                     let admin_state = admin_state
                         .with_client_trust_tracker(bifrost_admin::ClientTlsTrustTracker::new());
+
+                    let admin_state = {
+                        let relay_url = shared_config_manager
+                            .try_config()
+                            .map(|c| c.sync.remote_base_url.clone())
+                            .unwrap_or_else(|| "https://bifrost.bytedance.net".to_string());
+
+                        let data_dir_path = shared_config_manager.data_dir().to_path_buf();
+                        match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {
+                            Ok(identity) => {
+                                let admin_host = if config.host == "0.0.0.0" {
+                                    "127.0.0.1"
+                                } else {
+                                    &config.host
+                                };
+                                let ri_config = bifrost_admin::RemoteInvokeConfig {
+                                    relay_url,
+                                    ..Default::default()
+                                };
+                                let worker = bifrost_admin::RemoteInvokeWorker::new(
+                                    ri_config,
+                                    identity,
+                                    admin_host,
+                                    config.port,
+                                );
+                                worker.start();
+                                admin_state.with_remote_invoke_worker(worker)
+                            }
+                            Err(e) => {
+                                info!(error = %e, "remote invoke identity init failed, feature disabled");
+                                admin_state
+                            }
+                        }
+                    };
 
                     std::mem::drop(bifrost_admin::start_db_cleanup_task(traffic_db_store));
                     std::mem::drop(bifrost_admin::start_connection_cleanup_task(

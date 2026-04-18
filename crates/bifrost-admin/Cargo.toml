@@ -56,6 +56,7 @@ once_cell.workspace = true
 jsonwebtoken = "9"
 bcrypt = "0.17"
 rand.workspace = true
+gethostname = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 icns = "0.3"

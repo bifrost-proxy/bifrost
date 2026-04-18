@@ -5,7 +5,7 @@ import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, MysqlConfig,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
 } from '../types';
-import type { IUserDao, IEnvDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao } from './types';
+import type { IUserDao, IEnvDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao } from './types';
 
 function rowToUser(row: RowDataPacket): User {
   return {
@@ -499,6 +499,7 @@ export class MysqlStorage implements IStorage {
   public group: MysqlGroupDao;
   public groupMember: MysqlGroupMemberDao;
   public groupSetting: MysqlGroupSettingDao;
+  public remoteInvoke: IRemoteInvokeDao;
   private pool: Pool;
 
   constructor(config: MysqlConfig) {
@@ -516,6 +517,9 @@ export class MysqlStorage implements IStorage {
     this.group = new MysqlGroupDao(this.pool);
     this.groupMember = new MysqlGroupMemberDao(this.pool);
     this.groupSetting = new MysqlGroupSettingDao(this.pool);
+    this.remoteInvoke = new Proxy({} as IRemoteInvokeDao, {
+      get: () => () => { throw new Error('remote invoke not supported for MySQL storage'); },
+    });
   }
 
   async close(): Promise<void> {

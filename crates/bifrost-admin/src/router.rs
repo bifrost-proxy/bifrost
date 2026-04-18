@@ -19,6 +19,7 @@ use crate::handlers::{
     metrics::handle_metrics,
     notification::handle_notification,
     proxy::handle_proxy,
+    remote_invoke::handle_remote_invoke,
     replay::handle_replay,
     room::handle_room,
     rules::handle_rules,
@@ -187,6 +188,8 @@ impl AdminRouter {
         } else if path.starts_with("/api/bifrost-file") {
             let path_suffix = path.strip_prefix("/api/bifrost-file").unwrap_or("");
             handle_bifrost_file(req, path_suffix, state.clone()).await
+        } else if path.starts_with("/api/remote-invoke") {
+            handle_remote_invoke(req, state.remote_invoke_worker.clone(), path).await
         } else {
             error_response(StatusCode::NOT_FOUND, "API endpoint not found")
         }

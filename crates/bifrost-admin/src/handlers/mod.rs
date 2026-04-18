@@ -11,6 +11,7 @@ pub mod group_rules;
 pub mod metrics;
 pub mod notification;
 pub mod proxy;
+pub mod remote_invoke;
 pub mod replay;
 mod replay_ws;
 pub mod room;

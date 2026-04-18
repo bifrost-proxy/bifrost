@@ -16,6 +16,7 @@ pub mod network;
 pub mod notification_db;
 mod port_rebind;
 pub mod push;
+pub mod remote_invoke;
 pub mod replay_db;
 pub mod replay_executor;
 pub mod request_rules;
@@ -96,6 +97,11 @@ pub use ws_payload_store::{
     start_ws_payload_cleanup_task, SharedWsPayloadStore, WsPayloadStore, WsPayloadStoreConfigUpdate,
 };
 
+pub use handlers::remote_invoke::SharedRemoteInvokeWorker;
+pub use remote_invoke::{
+    identity::Identity as RemoteInvokeIdentity, types::RemoteInvokeConfig,
+    worker::RemoteInvokeWorker,
+};
 pub use replay_db::{
     ReplayDbStore, ReplayGroup, ReplayHistory, ReplayRequest, ReplayRequestSummary, RuleConfig,
     RuleMode, SharedReplayDbStore, MAX_CONCURRENT_REPLAYS, MAX_HISTORY, MAX_REQUESTS,

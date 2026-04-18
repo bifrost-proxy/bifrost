@@ -1,0 +1,217 @@
+import type { ServerResponse } from 'http';
+import type {
+  GrantMode,
+  GrantStatus,
+  CallStatus,
+  PairingStatus,
+  CallerInfo,
+  CommandSummary,
+  RemoteCommand,
+} from '../types';
+
+export type {
+  GrantMode,
+  GrantStatus,
+  CallStatus,
+  PairingStatus,
+  CallerInfo,
+  CommandSummary,
+  RemoteCommand,
+};
+
+export interface ClientStreamState {
+  clientInstanceId: string;
+  userId: string;
+  streamId: string;
+  res: ServerResponse;
+  lastHeartbeat: number;
+  discoverable: boolean;
+  discoverySessionId?: string;
+  pairCode?: string;
+  pairCodeExpiresAt?: number;
+  connectedAt: number;
+}
+
+export interface PairingSessionRecord {
+  id: string;
+  userId: string;
+  clientInstanceId: string;
+  callerFingerprint: string;
+  pairCode: string;
+  status: PairingStatus;
+  callerPubkey: string;
+  clientEphemeralPub: string;
+  callerInfo: CallerInfo;
+  commandSummary: CommandSummary;
+  command: RemoteCommand;
+  relayToken: string;
+  callId: string;
+  grantId: string;
+  expiresAt: number;
+  createdAt: number;
+}
+
+export interface GrantRecord {
+  id: string;
+  userId: string;
+  clientInstanceId: string;
+  callerFingerprint: string;
+  grantMode: GrantMode;
+  grantScope: string;
+  status: GrantStatus;
+  firstAuthorizedAt: number;
+  expiresAt: number;
+  lastUsedAt: number;
+  maxCalls: number;
+  remainingCalls: number;
+  createdBy: string;
+}
+
+export interface CallRecord {
+  id: string;
+  userId: string;
+  grantId: string;
+  pairingId: string;
+  clientInstanceId: string;
+  callerFingerprint: string;
+  sourceIp: string;
+  callerDisplayName: string;
+  status: CallStatus;
+  commandSummary: CommandSummary;
+  command: RemoteCommand;
+  payloadDigest: string;
+  stdoutDigest: string;
+  stderrDigest: string;
+  exitCode: number;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  bytesIn: number;
+  bytesOut: number;
+}
+
+export interface EventCursor {
+  callId: string;
+  lastSeq: number;
+}
+
+export interface EncryptedEnvelope {
+  version: number;
+  call_id: string;
+  seq: number;
+  direction: 'caller_to_client' | 'client_to_caller';
+  nonce: string;
+  ciphertext: string;
+  tag: string;
+  aad?: {
+    token_hash?: string;
+    frame_type?: string;
+  };
+}
+
+export interface StartPairingRequest {
+  client_instance_id: string;
+  pair_code: string;
+  caller_pubkey: string;
+  caller_info: CallerInfo;
+  command_summary: CommandSummary;
+  command: RemoteCommand;
+}
+
+export interface GrantDecisionRequest {
+  pairing_id: string;
+  client_instance_id: string;
+  decision: 'approve' | 'reject';
+  grant_mode?: GrantMode;
+  client_ephemeral_pub?: string;
+}
+
+export interface PublishPairCodeRequest {
+  client_instance_id: string;
+  pair_code: string;
+  expires_at: number;
+  discovery_session_id?: string;
+}
+
+export interface ClientHeartbeatRequest {
+  client_instance_id: string;
+  stream_id: string;
+  active_call_ids?: string[];
+}
+
+export interface ClientCallFrameRequest {
+  call_id: string;
+  client_instance_id: string;
+  envelope_json: string;
+}
+
+export interface ClientCallExitRequest {
+  call_id: string;
+  client_instance_id: string;
+  exit_code: number;
+  duration_ms?: number;
+  stdout_digest?: string;
+  stderr_digest?: string;
+  bytes_in?: number;
+  bytes_out?: number;
+}
+
+export interface OpenCallRequest {
+  grant_id: string;
+  client_instance_id: string;
+  caller_pubkey: string;
+  command_summary: CommandSummary;
+  command: RemoteCommand;
+}
+
+export interface UpdateGrantRequest {
+  grant_mode?: GrantMode;
+  expires_at?: string;
+}
+
+export interface CallsQueryParams {
+  client_instance_id?: string;
+  caller_fingerprint?: string;
+  status?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface GrantsQueryParams {
+  client_instance_id?: string;
+  status?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface ClientRegistrationRequest {
+  client_instance_id: string;
+  client_long_term_pubkey: string;
+  device_name: string;
+  platform: string;
+  bifrost_version: string;
+  signature: string;
+  timestamp: number;
+}
+
+export const ALLOWED_COMMANDS = new Set([
+  'status',
+  'traffic.list',
+  'traffic.get',
+  'traffic.search',
+  'search.get',
+]);
+
+export function isAllowedCommand(command: string): boolean {
+  return ALLOWED_COMMANDS.has(command);
+}
+
+export function grantModeTtlMs(mode: GrantMode): number | null {
+  switch (mode) {
+    case 'once': return null;
+    case '30m': return 30 * 60 * 1000;
+    case '1h': return 60 * 60 * 1000;
+    case '1d': return 24 * 60 * 60 * 1000;
+    case 'permanent': return null;
+  }
+}
