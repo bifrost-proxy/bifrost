@@ -17,10 +17,13 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(target_os = "macos")]
+use objc2_app_kit::NSWindow;
+#[cfg(target_os = "macos")]
 use tauri::window::EffectState;
 use tauri::window::{Window, WindowBuilder};
 use tauri::{
     image::Image,
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::{Color, WebviewBuilder},
     window::{Effect, EffectsBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
@@ -120,10 +123,111 @@ enum HostWindowCloseBehavior {
 
 fn main() {
     tauri::Builder::default()
+        .menu(|app| {
+            // App menu (macOS displays first submenu as app name)
+            let app_menu = Submenu::with_items(
+                app,
+                "Bifrost",
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::show_all(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?;
+            let file_menu = Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[&PredefinedMenuItem::close_window(app, None)?],
+            )?;
+            // Edit menu: Undo/Redo/SelectAll use custom MenuItem so on_menu_event
+            // can forward them to the WebView (PredefinedMenuItem bypasses JS).
+            // Cut/Copy/Paste keep PredefinedMenuItem — they work natively via
+            // WKWebView clipboard events that Monaco already handles.
+            let undo = MenuItem::with_id(app, "edit-undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
+            let redo = MenuItem::with_id(
+                app,
+                "edit-redo",
+                "Redo",
+                true,
+                Some("CmdOrCtrl+Shift+Z"),
+            )?;
+            let select_all = MenuItem::with_id(
+                app,
+                "edit-select-all",
+                "Select All",
+                true,
+                Some("CmdOrCtrl+A"),
+            )?;
+            let edit_menu = Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &undo,
+                    &redo,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &select_all,
+                ],
+            )?;
+            let view_menu = Submenu::with_items(
+                app,
+                "View",
+                true,
+                &[&PredefinedMenuItem::fullscreen(app, None)?],
+            )?;
+            let window_menu = Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::maximize(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::close_window(app, None)?,
+                ],
+            )?;
+            Menu::with_items(
+                app,
+                &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+            )
+        })
+        .on_menu_event(|app, event| {
+            // Forward custom Edit menu actions directly to the WebView via eval().
+            // We bypass the Tauri event system because emit_to target routing
+            // may not match JS-side listen() calls. Instead we dispatch a DOM
+            // CustomEvent that the JS layer picks up reliably.
+            let action = match event.id().as_ref() {
+                "edit-undo" => Some("undo"),
+                "edit-redo" => Some("redo"),
+                "edit-select-all" => Some("editor.action.selectAll"),
+                _ => None,
+            };
+            if let Some(action) = action {
+                if let Some(webview) = app.get_webview(MAIN_WINDOW_LABEL) {
+                    let js = format!(
+                        r#"window.dispatchEvent(new CustomEvent("bifrost-edit-command",{{detail:"{action}"}}))"#
+                    );
+                    let _ = webview.eval(&js);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             update_desktop_proxy_port,
             notify_main_window_ready,
+            set_document_edited,
             write_clipboard
         ])
         .setup(|app| {
@@ -1418,6 +1522,32 @@ fn notify_main_window_ready(app: AppHandle) -> Result<(), String> {
     );
 
     start_main_window_handoff(&app, "frontend ready handshake").map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = app
+            .get_window(HOST_WINDOW_LABEL)
+            .ok_or_else(|| "host window not found".to_string())?;
+        let window_for_main_thread = window.clone();
+        let run_result = window.run_on_main_thread(move || unsafe {
+            let ns_window: &NSWindow = &*window_for_main_thread
+                .ns_window()
+                .expect("failed to get ns_window for host window")
+                .cast();
+            ns_window.setDocumentEdited(edited);
+        });
+        return run_result.map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        let _ = edited;
+        Ok(())
+    }
 }
 
 #[tauri::command]

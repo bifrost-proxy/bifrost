@@ -33,9 +33,9 @@
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 45 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤、右键菜单、WebSocket/SSE、搜索 |
-| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 36 | 规则列表、创建/编辑/删除、语法高亮、自动补全、树形视图、Dynamic Island、导入导出 |
-| [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 19 | 脚本创建（Req/Res/Dec）、编辑、保存、测试运行、日志查看、名称校验、树形目录 |
-| [webui-values.md](./webui-values.md) | Web UI Values 页面 | 18 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出 |
+| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 38 | 规则列表、创建/编辑/删除、语法高亮、自动补全、树形视图、Dynamic Island、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
+| [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 21 | 脚本创建（Req/Res/Dec）、编辑、保存、测试运行、日志查看、名称校验、树形目录、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
+| [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 22 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
@@ -102,7 +102,7 @@
 
 ---
 
-**总计：55 个测试文件，1053 个测试用例**
+**总计：55 个测试文件，1059 个测试用例**
 
 ## 工作流程
 

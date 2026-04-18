@@ -3,6 +3,7 @@ import type { RuleFile, RuleFileDetail } from '../types';
 import * as api from '../api';
 import { isConnectionIssueError, isNotFoundError, normalizeApiErrorMessage } from '../api/client';
 import { message } from 'antd';
+import { clearDesktopDocumentEdited } from '../desktop/tauri';
 import {
   fetchGroupRules,
   getGroupRule,
@@ -36,6 +37,7 @@ interface RulesState {
   currentRule: RuleFileDetail | null;
   selectedRuleName: string | null;
   editingContent: Record<string, string>;
+  savedContent: Record<string, string>;
   searchKeyword: string;
   loading: boolean;
   saving: boolean;
@@ -65,6 +67,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
   currentRule: null,
   selectedRuleName: null,
   editingContent: {},
+  savedContent: {},
   searchKeyword: '',
   loading: false,
   saving: false,
@@ -82,6 +85,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       selectedRuleName: null,
       currentRule: null,
       editingContent: {},
+      savedContent: {},
     });
   },
 
@@ -120,7 +124,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     if (isGroupMode && activeGroupId) {
       try {
         const detail = await getGroupRule(activeGroupId, name);
-        set({
+        set((state) => ({
           currentRule: {
             name: detail.name,
             content: detail.content,
@@ -130,8 +134,9 @@ export const useRulesStore = create<RulesState>((set, get) => ({
             updated_at: detail.updated_at,
             sync: detail.sync,
           },
+          savedContent: { ...state.savedContent, [name]: detail.content },
           loading: false,
-        });
+        }));
       } catch (e) {
         if (isNotFoundError(e)) {
           message.warning(`Rule "${name}" no longer exists, refreshing list`);
@@ -149,7 +154,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
     try {
       const rule = await api.getRule(name);
-      set({ currentRule: rule, loading: false });
+      set((state) => ({
+        currentRule: rule,
+        savedContent: { ...state.savedContent, [name]: rule.content },
+        loading: false,
+      }));
     } catch (e) {
       if (isNotFoundError(e)) {
         message.warning(`Rule "${name}" no longer exists, refreshing list`);
@@ -175,7 +184,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     if (isGroupMode && activeGroupId) {
       try {
         const detail = await getGroupRule(activeGroupId, name);
-        set({
+        set((state) => ({
           currentRule: {
             name: detail.name,
             content: detail.content,
@@ -185,8 +194,9 @@ export const useRulesStore = create<RulesState>((set, get) => ({
             updated_at: detail.updated_at,
             sync: detail.sync,
           },
+          savedContent: { ...state.savedContent, [name]: detail.content },
           loading: false,
-        });
+        }));
       } catch (e) {
         if (isNotFoundError(e)) {
           message.warning(`Rule "${name}" no longer exists, refreshing list`);
@@ -204,7 +214,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
     try {
       const rule = await api.getRule(name);
-      set({ currentRule: rule, loading: false });
+      set((state) => ({
+        currentRule: rule,
+        savedContent: { ...state.savedContent, [name]: rule.content },
+        loading: false,
+      }));
     } catch (e) {
       if (isNotFoundError(e)) {
         message.warning(`Rule "${name}" no longer exists, refreshing list`);
@@ -271,6 +285,14 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
     const content = editingContent[selectedRuleName];
     if (content === undefined || content === currentRule?.content) {
+      if (content !== undefined) {
+        set((state) => {
+          const ec = { ...state.editingContent };
+          delete ec[selectedRuleName];
+          return { editingContent: ec };
+        });
+        await clearDesktopDocumentEdited().catch(() => undefined);
+      }
       return true;
     }
 
@@ -285,7 +307,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         const detail = await updateGroupRule(activeGroupId, selectedRuleName, content);
         const newEditingContent = { ...get().editingContent };
         delete newEditingContent[selectedRuleName];
-        set({
+        set((state) => ({
           currentRule: {
             name: detail.name,
             content: detail.content,
@@ -297,7 +319,9 @@ export const useRulesStore = create<RulesState>((set, get) => ({
           },
           saving: false,
           editingContent: newEditingContent,
-        });
+          savedContent: { ...state.savedContent, [selectedRuleName]: detail.content },
+        }));
+        await clearDesktopDocumentEdited().catch(() => undefined);
         await get().fetchRules();
         return true;
       } catch (e) {
@@ -308,15 +332,32 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
     try {
       await api.updateRule(selectedRuleName, content);
-      await get().fetchRules();
-      const rule = await api.getRule(selectedRuleName);
-      const newEditingContent = { ...get().editingContent };
-      delete newEditingContent[selectedRuleName];
-      set({
-        currentRule: rule,
-        saving: false,
-        editingContent: newEditingContent,
-      });
+
+      // Optimistic update: clear dirty state immediately after save succeeds.
+      // This prevents the yellow dot from lingering due to async timing issues
+      // in WKWebView where onDidChangeContent may fire after isSettingValueRef is cleared.
+      const ec = { ...get().editingContent };
+      delete ec[selectedRuleName];
+      const cr = get().currentRule;
+      set((state) => ({
+        editingContent: ec,
+        currentRule: cr ? { ...cr, content } : null,
+        savedContent: { ...state.savedContent, [selectedRuleName]: content },
+      }));
+      await clearDesktopDocumentEdited().catch(() => undefined);
+
+      // Refresh canonical data from server (best-effort after successful save)
+      try {
+        await get().fetchRules();
+        const rule = await api.getRule(selectedRuleName);
+        set((state) => ({
+          currentRule: rule,
+          saving: false,
+          savedContent: { ...state.savedContent, [selectedRuleName]: rule.content },
+        }));
+      } catch {
+        set({ saving: false });
+      }
       return true;
     } catch (e) {
       set({ error: isConnectionIssueError(e) ? null : (e as Error).message, saving: false });
@@ -354,9 +395,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await api.deleteRule(name);
-      const { selectedRuleName, editingContent } = get();
+      const { selectedRuleName, editingContent, savedContent } = get();
       const newEditingContent = { ...editingContent };
       delete newEditingContent[name];
+      const newSavedContent = { ...savedContent };
+      delete newSavedContent[name];
 
       if (selectedRuleName === name) {
         await get().fetchRules();
@@ -366,13 +409,14 @@ export const useRulesStore = create<RulesState>((set, get) => ({
           selectedRuleName: nextRule,
           currentRule: null,
           editingContent: newEditingContent,
+          savedContent: newSavedContent,
         });
         if (nextRule) {
           await get().selectRule(nextRule);
         }
       } else {
         await get().fetchRules();
-        set({ editingContent: newEditingContent });
+        set({ editingContent: newEditingContent, savedContent: newSavedContent });
       }
       return true;
     } catch (e) {
@@ -455,15 +499,21 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         newEditingContent[newName] = newEditingContent[oldName];
         delete newEditingContent[oldName];
       }
+      const newSavedContent = { ...get().savedContent };
+      if (newSavedContent[oldName] !== undefined) {
+        newSavedContent[newName] = newSavedContent[oldName];
+        delete newSavedContent[oldName];
+      }
       await get().fetchRules();
       if (selectedRuleName === oldName) {
         set({
           selectedRuleName: newName,
           editingContent: newEditingContent,
+          savedContent: newSavedContent,
         });
         await get().selectRule(newName);
       } else {
-        set({ editingContent: newEditingContent });
+        set({ editingContent: newEditingContent, savedContent: newSavedContent });
       }
       return true;
     } catch (e) {
@@ -498,15 +548,12 @@ export const useRulesStore = create<RulesState>((set, get) => ({
   },
 
   hasUnsavedChanges: (name: string) => {
-    const { editingContent, currentRule, rules } = get();
+    const { editingContent, savedContent } = get();
     const edited = editingContent[name];
     if (edited === undefined) return false;
-    const rule = rules.find((r) => r.name === name);
-    if (!rule) return false;
-    if (currentRule?.name === name) {
-      return edited !== currentRule.content;
-    }
-    return true;
+    const saved = savedContent[name];
+    if (saved === undefined) return false;
+    return edited !== saved;
   },
 
   clearError: () => set({ error: null }),

@@ -93,6 +93,19 @@ export async function notifyMainWindowReady(): Promise<void> {
   await invokeDesktop<void>("notify_main_window_ready");
 }
 
+export async function setDesktopDocumentEdited(edited: boolean): Promise<void> {
+  const invoke = getCurrentInvoke();
+  if (!invoke) {
+    return;
+  }
+
+  await invoke<void>("set_document_edited", { edited });
+}
+
+export async function clearDesktopDocumentEdited(): Promise<void> {
+  await setDesktopDocumentEdited(false);
+}
+
 export async function listenDesktopEvent(
   event: string,
   handler: (event: TauriEvent) => void,

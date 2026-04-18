@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { ValueItem } from '../api/values';
 import * as api from '../api';
 import { isConnectionIssueError } from '../api/client';
+import { clearDesktopDocumentEdited } from '../desktop/tauri';
 
 const VALUES_SYNC_CHANNEL = 'bifrost-values-sync';
 const valuesSyncChannel =
@@ -146,6 +147,12 @@ export const useValuesStore = create<ValuesState>((set, get) => ({
 
     const content = editingContent[selectedValueName];
     if (content === undefined || content === currentValue?.value) {
+      if (content !== undefined) {
+        const newEditingContent = { ...get().editingContent };
+        delete newEditingContent[selectedValueName];
+        set({ editingContent: newEditingContent });
+        await clearDesktopDocumentEdited().catch(() => undefined);
+      }
       return true;
     }
 
@@ -170,6 +177,7 @@ export const useValuesStore = create<ValuesState>((set, get) => ({
           saving: false,
         };
       });
+      await clearDesktopDocumentEdited().catch(() => undefined);
       return true;
     } catch (e) {
       set({ error: isConnectionIssueError(e) ? null : (e as Error).message, saving: false });

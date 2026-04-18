@@ -9,6 +9,7 @@ import {
   sendProxyRequest,
   startMockHttpServer,
   uniqueName,
+  waitForToast,
   waitForTrafficRow,
 } from "./helpers/admin-helpers";
 
@@ -326,6 +327,45 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
   } finally {
     await server.close();
   }
+});
+
+test("Rules 页面在内容经 undo 回到原文后，保存会清理未保存状态", async ({
+  page,
+  request,
+}) => {
+  const ruleName = uniqueName("undo-save-rule");
+  const originalContent = "example.com host://127.0.0.1:3000";
+
+  const createRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: ruleName,
+      content: originalContent,
+    },
+  });
+  if (!createRuleRes.ok()) {
+    throw new Error(await createRuleRes.text());
+  }
+
+  await openPage(page, "rules");
+  await expect(page.getByTestId("rules-list")).toBeVisible();
+
+  const ruleItem = page.getByTestId("rule-item").filter({ hasText: ruleName }).first();
+  await ruleItem.click();
+  await expect(page.getByTestId("rule-editor-title")).toHaveText(ruleName);
+
+  const editorInput = page.getByTestId("rule-editor-container").locator("textarea").last();
+  await editorInput.click({ force: true });
+  await editorInput.type("x", { delay: 0 });
+
+  const saveButton = page.getByTestId("rule-save-button");
+  await expect(saveButton).toBeEnabled();
+
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
+  await expect(saveButton).toBeEnabled();
+
+  await saveButton.click();
+  await waitForToast(page, "Saved");
+  await expect(saveButton).toBeDisabled();
 });
 
 test("Rules 列表支持按 / 分组的树状展开/折叠", async ({
