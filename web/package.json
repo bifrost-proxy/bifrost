@@ -15,6 +15,7 @@
     "preview": "vite preview",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\"",
+    "test:unit": "vitest run",
     "test:ui": "playwright test",
     "test:ui:headed": "playwright test --headed"
   },
@@ -41,6 +42,7 @@
     "@playwright/test": "^1.50.0",
     "@types/ws": "^8.5.11",
     "@eslint/js": "^9.39.1",
+    "vitest": "^4.1.2",
     "@types/mark.js": "^8.11.12",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",

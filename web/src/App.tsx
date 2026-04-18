@@ -27,6 +27,7 @@ import { useEditorCompletion } from "./hooks/useEditorCompletion";
 import { useForceRefreshStore } from "./stores/useForceRefreshStore";
 import { useDesktopCoreStore } from "./stores/useDesktopCoreStore";
 import AdminAuthGate from "./components/AdminAuthGate";
+import { initDesktopEditEventListener } from "./components/MonacoDesktopCommands";
 import {
   getDesktopPlatform,
   getAdminPrefix,
@@ -41,6 +42,9 @@ export default function App() {
     void initializeDesktopRuntime().finally(() => {
       setDesktopPlatform(getDesktopPlatform());
     });
+    if (isDesktopShell()) {
+      initDesktopEditEventListener();
+    }
   }, []);
 
   return <AppShell desktopPlatform={desktopPlatform} />;

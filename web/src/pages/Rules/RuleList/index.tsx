@@ -61,7 +61,6 @@ export default function RuleList() {
     selectedRuleName,
     searchKeyword,
     loading,
-    editingContent,
     isGroupMode,
     groupWritable,
     activeGroupId,
@@ -727,7 +726,7 @@ export default function RuleList() {
 
       const rule = child.rule;
       const isSelected = selectedRuleName === rule.name;
-      const hasChanges = hasUnsavedChanges(rule.name) || editingContent[rule.name] !== undefined;
+      const hasChanges = hasUnsavedChanges(rule.name);
 
       nodes.push(
         <Dropdown

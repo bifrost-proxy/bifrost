@@ -37,6 +37,9 @@ import {
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { useScriptsStore } from "../../stores/useScriptsStore";
+import { isDesktopShell } from "../../runtime";
+import { registerDesktopMonacoCommands } from "../../components/MonacoDesktopCommands";
+import { clearDesktopDocumentEdited } from "../../desktop/tauri";
 import type {
   ScriptType,
   ScriptLogEntry,
@@ -1112,6 +1115,8 @@ function EditorPanel({
         NonNullable<Parameters<typeof Editor>[0]["onMount"]>
       >[1],
     ) => {
+      registerDesktopMonacoCommands(editor, isDesktopShell());
+
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         saveRef.current();
       });
@@ -1757,8 +1762,11 @@ export default function ScriptsPage() {
       return;
     }
     if (selectedScript?.name) {
-      await saveScript(selectedType, selectedScript.name, editorContent);
-      message.success("Script saved");
+      const success = await saveScript(selectedType, selectedScript.name, editorContent);
+      if (success) {
+        await clearDesktopDocumentEdited().catch(() => undefined);
+        message.success("Script saved");
+      }
     }
   }, [isNewScript, selectedScript, selectedType, editorContent, saveScript]);
 
@@ -1774,7 +1782,10 @@ export default function ScriptsPage() {
       );
       return;
     }
-    await saveScript(selectedType, newScriptName, editorContent);
+    const success = await saveScript(selectedType, newScriptName, editorContent);
+    if (!success) return;
+
+    await clearDesktopDocumentEdited().catch(() => undefined);
     setShowNameModal(false);
     setNewScriptName("");
     setIsNewScript(false);

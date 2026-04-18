@@ -5,6 +5,8 @@ import { Empty, Spin, message, Button, Space, Modal } from "antd";
 import { SaveOutlined, CopyOutlined, DeleteOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { isDesktopShell } from "../../../runtime";
+import { registerDesktopMonacoCommands } from "../../../components/MonacoDesktopCommands";
 import BifrostEditor, {
   THEME_DARK,
   THEME_LIGHT,
@@ -187,6 +189,8 @@ export default function RuleEditor() {
       theme: editorTheme,
       readOnly: !canEdit,
     });
+
+    registerDesktopMonacoCommands(ed, isDesktopShell());
 
     ed.setModel(model);
     ed.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, () => {

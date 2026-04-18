@@ -16,6 +16,8 @@ import {
 import { useValuesStore } from "../../../stores/useValuesStore";
 import { useThemeStore } from "../../../stores/useThemeStore";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { isDesktopShell } from "../../../runtime";
+import { registerDesktopMonacoCommands } from "../../../components/MonacoDesktopCommands";
 import styles from "./index.module.css";
 
 function detectLanguage(content: string): "json" | "xml" | "plaintext" {
@@ -165,6 +167,8 @@ export default function ValueEditor() {
       },
       padding: { top: 8, bottom: 8 },
     });
+
+    registerDesktopMonacoCommands(ed, isDesktopShell());
 
     ed.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, () => {
       handleSave();

@@ -297,7 +297,7 @@ interface ScriptsState {
   applyScriptsSnapshot: (data: { request: ScriptInfo[]; response: ScriptInfo[]; decode: ScriptInfo[] }) => void;
   fetchScripts: () => Promise<void>;
   selectScript: (type: ScriptType, name: string) => Promise<void>;
-  saveScript: (type: ScriptType, name: string, content: string) => Promise<void>;
+  saveScript: (type: ScriptType, name: string, content: string) => Promise<boolean>;
   deleteScript: (type: ScriptType, name: string) => Promise<void>;
   renameScript: (type: ScriptType, oldName: string, newName: string) => Promise<boolean>;
   testScript: (type: ScriptType, content: string) => Promise<void>;
@@ -388,8 +388,10 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
           saving: false,
         };
       });
+      return true;
     } catch (e) {
       set({ error: String(e), saving: false });
+      return false;
     }
   },
 

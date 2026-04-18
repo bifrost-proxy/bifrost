@@ -189,3 +189,5 @@ test("Scripts 列表在获得焦点后支持上下键切换选中项", async ({
   await expect(firstScriptItem).toHaveAttribute("aria-selected", "true");
   await expect(secondScriptItem).toHaveAttribute("aria-selected", "false");
 });
+
+
