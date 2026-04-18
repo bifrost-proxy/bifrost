@@ -7,6 +7,7 @@ use bifrost_core::{BifrostError, Result};
 use parking_lot::RwLock;
 use rand::Rng;
 use serde_json::Value;
+use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
 use super::executor::RemoteInvokeExecutor;
@@ -36,6 +37,7 @@ pub struct RemoteInvokeWorker {
     discovery_session: Arc<RwLock<Option<DiscoverySession>>>,
     shutdown: Arc<AtomicBool>,
     current_stream_id: Arc<RwLock<Option<String>>>,
+    reconnect_notify: Arc<Notify>,
 }
 
 impl RemoteInvokeWorker {
@@ -59,6 +61,7 @@ impl RemoteInvokeWorker {
             discovery_session: Arc::new(RwLock::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             current_stream_id: Arc::new(RwLock::new(None)),
+            reconnect_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -93,6 +96,24 @@ impl RemoteInvokeWorker {
 
     pub fn relay_client(&self) -> &Arc<RelayClient> {
         &self.relay_client
+    }
+
+    pub fn update_relay_url(&self, new_url: &str) {
+        let old_url = self.relay_client.base_url();
+        let new_normalized = new_url.trim_end_matches('/');
+        if old_url == new_normalized {
+            debug!(url = %new_normalized, "relay_url unchanged, skip reconnect");
+            return;
+        }
+        info!(
+            old_url = %old_url,
+            new_url = %new_normalized,
+            "relay_url changed, triggering reconnect"
+        );
+        self.relay_client.update_base_url(new_url);
+        *self.discovery_session.write() = None;
+        self.pending_pairings.write().clear();
+        self.reconnect_notify.notify_waiters();
     }
 
     pub fn identity(&self) -> &Identity {
@@ -354,6 +375,10 @@ impl RemoteInvokeWorker {
                 }
                 _ = pair_code_ticker.tick() => {
                     self.maybe_refresh_pair_code().await;
+                }
+                _ = self.reconnect_notify.notified() => {
+                    info!("reconnect signal received during SSE session, disconnecting");
+                    return Ok(());
                 }
                 chunk = stream.next() => {
                     match chunk {
@@ -842,12 +867,14 @@ impl RemoteInvokeWorker {
     }
 
     async fn sleep_with_shutdown_check(&self, delay_ms: u64) {
-        let mut remaining = delay_ms;
+        let sleep_fut = tokio::time::sleep(Duration::from_millis(delay_ms));
+        tokio::pin!(sleep_fut);
 
-        while remaining > 0 && !self.shutdown.load(Ordering::SeqCst) {
-            let sleep_time = remaining.min(500);
-            tokio::time::sleep(Duration::from_millis(sleep_time)).await;
-            remaining = remaining.saturating_sub(sleep_time);
+        tokio::select! {
+            _ = &mut sleep_fut => {}
+            _ = self.reconnect_notify.notified() => {
+                info!("reconnect signal received, waking up immediately");
+            }
         }
     }
 }

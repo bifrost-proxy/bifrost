@@ -20,7 +20,7 @@ struct RelayApiResponse<T> {
 
 pub struct RelayClient {
     http: reqwest::Client,
-    base_url: String,
+    base_url: RwLock<String>,
     client_auth_token: RwLock<Option<String>>,
     client_instance_id: String,
 }
@@ -36,17 +36,27 @@ impl RelayClient {
 
         Self {
             http,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
             client_auth_token: RwLock::new(None),
             client_instance_id: client_instance_id.to_string(),
         }
+    }
+
+    pub fn update_base_url(&self, new_url: &str) {
+        let normalized = new_url.trim_end_matches('/').to_string();
+        *self.base_url.write() = normalized;
+        *self.client_auth_token.write() = None;
+    }
+
+    pub fn base_url(&self) -> String {
+        self.base_url.read().clone()
     }
 
     pub async fn register(
         &self,
         req: &ClientRegistrationRequest,
     ) -> Result<ClientRegistrationResponse> {
-        let url = format!("{}/v4/remote-invoke/client/register", self.base_url);
+        let url = format!("{}/v4/remote-invoke/client/register", self.base_url());
         let response =
             self.http.post(&url).json(req).send().await.map_err(|e| {
                 BifrostError::Network(format!("relay register request failed: {e}"))
@@ -64,7 +74,7 @@ impl RelayClient {
     }
 
     pub async fn heartbeat(&self, req: &ClientHeartbeatRequest) -> Result<()> {
-        let url = format!("{}/v4/remote-invoke/client/heartbeat", self.base_url);
+        let url = format!("{}/v4/remote-invoke/client/heartbeat", self.base_url());
         let response = self
             .authorized_post(&url)
             .json(req)
@@ -75,7 +85,7 @@ impl RelayClient {
     }
 
     pub async fn publish_pair_code(&self, req: &PublishPairCodeRequest) -> Result<()> {
-        let url = format!("{}/v4/remote-invoke/client/pair-code", self.base_url);
+        let url = format!("{}/v4/remote-invoke/client/pair-code", self.base_url());
         let response = self
             .authorized_post(&url)
             .json(req)
@@ -91,7 +101,7 @@ impl RelayClient {
     pub async fn close_discovery_session(&self, session_id: &str) -> Result<()> {
         let url = format!(
             "{}/v4/remote-invoke/client/discovery-session/{}?client_instance_id={}",
-            self.base_url,
+            self.base_url(),
             urlencoding::encode(session_id),
             urlencoding::encode(&self.client_instance_id),
         );
@@ -109,7 +119,8 @@ impl RelayClient {
     ) -> Result<serde_json::Value> {
         let url = format!(
             "{}/v4/remote-invoke/client/grants/{}/decision",
-            self.base_url, pairing_id
+            self.base_url(),
+            pairing_id
         );
         let response = self
             .authorized_post(&url)
@@ -126,7 +137,8 @@ impl RelayClient {
     pub async fn post_call_frame(&self, call_id: &str, req: &ClientCallFrameRequest) -> Result<()> {
         let url = format!(
             "{}/v4/remote-invoke/client/calls/{}/frame",
-            self.base_url, call_id
+            self.base_url(),
+            call_id
         );
         let response = self
             .authorized_post(&url)
@@ -142,7 +154,8 @@ impl RelayClient {
     pub async fn post_call_exit(&self, call_id: &str, req: &ClientCallExitRequest) -> Result<()> {
         let url = format!(
             "{}/v4/remote-invoke/client/calls/{}/exit",
-            self.base_url, call_id
+            self.base_url(),
+            call_id
         );
         let response = self
             .authorized_post(&url)
@@ -158,7 +171,8 @@ impl RelayClient {
     pub async fn revoke_ack(&self, grant_id: &str) -> Result<()> {
         let url = format!(
             "{}/v4/remote-invoke/client/grants/{}/revoke-ack",
-            self.base_url, grant_id
+            self.base_url(),
+            grant_id
         );
         let body = serde_json::json!({
             "client_instance_id": self.client_instance_id,
@@ -175,7 +189,7 @@ impl RelayClient {
     pub async fn list_grants(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!(
             "{}/v4/remote-invoke/grants?client_instance_id={}",
-            self.base_url,
+            self.base_url(),
             urlencoding::encode(&self.client_instance_id),
         );
         let response =
@@ -191,7 +205,7 @@ impl RelayClient {
         grant_id: &str,
         updates: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url, grant_id);
+        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url(), grant_id);
         let response = self
             .authorized_patch(&url)
             .json(updates)
@@ -205,7 +219,7 @@ impl RelayClient {
     }
 
     pub async fn delete_grant(&self, grant_id: &str) -> Result<()> {
-        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url, grant_id);
+        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url(), grant_id);
         let response = self.authorized_delete(&url).send().await.map_err(|e| {
             BifrostError::Network(format!("relay delete grant request failed: {e}"))
         })?;
@@ -215,7 +229,7 @@ impl RelayClient {
     pub async fn list_calls(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!(
             "{}/v4/remote-invoke/calls?client_instance_id={}",
-            self.base_url,
+            self.base_url(),
             urlencoding::encode(&self.client_instance_id),
         );
         let response =
@@ -227,7 +241,7 @@ impl RelayClient {
     }
 
     pub async fn get_call(&self, call_id: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/v4/remote-invoke/calls/{}", self.base_url, call_id);
+        let url = format!("{}/v4/remote-invoke/calls/{}", self.base_url(), call_id);
         let response =
             self.authorized_get(&url).send().await.map_err(|e| {
                 BifrostError::Network(format!("relay get call request failed: {e}"))
@@ -245,7 +259,7 @@ impl RelayClient {
             .unwrap_or_default();
         format!(
             "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}{}",
-            self.base_url,
+            self.base_url(),
             urlencoding::encode(&self.client_instance_id),
             urlencoding::encode(stream_id),
             token_part,
