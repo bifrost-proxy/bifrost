@@ -62,73 +62,39 @@ function PairingItem({
   };
 
   return (
-    <List.Item
-      actions={[
-        <Dropdown
-          key="approve"
-          menu={{
-            items: GRANT_MENU_ITEMS.map((item) => ({
-              key: item.key,
-              label: item.label,
-            })),
-            onClick: ({ key }) => handleApprove(key as GrantMode),
+    <List.Item>
+      <div style={{ width: "100%" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
           }}
-          trigger={["click"]}
         >
-          <Button
-            type="primary"
-            size="small"
-            icon={<CheckOutlined />}
-            loading={loading}
-            data-testid={`pairing-approve-${pairing.pairing_id}`}
-          >
-            Authorize
-          </Button>
-        </Dropdown>,
-        <Button
-          key="reject"
-          danger
-          size="small"
-          icon={<CloseOutlined />}
-          loading={loading}
-          onClick={handleReject}
-          data-testid={`pairing-reject-${pairing.pairing_id}`}
-        >
-          Reject
-        </Button>,
-        <Button
-          key="ignore"
-          size="small"
-          icon={<EyeInvisibleOutlined />}
-          onClick={() => onIgnore(pairing.pairing_id)}
-          data-testid={`pairing-ignore-${pairing.pairing_id}`}
-        >
-          Dismiss
-        </Button>,
-      ]}
-    >
-      <List.Item.Meta
-        avatar={
           <Tooltip title={pairing.caller_info.fingerprint}>
             <Tag color="blue" style={{ fontFamily: "monospace", fontSize: 11 }}>
               {formatFingerprint(pairing.caller_info.fingerprint)}
             </Tag>
           </Tooltip>
-        }
-        title={
-          <Space size={4} wrap>
-            <Text strong>
-              {pairing.caller_info.display_name || "Unknown Caller"}
+          <Text strong>
+            {pairing.caller_info.display_name || "Unknown Caller"}
+          </Text>
+          {pairing.caller_info.source_ip && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              from {pairing.caller_info.source_ip}
             </Text>
-            {pairing.caller_info.source_ip && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                from {pairing.caller_info.source_ip}
-              </Text>
-            )}
-          </Space>
-        }
-        description={
-          <Space size={4} wrap>
+          )}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginTop: 8,
+          }}
+        >
+          <Space size={4}>
             <Tag color="geekblue">
               {pairing.command_summary.command_preview || pairing.command.command}
             </Tag>
@@ -138,8 +104,48 @@ function PairingItem({
               </Text>
             )}
           </Space>
-        }
-      />
+          <Space size={4} style={{ flexShrink: 0 }}>
+            <Dropdown
+              menu={{
+                items: GRANT_MENU_ITEMS.map((item) => ({
+                  key: item.key,
+                  label: item.label,
+                })),
+                onClick: ({ key }) => handleApprove(key as GrantMode),
+              }}
+              trigger={["click"]}
+            >
+              <Button
+                type="primary"
+                size="small"
+                icon={<CheckOutlined />}
+                loading={loading}
+                data-testid={`pairing-approve-${pairing.pairing_id}`}
+              >
+                Authorize
+              </Button>
+            </Dropdown>
+            <Button
+              danger
+              size="small"
+              icon={<CloseOutlined />}
+              loading={loading}
+              onClick={handleReject}
+              data-testid={`pairing-reject-${pairing.pairing_id}`}
+            >
+              Reject
+            </Button>
+            <Button
+              size="small"
+              icon={<EyeInvisibleOutlined />}
+              onClick={() => onIgnore(pairing.pairing_id)}
+              data-testid={`pairing-ignore-${pairing.pairing_id}`}
+            >
+              Dismiss
+            </Button>
+          </Space>
+        </div>
+      </div>
     </List.Item>
   );
 }
@@ -235,7 +241,7 @@ export default function PairingApprovalModal() {
       }
       onCancel={handleClose}
       centered
-      width={620}
+      width={720}
       zIndex={999}
       data-testid="pairing-approval-modal"
     >

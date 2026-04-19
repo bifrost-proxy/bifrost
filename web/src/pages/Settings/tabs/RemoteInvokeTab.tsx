@@ -389,9 +389,8 @@ export default function RemoteInvokeTab() {
           <Card
             title={
               <Space>
-                <Badge count={pairingList.length} offset={[8, 0]}>
-                  <span>Pending Pairing Requests</span>
-                </Badge>
+                <span>Pending Pairing Requests</span>
+                <Badge count={pairingList.length} />
               </Space>
             }
             extra={
@@ -402,7 +401,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {pairingList.length === 0 ? (
               <Empty
@@ -471,9 +469,8 @@ export default function RemoteInvokeTab() {
             title={
               <Space>
                 <SafetyOutlined />
-                <Badge count={grants.length} offset={[8, 0]}>
-                  <span>Active Grants</span>
-                </Badge>
+                <span>Active Grants</span>
+                <Badge count={grants.length} />
               </Space>
             }
             extra={
@@ -484,7 +481,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {grants.length === 0 ? (
               <Empty
@@ -561,9 +557,8 @@ export default function RemoteInvokeTab() {
             title={
               <Space>
                 <HistoryOutlined />
-                <Badge count={calls.length} offset={[8, 0]}>
-                  <span>Recent Calls</span>
-                </Badge>
+                <span>Recent Calls</span>
+                <Badge count={calls.length} />
               </Space>
             }
             extra={
@@ -574,7 +569,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {calls.length === 0 ? (
               <Empty

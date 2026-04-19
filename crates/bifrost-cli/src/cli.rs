@@ -1355,6 +1355,18 @@ pub enum RemoteCommands {
         #[arg(help = "Pair code displayed on the remote device")]
         pair_code: String,
     },
+    #[command(about = "Disconnect from a remote Bifrost instance (revoke authorization)")]
+    Disconnect {
+        #[arg(long, help = "Revoke all grants for the target client")]
+        all: bool,
+        #[arg(
+            long,
+            help = "Revoke all grants for ALL clients (no --client-id needed)"
+        )]
+        all_clients: bool,
+        #[arg(long, help = "Specific grant ID to revoke")]
+        grant_id: Option<String>,
+    },
     #[command(about = "Get remote proxy status")]
     Status,
     #[command(about = "Search remote traffic records")]

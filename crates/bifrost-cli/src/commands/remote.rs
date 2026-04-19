@@ -46,6 +46,22 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         return handle_connect(&caller, &client_instance_id, pair_code, &caller_info).await;
     }
 
+    if let RemoteCommands::Disconnect {
+        all,
+        all_clients,
+        grant_id,
+    } = &opts.action
+    {
+        return handle_disconnect(
+            &caller,
+            opts.client_id.as_deref(),
+            *all,
+            *all_clients,
+            grant_id.as_deref(),
+        )
+        .await;
+    }
+
     let client_instance_id = resolve_client_id(&caller, opts.client_id.as_deref()).await?;
 
     let (command, args_json) = build_remote_command(&opts.action);
@@ -183,9 +199,110 @@ async fn handle_connect(
     }
 }
 
+async fn handle_disconnect(
+    caller: &CallerRelayClient,
+    client_id: Option<&str>,
+    all: bool,
+    all_clients: bool,
+    grant_id: Option<&str>,
+) -> bifrost_core::Result<()> {
+    if let Some(gid) = grant_id {
+        caller.delete_grant(gid).await?;
+        println!(
+            "{}",
+            format!("✓ Grant {} revoked.", &gid[..gid.len().min(8)]).bright_green()
+        );
+        return Ok(());
+    }
+
+    let client_instance_id = if all_clients {
+        None
+    } else if all {
+        match client_id {
+            Some(id) => Some(resolve_client_id(caller, Some(id)).await?),
+            None => {
+                return Err(BifrostError::Config(
+                    "use --client-id to target a specific client, or --all-clients to revoke all"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        Some(resolve_client_id(caller, client_id).await?)
+    };
+
+    let grants = caller.list_grants(client_instance_id.as_deref()).await?;
+
+    if grants.is_empty() {
+        println!("{}", "No grants found.".dimmed());
+        return Ok(());
+    }
+
+    if !all && !all_clients {
+        println!(
+            "{}",
+            format!("Found {} grant(s):", grants.len()).bright_yellow()
+        );
+        for (i, g) in grants.iter().enumerate() {
+            let gid = g.get("grant_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = g.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let cid = g
+                .get("client_instance_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let caller_name = g
+                .get("caller_display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            println!(
+                "  {} {} status={} client={} caller={}",
+                format!("[{}]", i + 1).bright_cyan(),
+                &gid[..gid.len().min(12)],
+                status,
+                &cid[..cid.len().min(12)],
+                caller_name,
+            );
+        }
+        println!(
+            "{}",
+            "Use --all to revoke for this client, --all-clients to revoke all, or --grant-id <id> to revoke one."
+                .dimmed()
+        );
+        return Ok(());
+    }
+
+    let mut deleted = 0;
+    for g in &grants {
+        if let Some(gid) = g.get("grant_id").and_then(|v| v.as_str()) {
+            match caller.delete_grant(gid).await {
+                Ok(()) => {
+                    deleted += 1;
+                    println!("  {} {}", "✓".bright_green(), &gid[..gid.len().min(12)]);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} {} — {}",
+                        "✗".bright_red(),
+                        &gid[..gid.len().min(12)],
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        format!("Revoked {deleted}/{} grant(s).", grants.len()).bright_green()
+    );
+
+    Ok(())
+}
+
 fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
     match action {
         RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
+        RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
         RemoteCommands::Status => ("status".to_string(), None),
         RemoteCommands::Search { keyword, limit } => {
             let args = serde_json::json!({
@@ -521,6 +638,51 @@ impl CallerRelayClient {
             Value::Array(arr) => Ok(arr),
             _ => Ok(vec![]),
         }
+    }
+
+    async fn list_grants(
+        &self,
+        client_instance_id: Option<&str>,
+    ) -> bifrost_core::Result<Vec<Value>> {
+        let mut url = format!("{}/v4/remote-invoke/grants?limit=100", self.base_url);
+        if let Some(cid) = client_instance_id {
+            url.push_str(&format!("&client_instance_id={}", urlencoding::encode(cid)));
+        }
+
+        let response = self
+            .http
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("list grants failed: {e}")))?;
+
+        let data: Value = self.parse_response_data(response, "list_grants").await?;
+        match data.get("list").and_then(|v| v.as_array()) {
+            Some(arr) => Ok(arr.clone()),
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn delete_grant(&self, grant_id: &str) -> bifrost_core::Result<()> {
+        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url, grant_id);
+        let response = self
+            .http
+            .delete(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("delete grant failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "delete grant failed with status {status}: {}",
+                truncate(&body, 500)
+            )));
+        }
+        Ok(())
     }
 
     async fn find_reusable_grant(
