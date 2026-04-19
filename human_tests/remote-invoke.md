@@ -1276,6 +1276,137 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### 全局授权弹窗测试用例
+
+以下用例覆盖全局授权弹窗的自动弹出、忽略（Dismiss）、以及多页面场景下的行为。
+
+### TC-RI-60：全局授权弹窗在非 Settings 页面自动弹出
+
+**前置条件**：Bifrost 客户端已连接 relay，发现模式已开启
+
+**操作步骤**：
+1. 在浏览器中打开 Bifrost 管理端的非 Settings 页面（如首页 `http://127.0.0.1:8800/_bifrost/`）
+2. 从另一终端发起远程调用触发配对请求：
+   ```bash
+   cargo run --bin bifrost -- remote status --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN" --pair-code <valid_code>
+   ```
+3. 等待 3 秒内观察浏览器页面
+
+**预期结果**：
+- 全局授权弹窗在当前页面（非 Settings 页）自动弹出
+- 弹窗标题包含 "Remote Command Authorization" 和待处理数量 Badge
+- 弹窗内展示调用方设备指纹、来源 IP、命令摘要
+- 弹窗提供 Authorize（下拉选择授权期限）、Reject、Dismiss 三种操作按钮
+
+---
+
+### TC-RI-61：全局授权弹窗 Dismiss 单个请求
+
+**前置条件**：全局授权弹窗已弹出，显示至少一个待授权请求
+
+**操作步骤**：
+1. 在全局弹窗中点击某个请求的 "Dismiss" 按钮
+
+**预期结果**：
+- 该请求从弹窗列表中消失
+- 如果没有其他未 Dismiss 的请求，弹窗自动关闭
+- 该请求在 Settings > Remote Invoke 的 Pending Requests 列表中仍然可见
+- 被 Dismiss 的请求不会在当前会话中再次触发弹窗弹出
+
+---
+
+### TC-RI-62：全局授权弹窗 Dismiss All
+
+**前置条件**：全局授权弹窗已弹出，显示至少两个待授权请求
+
+**操作步骤**：
+1. 在全局弹窗底部点击 "Dismiss All" 按钮
+
+**预期结果**：
+- 弹窗立即关闭
+- 所有当前待授权请求被标记为已忽略
+- 已忽略的请求不会再次触发弹窗弹出
+- Pending Requests 列表中仍可看到这些请求
+- 调用方 CLI 仍在等待授权状态（不受 Dismiss 影响）
+
+---
+
+### TC-RI-63：Dismiss 后新的配对请求重新触发弹窗
+
+**前置条件**：已 Dismiss All 关闭弹窗
+
+**操作步骤**：
+1. 生成新的配对码（刷新或重新进入发现模式）
+2. 从另一终端使用新配对码发起新的远程调用
+3. 等待 3 秒内观察浏览器页面
+
+**预期结果**：
+- 新的配对请求触发全局弹窗再次弹出
+- 弹窗中只显示新请求（之前被 Dismiss 的旧请求不再出现）
+- 新请求可正常执行 Authorize / Reject / Dismiss 操作
+
+---
+
+### TC-RI-64：通过全局弹窗 Authorize 下拉选择授权期限
+
+**前置条件**：全局授权弹窗已弹出
+
+**操作步骤**：
+1. 在弹窗中点击某个请求的 "Authorize" 下拉按钮
+2. 在下拉菜单中选择 "30 Minutes"
+
+**预期结果**：
+- 下拉菜单显示：This Time Only / 30 Minutes / 1 Hour / 1 Day / Permanent
+- 选择后请求被批准，弹窗显示成功提示 "Authorization granted"
+- 调用方 CLI 收到授权并成功执行命令
+- Active Grants 中新增一条 `30m` 模式的授权
+
+---
+
+### TC-RI-65：全局弹窗 Remote Invoke Settings 按钮导航
+
+**前置条件**：全局授权弹窗已弹出
+
+**操作步骤**：
+1. 在弹窗底部点击 "Remote Invoke Settings" 按钮
+
+**预期结果**：
+- 弹窗关闭（当前请求被 Dismiss）
+- 页面导航到 `Settings > Remote Invoke` Tab
+- Remote Invoke Tab 正常展示状态、Pending Requests、Active Grants 等区域
+
+---
+
+### TC-RI-66：关闭弹窗（点击 X 或遮罩）等同于 Dismiss All
+
+**前置条件**：全局授权弹窗已弹出
+
+**操作步骤**：
+1. 点击弹窗右上角的关闭按钮（X）
+2. 或者点击弹窗外的遮罩区域
+
+**预期结果**：
+- 弹窗关闭
+- 行为等同于 Dismiss All — 所有当前请求被忽略
+- 调用方 CLI 不受影响，仍在等待
+
+---
+
+### TC-RI-67：全局弹窗 Reject 操作
+
+**前置条件**：全局授权弹窗已弹出
+
+**操作步骤**：
+1. 在弹窗中点击某个请求的 "Reject" 按钮
+
+**预期结果**：
+- 请求被拒绝，弹窗显示成功提示 "Request rejected"
+- 该请求从弹窗列表中消失
+- 调用方 CLI 收到拒绝错误
+- History 中新增一条拒绝事件
+
+---
+
 ## 远端部署场景测试
 
 以下用例覆盖当 relay 服务部署到远端服务器（而非本地 localhost）时的测试场景。

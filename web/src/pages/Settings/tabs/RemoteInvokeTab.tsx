@@ -31,7 +31,6 @@ import {
   enterDiscoveryMode,
   exitDiscoveryMode,
   getClientIdentity,
-  getPendingPairings,
   getRemoteInvokeStatus,
   listCalls,
   listGrants,
@@ -41,12 +40,11 @@ import {
   type ClientIdentity,
   type DiscoverySession,
   type Grant,
-  type PairingRequest,
   type RemoteInvokeStatus,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
-import PairingRequestModal from "../../../components/PairingRequestModal";
+import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
 
 const { Text, Title } = Typography;
 
@@ -85,15 +83,13 @@ export default function RemoteInvokeTab() {
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
   const [loading, setLoading] = useState(false);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
-  const [pendingPairings, setPendingPairings] = useState<PairingRequest[]>([]);
   const [countdown, setCountdown] = useState("");
-  const [selectedPairing, setSelectedPairing] = useState<PairingRequest | null>(
-    null,
-  );
-  const [modalVisible, setModalVisible] = useState(false);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const pollRef = useRef<number | null>(null);
+
+  const pendingPairings = usePairingRequestStore((s) => s.pendingList);
+  const storeFetchPairings = usePairingRequestStore((s) => s.fetchPendingList);
 
   const refresh = useCallback(async () => {
     try {
@@ -107,15 +103,6 @@ export default function RemoteInvokeTab() {
       if (!isConnectionIssueError(e)) {
         console.error("Failed to fetch remote invoke status");
       }
-    }
-  }, []);
-
-  const refreshPairings = useCallback(async () => {
-    try {
-      const res = await getPendingPairings();
-      setPendingPairings(res.pairings ?? []);
-    } catch {
-      // ignore
     }
   }, []);
 
@@ -139,22 +126,20 @@ export default function RemoteInvokeTab() {
 
   useEffect(() => {
     void refresh();
-    void refreshPairings();
     void refreshGrants();
     void refreshCalls();
-  }, [refresh, refreshPairings, refreshGrants, refreshCalls]);
+  }, [refresh, refreshGrants, refreshCalls]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
       void refresh();
-      void refreshPairings();
       void refreshGrants();
       void refreshCalls();
     }, 3000);
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshPairings, refreshGrants, refreshCalls]);
+  }, [refresh, refreshGrants, refreshCalls]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -227,19 +212,6 @@ export default function RemoteInvokeTab() {
       copyToClipboard(code);
       message.success("Pair code copied");
     }
-  };
-
-  const handlePairingClick = (p: PairingRequest) => {
-    setSelectedPairing(p);
-    setModalVisible(true);
-  };
-
-  const handleModalClose = () => {
-    setModalVisible(false);
-    setSelectedPairing(null);
-    void refresh();
-    void refreshPairings();
-    void refreshGrants();
   };
 
   const handleRevokeGrant = async (grantId: string) => {
@@ -422,7 +394,7 @@ export default function RemoteInvokeTab() {
               <Button
                 size="small"
                 icon={<ReloadOutlined />}
-                onClick={() => void refreshPairings()}
+                onClick={() => void storeFetchPairings()}
               />
             }
             size="small"
@@ -436,18 +408,7 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={pairingList}
                 renderItem={(p) => (
-                  <List.Item
-                    actions={[
-                      <Button
-                        key="review"
-                        type="primary"
-                        size="small"
-                        onClick={() => handlePairingClick(p)}
-                      >
-                        Review
-                      </Button>,
-                    ]}
-                  >
+                  <List.Item>
                     <List.Item.Meta
                       avatar={
                         <Tooltip title={p.caller_info.fingerprint}>
@@ -656,12 +617,6 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
       </Row>
-
-      <PairingRequestModal
-        visible={modalVisible}
-        pairing={selectedPairing}
-        onClose={handleModalClose}
-      />
     </div>
   );
 }

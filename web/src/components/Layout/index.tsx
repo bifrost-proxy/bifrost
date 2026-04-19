@@ -16,6 +16,7 @@ import type { CSSProperties } from "react";
 import { useEffect, useMemo } from "react";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
 import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
+import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
 import { useNotificationStore } from "../../stores/useNotificationStore";
 import StatusBar from "../StatusBar";
 import { setNavigateCallback, type ReferenceLocation } from "../BifrostEditor";
@@ -46,6 +47,10 @@ export default function AppLayout() {
     stopSSE: stopIpTlsSSE,
     fetchPendingList: fetchIpTlsPendingList,
   } = usePendingIpTlsStore();
+  const {
+    startPolling: startPairingPolling,
+    stopPolling: stopPairingPolling,
+  } = usePairingRequestStore();
   const desktopEnabled = isDesktopShell();
   const desktopPlatform = getDesktopPlatform();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -92,11 +97,13 @@ export default function AppLayout() {
     requestNotificationPermission();
     fetchIpTlsPendingList();
     startIpTlsSSE();
+    startPairingPolling();
     return () => {
       stopSSE();
       stopIpTlsSSE();
+      stopPairingPolling();
     };
-  }, [fetchPendingList, startSSE, stopSSE, requestNotificationPermission, fetchIpTlsPendingList, startIpTlsSSE, stopIpTlsSSE]);
+  }, [fetchPendingList, startSSE, stopSSE, requestNotificationPermission, fetchIpTlsPendingList, startIpTlsSSE, stopIpTlsSSE, startPairingPolling, stopPairingPolling]);
 
   useEffect(() => {
     const handleNavigate = (location: ReferenceLocation) => {

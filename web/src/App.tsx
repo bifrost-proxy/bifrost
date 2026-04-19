@@ -5,6 +5,7 @@ import AppLayout from "./components/Layout";
 import BifrostFileDropZone from "./components/BifrostFileDropZone";
 import PendingAuthModal from "./components/PendingAuthModal";
 import PendingIpTlsModal from "./components/PendingIpTlsModal";
+import PairingApprovalModal from "./components/PairingApprovalModal";
 import Rules from "./pages/Rules";
 import Traffic from "./pages/Traffic";
 import TrafficDetailPage from "./pages/TrafficDetailPage";
@@ -265,6 +266,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
           <BifrostFileDropZone>
             <PendingAuthModal />
             <PendingIpTlsModal />
+            <PairingApprovalModal />
             <Routes>
               <Route path="/login" element={<Login />} />
               <Route path="/sync-login" element={<SyncLogin />} />
@@ -296,6 +298,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
           <BifrostFileDropZone>
             <PendingAuthModal />
             <PendingIpTlsModal />
+            <PairingApprovalModal />
             <Routes>
               <Route path="/login" element={<Login />} />
               <Route path="/sync-login" element={<SyncLogin />} />

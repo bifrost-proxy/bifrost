@@ -226,7 +226,7 @@ fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
             }
             RemoteTrafficCommands::Search { keyword, limit } => {
                 let args = serde_json::json!({
-                    "keyword": keyword,
+                    "query": keyword,
                     "limit": limit,
                 });
                 ("traffic.search".to_string(), Some(args.to_string()))
