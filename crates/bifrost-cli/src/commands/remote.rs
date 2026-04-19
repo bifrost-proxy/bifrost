@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use bifrost_core::{direct_reqwest_client_builder, BifrostError};
@@ -700,6 +701,7 @@ impl CallerRelayClient {
         let mut partial_line = String::new();
         let mut result = CallResult::default();
         let mut stdout_parts: Vec<String> = Vec::new();
+        let mut seen_frame_seqs: HashSet<u64> = HashSet::new();
 
         loop {
             tokio::select! {
@@ -729,8 +731,13 @@ impl CallerRelayClient {
                                                 if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
                                                     if let Some(envelope_json) = v.get("envelope_json").and_then(|e| e.as_str()) {
                                                         if let Ok(envelope) = serde_json::from_str::<Value>(envelope_json) {
-                                                            if let Some(ct) = envelope.get("ciphertext").and_then(|c| c.as_str()) {
-                                                                stdout_parts.push(ct.to_string());
+                                                            let seq = envelope.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
+                                                            if seen_frame_seqs.insert(seq) {
+                                                                if let Some(ct) = envelope.get("ciphertext").and_then(|c| c.as_str()) {
+                                                                    stdout_parts.push(ct.to_string());
+                                                                }
+                                                            } else {
+                                                                debug!(seq = seq, "skipping duplicate frame");
                                                             }
                                                         }
                                                     } else if let Some(ct) = v.get("ciphertext").and_then(|c| c.as_str()) {

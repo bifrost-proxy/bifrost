@@ -133,7 +133,15 @@ impl RemoteInvokeWorker {
             discovery_session_id: Some(session_id.clone()),
         };
 
-        self.relay_client.publish_pair_code(&req).await?;
+        if let Err(e) = self.relay_client.publish_pair_code(&req).await {
+            if is_relay_unauthorized(&e) {
+                warn!("publish_pair_code unauthorized, re-registering with relay");
+                self.register_with_relay().await?;
+                self.relay_client.publish_pair_code(&req).await?;
+            } else {
+                return Err(e);
+            }
+        }
 
         let session = DiscoverySession {
             session_id,
@@ -154,9 +162,21 @@ impl RemoteInvokeWorker {
     pub async fn exit_discovery_mode(&self) -> Result<()> {
         let session = self.discovery_session.read().clone();
         if let Some(s) = session {
-            self.relay_client
+            if let Err(e) = self
+                .relay_client
                 .close_discovery_session(&s.session_id)
-                .await?;
+                .await
+            {
+                if is_relay_unauthorized(&e) {
+                    warn!("close_discovery_session unauthorized, re-registering with relay");
+                    self.register_with_relay().await?;
+                    self.relay_client
+                        .close_discovery_session(&s.session_id)
+                        .await?;
+                } else {
+                    return Err(e);
+                }
+            }
             *self.discovery_session.write() = None;
             info!(session_id = %s.session_id, "exited discovery mode");
         }
@@ -181,7 +201,15 @@ impl RemoteInvokeWorker {
             discovery_session_id: Some(old.session_id.clone()),
         };
 
-        self.relay_client.publish_pair_code(&req).await?;
+        if let Err(e) = self.relay_client.publish_pair_code(&req).await {
+            if is_relay_unauthorized(&e) {
+                warn!("refresh publish_pair_code unauthorized, re-registering with relay");
+                self.register_with_relay().await?;
+                self.relay_client.publish_pair_code(&req).await?;
+            } else {
+                return Err(e);
+            }
+        }
 
         let session = DiscoverySession {
             session_id: old.session_id,
@@ -370,6 +398,10 @@ impl RemoteInvokeWorker {
                         return Ok(());
                     }
                     if let Err(e) = self.send_heartbeat(&stream_id).await {
+                        if is_relay_unauthorized(&e) {
+                            warn!(error = %e, "heartbeat auth rejected, triggering reconnect");
+                            return Err(e);
+                        }
                         warn!(error = %e, "heartbeat failed");
                     }
                 }
@@ -890,4 +922,8 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn is_relay_unauthorized(err: &BifrostError) -> bool {
+    matches!(err, BifrostError::Network(msg) if msg.contains("unauthorized"))
 }

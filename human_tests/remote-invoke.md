@@ -896,6 +896,37 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### TC-RI-回归-50：回归 — Discovery Mode API 在 auth token 过期/失效后不应返回 500
+
+**背景**：`enter_discovery_mode` / `exit_discovery_mode` / `refresh_pair_code` 在 relay 返回 401（auth token 失效）时，直接将网络错误透传为 HTTP 500 返回给前端。根本原因是 `client_auth_token` 仅存储在内存中，relay 重启或 Redis 清理后 token 失效，但 worker 未自动 re-register。修复方案：在上述三个 API 中检测 401 后自动调用 `register_with_relay()` 重新获取 token 并重试。同时在 SSE 心跳 401 时触发重连。
+
+**操作步骤**：
+1. 启动 Bifrost 测试实例并确认 Remote Invoke Worker 状态为 Connected：
+   ```bash
+   curl -s http://127.0.0.1:8801/_bifrost/api/remote-invoke/status | jq .state
+   ```
+2. 调用 Discovery Mode Enter API：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8801/_bifrost/api/remote-invoke/discovery/enter | jq .
+   ```
+3. 调用 Discovery Mode Refresh API：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8801/_bifrost/api/remote-invoke/discovery/refresh | jq .
+   ```
+4. 调用 Discovery Mode Exit API：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8801/_bifrost/api/remote-invoke/discovery/exit | jq .
+   ```
+
+**预期结果**：
+- 步骤 1：状态为 `"Connected"`
+- 步骤 2：返回 `{"success": true, "session": {...}}` 包含 `pair_code` 和 `session_id`，不返回 500
+- 步骤 3：返回 `{"success": true, "session": {...}}` 包含新的 `pair_code`，不返回 500
+- 步骤 4：返回 `{"success": true}`，不返回 500
+- 如果 auth token 已失效，worker 内部自动 re-register 后重试，前端无感知
+
+---
+
 ## 补充覆盖用例
 
 以下用例覆盖 gap 分析中发现的设计方案未被测试覆盖的关键场景。
@@ -1564,6 +1595,38 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - 重连成功后管理端状态恢复在线
 - 原授权仍然有效，新查询可正常执行
 - relay 记录 `client_disconnected` / `client_reconnected` 事件
+
+---
+
+### TC-RI-回归-60：回归 — SSE 事件缓冲不应导致 caller 收到重复 frame
+
+**背景**：当 caller 在 `open_call` 后尚未订阅 SSE 事件流时，client 已执行完命令并将 frame+exit 回传给 relay。relay 的 `pushToCallerStream` 将事件同时写入本地内存 buffer 和 Redis buffer。caller 随后订阅事件流时，`registerCallerEventStream` 同时 flush 了本地 buffer 和 Redis buffer，导致同一个 frame 事件被推送两次，caller 端输出重复的 JSON。
+
+**修复方案**：
+- 服务端（`remoteInvokeSse.ts`）：`registerCallerEventStream` flush 本地 buffer 后跳过 Redis buffer 读取，仅在本地无缓冲时回退读取 Redis，且始终清理 Redis buffer。
+- 客户端（`remote.rs`）：caller 端基于 `EncryptedEnvelope.seq` 字段去重，跳过已处理的 frame。
+
+**操作步骤**：
+1. 确保已有可复用授权
+2. 执行 `remote status` 命令并捕获原始输出：
+   ```bash
+   ./target/debug/bifrost remote status --client-id <client_instance_id> 2>/dev/null
+   ```
+3. 执行 `remote traffic list` 命令并验证 JSON 有效性：
+   ```bash
+   ./target/debug/bifrost remote traffic list --client-id <client_instance_id> 2>/dev/null | python3 -m json.tool
+   ```
+4. 执行 `remote traffic get <id>` 命令并验证：
+   ```bash
+   ./target/debug/bifrost remote traffic get <traffic_id> --client-id <client_instance_id> 2>/dev/null | python3 -m json.tool
+   ```
+
+**预期结果**：
+- 每个命令的输出是有效的单个 JSON 对象，不是两个拼接的 JSON
+- `python3 -m json.tool` 能正常解析输出，不报 "Extra data" 错误
+- status 输出只包含一份 version/uptime 信息
+- traffic list 输出只包含一份 records 数组
+- traffic get 输出只包含一份请求详情
 
 ---
 
