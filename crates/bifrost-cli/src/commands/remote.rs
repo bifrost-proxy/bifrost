@@ -718,8 +718,9 @@ impl CallerRelayClient {
         }
 
         let mut stream = response.bytes_stream();
-        let timeout = tokio::time::sleep(Duration::from_secs(CALL_EVENT_TIMEOUT_SECS));
-        tokio::pin!(timeout);
+        let mut timeout = Box::pin(tokio::time::sleep(Duration::from_secs(
+            CALL_EVENT_TIMEOUT_SECS,
+        )));
 
         let mut event_name = String::new();
         let mut data_buf = String::new();
@@ -727,10 +728,16 @@ impl CallerRelayClient {
         let mut result = CallResult::default();
         let mut stdout_parts: Vec<String> = Vec::new();
         let mut seen_frame_seqs: HashSet<u64> = HashSet::new();
+        let mut exit_received = false;
 
         loop {
             tokio::select! {
                 _ = &mut timeout => {
+                    if exit_received {
+                        debug!("grace timeout after exit, no late frame arrived");
+                        result.stdout = Some(stdout_parts.join(""));
+                        return Ok(result);
+                    }
                     warn!("call events timed out");
                     if stdout_parts.is_empty() {
                         return Err(BifrostError::Config("remote call timed out waiting for response".to_string()));
@@ -769,6 +776,11 @@ impl CallerRelayClient {
                                                         stdout_parts.push(ct.to_string());
                                                     }
                                                 }
+                                                if exit_received {
+                                                    debug!("late frame received after exit, returning");
+                                                    result.stdout = Some(stdout_parts.join(""));
+                                                    return Ok(result);
+                                                }
                                             }
                                             "exit" => {
                                                 if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
@@ -778,8 +790,13 @@ impl CallerRelayClient {
                                                     result.duration_ms = v.get("duration_ms")
                                                         .and_then(|d| d.as_u64());
                                                 }
-                                                result.stdout = Some(stdout_parts.join(""));
-                                                return Ok(result);
+                                                if !stdout_parts.is_empty() {
+                                                    result.stdout = Some(stdout_parts.join(""));
+                                                    return Ok(result);
+                                                }
+                                                debug!("exit received with empty stdout, waiting for delayed frame");
+                                                exit_received = true;
+                                                timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
                                             }
                                             "error" => {
                                                 if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
