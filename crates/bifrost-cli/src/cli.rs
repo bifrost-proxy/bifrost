@@ -683,13 +683,7 @@ pub enum Commands {
         #[arg(
             long,
             global = true,
-            help = "Authentication token for relay server (default: read from sync config)"
-        )]
-        token: Option<String>,
-        #[arg(
-            long,
-            global = true,
-            help = "Target client instance ID (required if multiple clients online)"
+            help = "Target client instance ID prefix (for selecting among saved connections)"
         )]
         client_id: Option<String>,
     },
@@ -1355,16 +1349,17 @@ pub enum RemoteCommands {
         #[arg(help = "Pair code displayed on the remote device")]
         pair_code: String,
     },
-    #[command(about = "Disconnect from a remote Bifrost instance (revoke authorization)")]
+    #[command(
+        about = "Revoke authorization for a remote Bifrost instance",
+        long_about = "Revoke authorization for a remote Bifrost instance.\n\n\
+            Without flags, revokes all grants for the target client (resolved via --client-id).\n\
+            Use --all to revoke grants for every connected client at once.\n\
+            Use --grant-id to revoke a single specific grant."
+    )]
     Disconnect {
-        #[arg(long, help = "Revoke all grants for the target client")]
+        #[arg(long, help = "Revoke grants for ALL clients (no --client-id needed)")]
         all: bool,
-        #[arg(
-            long,
-            help = "Revoke all grants for ALL clients (no --client-id needed)"
-        )]
-        all_clients: bool,
-        #[arg(long, help = "Specific grant ID to revoke")]
+        #[arg(long, help = "Revoke a single specific grant by ID")]
         grant_id: Option<String>,
     },
     #[command(about = "Get remote proxy status")]

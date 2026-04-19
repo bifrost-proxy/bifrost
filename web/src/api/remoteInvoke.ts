@@ -143,7 +143,7 @@ export interface Call {
   caller_fingerprint: string;
   caller_display_name?: string;
   command: string;
-  command_summary: { command_preview: string };
+  command_summary: { command_preview: string; masked_args_json?: string | null };
   command_detail?: Record<string, unknown>;
   status: string;
   source_ip?: string;

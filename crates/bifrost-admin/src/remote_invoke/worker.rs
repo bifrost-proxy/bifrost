@@ -25,6 +25,7 @@ const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
 const MAX_RECONNECT_DELAY_MS: u64 = 60000;
 const PAIR_CODE_DIGITS: u32 = 6;
 const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
+const GRANT_CLEANUP_INTERVAL_SECS: u64 = 60;
 
 struct TimestampedPairing {
     request: PairingRequest,
@@ -404,6 +405,10 @@ impl RemoteInvokeWorker {
         let mut pair_code_ticker = tokio::time::interval(pair_code_check_interval);
         pair_code_ticker.tick().await;
 
+        let grant_cleanup_interval = Duration::from_secs(GRANT_CLEANUP_INTERVAL_SECS);
+        let mut grant_cleanup_ticker = tokio::time::interval(grant_cleanup_interval);
+        grant_cleanup_ticker.tick().await;
+
         let mut event_name = String::new();
         let mut data_buf = String::new();
 
@@ -428,6 +433,9 @@ impl RemoteInvokeWorker {
                 }
                 _ = pair_code_ticker.tick() => {
                     self.maybe_refresh_pair_code().await;
+                }
+                _ = grant_cleanup_ticker.tick() => {
+                    self.periodic_grant_cleanup().await;
                 }
                 _ = self.reconnect_notify.notified() => {
                     info!("reconnect signal received during SSE session, disconnecting");
@@ -509,6 +517,57 @@ impl RemoteInvokeWorker {
                 remaining = pairings.len(),
                 "expired pairings cleanup done"
             );
+        }
+    }
+
+    pub async fn list_grants_and_cleanup(&self) -> Result<Vec<serde_json::Value>> {
+        let grants = self.relay_client.list_grants().await?;
+        let now = now_millis();
+        let mut live = Vec::new();
+        let mut dead_ids = Vec::new();
+
+        for grant in grants {
+            if is_grant_dead(&grant, now) {
+                if let Some(id) = grant.get("grant_id").and_then(|g| g.as_str()) {
+                    dead_ids.push(id.to_string());
+                }
+            } else {
+                live.push(grant);
+            }
+        }
+
+        if !dead_ids.is_empty() {
+            let relay = Arc::clone(&self.relay_client);
+            let count = dead_ids.len();
+            info!(
+                count = count,
+                grant_ids = ?dead_ids,
+                "cleaning up expired/dead grants from relay"
+            );
+            tokio::spawn(async move {
+                for id in &dead_ids {
+                    if let Err(e) = relay.delete_grant(id).await {
+                        warn!(error = %e, grant_id = %id, "failed to delete expired grant");
+                    }
+                }
+                info!(cleaned = count, "expired grants cleanup completed");
+            });
+        }
+
+        Ok(live)
+    }
+
+    async fn periodic_grant_cleanup(&self) {
+        match self.list_grants_and_cleanup().await {
+            Ok(live) => {
+                debug!(
+                    active_grants = live.len(),
+                    "periodic grant cleanup check done"
+                );
+            }
+            Err(e) => {
+                debug!(error = %e, "periodic grant cleanup failed (relay may be unreachable)");
+            }
         }
     }
 
@@ -643,6 +702,16 @@ impl RemoteInvokeWorker {
             command = %command.command,
             "executing remote command from grant_created"
         );
+
+        if command.command == "connect" {
+            info!(
+                call_id = %call_id,
+                grant_id = %grant_id,
+                "connect is a pairing meta-command, acknowledging with exit_code=0"
+            );
+            self.send_call_exit(&call_id, 0, None, None, 0).await;
+            return;
+        }
 
         self.active_calls
             .write()
@@ -977,4 +1046,17 @@ fn now_millis() -> u64 {
 
 fn is_relay_unauthorized(err: &BifrostError) -> bool {
     matches!(err, BifrostError::Network(msg) if msg.contains("unauthorized"))
+}
+
+fn is_grant_dead(grant: &serde_json::Value, now_ms: u64) -> bool {
+    let status = grant.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    if matches!(status, "expired" | "consumed" | "removed" | "revoked") {
+        return true;
+    }
+    if let Some(expires_at) = grant.get("expires_at").and_then(|e| e.as_u64()) {
+        if expires_at > 0 && expires_at < now_ms {
+            return true;
+        }
+    }
+    false
 }

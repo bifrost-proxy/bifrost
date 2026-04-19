@@ -254,8 +254,7 @@ async fn handle_grants_list(
         return method_not_allowed();
     }
 
-    let relay = worker.relay_client();
-    match relay.list_grants().await {
+    match worker.list_grants_and_cleanup().await {
         Ok(grants) => json_response(&serde_json::json!({
             "grants": grants,
         })),

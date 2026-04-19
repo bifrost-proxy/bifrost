@@ -10,9 +10,7 @@ import type {
   ClientCallFrameRequest,
   ClientCallExitRequest,
   OpenCallRequest,
-  UpdateGrantRequest,
   CallsQueryParams,
-  GrantsQueryParams,
   ClientRegistrationRequest,
 } from './types';
 import { isAllowedCommand, grantModeTtlMs } from './types';
@@ -25,8 +23,6 @@ import {
   findClientByPairCode,
   pushToPairingWatcher,
   pushToCallerStream,
-  registerCallerEventStream,
-  getAllClientStreams,
 } from './sse';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
@@ -102,10 +98,6 @@ export class RemoteInvokeService {
   }
 
   async startPairing(userId: string, req: StartPairingRequest, sourceIp: string): Promise<{ pairing_id: string; status: string }> {
-    if (!isAllowedCommand(req.command.command)) {
-      throw new Error('unsupported_command');
-    }
-
     const result = findClientByPairCode(req.pair_code);
     if (!result.found) {
       if (result.reason === 'consumed') {
@@ -124,9 +116,6 @@ export class RemoteInvokeService {
     }
 
     const resolvedClientId = clientStream.clientInstanceId;
-    if (req.client_instance_id && req.client_instance_id !== resolvedClientId) {
-      throw new Error('client_instance_id_mismatch');
-    }
 
     const pendingCount = await this.storage.remoteInvoke.countPendingPairings(resolvedClientId);
     if (pendingCount > 0) {
@@ -144,11 +133,11 @@ export class RemoteInvokeService {
       caller_fingerprint: req.caller_info.fingerprint,
       pair_code: req.pair_code,
       status: 'pending_approval',
-      caller_pubkey: req.caller_pubkey,
+      caller_pubkey: '',
       client_ephemeral_pub: '',
       caller_info_json: JSON.stringify(req.caller_info),
-      command_summary_json: JSON.stringify(req.command_summary),
-      command_json: JSON.stringify(req.command),
+      command_summary_json: '{}',
+      command_json: '{}',
       relay_token: '',
       call_id: '',
       grant_id: '',
@@ -165,11 +154,8 @@ export class RemoteInvokeService {
       pairing_id: pairingId,
       caller_fingerprint: req.caller_info.fingerprint,
       caller_display_name: req.caller_info.display_name ?? '',
-      caller_pubkey: req.caller_pubkey,
       source_ip: sourceIp,
       user_agent: req.caller_info.user_agent ?? '',
-      command_summary: req.command_summary,
-      command: req.command,
       expires_at: expiresAt,
     });
 
@@ -186,7 +172,7 @@ export class RemoteInvokeService {
     return { pairing_id: pairingId, status: 'pending_approval' };
   }
 
-  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; call_id?: string; relay_token?: string; status: string }> {
+  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
     if (pairing.status !== 'pending_approval') throw new Error('pairing_not_pending');
@@ -217,8 +203,6 @@ export class RemoteInvokeService {
 
     const grantMode = req.grant_mode ?? 'once';
     const grantId = nanoid();
-    const callId = nanoid();
-    const relayToken = generateRelayToken();
 
     const activeGrantCount = await this.storage.remoteInvoke.countActiveGrantsForClient(pairing.client_instance_id);
     if (activeGrantCount >= this.config.max_grants_per_client) {
@@ -256,60 +240,35 @@ export class RemoteInvokeService {
     };
     await this.storage.remoteInvoke.createGrant(grant);
 
-    const call: RemoteInvokeCall = {
-      id: callId,
-      user_id: pairing.user_id,
-      grant_id: grantId,
-      pairing_id: pairing.id,
-      client_instance_id: pairing.client_instance_id,
-      caller_fingerprint: pairing.caller_fingerprint,
-      source_ip: JSON.parse(pairing.caller_info_json).source_ip ?? '',
-      caller_display_name: JSON.parse(pairing.caller_info_json).display_name ?? '',
-      status: 'authorized',
-      command_summary_json: pairing.command_summary_json,
-      command_json: pairing.command_json,
-      payload_digest: '',
-      stdout_digest: '',
-      stderr_digest: '',
-      exit_code: -1,
-      started_at: now,
-      ended_at: '',
-      duration_ms: 0,
-      bytes_in: 0,
-      bytes_out: 0,
-    };
-    await this.storage.remoteInvoke.createCall(call);
-
     await this.storage.remoteInvoke.updatePairing(pairing.id, {
       status: 'approved',
       client_ephemeral_pub: req.client_ephemeral_pub ?? '',
-      relay_token: relayToken,
-      call_id: callId,
       grant_id: grantId,
       update_time: now,
     });
 
+    const clientRecord = await this.storage.remoteInvoke.getClientRecord(pairing.client_instance_id);
+    const deviceName = clientRecord?.client_name || pairing.client_instance_id;
+    const platform = clientRecord?.platform || '';
+
     pushToPairingWatcher(pairing.id, 'approved', {
-      pairing_id: pairing.id,
-      call_id: callId,
-      relay_token: relayToken,
+      status: 'approved',
       grant_id: grantId,
-      client_ephemeral_pub: req.client_ephemeral_pub ?? '',
-      expires_at: grantExpiresAt,
+      client_instance_id: pairing.client_instance_id,
+      device_name: deviceName,
+      platform,
+      grant_mode: grantMode,
     });
 
     pushToClient(pairing.client_instance_id, 'grant_created', {
       grant_id: grantId,
-      call_id: callId,
       caller_fingerprint: pairing.caller_fingerprint,
       grant_mode: grantMode,
-      command: JSON.parse(pairing.command_json),
-      command_summary: JSON.parse(pairing.command_summary_json),
     });
 
     await this.storage.remoteInvoke.appendEvent({
       id: nanoid(),
-      call_id: callId,
+      call_id: '',
       event_type: 'pairing_approved',
       seq: 0,
       direction: '',
@@ -317,7 +276,14 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    return { grant_id: grantId, call_id: callId, relay_token: relayToken, status: 'approved' };
+    return {
+      grant_id: grantId,
+      status: 'approved',
+      client_instance_id: pairing.client_instance_id,
+      device_name: deviceName,
+      platform,
+      grant_mode: grantMode,
+    };
   }
 
   async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | null> {
@@ -340,6 +306,15 @@ export class RemoteInvokeService {
   async openCall(userId: string, req: OpenCallRequest): Promise<{ call_id: string; relay_token: string }> {
     const grant = await this.storage.remoteInvoke.getGrant(req.grant_id);
     if (!grant) throw new Error('grant_not_found');
+
+    if (grant.caller_fingerprint !== req.caller_fingerprint) {
+      throw new Error('caller_fingerprint_mismatch');
+    }
+
+    if (grant.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_instance_id_mismatch');
+    }
+
     if (grant.status !== 'active') throw new Error('grant_not_active');
 
     if (grant.expires_at && new Date(grant.expires_at) < new Date()) {
@@ -531,48 +506,13 @@ export class RemoteInvokeService {
     });
   }
 
-  async listGrants(userId: string, query: GrantsQueryParams): Promise<{ list: RemoteInvokeGrant[]; total: number }> {
-    return this.storage.remoteInvoke.listGrants(userId, query);
-  }
-
-  async updateGrant(userId: string, grantId: string, req: UpdateGrantRequest): Promise<void> {
+  async removeGrant(userId: string, grantId: string, callerFingerprint: string): Promise<void> {
     const grant = await this.storage.remoteInvoke.getGrant(grantId);
     if (!grant) throw new Error('grant_not_found');
 
-    const fields: Partial<RemoteInvokeGrant> = { update_time: new Date().toISOString() };
-    if (req.grant_mode) {
-      fields.grant_mode = req.grant_mode;
-      const ttl = grantModeTtlMs(req.grant_mode);
-      if (ttl) {
-        fields.expires_at = new Date(Date.now() + ttl).toISOString();
-      } else if (req.grant_mode === 'permanent') {
-        fields.expires_at = '';
-      }
-      if (req.grant_mode === 'once') {
-        fields.max_calls = 1;
-        fields.remaining_calls = 1;
-      }
+    if (grant.caller_fingerprint !== callerFingerprint) {
+      throw new Error('caller_fingerprint_mismatch');
     }
-    if (req.expires_at) {
-      fields.expires_at = req.expires_at;
-    }
-
-    await this.storage.remoteInvoke.updateGrant(grantId, fields);
-
-    await this.storage.remoteInvoke.appendEvent({
-      id: nanoid(),
-      call_id: '',
-      event_type: 'grant_updated',
-      seq: 0,
-      direction: '',
-      event_summary_json: JSON.stringify({ grant_id: grantId, changes: fields }),
-      create_time: new Date().toISOString(),
-    });
-  }
-
-  async removeGrant(userId: string, grantId: string): Promise<void> {
-    const grant = await this.storage.remoteInvoke.getGrant(grantId);
-    if (!grant) throw new Error('grant_not_found');
 
     await this.storage.remoteInvoke.updateGrant(grantId, {
       status: 'removed',
@@ -606,50 +546,6 @@ export class RemoteInvokeService {
 
   async listCallEvents(callId: string, query?: { offset?: number; limit?: number }): Promise<{ list: RemoteInvokeEvent[]; total: number }> {
     return this.storage.remoteInvoke.listCallEvents(callId, query);
-  }
-
-  async getOnlineClients(userId: string): Promise<Array<{
-    client_instance_id: string;
-    client_name: string;
-    platform: string;
-    online_status: string;
-    discoverable: boolean;
-    discovery_expires_at: number | undefined;
-    last_heartbeat_at: number;
-    active_grant_count: number;
-  }>> {
-    const result: Array<{
-      client_instance_id: string;
-      client_name: string;
-      platform: string;
-      online_status: string;
-      discoverable: boolean;
-      discovery_expires_at: number | undefined;
-      last_heartbeat_at: number;
-      active_grant_count: number;
-    }> = [];
-
-    for (const [cid, state] of getAllClientStreams()) {
-      if (userId && state.userId && state.userId !== userId) continue;
-
-      const { list: grants } = await this.storage.remoteInvoke.listGrants(userId, {
-        client_instance_id: cid,
-        status: 'active',
-      });
-
-      result.push({
-        client_instance_id: cid,
-        client_name: cid,
-        platform: '',
-        online_status: 'online',
-        discoverable: state.discoverable,
-        discovery_expires_at: state.pairCodeExpiresAt,
-        last_heartbeat_at: state.lastHeartbeat,
-        active_grant_count: grants.length,
-      });
-    }
-
-    return result;
   }
 
   async revokeAck(_grantId: string): Promise<void> {

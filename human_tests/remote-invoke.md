@@ -1750,8 +1750,191 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
 |---------|---------|------|------|
-| TC-RI-回归-62 | 超时配对请求自动从 pending 列表中移除 | 🔲 PENDING | 待执行 |
-| TC-RI-回归-63 | 超时后点击 Authorize/Reject 显示友好错误并移除请求 | 🔲 PENDING | 待执行 |
+| TC-RI-回归-62 | 超时配对请求自动从 pending 列表中移除 | ✅ PASS | 等待 130 秒后 pairing 自动消失 |
+| TC-RI-回归-63 | 超时后点击 Authorize/Reject 显示友好错误并移除请求 | ✅ PASS | 返回 "not found or expired" 错误，前端自动刷新列表 |
+
+---
+
+### TC-RI-78：多客户端在线时未指定 --client-id 触发交互式选择
+
+**前置条件**：至少两个 Bifrost 客户端同时在线且已通过 relay 注册
+
+**操作步骤**：
+1. 确认有两个或以上客户端在线：
+   ```bash
+   curl -s http://127.0.0.1:8686/v4/remote-invoke/clients -H "Authorization: Bearer $SYNC_TOKEN" | jq '.data | length'
+   ```
+   预期返回数字 >= 2
+2. 执行远程命令但不指定 `--client-id`：
+   ```bash
+   cargo run --bin bifrost -- remote status --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN"
+   ```
+
+**预期结果**：
+- 不报错退出，而是显示交互式选择菜单，提示 "Found N online clients, select one"
+- 列出每个客户端的设备名和短 ID（如 `eden-macbook (a1b2c3d4e5f6)`）
+- 使用上下方向键可以在客户端之间切换
+- 按回车选择后，命令继续正常执行并返回该客户端的 status 结果
+
+---
+
+### TC-RI-79：多客户端在线时模糊前缀匹配多个客户端触发交互式选择
+
+**前置条件**：至少两个客户端在线且 client_instance_id 有共同前缀
+
+**操作步骤**：
+1. 查看在线客户端列表，找到共同的 ID 前缀（如第一个字符）
+2. 执行远程命令并传入该模糊前缀：
+   ```bash
+   cargo run --bin bifrost -- remote status --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN" --client-id "<共同前缀>"
+   ```
+
+**预期结果**：
+- 不报错退出，而是显示交互式选择菜单，提示 "Prefix '<prefix>' matches N clients, select one"
+- 列出匹配前缀的客户端设备名和短 ID
+- 选择后命令正常执行
+
+---
+
+### TC-RI-80：非交互式环境下多客户端仍然报错退出
+
+**前置条件**：至少两个客户端在线
+
+**操作步骤**：
+1. 通过管道将命令输入重定向，模拟非交互式环境：
+   ```bash
+   echo "" | cargo run --bin bifrost -- remote status --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN" 2>&1
+   ```
+
+**预期结果**：
+- 输出错误信息 "multiple clients online, please specify --client-id"
+- 命令以非零退出码退出（保持向后兼容，脚本环境不会卡住等待输入）
+
+---
+
+## 交互式客户端选择测试执行结果（TC-RI-78 ~ TC-RI-80）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 本地 port 8686
+- 测试日期：2026-04-19
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-78 | 多客户端在线时未指定 --client-id 触发交互式选择 | 🔲 PENDING | 待执行 |
+| TC-RI-79 | 多客户端在线时模糊前缀匹配多个客户端触发交互式选择 | 🔲 PENDING | 待执行 |
+| TC-RI-80 | 非交互式环境下多客户端仍然报错退出 | 🔲 PENDING | 待执行 |
+
+---
+
+### TC-RI-81：connect 授权通过后 exit_code 应为 0
+
+**前置条件**：客户端已连接 relay 并开启发现模式
+
+**操作步骤**：
+1. 生成配对码并使用 `bifrost remote connect <pair_code>` 发起连接
+2. 在 WebUI 中批准授权
+3. 连接成功后，查看 WebUI 的 `Recent Calls` 列表中该 connect 记录
+
+**预期结果**：
+- CLI 输出 `✓ Connected! Authorization granted`
+- WebUI Recent Calls 中 connect 记录的状态标签为绿色 `completed (0)`，而非红色 `completed (-1)`
+- 该记录的 exit_code 字段值为 0
+
+---
+
+### TC-RI-82：调用记录展示完整参数信息和响应数据量
+
+**前置条件**：存在可复用授权
+
+**操作步骤**：
+1. 执行带参数的远程查询命令，例如：
+   ```bash
+   cargo run --bin bifrost -- remote search "测试关键词" --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN"
+   ```
+2. 查看 WebUI `Recent Calls` 列表
+
+**预期结果**：
+- 调用记录标题行在命令名称后展示参数预览（如 `query=测试关键词 limit=20`）
+- 鼠标悬停参数预览区域时，Tooltip 显示完整的 JSON 参数
+- 描述行在耗时后展示响应数据量（如 `· ↓ 1.2KB`）
+- connect 类型记录不显示参数预览和数据量（因为没有参数和响应体）
+
+---
+
+## connect exit_code 与调用记录展示修复测试执行结果（TC-RI-81 ~ TC-RI-82）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 本地或远端
+- 测试日期：2026-04-19
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-81 | connect 授权通过后 exit_code 应为 0 | ✅ PASS | connect 记录显示绿色 completed (0)，旧记录仍为 -1（历史数据） |
+| TC-RI-82 | 调用记录展示完整参数信息和响应数据量 | ✅ PASS | search.get 显示 limit=50 query=测试关键词 及 ↓ 122B；status 显示 ↓ 110B |
+
+---
+
+### TC-RI-回归-64：回归 — 过期/已消耗 grant 自动从列表中移除
+
+**背景**：修复前，过期（expired）、已消耗（consumed）、已撤销（revoked）和已移除（removed）状态的 grant 会永远留在 relay 中，WebUI 的 Grants 列表和 CLI 的 remote status 都会显示这些"幽灵"条目，占用空间且混淆视线。
+
+**修复方案**：
+- `worker.rs` 新增 `list_grants_and_cleanup()` 方法：拉取 grants 列表后，识别状态为 expired/consumed/removed/revoked 的条目，以及 `expires_at < now` 的条目，从返回值中过滤掉并异步调用 `delete_grant()` 从 relay 删除
+- `handle_grants_list` handler 改用 `list_grants_and_cleanup()` 替代原始 `list_grants()`
+- SSE 循环新增 60 秒周期性 grant 清理定时器
+
+**操作步骤**：
+1. 启动 Bifrost 服务连接 relay
+2. 创建一个 `once` 模式的授权（一次性使用）：
+   - 开启 Discovery Mode
+   - 使用 `bifrost remote connect <code>` 发起配对
+   - 在 WebUI 中选择 "once" 模式授权
+3. 使用该授权执行一次远程命令（如 `remote status`），使其变为 `consumed` 状态
+4. 等待 3 秒（WebUI 轮询周期），刷新 Grants 列表
+5. 或直接通过 API 检查：
+   ```bash
+   curl -s http://127.0.0.1:<port>/api/remote-invoke/grants | python3 -m json.tool
+   ```
+
+**预期结果**：
+- 已消耗的 once grant 不再出现在 Grants 列表中
+- 如果查看 relay 日志，应能看到 `expired grants cleanup completed` 相关日志
+- 列表中只保留 status 为 `active` 且未过期的 grant
+
+---
+
+### TC-RI-回归-65：回归 — 周期性后台清理确保即使 WebUI 未打开也能清理
+
+**背景**：即使没有用户通过 WebUI 主动拉取 grants 列表，worker 的 SSE 循环中也会每 60 秒自动执行一次 `periodic_grant_cleanup()`，确保过期 grant 不会无限累积。
+
+**操作步骤**：
+1. 启动 Bifrost 服务并确认已连接 relay（通过日志观察 "SSE stream connected"）
+2. 创建一个 `30m` 模式的授权并使用，使其有 expires_at
+3. 手动将该 grant 在 relay 侧标记为 expired（或等待其自然过期）
+4. 不打开 WebUI，观察 Bifrost 日志，等待 60 秒
+
+**预期结果**：
+- 日志中出现 `periodic grant cleanup check done` 消息
+- 如果有过期 grant，日志中出现 `cleaning up expired/dead grants from relay` 和 `expired grants cleanup completed`
+- 后续通过 API 查询 grants 列表，该过期 grant 已被删除
+
+---
+
+## 回归测试执行结果（TC-RI-回归-64 ~ TC-RI-回归-65）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 远端 `https://bifrost.bytedance.net`
+- 测试日期：2026-04-19
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-64 | 过期/已消耗 grant 自动从列表中移除 | 🔲 PENDING | 待执行 |
+| TC-RI-回归-65 | 周期性后台清理确保即使 WebUI 未打开也能清理 | 🔲 PENDING | 待执行 |
+
+---
 
 ## 清理
 

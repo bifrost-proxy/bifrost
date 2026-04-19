@@ -110,12 +110,8 @@ export interface EncryptedEnvelope {
 }
 
 export interface StartPairingRequest {
-  client_instance_id: string;
   pair_code: string;
-  caller_pubkey: string;
   caller_info: CallerInfo;
-  command_summary: CommandSummary;
-  command: RemoteCommand;
 }
 
 export interface GrantDecisionRequest {
@@ -159,14 +155,10 @@ export interface ClientCallExitRequest {
 export interface OpenCallRequest {
   grant_id: string;
   client_instance_id: string;
+  caller_fingerprint: string;
   caller_pubkey: string;
   command_summary: CommandSummary;
   command: RemoteCommand;
-}
-
-export interface UpdateGrantRequest {
-  grant_mode?: GrantMode;
-  expires_at?: string;
 }
 
 export interface CallsQueryParams {

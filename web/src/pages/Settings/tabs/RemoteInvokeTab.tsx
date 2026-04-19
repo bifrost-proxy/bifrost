@@ -57,6 +57,26 @@ function formatFingerprint(fp: string): string {
   return `${short.slice(0, 4)}:${short.slice(4, 8)}:${short.slice(8, 12)}:${short.slice(12, 16)}`;
 }
 
+function formatArgsPreview(argsJson?: string | null): string {
+  if (!argsJson) return "";
+  try {
+    const obj = JSON.parse(argsJson);
+    return Object.entries(obj)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ");
+  } catch {
+    return argsJson.length > 60 ? argsJson.slice(0, 60) + "…" : argsJson;
+  }
+}
+
+function formatBytes(bytes: number | null | undefined): string | null {
+  if (bytes == null || bytes === 0) return null;
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
 function formatCountdown(expiresAt: number): string {
   const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   if (remaining <= 0) return "Expired";
@@ -583,7 +603,10 @@ export default function RemoteInvokeTab() {
                 dataSource={calls}
                 size="small"
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
-                renderItem={(c) => (
+                renderItem={(c) => {
+                  const argsPreview = formatArgsPreview(c.command_summary?.masked_args_json);
+                  const bytesLabel = formatBytes(c.bytes_out);
+                  return (
                   <List.Item>
                     <List.Item.Meta
                       title={
@@ -591,6 +614,13 @@ export default function RemoteInvokeTab() {
                           <Text code style={{ fontSize: 11 }}>
                             {c.command_summary?.command_preview ?? '-'}
                           </Text>
+                          {argsPreview && (
+                            <Tooltip title={c.command_summary?.masked_args_json}>
+                              <Text type="secondary" style={{ fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
+                                {argsPreview}
+                              </Text>
+                            </Tooltip>
+                          )}
                           <Tag
                             color={
                               c.status === "completed"
@@ -624,11 +654,17 @@ export default function RemoteInvokeTab() {
                               · {c.duration_ms}ms
                             </Text>
                           )}
+                          {bytesLabel && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · ↓ {bytesLabel}
+                            </Text>
+                          )}
                         </Space>
                       }
                     />
                   </List.Item>
-                )}
+                  );
+                }}
               />
             )}
           </Card>
