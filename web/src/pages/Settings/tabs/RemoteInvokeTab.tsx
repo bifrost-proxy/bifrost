@@ -21,6 +21,7 @@ import {
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
+  EyeOutlined,
   HistoryOutlined,
   ReloadOutlined,
   SafetyOutlined,
@@ -45,6 +46,8 @@ import {
 import { isConnectionIssueError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
+import PairingRequestModal from "../../../components/PairingRequestModal";
+import type { PairingRequest } from "../../../api/remoteInvoke";
 
 const { Text, Title } = Typography;
 
@@ -88,6 +91,7 @@ export default function RemoteInvokeTab() {
   const [calls, setCalls] = useState<Call[]>([]);
   const pollRef = useRef<number | null>(null);
 
+  const [reviewPairing, setReviewPairing] = useState<PairingRequest | null>(null);
   const pendingPairings = usePairingRequestStore((s) => s.pendingList);
   const storeFetchPairings = usePairingRequestStore((s) => s.fetchPendingList);
 
@@ -409,7 +413,19 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={pairingList}
                 renderItem={(p) => (
-                  <List.Item>
+                  <List.Item
+                    actions={[
+                      <Button
+                        key="review"
+                        type="primary"
+                        size="small"
+                        icon={<EyeOutlined />}
+                        onClick={() => setReviewPairing(p)}
+                      >
+                        Review
+                      </Button>,
+                    ]}
+                  >
                     <List.Item.Meta
                       avatar={
                         <Tooltip title={p.caller_info.fingerprint}>
@@ -620,6 +636,14 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
       </Row>
+      <PairingRequestModal
+        visible={reviewPairing !== null}
+        pairing={reviewPairing}
+        onClose={() => {
+          setReviewPairing(null);
+          void storeFetchPairings();
+        }}
+      />
     </div>
   );
 }
