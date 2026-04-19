@@ -302,7 +302,7 @@ async fn test_res_cors_all() -> Result<(), String> {
     .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_success()?;
-    result.assert_header_contains("access-control-allow-origin", "*")?;
+    result.assert_header_contains("access-control-allow-origin", "http://other.example.com")?;
 
     Ok(())
 }
@@ -629,7 +629,7 @@ async fn test_res_combined_modifications() -> Result<(), String> {
     result.assert_success()?;
     result.assert_header("x-custom", "combined-test")?;
     result.assert_header_contains("content-type", "application/json")?;
-    result.assert_header_contains("access-control-allow-origin", "*")?;
+    result.assert_header_contains("access-control-allow-origin", "http://example.com")?;
 
     Ok(())
 }

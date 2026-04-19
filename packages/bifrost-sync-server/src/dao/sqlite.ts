@@ -8,8 +8,9 @@ const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
+  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord,
 } from '../types';
-import type { IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IStorage } from './types';
+import type { IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
 
 export class SqliteUserDao implements IUserDao {
   constructor(private db: Database.Database) { }
@@ -412,12 +413,224 @@ export class SqliteGroupSettingDao implements IGroupSettingDao {
   }
 }
 
+export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
+  constructor(private db: Database.Database) {}
+
+  async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
+    this.db.prepare(
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.client_ephemeral_pub, p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.expires_at, p.create_time, p.update_time);
+    return p;
+  }
+
+  async getPairing(pairingId: string): Promise<RemoteInvokePairing | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE id = ?').get(pairingId) as RemoteInvokePairing | undefined;
+  }
+
+  async updatePairing(pairingId: string, fields: Partial<RemoteInvokePairing>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(pairingId);
+    this.db.prepare(`UPDATE bifrost_remote_invoke_pairings SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  async findPairingByCode(userId: string, clientInstanceId: string, pairCode: string): Promise<RemoteInvokePairing | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE user_id = ? AND client_instance_id = ? AND pair_code = ? AND status = ? ORDER BY create_time DESC LIMIT 1').get(userId, clientInstanceId, pairCode, 'pending_approval') as RemoteInvokePairing | undefined;
+  }
+
+  async countPendingPairings(clientInstanceId: string): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as total FROM bifrost_remote_invoke_pairings WHERE client_instance_id = ? AND status = ?').get(clientInstanceId, 'pending_approval') as { total: number };
+    return row.total;
+  }
+
+  async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
+    this.db.prepare(
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
+    return g;
+  }
+
+  async getGrant(grantId: string): Promise<RemoteInvokeGrant | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE id = ?').get(grantId) as RemoteInvokeGrant | undefined;
+  }
+
+  async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+  }
+
+  async listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeGrant[]; total: number }> {
+    const conditions: string[] = ['user_id = ?'];
+    const params: unknown[] = [userId];
+    if (query.client_instance_id) {
+      conditions.push('client_instance_id = ?');
+      params.push(query.client_instance_id);
+    }
+    if (query.status) {
+      conditions.push('status = ?');
+      params.push(query.status);
+    }
+    const where = conditions.join(' AND ');
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 100;
+    const countRow = this.db.prepare(`SELECT COUNT(*) as total FROM bifrost_remote_invoke_grants WHERE ${where}`).get(...params) as { total: number };
+    const list = this.db.prepare(`SELECT * FROM bifrost_remote_invoke_grants WHERE ${where} ORDER BY first_authorized_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as RemoteInvokeGrant[];
+    return { list, total: countRow.total };
+  }
+
+  async countActiveGrantsForClient(clientInstanceId: string): Promise<number> {
+    const row = this.db.prepare(
+      'SELECT COUNT(*) as total FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ?'
+    ).get(clientInstanceId, 'active') as { total: number };
+    return row.total;
+  }
+
+  async updateGrant(grantId: string, fields: Partial<RemoteInvokeGrant>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(grantId);
+    this.db.prepare(`UPDATE bifrost_remote_invoke_grants SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  async deleteGrant(grantId: string): Promise<boolean> {
+    const result = this.db.prepare('DELETE FROM bifrost_remote_invoke_grants WHERE id = ?').run(grantId);
+    return result.changes > 0;
+  }
+
+  async touchGrantLastUsed(grantId: string, ts: string): Promise<void> {
+    this.db.prepare('UPDATE bifrost_remote_invoke_grants SET last_used_at = ?, update_time = ? WHERE id = ?').run(ts, ts, grantId);
+  }
+
+  async consumeGrantCall(grantId: string): Promise<void> {
+    this.db.prepare('UPDATE bifrost_remote_invoke_grants SET remaining_calls = MAX(remaining_calls - 1, 0), update_time = ? WHERE id = ?').run(new Date().toISOString(), grantId);
+  }
+
+  async createCall(c: RemoteInvokeCall): Promise<RemoteInvokeCall> {
+    this.db.prepare(
+      `INSERT INTO bifrost_remote_invoke_calls (id, user_id, grant_id, pairing_id, client_instance_id, caller_fingerprint, source_ip, caller_display_name, status, command_summary_json, command_json, payload_digest, stdout_digest, stderr_digest, exit_code, started_at, ended_at, duration_ms, bytes_in, bytes_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(c.id, c.user_id, c.grant_id, c.pairing_id, c.client_instance_id, c.caller_fingerprint, c.source_ip, c.caller_display_name, c.status, c.command_summary_json, c.command_json, c.payload_digest, c.stdout_digest, c.stderr_digest, c.exit_code, c.started_at, c.ended_at, c.duration_ms, c.bytes_in, c.bytes_out);
+    return c;
+  }
+
+  async getCall(callId: string): Promise<RemoteInvokeCall | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_calls WHERE id = ?').get(callId) as RemoteInvokeCall | undefined;
+  }
+
+  async updateCall(callId: string, fields: Partial<RemoteInvokeCall>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(callId);
+    this.db.prepare(`UPDATE bifrost_remote_invoke_calls SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  async listCalls(userId: string, query: { client_instance_id?: string; caller_fingerprint?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeCall[]; total: number }> {
+    const conditions: string[] = ['user_id = ?'];
+    const params: unknown[] = [userId];
+    if (query.client_instance_id) {
+      conditions.push('client_instance_id = ?');
+      params.push(query.client_instance_id);
+    }
+    if (query.caller_fingerprint) {
+      conditions.push('caller_fingerprint = ?');
+      params.push(query.caller_fingerprint);
+    }
+    if (query.status) {
+      conditions.push('status = ?');
+      params.push(query.status);
+    }
+    const where = conditions.join(' AND ');
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 100;
+    const countRow = this.db.prepare(`SELECT COUNT(*) as total FROM bifrost_remote_invoke_calls WHERE ${where}`).get(...params) as { total: number };
+    const list = this.db.prepare(`SELECT * FROM bifrost_remote_invoke_calls WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as RemoteInvokeCall[];
+    return { list, total: countRow.total };
+  }
+
+  async appendEvent(event: RemoteInvokeEvent): Promise<void> {
+    this.db.prepare(
+      `INSERT INTO bifrost_remote_invoke_events (id, call_id, event_type, seq, direction, event_summary_json, create_time) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(event.id, event.call_id, event.event_type, event.seq, event.direction, event.event_summary_json, event.create_time);
+  }
+
+  async listCallEvents(callId: string, query?: { offset?: number; limit?: number }): Promise<{ list: RemoteInvokeEvent[]; total: number }> {
+    const offset = query?.offset ?? 0;
+    const limit = query?.limit ?? 500;
+    const countRow = this.db.prepare('SELECT COUNT(*) as total FROM bifrost_remote_invoke_events WHERE call_id = ?').get(callId) as { total: number };
+    const list = this.db.prepare('SELECT * FROM bifrost_remote_invoke_events WHERE call_id = ? ORDER BY create_time ASC LIMIT ? OFFSET ?').all(callId, limit, offset) as RemoteInvokeEvent[];
+    return { list, total: countRow.total };
+  }
+
+  async registerClient(record: RemoteInvokeClientRecord): Promise<void> {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO bifrost_remote_invoke_clients (client_instance_id, user_id, client_name, platform, bifrost_version, client_auth_token, client_pubkey_hash, token_expires_at, last_heartbeat_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(record.client_instance_id, record.user_id, record.client_name, record.platform, record.bifrost_version, record.client_auth_token, record.client_pubkey_hash, record.token_expires_at, record.last_heartbeat_at, record.create_time, record.update_time);
+  }
+
+  async getClientRecord(clientInstanceId: string): Promise<RemoteInvokeClientRecord | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_clients WHERE client_instance_id = ?').get(clientInstanceId) as RemoteInvokeClientRecord | undefined;
+  }
+
+  async updateClientRecord(clientInstanceId: string, fields: Partial<RemoteInvokeClientRecord>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'client_instance_id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(clientInstanceId);
+    this.db.prepare(`UPDATE bifrost_remote_invoke_clients SET ${sets.join(', ')} WHERE client_instance_id = ?`).run(...params);
+  }
+
+  async cleanupExpiredData(now: string, retentionDays: number, maxRecords: number): Promise<number> {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    let total = 0;
+
+    const r1 = this.db.prepare('DELETE FROM bifrost_remote_invoke_events WHERE create_time < ?').run(cutoff);
+    total += r1.changes;
+
+    const r2 = this.db.prepare('DELETE FROM bifrost_remote_invoke_calls WHERE started_at < ?').run(cutoff);
+    total += r2.changes;
+
+    const r3 = this.db.prepare('DELETE FROM bifrost_remote_invoke_pairings WHERE create_time < ?').run(cutoff);
+    total += r3.changes;
+
+    const countRow = this.db.prepare('SELECT COUNT(*) as cnt FROM bifrost_remote_invoke_calls').get() as { cnt: number };
+    if (countRow.cnt > maxRecords) {
+      const excess = countRow.cnt - maxRecords;
+      const r4 = this.db.prepare('DELETE FROM bifrost_remote_invoke_calls WHERE id IN (SELECT id FROM bifrost_remote_invoke_calls ORDER BY started_at ASC LIMIT ?)').run(excess);
+      total += r4.changes;
+    }
+
+    return total;
+  }
+}
+
 export class SqliteStorage implements IStorage {
   public user: SqliteUserDao;
   public env: SqliteEnvDao;
   public group: SqliteGroupDao;
   public groupMember: SqliteGroupMemberDao;
   public groupSetting: SqliteGroupSettingDao;
+  public remoteInvoke: SqliteRemoteInvokeDao;
   private db: Database.Database;
 
   constructor(dataDir: string) {
@@ -432,6 +645,7 @@ export class SqliteStorage implements IStorage {
     this.group = new SqliteGroupDao(this.db);
     this.groupMember = new SqliteGroupMemberDao(this.db);
     this.groupSetting = new SqliteGroupSettingDao(this.db);
+    this.remoteInvoke = new SqliteRemoteInvokeDao(this.db);
   }
 
   private migrate() {
@@ -484,6 +698,94 @@ export class SqliteStorage implements IStorage {
         group_id       TEXT PRIMARY KEY,
         rules_enabled  INTEGER DEFAULT 1,
         visibility     TEXT DEFAULT 'private'
+      );
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_pairings (
+        id                    TEXT PRIMARY KEY,
+        user_id               TEXT NOT NULL,
+        client_instance_id    TEXT NOT NULL,
+        caller_fingerprint    TEXT NOT NULL DEFAULT '',
+        pair_code             TEXT NOT NULL DEFAULT '',
+        status                TEXT NOT NULL DEFAULT 'created',
+        caller_pubkey         TEXT NOT NULL DEFAULT '',
+        client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
+        caller_info_json      TEXT NOT NULL DEFAULT '{}',
+        command_summary_json  TEXT NOT NULL DEFAULT '{}',
+        command_json          TEXT NOT NULL DEFAULT '{}',
+        relay_token           TEXT NOT NULL DEFAULT '',
+        call_id               TEXT NOT NULL DEFAULT '',
+        grant_id              TEXT NOT NULL DEFAULT '',
+        expires_at            TEXT NOT NULL DEFAULT '',
+        create_time           TEXT NOT NULL,
+        update_time           TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_pairings_user_code ON bifrost_remote_invoke_pairings(user_id, pair_code, status);
+      CREATE INDEX IF NOT EXISTS idx_ri_pairings_client ON bifrost_remote_invoke_pairings(client_instance_id, status);
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_grants (
+        id                    TEXT PRIMARY KEY,
+        user_id               TEXT NOT NULL,
+        client_instance_id    TEXT NOT NULL,
+        caller_fingerprint    TEXT NOT NULL DEFAULT '',
+        caller_display_name   TEXT NOT NULL DEFAULT '',
+        grant_mode            TEXT NOT NULL DEFAULT 'once',
+        grant_scope           TEXT NOT NULL DEFAULT 'query',
+        status                TEXT NOT NULL DEFAULT 'active',
+        first_authorized_at   TEXT NOT NULL DEFAULT '',
+        expires_at            TEXT NOT NULL DEFAULT '',
+        last_used_at          TEXT NOT NULL DEFAULT '',
+        max_calls             INTEGER NOT NULL DEFAULT 1,
+        remaining_calls       INTEGER NOT NULL DEFAULT 1,
+        created_by            TEXT NOT NULL DEFAULT '',
+        update_time           TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_grants_reusable ON bifrost_remote_invoke_grants(user_id, client_instance_id, caller_fingerprint, status);
+      CREATE INDEX IF NOT EXISTS idx_ri_grants_user ON bifrost_remote_invoke_grants(user_id, status, expires_at);
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_calls (
+        id                    TEXT PRIMARY KEY,
+        user_id               TEXT NOT NULL,
+        grant_id              TEXT NOT NULL DEFAULT '',
+        pairing_id            TEXT NOT NULL DEFAULT '',
+        client_instance_id    TEXT NOT NULL DEFAULT '',
+        caller_fingerprint    TEXT NOT NULL DEFAULT '',
+        source_ip             TEXT NOT NULL DEFAULT '',
+        caller_display_name   TEXT NOT NULL DEFAULT '',
+        status                TEXT NOT NULL DEFAULT 'pending',
+        command_summary_json  TEXT NOT NULL DEFAULT '{}',
+        command_json          TEXT NOT NULL DEFAULT '{}',
+        payload_digest        TEXT NOT NULL DEFAULT '',
+        stdout_digest         TEXT NOT NULL DEFAULT '',
+        stderr_digest         TEXT NOT NULL DEFAULT '',
+        exit_code             INTEGER NOT NULL DEFAULT -1,
+        started_at            TEXT NOT NULL DEFAULT '',
+        ended_at              TEXT NOT NULL DEFAULT '',
+        duration_ms           INTEGER NOT NULL DEFAULT 0,
+        bytes_in              INTEGER NOT NULL DEFAULT 0,
+        bytes_out             INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_calls_user ON bifrost_remote_invoke_calls(user_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_ri_calls_grant ON bifrost_remote_invoke_calls(grant_id);
+      CREATE INDEX IF NOT EXISTS idx_ri_calls_status ON bifrost_remote_invoke_calls(status, started_at);
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_events (
+        id                    TEXT PRIMARY KEY,
+        call_id               TEXT NOT NULL DEFAULT '',
+        event_type            TEXT NOT NULL DEFAULT '',
+        seq                   INTEGER NOT NULL DEFAULT 0,
+        direction             TEXT NOT NULL DEFAULT '',
+        event_summary_json    TEXT NOT NULL DEFAULT '{}',
+        create_time           TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_events_call ON bifrost_remote_invoke_events(call_id, create_time);
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_clients (
+        client_instance_id    TEXT PRIMARY KEY,
+        user_id               TEXT NOT NULL DEFAULT '',
+        client_name           TEXT NOT NULL DEFAULT '',
+        platform              TEXT NOT NULL DEFAULT '',
+        bifrost_version       TEXT NOT NULL DEFAULT '',
+        client_auth_token     TEXT NOT NULL DEFAULT '',
+        client_pubkey_hash    TEXT NOT NULL DEFAULT '',
+        token_expires_at      TEXT NOT NULL DEFAULT '',
+        last_heartbeat_at     TEXT NOT NULL DEFAULT '',
+        create_time           TEXT NOT NULL,
+        update_time           TEXT NOT NULL
       );
     `);
     this.migrateAddSortOrder();

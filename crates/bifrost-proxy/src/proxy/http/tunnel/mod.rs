@@ -2523,7 +2523,17 @@ async fn handle_intercepted_request_with_protocol(
         .with_cookies(incoming_cookies.clone())
         .with_query_params(query_params.clone())
         .with_client_process(client_app.clone(), client_pid, client_path.clone());
-    apply_res_rules(&mut res_parts, &resolved_rules, verbose_logging, &ctx);
+    let request_origin = incoming_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
+        .map(|(_, v)| v.as_str());
+    apply_res_rules(
+        &mut res_parts,
+        &resolved_rules,
+        verbose_logging,
+        &ctx,
+        request_origin,
+    );
 
     let res_headers: Vec<(String, String)> = res_parts
         .headers

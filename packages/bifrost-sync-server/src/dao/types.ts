@@ -47,11 +47,44 @@ export interface IGroupSettingDao {
   init(groupId: string, visibility?: string): Promise<void>;
 }
 
+export interface IRemoteInvokeDao {
+  createPairing(pairing: import('../types').RemoteInvokePairing): Promise<import('../types').RemoteInvokePairing>;
+  getPairing(pairingId: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  updatePairing(pairingId: string, fields: Partial<import('../types').RemoteInvokePairing>): Promise<void>;
+  findPairingByCode(userId: string, clientInstanceId: string, pairCode: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  countPendingPairings(clientInstanceId: string): Promise<number>;
+
+  createGrant(grant: import('../types').RemoteInvokeGrant): Promise<import('../types').RemoteInvokeGrant>;
+  getGrant(grantId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
+  findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
+  listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: import('../types').RemoteInvokeGrant[]; total: number }>;
+  countActiveGrantsForClient(clientInstanceId: string): Promise<number>;
+  updateGrant(grantId: string, fields: Partial<import('../types').RemoteInvokeGrant>): Promise<void>;
+  deleteGrant(grantId: string): Promise<boolean>;
+  touchGrantLastUsed(grantId: string, ts: string): Promise<void>;
+  consumeGrantCall(grantId: string): Promise<void>;
+
+  createCall(call: import('../types').RemoteInvokeCall): Promise<import('../types').RemoteInvokeCall>;
+  getCall(callId: string): Promise<import('../types').RemoteInvokeCall | undefined>;
+  updateCall(callId: string, fields: Partial<import('../types').RemoteInvokeCall>): Promise<void>;
+  listCalls(userId: string, query: { client_instance_id?: string; caller_fingerprint?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: import('../types').RemoteInvokeCall[]; total: number }>;
+
+  appendEvent(event: import('../types').RemoteInvokeEvent): Promise<void>;
+  listCallEvents(callId: string, query?: { offset?: number; limit?: number }): Promise<{ list: import('../types').RemoteInvokeEvent[]; total: number }>;
+
+  registerClient(record: import('../types').RemoteInvokeClientRecord): Promise<void>;
+  getClientRecord(clientInstanceId: string): Promise<import('../types').RemoteInvokeClientRecord | undefined>;
+  updateClientRecord(clientInstanceId: string, fields: Partial<import('../types').RemoteInvokeClientRecord>): Promise<void>;
+
+  cleanupExpiredData(now: string, retentionDays: number, maxRecords: number): Promise<number>;
+}
+
 export interface IStorage {
   user: IUserDao;
   env: IEnvDao;
   group: IGroupDao;
   groupMember: IGroupMemberDao;
   groupSetting: IGroupSettingDao;
+  remoteInvoke: IRemoteInvokeDao;
   close(): Promise<void>;
 }

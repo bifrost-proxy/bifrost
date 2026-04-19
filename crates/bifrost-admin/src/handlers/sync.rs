@@ -261,6 +261,8 @@ async fn update_sync_config(req: Request<Incoming>, state: SharedAdminState) -> 
         }
     }
 
+    let new_relay_url = request.remote_base_url.clone();
+
     match config_manager
         .update_sync_config(SyncConfigUpdate {
             enabled: request.enabled,
@@ -272,6 +274,12 @@ async fn update_sync_config(req: Request<Incoming>, state: SharedAdminState) -> 
         .await
     {
         Ok(_) => {
+            if let Some(new_url) = new_relay_url {
+                if let Some(ref worker) = state.remote_invoke_worker {
+                    worker.update_relay_url(&new_url);
+                }
+            }
+
             if let Some(sync_manager) = state.sync_manager.clone() {
                 sync_manager.trigger_sync();
                 json_response(&sync_manager.status().await)

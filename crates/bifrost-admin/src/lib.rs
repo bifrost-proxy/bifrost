@@ -16,6 +16,7 @@ pub mod network;
 pub mod notification_db;
 mod port_rebind;
 pub mod push;
+pub mod remote_invoke;
 pub mod replay_db;
 pub mod replay_executor;
 pub mod request_rules;
@@ -50,7 +51,7 @@ pub use body_store::{
 };
 pub use client_trust_tracker::{
     classify_tls_accept_error, ClientTlsTrustTracker, ClientTrustEvent, ClientTrustSummary,
-    TlsAcceptFailureReason,
+    DomainFailureSummary, TlsAcceptFailureReason,
 };
 pub use connection_monitor::{
     start_connection_cleanup_task, ConnectionMonitor, SharedConnectionMonitor, WebSocketFrameRecord,
@@ -96,6 +97,11 @@ pub use ws_payload_store::{
     start_ws_payload_cleanup_task, SharedWsPayloadStore, WsPayloadStore, WsPayloadStoreConfigUpdate,
 };
 
+pub use handlers::remote_invoke::SharedRemoteInvokeWorker;
+pub use remote_invoke::{
+    identity::Identity as RemoteInvokeIdentity, types::RemoteInvokeConfig,
+    worker::RemoteInvokeWorker,
+};
 pub use replay_db::{
     ReplayDbStore, ReplayGroup, ReplayHistory, ReplayRequest, ReplayRequestSummary, RuleConfig,
     RuleMode, SharedReplayDbStore, MAX_CONCURRENT_REPLAYS, MAX_HISTORY, MAX_REQUESTS,

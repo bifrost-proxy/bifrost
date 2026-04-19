@@ -513,7 +513,7 @@ async fn test_protocol_rescors() -> Result<(), String> {
     .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_success()?;
-    result.assert_header("Access-Control-Allow-Origin", "*")?;
+    result.assert_header("Access-Control-Allow-Origin", "http://other-domain.com")?;
 
     Ok(())
 }
@@ -693,7 +693,7 @@ async fn test_protocol_combined_pipeline() -> Result<(), String> {
     mock.assert_header_received("user-agent", "Pipeline-UA/1.0")?;
 
     result.assert_header("X-Response-Added", "yes")?;
-    result.assert_header("Access-Control-Allow-Origin", "*")?;
+    result.assert_header("Access-Control-Allow-Origin", "http://client.com")?;
 
     Ok(())
 }

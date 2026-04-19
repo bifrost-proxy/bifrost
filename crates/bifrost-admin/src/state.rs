@@ -118,6 +118,7 @@ pub struct AdminState {
     pub sync_manager: Option<SharedSyncManager>,
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
+    pub remote_invoke_worker: Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
     group_cache_resolved: AtomicBool,
     badge_rules_cache: parking_lot::RwLock<String>,
@@ -160,6 +161,7 @@ impl AdminState {
             sync_manager: None,
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
+            remote_invoke_worker: None,
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
             badge_rules_cache: parking_lot::RwLock::new(
@@ -828,6 +830,14 @@ impl AdminState {
 
     pub fn with_client_trust_tracker(mut self, tracker: ClientTlsTrustTracker) -> Self {
         self.client_trust_tracker = Some(Arc::new(tracker));
+        self
+    }
+
+    pub fn with_remote_invoke_worker(
+        mut self,
+        worker: crate::handlers::remote_invoke::SharedRemoteInvokeWorker,
+    ) -> Self {
+        self.remote_invoke_worker = Some(worker);
         self
     }
 

@@ -467,7 +467,7 @@ async fn test_cors_headers() -> Result<(), String> {
     .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_success()?;
-    result.assert_header("Access-Control-Allow-Origin", "*")?;
+    result.assert_header("Access-Control-Allow-Origin", "http://example.com")?;
 
     Ok(())
 }

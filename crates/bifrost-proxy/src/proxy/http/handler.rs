@@ -871,6 +871,12 @@ pub async fn handle_http_request(
 
     let (mut parts, body) = req.into_parts();
 
+    let request_origin = parts
+        .headers
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let original_req_headers = admin_state
         .as_ref()
         .map(|_| headers_to_pairs(&parts.headers));
@@ -1632,7 +1638,13 @@ pub async fn handle_http_request(
         .map(|_| headers_to_pairs(&res_parts.headers));
     let res_content_encoding = response_content_encoding(&res_parts);
 
-    apply_res_rules(&mut res_parts, &resolved_rules, verbose_logging, ctx);
+    apply_res_rules(
+        &mut res_parts,
+        &resolved_rules,
+        verbose_logging,
+        ctx,
+        request_origin.as_deref(),
+    );
 
     let res_content_type = get_content_type(&res_parts);
     let force_body_processing_for_badge =

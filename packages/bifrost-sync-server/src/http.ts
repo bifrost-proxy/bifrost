@@ -62,6 +62,16 @@ export async function requireAuth(ctx: RequestContext, storage: IStorage): Promi
   return true;
 }
 
+export async function optionalAuth(ctx: RequestContext, storage: IStorage): Promise<void> {
+  const token = ctx.req.headers['x-bifrost-token'] as string | undefined;
+  if (token) {
+    const user = await storage.user.findByToken(token);
+    if (user) {
+      ctx.user = user;
+    }
+  }
+}
+
 export function parseQuery(url: URL, key: string): string | undefined {
   return url.searchParams.get(key) ?? undefined;
 }
@@ -96,4 +106,36 @@ export function setHtmlSecurityHeaders(res: ServerResponse) {
     'Content-Security-Policy',
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   );
+}
+
+export function openSse(res: ServerResponse) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+}
+
+export function writeSseEvent(res: ServerResponse, event: string, data: unknown, id?: string) {
+  if (id) res.write(`id: ${id}\n`);
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+export function writeSseComment(res: ServerResponse, comment: string) {
+  res.write(`: ${comment}\n\n`);
+}
+
+export function closeSse(res: ServerResponse) {
+  try {
+    res.end();
+  } catch {}
+}
+
+export function extractBearerToken(req: IncomingMessage): string | undefined {
+  const auth = req.headers['authorization'];
+  if (!auth || !auth.startsWith('Bearer ')) return undefined;
+  return auth.slice(7);
 }

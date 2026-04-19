@@ -11,6 +11,7 @@ pub fn apply_res_rules(
     rules: &ResolvedRules,
     verbose_logging: bool,
     ctx: &RequestContext,
+    request_origin: Option<&str>,
 ) {
     apply_res_status(parts, rules, verbose_logging, ctx);
     apply_res_delete_headers(parts, rules, verbose_logging, ctx);
@@ -23,7 +24,7 @@ pub fn apply_res_rules(
     apply_res_header_replace(parts, rules, verbose_logging, ctx);
 
     if rules.res_cors.is_enabled() {
-        apply_res_cors(parts, &rules.res_cors, ctx, verbose_logging);
+        apply_res_cors(parts, &rules.res_cors, ctx, verbose_logging, request_origin);
     }
 
     apply_res_trailers(parts, rules, verbose_logging, ctx);
@@ -542,6 +543,7 @@ fn apply_res_cors(
     cors: &CorsConfig,
     ctx: &RequestContext,
     verbose_logging: bool,
+    request_origin: Option<&str>,
 ) {
     if verbose_logging {
         info!(
@@ -551,7 +553,12 @@ fn apply_res_cors(
         );
     }
 
-    let origin = cors.origin.as_deref().unwrap_or("*");
+    let configured_origin = cors.origin.as_deref().unwrap_or("*");
+    let origin = if configured_origin == "*" {
+        request_origin.unwrap_or("*")
+    } else {
+        configured_origin
+    };
     if let Ok(header_value) = origin.parse::<HeaderValue>() {
         parts
             .headers
@@ -704,7 +711,7 @@ mod tests {
         let ctx = RequestContext::new();
         rules.status_code = Some(404);
 
-        apply_res_rules(&mut parts, &rules, false, &ctx);
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
 
         assert_eq!(parts.status, StatusCode::NOT_FOUND);
     }
@@ -721,7 +728,7 @@ mod tests {
             .res_headers
             .push(("Content-Type".to_string(), "application/json".to_string()));
 
-        apply_res_rules(&mut parts, &rules, false, &ctx);
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
 
         assert_eq!(
             parts
@@ -752,7 +759,7 @@ mod tests {
             crate::server::ResCookieValue::simple("test".to_string()),
         ));
 
-        apply_res_rules(&mut parts, &rules, false, &ctx);
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
 
         let cookies: Vec<_> = parts
             .headers
@@ -769,7 +776,7 @@ mod tests {
         let ctx = RequestContext::new();
         rules.res_cors = CorsConfig::enable_all();
 
-        apply_res_rules(&mut parts, &rules, false, &ctx);
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
 
         assert!(parts
             .headers

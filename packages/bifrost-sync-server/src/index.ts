@@ -5,6 +5,7 @@ import { handleOAuth2 } from './routes/oauth2';
 import { handleEnv } from './routes/env';
 import { handleGroup } from './routes/group';
 import { handleUser } from './routes/user';
+import { handleRemoteInvoke } from './routes/remote-invoke';
 import { readBody, sendJson, sendError, sendRateLimited, setSecurityHeaders, type RequestContext } from './http';
 import { RateLimiter, AccountLockManager, getClientIp } from './security';
 import type { SyncServerConfig } from './types';
@@ -43,7 +44,7 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
     );
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, x-bifrost-token',
+      'Content-Type, x-bifrost-token, Authorization',
     );
 
     if (req.method === 'OPTIONS') {
@@ -93,6 +94,7 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
       if (await handleUser(ctx, storage)) return;
       if (await handleEnv(ctx, storage)) return;
       if (await handleGroup(ctx, storage)) return;
+      if (await handleRemoteInvoke(ctx, storage, config.remote_invoke)) return;
 
       sendJson(res, 404, { code: -1, message: 'Not Found' });
     } catch (e: unknown) {
