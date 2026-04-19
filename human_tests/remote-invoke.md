@@ -1630,6 +1630,36 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### TC-RI-回归-61：回归 — 多实例 SSE frame/exit 竞态条件不应导致 caller 丢失 frame
+
+**背景**：在多实例（TCE）部署环境下，当 client 执行完命令后将 `frame` 和 `exit` 事件分别 POST 到 relay，但 `frame` 和 `exit` 可能被路由到不同实例。caller 的 `registerCallerEventStream` 在实例 V 上完成后，`frame` 事件可能延迟写入实例 Z 的 Redis buffer。此时 caller 只收到 `exit` 事件而丢失 `frame`，导致输出为空。
+
+**修复方案（双端修复）**：
+- 服务端（`remoteInvokeSse.ts`）：`registerCallerEventStream` 注册后，除初始 flush 外还在 500ms 和 2000ms 各安排一次延迟 Redis buffer 重读（`flushRedisCallerBuf`），使用 `flushedKeys: Set<string>` 做内容级去重，确保不漏不重。
+- 客户端（`remote.rs`）：当收到 `exit` 事件但 stdout 为空时，不立即返回，而是设置 `exit_received = true` 并将超时重置为 3 秒（grace period）。如果在 grace period 内收到延迟的 `frame` 事件，立即返回带数据的结果；如果 grace period 超时仍无 frame，则静默返回空结果（不报错）。
+
+**操作步骤**：
+1. 确保已有可复用授权
+2. 连续执行 10 轮、每轮 4 个命令的稳定性测试：
+   ```bash
+   for i in $(seq 1 10); do
+     echo "Round $i:"
+     ./target/debug/bifrost -p 8800 remote status --client-id <client_id> 2>/dev/null | head -c 50
+     ./target/debug/bifrost -p 8800 remote traffic list --client-id <client_id> 2>/dev/null | head -c 50
+     ./target/debug/bifrost -p 8800 remote traffic get <req_id> --client-id <client_id> 2>/dev/null | head -c 50
+     ./target/debug/bifrost -p 8800 remote search httpbin --client-id <client_id> 2>/dev/null | head -c 50
+     sleep 0.3
+   done
+   ```
+
+**预期结果**：
+- 10 轮 × 4 命令 = 40 次调用全部成功返回非空结果
+- 无间歇性空输出或超时错误
+- 每个命令的输出均为有效 JSON 且不重复
+- 通过率 100%，不因多实例事件路由差异而丢失数据
+
+---
+
 ## 补充覆盖用例测试执行结果（TC-RI-50 ~ TC-RI-59）
 
 测试环境：
@@ -1660,6 +1690,18 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 | `pair_slot_occupied` 冲突检查 | sqlite.ts 新增 `countPendingPairings()`，service.ts 在 `startPairing` 中检查未决配对数 | TC-RI-55 | ✅ 已修复 |
 | `pair_code_already_consumed` 错误码 | sse.ts 新增 `consumeClientDiscovery()` 保留已消费 pairCode，`findClientByPairCode` 返回精确错误 | TC-RI-55 | ✅ 已修复 |
 | `max_grants_per_client` 上限 | sqlite.ts 新增 `countActiveGrantsForClient()`，service.ts 在 `submitGrantDecision` 中按 client_instance_id 维度检查 | TC-RI-58 | ✅ 已修复 |
+
+## 回归测试执行结果（TC-RI-回归-60 ~ TC-RI-回归-61）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 远端 `https://bifrost.bytedance.net`（bifrost-server-v4）
+- 测试日期：2026-04-19
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-60 | SSE 事件缓冲不应导致 caller 收到重复 frame | ✅ PASS | 40 次调用均返回有效单个 JSON，无 "Extra data" 错误 |
+| TC-RI-回归-61 | 多实例 SSE frame/exit 竞态条件不应导致 caller 丢失 frame | ✅ PASS | 10 轮 × 4 命令 = 40/40 全部通过，0 次空输出或超时 |
 
 ## 清理
 
