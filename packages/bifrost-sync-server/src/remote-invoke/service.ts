@@ -123,11 +123,12 @@ export class RemoteInvokeService {
       throw new Error('invalid_pair_code');
     }
 
-    if (req.client_instance_id !== clientStream.clientInstanceId) {
+    const resolvedClientId = clientStream.clientInstanceId;
+    if (req.client_instance_id && req.client_instance_id !== resolvedClientId) {
       throw new Error('client_instance_id_mismatch');
     }
 
-    const pendingCount = await this.storage.remoteInvoke.countPendingPairings(req.client_instance_id);
+    const pendingCount = await this.storage.remoteInvoke.countPendingPairings(resolvedClientId);
     if (pendingCount > 0) {
       throw new Error('pair_slot_occupied');
     }
@@ -139,7 +140,7 @@ export class RemoteInvokeService {
     const pairing: RemoteInvokePairing = {
       id: pairingId,
       user_id: userId,
-      client_instance_id: req.client_instance_id,
+      client_instance_id: resolvedClientId,
       caller_fingerprint: req.caller_info.fingerprint,
       pair_code: req.pair_code,
       status: 'pending_approval',
@@ -158,9 +159,9 @@ export class RemoteInvokeService {
 
     await this.storage.remoteInvoke.createPairing(pairing);
 
-    consumeClientDiscovery(req.client_instance_id);
+    consumeClientDiscovery(resolvedClientId);
 
-    pushToClient(req.client_instance_id, 'pairing_request', {
+    pushToClient(resolvedClientId, 'pairing_request', {
       pairing_id: pairingId,
       caller_fingerprint: req.caller_info.fingerprint,
       caller_display_name: req.caller_info.display_name ?? '',
@@ -629,7 +630,7 @@ export class RemoteInvokeService {
     }> = [];
 
     for (const [cid, state] of getAllClientStreams()) {
-      if (state.userId && state.userId !== userId) continue;
+      if (userId && state.userId && state.userId !== userId) continue;
 
       const { list: grants } = await this.storage.remoteInvoke.listGrants(userId, {
         client_instance_id: cid,

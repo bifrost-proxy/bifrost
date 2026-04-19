@@ -32,7 +32,6 @@ pub fn handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
 
 async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
     let caller = CallerRelayClient::new(&opts.relay_url, &opts.token);
-    let client_instance_id = resolve_client_id(&caller, opts.client_id.as_deref()).await?;
     let caller_fingerprint = generate_caller_fingerprint();
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
@@ -42,8 +41,11 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     if let RemoteCommands::Connect { pair_code } = &opts.action {
+        let client_instance_id = opts.client_id.clone().unwrap_or_default();
         return handle_connect(&caller, &client_instance_id, pair_code, &caller_info).await;
     }
+
+    let client_instance_id = resolve_client_id(&caller, opts.client_id.as_deref()).await?;
 
     let (command, args_json) = build_remote_command(&opts.action);
     let command_summary = CommandSummary {

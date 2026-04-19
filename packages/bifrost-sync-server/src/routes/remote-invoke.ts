@@ -358,8 +358,8 @@ function handleRevokeAck(ctx: RequestContext): boolean {
 
 async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.client_instance_id || !body?.pair_code || !body?.caller_info) {
-    sendError(ctx.res, 400, 'client_instance_id, pair_code, and caller_info are required');
+  if (!body?.pair_code || !body?.caller_info) {
+    sendError(ctx.res, 400, 'pair_code and caller_info are required');
     return true;
   }
 
