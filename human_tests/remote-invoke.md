@@ -1703,6 +1703,56 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 | TC-RI-回归-60 | SSE 事件缓冲不应导致 caller 收到重复 frame | ✅ PASS | 40 次调用均返回有效单个 JSON，无 "Extra data" 错误 |
 | TC-RI-回归-61 | 多实例 SSE frame/exit 竞态条件不应导致 caller 丢失 frame | ✅ PASS | 10 轮 × 4 命令 = 40/40 全部通过，0 次空输出或超时 |
 
+### TC-RI-回归-62：回归 — 超时配对请求自动从 pending 列表中移除
+
+**背景**：修复前，如果调用方发起 pairing 请求后超时（`pair_code_ttl_secs` 默认 120 秒），该请求会永远留在 pending 列表中。用户点击 Authorize 或 Reject 会收到错误但请求不会消失。
+
+**操作步骤**：
+1. 启动 Bifrost 服务和 relay 服务
+2. 在 WebUI 进入 Settings > Remote Invoke，开启 Discovery Mode
+3. 使用调用方 CLI 发起远程命令触发 pairing 请求：
+   ```bash
+   bifrost remote status --relay-url http://127.0.0.1:8686 --pair-code <code>
+   ```
+4. 在 WebUI 观察到 Remote Command Authorization 弹窗或 Pending Requests 区域出现该请求
+5. **不进行任何操作**，等待 `pair_code_ttl_secs`（120 秒）超时
+6. 等待超时后（最多 5 秒内），观察 Pending Requests 区域
+
+**预期结果**：
+- 超时后，该 pairing 请求应在下一个清理周期（5 秒内）自动从 pending 列表中消失
+- 如果弹窗中没有其他待处理请求，弹窗自动关闭
+- 前端 3 秒一次的轮询会感知到后端已清理掉超时请求，UI 自动更新
+
+---
+
+### TC-RI-回归-63：回归 — 超时后点击 Authorize/Reject 显示友好错误并移除请求
+
+**背景**：即使清理周期尚未触发，用户手动点击 Authorize 或 Reject 一个已经在 relay 侧超时的请求时，也应该有良好的用户体验。
+
+**操作步骤**：
+1. 复用 TC-RI-回归-62 的环境，制造一个即将超时的 pairing 请求
+2. 等待 relay 侧超时（120 秒）但在后端清理周期（5 秒）到来前迅速操作
+3. 点击 Authorize > 选择任意授权期限
+
+**预期结果**：
+- 显示 warning 级别的 toast 提示："Request may have expired and was removed"
+- 该 pairing 请求从弹窗/列表中自动消失（因为 store 在失败后会重新 fetchPendingList）
+- 不显示 error 级别的错误提示
+
+---
+
+## 回归测试执行结果（TC-RI-回归-62 ~ TC-RI-回归-63）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 本地 port 8686
+- 测试日期：2026-04-19
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-62 | 超时配对请求自动从 pending 列表中移除 | 🔲 PENDING | 待执行 |
+| TC-RI-回归-63 | 超时后点击 Authorize/Reject 显示友好错误并移除请求 | 🔲 PENDING | 待执行 |
+
 ## 清理
 
 测试完成后清理本地临时数据：

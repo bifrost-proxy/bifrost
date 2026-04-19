@@ -26,13 +26,18 @@ const MAX_RECONNECT_DELAY_MS: u64 = 60000;
 const PAIR_CODE_DIGITS: u32 = 6;
 const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
 
+struct TimestampedPairing {
+    request: PairingRequest,
+    received_at: u64,
+}
+
 pub struct RemoteInvokeWorker {
     config: RemoteInvokeConfig,
     identity: Identity,
     relay_client: Arc<RelayClient>,
     executor: Arc<RemoteInvokeExecutor>,
     state: Arc<RwLock<WorkerState>>,
-    pending_pairings: Arc<RwLock<HashMap<String, PairingRequest>>>,
+    pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
     active_calls: Arc<RwLock<HashMap<String, String>>>,
     discovery_session: Arc<RwLock<Option<DiscoverySession>>>,
     shutdown: Arc<AtomicBool>,
@@ -87,7 +92,11 @@ impl RemoteInvokeWorker {
     }
 
     pub fn pending_pairings(&self) -> Vec<PairingRequest> {
-        self.pending_pairings.read().values().cloned().collect()
+        self.pending_pairings
+            .read()
+            .values()
+            .map(|tp| tp.request.clone())
+            .collect()
     }
 
     pub fn active_call_ids(&self) -> Vec<String> {
@@ -224,14 +233,14 @@ impl RemoteInvokeWorker {
     }
 
     pub async fn approve_pairing(&self, pairing_id: &str, grant_mode: GrantMode) -> Result<Value> {
-        let pairing = {
+        let found = {
             let pairings = self.pending_pairings.read();
-            pairings.get(pairing_id).cloned()
+            pairings.contains_key(pairing_id)
         };
 
-        if pairing.is_none() {
+        if !found {
             return Err(BifrostError::Network(format!(
-                "pairing {} not found in pending list",
+                "pairing {} not found or expired",
                 pairing_id
             )));
         }
@@ -261,6 +270,18 @@ impl RemoteInvokeWorker {
     }
 
     pub async fn reject_pairing(&self, pairing_id: &str) -> Result<Value> {
+        let found = {
+            let pairings = self.pending_pairings.read();
+            pairings.contains_key(pairing_id)
+        };
+
+        if !found {
+            return Err(BifrostError::Network(format!(
+                "pairing {} not found or expired",
+                pairing_id
+            )));
+        }
+
         let req = GrantDecisionRequest {
             pairing_id: pairing_id.to_string(),
             client_instance_id: self.identity.instance_id.clone(),
@@ -469,7 +490,31 @@ impl RemoteInvokeWorker {
         Ok(())
     }
 
+    fn cleanup_expired_pairings(&self) {
+        let ttl_ms = self.config.pair_code_ttl_secs * 1000;
+        let now = now_millis();
+        let mut pairings = self.pending_pairings.write();
+        let before = pairings.len();
+        pairings.retain(|id, tp| {
+            let alive = now.saturating_sub(tp.received_at) < ttl_ms;
+            if !alive {
+                info!(pairing_id = %id, age_secs = (now - tp.received_at) / 1000, "removing expired pairing request");
+            }
+            alive
+        });
+        let removed = before - pairings.len();
+        if removed > 0 {
+            debug!(
+                removed = removed,
+                remaining = pairings.len(),
+                "expired pairings cleanup done"
+            );
+        }
+    }
+
     async fn maybe_refresh_pair_code(&self) {
+        self.cleanup_expired_pairings();
+
         let needs_refresh = {
             let session = self.discovery_session.read();
             match session.as_ref() {
@@ -747,7 +792,13 @@ impl RemoteInvokeWorker {
             "received pairing request, awaiting user decision"
         );
 
-        self.pending_pairings.write().insert(pairing_id, request);
+        let timestamped = TimestampedPairing {
+            request,
+            received_at: now_millis(),
+        };
+        self.pending_pairings
+            .write()
+            .insert(pairing_id, timestamped);
     }
 
     async fn handle_call_open(&self, data: Value) {

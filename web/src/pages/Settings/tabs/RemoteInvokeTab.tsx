@@ -113,7 +113,8 @@ export default function RemoteInvokeTab() {
   const refreshGrants = useCallback(async () => {
     try {
       const res = await listGrants();
-      setGrants(res.grants ?? []);
+      const sorted = (res.grants ?? []).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+      setGrants(sorted);
     } catch {
       // ignore
     }
@@ -122,7 +123,8 @@ export default function RemoteInvokeTab() {
   const refreshCalls = useCallback(async () => {
     try {
       const res = await listCalls();
-      setCalls(res.calls ?? []);
+      const sorted = (res.calls ?? []).sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0));
+      setCalls(sorted);
     } catch {
       // ignore
     }
@@ -464,13 +466,13 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24}>
           <Card
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Active Grants</span>
-                <Badge count={grants.length} />
+                <span>Grants</span>
+                <Badge count={grants.filter((g) => g.status === "active").length} />
               </Space>
             }
             extra={
@@ -491,9 +493,10 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={grants}
                 size="small"
+                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(g) => (
                   <List.Item
-                    actions={[
+                    actions={g.status === "removed" ? [] : [
                       <Popconfirm
                         key="revoke"
                         title="Revoke this grant?"
@@ -552,7 +555,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24}>
           <Card
             title={
               <Space>
@@ -579,6 +582,7 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={calls}
                 size="small"
+                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(c) => (
                   <List.Item>
                     <List.Item.Meta

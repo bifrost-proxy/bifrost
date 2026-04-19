@@ -179,7 +179,15 @@ async fn handle_connect(
             );
             println!(
                 "{}",
-                "  You can now run commands like: bifrost remote status".dimmed()
+                format!("  Client ID: {}", client_instance_id).dimmed()
+            );
+            println!(
+                "{}",
+                format!(
+                    "  You can now run commands like: bifrost remote status --client-id {}",
+                    &client_instance_id[..client_instance_id.len().min(8)]
+                )
+                .dimmed()
             );
             Ok(())
         }

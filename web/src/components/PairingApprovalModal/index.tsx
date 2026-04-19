@@ -45,20 +45,28 @@ function PairingItem({
   onIgnore,
 }: {
   pairing: PairingRequest;
-  onApprove: (pairingId: string, mode: GrantMode) => void;
-  onReject: (pairingId: string) => void;
+  onApprove: (pairingId: string, mode: GrantMode) => Promise<void>;
+  onReject: (pairingId: string) => Promise<void>;
   onIgnore: (pairingId: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
 
   const handleApprove = async (mode: GrantMode) => {
     setLoading(true);
-    onApprove(pairing.pairing_id, mode);
+    try {
+      await onApprove(pairing.pairing_id, mode);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleReject = () => {
+  const handleReject = async () => {
     setLoading(true);
-    onReject(pairing.pairing_id);
+    try {
+      await onReject(pairing.pairing_id);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -170,7 +178,7 @@ export default function PairingApprovalModal() {
       if (ok) {
         message.success("Authorization granted");
       } else {
-        message.error("Failed to authorize");
+        message.warning("Request may have expired and was removed");
       }
     },
     [storeApprove],
@@ -182,7 +190,7 @@ export default function PairingApprovalModal() {
       if (ok) {
         message.success("Request rejected");
       } else {
-        message.error("Failed to reject");
+        message.warning("Request may have expired and was removed");
       }
     },
     [storeReject],

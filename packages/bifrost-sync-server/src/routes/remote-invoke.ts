@@ -443,7 +443,7 @@ async function handleFindReusableGrant(ctx: RequestContext, service: RemoteInvok
 async function handleListGrants(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const query = {
     client_instance_id: ctx.url.searchParams.get('client_instance_id') ?? undefined,
-    status: ctx.url.searchParams.get('status') ?? undefined,
+    status: ctx.url.searchParams.get('status') ?? 'active',
     offset: parseInt(ctx.url.searchParams.get('offset') ?? '0', 10),
     limit: parseInt(ctx.url.searchParams.get('limit') ?? '100', 10),
   };
