@@ -276,11 +276,36 @@ async fn resolve_client_id(
     caller: &CallerRelayClient,
     explicit_id: Option<&str>,
 ) -> bifrost_core::Result<String> {
-    if let Some(id) = explicit_id {
-        return Ok(id.to_string());
+    let clients = caller.list_online_clients().await?;
+
+    if let Some(prefix) = explicit_id {
+        let matches: Vec<&str> = clients
+            .iter()
+            .filter_map(|c| c.get("client_instance_id").and_then(|v| v.as_str()))
+            .filter(|id| id.starts_with(prefix))
+            .collect();
+
+        match matches.len() {
+            0 => {
+                return Err(BifrostError::Config(format!(
+                    "no online client matching prefix '{prefix}'"
+                )));
+            }
+            1 => {
+                let full_id = matches[0].to_string();
+                if full_id != prefix {
+                    debug!(prefix = %prefix, full_id = %full_id, "resolved short client id");
+                }
+                return Ok(full_id);
+            }
+            n => {
+                return Err(BifrostError::Config(format!(
+                    "ambiguous client id prefix '{prefix}' matches {n} clients, please be more specific"
+                )));
+            }
+        }
     }
 
-    let clients = caller.list_online_clients().await?;
     match clients.len() {
         0 => Err(BifrostError::Config(
             "no online clients found on relay server".to_string(),
