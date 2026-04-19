@@ -229,7 +229,7 @@ export default function RemoteInvokeTab() {
   const pairingList = pendingPairings;
 
   return (
-    <div data-testid="settings-remote-invoke-tab">
+    <div data-testid="settings-remote-invoke-tab" style={{ paddingBottom: 20 }}>
       <Row gutter={[16, 16]}>
         <Col xs={24}>
           <Alert
@@ -398,6 +398,7 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
+            styles={{ header: { overflow: "visible" } }}
           >
             {pairingList.length === 0 ? (
               <Empty
@@ -467,6 +468,7 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
+            styles={{ header: { overflow: "visible" } }}
           >
             {grants.length === 0 ? (
               <Empty
@@ -556,6 +558,7 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
+            styles={{ header: { overflow: "visible" } }}
           >
             {calls.length === 0 ? (
               <Empty
