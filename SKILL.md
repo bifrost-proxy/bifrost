@@ -540,6 +540,22 @@ bifrost install-skill -t universal             # 仅安装到通用 .agents/skil
 bifrost install-skill -t all -y                # 自动安装到所有支持的工具
 ```
 
+### 22. 远程调用 (Remote)
+
+通过云端 Relay 中转，远程查询目标 Bifrost 客户端实例的状态和流量信息。适用于目标 Bifrost 实例不在本机的场景。
+
+```bash
+bifrost remote status                                              # 查看远端状态
+bifrost remote search <query>                                      # 远程搜索流量
+bifrost remote traffic list [--limit N] [--host example.com] ...   # 远程流量列表
+bifrost remote traffic get <id> --request-body --response-body     # 远程获取流量详情
+```
+
+- 所有远程命令为只读操作，不支持配置修改
+- 首次调用需走配对授权流程（目标客户端开启发现模式 → 获取授权码 → 配对 → 人工批准）
+- 已授权的调用方在有效期内可直接复用
+- 完整参数和授权说明详见 [bifrost_remote_skill.md](./bifrost_remote_skill.md)
+
 ## 推荐工作流
 
 ### 调试 HTTPS 明文请求

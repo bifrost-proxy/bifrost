@@ -1120,7 +1120,7 @@ struct ReusableGrant {
   - **禁止字符串拼接调用 shell**（禁止 `sh -c`），必须使用结构化参数传递（如 `Command::new().arg()`）。
   - 所有 `args` 字段必须经过**类型校验和白名单过滤**：
     - `id` 类参数：纯数字，最大长度 `20` 字符
-    - `query` 类参数：`[a-zA-Z0-9._\-:/]`，最大长度 `500` 字符
+    - `query` 类参数：支持 Unicode（含中文），禁止 ASCII 控制字符，最大长度 `500` 字符
     - 其他参数类型在白名单定义时明确允许的字符集和长度上限
   - 参数 sanitization 作为 `RemoteQueryExecutor` 的**入口强制步骤**，在命令分发前执行，校验失败直接返回 `invalid_args` 错误。
 - 输出统一包装为：
@@ -1992,7 +1992,7 @@ struct ReusableGrant {
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 | 安全约束 |
 |------|------|------|--------|------|---------|
-| `query` | string | **是** | - | 搜索关键词 | 长度 ≤ 500，字符集 `[a-zA-Z0-9._\-:/]` |
+| `query` | string | **是** | - | 搜索关键词 | 长度 ≤ 500，支持 Unicode（含中文），禁止 ASCII 控制字符 |
 
 - **响应内容**（JSON）：返回匹配的流量记录列表。
 - **与本地 CLI 的差异**：远程版目前仅支持 keyword 搜索，不支持本地 `bifrost traffic search` 的高级筛选参数（`--url`、`--headers`、`--body`、`--status`、`--method` 等范围限定）。后续可按需扩展。

@@ -181,13 +181,9 @@ impl RemoteInvokeExecutor {
                     MAX_QUERY_LEN
                 )));
             }
-            if !query
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
-            {
+            if query.chars().any(|c| c.is_ascii_control()) {
                 return Err(BifrostError::Config(
-                    "query param contains invalid characters (allowed: alphanumeric . _ - : /)"
-                        .to_string(),
+                    "query param must not contain ASCII control characters".to_string(),
                 ));
             }
         }
@@ -597,14 +593,37 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_args_query_rejects_special_chars() {
+    fn test_validate_args_query_rejects_control_chars() {
         let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
-            args_json: Some(r#"{"query":"'; DROP TABLE--"}"#.to_string()),
+            args_json: Some(r#"{"query":"hello\u0000world"}"#.to_string()),
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_err());
+    }
+
+    #[test]
+    fn test_validate_args_query_accepts_chinese() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            command: "traffic.search".to_string(),
+            args_json: Some(r#"{"query":"测试中文搜索"}"#.to_string()),
+        };
+        let args = executor.parse_and_validate_args(&cmd);
+        assert!(args.is_ok());
+        assert_eq!(args.unwrap().query.as_deref(), Some("测试中文搜索"));
+    }
+
+    #[test]
+    fn test_validate_args_query_accepts_special_url_chars() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            command: "traffic.search".to_string(),
+            args_json: Some(r#"{"query":"example.com/path?key=value&foo=bar"}"#.to_string()),
+        };
+        let args = executor.parse_and_validate_args(&cmd);
+        assert!(args.is_ok());
     }
 
     #[test]
