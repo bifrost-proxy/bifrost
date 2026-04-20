@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bifrost_core::{direct_reqwest_client_builder, BifrostError};
 use colored::Colorize;
+use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,13 +16,174 @@ use crate::cli::{RemoteCommands, RemoteTrafficCommands};
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 const CALL_EVENT_TIMEOUT_SECS: u64 = 120;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
+const CONNECTIONS_FILE: &str = "remote-connections.json";
+const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 
 #[derive(Debug)]
 pub struct RemoteOptions {
     pub relay_url: String,
-    pub token: String,
     pub client_id: Option<String>,
     pub action: RemoteCommands,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalConnection {
+    client_instance_id: String,
+    device_name: String,
+    platform: String,
+    relay_url: String,
+    grant_id: String,
+    grant_mode: String,
+    caller_fingerprint: String,
+    connected_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConnectionsFile {
+    version: u32,
+    connections: Vec<LocalConnection>,
+}
+
+fn connections_path() -> PathBuf {
+    bifrost_storage::data_dir().join(CONNECTIONS_FILE)
+}
+
+fn load_connections() -> bifrost_core::Result<Vec<LocalConnection>> {
+    let path = connections_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "read {}: {e}",
+            path.display()
+        )))
+    })?;
+    let file: ConnectionsFile = serde_json::from_str(&content)
+        .map_err(|e| BifrostError::Config(format!("parse {}: {e}", path.display())))?;
+    Ok(file.connections)
+}
+
+fn save_connections(connections: &[LocalConnection]) -> bifrost_core::Result<()> {
+    let path = connections_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "mkdir {}: {e}",
+                parent.display()
+            )))
+        })?;
+    }
+    let file = ConnectionsFile {
+        version: 1,
+        connections: connections.to_vec(),
+    };
+    let content = serde_json::to_string_pretty(&file)
+        .map_err(|e| BifrostError::Config(format!("serialize connections: {e}")))?;
+    std::fs::write(&path, content).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "write {}: {e}",
+            path.display()
+        )))
+    })?;
+    Ok(())
+}
+
+fn resolve_local_connection(
+    connections: &[LocalConnection],
+    explicit_id: Option<&str>,
+) -> bifrost_core::Result<LocalConnection> {
+    if let Some(prefix) = explicit_id {
+        let matches: Vec<&LocalConnection> = connections
+            .iter()
+            .filter(|c| c.client_instance_id.starts_with(prefix))
+            .collect();
+
+        match matches.len() {
+            0 => {
+                return Err(BifrostError::Config(
+                    "no saved connection matching that prefix, please run `bifrost remote connect <pair-code>` first".to_string(),
+                ));
+            }
+            1 => {
+                let conn = matches[0];
+                if conn.client_instance_id != prefix {
+                    debug!(prefix = %prefix, full_id = %conn.client_instance_id, "resolved short client id from local connections");
+                }
+                return Ok(conn.clone());
+            }
+            n => {
+                if !std::io::stdin().is_terminal() {
+                    return Err(BifrostError::Config(format!(
+                        "ambiguous client id prefix '{prefix}' matches {n} saved connections, please be more specific"
+                    )));
+                }
+
+                let items: Vec<String> = matches
+                    .iter()
+                    .map(|c| {
+                        let short_id = &c.client_instance_id[..c.client_instance_id.len().min(12)];
+                        format!("{} ({short_id})", c.device_name)
+                    })
+                    .collect();
+
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!(
+                        "Prefix '{prefix}' matches {n} connections, select one"
+                    ))
+                    .items(&items)
+                    .default(0)
+                    .interact()
+                    .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
+
+                return Ok(matches[selection].clone());
+            }
+        }
+    }
+
+    match connections.len() {
+        0 => Err(BifrostError::Config(
+            "no saved connection, please run `bifrost remote connect <pair-code>` first"
+                .to_string(),
+        )),
+        1 => {
+            let conn = &connections[0];
+            let short_id = &conn.client_instance_id[..conn.client_instance_id.len().min(12)];
+            println!(
+                "{}",
+                format!(
+                    "→ Using saved connection: {} ({short_id})",
+                    conn.device_name
+                )
+                .dimmed()
+            );
+            Ok(conn.clone())
+        }
+        n => {
+            if !std::io::stdin().is_terminal() {
+                return Err(BifrostError::Config(
+                    "multiple saved connections, please specify --client-id".to_string(),
+                ));
+            }
+
+            let items: Vec<String> = connections
+                .iter()
+                .map(|c| {
+                    let short_id = &c.client_instance_id[..c.client_instance_id.len().min(12)];
+                    format!("{} ({short_id})", c.device_name)
+                })
+                .collect();
+
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Found {n} saved connections, select one"))
+                .items(&items)
+                .default(0)
+                .interact()
+                .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
+
+            Ok(connections[selection].clone())
+        }
+    }
 }
 
 pub fn handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
@@ -32,7 +196,7 @@ pub fn handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
 }
 
 async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
-    let caller = CallerRelayClient::new(&opts.relay_url, &opts.token);
+    let caller = CallerRelayClient::new(&opts.relay_url);
     let caller_fingerprint = generate_caller_fingerprint();
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
@@ -42,11 +206,24 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     if let RemoteCommands::Connect { pair_code } = &opts.action {
-        let client_instance_id = opts.client_id.clone().unwrap_or_default();
-        return handle_connect(&caller, &client_instance_id, pair_code, &caller_info).await;
+        return handle_connect(&caller, pair_code, &caller_info, &opts.relay_url).await;
     }
 
-    let client_instance_id = resolve_client_id(&caller, opts.client_id.as_deref()).await?;
+    let connections = load_connections()?;
+
+    if let RemoteCommands::Disconnect { all, grant_id } = &opts.action {
+        return handle_disconnect(
+            &caller,
+            &connections,
+            opts.client_id.as_deref(),
+            *all,
+            grant_id.as_deref(),
+            &caller_fingerprint,
+        )
+        .await;
+    }
+
+    let conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
 
     let (command, args_json) = build_remote_command(&opts.action);
     let command_summary = CommandSummary {
@@ -55,7 +232,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     let grant = caller
-        .find_reusable_grant(&client_instance_id, &caller_fingerprint)
+        .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
         .await?;
 
     let grant = match grant {
@@ -63,7 +240,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         None => {
             eprintln!(
                 "{}",
-                "✗ No existing authorization found. Please run `bifrost remote connect <pair-code>` first."
+                "✗ Authorization expired or revoked. Please run `bifrost remote connect <pair-code>` again."
                     .bright_red()
             );
             std::process::exit(1);
@@ -83,21 +260,26 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let call_result = caller
         .open_call(&OpenCallRequest {
             grant_id: grant.grant_id.clone(),
-            client_instance_id: client_instance_id.clone(),
+            client_instance_id: conn.client_instance_id.clone(),
+            caller_fingerprint: caller_fingerprint.clone(),
             command: RemoteCommand {
                 command: command.clone(),
                 args_json: args_json.clone(),
             },
             command_summary,
-            caller_pubkey: String::new(),
         })
         .await?;
 
     debug!(call_id = %call_result.call_id, grant_id = %grant.grant_id, "call opened, subscribing to events");
     println!("{}", "→ Executing command on remote device...".dimmed());
 
+    let stream_stdout = should_stream_remote_command(&command);
     let result = caller
-        .subscribe_call_events(&call_result.call_id, &call_result.relay_token)
+        .subscribe_call_events(
+            &call_result.call_id,
+            &call_result.relay_token,
+            stream_stdout,
+        )
         .await?;
 
     print_remote_result(&command, &result);
@@ -111,15 +293,10 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
 async fn handle_connect(
     caller: &CallerRelayClient,
-    client_instance_id: &str,
     pair_code: &str,
     caller_info: &CallerInfo,
+    relay_url: &str,
 ) -> bifrost_core::Result<()> {
-    let command_summary = CommandSummary {
-        command_preview: "connect".to_string(),
-        masked_args_json: None,
-    };
-
     println!(
         "{}",
         format!(
@@ -129,19 +306,14 @@ async fn handle_connect(
         .dimmed()
     );
 
-    let pairing_result = caller
-        .start_pairing(&StartPairingRequest {
-            client_instance_id: client_instance_id.to_string(),
+    let pairing_result = start_pairing_with_retry(
+        caller,
+        &StartPairingRequest {
             pair_code: pair_code.to_string(),
-            caller_pubkey: String::new(),
             caller_info: caller_info.clone(),
-            command_summary,
-            command: RemoteCommand {
-                command: "connect".to_string(),
-                args_json: None,
-            },
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     println!(
         "{}",
@@ -153,6 +325,39 @@ async fn handle_connect(
     match approval.status.as_str() {
         "approved" => {
             let grant_id = approval.grant_id.unwrap_or_else(|| "unknown".to_string());
+            let client_instance_id = approval.client_instance_id.unwrap_or_default();
+            let device_name = approval
+                .device_name
+                .unwrap_or_else(|| "unknown".to_string());
+            let platform = approval.platform.unwrap_or_else(|| "unknown".to_string());
+            let grant_mode = approval.grant_mode.unwrap_or_else(|| "unknown".to_string());
+
+            let new_conn = LocalConnection {
+                client_instance_id: client_instance_id.clone(),
+                device_name: device_name.clone(),
+                platform: platform.clone(),
+                relay_url: relay_url.to_string(),
+                grant_id: grant_id.clone(),
+                grant_mode,
+                caller_fingerprint: caller_info.fingerprint.clone(),
+                connected_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+
+            let mut connections = load_connections().unwrap_or_default();
+            if let Some(existing) = connections
+                .iter_mut()
+                .find(|c| c.client_instance_id == client_instance_id && c.relay_url == relay_url)
+            {
+                *existing = new_conn;
+            } else {
+                connections.push(new_conn);
+            }
+            save_connections(&connections)?;
+
+            let short_id = &client_instance_id[..client_instance_id.len().min(12)];
             println!(
                 "{}",
                 format!(
@@ -163,7 +368,14 @@ async fn handle_connect(
             );
             println!(
                 "{}",
-                "  You can now run commands like: bifrost remote status".dimmed()
+                format!("  Device: {device_name} ({platform})").dimmed()
+            );
+            println!(
+                "{}",
+                format!(
+                    "  You can now run commands like: bifrost remote status --client-id {short_id}"
+                )
+                .dimmed()
             );
             Ok(())
         }
@@ -183,9 +395,158 @@ async fn handle_connect(
     }
 }
 
+async fn start_pairing_with_retry(
+    caller: &CallerRelayClient,
+    req: &StartPairingRequest,
+) -> bifrost_core::Result<StartPairingResponse> {
+    let mut retry_idx = 0usize;
+
+    loop {
+        match caller.start_pairing(req).await {
+            Ok(result) => return Ok(result),
+            Err(err) if is_retryable_start_pairing_overload(&err) => {
+                if retry_idx >= START_PAIRING_OVERLOAD_RETRY_DELAYS_MS.len() {
+                    return Err(start_pairing_overload_error());
+                }
+
+                let delay_ms = START_PAIRING_OVERLOAD_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+
+                warn!(
+                    attempt = retry_idx,
+                    delay_ms, "relay overload protection triggered during start_pairing, retrying"
+                );
+                println!(
+                    "{}",
+                    format!("↻ Relay is temporarily busy, retrying pairing in {delay_ms}ms...")
+                        .dimmed()
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn is_retryable_start_pairing_overload(err: &BifrostError) -> bool {
+    let BifrostError::Network(message) = err else {
+        return false;
+    };
+
+    let lower = message.to_ascii_lowercase();
+    lower.contains("start_pairing failed with status 503") && lower.contains("overload-protect")
+}
+
+fn start_pairing_overload_error() -> BifrostError {
+    BifrostError::Network(
+        "pairing service is temporarily busy (relay overload protection triggered). Please wait a few seconds and run `bifrost remote connect <pair-code>` again.".to_string(),
+    )
+}
+
+async fn handle_disconnect(
+    caller: &CallerRelayClient,
+    connections: &[LocalConnection],
+    client_id: Option<&str>,
+    all: bool,
+    grant_id: Option<&str>,
+    caller_fingerprint: &str,
+) -> bifrost_core::Result<()> {
+    if let Some(gid) = grant_id {
+        caller.delete_grant(gid, caller_fingerprint).await?;
+        let mut conns = connections.to_vec();
+        conns.retain(|c| c.grant_id != gid);
+        save_connections(&conns)?;
+        println!(
+            "{}",
+            format!("✓ Grant {} revoked.", &gid[..gid.len().min(8)]).bright_green()
+        );
+        return Ok(());
+    }
+
+    if all {
+        if connections.is_empty() {
+            println!("{}", "No saved connections.".dimmed());
+            return Ok(());
+        }
+
+        println!(
+            "{}",
+            format!("Revoking {} connection(s)…", connections.len()).bright_yellow()
+        );
+
+        let mut remaining = connections.to_vec();
+        let mut deleted = 0usize;
+        let total = remaining.len();
+        let mut to_remove = Vec::new();
+
+        for (i, conn) in connections.iter().enumerate() {
+            let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
+            match caller
+                .delete_grant(&conn.grant_id, caller_fingerprint)
+                .await
+            {
+                Ok(()) => {
+                    deleted += 1;
+                    to_remove.push(i);
+                    println!(
+                        "  {} {} ({})",
+                        "✓".bright_green(),
+                        short_id,
+                        conn.device_name
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} {} ({}) — {}",
+                        "✗".bright_red(),
+                        short_id,
+                        conn.device_name,
+                        e
+                    );
+                }
+            }
+        }
+
+        for i in to_remove.into_iter().rev() {
+            remaining.remove(i);
+        }
+        save_connections(&remaining)?;
+
+        println!(
+            "{}",
+            format!("Revoked {deleted}/{total} connection(s).").bright_green()
+        );
+        return Ok(());
+    }
+
+    let conn = resolve_local_connection(connections, client_id)?;
+    let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
+
+    caller
+        .delete_grant(&conn.grant_id, caller_fingerprint)
+        .await?;
+
+    let mut conns = connections.to_vec();
+    conns.retain(|c| {
+        !(c.client_instance_id == conn.client_instance_id && c.relay_url == conn.relay_url)
+    });
+    save_connections(&conns)?;
+
+    println!(
+        "{}",
+        format!(
+            "✓ Disconnected from {} (grant: {short_id})",
+            conn.device_name
+        )
+        .bright_green()
+    );
+    Ok(())
+}
+
 fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
     match action {
         RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
+        RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
         RemoteCommands::Status => ("status".to_string(), None),
         RemoteCommands::Search { keyword, limit } => {
             let args = serde_json::json!({
@@ -238,6 +599,10 @@ fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
     }
 }
 
+fn should_stream_remote_command(command: &str) -> bool {
+    matches!(command, "search.get" | "traffic.search")
+}
+
 fn generate_caller_fingerprint() -> String {
     let machine_id = get_hostname();
     let user = get_username();
@@ -272,82 +637,6 @@ fn get_username() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
-async fn resolve_client_id(
-    caller: &CallerRelayClient,
-    explicit_id: Option<&str>,
-) -> bifrost_core::Result<String> {
-    let clients = caller.list_online_clients().await?;
-
-    if let Some(prefix) = explicit_id {
-        let matches: Vec<&str> = clients
-            .iter()
-            .filter_map(|c| c.get("client_instance_id").and_then(|v| v.as_str()))
-            .filter(|id| id.starts_with(prefix))
-            .collect();
-
-        match matches.len() {
-            0 => {
-                return Err(BifrostError::Config(format!(
-                    "no online client matching prefix '{prefix}'"
-                )));
-            }
-            1 => {
-                let full_id = matches[0].to_string();
-                if full_id != prefix {
-                    debug!(prefix = %prefix, full_id = %full_id, "resolved short client id");
-                }
-                return Ok(full_id);
-            }
-            n => {
-                return Err(BifrostError::Config(format!(
-                    "ambiguous client id prefix '{prefix}' matches {n} clients, please be more specific"
-                )));
-            }
-        }
-    }
-
-    match clients.len() {
-        0 => Err(BifrostError::Config(
-            "no online clients found on relay server".to_string(),
-        )),
-        1 => {
-            let id = clients[0]
-                .get("client_instance_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    BifrostError::Config("client response missing client_instance_id".to_string())
-                })?;
-            println!(
-                "{}",
-                format!("→ Found online client: {}", &id[..id.len().min(12)]).dimmed()
-            );
-            Ok(id.to_string())
-        }
-        n => {
-            println!("{}", format!("Found {} online clients:", n).bright_yellow());
-            for (i, c) in clients.iter().enumerate() {
-                let id = c
-                    .get("client_instance_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let name = c
-                    .get("device_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                println!(
-                    "  {} {} ({})",
-                    format!("[{}]", i + 1).bright_cyan(),
-                    name,
-                    id
-                );
-            }
-            Err(BifrostError::Config(
-                "multiple clients online, please specify --client-id".to_string(),
-            ))
-        }
-    }
-}
-
 fn print_remote_result(command: &str, result: &CallResult) {
     if let Some(ref stdout) = result.stdout {
         if !stdout.is_empty() {
@@ -371,22 +660,23 @@ fn print_remote_result(command: &str, result: &CallResult) {
         eprintln!(
             "{}",
             format!(
-                "Remote command '{}' exited with code {}",
-                command, result.exit_code
+                "Remote command '{}' exited with code {}{}",
+                command,
+                result.exit_code,
+                if result.stderr.is_none() {
+                    " (no error details received from remote)"
+                } else {
+                    ""
+                }
             )
             .bright_red()
         );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Caller Relay Client
-// ---------------------------------------------------------------------------
-
 struct CallerRelayClient {
     http: reqwest::Client,
     base_url: String,
-    token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,12 +706,8 @@ struct RemoteCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StartPairingRequest {
-    client_instance_id: String,
     pair_code: String,
-    caller_pubkey: String,
     caller_info: CallerInfo,
-    command_summary: CommandSummary,
-    command: RemoteCommand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,7 +723,13 @@ struct PairingWatchResult {
     #[serde(default)]
     grant_id: Option<String>,
     #[serde(default)]
-    relay_token: Option<String>,
+    client_instance_id: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    grant_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,9 +743,9 @@ struct GrantInfo {
 struct OpenCallRequest {
     grant_id: String,
     client_instance_id: String,
+    caller_fingerprint: String,
     command: RemoteCommand,
     command_summary: CommandSummary,
-    caller_pubkey: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -479,7 +771,7 @@ struct RelayApiResponse<T> {
 }
 
 impl CallerRelayClient {
-    fn new(base_url: &str, token: &str) -> Self {
+    fn new(base_url: &str) -> Self {
         let http = direct_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -490,37 +782,36 @@ impl CallerRelayClient {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
-            token: token.to_string(),
         }
     }
 
-    fn auth_headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if !self.token.is_empty() {
-            headers.insert(
-                "x-bifrost-token",
-                reqwest::header::HeaderValue::from_str(&self.token)
-                    .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
-            );
-        }
-        headers
-    }
-
-    async fn list_online_clients(&self) -> bifrost_core::Result<Vec<Value>> {
-        let url = format!("{}/v4/remote-invoke/clients", self.base_url);
+    async fn delete_grant(
+        &self,
+        grant_id: &str,
+        caller_fingerprint: &str,
+    ) -> bifrost_core::Result<()> {
+        let url = format!(
+            "{}/v4/remote-invoke/grants/{}?caller_fingerprint={}",
+            self.base_url,
+            grant_id,
+            urlencoding::encode(caller_fingerprint),
+        );
         let response = self
             .http
-            .get(&url)
-            .headers(self.auth_headers())
+            .delete(&url)
             .send()
             .await
-            .map_err(|e| BifrostError::Network(format!("list clients failed: {e}")))?;
+            .map_err(|e| BifrostError::Network(format!("delete grant failed: {e}")))?;
 
-        let data: Value = self.parse_response_data(response, "list_clients").await?;
-        match data {
-            Value::Array(arr) => Ok(arr),
-            _ => Ok(vec![]),
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "delete grant failed with status {status}: {}",
+                truncate(&body, 500)
+            )));
         }
+        Ok(())
     }
 
     async fn find_reusable_grant(
@@ -538,7 +829,6 @@ impl CallerRelayClient {
         let response = self
             .http
             .get(&url)
-            .headers(self.auth_headers())
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("find reusable grant failed: {e}")))?;
@@ -565,7 +855,6 @@ impl CallerRelayClient {
         let response = self
             .http
             .post(&url)
-            .headers(self.auth_headers())
             .json(req)
             .send()
             .await
@@ -587,7 +876,6 @@ impl CallerRelayClient {
 
         let response = sse_http
             .get(&url)
-            .headers(self.auth_headers())
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("watch pairing failed: {e}")))?;
@@ -637,12 +925,28 @@ impl CallerRelayClient {
                                                     let grant_id = v.get("grant_id")
                                                         .and_then(|g| g.as_str())
                                                         .map(|s| s.to_string());
-                                                    let relay_token = v.get("relay_token")
-                                                        .and_then(|t| t.as_str())
+                                                    let client_instance_id = v.get("client_instance_id")
+                                                        .and_then(|g| g.as_str())
+                                                        .map(|s| s.to_string());
+                                                    let device_name = v.get("device_name")
+                                                        .and_then(|g| g.as_str())
+                                                        .map(|s| s.to_string());
+                                                    let platform = v.get("platform")
+                                                        .and_then(|g| g.as_str())
+                                                        .map(|s| s.to_string());
+                                                    let grant_mode = v.get("grant_mode")
+                                                        .and_then(|g| g.as_str())
                                                         .map(|s| s.to_string());
 
                                                     if status == "approved" || status == "rejected" || status == "expired" || status == "cancelled" {
-                                                        return Ok(PairingWatchResult { status, grant_id, relay_token });
+                                                        return Ok(PairingWatchResult {
+                                                            status,
+                                                            grant_id,
+                                                            client_instance_id,
+                                                            device_name,
+                                                            platform,
+                                                            grant_mode,
+                                                        });
                                                     }
                                                 }
                                             }
@@ -678,7 +982,6 @@ impl CallerRelayClient {
         let response = self
             .http
             .post(&url)
-            .headers(self.auth_headers())
             .json(req)
             .send()
             .await
@@ -691,6 +994,7 @@ impl CallerRelayClient {
         &self,
         call_id: &str,
         relay_token: &str,
+        stream_stdout: bool,
     ) -> bifrost_core::Result<CallResult> {
         let url = format!(
             "{}/v4/remote-invoke/calls/{}/events",
@@ -735,14 +1039,18 @@ impl CallerRelayClient {
                 _ = &mut timeout => {
                     if exit_received {
                         debug!("grace timeout after exit, no late frame arrived");
-                        result.stdout = Some(stdout_parts.join(""));
+                        if !stream_stdout {
+                            result.stdout = Some(stdout_parts.join(""));
+                        }
                         return Ok(result);
                     }
                     warn!("call events timed out");
-                    if stdout_parts.is_empty() {
+                    if !stream_stdout && stdout_parts.is_empty() {
                         return Err(BifrostError::Config("remote call timed out waiting for response".to_string()));
                     }
-                    result.stdout = Some(stdout_parts.join(""));
+                    if !stream_stdout {
+                        result.stdout = Some(stdout_parts.join(""));
+                    }
                     return Ok(result);
                 }
                 chunk = stream.next() => {
@@ -766,20 +1074,29 @@ impl CallerRelayClient {
                                                             let seq = envelope.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
                                                             if seen_frame_seqs.insert(seq) {
                                                                 if let Some(ct) = envelope.get("ciphertext").and_then(|c| c.as_str()) {
-                                                                    stdout_parts.push(ct.to_string());
+                                                                    if stream_stdout {
+                                                                        print!("{ct}");
+                                                                        std::io::stdout().flush().ok();
+                                                                    } else {
+                                                                        stdout_parts.push(ct.to_string());
+                                                                    }
                                                                 }
                                                             } else {
                                                                 debug!(seq = seq, "skipping duplicate frame");
                                                             }
                                                         }
                                                     } else if let Some(ct) = v.get("ciphertext").and_then(|c| c.as_str()) {
-                                                        stdout_parts.push(ct.to_string());
+                                                        if stream_stdout {
+                                                            print!("{ct}");
+                                                            std::io::stdout().flush().ok();
+                                                        } else {
+                                                            stdout_parts.push(ct.to_string());
+                                                        }
                                                     }
                                                 }
                                                 if exit_received {
-                                                    debug!("late frame received after exit, returning");
-                                                    result.stdout = Some(stdout_parts.join(""));
-                                                    return Ok(result);
+                                                    debug!("late frame received after exit");
+                                                    timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
                                                 }
                                             }
                                             "exit" => {
@@ -789,8 +1106,12 @@ impl CallerRelayClient {
                                                         .unwrap_or(0) as i32;
                                                     result.duration_ms = v.get("duration_ms")
                                                         .and_then(|d| d.as_u64());
+                                                    result.stderr = v.get("stderr")
+                                                        .and_then(|s| s.as_str())
+                                                        .filter(|s| !s.is_empty())
+                                                        .map(|s| s.to_string());
                                                 }
-                                                if !stdout_parts.is_empty() {
+                                                if !stream_stdout && !stdout_parts.is_empty() {
                                                     result.stdout = Some(stdout_parts.join(""));
                                                     return Ok(result);
                                                 }
@@ -808,7 +1129,9 @@ impl CallerRelayClient {
                                                     result.exit_code = -1;
                                                     result.stderr = Some(msg.to_string());
                                                 }
-                                                result.stdout = Some(stdout_parts.join(""));
+                                                if !stream_stdout {
+                                                    result.stdout = Some(stdout_parts.join(""));
+                                                }
                                                 return Ok(result);
                                             }
                                             _ => {
@@ -833,7 +1156,9 @@ impl CallerRelayClient {
                         }
                         None => {
                             info!("call events stream closed");
-                            result.stdout = Some(stdout_parts.join(""));
+                            if !stream_stdout {
+                                result.stdout = Some(stdout_parts.join(""));
+                            }
                             return Ok(result);
                         }
                     }
@@ -895,5 +1220,84 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max).collect();
         format!("{t}...(truncated)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_remote_command_for_search_uses_streaming_command() {
+        let (command, args_json) = build_remote_command(&RemoteCommands::Search {
+            keyword: "nextoncall".to_string(),
+            limit: 7,
+        });
+
+        assert_eq!(command, "search.get");
+        let args = args_json.expect("search args_json should exist");
+        let parsed: Value = serde_json::from_str(&args).expect("search args_json should be valid");
+        assert_eq!(parsed["query"], "nextoncall");
+        assert_eq!(parsed["limit"], 7);
+    }
+
+    #[test]
+    fn test_build_remote_command_for_traffic_search_uses_streaming_command() {
+        let (command, args_json) = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Search {
+                keyword: "token".to_string(),
+                limit: 3,
+            },
+        });
+
+        assert_eq!(command, "traffic.search");
+        let args = args_json.expect("traffic search args_json should exist");
+        let parsed: Value =
+            serde_json::from_str(&args).expect("traffic search args_json should be valid");
+        assert_eq!(parsed["query"], "token");
+        assert_eq!(parsed["limit"], 3);
+    }
+
+    #[test]
+    fn test_should_stream_remote_command_marks_search_variants_only() {
+        assert!(should_stream_remote_command("search.get"));
+        assert!(should_stream_remote_command("traffic.search"));
+        assert!(!should_stream_remote_command("status"));
+        assert!(!should_stream_remote_command("traffic.get"));
+    }
+
+    #[test]
+    fn test_retryable_start_pairing_overload_matches_503_overload_protect() {
+        let err = BifrostError::Network(
+            "start_pairing failed with status 503 Service Unavailable: overload-protect triggered"
+                .to_string(),
+        );
+
+        assert!(is_retryable_start_pairing_overload(&err));
+    }
+
+    #[test]
+    fn test_retryable_start_pairing_overload_rejects_non_overload_errors() {
+        let invalid_code = BifrostError::Network(
+            "start_pairing failed with status 400 Bad Request: pair_code_expired".to_string(),
+        );
+        let unrelated_503 = BifrostError::Network(
+            "watch_pairing failed with status 503 Service Unavailable: upstream maintenance"
+                .to_string(),
+        );
+
+        assert!(!is_retryable_start_pairing_overload(&invalid_code));
+        assert!(!is_retryable_start_pairing_overload(&unrelated_503));
+    }
+
+    #[test]
+    fn test_start_pairing_overload_error_is_actionable() {
+        let err = start_pairing_overload_error();
+        let BifrostError::Network(message) = err else {
+            panic!("expected network error");
+        };
+
+        assert!(message.contains("pairing service is temporarily busy"));
+        assert!(message.contains("bifrost remote connect <pair-code>"));
     }
 }

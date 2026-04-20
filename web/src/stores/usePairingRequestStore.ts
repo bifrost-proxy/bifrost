@@ -91,6 +91,7 @@ export const usePairingRequestStore = create<PairingRequestState>((set, get) => 
       if (!isConnectionIssueError(e)) {
         console.error("Failed to approve pairing:", e);
       }
+      await get().fetchPendingList();
       return false;
     }
   },
@@ -106,6 +107,7 @@ export const usePairingRequestStore = create<PairingRequestState>((set, get) => 
       if (!isConnectionIssueError(e)) {
         console.error("Failed to reject pairing:", e);
       }
+      await get().fetchPendingList();
       return false;
     }
   },

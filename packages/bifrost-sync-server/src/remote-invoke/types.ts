@@ -110,12 +110,8 @@ export interface EncryptedEnvelope {
 }
 
 export interface StartPairingRequest {
-  client_instance_id: string;
   pair_code: string;
-  caller_pubkey: string;
   caller_info: CallerInfo;
-  command_summary: CommandSummary;
-  command: RemoteCommand;
 }
 
 export interface GrantDecisionRequest {
@@ -150,6 +146,7 @@ export interface ClientCallExitRequest {
   client_instance_id: string;
   exit_code: number;
   duration_ms?: number;
+  stderr?: string;
   stdout_digest?: string;
   stderr_digest?: string;
   bytes_in?: number;
@@ -159,14 +156,10 @@ export interface ClientCallExitRequest {
 export interface OpenCallRequest {
   grant_id: string;
   client_instance_id: string;
+  caller_fingerprint: string;
   caller_pubkey: string;
   command_summary: CommandSummary;
   command: RemoteCommand;
-}
-
-export interface UpdateGrantRequest {
-  grant_mode?: GrantMode;
-  expires_at?: string;
 }
 
 export interface CallsQueryParams {
@@ -185,6 +178,7 @@ export interface GrantsQueryParams {
 }
 
 export interface ClientRegistrationRequest {
+  challenge_id: string;
   client_instance_id: string;
   client_long_term_pubkey: string;
   device_name: string;
@@ -192,6 +186,40 @@ export interface ClientRegistrationRequest {
   bifrost_version: string;
   signature: string;
   timestamp: number;
+}
+
+export interface ClientRegistrationChallengeRequest {
+  client_instance_id: string;
+}
+
+export interface ClientRegistrationChallengeResponse {
+  challenge_id: string;
+  challenge: string;
+  expires_at: number;
+  algorithm: string;
+}
+
+export function buildRegistrationSignaturePayload(
+  challengeId: string,
+  challenge: string,
+  clientInstanceId: string,
+  deviceName: string,
+  platform: string,
+  bifrostVersion: string,
+  clientLongTermPubkey: string,
+  timestamp: number,
+): string {
+  return JSON.stringify([
+    'bifrost-remote-register-v1',
+    challengeId,
+    challenge,
+    clientInstanceId,
+    deviceName,
+    platform,
+    bifrostVersion,
+    clientLongTermPubkey,
+    timestamp,
+  ]);
 }
 
 export const ALLOWED_COMMANDS = new Set([

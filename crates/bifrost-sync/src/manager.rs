@@ -154,6 +154,10 @@ impl SyncManagerHandle {
         self.inner.remote_sample(limit).await
     }
 
+    pub fn session_token(&self) -> Option<String> {
+        self.inner.session_token()
+    }
+
     pub async fn record_deleted_rule(&self, rule: &RuleFile) -> Result<()> {
         self.inner.record_deleted_rule(rule).await
     }
@@ -247,6 +251,10 @@ impl SyncManager {
     pub fn has_session(&self) -> bool {
         let state = self.state.lock();
         state.token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    pub fn session_token(&self) -> Option<String> {
+        self.state.lock().token.clone()
     }
 
     pub async fn login_url(&self, callback_url: &str) -> Result<String> {

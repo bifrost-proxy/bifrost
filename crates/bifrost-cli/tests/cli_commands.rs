@@ -958,6 +958,29 @@ fn start_all_options_parse() {
 }
 
 #[test]
+fn root_help_start_reference_stays_in_sync_with_start_flags() {
+    let help = run_help(&[]);
+    for opt in &[
+        "start [OPTIONS]",
+        "--skip-cert-check",
+        "--access-mode",
+        "--proxy-user <USER:PASS>",
+        "--system-proxy",
+        "--no-system-proxy",
+        "--proxy-bypass",
+        "--cli-proxy",
+        "--cli-proxy-no-proxy",
+        "-y, --yes",
+    ] {
+        assert!(
+            help.contains(opt),
+            "root help subcommand reference should contain '{}'",
+            opt
+        );
+    }
+}
+
+#[test]
 fn search_all_options_parse() {
     let help = run_help(&["search"]);
     for opt in &[

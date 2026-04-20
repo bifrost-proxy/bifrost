@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use super::types::{
     ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
+    ClientRegistrationChallengeRequest, ClientRegistrationChallengeResponse,
     ClientRegistrationRequest, ClientRegistrationResponse, GrantDecisionRequest,
     PublishPairCodeRequest,
 };
@@ -23,10 +24,17 @@ pub struct RelayClient {
     base_url: RwLock<String>,
     client_auth_token: RwLock<Option<String>>,
     client_instance_id: String,
+    device_name: String,
+    platform: String,
 }
 
 impl RelayClient {
-    pub fn new(base_url: &str, client_instance_id: &str) -> Self {
+    pub fn new(
+        base_url: &str,
+        client_instance_id: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Self {
         let http = direct_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -39,6 +47,8 @@ impl RelayClient {
             base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
             client_auth_token: RwLock::new(None),
             client_instance_id: client_instance_id.to_string(),
+            device_name: device_name.to_string(),
+            platform: platform.to_string(),
         }
     }
 
@@ -55,14 +65,42 @@ impl RelayClient {
     pub async fn register(
         &self,
         req: &ClientRegistrationRequest,
+        user_auth_token: Option<&str>,
     ) -> Result<ClientRegistrationResponse> {
         let url = format!("{}/v4/remote-invoke/client/register", self.base_url());
-        let response =
-            self.http.post(&url).json(req).send().await.map_err(|e| {
-                BifrostError::Network(format!("relay register request failed: {e}"))
-            })?;
+        let mut request = self.http.post(&url).json(req);
+        if let Some(token) = user_auth_token {
+            request = request.header("x-bifrost-token", token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("relay register request failed: {e}")))?;
         self.parse_response_with_data::<ClientRegistrationResponse>(response, "register")
             .await
+    }
+
+    pub async fn request_registration_challenge(
+        &self,
+        req: &ClientRegistrationChallengeRequest,
+        user_auth_token: Option<&str>,
+    ) -> Result<ClientRegistrationChallengeResponse> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/register/challenge",
+            self.base_url()
+        );
+        let mut request = self.http.post(&url).json(req);
+        if let Some(token) = user_auth_token {
+            request = request.header("x-bifrost-token", token);
+        }
+        let response = request.send().await.map_err(|e| {
+            BifrostError::Network(format!("relay register challenge request failed: {e}"))
+        })?;
+        self.parse_response_with_data::<ClientRegistrationChallengeResponse>(
+            response,
+            "request_registration_challenge",
+        )
+        .await
     }
 
     pub fn set_auth_token(&self, token: String) {
@@ -186,77 +224,62 @@ impl RelayClient {
         self.parse_response_empty(response, "revoke_ack").await
     }
 
-    pub async fn list_grants(&self) -> Result<Vec<serde_json::Value>> {
+    pub async fn delete_grant(&self, grant_id: &str) -> Result<()> {
         let url = format!(
-            "{}/v4/remote-invoke/grants?client_instance_id={}",
+            "{}/v4/remote-invoke/client/grants/{}",
             self.base_url(),
-            urlencoding::encode(&self.client_instance_id),
+            grant_id
         );
-        let response =
-            self.authorized_get(&url).send().await.map_err(|e| {
-                BifrostError::Network(format!("relay list grants request failed: {e}"))
-            })?;
-        let wrapper: serde_json::Value = self
-            .parse_response_with_data(response, "list_grants")
-            .await?;
-        match wrapper.get("list").and_then(|v| v.as_array()) {
-            Some(arr) => Ok(arr.clone()),
-            None => Ok(vec![]),
-        }
-    }
-
-    pub async fn update_grant(
-        &self,
-        grant_id: &str,
-        updates: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url(), grant_id);
+        let body = serde_json::json!({
+            "client_instance_id": self.client_instance_id,
+        });
         let response = self
-            .authorized_patch(&url)
-            .json(updates)
+            .authorized_delete(&url)
+            .json(&body)
             .send()
             .await
             .map_err(|e| {
-                BifrostError::Network(format!("relay update grant request failed: {e}"))
+                BifrostError::Network(format!("relay delete grant request failed: {e}"))
             })?;
-        self.parse_response_with_data::<serde_json::Value>(response, "update_grant")
-            .await
-    }
-
-    pub async fn delete_grant(&self, grant_id: &str) -> Result<()> {
-        let url = format!("{}/v4/remote-invoke/grants/{}", self.base_url(), grant_id);
-        let response = self.authorized_delete(&url).send().await.map_err(|e| {
-            BifrostError::Network(format!("relay delete grant request failed: {e}"))
-        })?;
         self.parse_response_empty(response, "delete_grant").await
     }
 
-    pub async fn list_calls(&self) -> Result<Vec<serde_json::Value>> {
+    pub async fn poll_pending_pairings(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!(
-            "{}/v4/remote-invoke/calls?client_instance_id={}",
+            "{}/v4/remote-invoke/client/pending-pairings?client_instance_id={}",
             self.base_url(),
             urlencoding::encode(&self.client_instance_id),
         );
-        let response =
-            self.authorized_get(&url).send().await.map_err(|e| {
-                BifrostError::Network(format!("relay list calls request failed: {e}"))
-            })?;
-        let wrapper: serde_json::Value = self
-            .parse_response_with_data(response, "list_calls")
-            .await?;
-        match wrapper.get("list").and_then(|v| v.as_array()) {
-            Some(arr) => Ok(arr.clone()),
-            None => Ok(vec![]),
-        }
+        let response = self.authorized_get(&url).send().await.map_err(|e| {
+            BifrostError::Network(format!("relay poll_pending_pairings request failed: {e}"))
+        })?;
+        self.parse_response_with_data::<Vec<serde_json::Value>>(response, "poll_pending_pairings")
+            .await
     }
 
-    pub async fn get_call(&self, call_id: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/v4/remote-invoke/calls/{}", self.base_url(), call_id);
-        let response =
-            self.authorized_get(&url).send().await.map_err(|e| {
-                BifrostError::Network(format!("relay get call request failed: {e}"))
-            })?;
-        self.parse_response_with_data::<serde_json::Value>(response, "get_call")
+    pub async fn cancel_pending_pairings(&self) -> Result<()> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/pending-pairings?client_instance_id={}",
+            self.base_url(),
+            urlencoding::encode(&self.client_instance_id),
+        );
+        let response = self.authorized_delete(&url).send().await.map_err(|e| {
+            BifrostError::Network(format!("relay cancel_pending_pairings request failed: {e}"))
+        })?;
+        self.parse_response_empty(response, "cancel_pending_pairings")
+            .await
+    }
+
+    pub async fn fetch_active_grants(&self) -> Result<Vec<serde_json::Value>> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/active-grants?client_instance_id={}",
+            self.base_url(),
+            urlencoding::encode(&self.client_instance_id),
+        );
+        let response = self.authorized_get(&url).send().await.map_err(|e| {
+            BifrostError::Network(format!("relay fetch_active_grants request failed: {e}"))
+        })?;
+        self.parse_response_with_data::<Vec<serde_json::Value>>(response, "fetch_active_grants")
             .await
     }
 
@@ -268,10 +291,12 @@ impl RelayClient {
             .map(|t| format!("&client_auth_token={}", urlencoding::encode(t)))
             .unwrap_or_default();
         format!(
-            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}{}",
+            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}&client_name={}&platform={}{}",
             self.base_url(),
             urlencoding::encode(&self.client_instance_id),
             urlencoding::encode(stream_id),
+            urlencoding::encode(&self.device_name),
+            urlencoding::encode(&self.platform),
             token_part,
         )
     }
@@ -291,14 +316,6 @@ impl RelayClient {
 
     fn authorized_post(&self, url: &str) -> reqwest::RequestBuilder {
         let mut builder = self.http.post(url);
-        if let Some(token) = self.client_auth_token.read().as_deref() {
-            builder = builder.header("Authorization", format!("Bearer {token}"));
-        }
-        builder
-    }
-
-    fn authorized_patch(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.patch(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }

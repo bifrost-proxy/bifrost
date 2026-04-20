@@ -26,16 +26,21 @@
 
 方案拆成四层，职责必须分离：
 
-1. **配对层**
+1. **配对层（可见性管控）**
+  - Relay 绝不主动暴露注册的客户端信息。`pair_code` 是唯一的客户端发现机制。
   - Bifrost 客户端在发现模式下生成 `6` 位一次性授权码，仅用于让调用方证明“知道当前可见的本地码”。
-2. **授权层**
+  - Caller 不需要注册、不需要登录、不需要 token。
+2. **授权层（Client 主动授权）**
    - 真正是否允许执行命令，必须由本地 Bifrost 用户在 WebUI 中人工批准。
-3. **会话层**
-   - 授权成功后由云端签发短期 `relay token`，用于后续路由、续流、恢复和撤销。
-4. **加密层**
+   - 只有被调用客户端审批通过后，才会向 Caller 释放 `client_instance_id`、设备信息以及 `grant`。
+3. **凭证层（grant 绑定）**
+   - 授权成功后，`grant_id`（UUID 不可猜测）+ `caller_fingerprint`（主机标识 hash）构成操作凭证。
+   - 每次创建调用时，Relay 签发 per-call 的 `relay_token`，仅用于该次调用的路由和 SSE 订阅。
+   - Caller 不需要任何身份 token（无 `x-bifrost-token`），安全性由可见性管控 + grant 绑定保障。
+4. **加密层**（规划中，首版未实现）
    - 调用内容不依赖云端 token 明文传输，而是通过调用方与 Bifrost 客户端之间的端到端密钥协商进行双向加密。
 
-这四层同时存在，才能同时满足“知道码才可发起”“需要人工授权”“后续可复用 token”“云端不知道明文内容”。
+这四层同时存在，才能同时满足“pair_code 门控发现”“需要人工授权”“grant 绑定可复用”“云端不知道明文内容”。
 
 ## 角色与边界
 
@@ -56,13 +61,29 @@
 
 ### 信任边界
 
-- 云端 Relay **默认不可信任明文内容**。
-- 调用命令、stdin/stdout/stderr 原文、返回结果原文都应只在调用方和 Bifrost 客户端之间可见。
+- 云端 Relay **是透明中继服务，不管理 Caller 身份**（Caller 无需任何鉴权 token）。
+- Relay 的安全模型基于两根支柱：
+  1. **客户端可见性管控** — Relay 绝不主动暴露注册的客户端信息。`pair_code` 是唯一的客户端发现机制。
+  2. **Client 主动授权** — 只有被调用客户端审批通过后，才会向 Caller 释放 `client_instance_id`、设备信息以及 `grant`。
+- Caller 不需要注册、不需要登录、不需要 token。
+- Client 注册仍需 `client_auth_token`（保持现有机制不变）。
 - 云端只知道：
   - 哪个调用会话在进行
   - 哪个客户端在线
   - 哪个授权策略生效
   - 哪些摘要和审计事件需要保留
+
+### grant 作为操作凭证的安全性
+
+无 `caller_token` 时，操作鉴权完全靠 `grant_id` + `caller_fingerprint`：
+
+| 攻击场景 | 防御 |
+|---|---|
+| 猜测 grant_id | UUID v4，128 位随机，不可暴力枚举 |
+| 窃取 grant_id | 需同时知道 caller_fingerprint（hostname hash）才能使用 |
+| 伪造 caller_fingerprint | fingerprint 基于 username+hostname 生成，攻击者需知道目标机器信息 |
+| 遍历客户端 | `GET /clients` 已删除，无枚举入口 |
+| 重放已过期 grant | Relay 校验 grant 时效（Once/30m/1h/1d/Permanent） |
 
 ## 目标与非目标
 
@@ -79,7 +100,7 @@
   - 多次调用 `1 小时`
   - 多次调用 `1 天`
   - 永久
-- 支持授权后签发 token，并基于 token 绑定端到端加密会话。
+- 支持授权后签发 per-call `relay_token`，用于单次调用的路由与 SSE 订阅。
 - 支持 WebUI 中查看完整调用记录、事件、来源、命令、内容摘要。
 - 调用记录保留 `90` 天，且最多保留 `10k` 条。
 
@@ -133,20 +154,24 @@
 
 ### 逻辑链路
 
-1. Bifrost 客户端启动远程调用模块，并向 Relay 建立 SSE 长连接。
+1. Bifrost 客户端启动远程调用模块，向 Relay 注册并建立 SSE 长连接。
 2. 客户端在本地 WebUI 的 Remote Invoke Tab 里进入发现模式，生成一个一次性 `6` 位授权码。
-3. 调用方拿到该一次性授权码后，通过 Relay 发起配对请求。
+3. 调用方（Caller）通过带外方式获取 `pair_code`（微信/口头/截屏），通过 Relay 发起配对请求。
+   - Caller 只需提供 `pair_code` + `caller_info`，**不需要提前知道 `client_instance_id`**。
+   - Relay 从 `pair_code` 自动解析出目标客户端。
+   - 如果 Relay 前层临时触发 `503 overload-protect`，CLI 会做有限次退避重试；若仍失败，需输出明确提示，指引用户稍后重新执行 `bifrost remote connect <pair-code>`，而不是直接暴露基础设施原始报错。
 4. Relay 把“待授权远程调用请求”推送给对应 Bifrost 客户端。
-5. 本地 WebUI 全局弹窗展示请求信息和命令预览，用户选择授权策略。
+5. 本地 WebUI 全局弹窗展示请求信息，用户选择授权策略。
 6. 授权通过后：
-   - Relay 签发 `relay token`
-   - 调用方与客户端交换临时公钥
-   - 双方派生会话密钥
-   - 后续命令内容以加密信封方式经 Relay 转发
-7. 会话执行期间：
-   - 调用方通过 HTTP 请求发送输入
+   - Relay 创建 `grant`（绑定 `caller_fingerprint`）
+   - 通过 SSE 将 `{grant_id, client_instance_id, device_name, platform, grant_mode}` 返回给 Caller
+   - Caller 将连接信息保存到本地 `{BIFROST_DATA_DIR}/remote-connections.json`
+7. 后续命令执行时：
+   - Caller 从本地连接文件读取 `client_instance_id` + `grant_id` + `caller_fingerprint`
+   - 向 Relay 验证 grant 有效性
+   - 通过 `POST /calls/open` 创建调用（Relay 签发 per-call `relay_token`）
    - 通过 SSE 持续接收事件流
-   - 客户端通过 SSE 接收下行事件，通过 HTTP 回传加密帧
+   - 客户端通过 SSE 接收下行事件，通过 HTTP 回传输出帧
 8. 会话结束后：
    - 客户端上报执行结果摘要
    - Relay 持久化记录与事件
@@ -210,48 +235,58 @@
 - 配对成功只代表“这个远端知道当前一次性授权码”。
 - 只有本地用户在 WebUI 中点击批准，调用才进入可执行状态。
 - 未经人工批准，调用方不能拿到后续 `relay token`。
+- client 侧所有上行审批/执行事件都必须绑定到认证后的 `client_instance_id`：
+  - `POST /v4/remote-invoke/client/grants/:pairingId/decision` 必须校验 pairing 的目标 client 与当前 `client_auth_token` 对应 client 一致
+  - `POST /v4/remote-invoke/client/calls/:callId/frame|exit` 必须校验 call 的归属 client 与当前 `client_auth_token` 对应 client 一致
+  - 禁止“任意已注册 client 只要知道 `pairing_id` / `call_id` 就能代替目标 client 操作”的旁路
 
-### 3. token 只负责路由绑定，不承担明文保密
+### 3. relay_token 只负责 per-call 路由
 
-- 授权成功后由 Relay 签发 `relay token`，建议使用 **随机 256 bit opaque token**，不要把敏感信息直接塞进 JWT 明文载荷。
-- token 元数据落库或 Redis，字段包含：
-  - `grant_id`
-  - `client_instance_id`
-  - `caller_fingerprint`
-  - `scope`
-  - `expires_at`
-  - `revoked_at`
-  - `max_calls`
-  - `remaining_calls`
+- **`relay_token` 是 per-call 级别的临时路由凭据**，每次创建调用（`POST /calls/open`）时由 Relay 签发。
+- 使用 **随机 256 bit opaque token**（64 hex 字符），不使用 JWT。
 - token 用途：
-  - 调用方恢复 SSE
-  - Relay 校验是否仍在授权窗口内
-  - 加密握手时作为 channel binding 输入
-- 对于“永久授权”和其他可复用授权，grant 必须额外绑定 `caller_fingerprint`，不能只绑定 token 本身。
+  - 调用方订阅 `GET /calls/:call_id/events` SSE
+  - 调用方发送 `POST /calls/:call_id/input` 输入帧
+  - 调用方取消 `POST /calls/:call_id/cancel`
+- token 不是 Caller 的身份凭据——Caller 无需任何身份 token。
+- **真正的操作凭证是 `grant_id` + `caller_fingerprint`**：
+  - `grant_id`：UUID v4，不可猜测，绑定 `caller_fingerprint`
+  - `caller_fingerprint`：基于调用方主机信息生成的稳定标识
+  - 所有涉及 grant 的 Caller 端点都需要同时提供两者，Relay 校验绑定关系
 
-### 3.1 授权复用与用户数据库落库
+### 3.1 授权复用与本地连接文件
 
-- 一次配对 + 人工授权完成后，**可复用授权信息必须持久化到 Relay 的用户数据库记录中**，作为后续 `bifrost remote` 直接复用的来源。
-- 目标：
-  - 避免每次执行查询命令都重新走配对和人工授权
-  - 允许服务端统一管理授权状态、有效期、撤销和审计
-- 存储原则：
-  - **Relay 用户数据库是授权信息的权威来源**
-  - 本地 CLI 仅可缓存最小必要信息用于体验优化，但不能作为最终授权依据
-- 授权记录至少绑定：
-  - `user_id`
-  - `client_instance_id`
-  - `caller_fingerprint`
-  - `grant_id`
-  - `grant_mode`
-  - `expires_at`
-  - `status`
-- `bifrost remote` 在发起新命令前，先调用 Relay 查询当前用户在该 `client_instance_id + caller_fingerprint` 下是否存在可复用且未过期的授权：
-  - 如果存在，则直接进入 `call` 流程
-  - 如果不存在，则退回到一次性授权码 + 人工授权流程
-- 这意味着“配对完成后的相关信息”不是一次性临时态，而是升级为用户级可复用授权记录。
+- 一次配对 + 人工授权完成后，连接信息保存到 Caller 本地文件，用于后续 `bifrost remote` 直接复用。
+- **本地连接文件路径**：`{BIFROST_DATA_DIR}/remote-connections.json`（默认 `~/.bifrost/remote-connections.json`）
+- **文件结构**：
+```json
+{
+  "version": 1,
+  "connections": [
+    {
+      "client_instance_id": "uuid-xxx-full",
+      "device_name": "Eden-MacBook",
+      "platform": "macos",
+      "relay_url": "https://bifrost.bytedance.net",
+      "grant_id": "grant-xxx",
+      "grant_mode": "permanent",
+      "caller_fingerprint": "fp-xxx",
+      "connected_at": 1713600000000
+    }
+  ]
+}
+```
+- 不再有 `caller_token` 字段。`grant_id` + `caller_fingerprint` 就是操作凭证。
+- **授权复用流程**：
+  - `bifrost remote` 在发起新命令前，从本地连接文件读取 `client_instance_id` + `grant_id` + `caller_fingerprint`
+  - 调用 Relay 的 `GET /grants/reusable?client_instance_id=X&caller_fingerprint=Y` 验证 grant 仍有效
+  - 如果有效，直接进入 `POST /calls/open` 流程
+  - 如果无效（过期/撤销），报错 "authorization expired, please run `bifrost remote connect <pair-code>` again"
+- **重复配对处理**：同一 Caller 对同一 Client 再次 `connect` 时，新 grant 与旧 grant 并存，本地连接文件更新为最新 grant，旧 grant 在服务端自然过期。
 
-### 4. 真正保密依赖端到端加密
+### 4. 真正保密依赖端到端加密（规划中，首版未实现）
+
+> **实现状态**：首版以明文信封格式传输（`EncryptedEnvelope` 中 `nonce`/`tag` 为空，`ciphertext` 实际为明文），端到端加密作为后续安全增强项。
 
 - 授权通过后，由调用方与客户端交换临时公钥，推荐：
   - `X25519` 做 ECDH
@@ -307,23 +342,21 @@
 ### 4.4 客户端身份认证（client_auth_token）
 
 - **client_auth_token 是客户端与 Relay 之间的身份凭据**，用于认证客户端 SSE 连接和所有客户端上行 HTTP 请求。
-- **签发流程**：
-  1. 客户端首次启动并生成 `client_instance_id` 时，同时生成一对长期密钥 `client_long_term_keypair`（Ed25519）。
-  2. 客户端使用 `client_long_term_privkey` 对 `client_instance_id + timestamp` 签名，向 Relay 的 `POST /v4/remote-invoke/client/register` 接口提交注册请求。
-  3. Relay 验证签名后，签发 `client_auth_token`（随机 256 bit opaque token），并绑定 `client_instance_id` + `client_long_term_pubkey_hash`。
-  4. token 元数据落库：`client_instance_id`、`pubkey_hash`、`issued_at`、`expires_at`、`revoked_at`。
+- **签发流程**（当前实现）：
+  1. 客户端首次启动并生成 `client_instance_id` 时，同时生成 `client_long_term_pubkey`。
+  2. 客户端向 Relay 的 `POST /v4/remote-invoke/client/register` 提交注册请求，携带 `client_instance_id`、`client_long_term_pubkey`、`device_name`、`platform`、`signature`。
+  3. Relay 签发 `client_auth_token`（随机 256 bit opaque token = 64 hex 字符），绑定 `client_instance_id` + `pubkey`。
+  4. token 存储在 Redis 中，TTL 30 天。
 - **校验规则**：
-  - 客户端所有上行请求（SSE 建连、心跳、授权决策、帧回传等）必须携带 `client_auth_token`。
-  - Relay 校验 token 有效性，并比对 `client_instance_id` 是否匹配。
-  - token 绑定 `client_long_term_pubkey_hash`，防止攻击者使用窃取的 token 冒充其他客户端。
-- **轮换策略**：
-  - token 有效期建议 `30 天`，临近过期时客户端自动使用长期私钥签名申请续签。
-  - 续签时 Relay 签发新 token 并废弃旧 token（grace period `5 分钟`内新旧 token 均有效）。
-  - 客户端检测到 token 被拒绝（`401`）后，自动触发重新注册流程。
-- **`client_long_term_pubkey` 的用途**（闭环）：
-  - 客户端注册和 token 续签时的身份证明。
-  - 可复用授权中绑定 grant 到特定客户端身份。
-  - 未来可用于客户端侧签名审计事件。
+  - 客户端所有上行请求（SSE 建连、心跳、授权决策、帧回传等）必须携带 `client_auth_token`（通过 `Authorization: Bearer` header 或 query 参数）。
+  - Relay 通过 `requireClientAuth()` 中间件校验 token 有效性，并比对 `client_instance_id` 是否匹配。
+  - 使用常量时间比对（constant-time comparison）防止时序侧信道攻击。
+- **轮换策略**（当前实现）：
+  - token 有效期 `30 天`。
+  - 客户端检测到 token 被拒绝（`401`）后，自动触发完整的重新注册流程（而非续签）。
+  - **Token 续签端点**（`POST /client/token/renew`）**尚未实现**，当前通过重新注册替代。
+
+> **设计文档 vs 实现差异**：设计文档要求 Ed25519 签名验证和独立续签端点。当前实现简化为：注册时只验证 pubkey 一致性（不验证签名），过期后重新注册（不使用续签）。后续可平滑升级。
 
 ### 5. 审计摘要与原文分离
 
@@ -421,27 +454,30 @@
 6. 授权码一旦被成功消费，或手动关闭发现模式后，当前 `discovery_session_id` 立即失效。
 7. 若授权码超时未被消费且发现模式仍开启，客户端自动生成新 `pair_code` 和 `pairing_id`，沿用当前 `discovery_session_id`，向 Relay 注册新映射并废弃旧码。WebUI 无缝刷新展示新授权码。
 
-### C. 调用方发起请求
+### C. 调用方发起配对（`bifrost remote connect`）
 
-1. 调用方优先调用“查询可复用授权”接口。
-2. 若找到当前用户在该客户端上的有效授权，则直接复用授权并跳过配对流程。
-3. 若未找到有效授权，调用方需要先确定目标客户端：
-   - 显式指定 `client_instance_id`
-   - 或在只有一个处于发现模式的客户端时自动选择
-4. 再向 Relay 发起 `POST /v4/remote-invoke/pairings/start`。
-5. 请求包含：
-   - `client_instance_id`（推荐显式传递）
-   - `pair_code`
-   - `caller_pubkey`
+1. 调用方通过带外方式获取 `pair_code`（Client 用户通过微信/口头/截屏等方式告知）。
+2. 向 Relay 发起 `POST /v4/remote-invoke/pairings/start`。
+3. 请求只需包含：
+   - `pair_code`（6 位一次性授权码）
    - `caller_info`
-     - `display_name`
-     - `user_agent`
-     - `source_ip`
-     - `optional account info`
-   - `command_summary`
-   - `encrypted_preview`（可选）
+     - `fingerprint`（调用方设备指纹）
+     - `display_name`（调用方设备名）
+4. **不需要 `client_instance_id`** — Relay 通过 `pair_code` 自动解析出目标客户端。
+5. **不需要 `command` / `command_summary`** — connect 阶段只做配对授权，不携带具体命令。
 6. Relay 验证授权码后创建 `pairing session`，状态变为 `pending_approval`。
 7. Relay 把待授权事件推送给客户端。
+
+### C.1 调用方执行命令
+
+1. 从本地连接文件（`{BIFROST_DATA_DIR}/remote-connections.json`）读取已保存的连接信息。
+2. 通过 `resolve_local_connection()` 从本地文件中按前缀匹配 `client_instance_id`：
+   - 0 个匹配 → 报错 "no saved connection, please run `bifrost remote connect <pair-code>` first"
+   - 1 个匹配 → 直接使用
+   - 多个匹配 → 交互选择（展示 `device_name + short_id`）
+3. 调用 `GET /grants/reusable?client_instance_id=X&caller_fingerprint=Y` 验证 grant 有效性。
+4. 有效 → 通过 `POST /calls/open` 创建调用并执行命令。
+5. 无效 → 报错 "authorization expired, please run `bifrost remote connect <pair-code>` again"。
 
 ### D. 本地人工授权
 
@@ -450,7 +486,7 @@
    - 触发全局弹窗
    - Remote Invoke Tab 展示 pending item
 2. 弹窗展示：
-   - 调用方设备指纹（`caller_pubkey` 的 `sha256` 截短为 16 位 hex，如 `a3f1:b2c4:9e8d:07f6`）
+   - 调用方设备指纹（`caller_fingerprint`，基于 username+hostname 的 hash，展示为截短格式）
    - 调用方显示名
    - 远端来源 IP / 地域（如果可得）
    - User-Agent
@@ -473,33 +509,45 @@
   - 客户端校验 token 后才处理授权请求。
 - **永久授权的二次确认**：选择「永久」时，WebUI 必须弹出二次确认对话框，要求用户输入 `CONFIRM` 文本后才提交，防止误触导致过度授权。
 
-### E. token 签发与密钥协商
+### E. 配对审批通过后
 
-1. Relay 创建 `authorization_grant`。
-2. Relay 签发：
-   - `relay_token`
-   - `call_id`
-   - `grant_id`
-   - `expires_at`
-3. Relay 将客户端临时公钥下发给调用方，将调用方临时公钥下发给客户端。
-4. 双方各自使用 HKDF 派生会话密钥，输入包含 `shared_secret`、`relay_token`、`call_id`、双方 ephemeral pub、`sha256(pair_code)`。
-5. 双方各自计算 session fingerprint 并展示（调用方 CLI 输出 / 客户端 WebUI 展示），供高安全模式下人工比对。
-6. 进入 `key_exchanged`。
-7. 对于可复用授权，Relay 同时把 grant 信息写入当前用户数据库记录，供后续 `bifrost remote` 直接复用。
+1. Client 用户在 WebUI 中批准配对，选择授权策略（仅本次 / 30m / 1h / 1d / 永久）。
+2. Client 通过 HTTP 向 Relay 提交 grant 创建请求（`POST /client/grants/:pairingId/decision`）。
+3. Relay 创建 `authorization_grant`，绑定 `caller_fingerprint`。
+4. Relay 通过 pairing watcher SSE 向 Caller 推送 `decision` 事件：
+```json
+{
+  "status": "approved",
+  "grant_id": "grant-xxx",
+  "client_instance_id": "uuid-full-id",
+  "device_name": "Eden-MacBook",
+  "platform": "macos",
+  "grant_mode": "permanent"
+}
+```
+5. Caller 从此事件中获得 `client_instance_id`、`grant_id`、`device_name`、`platform`、`grant_mode`。
+6. Caller 将连接信息保存到本地 `{BIFROST_DATA_DIR}/remote-connections.json`。
+   - 如果同一个 `{client_instance_id, relay_url}` 已存在，更新（覆盖旧 grant）。
 
-**可复用授权的后续调用密钥协商**：
-- 复用授权时不需要重走配对流程，但仍需每次 call 交换新的 ephemeral key pair。
-- 调用方在 `open call` 时附带本次 `caller_ephemeral_pub`。
-- 客户端在 `call_open` 响应中附带本次 `client_ephemeral_pub`。
-- 双方派生本次 call 的独立会话密钥（输入加入 `grant_id` + `call_id`）。
-- call 结束后 ephemeral key 和会话密钥立即从内存清除。
+### E.1 命令执行（调用创建）
+
+1. Caller 使用本地连接文件中的 `grant_id` + `caller_fingerprint` 调用 `POST /calls/open`。
+2. Relay 校验：
+   - grant 存在且状态为 `active`
+   - `grant.caller_fingerprint === 请求中的 caller_fingerprint`
+   - `grant.client_instance_id === 请求中的 client_instance_id`
+   - grant 未过期
+   - `remaining_calls > 0`（对于 `once` 类型）
+3. 校验通过后，Relay 签发 per-call 的 `relay_token`（随机 256 bit），创建 call。
+4. Relay 通过客户端 SSE 推送 `call_open` 事件给 Client。
+5. Client 执行命令，通过 HTTP 回传输出帧。
 
 ### F. 调用执行与流式传输
 
 1. 调用方使用 `POST /v4/remote-invoke/calls/:call_id/input`
    - body 为加密信封
    - 也可支持首次创建时直接附带首个命令帧
-2. 调用方使用 `GET /v4/remote-invoke/calls/:call_id/events?token=...`
+2. 调用方使用 `GET /v4/remote-invoke/calls/:call_id/events`（通过 `Authorization: Bearer <relay_token>` header 认证）
    - 以 SSE 接收：
      - `status`
      - `stdout`
@@ -547,11 +595,11 @@
 #### 0. 查询可复用授权
 
 - `GET /v4/remote-invoke/grants/reusable`
-- Header:
-  - `x-bifrost-token`
+- **无需身份认证**（Caller 不需要 token）
 - Query:
   - `client_instance_id`
   - `caller_fingerprint`
+- Relay 校验：只返回 `caller_fingerprint` 完全匹配的 grant
 - 响应：
   - 是否存在可复用授权
   - `grant_id`
@@ -562,30 +610,45 @@
 #### 1. 创建配对请求
 
 - `POST /v4/remote-invoke/pairings/start`
+- **无需身份认证**（Caller 不需要 token）
 - 请求：
-  - `client_instance_id`
-  - `pair_code`
-  - `caller_pubkey`
-  - `caller_info`
-  - `command_summary`
+  - `pair_code`（Relay 从 pair_code 自动解析 `client_instance_id`）
+  - `caller_info`（`fingerprint` + `display_name`）
+- **不再需要**：`client_instance_id`、`caller_pubkey`、`command_summary`、`command`
 - 响应：
   - `pairing_id`
   - `status=pending_approval`
   - `approval_sse_url`
 
+#### 1.1 创建调用
+
+- `POST /v4/remote-invoke/calls/open`
+- **无需身份认证**（通过 grant 绑定校验替代）
+- 请求：
+  - `grant_id`
+  - `client_instance_id`
+  - `caller_fingerprint`
+  - `command`（`{ "command": "status", "args_json": null }`）
+  - `command_summary`（`{ "command_preview": "status" }`）
+- Relay 校验：
+  - grant 存在 + `caller_fingerprint` 匹配 + `client_instance_id` 匹配 + 未过期
+- 响应：
+  - `call_id`
+  - `relay_token`（per-call 临时 token）
+
 #### 2. 等待授权状态
 
 - `GET /v4/remote-invoke/pairings/:pairing_id/watch`
+- **无需身份认证**（`pairing_id` 是一次性 UUID）
 - SSE 事件：
-  - `pending`
-  - `approved`
-  - `rejected`
-  - `expired`
-- `approved` 时返回：
-  - `call_id`
-  - `relay_token`
-  - `client_ephemeral_pub`
-  - `expires_at`
+  - `status`（包含 `pending_approval`、`timeout` 等）
+  - `decision`（审批结果）
+- `decision` 中 `status=approved` 时返回：
+  - `grant_id`
+  - `client_instance_id`
+  - `device_name`
+  - `platform`
+  - `grant_mode`
 
 #### 3. 发送调用输入
 
@@ -612,38 +675,25 @@
 
 - `POST /v4/remote-invoke/calls/:call_id/cancel`
 
-#### 6. 列出当前用户的授权记录
+#### ~~6. 列出当前用户的授权记录~~ — 已删除
 
-- `GET /v4/remote-invoke/grants`
-- Header:
-  - `x-bifrost-token`
+> Caller 无需列出所有 grant。仅通过 `/grants/reusable` 查询具体授权即可。
 
-#### 6.1 列出当前用户在线客户端
+#### ~~6.1 列出当前用户在线客户端~~ — 已删除
 
-- `GET /v4/remote-invoke/clients`
-- Header:
-  - `x-bifrost-token`
-- 返回：
-  - 客户端实例列表
-  - 在线状态
-  - 发现模式状态
-  - 最近心跳
-  - 当前活跃授权数
+> `GET /v4/remote-invoke/clients` 已**完全删除**，不保留任何访问入口。客户端发现仅通过 `pair_code` 机制。
 
-#### 7. 更新授权有效期
+#### ~~7. 更新授权有效期~~ — 已删除
 
-- `PATCH /v4/remote-invoke/grants/:grant_id`
-- Header:
-  - `x-bifrost-token`
-- Body:
-  - `grant_mode`
-  - `expires_at`
+> Grant 属性由 Client 审批时决定，Caller 不应修改。Grant 管理由 Client 侧通过 WebUI 完成。
 
 #### 8. 移除授权
 
 - `DELETE /v4/remote-invoke/grants/:grant_id`
-- Header:
-  - `x-bifrost-token`
+- **无需身份认证**（通过 `caller_fingerprint` 校验归属替代）
+- Query:
+  - `caller_fingerprint`
+- Relay 校验：`grant.caller_fingerprint === 请求参数中的 caller_fingerprint`
 
 ### Relay -> 客户端 SSE 事件
 
@@ -666,25 +716,56 @@
 - `grant_revoked`
 - `ping`
 
+#### 下行事件职责边界
+
+- `grant_created`
+  - 语义：配对审批通过后，将新授权同步到 client 本地缓存
+  - 最小字段：`grant_id`、`caller_fingerprint`、`grant_mode`
+  - 可选字段：`caller_info.display_name`、`expires_at`
+  - **不承载调用执行语义**，不要求 `call_id`、`command`
+- `call_open`
+  - 语义：在已有 grant 基础上发起一条具体调用
+  - 必须包含：`call_id`、`grant_id`、`command`
+  - client 必须先校验 `grant_id` 已存在于本地 `local_grants` 且状态有效，再执行命令
+- 两类事件禁止混用：
+  - 不允许把 `grant_created` 当成 `call_open` 的替代事件
+  - 不允许在 client 侧要求 `grant_created` 提供 `call_id` / `command`
+
 ### 客户端 -> Relay HTTP API
 
 #### 0. 客户端注册
 
-- `POST /v4/remote-invoke/client/register`
+- `POST /v4/remote-invoke/client/register/challenge`
+- Header:
+  - `x-bifrost-token`（必须，由 client 所属用户的 sync session 提供）
 - Body:
+  - `client_instance_id`
+- 响应：
+  - `challenge_id`
+  - `challenge`
+  - `expires_at`
+  - `algorithm = "ed25519"`
+
+- `POST /v4/remote-invoke/client/register`
+- Header:
+  - `x-bifrost-token`（必须，与 challenge 申请阶段保持同一用户上下文）
+- Body:
+  - `challenge_id`
   - `client_instance_id`
   - `client_long_term_pubkey`
   - `device_name`
   - `platform`
   - `bifrost_version`
-  - `signature`（使用 `client_long_term_privkey` 对 `client_instance_id + timestamp` 的 Ed25519 签名）
+  - `signature`（使用 `client_long_term_privkey` 对 `["bifrost-remote-register-v1", challenge_id, challenge, client_instance_id, device_name, platform, bifrost_version, client_long_term_pubkey, timestamp]` 的 Ed25519 签名）
   - `timestamp`
 - 响应：
   - `client_auth_token`
   - `expires_at`
 - 安全约束：
-  - Relay 验证签名合法后签发 token
-  - 同一 `client_instance_id` 重复注册时，Relay 验证 pubkey 一致性
+  - Relay 先校验 `x-bifrost-token`，确认注册请求归属某个已登录用户
+  - Relay 只接受一次性 challenge，challenge 过期或被消费后必须拒绝
+  - Relay 验证签名合法后才签发 token，确保注册方真正持有长期私钥
+  - 同一 `client_instance_id` 重复注册时，Relay 验证 owner 与 pubkey 一致性
 
 #### 0.1 客户端 Token 续签
 
@@ -844,13 +925,12 @@ struct CommandSummary {
 }
 
 struct StartPairingReq {
-  1: required string client_instance_id,
-  2: required string pair_code,
-  3: required string caller_pubkey,
-  4: required CallerInfo caller_info,
-  5: required CommandSummary command_summary,
-  6: required RemoteCommand command,
+  1: required string pair_code,
+  2: required CallerInfo caller_info,
 }
+
+// 注意：client_instance_id 由 Relay 从 pair_code 自动解析，不再由 Caller 传入
+// caller_pubkey、command_summary、command 在 connect 阶段不再需要（命令在 calls/open 时传入）
 
 struct StartPairingData {
   1: required string pairing_id,
@@ -882,7 +962,7 @@ struct GrantDecisionReq {
   2: required string client_instance_id,
   3: required string decision,
   4: optional string grant_mode,
-  5: optional string client_ephemeral_pub,
+  // client_ephemeral_pub 属于端到端加密（首版未实现），暂不传输
 }
 
 struct ClientCallFrameReq {
@@ -914,18 +994,8 @@ struct RemoteInvokeRecord {
   9: optional i32 exit_code,
 }
 
-struct RemoteInvokeClient {
-  1: required string client_instance_id,
-  2: optional string client_name,
-  3: optional string platform,
-  4: required string online_status,
-  5: required bool discoverable,
-  6: optional i64 discovery_expires_at,
-  7: optional i64 last_heartbeat_at,
-  8: optional i32 active_grant_count,
-  9: optional i32 active_call_count,
-  10: optional i32 active_caller_count,
-}
+// RemoteInvokeClient 结构已删除 — GET /clients 端点已完全移除，
+// Relay 不再对外暴露客户端列表，客户端发现仅通过 pair_code 机制
 
 struct ReusableGrant {
   1: required string id,
@@ -943,12 +1013,10 @@ struct ReusableGrant {
 
 - `StartPairing`
 - `GetPairingStatus`
+- `OpenCall`
 - `PostCallInput`
 - `CancelCall`
 - `GetReusableGrant`
-- `ListReusableGrants`
-- `ListRemoteInvokeClients`
-- `UpdateGrant`
 - `DeleteGrant`
 - `ClientHeartbeat`
 - `PublishPairCode`
@@ -989,23 +1057,18 @@ struct ReusableGrant {
 
 - 语义：调用方程序实例/设备的稳定指纹。
 - 用途：
-  - 绑定长期授权
-  - 绑定 token
+  - 绑定长期授权（grant）
   - 支撑风控和审计
-- 组成建议：
-  - 调用端生成本地持久化 `device_id`
-  - 再结合：
-    - `app_name`
-    - `app_version`
-    - `platform`
-    - `public_key_hash`
-  - 最终计算 `sha256`
+  - 作为"授权复用命中"的关键维度
+- **当前实现**（`remote.rs`）：
+  - 生成算法：`simple_hash("bifrost-cli:{username}:{hostname}")`
+  - 基于操作系统的 `username` 和 `hostname` 组合
+  - 不再依赖 `device_id`、`app_version`、`platform`、`public_key_hash` 等复杂因素
 - 要求：
-  - 稳定但可轮换
-  - 可被用户主动重置
+  - 稳定但可轮换（更换用户名或主机名即变化）
   - 不直接暴露过多宿主机敏感信息
-- 它同时也是“授权复用命中”的关键维度：
-  - 同一用户、同一 `client_instance_id`、同一 `caller_fingerprint` 才允许直接复用既有授权
+- 它同时也是"授权复用命中"的关键维度：
+  - 同一 `client_instance_id`、同一 `caller_fingerprint` 才允许直接复用既有授权
 
 #### `call_id`
 
@@ -1070,25 +1133,20 @@ struct ReusableGrant {
 
 1. 用户或程序执行：
    - `bifrost remote traffic get 57544`
-2. CLI 读取本地调用端配置：
-   - Relay 地址
-   - 调用端设备 ID
-   - 设备私钥 / 公钥
-   - 默认目标客户端（可选）
-3. CLI 组装结构化命令与摘要。
-4. CLI 先决定目标客户端：
-   - 用户显式传 `--client <client_instance_id|alias>`
-   - 或调用 `ListRemoteInvokeClients` / `GetReusableGrant` 自动解析
-5. 若没有可复用授权，则 CLI 使用一次性授权码调用 `StartPairing`。
-6. CLI 建立 `pairing watch SSE` 等待人工授权。
-7. 收到 `approved` 后：
-   - 拿到 `call_id`
-   - 拿到 `relay_token`
-   - 拿到 `client_ephemeral_pub`
-8. CLI 派生会话密钥。
-9. CLI 发首个 `PostCallInput`。
-10. CLI 订阅 `calls/:call_id/events`。
-11. 收到 `frame/exit/error` 后流式输出到终端并退出。
+2. CLI 加载本地连接文件 `{BIFROST_DATA_DIR}/remote-connections.json`。
+3. CLI 通过 `resolve_local_connection()` 从本地文件中解析目标客户端：
+   - 用户显式传 `--client-id <前缀>` → 在本地连接文件中按前缀匹配
+   - 未传 `--client-id` → 如果仅有一个连接则直接使用，多个则交互选择
+   - 0 个匹配 → 报错 "no saved connection, please run `bifrost remote connect <pair-code>` first"
+4. CLI 从匹配的连接记录中获取 `client_instance_id`、`grant_id`、`caller_fingerprint`。
+5. CLI 调用 `GET /grants/reusable?client_instance_id=X&caller_fingerprint=Y` 验证 grant 有效性。
+   - 有效 → 继续
+   - 无效 → 报错 "authorization expired, please run `bifrost remote connect <pair-code>` again"
+6. CLI 组装结构化命令与摘要。
+7. CLI 调用 `POST /calls/open {grant_id, client_instance_id, caller_fingerprint, command, command_summary}`。
+8. Relay 校验 grant 绑定关系后签发 per-call `relay_token`，返回 `call_id` + `relay_token`。
+9. CLI 订阅 `GET /calls/:call_id/events`（通过 `Authorization: Bearer <relay_token>` header）。
+10. 收到 `frame/exit/error` 后流式输出到终端并退出。
 
 #### 客户端时序
 
@@ -1120,7 +1178,7 @@ struct ReusableGrant {
   - **禁止字符串拼接调用 shell**（禁止 `sh -c`），必须使用结构化参数传递（如 `Command::new().arg()`）。
   - 所有 `args` 字段必须经过**类型校验和白名单过滤**：
     - `id` 类参数：纯数字，最大长度 `20` 字符
-    - `query` 类参数：`[a-zA-Z0-9._\-:/]`，最大长度 `500` 字符
+    - `query` 类参数：支持 Unicode（含中文），禁止 ASCII 控制字符，最大长度 `500` 字符
     - 其他参数类型在白名单定义时明确允许的字符集和长度上限
   - 参数 sanitization 作为 `RemoteQueryExecutor` 的**入口强制步骤**，在命令分发前执行，校验失败直接返回 `invalid_args` 错误。
 - 输出统一包装为：
@@ -1150,7 +1208,32 @@ struct ReusableGrant {
   - `last_client_instance_id`
   - `last_grant_lookup_at`
   - `last_successful_grant_id`
-- 可复用授权的权威记录存放在 Relay 用户数据库中。
+- 可复用授权的权威记录存放在 Relay 服务端存储中（Redis + DB）。
+
+#### Caller 本地连接文件
+
+- **路径**：`{BIFROST_DATA_DIR}/remote-connections.json`（默认 `~/.bifrost/remote-connections.json`）
+- Caller 端不再需要任何身份 token，连接信息完全基于 grant 凭证。
+- **结构**：
+```json
+{
+  "version": 1,
+  "connections": [
+    {
+      "client_instance_id": "uuid-xxx-full",
+      "device_name": "Eden-MacBook",
+      "platform": "macos",
+      "relay_url": "https://bifrost.bytedance.net",
+      "grant_id": "grant-xxx",
+      "grant_mode": "permanent",
+      "caller_fingerprint": "fp-xxx",
+      "connected_at": 1713600000000
+    }
+  ]
+}
+```
+- 不含 `caller_token` 字段。`grant_id` + `caller_fingerprint` 就是操作凭证。
+- `resolve_local_connection()` 从此文件中按前缀匹配 `client_instance_id`，替代原来的 `resolve_client_id()`（不再调用 `GET /clients`）。
 
 ### Settings 内 Tab 细化
 
@@ -1162,19 +1245,13 @@ struct ReusableGrant {
 - 当前发现模式状态
 - 当前一次性授权码和剩余时间
 
-#### Clients 区
+#### ~~Clients 区~~ — 已简化
 
-- 在线客户端列表
-- 客户端名称 / 实例 ID / 平台
-- 在线状态
-- 发现模式状态
-- 最近心跳
-- 当前活跃授权数（跨所有调用方的 grant 总数）
-- 当前活跃调用数（当前正在执行的并发 call 数）
-- 当前活跃调用方数（当前持有有效 grant 的不同 caller 数）
-- 进入发现模式按钮
-- 退出发现模式按钮
-- 查看该客户端历史按钮
+> 原设计中"在线客户端列表"部分已不适用，因为 `GET /clients` 端点已完全删除。
+> 当前 Settings 内的 Remote Invoke Tab 聚焦于**本机客户端自身的状态管理**：
+> - 发现模式状态和一次性授权码展示
+> - 当前 Relay 连接状态
+> - 进入/退出发现模式按钮
 
 #### Pending Requests 区
 
@@ -1185,8 +1262,7 @@ struct ReusableGrant {
 
 #### Active Grants 区
 
-- 按客户端维度筛选
-- 按调用方指纹分行展示，同一客户端的多个调用方 grant 并列呈现
+- 按调用方指纹分行展示
 - 指纹
 - 调用方显示名
 - 授权模式
@@ -1194,26 +1270,21 @@ struct ReusableGrant {
 - 最近使用时间
 - 到期时间
 - 活跃 call 数（该调用方当前正在进行的调用数）
-- 修改有效期按钮
-- 修改授权模式按钮
-- 移除授权按钮
+- 移除授权按钮（Client 侧通过 Relay Client 路由管理）
 - 刷新列表按钮
+
+> **改造说明**：原设计中的"修改有效期按钮"和"修改授权模式按钮"已移除。Grant 属性由 Client 审批时决定，Caller 不应修改（`PATCH /grants/:id` 已删除）。Grant 管理由 Client 侧通过 WebUI + Client 路由完成。
 
 #### Active Grants 交互要求
 
-- 管理端必须支持对已授权客户端执行以下操作：
-  - 把一次性授权升级为限时授权
-  - 把限时授权改短或改长
-  - 把永久授权改成限时授权
-  - 直接移除授权
-- 当管理端修改授权有效期后：
-  - Relay 用户数据库记录立即更新
-  - 新命令从新授权配置生效
-  - 如当前有活跃调用，不强制中断，默认对后续新调用生效
+- 管理端（Client WebUI）支持对已授权的 grant 执行以下操作：
+  - 直接移除授权（通过 Relay Client 路由或本地管理接口）
 - 当管理端移除授权后：
   - grant 状态置为 `removed` 或 `revoked`
   - 后续 `bifrost remote` 不能再直接复用
   - 必须重新走配对授权流程
+
+> **改造说明**：原设计中"把一次性授权升级为限时授权"、"改短改长有效期"等操作已移除。Grant 的授权模式和有效期在 Client 审批时一次性确定，后续不可由 Caller 或管理端修改（`PATCH /grants/:id` 已删除）。"Relay 用户数据库记录立即更新"的描述不再适用——当前 Relay 是透明中继服务。
 
 #### History 区
 
@@ -1335,10 +1406,12 @@ struct ReusableGrant {
   - MySQL 实现
 - 首次开发优先把 SQLite 跑通，再补 MySQL。
 - DAO 需要显式支持：
-  - `findReusableGrant(userId, clientInstanceId, callerFingerprint)`
-  - `listGrants(userId, query)`
-  - `updateGrant(grantId, patch)`
+  - `findReusableGrant(clientInstanceId, callerFingerprint)`
+  - `getGrant(grantId)`
   - `deleteGrant(grantId)`
+  - `touchGrantLastUsed(grantId, ts)`
+
+> **改造说明**：原设计中的 `listGrants(userId, query)` 和 `updateGrant(grantId, patch)` 已移除。Caller 无需列出所有 grant（仅通过 `/grants/reusable` 查询具体授权），Grant 属性在 Client 审批时确定后不可修改。
 
 #### 配置层
 
@@ -1362,24 +1435,23 @@ struct ReusableGrant {
 - 本地版允许做以下简化，以加速验证：
   - 首版只支持 SQLite
   - 首版先不接 OAuth2，只用密码模式或测试 token
-  - 首版先不做复杂多租户隔离，只需保证 `user_id` 维度隔离
+  - 首版不做多租户隔离（Caller 无用户概念，以 `caller_fingerprint` 维度隔离）
   - 首版先实现查询命令白名单，不引入额外命令扩展机制
 - 但以下协议语义不能简化掉：
   - `client_instance_id`
   - `stream_id`
   - `caller_fingerprint`
-  - 用户数据库中的授权复用记录
-  - 配对 / 授权 / token / 加密 / 审计 全链路
+  - 授权复用记录（存储在 Relay 服务端 DB 中）
+  - 配对 / 授权 / 审计 全链路
 
 ### 本地验证完成的判定标准
 
 - `packages/bifrost-sync-server` 中转能力完成以下事项后，才能视为可迁移：
   - 单机本地完整链路跑通
   - `bifrost remote` 成功调用查询命令
-  - 二次执行命令可直接复用已有授权，无需重新配对
+  - 二次执行命令可直接复用已有授权（grant），无需重新配对
   - 管理端可修改有效期并成功影响后续新调用
   - 管理端可移除授权并强制后续重新授权
-  - Settings 中可完成授权与查看历史
   - 调用记录保留与清理策略正确
   - 断线重连与幂等主路径通过
   - 自动化测试与 human_tests 通过
@@ -1408,19 +1480,17 @@ struct ReusableGrant {
 - 新增 `IRemoteInvokeDao`，建议方法：
   - `createPairing(...)`
   - `getPairing(pairingId)`
-  - `consumePairCode(userId, pairCode)`
+  - `consumePairCode(pairCode)`
   - `createGrant(...)`
-  - `findReusableGrant(userId, clientInstanceId, callerFingerprint)`
-  - `listGrants(userId, query)`
+  - `findReusableGrant(clientInstanceId, callerFingerprint)`
   - `getGrant(grantId)`
-  - `updateGrant(grantId, patch)`
   - `deleteGrant(grantId)`
   - `touchGrantLastUsed(grantId, ts)`
   - `createCall(...)`
   - `getCall(callId)`
   - `updateCall(callId, patch)`
   - `appendEvent(...)`
-  - `listCalls(userId, query)`
+  - `listCalls(query)`
   - `listCallEvents(callId, query)`
   - `cleanupExpiredData(now, retentionDays, maxRecords)`
 
@@ -1431,7 +1501,7 @@ struct ReusableGrant {
   - 先把 SQLite 版做完整
   - MySQL 跟着补齐同名语义
 - 需要特别注意：
-  - `grant` 查询要走 `user_id + client_instance_id + caller_fingerprint + status`
+  - `grant` 查询要走 `client_instance_id + caller_fingerprint + status`
   - `call event` 写入频率高，要避免大字段与低选择性索引过多
 
 #### 4. `src/dao/index.ts`
@@ -1496,7 +1566,6 @@ struct ReusableGrant {
   - `postCallerInput()`
   - `postClientFrame()`
   - `postClientExit()`
-  - `updateGrant()`
   - `removeGrant()`
   - `listHistory()`
 - 原则：
@@ -1560,29 +1629,29 @@ struct ReusableGrant {
   - 二次调用复用授权
   - 管理端修改有效期
   - 管理端删除授权
+  - Caller 无需 token 即可完成配对和命令执行（验证 Caller 路由无鉴权）
 
 ### 路由映射表
 
 #### 调用方接口
 
 - `GET /v4/remote-invoke/grants/reusable`
-  - 认证：需要 `x-bifrost-token`
-  - 作用：查询当前用户可复用授权
-- `GET /v4/remote-invoke/grants`
-  - 认证：需要 `x-bifrost-token`
-  - 作用：列出当前用户授权
-- `PATCH /v4/remote-invoke/grants/:grant_id`
-  - 认证：需要 `x-bifrost-token`
-  - 作用：修改授权模式/有效期
+  - 认证：**无需身份认证**（Caller 不需要 token，通过 `caller_fingerprint` 参数校验 grant 绑定）
+  - 作用：查询可复用授权
+- ~~`GET /v4/remote-invoke/grants`~~ — **已删除**（Caller 无需列出所有 grant，仅通过 `/grants/reusable` 查询具体授权）
+- ~~`PATCH /v4/remote-invoke/grants/:grant_id`~~ — **已删除**（Grant 属性由 Client 审批时决定，Caller 不应修改）
 - `DELETE /v4/remote-invoke/grants/:grant_id`
-  - 认证：需要 `x-bifrost-token`
+  - 认证：**无需身份认证**（通过 `caller_fingerprint` query 参数校验归属）
   - 作用：移除授权
 - `POST /v4/remote-invoke/pairings/start`
-  - 认证：需要 `x-bifrost-token`
-  - 作用：发起配对请求
+  - 认证：**无需身份认证**（`pair_code` 本身就是发现门控）
+  - 作用：发起配对请求（只需 `pair_code` + `caller_info`，不需要 `client_instance_id`）
 - `GET /v4/remote-invoke/pairings/:pairing_id/watch`
-  - 认证：需要 `x-bifrost-token`
+  - 认证：**无需身份认证**（`pairing_id` 是一次性 UUID）
   - 作用：SSE 观察授权状态
+- `POST /v4/remote-invoke/calls/open`
+  - 认证：**无需身份认证**（通过 `grant_id` + `caller_fingerprint` 校验绑定关系）
+  - 作用：创建调用，Relay 签发 per-call `relay_token`
 - `POST /v4/remote-invoke/calls/:call_id/input`
   - 认证：`Authorization: Bearer <relay_token>`
   - 作用：发送加密输入帧
@@ -1620,13 +1689,13 @@ struct ReusableGrant {
 #### 管理端接口
 
 - `GET /v4/remote-invoke/calls`
-  - 认证：`x-bifrost-token`
+  - 认证：`client_auth_token`（Client 侧管理端认证）
   - 作用：历史列表
 - `GET /v4/remote-invoke/calls/:call_id`
-  - 认证：`x-bifrost-token`
+  - 认证：`client_auth_token`
   - 作用：调用详情
 - `GET /v4/remote-invoke/calls/:call_id/events`
-  - 认证：`x-bifrost-token`
+  - 认证：`client_auth_token`
   - 作用：管理端查看事件时间线
 
 ### SQL 落地建议
@@ -1635,27 +1704,26 @@ struct ReusableGrant {
 
 - 字段建议：
   - `id`
-  - `user_id`
   - `client_instance_id`
   - `caller_fingerprint`
   - `pair_code`
   - `status`
-  - `caller_pubkey`
-  - `client_ephemeral_pub`
-  - `command_summary_json`
+  - `caller_display_name`
+  - `caller_source_ip`
   - `expires_at`
   - `create_time`
   - `update_time`
 - 索引建议：
-  - `(user_id, pair_code, status)`
+  - `(pair_code, status)`
   - `(client_instance_id, status)`
   - `(expires_at)`
+
+> **改造说明**：移除了 `user_id`、`caller_pubkey`、`client_ephemeral_pub`、`command_summary_json` 字段。`user_id` 不再需要（Caller 无身份概念）；`caller_pubkey` 和 `client_ephemeral_pub` 属于端到端加密（首版未实现）；`command_summary_json` 在 connect 阶段不再携带（命令在 calls/open 时传入）。
 
 #### `bifrost_remote_invoke_grants`
 
 - 字段建议：
   - `id`
-  - `user_id`
   - `client_instance_id`
   - `caller_fingerprint`
   - `grant_mode`
@@ -1667,15 +1735,14 @@ struct ReusableGrant {
   - `created_by`
   - `update_time`
 - 索引建议：
-  - `(user_id, client_instance_id, caller_fingerprint, status)`
-  - `(user_id, status, expires_at)`
+  - `(client_instance_id, caller_fingerprint, status)`
+  - `(status, expires_at)`
   - `(expires_at)`
 
 #### `bifrost_remote_invoke_calls`
 
 - 字段建议：
   - `id`
-  - `user_id`
   - `grant_id`
   - `pairing_id`
   - `client_instance_id`
@@ -1690,7 +1757,7 @@ struct ReusableGrant {
   - `ended_at`
   - `duration_ms`
 - 索引建议：
-  - `(user_id, started_at DESC)`
+  - `(started_at DESC)`
   - `(client_instance_id, started_at DESC)`
   - `(grant_id)`
   - `(status, started_at DESC)`
@@ -1760,15 +1827,25 @@ struct ReusableGrant {
 
 ### `bifrost remote` 与 relay 的接口映射
 
+- `bifrost remote connect <pair_code>`
+  - `POST /v4/remote-invoke/pairings/start`（只需 `pair_code` + `caller_info`）
+  - `GET /v4/remote-invoke/pairings/:pairing_id/watch`（等待审批）
+  - 审批通过后保存连接信息到 `{BIFROST_DATA_DIR}/remote-connections.json`
+  - 注意：caller 链路不使用 `x-bifrost-token`，安全边界由 `pair_code`、`caller_fingerprint` 与 grant 绑定承担
 - `bifrost remote traffic get 57544`
-  - 先查 `GET /v4/remote-invoke/grants/reusable`
-  - 命中则直接 `open call`
-  - 未命中则走 pairing
+  - 从本地连接文件 `resolve_local_connection()` 解析目标
+  - `GET /v4/remote-invoke/grants/reusable?client_instance_id=X&caller_fingerprint=Y` 验证 grant
+  - 命中则 `POST /v4/remote-invoke/calls/open`
+  - `GET /v4/remote-invoke/calls/:call_id/events`（SSE 接收结果）
+  - 未命中则报错 "authorization expired, please run `bifrost remote connect <pair-code>` again"
 - `bifrost remote status`
-  - 优先查可复用授权
-  - 若命中则直接执行只读查询
+  - 同上流程：本地解析 → 验证 grant → 创建 call
+- `bifrost remote disconnect [--client-id <前缀>] [--all]`
+  - 从本地连接文件解析目标
+  - `DELETE /v4/remote-invoke/grants/:grant_id?caller_fingerprint=Y`
+  - 成功后从本地连接文件中移除记录
 - 后续首版只读查询命令都遵循同一规则：
-  - “先查可复用授权，再决定是否重新授权”
+  - 先从本地连接文件解析，再查可复用授权，再创建 call 执行
 
 ### 新增模块
 
@@ -1796,7 +1873,7 @@ struct ReusableGrant {
 - `remote_invoke:pairing:{pairing_id}`
 - `remote_invoke:call_route:{call_id}`
 - `remote_invoke:grant_cache:{grant_id}`
-- `remote_invoke:grant_lookup:{user_id}:{client_instance_id}:{caller_fingerprint}`
+- `remote_invoke:grant_lookup:{client_instance_id}:{caller_fingerprint}`
 - `remote_invoke:rate_limit:{client_or_ip}`
 
 ### 数据库存储
@@ -1804,7 +1881,6 @@ struct ReusableGrant {
 #### 表 1：`remote_invoke_grant`
 
 - `id`
-- `user_id`
 - `client_instance_id`
 - `caller_fingerprint`
 - `grant_scope`
@@ -1820,9 +1896,9 @@ struct ReusableGrant {
 
 说明：
 
-- 此表同时承担“可复用授权记录”的职责。
-- 对于 `packages/bifrost-sync-server`，它直接落在本地用户数据库中。
-- 对于 `bifrost-server-v4`，迁移后同样应落在对应用户数据域中，而不是仅存在临时缓存里。
+- 此表同时承担"可复用授权记录"的职责。
+- 对于 `packages/bifrost-sync-server`，它直接落在本地 SQLite 数据库中。
+- 对于 `bifrost-server-v4`，迁移后同样应落在对应数据域（Redis + 持久化 DB），而不是仅存在临时缓存里。
 
 #### 表 2：`remote_invoke_call`
 
@@ -1981,21 +2057,67 @@ struct ReusableGrant {
 | `response_body` | bool | 否 | `false` | 是否包含响应体 | - |
 
 - **响应内容**（JSON）：返回完整的流量记录详情，包含请求/响应头、timing 信息、TLS 信息等。当 `request_body=true` 时，响应中额外包含 `request_body` 字段；当 `response_body=true` 时，响应中额外包含 `response_body` 字段。
-- **与本地 CLI 的差异**：远程版完整支持本地 `bifrost traffic get` 的所有能力（`--request-body`、`--response-body`），通过结构化参数传递。
+- **执行语义**：
+  - 当 `id` 为纯数字时，客户端必须按本地 `bifrost traffic get <seq>` 的规则，先将 sequence 解析到真实 traffic id，再读取详情。
+  - 解析过程应优先命中精确 sequence；若仅提供短后缀，则按最新记录优先匹配，并保持与本地 CLI 一致的候选顺序。
+- **与本地 CLI 的差异**：远程版完整支持本地 `bifrost traffic get` 的所有能力（`--request-body`、`--response-body`、纯数字 sequence 解析），通过结构化参数传递。
 
 #### `traffic.search` — 按关键词搜索流量记录
 
 - **用途**：按关键词全文搜索流量记录（搜索范围覆盖 URL、headers、body）。
-- **本地 API**：`POST /_bifrost/api/search` body=`{"keyword": query}`
+- **本地 API**：`POST /_bifrost/api/search/stream` body=`{"keyword": query, "limit": limit}`
 - **别名**：`search.get`（功能完全等价）
 - **请求参数**（`args_json` 中的字段）：
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 | 安全约束 |
 |------|------|------|--------|------|---------|
-| `query` | string | **是** | - | 搜索关键词 | 长度 ≤ 500，字符集 `[a-zA-Z0-9._\-:/]` |
+| `query` | string | **是** | - | 搜索关键词 | 长度 ≤ 500，支持 Unicode（含中文），禁止 ASCII 控制字符 |
+| `limit` | number | 否 | `50` | 最大返回结果数 | 强制上限 `100` |
 
-- **响应内容**（JSON）：返回匹配的流量记录列表。
-- **与本地 CLI 的差异**：远程版目前仅支持 keyword 搜索，不支持本地 `bifrost traffic search` 的高级筛选参数（`--url`、`--headers`、`--body`、`--status`、`--method` 等范围限定）。后续可按需扩展。
+- **响应内容**（stdout 流式文本）：
+  - 远程调用必须复用本地 `bifrost search` 的 SSE 搜索链路，而不是阻塞式一次性查询。
+  - 客户端逐步把搜索结果、进度和最终 summary 通过 relay frame 推送给 caller，caller 收到 frame 后立即写到终端。
+  - 输出格式与本地 `bifrost search <keyword>` 的默认表格模式保持一致，至少包含结果行、搜索进度和最终 summary。
+- **与本地 CLI 的差异**：远程版目前仍只支持 keyword + limit，不支持本地 `bifrost search` 的高级筛选参数（`--url`、`--headers`、`--body`、`--status`、`--method` 等范围限定）。后续可按需扩展。
+
+#### 失败回传语义
+
+- 当远程命令执行失败时，client 侧生成的错误文本必须通过 relay 原样回传给 caller，不能只返回 `exit_code = -1`。
+- `call exit` 事件除 digest 外，还需要携带可选 `stderr` 字段，供 caller 在终端直接展示。
+- 对流式命令（当前为 `traffic.search` / `search.get`），caller 需要边收 frame 边输出；对非流式命令，继续保持“完整收集后一次性输出”模式。
+
+## 2026-04-20 回归修复
+
+### 问题现象
+
+1. `bifrost remote traffic get 566961` 在远端有数据时仍返回 `Remote command 'traffic.get' exited with code -1`
+2. `bifrost remote search nextoncall` 在 client 侧存在匹配数据时返回 `exit code -1`
+3. 失败时 caller 终端看不到真实错误原因，只能看到 `-1`
+
+### 根因
+
+1. `traffic.get` 远程执行器直接把纯数字入参当作真实 traffic id 请求 `/api/traffic/{id}`，没有复用本地 CLI 的 sequence 解析逻辑。
+2. `search.get` / `traffic.search` 远程执行器仍走阻塞式 `POST /api/search`，并受 30s 请求超时限制；在大流量库上无法像本地 `bifrost search` 一样边搜边回传结果。
+3. relay 的 `call exit` 事件只回传 digest，不回传实际 `stderr` 文本，导致 caller 无法展示真实错误。
+
+### 修复方案
+
+1. 在 remote executor 中补齐 sequence -> real id 解析，保证 `remote traffic get <seq>` 与本地 CLI 语义一致。
+2. 将远程搜索切换到 `/api/search/stream`，在 client 侧把 SSE 事件转换为终端文本并通过多帧 relay 输出。
+3. 扩展 `ClientCallExitRequest` / relay exit 事件，增加可选 `stderr` 字段并在 caller 侧展示。
+
+### 验证计划
+
+- 单元测试：
+  - `remote_invoke::executor` 覆盖纯数字 sequence 解析与非法 id 拒绝
+  - `remote CLI` 覆盖 exit 事件中的 `stderr` 展示与流式 frame 输出行为
+- E2E：
+  - 扩展 `e2e-tests/tests/test_remote_invoke_e2e.sh`
+  - 回归 `remote traffic get <seq>` 能正确返回详情
+  - 回归 `remote search <keyword>` 能返回命中结果，且运行期间提前产生输出
+- Human tests：
+  - 更新 `human_tests/remote-invoke.md`
+  - 逐条执行 sequence 查询、流式搜索、错误透传三个回归场景
 
 #### `traffic.clear` — 不支持
 
@@ -2026,7 +2148,7 @@ struct ReusableGrant {
 
 - 当有新的配对请求时，全局弹出通知。
 - 展示字段：
-  - 调用方设备指纹（`caller_pubkey` 的 `sha256` 截短为 16 位 hex，格式 `a3f1:b2c4:9e8d:07f6`）
+  - 调用方设备指纹（`caller_fingerprint`，基于 username+hostname 的 hash 截短展示）
   - 调用方显示名
   - 来源 IP / 地域（如果可得）
   - User-Agent
@@ -2137,12 +2259,12 @@ struct ReusableGrant {
   - Relay 仅存摘要
   - token 只做绑定，不做明文保护
 
-### 风险 4：授权后 token 被窃取
+### 风险 4：grant 凭证被窃取
 
 - 防护：
-  - token 与 `caller_fingerprint` 绑定
-  - token 与临时公钥绑定
-  - 短期 token
+  - `grant_id` 与 `caller_fingerprint` 双因子绑定，窃取 `grant_id` 还需知道对应的 `caller_fingerprint`
+  - `caller_fingerprint` 基于 username+hostname 生成，攻击者需知道目标机器信息
+  - grant 有时效策略（Once/30m/1h/1d/Permanent），过期自动失效
   - 支持手动 revoke
   - SSE/HTTP 全程 HTTPS
 
@@ -2181,9 +2303,11 @@ struct ReusableGrant {
 ### 风险 9：Discovery 模式客户端枚举
 
 - 防护：
-  - `GET /v4/remote-invoke/clients` 接口只返回当前认证用户（`x-bifrost-token` 绑定的 `user_id`）名下的客户端
-  - Relay 必须做严格的租户隔离，禁止跨用户查看客户端列表
-  - 客户端列表不返回 `client_auth_token` 或 `client_long_term_pubkey` 等敏感字段
+  - **`GET /v4/remote-invoke/clients` 端点已完全删除**，不保留任何访问入口
+  - Relay 绝不主动暴露注册的客户端信息
+  - 客户端发现仅通过 `pair_code` 机制（6 位一次性码，2 分钟 TTL）
+  - 配对成功前，Caller 无法获知任何 `client_instance_id` 或设备信息
+  - 只有 Client 用户审批通过后，Caller 才能获取 `client_instance_id`、`device_name`、`platform` 等信息
 
 ### 风险 10：时钟偏差导致过期判断异常
 
@@ -2201,22 +2325,23 @@ struct ReusableGrant {
 
 ## 分阶段实施建议
 
-### Phase 1：最小闭环（含端到端加密骨架）
+### Phase 1：最小闭环（明文信封骨架）
 
-> ⚠️ 端到端加密从 Phase 1 即纳入，不做"明文中转版本"。原因：协议格式一旦定型，后续再插入加密层会导致所有帧格式和状态机迁移，成本远高于首版就集成骨架。
+> **实现状态更新**：首版采用明文信封格式传输（`EncryptedEnvelope` 中 `nonce`/`tag` 为空，`ciphertext` 实际为明文）。端到端加密作为后续安全增强项，不在 Phase 1 纳入。
 
 - 客户端在线 SSE
 - 发现模式与一次性授权码
-- 6 位码配对
+- 6 位码配对（Relay 从 pair_code 自动解析 client_instance_id）
 - 本地人工授权
 - 一次调用
-- `bifrost remote` 程序化调用入口
+- `bifrost remote` 程序化调用入口（基于本地连接文件，无需 Caller token）
 - 仅只读查询命令白名单
 - 多客户端在线管理
 - 大结果分片流式传输
 - SSE 输出流
 - 调用记录落库
-- **端到端加密骨架**：X25519 密钥交换 + HKDF 派生 + ChaCha20-Poly1305/AES-256-GCM 加密帧，Phase 1 即覆盖配对→授权→加密→执行全链路
+- grant_id + caller_fingerprint 双因子操作凭证
+- per-call relay_token 路由
 
 ### Phase 2：完整授权 + 安全增强
 
@@ -2225,7 +2350,8 @@ struct ReusableGrant {
 - WebUI 历史页
 - 失败重连 / 恢复
 - 设备指纹可信绑定与迁移
-- client_auth_token 注册与续期
+- client_auth_token 注册与续期（当前通过重新注册替代续签）
+- **端到端加密**：X25519 密钥交换 + HKDF 派生 + ChaCha20-Poly1305/AES-256-GCM 加密帧
 
 ### Phase 3：高级安全与运维
 
@@ -2278,9 +2404,9 @@ struct ReusableGrant {
 ### 多 caller 并发授权（grant）
 
 - 授权（grant）按 `caller_fingerprint` 维度独立管理。
-- **同一客户端可同时存在多个来自不同调用方的活跃 grant**。每个 grant 绑定 `(user_id, client_instance_id, caller_fingerprint)` 三元组。
+- **同一客户端可同时存在多个来自不同调用方的活跃 grant**。每个 grant 绑定 `(client_instance_id, caller_fingerprint)` 二元组。
 - grant 之间完全隔离：调用方 A 的 grant 撤销不影响调用方 B。
-- 可复用授权查询 `findReusableGrant(userId, clientInstanceId, callerFingerprint)` 天然按 caller 隔离。
+- 可复用授权查询 `findReusableGrant(clientInstanceId, callerFingerprint)` 天然按 caller 隔离。
 - 配置约束：
   - `remote_invoke.max_grants_per_client`（默认 `20`）— 同一客户端允许的最大活跃 grant 数（跨所有 caller），超出后新配对被拒绝并返回 `grant_limit_exceeded`。
 
@@ -2387,7 +2513,7 @@ struct ReusableGrant {
 - 验证调用方通过一次性授权码发起请求后，本地弹出授权
 - 验证拒绝后调用方收到 `rejected`
 - 验证一次调用授权后，仅首个 call 成功
-- 验证 `30m` 授权下多次调用可复用 token
+- 验证 `30m` 授权下多次调用可复用 grant
 - 验证客户端断线时 SSE 收到中断事件
 - 验证加密帧经 Relay 转发但服务端日志不出现明文
 - 验证多调用方各自配对授权后可并发 call 同一客户端
@@ -2434,7 +2560,7 @@ struct ReusableGrant {
 
 1. 调用方按“纯程序化接入”设计，通过新增 `bifrost remote` 指令发起调用。
 2. 首版命令范围固定为 Bifrost 只读查询命令，不支持任意 shell。
-3. “永久授权”必须绑定调用方设备指纹，而不是只绑定 token。
+3. "永久授权"必须绑定调用方设备指纹（`caller_fingerprint`），而不是依赖会话级 token。
 4. `Remote Invoke` 历史与授权管理放在 `Settings` 内，不新增一级导航。
 5. 首版支持大流量传输，调用输入与输出都采用分片流式传输，不限制在中小载荷场景。
 6. 首版支持多个 Bifrost 远端调用客户端同时在线，WebUI 在 `Settings -> Remote Invoke` 中统一管理多个客户端。
@@ -2443,3 +2569,65 @@ struct ReusableGrant {
    - Bifrost 客户端主动进入发现模式
    - 展示一个一次性授权码
    - `bifrost remote` 端使用该一次性授权码发起配对授权流程
+
+---
+
+## 附录：安全重构改造记录
+
+> 本章节整合自 `design/remote-invoke-security-redesign.md`，记录 Remote Invoke 安全架构从初版到当前方案的核心变更。
+
+### 改造背景
+
+初版设计中 Caller 路由使用 `x-bifrost-token` 进行身份认证，但实际实现中 **所有 Caller 路由均无鉴权**。排查发现这并非遗漏，而是架构选择：在 Relay 透明中继模型下，Caller 不应持有 Relay 颁发的身份 token。
+
+### 核心理念变更
+
+| 维度 | 初版设计 | 当前方案 |
+| --- | --- | --- |
+| Relay 角色 | 身份提供者 + 中继 | 纯透明中继（不颁发 Caller 身份） |
+| Caller 身份 | `x-bifrost-token` | 无身份概念，通过 `caller_fingerprint` 追踪 |
+| 客户端发现 | `GET /clients` 枚举 | `pair_code` 一次性码（2 分钟 TTL） |
+| 操作凭证 | Token + fingerprint | `grant_id` + `caller_fingerprint` 双因子 |
+| relay_token | 会话级 token | per-call 临时路由令牌 |
+| Grant 管理 | Caller 可 PATCH 修改 | Client 审批时确定，不可后续修改 |
+| 数据隔离 | `user_id` 维度 | `client_instance_id` + `caller_fingerprint` 维度 |
+
+### 安全门链
+
+```
+pair_code 可见性门控（6位码，2分钟TTL）
+  → 人工审批（Client用户确认弹窗）
+    → grant 绑定（client_instance_id + caller_fingerprint）
+      → per-call relay_token（256-bit随机，call生命周期内有效）
+        → 命令白名单（仅只读查询命令）
+```
+
+### 已删除/改造的端点
+
+| 端点 | 处理方式 | 原因 |
+| --- | --- | --- |
+| `GET /clients` | 完全删除 | 防止客户端枚举，以 pair_code 替代 |
+| `PATCH /grants/:id` | 完全删除 | Grant 属性 Client 审批时确定，不可后续修改 |
+| `GET /grants` | 完全删除 | Caller 无需列出所有 grant |
+| `POST /pairings/start` | 改造 | 移除 `client_instance_id`（从 pair_code 解析）、`caller_pubkey`、`command` |
+| `POST /calls/open` | 新增 | 独立的 call 创建端点，校验 grant 绑定后签发 relay_token |
+| 所有 Caller 路由 | 移除鉴权 | Caller 无 token，安全性由 pair_code + grant 保障 |
+
+### CLI 改造
+
+- `CallerRelayClient` 结构中不再有 `token` 字段
+- 新增本地连接文件 `{BIFROST_DATA_DIR}/remote-connections.json` 存储已建立的连接
+- `resolve_local_connection()` 替代 `resolve_client_id()`，纯本地文件操作
+- `caller_fingerprint` 生成算法：`simple_hash("bifrost-cli:{username}:{hostname}")`
+
+### 实现状态标注
+
+- ✅ Caller 路由无鉴权（透明中继模型）
+- ✅ pair_code 发现机制（6位码，自动消费解析 client_instance_id）
+- ✅ grant_id + caller_fingerprint 双因子操作凭证
+- ✅ per-call relay_token 路由
+- ✅ 本地连接文件
+- ✅ 命令白名单（status, traffic.list, traffic.get, traffic.search, search.get）
+- ⏳ 端到端加密（EncryptedEnvelope 当前为明文信封，nonce/tag 为空）
+- ⏳ Ed25519 签名验证（当前简化实现）
+- ⏳ 设备指纹可信绑定与迁移

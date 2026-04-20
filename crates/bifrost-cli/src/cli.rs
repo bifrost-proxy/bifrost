@@ -44,29 +44,30 @@ DEFAULT BEHAVIOR:
 SUBCOMMAND REFERENCE
 ────────────────────────────────────────────────────────────────────────────
 
-start [OPTIONS]                   Start the proxy server (default)
+start [OPTIONS]                   Start the proxy server (default when no subcommand provided)
   -p, --port <PORT>                   Unified proxy port for HTTP/HTTPS/SOCKS5
   -H, --host <HOST>                   Listen address (overrides global -H)
   --socks5-port <PORT>                Separate SOCKS5 port (optional; default: share main port)
   -d, --daemon                        Run as background daemon
-  --skip-cert-check                   Skip CA certificate check
-  --access-mode <MODE>                Access mode: local_only|whitelist|interactive|allow_all
-  --whitelist <IPS>                   Client IP whitelist (comma-separated, supports CIDR)
+  --skip-cert-check                   Skip CA certificate installation check
+  --access-mode <MODE>                Access control mode: local_only|whitelist|interactive|allow_all
+  --whitelist <IPS>                   Client IP whitelist (comma-separated, supports CIDR notation)
   --allow-lan                         Allow LAN (private network) clients
-  --proxy-user <USER:PASS>            Proxy user credentials (can be repeated)
+  --proxy-user <USER:PASS>            Proxy user credentials in USER:PASS format (can be repeated)
   --intercept                         Enable TLS/HTTPS interception
-  --no-intercept                      Disable TLS/HTTPS interception
+  --no-intercept                      Disable TLS/HTTPS interception (default: disabled)
   --intercept-exclude <DOMAINS>       Exclude domains from interception (supports wildcards)
   --intercept-include <DOMAINS>       Force intercept domains (highest priority)
   --app-intercept-exclude <APPS>      Exclude apps from TLS interception (supports wildcards)
   --app-intercept-include <APPS>      Force intercept apps (highest priority)
-  --unsafe-ssl                        Skip upstream TLS verification (dangerous)
+  --unsafe-ssl                        Skip upstream server TLS certificate verification (dangerous)
   --enable-badge-injection            Enable injecting Bifrost badge into HTML pages
   --disable-badge-injection           Disable injecting Bifrost badge into HTML pages
   --no-disconnect-on-config-change    Disable auto-disconnect when TLS config changes
   --rules <RULE>                      Proxy rule, e.g. host:// or http3:// (can be repeated)
   --rules-file <PATH>                 Path to rules file
-  --system-proxy                      Enable system proxy
+  --system-proxy                      Enable system proxy configuration
+  --no-system-proxy                   Disable system proxy configuration
   --proxy-bypass <LIST>               System proxy bypass list
   --cli-proxy                         Enable CLI proxy env vars while proxy is running
   --cli-proxy-no-proxy <LIST>         CLI proxy no-proxy list
@@ -683,13 +684,7 @@ pub enum Commands {
         #[arg(
             long,
             global = true,
-            help = "Authentication token for relay server (default: read from sync config)"
-        )]
-        token: Option<String>,
-        #[arg(
-            long,
-            global = true,
-            help = "Target client instance ID (required if multiple clients online)"
+            help = "Target client instance ID prefix (for selecting among saved connections)"
         )]
         client_id: Option<String>,
     },
@@ -1354,6 +1349,19 @@ pub enum RemoteCommands {
     Connect {
         #[arg(help = "Pair code displayed on the remote device")]
         pair_code: String,
+    },
+    #[command(
+        about = "Revoke authorization for a remote Bifrost instance",
+        long_about = "Revoke authorization for a remote Bifrost instance.\n\n\
+            Without flags, revokes all grants for the target client (resolved via --client-id).\n\
+            Use --all to revoke grants for every connected client at once.\n\
+            Use --grant-id to revoke a single specific grant."
+    )]
+    Disconnect {
+        #[arg(long, help = "Revoke grants for ALL clients (no --client-id needed)")]
+        all: bool,
+        #[arg(long, help = "Revoke a single specific grant by ID")]
+        grant_id: Option<String>,
     },
     #[command(about = "Get remote proxy status")]
     Status,

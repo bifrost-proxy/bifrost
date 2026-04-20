@@ -240,7 +240,6 @@ fn main() {
         Some(Commands::Remote {
             action,
             relay_url,
-            token,
             client_id,
         }) => {
             let relay_url = match relay_url {
@@ -259,10 +258,8 @@ fn main() {
                     }
                 }
             };
-            let token = token.unwrap_or_default();
             remote::handle_remote_command(remote::RemoteOptions {
                 relay_url,
-                token,
                 client_id,
                 action,
             })

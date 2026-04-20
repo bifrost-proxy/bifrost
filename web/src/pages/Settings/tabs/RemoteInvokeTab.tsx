@@ -57,6 +57,26 @@ function formatFingerprint(fp: string): string {
   return `${short.slice(0, 4)}:${short.slice(4, 8)}:${short.slice(8, 12)}:${short.slice(12, 16)}`;
 }
 
+function formatArgsPreview(argsJson?: string | null): string {
+  if (!argsJson) return "";
+  try {
+    const obj = JSON.parse(argsJson);
+    return Object.entries(obj)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ");
+  } catch {
+    return argsJson.length > 60 ? argsJson.slice(0, 60) + "…" : argsJson;
+  }
+}
+
+function formatBytes(bytes: number | null | undefined): string | null {
+  if (bytes == null || bytes === 0) return null;
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
 function formatCountdown(expiresAt: number): string {
   const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   if (remaining <= 0) return "Expired";
@@ -113,7 +133,8 @@ export default function RemoteInvokeTab() {
   const refreshGrants = useCallback(async () => {
     try {
       const res = await listGrants();
-      setGrants(res.grants ?? []);
+      const sorted = (res.grants ?? []).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+      setGrants(sorted);
     } catch {
       // ignore
     }
@@ -122,7 +143,8 @@ export default function RemoteInvokeTab() {
   const refreshCalls = useCallback(async () => {
     try {
       const res = await listCalls();
-      setCalls(res.calls ?? []);
+      const sorted = (res.calls ?? []).sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0));
+      setCalls(sorted);
     } catch {
       // ignore
     }
@@ -389,9 +411,8 @@ export default function RemoteInvokeTab() {
           <Card
             title={
               <Space>
-                <Badge count={pairingList.length} offset={[8, 0]}>
-                  <span>Pending Pairing Requests</span>
-                </Badge>
+                <span>Pending Pairing Requests</span>
+                <Badge count={pairingList.length} />
               </Space>
             }
             extra={
@@ -402,7 +423,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {pairingList.length === 0 ? (
               <Empty
@@ -466,14 +486,13 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24}>
           <Card
             title={
               <Space>
                 <SafetyOutlined />
-                <Badge count={grants.length} offset={[8, 0]}>
-                  <span>Active Grants</span>
-                </Badge>
+                <span>Grants</span>
+                <Badge count={grants.filter((g) => g.status === "active").length} />
               </Space>
             }
             extra={
@@ -484,7 +503,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {grants.length === 0 ? (
               <Empty
@@ -495,9 +513,10 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={grants}
                 size="small"
+                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(g) => (
                   <List.Item
-                    actions={[
+                    actions={g.status === "removed" ? [] : [
                       <Popconfirm
                         key="revoke"
                         title="Revoke this grant?"
@@ -556,14 +575,13 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24}>
           <Card
             title={
               <Space>
                 <HistoryOutlined />
-                <Badge count={calls.length} offset={[8, 0]}>
-                  <span>Recent Calls</span>
-                </Badge>
+                <span>Recent Calls</span>
+                <Badge count={calls.length} />
               </Space>
             }
             extra={
@@ -574,7 +592,6 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
-            styles={{ header: { overflow: "visible" } }}
           >
             {calls.length === 0 ? (
               <Empty
@@ -585,7 +602,11 @@ export default function RemoteInvokeTab() {
               <List
                 dataSource={calls}
                 size="small"
-                renderItem={(c) => (
+                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
+                renderItem={(c) => {
+                  const argsPreview = formatArgsPreview(c.command_summary?.masked_args_json);
+                  const bytesLabel = formatBytes(c.bytes_out);
+                  return (
                   <List.Item>
                     <List.Item.Meta
                       title={
@@ -593,6 +614,13 @@ export default function RemoteInvokeTab() {
                           <Text code style={{ fontSize: 11 }}>
                             {c.command_summary?.command_preview ?? '-'}
                           </Text>
+                          {argsPreview && (
+                            <Tooltip title={c.command_summary?.masked_args_json}>
+                              <Text type="secondary" style={{ fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
+                                {argsPreview}
+                              </Text>
+                            </Tooltip>
+                          )}
                           <Tag
                             color={
                               c.status === "completed"
@@ -626,11 +654,17 @@ export default function RemoteInvokeTab() {
                               · {c.duration_ms}ms
                             </Text>
                           )}
+                          {bytesLabel && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · ↓ {bytesLabel}
+                            </Text>
+                          )}
                         </Space>
                       }
                     />
                   </List.Item>
-                )}
+                  );
+                }}
               />
             )}
           </Card>
