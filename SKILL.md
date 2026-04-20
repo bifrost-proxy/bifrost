@@ -557,6 +557,7 @@ bifrost install-skill -t all -y                # 自动安装到所有支持的�
 #### 命令
 
 ```bash
+bifrost remote connect <code>                  # 使用授权码建立配对
 bifrost remote status                          # 查看远端状态
 bifrost remote search <query>                  # 远程搜索流量（支持中文等 Unicode，禁止 ASCII 控制字符，最大 500 字符）
 bifrost remote traffic search <query>          # 等价于 bifrost remote search
