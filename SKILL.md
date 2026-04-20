@@ -630,6 +630,12 @@ bifrost remote traffic get <id> [OPTIONS]      # 远程获取流量详情
 #### 远程调用常见工作流
 
 ```bash
+# 使用授权码建立连接
+bifrost remote connect <code>
+
+# 查看远端状态
+bifrost remote status
+
 # 远程排查某个域名的请求
 bifrost remote traffic list --host example.com --limit 20
 bifrost remote traffic get <id> --request-body --response-body
@@ -638,8 +644,6 @@ bifrost remote traffic get <id> --request-body --response-body
 bifrost remote search "error"
 bifrost remote search "api/v1/users"
 
-# 查看远端状态
-bifrost remote status
 ```
 
 #### 远程调用 Agent 行为建议
