@@ -1165,7 +1165,7 @@ pub fn run_foreground(
                     .expect("Failed to create sync manager"),
             );
             let _sync_task = sync_manager.clone().start();
-            let admin_state = admin_state.with_sync_manager_shared(sync_manager);
+            let admin_state = admin_state.with_sync_manager_shared(sync_manager.clone());
             let admin_state =
                 admin_state.with_ip_tls_pending_manager(bifrost_admin::IpTlsPendingManager::new());
             let admin_state = admin_state
@@ -1192,6 +1192,7 @@ pub fn run_foreground(
                         let worker = bifrost_admin::RemoteInvokeWorker::new(
                             ri_config,
                             identity,
+                            Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
                             admin_host,
                             config.port,
                         );
@@ -1869,7 +1870,7 @@ pub fn run_daemon(
                             .expect("Failed to create sync manager"),
                     );
                     let _sync_task = sync_manager.clone().start();
-                    let admin_state = admin_state.with_sync_manager_shared(sync_manager);
+                    let admin_state = admin_state.with_sync_manager_shared(sync_manager.clone());
                     let admin_state = admin_state
                         .with_ip_tls_pending_manager(bifrost_admin::IpTlsPendingManager::new());
                     let admin_state = admin_state
@@ -1896,6 +1897,7 @@ pub fn run_daemon(
                                 let worker = bifrost_admin::RemoteInvokeWorker::new(
                                     ri_config,
                                     identity,
+                                    Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
                                     admin_host,
                                     config.port,
                                 );

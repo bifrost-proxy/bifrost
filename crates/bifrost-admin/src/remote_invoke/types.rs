@@ -295,6 +295,8 @@ pub struct GrantInfo {
     pub grant_id: String,
     pub client_instance_id: String,
     pub caller_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_display_name: Option<String>,
     pub grant_mode: GrantMode,
     pub grant_scope: String,
     pub status: GrantStatus,
@@ -358,6 +360,7 @@ pub struct DiscoverySession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRegistrationRequest {
+    pub challenge_id: String,
     pub client_instance_id: String,
     pub client_long_term_pubkey: String,
     pub device_name: String,
@@ -371,6 +374,44 @@ pub struct ClientRegistrationRequest {
 pub struct ClientRegistrationResponse {
     pub client_auth_token: String,
     pub expires_at: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRegistrationChallengeRequest {
+    pub client_instance_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRegistrationChallengeResponse {
+    pub challenge_id: String,
+    pub challenge: String,
+    pub expires_at: u64,
+    pub algorithm: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_registration_signature_payload(
+    challenge_id: &str,
+    challenge: &str,
+    client_instance_id: &str,
+    device_name: &str,
+    platform: &str,
+    bifrost_version: &str,
+    client_long_term_pubkey: &str,
+    timestamp: u64,
+) -> String {
+    serde_json::json!([
+        "bifrost-remote-register-v1",
+        challenge_id,
+        challenge,
+        client_instance_id,
+        device_name,
+        platform,
+        bifrost_version,
+        client_long_term_pubkey,
+        timestamp,
+    ])
+    .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +456,8 @@ pub struct ClientCallExitRequest {
     pub exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

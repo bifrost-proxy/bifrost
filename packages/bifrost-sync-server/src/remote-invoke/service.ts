@@ -11,9 +11,10 @@ import type {
   ClientCallExitRequest,
   OpenCallRequest,
   CallsQueryParams,
+  ClientRegistrationChallengeResponse,
   ClientRegistrationRequest,
 } from './types';
-import { isAllowedCommand, grantModeTtlMs } from './types';
+import { buildRegistrationSignaturePayload, isAllowedCommand, grantModeTtlMs } from './types';
 import {
   pushToClient,
   getClientStream,
@@ -26,9 +27,15 @@ import {
 } from './sse';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
+const REGISTER_CHALLENGE_TTL_MS = 60_000;
+const REGISTER_TIMESTAMP_SKEW_MS = 5 * 60_000;
 
 function generateRelayToken(): string {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function computeStoredPubkeyHash(pubkeyDer: Buffer): string {
+  return crypto.createHash('sha256').update(pubkeyDer).digest('hex');
 }
 
 function constantTimeCompare(a: string, b: string): boolean {
@@ -39,15 +46,103 @@ function constantTimeCompare(a: string, b: string): boolean {
 }
 
 export class RemoteInvokeService {
+  private callTokens = new Map<string, string>();
+  private registrationChallenges = new Map<
+    string,
+    {
+      clientInstanceId: string;
+      userId: string;
+      challenge: string;
+      expiresAt: number;
+    }
+  >();
+
   constructor(
     private storage: IStorage,
     private config: RemoteInvokeConfig,
-  ) {}
+  ) { }
 
-  async registerClient(req: ClientRegistrationRequest): Promise<{ client_auth_token: string; expires_at: string }> {
+  issueRegistrationChallenge(
+    userId: string,
+    clientInstanceId: string,
+  ): ClientRegistrationChallengeResponse {
+    this.cleanupExpiredRegistrationChallenges();
+    const challengeId = nanoid();
+    const challenge = generateRelayToken();
+    const expiresAt = Date.now() + REGISTER_CHALLENGE_TTL_MS;
+    this.registrationChallenges.set(challengeId, {
+      clientInstanceId,
+      userId,
+      challenge,
+      expiresAt,
+    });
+    return {
+      challenge_id: challengeId,
+      challenge,
+      expires_at: expiresAt,
+      algorithm: 'ed25519',
+    };
+  }
+
+  async registerClient(
+    userId: string,
+    req: ClientRegistrationRequest,
+  ): Promise<{ client_auth_token: string; expires_at: string }> {
+    const challengeEntry = this.registrationChallenges.get(req.challenge_id);
+    if (!challengeEntry) {
+      throw new Error('registration_challenge_not_found');
+    }
+    this.registrationChallenges.delete(req.challenge_id);
+    if (challengeEntry.expiresAt < Date.now()) {
+      throw new Error('registration_challenge_expired');
+    }
+    if (challengeEntry.clientInstanceId !== req.client_instance_id) {
+      throw new Error('registration_client_instance_id_mismatch');
+    }
+    if (challengeEntry.userId !== userId) {
+      throw new Error('registration_user_mismatch');
+    }
+    if (!Number.isFinite(req.timestamp)) {
+      throw new Error('invalid_registration_timestamp');
+    }
+    const timestampMs = req.timestamp * 1000;
+    if (Math.abs(Date.now() - timestampMs) > REGISTER_TIMESTAMP_SKEW_MS) {
+      throw new Error('registration_timestamp_out_of_window');
+    }
+
+    const pubkeyDer = decodeBase64(req.client_long_term_pubkey, 'client_long_term_pubkey');
+    const signature = decodeBase64(req.signature, 'signature');
+    const payload = buildRegistrationSignaturePayload(
+      req.challenge_id,
+      challengeEntry.challenge,
+      req.client_instance_id,
+      req.device_name,
+      req.platform,
+      req.bifrost_version,
+      req.client_long_term_pubkey,
+      req.timestamp,
+    );
+    const publicKey = crypto.createPublicKey({
+      key: pubkeyDer,
+      format: 'der',
+      type: 'spki',
+    });
+    const verified = crypto.verify(
+      null,
+      Buffer.from(payload, 'utf8'),
+      publicKey,
+      signature,
+    );
+    if (!verified) {
+      throw new Error('invalid_registration_signature');
+    }
+
     const existing = await this.storage.remoteInvoke.getClientRecord(req.client_instance_id);
     if (existing) {
-      const pubkeyHash = crypto.createHash('sha256').update(req.client_long_term_pubkey).digest('hex');
+      if (existing.user_id && existing.user_id !== userId) {
+        throw new Error('client_instance_id_owned_by_another_user');
+      }
+      const pubkeyHash = computeStoredPubkeyHash(pubkeyDer);
       if (existing.client_pubkey_hash && existing.client_pubkey_hash !== pubkeyHash) {
         throw new Error('pubkey mismatch for existing client_instance_id');
       }
@@ -56,11 +151,11 @@ export class RemoteInvokeService {
     const token = generateRelayToken();
     const now = new Date().toISOString();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    const pubkeyHash = crypto.createHash('sha256').update(req.client_long_term_pubkey).digest('hex');
+    const pubkeyHash = computeStoredPubkeyHash(pubkeyDer);
 
     const record: RemoteInvokeClientRecord = {
       client_instance_id: req.client_instance_id,
-      user_id: '',
+      user_id: userId,
       client_name: req.device_name,
       platform: req.platform,
       bifrost_version: req.bifrost_version,
@@ -95,6 +190,40 @@ export class RemoteInvokeService {
 
   async closeDiscoverySession(clientInstanceId: string, _discoverySessionId: string): Promise<void> {
     clearClientDiscovery(clientInstanceId);
+  }
+
+  async getPendingPairingsForClient(clientInstanceId: string): Promise<Array<{
+    pairing_id: string;
+    caller_fingerprint: string;
+    caller_display_name: string;
+    source_ip: string;
+    user_agent: string;
+    status: string;
+  }>> {
+    const pairings = await this.storage.remoteInvoke.listPendingPairings(clientInstanceId);
+    return pairings.map((p) => {
+      let callerInfo: any = {};
+      try { callerInfo = JSON.parse(p.caller_info_json || '{}'); } catch { /* ignore */ }
+      return {
+        pairing_id: p.id,
+        caller_fingerprint: p.caller_fingerprint || callerInfo.fingerprint || '',
+        caller_display_name: callerInfo.display_name || '',
+        source_ip: callerInfo.source_ip || '',
+        user_agent: callerInfo.user_agent || '',
+        status: p.status,
+      };
+    });
+  }
+
+  async cancelPendingPairings(clientInstanceId: string): Promise<number> {
+    const pairings = await this.storage.remoteInvoke.listPendingPairings(clientInstanceId);
+    for (const p of pairings) {
+      pushToPairingWatcher(p.id, 'rejected', {
+        pairing_id: p.id,
+        reason: 'cancelled_by_client',
+      });
+    }
+    return this.storage.remoteInvoke.cancelPendingPairings(clientInstanceId);
   }
 
   async startPairing(userId: string, req: StartPairingRequest, sourceIp: string): Promise<{ pairing_id: string; status: string }> {
@@ -303,6 +432,24 @@ export class RemoteInvokeService {
     return grant;
   }
 
+  async listActiveGrantsForClient(clientInstanceId: string): Promise<RemoteInvokeGrant[]> {
+    const grants = await this.storage.remoteInvoke.listActiveGrantsForClient(clientInstanceId);
+    const now = new Date();
+    const active: RemoteInvokeGrant[] = [];
+    for (const g of grants) {
+      if (g.expires_at && new Date(g.expires_at) < now) {
+        await this.storage.remoteInvoke.updateGrant(g.id, { status: 'expired' });
+        continue;
+      }
+      if (g.grant_mode === 'once' && g.remaining_calls <= 0) {
+        await this.storage.remoteInvoke.updateGrant(g.id, { status: 'consumed' });
+        continue;
+      }
+      active.push(g);
+    }
+    return active;
+  }
+
   async openCall(userId: string, req: OpenCallRequest): Promise<{ call_id: string; relay_token: string }> {
     const grant = await this.storage.remoteInvoke.getGrant(req.grant_id);
     if (!grant) throw new Error('grant_not_found');
@@ -333,6 +480,7 @@ export class RemoteInvokeService {
 
     const callId = nanoid();
     const relayToken = generateRelayToken();
+    this.callTokens.set(callId, relayToken);
     const now = new Date().toISOString();
 
     const call: RemoteInvokeCall = {
@@ -385,6 +533,16 @@ export class RemoteInvokeService {
     return { call_id: callId, relay_token: relayToken };
   }
 
+  verifyCallToken(callId: string, token: string): boolean {
+    const stored = this.callTokens.get(callId);
+    if (!stored) return false;
+    return constantTimeCompare(stored, token);
+  }
+
+  clearCallToken(callId: string): void {
+    this.callTokens.delete(callId);
+  }
+
   async postCallerInput(callId: string, envelopeJson: string): Promise<void> {
     const call = await this.storage.remoteInvoke.getCall(callId);
     if (!call) throw new Error('call_not_found');
@@ -415,6 +573,9 @@ export class RemoteInvokeService {
   async postClientFrame(req: ClientCallFrameRequest): Promise<void> {
     const call = await this.storage.remoteInvoke.getCall(req.call_id);
     if (!call) throw new Error('call_not_found');
+    if (call.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_mismatch');
+    }
 
     pushToCallerStream(req.call_id, 'frame', {
       call_id: req.call_id,
@@ -435,6 +596,9 @@ export class RemoteInvokeService {
   async postClientExit(req: ClientCallExitRequest): Promise<void> {
     const call = await this.storage.remoteInvoke.getCall(req.call_id);
     if (!call) throw new Error('call_not_found');
+    if (call.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_mismatch');
+    }
 
     const now = new Date().toISOString();
     await this.storage.remoteInvoke.updateCall(req.call_id, {
@@ -452,6 +616,7 @@ export class RemoteInvokeService {
       call_id: req.call_id,
       exit_code: req.exit_code,
       duration_ms: req.duration_ms,
+      stderr: req.stderr,
       stdout_digest: req.stdout_digest,
       stderr_digest: req.stderr_digest,
     });
@@ -470,6 +635,8 @@ export class RemoteInvokeService {
       event_summary_json: JSON.stringify({ exit_code: req.exit_code, duration_ms: req.duration_ms }),
       create_time: now,
     });
+
+    this.callTokens.delete(req.call_id);
   }
 
   async cancelCall(callId: string): Promise<void> {
@@ -534,6 +701,34 @@ export class RemoteInvokeService {
     });
   }
 
+  async removeGrantByClient(clientInstanceId: string, grantId: string): Promise<void> {
+    const grant = await this.storage.remoteInvoke.getGrant(grantId);
+    if (!grant) throw new Error('grant_not_found');
+
+    if (grant.client_instance_id !== clientInstanceId) {
+      throw new Error('client_instance_id_mismatch');
+    }
+
+    await this.storage.remoteInvoke.updateGrant(grantId, {
+      status: 'removed',
+      update_time: new Date().toISOString(),
+    });
+
+    pushToClient(grant.client_instance_id, 'grant_revoked', {
+      grant_id: grantId,
+    });
+
+    await this.storage.remoteInvoke.appendEvent({
+      id: nanoid(),
+      call_id: '',
+      event_type: 'grant_removed',
+      seq: 0,
+      direction: '',
+      event_summary_json: JSON.stringify({ grant_id: grantId }),
+      create_time: new Date().toISOString(),
+    });
+  }
+
   async listCalls(userId: string, query: CallsQueryParams): Promise<{ list: RemoteInvokeCall[]; total: number }> {
     return this.storage.remoteInvoke.listCalls(userId, query);
   }
@@ -544,10 +739,51 @@ export class RemoteInvokeService {
     return call;
   }
 
+  async getCallForClient(clientInstanceId: string, callId: string): Promise<RemoteInvokeCall | null> {
+    const call = await this.storage.remoteInvoke.getCall(callId);
+    if (!call || call.client_instance_id !== clientInstanceId) {
+      return null;
+    }
+    return call;
+  }
+
+  async listCallsForClient(
+    clientInstanceId: string,
+    query: CallsQueryParams,
+  ): Promise<{ list: RemoteInvokeCall[]; total: number }> {
+    return this.storage.remoteInvoke.listCalls('', {
+      ...query,
+      client_instance_id: clientInstanceId,
+    });
+  }
+
   async listCallEvents(callId: string, query?: { offset?: number; limit?: number }): Promise<{ list: RemoteInvokeEvent[]; total: number }> {
     return this.storage.remoteInvoke.listCallEvents(callId, query);
   }
 
   async revokeAck(_grantId: string): Promise<void> {
   }
+
+  private cleanupExpiredRegistrationChallenges(): void {
+    const now = Date.now();
+    for (const [challengeId, challenge] of this.registrationChallenges.entries()) {
+      if (challenge.expiresAt < now) {
+        this.registrationChallenges.delete(challengeId);
+      }
+    }
+  }
+}
+
+function decodeBase64(value: string, field: string): Buffer {
+  if (!value || typeof value !== 'string' || value.length % 4 !== 0) {
+    throw new Error(`invalid_${field}_base64`);
+  }
+  if (!/^[A-Za-z0-9+/=]+$/.test(value)) {
+    throw new Error(`invalid_${field}_base64`);
+  }
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length === 0 || decoded.toString('base64') !== value) {
+    throw new Error(`invalid_${field}_base64`);
+  }
+  return decoded;
 }

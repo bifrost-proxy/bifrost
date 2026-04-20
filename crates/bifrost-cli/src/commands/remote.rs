@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 const CALL_EVENT_TIMEOUT_SECS: u64 = 120;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
 const CONNECTIONS_FILE: &str = "remote-connections.json";
+const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 
 #[derive(Debug)]
 pub struct RemoteOptions {
@@ -272,8 +273,13 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     debug!(call_id = %call_result.call_id, grant_id = %grant.grant_id, "call opened, subscribing to events");
     println!("{}", "→ Executing command on remote device...".dimmed());
 
+    let stream_stdout = should_stream_remote_command(&command);
     let result = caller
-        .subscribe_call_events(&call_result.call_id, &call_result.relay_token)
+        .subscribe_call_events(
+            &call_result.call_id,
+            &call_result.relay_token,
+            stream_stdout,
+        )
         .await?;
 
     print_remote_result(&command, &result);
@@ -300,12 +306,14 @@ async fn handle_connect(
         .dimmed()
     );
 
-    let pairing_result = caller
-        .start_pairing(&StartPairingRequest {
+    let pairing_result = start_pairing_with_retry(
+        caller,
+        &StartPairingRequest {
             pair_code: pair_code.to_string(),
             caller_info: caller_info.clone(),
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     println!(
         "{}",
@@ -385,6 +393,54 @@ async fn handle_connect(
             )))
         }
     }
+}
+
+async fn start_pairing_with_retry(
+    caller: &CallerRelayClient,
+    req: &StartPairingRequest,
+) -> bifrost_core::Result<StartPairingResponse> {
+    let mut retry_idx = 0usize;
+
+    loop {
+        match caller.start_pairing(req).await {
+            Ok(result) => return Ok(result),
+            Err(err) if is_retryable_start_pairing_overload(&err) => {
+                if retry_idx >= START_PAIRING_OVERLOAD_RETRY_DELAYS_MS.len() {
+                    return Err(start_pairing_overload_error());
+                }
+
+                let delay_ms = START_PAIRING_OVERLOAD_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+
+                warn!(
+                    attempt = retry_idx,
+                    delay_ms, "relay overload protection triggered during start_pairing, retrying"
+                );
+                println!(
+                    "{}",
+                    format!("↻ Relay is temporarily busy, retrying pairing in {delay_ms}ms...")
+                        .dimmed()
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn is_retryable_start_pairing_overload(err: &BifrostError) -> bool {
+    let BifrostError::Network(message) = err else {
+        return false;
+    };
+
+    let lower = message.to_ascii_lowercase();
+    lower.contains("start_pairing failed with status 503") && lower.contains("overload-protect")
+}
+
+fn start_pairing_overload_error() -> BifrostError {
+    BifrostError::Network(
+        "pairing service is temporarily busy (relay overload protection triggered). Please wait a few seconds and run `bifrost remote connect <pair-code>` again.".to_string(),
+    )
 }
 
 async fn handle_disconnect(
@@ -543,6 +599,10 @@ fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
     }
 }
 
+fn should_stream_remote_command(command: &str) -> bool {
+    matches!(command, "search.get" | "traffic.search")
+}
+
 fn generate_caller_fingerprint() -> String {
     let machine_id = get_hostname();
     let user = get_username();
@@ -600,8 +660,14 @@ fn print_remote_result(command: &str, result: &CallResult) {
         eprintln!(
             "{}",
             format!(
-                "Remote command '{}' exited with code {}",
-                command, result.exit_code
+                "Remote command '{}' exited with code {}{}",
+                command,
+                result.exit_code,
+                if result.stderr.is_none() {
+                    " (no error details received from remote)"
+                } else {
+                    ""
+                }
             )
             .bright_red()
         );
@@ -928,6 +994,7 @@ impl CallerRelayClient {
         &self,
         call_id: &str,
         relay_token: &str,
+        stream_stdout: bool,
     ) -> bifrost_core::Result<CallResult> {
         let url = format!(
             "{}/v4/remote-invoke/calls/{}/events",
@@ -972,14 +1039,18 @@ impl CallerRelayClient {
                 _ = &mut timeout => {
                     if exit_received {
                         debug!("grace timeout after exit, no late frame arrived");
-                        result.stdout = Some(stdout_parts.join(""));
+                        if !stream_stdout {
+                            result.stdout = Some(stdout_parts.join(""));
+                        }
                         return Ok(result);
                     }
                     warn!("call events timed out");
-                    if stdout_parts.is_empty() {
+                    if !stream_stdout && stdout_parts.is_empty() {
                         return Err(BifrostError::Config("remote call timed out waiting for response".to_string()));
                     }
-                    result.stdout = Some(stdout_parts.join(""));
+                    if !stream_stdout {
+                        result.stdout = Some(stdout_parts.join(""));
+                    }
                     return Ok(result);
                 }
                 chunk = stream.next() => {
@@ -1003,20 +1074,29 @@ impl CallerRelayClient {
                                                             let seq = envelope.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
                                                             if seen_frame_seqs.insert(seq) {
                                                                 if let Some(ct) = envelope.get("ciphertext").and_then(|c| c.as_str()) {
-                                                                    stdout_parts.push(ct.to_string());
+                                                                    if stream_stdout {
+                                                                        print!("{ct}");
+                                                                        std::io::stdout().flush().ok();
+                                                                    } else {
+                                                                        stdout_parts.push(ct.to_string());
+                                                                    }
                                                                 }
                                                             } else {
                                                                 debug!(seq = seq, "skipping duplicate frame");
                                                             }
                                                         }
                                                     } else if let Some(ct) = v.get("ciphertext").and_then(|c| c.as_str()) {
-                                                        stdout_parts.push(ct.to_string());
+                                                        if stream_stdout {
+                                                            print!("{ct}");
+                                                            std::io::stdout().flush().ok();
+                                                        } else {
+                                                            stdout_parts.push(ct.to_string());
+                                                        }
                                                     }
                                                 }
                                                 if exit_received {
-                                                    debug!("late frame received after exit, returning");
-                                                    result.stdout = Some(stdout_parts.join(""));
-                                                    return Ok(result);
+                                                    debug!("late frame received after exit");
+                                                    timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
                                                 }
                                             }
                                             "exit" => {
@@ -1026,8 +1106,12 @@ impl CallerRelayClient {
                                                         .unwrap_or(0) as i32;
                                                     result.duration_ms = v.get("duration_ms")
                                                         .and_then(|d| d.as_u64());
+                                                    result.stderr = v.get("stderr")
+                                                        .and_then(|s| s.as_str())
+                                                        .filter(|s| !s.is_empty())
+                                                        .map(|s| s.to_string());
                                                 }
-                                                if !stdout_parts.is_empty() {
+                                                if !stream_stdout && !stdout_parts.is_empty() {
                                                     result.stdout = Some(stdout_parts.join(""));
                                                     return Ok(result);
                                                 }
@@ -1045,7 +1129,9 @@ impl CallerRelayClient {
                                                     result.exit_code = -1;
                                                     result.stderr = Some(msg.to_string());
                                                 }
-                                                result.stdout = Some(stdout_parts.join(""));
+                                                if !stream_stdout {
+                                                    result.stdout = Some(stdout_parts.join(""));
+                                                }
                                                 return Ok(result);
                                             }
                                             _ => {
@@ -1070,7 +1156,9 @@ impl CallerRelayClient {
                         }
                         None => {
                             info!("call events stream closed");
-                            result.stdout = Some(stdout_parts.join(""));
+                            if !stream_stdout {
+                                result.stdout = Some(stdout_parts.join(""));
+                            }
                             return Ok(result);
                         }
                     }
@@ -1132,5 +1220,84 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max).collect();
         format!("{t}...(truncated)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_remote_command_for_search_uses_streaming_command() {
+        let (command, args_json) = build_remote_command(&RemoteCommands::Search {
+            keyword: "nextoncall".to_string(),
+            limit: 7,
+        });
+
+        assert_eq!(command, "search.get");
+        let args = args_json.expect("search args_json should exist");
+        let parsed: Value = serde_json::from_str(&args).expect("search args_json should be valid");
+        assert_eq!(parsed["query"], "nextoncall");
+        assert_eq!(parsed["limit"], 7);
+    }
+
+    #[test]
+    fn test_build_remote_command_for_traffic_search_uses_streaming_command() {
+        let (command, args_json) = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Search {
+                keyword: "token".to_string(),
+                limit: 3,
+            },
+        });
+
+        assert_eq!(command, "traffic.search");
+        let args = args_json.expect("traffic search args_json should exist");
+        let parsed: Value =
+            serde_json::from_str(&args).expect("traffic search args_json should be valid");
+        assert_eq!(parsed["query"], "token");
+        assert_eq!(parsed["limit"], 3);
+    }
+
+    #[test]
+    fn test_should_stream_remote_command_marks_search_variants_only() {
+        assert!(should_stream_remote_command("search.get"));
+        assert!(should_stream_remote_command("traffic.search"));
+        assert!(!should_stream_remote_command("status"));
+        assert!(!should_stream_remote_command("traffic.get"));
+    }
+
+    #[test]
+    fn test_retryable_start_pairing_overload_matches_503_overload_protect() {
+        let err = BifrostError::Network(
+            "start_pairing failed with status 503 Service Unavailable: overload-protect triggered"
+                .to_string(),
+        );
+
+        assert!(is_retryable_start_pairing_overload(&err));
+    }
+
+    #[test]
+    fn test_retryable_start_pairing_overload_rejects_non_overload_errors() {
+        let invalid_code = BifrostError::Network(
+            "start_pairing failed with status 400 Bad Request: pair_code_expired".to_string(),
+        );
+        let unrelated_503 = BifrostError::Network(
+            "watch_pairing failed with status 503 Service Unavailable: upstream maintenance"
+                .to_string(),
+        );
+
+        assert!(!is_retryable_start_pairing_overload(&invalid_code));
+        assert!(!is_retryable_start_pairing_overload(&unrelated_503));
+    }
+
+    #[test]
+    fn test_start_pairing_overload_error_is_actionable() {
+        let err = start_pairing_overload_error();
+        let BifrostError::Network(message) = err else {
+            panic!("expected network error");
+        };
+
+        assert!(message.contains("pairing service is temporarily busy"));
+        assert!(message.contains("bifrost remote connect <pair-code>"));
     }
 }

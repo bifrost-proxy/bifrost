@@ -264,6 +264,7 @@ dependencies = [
  "rand 0.8.5",
  "regex 1.12.3",
  "reqwest",
+ "ring",
  "rusqlite",
  "rust-embed",
  "rustls",

@@ -29,7 +29,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 1. 启动本地 Bifrost 服务（使用临时数据目录，避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 启动本地 relay 服务 `bifrost-sync-server`（使用独立临时数据目录）：
    ```bash
@@ -1862,6 +1862,71 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### TC-RI-83：回归 — `remote traffic get <sequence>` 按 sequence 正确返回详情
+
+**前置条件**：
+- 已有可复用授权
+- client 侧正在记录 traffic
+
+**操作步骤**：
+1. 通过本地代理发起一个带唯一 marker 的请求，例如：
+   ```bash
+   MARKER="remote-invoke-$(date +%s)"
+   curl -sS --proxy http://127.0.0.1:8800 "http://httpbin.org/anything/${MARKER}" >/dev/null
+   ```
+2. 在 client 侧查询最新 traffic，记录该请求对应的 `seq`
+3. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote traffic get <seq> --relay http://127.0.0.1:8686 --client-id <client_prefix>
+   ```
+
+**预期结果**：
+- 命令成功退出，不显示 `Remote command 'traffic.get' exited with code -1`
+- 输出 JSON 中包含该 `seq`
+- 输出详情包含步骤 1 中的 marker 路径
+
+---
+
+### TC-RI-84：回归 — `remote search` 采用流式输出并返回命中结果
+
+**前置条件**：
+- 已有可复用授权
+- client 侧存在包含唯一 marker 的 traffic
+
+**操作步骤**：
+1. 准备一个唯一 marker，并通过代理产生对应请求
+2. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote search "<marker>" --relay http://127.0.0.1:8686 --client-id <client_prefix> --limit 5
+   ```
+3. 观察命令执行过程中的终端输出
+
+**预期结果**：
+- 命令执行过程中先出现搜索进度文本（如 `Searching...`），而不是长时间无输出
+- 搜索结果表格中包含 `<marker>` 对应的记录
+- 结尾 summary 显示 `Found 1 matches` 或与实际命中数一致的结果
+- 命令成功退出，不显示 `Remote command 'search.get' exited with code -1`
+
+---
+
+### TC-RI-85：回归 — 远程命令失败时 caller 能看到真实错误文本
+
+**前置条件**：已有可复用授权
+
+**操作步骤**：
+1. 在 caller 侧执行一个必然失败的查询，例如：
+   ```bash
+   cargo run --bin bifrost -- remote traffic get 999999999 --relay http://127.0.0.1:8686 --client-id <client_prefix>
+   ```
+2. 观察终端输出
+
+**预期结果**：
+- 终端输出包含真实错误原因（如 `No traffic record with sequence suffix '999999999' found`）
+- 不再只有 `Remote command 'traffic.get' exited with code -1` 这一行空错误
+- 调用记录仍保留失败状态，便于审计
+
+---
+
 ## connect exit_code 与调用记录展示修复测试执行结果（TC-RI-81 ~ TC-RI-82）
 
 测试环境：
@@ -1873,6 +1938,19 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 |---------|---------|------|------|
 | TC-RI-81 | connect 授权通过后 exit_code 应为 0 | ✅ PASS | connect 记录显示绿色 completed (0)，旧记录仍为 -1（历史数据） |
 | TC-RI-82 | 调用记录展示完整参数信息和响应数据量 | ✅ PASS | search.get 显示 limit=50 query=测试关键词 及 ↓ 122B；status 显示 ↓ 110B |
+
+## remote traffic get/search/stderr 回归测试执行结果（TC-RI-83 ~ TC-RI-85）
+
+测试环境：
+- Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
+- Relay Server: 本地 8686/8687
+- 测试日期：2026-04-20
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-83 | `remote traffic get <sequence>` 按 sequence 正确返回详情 | ✅ PASS | 通过 `seq=1` 成功返回 `remote-invoke-19370` 对应请求详情；输出字段为 legacy `sequence=1`，但 sequence 查询链路已恢复 |
+| TC-RI-84 | `remote search` 采用流式输出并返回命中结果 | ✅ PASS | caller 终端先看到 `Searching...`，随后输出 `remote-invoke-19370` 命中记录，summary 为 `Found 1 matches` |
+| TC-RI-85 | 远程命令失败时 caller 能看到真实错误文本 | ✅ PASS | `remote traffic get 999999999` 终端明确显示 `No traffic record with sequence suffix '999999999' found`，不再只有 exit code -1 |
 
 ---
 
@@ -1936,6 +2014,858 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### TC-RI-回归-66：回归 — 客户端侧 DELETE grant 路由正常工作（Relay Server）
+
+**背景**：新增 `DELETE /v4/remote-invoke/client/grants/:grantId` 路由，允许客户端（Bifrost 实例）通过 `client_auth_token` 认证后主动删除自己的 grant。该路由通过 `client_instance_id` 验证归属，而非 `caller_fingerprint`。
+
+**前置条件**：
+- Bifrost 客户端已连接 Relay 并拥有有效的 `client_auth_token`
+- 至少存在一个活跃的 grant
+
+**操作步骤**：
+1. 获取当前客户端的 client_instance_id 和 client_auth_token：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/status | jq '{client_instance_id: .client_instance_id}'
+   ```
+2. 查看当前活跃 grants 列表（使用 Relay API），记录一个 grant_id：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<cid>&caller_fingerprint=<fp>" | jq .
+   ```
+3. 使用客户端认证身份发起 DELETE 请求：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/client/grants/<grant_id>?client_instance_id=<cid>&client_auth_token=<token>" | jq .
+   ```
+4. 再次查询该 grant 是否仍可复用：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<cid>&caller_fingerprint=<fp>" | jq .
+   ```
+
+**预期结果**：
+- 步骤 3 返回 `{"code": 0, "message": "ok", "data": null}`
+- 步骤 4 返回的 data 为 null（grant 已被移除，不可复用）
+- 客户端 SSE 流收到 `grant_revoked` 事件
+- grant 状态变为 `removed`
+
+---
+
+### TC-RI-回归-67：回归 — 客户端侧 DELETE grant 验证 client_instance_id 归属
+
+**背景**：客户端侧 DELETE grant 必须验证 grant 的 `client_instance_id` 与请求者的 `client_instance_id` 匹配，防止跨客户端越权删除。
+
+**操作步骤**：
+1. 使用客户端 A 的认证信息尝试删除属于客户端 B 的 grant：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/client/grants/<grant_id_of_client_B>?client_instance_id=<cid_A>&client_auth_token=<token_A>" | jq .
+   ```
+
+**预期结果**：
+- 返回 HTTP 403 状态码
+- 错误信息为 `client_instance_id_mismatch`
+- 客户端 B 的 grant 未被修改
+
+---
+
+### TC-RI-回归-68：回归 — 客户端侧 DELETE grant 不存在的 grant 返回 404
+
+**操作步骤**：
+1. 使用客户端认证信息尝试删除不存在的 grant：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/client/grants/nonexistent_grant_id?client_instance_id=<cid>&client_auth_token=<token>" | jq .
+   ```
+
+**预期结果**：
+- 返回 HTTP 404 状态码
+- 错误信息为 `grant_not_found`
+
+---
+
+### TC-RI-回归-69：回归 — 客户端侧 DELETE grant 缺少 client_instance_id 返回 400
+
+**操作步骤**：
+1. 发起 DELETE 请求但不提供 client_instance_id：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/client/grants/<grant_id>?client_auth_token=<token>" | jq .
+   ```
+
+**预期结果**：
+- 返回 HTTP 400 或 401 状态码
+- 错误信息提示 client_instance_id 缺失
+
+---
+
+### TC-RI-回归-70：回归 — Sync Server 客户端侧 DELETE grant 路由正常工作
+
+**背景**：Sync Server 版本的 `DELETE /v4/remote-invoke/client/grants/:grantId` 路由使用 SQLite 持久化存储，通过 `storage.remoteInvoke.updateGrant()` 将 grant 状态设为 `removed`。
+
+**前置条件**：
+- 使用本地 sync server（端口 8686）
+- 已有活跃 grant
+
+**操作步骤**：
+1. 查看当前活跃 grants 列表：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<cid>&caller_fingerprint=<fp>" | jq .
+   ```
+2. 使用客户端身份发起 DELETE 请求（通过 body 传递 client_instance_id）：
+   ```bash
+   curl -s -X DELETE "http://127.0.0.1:8686/v4/remote-invoke/client/grants/<grant_id>" \
+     -H "Content-Type: application/json" \
+     -d '{"client_instance_id": "<cid>"}' | jq .
+   ```
+3. 验证 grant 已被移除：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<cid>&caller_fingerprint=<fp>" | jq .
+   ```
+
+**预期结果**：
+- 步骤 2 返回 `{"code": 0, "message": "ok"}`
+- 步骤 3 返回的 data 为 null
+- SQLite 数据库中该 grant 的 status 字段为 `removed`
+- 客户端 SSE 流收到 `grant_revoked` 事件
+
+---
+
+### TC-RI-回归-71：回归 — relay_token 鉴权：events 路由无 token 返回 401
+
+**背景**：安全加固后，`GET /calls/:callId/events`、`POST /calls/:callId/input`、`POST /calls/:callId/cancel` 三个路由必须携带有效的 `relay_token`（Bearer）。此前仅靠 `callId` 不可预测性保护，存在枚举/窃听风险。修复方案：在 `openCall` 时将 `relay_token` 存入 Redis/内存，上述路由提取 Bearer token 并验证。
+
+**操作步骤**：
+1. 使用一个虚拟的 callId 直接访问 events 路由，不携带 Authorization 头：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
+   ```
+
+**预期结果**：
+- 返回 HTTP 401
+- 不返回 SSE 数据流
+
+---
+
+### TC-RI-回归-72：回归 — relay_token 鉴权：events 路由错误 token 返回 401
+
+**操作步骤**：
+1. 使用错误的 Bearer token 访问 events 路由：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     -H "Authorization: Bearer fake-token-12345" \
+     "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
+   ```
+
+**预期结果**：
+- 返回 HTTP 401
+- 不返回 SSE 数据流
+
+---
+
+### TC-RI-回归-73：回归 — relay_token 鉴权：input 路由无 token 返回 401
+
+**操作步骤**：
+1. 使用虚拟 callId 直接 POST input 路由，不携带 Authorization：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/input" \
+     -H "Content-Type: application/json" \
+     -d '{"data":"test"}'
+   ```
+
+**预期结果**：
+- 返回 HTTP 401
+
+---
+
+### TC-RI-回归-74：回归 — relay_token 鉴权：cancel 路由无 token 返回 401
+
+**操作步骤**：
+1. 使用虚拟 callId 直接 POST cancel 路由，不携带 Authorization：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/cancel"
+   ```
+
+**预期结果**：
+- 返回 HTTP 401
+
+---
+
+### TC-RI-回归-75：回归 — calls 列表和详情路由已移至 client 路径
+
+**背景**：`GET /calls` 和 `GET /calls/:callId` 被移至 `/client/calls` 前缀路径下，需要 `requireClientAuth` 中间件验证 `client_auth_token`。原路径不再可用。
+
+**操作步骤**：
+1. 访问原路径 `GET /v4/remote-invoke/calls`（不携带 client 认证）：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     "https://bifrost.bytedance.net/v4/remote-invoke/calls"
+   ```
+2. 访问新路径 `GET /v4/remote-invoke/client/calls`（不携带 client 认证）：
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}' \
+     "https://bifrost.bytedance.net/v4/remote-invoke/client/calls"
+   ```
+
+**预期结果**：
+- 步骤 1：返回 HTTP 404（路由已不存在）
+- 步骤 2：返回 HTTP 401（缺少 client 认证）
+
+---
+
+### TC-RI-回归-76：回归 — approve_pairing 正确提取 caller_fingerprint
+
+**背景**：修复前 `approve_pairing` 中 `caller_fingerprint` 始终为空字符串，因为从 relay 响应中提取，但 relay 的 `submitGrantDecision` 不返回 `caller_fingerprint`。修复后从本地 `pending_pairings` 缓存中提取。
+
+**操作步骤**：
+1. 完成一次完整的配对流程（生成 pair_code → connect → approve）
+2. 查看 Client 侧 grants 列表：
+   ```bash
+   curl -s http://127.0.0.1:<port>/_bifrost/api/remote-invoke/grants | jq '.grants[0].caller_fingerprint'
+   ```
+
+**预期结果**：
+- `caller_fingerprint` 不为空字符串
+- 值为调用方的真实设备指纹哈希（如 `sha256:xxxxxxxx`）
+
+---
+
+### TC-RI-回归-77：回归 — delete_grant 在 relay 异常时仍清理本地状态
+
+**背景**：修复前 `delete_grant` 先删本地再删远端，如果远端失败则本地已删但远端残留；后改为先远端后本地，但远端失败导致本地也无法删除。最终修复为：无论远端成败，本地总是删除，远端失败记 warn 日志。
+
+**操作步骤**：
+1. 完成一次配对流程获得 grant
+2. 通过 Admin API 删除 grant（DELETE 方法）：
+   ```bash
+   curl -s -X DELETE http://127.0.0.1:<port>/_bifrost/api/remote-invoke/grants/<grant_id> | jq .
+   ```
+3. 查看 grants 列表确认本地已删除
+
+**预期结果**：
+- API 返回成功
+- 本地 grants 列表中该 grant 已消失
+- 即使 relay 暂时不可达，本地删除仍然成功
+
+---
+
+### TC-RI-回归-78：回归 — call_open 事件必须验证本地 grant 存在且有效
+
+**背景**：修复前 `handle_call_open` 收到 SSE call_open 事件后直接解析并执行命令，未校验 `grant_id` 是否在本地 `local_grants` 中存在且处于有效状态。攻击者可通过 relay 中间人伪造 call_open 事件，携带任意或空的 grant_id 绕过授权直接执行命令。修复后新增完整的 grant 验证链：空 grant_id → grant 不存在 → grant 已死亡（过期/撤销/已消费） → 状态非 Active → remaining_calls 耗尽 → 全部拒绝并返回 exit_code -2。
+
+**前置条件**：
+- Bifrost 服务已启动，remote invoke 模块已加载
+
+**操作步骤**：
+1. 运行 `validate_grant_for_call` 相关的 9 个单元测试，验证各分支逻辑：
+   ```bash
+   cargo test -p bifrost-admin test_validate_grant -- --nocapture
+   ```
+2. 确认以下场景均被测试覆盖：
+   - 不存在的 grant_id → 返回 reject reason "not found"
+   - Active + Permanent grant → 通过验证，更新 last_used_at
+   - Active + Once grant（remaining_calls=1）→ 通过验证，remaining_calls 降为 0，状态变为 Consumed
+   - Once grant（remaining_calls=0）→ 拒绝，状态标记为 Consumed
+   - 时间过期的 grant（expires_at < now）→ 拒绝（dead）
+   - 已撤销的 grant（status=Revoked）→ 拒绝（dead）
+   - 未过期的 grant（expires_at > now）→ 通过验证
+   - Expired 状态的 grant → is_grant_info_dead 返回 true
+   - 时间过期检测 → is_grant_info_dead 正确判断
+
+**预期结果**：
+- 所有 9 个单元测试通过（test result: ok. 9 passed）
+- 空 grant_id 的 call_open 事件被拒绝（exit_code -2），日志包含 `SECURITY: call_open rejected`
+- 不存在的 grant_id 被拒绝
+- 过期/已撤销/已消费的 grant 被拒绝
+- 仅 Active 且未过期、有剩余调用次数的 grant 允许执行
+- Once 模式 grant 在使用后自动标记为 Consumed
+
+---
+
+## 回归测试执行结果（TC-RI-回归-71 ~ TC-RI-回归-78）
+
+测试环境：
+- Bifrost: 本地，`BIFROST_DATA_DIR` 临时目录
+- Relay Server: 远端 `https://bifrost.bytedance.net`
+- 测试日期：2026-04-20
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-71 | events 路由无 token 返回 401 | ✅ PASS | 返回 HTTP 401 |
+| TC-RI-回归-72 | events 路由错误 token 返回 401 | ✅ PASS | 返回 HTTP 401 |
+| TC-RI-回归-73 | input 路由无 token 返回 401 | ✅ PASS | 返回 HTTP 401 |
+| TC-RI-回归-74 | cancel 路由无 token 返回 401 | ✅ PASS | 返回 HTTP 401 |
+| TC-RI-回归-75 | calls 列表和详情路由已移至 client 路径 | ✅ PASS | 原路径返回 404，新路径无认证返回 401 |
+| TC-RI-回归-76 | approve_pairing 正确提取 caller_fingerprint | ✅ PASS | caller_fingerprint=b92541d979bc949e67bbb3ae4bde4cb4，非空 |
+| TC-RI-回归-77 | delete_grant 在 relay 异常时仍清理本地状态 | ✅ PASS | DELETE 返回 success:true，grant 数量从 2 降为 1 |
+| TC-RI-回归-78 | call_open 事件必须验证本地 grant 存在且有效 | ✅ PASS | 9 个单元测试全部通过：missing grant 拒绝、permanent 通过、once 消费、consumed 拒绝、expired 拒绝、revoked 拒绝、not-yet-expired 通过、dead 状态检测、时间过期检测 |
+
+---
+
+### TC-RI-回归-79：真实 relay E2E — 完整配对流程（discovery → connect → approve）
+
+**背景**：使用真实 relay 服务（`bifrost.bytedance.net`）而非本地 mock 验证完整配对流程的端到端可靠性。
+
+**操作步骤**：
+1. 启动 Bifrost 服务连接真实 relay：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-grant-test RUST_LOG=debug cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy
+   ```
+2. 确认服务状态为 Connected：
+   ```bash
+   curl -s http://127.0.0.1:8801/_bifrost/api/remote-invoke/status
+   ```
+3. 进入 discovery 模式：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8801/_bifrost/api/remote-invoke/discovery/enter
+   ```
+4. 使用 caller CLI 发起配对：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net connect <pair_code>
+   ```
+5. 查看 pending pairings 并批准：
+   ```bash
+   curl -s http://127.0.0.1:8801/_bifrost/api/remote-invoke/pairings/pending
+   curl -s -X POST 'http://127.0.0.1:8801/_bifrost/api/remote-invoke/pairings/<pairing_id>/approve' -H 'Content-Type: application/json' -d '{"grant_mode":"30m"}'
+   ```
+
+**预期结果**：
+- 服务成功连接真实 relay，状态为 `Connected`
+- Discovery 模式正常开启，返回 6 位配对码
+- Caller CLI 显示 `⏳ Waiting for approval...`
+- Pending pairings 中出现配对请求，包含 caller_info
+- 批准后 caller CLI 显示 `✓ Connected! Authorization granted`
+- Grants 列表中出现新的 active grant
+
+---
+
+### TC-RI-回归-80：真实 relay E2E — grant 有效时命令执行成功
+
+**前置条件**：已完成 TC-RI-回归-79
+
+**操作步骤**：
+1. 使用 caller CLI 执行远程 status 命令：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   ```
+2. 使用 caller CLI 执行远程 traffic list 命令：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net traffic list --limit 3
+   ```
+
+**预期结果**：
+- `status` 命令返回有效 JSON（含 version, os, uptime 等），exit_code=0
+- `traffic list` 命令返回有效 JSON（含 records 数组），exit_code=0
+- 两个命令均通过 grant 验证，无 SECURITY 拒绝日志
+
+---
+
+### TC-RI-回归-81：真实 relay E2E — 已撤销 grant 被安全策略拒绝（exit_code=-2）
+
+**前置条件**：已完成 TC-RI-回归-80
+
+**操作步骤**：
+1. 通过 Admin API 撤销 grant：
+   ```bash
+   curl -s -X DELETE 'http://127.0.0.1:8801/_bifrost/api/remote-invoke/grants/<grant_id>'
+   ```
+2. 确认 grants 列表为空
+3. 再次用 caller 执行命令：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   ```
+
+**预期结果**：
+- Grant 撤销成功，列表为空
+- 再次执行命令时输出 `Remote command 'status' exited with code -2`
+- Exit code 为 254（即 -2 的 unsigned 表示）
+- 服务端 `validate_grant_for_call` 拒绝了不在 `local_grants` 中的 grant
+
+---
+
+### TC-RI-回归-82：真实 relay E2E — once 模式 grant 单次使用后被拒绝
+
+**操作步骤**：
+1. 重新配对并使用 `once` 模式批准
+2. 确认 grant 为 active，max_calls=1, remaining_calls=1
+3. 第一次执行远程命令（应成功）：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   ```
+4. 确认 grants 列表为空（once grant 已消耗并清理）
+5. 第二次执行远程命令（应被拒绝）：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   ```
+
+**预期结果**：
+- 第一次执行：返回有效状态数据，exit_code=0
+- Once grant 被消耗：remaining_calls 从 1 降为 0，状态变为 consumed，并从列表中清理
+- 第二次执行：输出 `✗ Authorization expired or revoked`，exit_code=1
+
+---
+
+## 真实 relay E2E 测试执行结果（TC-RI-回归-79 ~ TC-RI-回归-82）
+
+测试环境：
+- Bifrost: 本地 port 8801，`BIFROST_DATA_DIR=./.bifrost-grant-test`
+- Relay Server: 远端 `https://bifrost.bytedance.net`
+- 测试日期：2026-04-20
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-79 | 真实 relay E2E — 完整配对流程 | ✅ PASS | discovery→connect→approve 全链路通过，pairing_id=ae4bee5a70455690，grant_id=7c356d63fa387c13(30m) |
+| TC-RI-回归-80 | 真实 relay E2E — grant 有效时命令执行成功 | ✅ PASS | status 返回 version=0.0.56-beta/macos/aarch64，traffic list 返回空列表，exit_code=0 |
+| TC-RI-回归-81 | 真实 relay E2E — 已撤销 grant 被安全策略拒绝 | ✅ PASS | 撤销后执行命令返回 exit_code=-2(254)，validate_grant_for_call 拒绝了不存在的 grant |
+| TC-RI-回归-82 | 真实 relay E2E — once 模式 grant 单次使用后被拒绝 | ✅ PASS | 第一次成功(exit=0)→grant consumed→第二次被拒(exit=1, "Authorization expired or revoked") |
+
+---
+
+## 回归测试：执行端调用日志记录（TC-RI-回归-83 ~ TC-RI-回归-84）
+
+> Bug 背景：执行端（executor）完成远程命令后不记录调用历史，WebUI "Recent Calls" 始终显示 "No recent calls"，`GET /api/remote-invoke/calls` 返回空列表。根因是 `active_calls` 仅保存运行中调用 ID，命令结束后立即删除、无持久化历史。修复方案：在 worker 中增加 `call_history: VecDeque<CallInfo>` 环形缓冲，每次调用开始时写入 Streaming 状态记录，结束时更新为 Completed/Failed。
+
+### TC-RI-回归-83：执行端 Recent Calls 记录已完成调用
+
+**前置条件**：
+- Bifrost 执行端已启动并通过 relay 完成配对，状态为 Connected
+- 至少存在一个有效 grant
+
+**操作步骤**：
+1. 通过 caller 端发起一条远程命令（如 `bifrost status`）并等待返回
+2. 在执行端查询调用列表：`curl http://localhost:8800/api/remote-invoke/calls`
+3. 检查返回的 JSON
+
+**预期结果**：
+- 返回 `{"calls": [...]}` 且数组非空
+- 数组中的每个元素为完整的 `CallInfo` 对象，包含以下字段：
+  - `call_id`：非空字符串
+  - `grant_id`：非空字符串，对应使用的 grant
+  - `status`：`"completed"` 或 `"failed"`
+  - `exit_code`：整数（成功时为 0）
+  - `started_at`：Unix 时间戳（秒），大于 0
+  - `duration_ms`：执行耗时毫秒数，大于 0
+  - `command`：执行的命令字符串
+  - `caller_fingerprint`：调用方指纹
+- 最近的调用排在数组第一位（逆序排列）
+
+### TC-RI-回归-84：调用列表按逆序排列且受 max_records 限制
+
+**前置条件**：
+- 同 TC-RI-回归-83
+
+**操作步骤**：
+1. 通过 caller 端连续发起 2 条不同远程命令（如 `bifrost status`、`bifrost traffic list`）
+2. 查询调用列表：`curl http://localhost:8800/api/remote-invoke/calls`
+3. 检查返回的 JSON 中 calls 数组的顺序
+
+**预期结果**：
+- calls 数组包含 2 条记录
+- 第一条记录对应最后执行的命令（如 `bifrost traffic list`），第二条对应先执行的命令（如 `bifrost status`）
+- 每条记录的 `started_at` 字段满足：`calls[0].started_at >= calls[1].started_at`
+
+---
+
+## 安全回归测试：client 注册与调用详情隔离（TC-RI-回归-85 ~ TC-RI-回归-88）
+
+### TC-RI-回归-85：client 注册 challenge/register 必须携带 x-bifrost-token
+
+**操作步骤**：
+1. 直接请求 register challenge，不带 `x-bifrost-token`：
+   ```bash
+   curl -s -o /tmp/ri-no-token-challenge.json -w '%{http_code}' \
+     -X POST http://127.0.0.1:8686/v4/remote-invoke/client/register/challenge \
+     -H 'Content-Type: application/json' \
+     -d '{"client_instance_id":"unauthorized-client"}'
+   ```
+2. 直接请求 register，不带 `x-bifrost-token`：
+   ```bash
+   curl -s -o /tmp/ri-no-token-register.json -w '%{http_code}' \
+     -X POST http://127.0.0.1:8686/v4/remote-invoke/client/register \
+     -H 'Content-Type: application/json' \
+     -d '{"challenge_id":"missing","client_instance_id":"unauthorized-client","client_long_term_pubkey":"Zm9v","device_name":"unauthorized-device","platform":"macos","bifrost_version":"0.0.0-test","signature":"YmFy","timestamp":1700000000}'
+   ```
+
+**预期结果**：
+- 两个请求都返回 `401`
+- 返回消息明确指出缺少 `x-bifrost-token` 或未授权
+- 不能在未登录 relay 的情况下为任意 `client_instance_id` 申请 challenge 或刷新 client token
+
+### TC-RI-回归-86：client 注册必须通过 challenge + 私钥签名校验，challenge 不可重放
+
+**前置条件**：
+- 已通过 `/v4/sso/register` 或 `/v4/sso/login` 获取 `SYNC_TOKEN`
+
+**操作步骤**：
+1. 携带 `x-bifrost-token: $SYNC_TOKEN` 调用 `/v4/remote-invoke/client/register/challenge`
+2. 使用返回的 `challenge_id`、`challenge` 与 client 长期私钥对注册负载签名，再调用 `/v4/remote-invoke/client/register`
+3. 记录首次 register 的返回结果
+4. 使用相同的 `challenge_id`、`signature`、`timestamp` 再次调用一次 register
+5. 再申请一个新的 challenge，但把 `signature` 替换成伪造值后调用 register
+
+**预期结果**：
+- 首次 register 成功，返回新的 `client_auth_token`
+- 第二次重放同一 challenge 返回失败，消息为 `registration_challenge_not_found` 或等效的一次性 challenge 已消费错误
+- 伪造签名的请求返回失败，消息为 `invalid_registration_signature` 或等效错误
+- relay 不会在签名无效或 challenge 被消费后签发新的 `client_auth_token`
+
+### TC-RI-回归-87：caller 发起配对/连接认证仍然不需要 x-bifrost-token
+
+**前置条件**：
+- 执行端已成功注册到 relay，状态为 `Connected`
+- 已进入 discovery 模式并拿到有效 `pair_code`
+
+**操作步骤**：
+1. 使用 caller CLI 发起连接，不传任何 `x-bifrost-token`：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url http://127.0.0.1:8686 connect <pair_code>
+   ```
+2. 在执行端批准该 pairing
+
+**预期结果**：
+- caller 可以正常进入 `Waiting for approval...`
+- 批准后 caller 可以成功完成连接
+- 整个 caller -> relay 的配对/连接链路不要求 `x-bifrost-token`
+- 安全边界保持为：caller 依赖 `pair_code + caller_fingerprint/grant`，client 注册依赖 `x-bifrost-token + challenge + 签名`
+
+### TC-RI-回归-88：client call detail 接口按 client_instance_id 做所有权隔离
+
+**前置条件**：
+- 已注册两个不同的 client，分别持有各自的 `client_auth_token`
+- 其中 client A 至少有一条历史 call 记录，记下其 `call_id`
+
+**操作步骤**：
+1. 使用 client B 的 `client_auth_token` 请求：
+   ```bash
+   curl -s -o /tmp/ri-call-cross-client.json -w '%{http_code}' \
+     "http://127.0.0.1:8686/v4/remote-invoke/client/calls/<call_id>?client_instance_id=<client_b_id>" \
+     -H "Authorization: Bearer <client_b_token>"
+   ```
+2. 使用 client A 的 `client_auth_token` 请求同一个 `call_id`
+
+**预期结果**：
+- 第 1 步返回 `404` 或等效的 not found，不能读取到 client A 的 call 元数据
+- 第 2 步返回 `200`，可以读取到该 call 的详情
+- Relay 对 `GET /v4/remote-invoke/client/calls/:id` 的返回结果按认证后的 `client_instance_id` 做所有权校验
+
+### TC-RI-回归-89：client pairing decision 必须校验 pairing 归属
+
+**前置条件**：
+- 已注册两个不同的 client，分别持有各自的 `client_auth_token`
+- 其中 client A 已收到一个待审批 pairing，请记下其 `pairing_id`
+
+**操作步骤**：
+1. 使用 client B 的 `client_auth_token` 调用：
+   ```bash
+   curl -s -o /tmp/ri-cross-pairing.json -w '%{http_code}' \
+     -X POST "http://127.0.0.1:8686/v4/remote-invoke/client/grants/<pairing_id>/decision" \
+     -H "Authorization: Bearer <client_b_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"decision":"approve","grant_mode":"once","client_instance_id":"<client_b_id>"}'
+   ```
+2. 再使用 client A 的 `client_auth_token` 对同一个 `pairing_id` 发起 approve
+
+**预期结果**：
+- 第 1 步返回 `403` 或等效的所有权不匹配错误，消息为 `client_mismatch` / `client_instance_id_mismatch` 或等效错误
+- pairing 不会被错误批准或拒绝
+- 第 2 步返回成功，由真正归属的 client A 完成审批
+
+### TC-RI-回归-90：client call frame/exit 必须校验 call 归属
+
+**前置条件**：
+- 已注册两个不同的 client，分别持有各自的 `client_auth_token`
+- 其中 client A 拥有一条活跃 call，记下其 `call_id`
+
+**操作步骤**：
+1. 使用 client B 的 `client_auth_token` 调用：
+   ```bash
+   curl -s -o /tmp/ri-cross-frame.json -w '%{http_code}' \
+     -X POST "http://127.0.0.1:8686/v4/remote-invoke/client/calls/<call_id>/frame" \
+     -H "Authorization: Bearer <client_b_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"client_instance_id":"<client_b_id>","envelope_json":"{\"kind\":\"stdout\"}"}'
+   ```
+2. 使用 client B 的 `client_auth_token` 再调用同一 `call_id` 的 `/exit`
+3. 使用 client A 的 `client_auth_token` 调用同一 `call_id` 的 `/frame`
+
+**预期结果**：
+- 第 1、2 步均返回 `403` 或等效的所有权不匹配错误，消息为 `client_mismatch` / `client_instance_id_mismatch` 或等效错误
+- 非归属 client 不能注入 frame，也不能结束别人的 call
+- 第 3 步返回成功，由真正归属的 client A 正常上报 frame
+
+---
+
+### TC-RI-回归-85 ~ TC-RI-回归-90 执行结果（2026-04-20）
+
+执行方式说明：
+- `TC-RI-回归-85`、`TC-RI-回归-87`：通过 `bash e2e-tests/tests/test_remote_invoke_e2e.sh` 在本地启动 `bifrost-sync-server` 与 Bifrost 执行端后真实执行
+- `TC-RI-回归-86`、`TC-RI-回归-88`、`TC-RI-回归-89`、`TC-RI-回归-90`：通过 `pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts` 启动真实本地 sync-server，并对 API 发起实际 challenge/register/call-detail/pairing-decision/call-frame 请求完成验证
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-85 | client 注册 challenge/register 必须携带 x-bifrost-token | ✅ PASS | E2E 中直接对 relay 发起未鉴权请求，`/client/register/challenge` 与 `/client/register` 均返回 `401` |
+| TC-RI-回归-86 | client 注册必须通过 challenge + 私钥签名校验，challenge 不可重放 | ✅ PASS | `remote-invoke-security.test.ts` 验证首次签名注册成功、重放返回 `registration_challenge_not_found`、伪造签名返回 `invalid_registration_signature` |
+| TC-RI-回归-87 | caller 发起配对/连接认证仍然不需要 x-bifrost-token | ✅ PASS | E2E 中 caller 仅通过 `pair_code` 发起 `remote connect`，未提供 `x-bifrost-token` 仍可进入等待审批并在批准后连接成功 |
+| TC-RI-回归-88 | client call detail 接口按 client_instance_id 做所有权隔离 | ✅ PASS | `remote-invoke-security.test.ts` 注册两个 client token，验证 client B 查询 client A 的 `call_id` 返回 `404`，owner 查询返回 `200` |
+| TC-RI-回归-89 | client pairing decision 必须校验 pairing 归属 | ✅ PASS | `remote-invoke-security.test.ts` 注册两个 client token，验证 client B 审批 client A 的 `pairing_id` 返回 `403 client_mismatch`，归属 client A 审批成功 |
+| TC-RI-回归-90 | client call frame/exit 必须校验 call 归属 | ✅ PASS | `remote-invoke-security.test.ts` 注册两个 client token，验证 client B 向 client A 的 `call_id` 上报 `/frame`、`/exit` 均返回 `403 client_mismatch`，归属 client A 上报 `/frame` 返回 `200` |
+
+---
+
+### TC-RI-回归-91：`remote connect` 遇到 relay overload-protect 时应重试并给出可行动提示
+
+**背景**：线上 relay 前层可能返回 `503 Service Unavailable: overload-protect triggered`。修复前 CLI 会直接把底层网络错误原样暴露给用户，既没有短暂重试，也没有明确提示下一步操作。
+
+**前置条件**：
+- 已执行 `cargo build --release --bin bifrost`
+- 本地可用 `python3`
+- 使用独立测试数据目录，避免污染现有连接记录：
+  ```bash
+  export BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-remote-overload.XXXXXX)"
+  ```
+
+**操作步骤**：
+1. 启动本地 mock relay，令 `994430` 前两次 `POST /v4/remote-invoke/pairings/start` 返回 `503 overload-protect triggered`，第 3 次返回成功；令 `994431` 始终返回 `503 overload-protect triggered`：
+   ```bash
+   PORT=18786
+   python3 -u - <<'PY' "$PORT"
+import json
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+attempts = {}
+pairings = {}
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def _write_json(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.startswith("/v4/remote-invoke/pairings/") and self.path.endswith("/watch"):
+            pairing_id = self.path.split("/")[4]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(b"event: connected\n")
+            self.wfile.write(f"data: {json.dumps({'pairing_id': pairing_id})}\n\n".encode())
+            self.wfile.flush()
+            time.sleep(0.05)
+            self.wfile.write(b"event: approved\n")
+            self.wfile.write(b'data: {"status":"approved","grant_id":"grant-retry-ok","client_instance_id":"client-retry-ok-123456","device_name":"Retry Device","platform":"macos","grant_mode":"permanent"}\n\n')
+            self.wfile.flush()
+            return
+        self._write_json(404, {"code": 404, "message": "not_found", "data": None})
+
+    def do_POST(self):
+        if self.path != "/v4/remote-invoke/pairings/start":
+            self._write_json(404, {"code": 404, "message": "not_found", "data": None})
+            return
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = json.loads(raw.decode() or "{}")
+        pair_code = body.get("pair_code", "")
+        attempts[pair_code] = attempts.get(pair_code, 0) + 1
+        should_overload = pair_code == "994431" or attempts[pair_code] <= 2
+        if should_overload:
+            payload = b"overload-protect triggered"
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        pairing_id = f"pairing-{pair_code}"
+        pairings[pairing_id] = True
+        self._write_json(200, {"code": 0, "message": "ok", "data": {"pairing_id": pairing_id}})
+
+ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+   ```
+2. 在另一个终端执行瞬时过载场景：
+   ```bash
+   cargo run --bin bifrost -- remote connect 994430 --relay-url "http://127.0.0.1:${PORT}"
+   ```
+3. 继续执行持续过载场景：
+   ```bash
+   cargo run --bin bifrost -- remote connect 994431 --relay-url "http://127.0.0.1:${PORT}"
+   ```
+4. 检查本地连接文件：
+   ```bash
+   cat "$BIFROST_DATA_DIR/remote-connections.json"
+   ```
+
+**预期结果**：
+- 步骤 2 中，CLI 至少输出一次 `Relay is temporarily busy, retrying pairing ...`，随后成功输出 `✓ Connected! Authorization granted`
+- 步骤 2 完成后，`remote-connections.json` 中新增 `client-retry-ok-123456` 连接记录
+- 步骤 3 中，CLI 在有限重试后退出失败，并输出 `pairing service is temporarily busy` 与 `bifrost remote connect <pair-code>` 提示
+- 整个过程中不再直接向用户暴露原始的 `start_pairing failed with status 503 Service Unavailable: overload-protect triggered`
+
+### TC-RI-回归-91 执行结果（2026-04-20）
+
+执行方式说明：
+- 通过 `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh` 启动本地 mock relay，真实执行 CLI `remote connect` 的“瞬时过载重试成功”与“持续过载给出可行动提示”两条路径
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-91 | `remote connect` 遇到 relay overload-protect 时应重试并给出可行动提示 | ✅ PASS | `994430` 在前 2 次 `503 overload-protect` 后第 3 次成功配对并写入 `client-retry-ok-123456`；`994431` 在 4 次受限重试后返回 `pairing service is temporarily busy`，不再直接暴露原始 503 文案 |
+
+---
+
+## 协议回归测试：grant_created / call_open 职责分离（TC-RI-回归-92 ~ TC-RI-回归-94）
+
+> Bug 背景：relay 在 pairing 审批通过后下发的 `grant_created` 事件仍然只有 `grant_id`、`caller_fingerprint`、`grant_mode` 等授权同步字段；但 client 侧曾错误地把它当成 `call_open` 处理，要求必须携带 `call_id` 与 `command`。结果是审批成功后的 grant 无法写入本地 `local_grants`，后续真正的 `call_open` 又因“grant not found in local_grants”被拒绝，表现为 connect 成功后 remote/client 无法继续正常通信。
+
+### TC-RI-回归-92：`grant_created` 最小 payload 仍能写入本地 grant 缓存
+
+**操作步骤**：
+1. 执行 worker 的 grant 构造单元测试：
+   ```bash
+   cargo test -p bifrost-admin test_build_grant_info_from_grant_created -- --nocapture
+   ```
+2. 关注以下场景：
+   - 仅提供 `grant_id`、`caller_fingerprint`、`grant_mode=permanent`
+   - 提供嵌套 `caller_info`，验证优先使用其中的 `fingerprint` / `display_name`
+   - 缺失 `grant_id` 时返回拒绝
+
+**预期结果**：
+- 3 个单元测试全部通过
+- 最小 payload 不再要求 `call_id`、`command`
+- `GrantMode::Once` 会正确初始化 `max_calls=1`、`remaining_calls=1`
+
+### TC-RI-回归-93：connect 批准后首个远程调用可以立即成功
+
+**前置条件**：
+- 使用本地 relay 或真实 relay 启动 Bifrost 执行端
+- `remote invoke` 模块状态为 `Connected`
+
+**操作步骤**：
+1. 进入 discovery 模式，获取 `pair_code`
+2. 使用 caller 执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect <pair_code> --relay-url <relay_url>
+   ```
+3. 在执行端批准该 pairing
+4. 连接成功后，立刻执行首个远程命令：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote status --relay-url <relay_url> --client-id <client_id_prefix>
+   ```
+
+**预期结果**：
+- connect 输出 `✓ Connected! Authorization granted`
+- 批准后执行端 grants 列表出现新的 active grant
+- 首个 `remote status` 命令成功返回设备信息
+- 执行端日志中不再出现 `grant_created missing call_id`、`grant_created missing command`、`grant not found in local_grants`
+
+### TC-RI-回归-94：越权防护与 connect 修复可同时成立
+
+**操作步骤**：
+1. 执行 sync-server 安全回归测试：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts
+   ```
+2. 重点确认：
+   - 非归属 client 审批别人的 pairing 返回 `403`
+   - 非归属 client 上报别人的 `/frame`、`/exit` 返回 `403`
+
+**预期结果**：
+- 安全回归测试通过
+- `client_mismatch` 保护仍然生效
+- 本次 connect/grant 修复没有回退 review finding 中的授权约束
+
+### TC-RI-回归-92 ~ TC-RI-回归-94 执行结果（2026-04-20）
+
+执行方式说明：
+- `TC-RI-回归-92`：运行 `cargo test -p bifrost-admin test_build_grant_info_from_grant_created -- --nocapture`
+- `TC-RI-回归-93`：运行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，关注 connect 成功后紧接着的 `remote status`
+- `TC-RI-回归-94`：运行 `pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts`
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-92 | `grant_created` 最小 payload 仍能写入本地 grant 缓存 | ✅ PASS | `cargo test -p bifrost-admin test_build_grant_info_from_grant_created -- --nocapture` 通过，3 个单元测试覆盖最小 payload、嵌套 `caller_info` 优先级、缺失 `grant_id` 拒绝 |
+| TC-RI-回归-93 | connect 批准后首个远程调用可以立即成功 | ✅ PASS | `bash e2e-tests/tests/test_remote_invoke_e2e.sh` 全部 35 项断言通过；`TC-RI-01A` 验证 connect 日志包含 `Connected! Authorization granted`，`TC-RI-02` 验证批准后立即执行 `remote status` 成功 |
+| TC-RI-回归-94 | 越权防护与 connect 修复可同时成立 | ✅ PASS | `pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts` 4/4 通过，pairing decision 与 call frame/exit 的 `client_mismatch` 保护仍然生效 |
+
+### TC-RI-回归-95：SSE 推送失败时客户端通过轮询发现 pending pairing
+
+**前置条件**：
+- 本地 bifrost-sync-server 或真实 relay 已启动并启用 `--enable-remote-invoke`
+- Bifrost 执行端已注册、SSE 已连接（状态 `Connected`）
+- 执行端已进入 discovery 模式（`POST /api/remote-invoke/discovery-session`）
+
+**操作步骤**：
+1. 启动 Bifrost 执行端，确认 `remote invoke` 模块状态为 `Connected`
+2. 在执行端创建 discovery session 获取 `pair_code`
+3. 使用 caller 发起配对：
+   ```bash
+   cargo run --bin bifrost -- remote connect <pair_code> --relay-url <relay_url>
+   ```
+4. 等待 10 秒（两个轮询周期），观察执行端日志是否出现：
+   - `discovered N new pending pairing(s) via polling`（轮询发现新配对）
+   - 或 SSE 推送日志 `pairing_request`
+5. 检查执行端 `GET /api/remote-invoke/pairings/pending` 是否返回该 pairing
+
+**预期结果**：
+- 无论 SSE 推送是否成功，轮询机制都能在 10 秒内发现新的 pending pairing
+- 执行端 `/api/remote-invoke/pairings/pending` 返回至少 1 条 pending pairing，包含 `pairing_id`、`caller_fingerprint`
+- caller 端不会永久卡在 `Waiting for approval` 状态
+
+### TC-RI-回归-96：SSE 重连后自动清理 stale pending pairing（pair_slot_occupied 修复）
+
+**前置条件**：
+- 本地 bifrost-sync-server 或真实 relay 已启动
+- Bifrost 执行端已注册
+
+**操作步骤**：
+1. 启动 Bifrost 执行端，确认状态 `Connected`
+2. 创建 discovery session，获取 `pair_code`
+3. 使用 caller 发起配对（不做审批），创建一个 pending pairing
+4. 强制断开执行端的 SSE 连接（可通过重启 Bifrost 执行端）
+5. 等待执行端 SSE 重连成功（日志出现 `cleared stale pending pairings on SSE reconnect`）
+6. 使用新的 `pair_code` 再次发起配对：
+   ```bash
+   cargo run --bin bifrost -- remote connect <new_pair_code> --relay-url <relay_url>
+   ```
+
+**预期结果**：
+- 第 5 步：执行端日志显示 `cleared stale pending pairings on SSE reconnect`
+- 第 6 步：新配对成功发起，**不**返回 `pair_slot_occupied` 错误
+- relay 端的 stale pending pairing 已被取消（状态变为 `rejected`，reason 为 `cancelled_by_client`）
+
+### TC-RI-回归-97：pending-pairings API 端点正确性验证
+
+**前置条件**：
+- 本地 bifrost-sync-server 已启动并启用 `--enable-remote-invoke`
+- Bifrost 执行端已注册
+
+**操作步骤**：
+1. 启动 Bifrost 执行端，确认状态 `Connected`
+2. 直接调用 relay 的 GET pending-pairings API（无 pending pairing 时）：
+   ```bash
+   curl -s -H "Authorization: Bearer <client_auth_token>" http://localhost:<relay_port>/v4/remote-invoke/client/pending-pairings
+   ```
+3. 创建 discovery session，发起一个 pairing（不审批）
+4. 再次调用 GET pending-pairings API
+5. 调用 DELETE pending-pairings API 取消所有 pending：
+   ```bash
+   curl -s -X DELETE -H "Authorization: Bearer <client_auth_token>" http://localhost:<relay_port>/v4/remote-invoke/client/pending-pairings
+   ```
+6. 再次调用 GET pending-pairings API 确认已清空
+
+**预期结果**：
+- 第 2 步：返回 `{"code":0,"message":"ok","data":[]}`
+- 第 4 步：返回 `{"code":0,"message":"ok","data":[{"pairing_id":"...","caller_fingerprint":"...","status":"pending_approval",...}]}`
+- 第 5 步：返回 `{"code":0,"message":"ok","data":{"cancelled":1}}`
+- 第 6 步：返回 `{"code":0,"message":"ok","data":[]}`
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：
@@ -1943,4 +2873,5 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 ```bash
 rm -rf .bifrost-test
 rm -rf /Users/eden/work/github/bifrost/.bifrost-sync-test
+rm -rf /tmp/bifrost-remote-overload.*
 ```

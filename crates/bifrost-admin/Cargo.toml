@@ -57,6 +57,7 @@ jsonwebtoken = "9"
 bcrypt = "0.17"
 rand.workspace = true
 gethostname = "1"
+ring = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 icns = "0.3"

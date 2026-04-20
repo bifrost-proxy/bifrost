@@ -3,6 +3,7 @@
 ## 功能模块说明
 
 本文档覆盖 `bifrost start` 命令的高级启动参数，包括：
+- 顶层 `bifrost --help` 中 `start` 参考区块与实际参数同步
 - TLS 拦截域名排除/白名单（`--intercept-exclude`、`--intercept-include`）
 - TLS 拦截应用排除/白名单（`--app-intercept-exclude`、`--app-intercept-include`）
 - 系统代理配置（`--system-proxy`、`--no-system-proxy`、`--proxy-bypass`）
@@ -858,6 +859,42 @@ rm -rf /tmp/bifrost-test-logs
 - 步骤 3 的代理请求正常返回
 - 步骤 4 的日志文件中存在 `DEBUG` 级别日志，说明 daemon 子进程继承了 CLI 传入的 `--log-level debug`
 - 未显式设置 `RUST_LOG` 时，不会再退回为硬编码 `info`
+
+---
+
+### TC-CSA-32：顶层 `bifrost --help` 的 start 参考区块与实际参数保持一致
+
+**操作步骤**：
+1. 执行顶层帮助命令并保存输出：
+   ```bash
+   ./target/debug/bifrost --help > /tmp/bifrost-root-help.txt
+   ```
+2. 执行 `start` 子命令帮助并保存输出：
+   ```bash
+   ./target/debug/bifrost start --help > /tmp/bifrost-start-help.txt
+   ```
+3. 校验顶层帮助的 `start` 参考区块包含关键参数：
+   ```bash
+   rg --fixed-strings -- '--no-system-proxy' /tmp/bifrost-root-help.txt
+   rg --fixed-strings -- '--proxy-bypass' /tmp/bifrost-root-help.txt
+   rg --fixed-strings -- '--cli-proxy' /tmp/bifrost-root-help.txt
+   rg --fixed-strings -- '--cli-proxy-no-proxy' /tmp/bifrost-root-help.txt
+   rg --fixed-strings -- '-y, --yes' /tmp/bifrost-root-help.txt
+   ```
+4. 校验 `start --help` 也包含同一组关键参数：
+   ```bash
+   rg --fixed-strings -- '--no-system-proxy' /tmp/bifrost-start-help.txt
+   rg --fixed-strings -- '--proxy-bypass' /tmp/bifrost-start-help.txt
+   rg --fixed-strings -- '--cli-proxy' /tmp/bifrost-start-help.txt
+   rg --fixed-strings -- '--cli-proxy-no-proxy' /tmp/bifrost-start-help.txt
+   rg --fixed-strings -- '--yes' /tmp/bifrost-start-help.txt
+   ```
+
+**预期结果**：
+- 顶层 `bifrost --help` 的 `SUBCOMMAND REFERENCE` 中能看到 `start [OPTIONS]`
+- 顶层帮助包含 `--no-system-proxy`、`--proxy-bypass`、`--cli-proxy`、`--cli-proxy-no-proxy`、`-y, --yes`
+- `bifrost start --help` 包含同一组关键参数
+- 两份帮助输出对 `start` 参数的关键集合描述一致，不会遗漏 `--no-system-proxy`
 
 ---
 

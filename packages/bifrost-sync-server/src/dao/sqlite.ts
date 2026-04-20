@@ -449,6 +449,15 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     return row.total;
   }
 
+  async listPendingPairings(clientInstanceId: string): Promise<RemoteInvokePairing[]> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE client_instance_id = ? AND status = ? ORDER BY create_time DESC').all(clientInstanceId, 'pending_approval') as RemoteInvokePairing[];
+  }
+
+  async cancelPendingPairings(clientInstanceId: string): Promise<number> {
+    const result = this.db.prepare('UPDATE bifrost_remote_invoke_pairings SET status = ?, update_time = ? WHERE client_instance_id = ? AND status = ?').run('rejected', new Date().toISOString(), clientInstanceId, 'pending_approval');
+    return result.changes;
+  }
+
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
     this.db.prepare(
       `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -488,6 +497,12 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
       'SELECT COUNT(*) as total FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ?'
     ).get(clientInstanceId, 'active') as { total: number };
     return row.total;
+  }
+
+  async listActiveGrantsForClient(clientInstanceId: string): Promise<RemoteInvokeGrant[]> {
+    return this.db.prepare(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ? ORDER BY first_authorized_at DESC'
+    ).all(clientInstanceId, 'active') as RemoteInvokeGrant[];
   }
 
   async updateGrant(grantId: string, fields: Partial<RemoteInvokeGrant>): Promise<void> {
