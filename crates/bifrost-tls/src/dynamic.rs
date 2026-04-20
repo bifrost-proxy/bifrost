@@ -137,8 +137,10 @@ impl DynamicCertGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ca::generate_root_ca;
+    use crate::ca::{generate_root_ca, load_root_ca};
     use crate::init_crypto_provider;
+    use std::fs;
+    use tempfile::tempdir;
     use x509_parser::parse_x509_certificate;
 
     #[test]
@@ -213,5 +215,37 @@ mod tests {
             validity_days <= 100,
             "leaf validity should stay browser-safe"
         );
+    }
+
+    #[test]
+    fn test_generate_for_domain_with_rsa_ca() {
+        init_crypto_provider();
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+
+        fs::write(&cert_path, include_str!("../testdata/test-rsa-ca.crt"))
+            .expect("Failed to write RSA cert");
+        fs::write(&key_path, include_str!("../testdata/test-rsa-ca-pkcs8.key"))
+            .expect("Failed to write RSA key");
+
+        let ca = Arc::new(load_root_ca(&cert_path, &key_path).expect("Failed to load RSA CA"));
+        let generator = DynamicCertGenerator::new(ca);
+
+        let cert_key = generator
+            .generate_for_domain("example.com")
+            .expect("Failed to generate certificate with RSA CA");
+
+        assert_eq!(cert_key.cert.len(), 2);
+
+        let leaf = parse_x509_certificate(cert_key.cert[0].as_ref())
+            .expect("Failed to parse leaf certificate")
+            .1;
+        let issuer = parse_x509_certificate(cert_key.cert[1].as_ref())
+            .expect("Failed to parse issuer certificate")
+            .1;
+
+        leaf.verify_signature(Some(issuer.public_key()))
+            .expect("leaf certificate should verify against RSA issuer");
     }
 }

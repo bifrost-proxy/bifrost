@@ -3,9 +3,11 @@ use bifrost_core::error::{BifrostError, Result};
 use chrono::{DateTime, Utc};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    KeyUsagePurpose, PublicKeyData, PKCS_ECDSA_P256_SHA256,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls_pemfile::private_key;
+use std::convert::TryFrom;
 use std::fs;
 use std::path::Path;
 use x509_parser::prelude::*;
@@ -94,16 +96,18 @@ pub fn load_root_ca(cert_path: &Path, key_path: &Path) -> Result<CertificateAuth
     let cert_pem = fs::read_to_string(cert_path)?;
     let key_pem = fs::read_to_string(key_path)?;
 
-    let key_pair = KeyPair::from_pem(&key_pem)
-        .map_err(|e| BifrostError::Tls(format!("Failed to parse CA key: {e}")))?;
-
     let pem = parse_x509_pem(cert_pem.as_bytes())
         .map_err(|e| BifrostError::Tls(format!("Failed to parse CA certificate PEM: {e}")))?
         .1;
 
-    let _parsed_cert = pem
+    let parsed_cert = pem
         .parse_x509()
         .map_err(|e| BifrostError::Tls(format!("Failed to parse X.509 certificate: {e}")))?;
+
+    let key_pair = load_key_pair(&key_pem)
+        .map_err(|e| BifrostError::Tls(format!("Failed to parse CA key: {e}")))?;
+
+    public_keys_match(&key_pair, &parsed_cert)?;
 
     Ok(CertificateAuthority::new(
         CertificateDer::from(pem.contents),
@@ -118,22 +122,6 @@ pub fn validate_ca_files(cert_path: &Path, key_path: &Path) -> Result<()> {
             "CA certificate or key file not found".to_string(),
         ));
     }
-
-    let key_pem = fs::read_to_string(key_path)?;
-    if !key_pem.contains("BEGIN EC PRIVATE KEY") && !key_pem.contains("BEGIN PRIVATE KEY") {
-        return Err(BifrostError::Tls(
-            "CA key is not in ECDSA format (expected EC PRIVATE KEY or PKCS#8 format)".to_string(),
-        ));
-    }
-
-    if key_pem.contains("BEGIN RSA PRIVATE KEY") {
-        return Err(BifrostError::Tls(
-            "CA key is in RSA format, but ECDSA P-256 is required".to_string(),
-        ));
-    }
-
-    KeyPair::from_pem(&key_pem)
-        .map_err(|e| BifrostError::Tls(format!("Invalid CA key format: {e}")))?;
 
     let cert_pem = fs::read_to_string(cert_path)?;
     let pem = parse_x509_pem(cert_pem.as_bytes())
@@ -150,14 +138,11 @@ pub fn validate_ca_files(cert_path: &Path, key_path: &Path) -> Result<()> {
         ));
     }
 
-    let algo_oid = cert.public_key().algorithm.algorithm.to_id_string();
-    let is_ecdsa = algo_oid.contains("1.2.840.10045.2.1");
-    if !is_ecdsa {
-        return Err(BifrostError::Tls(format!(
-            "CA certificate uses unsupported algorithm (OID: {}), expected ECDSA",
-            algo_oid
-        )));
-    }
+    let key_pem = fs::read_to_string(key_path)?;
+    let key_pair = load_key_pair(&key_pem)
+        .map_err(|e| BifrostError::Tls(format!("Invalid CA key format: {e}")))?;
+
+    public_keys_match(&key_pair, &cert)?;
 
     Ok(())
 }
@@ -401,6 +386,27 @@ fn oid_to_algorithm_name(oid: &x509_parser::oid_registry::Oid) -> String {
     }
 }
 
+fn load_key_pair(key_pem: &str) -> Result<KeyPair> {
+    let mut reader = std::io::BufReader::new(key_pem.as_bytes());
+    let key = private_key(&mut reader)
+        .map_err(|e| BifrostError::Tls(format!("Failed to parse private key PEM: {e}")))?
+        .ok_or_else(|| BifrostError::Tls("No private key found in PEM".to_string()))?;
+
+    KeyPair::try_from(&key).map_err(|e| BifrostError::Tls(format!("Failed to parse CA key: {e}")))
+}
+
+fn public_keys_match<'a>(key_pair: &KeyPair, cert: &X509Certificate<'a>) -> Result<()> {
+    let cert_spki = cert.public_key().raw.to_owned();
+    let key_spki = key_pair.subject_public_key_info();
+    if cert_spki == key_spki {
+        Ok(())
+    } else {
+        Err(BifrostError::Tls(
+            "CA certificate public key does not match private key".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +479,39 @@ mod tests {
             .expect("Failed to get loaded certificate DER");
 
         assert_eq!(original_der.as_ref(), loaded_der.as_ref());
+    }
+
+    #[test]
+    fn test_validate_ca_files_accepts_rsa_pkcs8_ca() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+
+        fs::write(&cert_path, include_str!("../testdata/test-rsa-ca.crt"))
+            .expect("Failed to write RSA cert");
+        fs::write(&key_path, include_str!("../testdata/test-rsa-ca-pkcs8.key"))
+            .expect("Failed to write RSA key");
+
+        validate_ca_files(&cert_path, &key_path).expect("RSA CA should be accepted");
+        load_root_ca(&cert_path, &key_path).expect("RSA CA should load");
+    }
+
+    #[test]
+    fn test_load_root_ca_rejects_mismatched_key() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+
+        let cert_ca = generate_root_ca().expect("Failed to generate certificate CA");
+        let key_ca = generate_root_ca().expect("Failed to generate key CA");
+
+        fs::write(&cert_path, cert_ca.certificate_pem()).expect("Failed to write cert");
+        fs::write(&key_path, key_ca.key_pair.serialize_pem()).expect("Failed to write key");
+
+        let err = load_root_ca(&cert_path, &key_path).expect_err("mismatched key should fail");
+        assert!(
+            format!("{err}").contains("public key does not match"),
+            "unexpected error: {err}"
+        );
     }
 }
