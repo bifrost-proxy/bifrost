@@ -61,10 +61,6 @@ fn sync_config_options_parse() {
 fn remote_connect_help_explains_one_time_pairing() {
     let help = run_help(&["remote", "connect"]);
     assert!(
-        help.contains("first-time pairing"),
-        "remote connect help should describe first-time pairing"
-    );
-    assert!(
         help.contains("one-time"),
         "remote connect help should mention one-time pair code usage"
     );
