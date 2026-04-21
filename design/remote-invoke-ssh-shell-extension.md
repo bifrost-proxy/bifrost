@@ -681,7 +681,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 \
   --relay-url http://localhost:3200 --unsafe-ssl --no-system-proxy
 
 # CLI 使用 SSH 密钥连接
-bifrost remote connect --ssh-key ./test-key.bifrost --relay http://localhost:3200
+bifrost remote connect --ssh-key ./test-key.bifrost --relay-url http://localhost:3200
 ```
 
 ***
