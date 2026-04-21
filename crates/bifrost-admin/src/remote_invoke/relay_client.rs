@@ -8,7 +8,7 @@ use super::types::{
     ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
     ClientRegistrationChallengeRequest, ClientRegistrationChallengeResponse,
     ClientRegistrationRequest, ClientRegistrationResponse, GrantDecisionRequest,
-    PublishPairCodeRequest,
+    PublishPairCodeRequest, SshConnectResultRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +206,24 @@ impl RelayClient {
         self.parse_response_empty(response, "post_call_exit").await
     }
 
+    pub async fn post_ssh_connect_result(&self, req: &SshConnectResultRequest) -> Result<()> {
+        let url = format!(
+            "{}/v4/remote-invoke/ssh/connect-result?client_instance_id={}",
+            self.base_url(),
+            urlencoding::encode(&self.client_instance_id),
+        );
+        let response = self
+            .authorized_post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!("relay post ssh connect result failed: {e}"))
+            })?;
+        self.parse_response_empty(response, "post_ssh_connect_result")
+            .await
+    }
+
     pub async fn revoke_ack(&self, grant_id: &str) -> Result<()> {
         let url = format!(
             "{}/v4/remote-invoke/client/grants/{}/revoke-ack",
@@ -280,6 +298,20 @@ impl RelayClient {
             BifrostError::Network(format!("relay fetch_active_grants request failed: {e}"))
         })?;
         self.parse_response_with_data::<Vec<serde_json::Value>>(response, "fetch_active_grants")
+            .await
+    }
+
+    pub async fn fetch_client_call(&self, call_id: &str) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/calls/{}?client_instance_id={}",
+            self.base_url(),
+            urlencoding::encode(call_id),
+            urlencoding::encode(&self.client_instance_id),
+        );
+        let response = self.authorized_get(&url).send().await.map_err(|e| {
+            BifrostError::Network(format!("relay fetch_client_call request failed: {e}"))
+        })?;
+        self.parse_response_with_data::<serde_json::Value>(response, "fetch_client_call")
             .await
     }
 

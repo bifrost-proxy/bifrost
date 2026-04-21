@@ -18,7 +18,9 @@ use bifrost_admin::{
 };
 use bifrost_core::{Rule, UserPassAccountConfig, UserPassAuthConfig};
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
-use bifrost_storage::{set_data_dir, ConfigChangeEvent, ConfigManager, TrafficConfigUpdate};
+use bifrost_storage::{
+    set_data_dir, ConfigChangeEvent, ConfigManager, TrafficConfigUpdate, DEFAULT_REMOTE_BASE_URL,
+};
 use bifrost_sync::SyncManager;
 use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
 use parking_lot::RwLock as ParkingRwLock;
@@ -1175,7 +1177,7 @@ pub fn run_foreground(
                 let relay_url = shared_config_manager
                     .try_config()
                     .map(|c| c.sync.remote_base_url.clone())
-                    .unwrap_or_else(|| "https://bifrost.bytedance.net".to_string());
+                    .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
 
                 let data_dir_path = shared_config_manager.data_dir().to_path_buf();
                 match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {
@@ -1880,7 +1882,7 @@ pub fn run_daemon(
                         let relay_url = shared_config_manager
                             .try_config()
                             .map(|c| c.sync.remote_base_url.clone())
-                            .unwrap_or_else(|| "https://bifrost.bytedance.net".to_string());
+                            .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
 
                         let data_dir_path = shared_config_manager.data_dir().to_path_buf();
                         match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {

@@ -279,12 +279,14 @@ pub struct SyncConfig {
     pub connect_timeout_ms: u64,
 }
 
+pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.bytedance.net";
+
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             auto_sync: true,
-            remote_base_url: "https://bifrost.bytedance.net".to_string(),
+            remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
             probe_interval_secs: 5,
             connect_timeout_ms: 3_000,
         }

@@ -631,10 +631,10 @@ bifrost remote traffic get <id> [OPTIONS]      # 远程获取流量详情
 #### 远程调用常见工作流
 
 ```bash
-# 使用授权码建立连接
+# 首次授权或授权失效时，使用一次性授权码建立连接
 bifrost remote connect <code>
 
-# 查看远端状态
+# connect 成功后，不要再次使用同一个 code；优先检查远端状态
 bifrost remote status
 
 # 远程排查某个域名的请求
@@ -650,10 +650,13 @@ bifrost remote search "api/v1/users"
 #### 远程调用 Agent 行为建议
 
 - 优先检查是否有可复用授权，避免每次都走配对流程
+- `bifrost remote connect <code>` 只用于首次配对或授权失效后的重新配对；如果此前 connect 已成功，下一步应优先执行 `bifrost remote status`
+- 配对码（pair code / `<code>`）是一次性的，成功消费后不能再次复用；不要在 connect 成功后再次尝试用同一个 code 连接
+- 当用户说“已经连过了 / 刚刚 connect 成功 / 已经授权过”，默认先执行 `bifrost remote status` 或其他只读查询，而不是再次 `remote connect`
 - 远程命令仅支持只读查询，不要尝试远程修改配置或规则
 - 当用户需要修改远端 Bifrost 配置时，提示用户直接在目标机器上操作
 - 如果远程命令返回 `unsupported_command`，说明该操作不在白名单内
-- 如果返回授权相关错误，引导用户在目标 Bifrost WebUI 中进行授权
+- 如果返回授权相关错误（例如授权过期、被撤销、无本地连接记录），再引导用户重新 `remote connect <code>` 并在目标 Bifrost WebUI 中进行授权
 - 遇到网络超时或 Relay 不可达，提示检查 Relay 服务状态和网络连接
 
 ## 推荐工作流

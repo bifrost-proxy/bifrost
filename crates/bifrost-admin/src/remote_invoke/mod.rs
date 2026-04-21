@@ -2,6 +2,7 @@ pub mod config;
 pub mod executor;
 pub mod identity;
 pub mod relay_client;
+pub mod ssh_keys;
 pub mod types;
 pub mod worker;
 

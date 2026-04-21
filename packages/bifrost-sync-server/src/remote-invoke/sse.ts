@@ -4,7 +4,9 @@ import type { ClientStreamState } from './types';
 
 const clientStreams = new Map<string, ClientStreamState>();
 const callerStreams = new Map<string, { res: ServerResponse; callId: string }>();
+const callerEventBuffers = new Map<string, Array<{ event: string; data: unknown; id?: string }>>();
 const pairingWatchers = new Map<string, { res: ServerResponse; pairingId: string }>();
+const MAX_BUFFERED_CALLER_EVENTS = 256;
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -95,14 +97,49 @@ export function unregisterCallerEventStream(callId: string): void {
   callerStreams.delete(callId);
 }
 
-export function pushToCallerStream(callId: string, event: string, data: unknown, id?: string): boolean {
+export function flushCallerEventStream(callId: string): boolean {
   const entry = callerStreams.get(callId);
   if (!entry) return false;
+  const buffered = callerEventBuffers.get(callId);
+  if (!buffered?.length) return true;
+
+  try {
+    for (const event of buffered) {
+      writeSseEvent(entry.res, event.event, event.data, event.id);
+    }
+    callerEventBuffers.delete(callId);
+    return true;
+  } catch {
+    callerStreams.delete(callId);
+    return false;
+  }
+}
+
+export function clearCallerEventBuffer(callId: string): void {
+  callerEventBuffers.delete(callId);
+}
+
+function bufferCallerEvent(callId: string, event: string, data: unknown, id?: string): void {
+  const existing = callerEventBuffers.get(callId) ?? [];
+  existing.push({ event, data, id });
+  while (existing.length > MAX_BUFFERED_CALLER_EVENTS) {
+    existing.shift();
+  }
+  callerEventBuffers.set(callId, existing);
+}
+
+export function pushToCallerStream(callId: string, event: string, data: unknown, id?: string): boolean {
+  const entry = callerStreams.get(callId);
+  if (!entry) {
+    bufferCallerEvent(callId, event, data, id);
+    return true;
+  }
   try {
     writeSseEvent(entry.res, event, data, id);
     return true;
   } catch {
     callerStreams.delete(callId);
+    bufferCallerEvent(callId, event, data, id);
     return false;
   }
 }

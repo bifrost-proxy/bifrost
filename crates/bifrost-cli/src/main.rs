@@ -1,8 +1,9 @@
 use bifrost_core::{init_logging_with_config, install_panic_hook, LogConfig, LogOutput};
-use bifrost_storage::data_dir;
+use bifrost_storage::{data_dir, ConfigManager, DEFAULT_REMOTE_BASE_URL};
 use bifrost_tls::init_crypto_provider;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
+use std::path::Path;
 
 mod cli;
 mod commands;
@@ -30,6 +31,51 @@ fn get_effective_port(cli_port: u16) -> u16 {
         return cli_port;
     }
     read_runtime_port().unwrap_or(DEFAULT_PORT)
+}
+
+fn normalize_relay_url(value: Option<String>) -> Option<String> {
+    value.and_then(|url| {
+        let trimmed = url.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn select_remote_relay_url(
+    explicit: Option<String>,
+    runtime: Option<String>,
+    configured: Option<String>,
+) -> String {
+    normalize_relay_url(explicit)
+        .or_else(|| normalize_relay_url(runtime))
+        .or_else(|| normalize_relay_url(configured))
+        .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string())
+}
+
+fn read_runtime_relay_url(port: u16) -> Option<String> {
+    let client = commands::config::client::ConfigApiClient::new("127.0.0.1", port);
+    client
+        .get_sync_status()
+        .ok()
+        .and_then(|status| normalize_relay_url(Some(status.remote_base_url)))
+}
+
+fn read_configured_relay_url(data_dir_path: &Path) -> Option<String> {
+    let config_path = data_dir_path.join("config.toml");
+    if !config_path.exists() {
+        return None;
+    }
+
+    ConfigManager::new(data_dir_path.to_path_buf())
+        .ok()
+        .and_then(|manager| manager.try_config())
+        .and_then(|config| normalize_relay_url(Some(config.sync.remote_base_url)))
+}
+
+fn resolve_remote_relay_url(explicit: Option<String>, cli_port: u16) -> String {
+    let effective_port = get_effective_port(cli_port);
+    let runtime = read_runtime_relay_url(effective_port);
+    let configured = read_configured_relay_url(&data_dir());
+    select_remote_relay_url(explicit, runtime, configured)
 }
 
 fn main() {
@@ -242,22 +288,7 @@ fn main() {
             relay_url,
             client_id,
         }) => {
-            let relay_url = match relay_url {
-                Some(url) => url,
-                None => {
-                    let client = commands::config::client::ConfigApiClient::new(
-                        "127.0.0.1",
-                        get_effective_port(cli.port),
-                    );
-                    match client.get_sync_status() {
-                        Ok(status) if !status.remote_base_url.is_empty() => status.remote_base_url,
-                        _ => {
-                            eprintln!("Error: --relay-url is required (could not detect from running proxy)");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            };
+            let relay_url = resolve_remote_relay_url(relay_url, cli.port);
             remote::handle_remote_command(remote::RemoteOptions {
                 relay_url,
                 client_id,
@@ -421,5 +452,103 @@ fn main() {
     if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bifrost_storage::UnifiedConfig;
+    use tempfile::TempDir;
+
+    #[test]
+    fn normalize_relay_url_trims_and_rejects_empty_values() {
+        assert_eq!(normalize_relay_url(None), None);
+        assert_eq!(normalize_relay_url(Some("".to_string())), None);
+        assert_eq!(normalize_relay_url(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_relay_url(Some(" https://relay.example.com/path ".to_string())),
+            Some("https://relay.example.com/path".to_string())
+        );
+    }
+
+    #[test]
+    fn select_remote_relay_url_honors_precedence_order() {
+        assert_eq!(
+            select_remote_relay_url(
+                Some("https://cli.example.com".to_string()),
+                Some("https://runtime.example.com".to_string()),
+                Some("https://config.example.com".to_string()),
+            ),
+            "https://cli.example.com"
+        );
+
+        assert_eq!(
+            select_remote_relay_url(
+                Some("   ".to_string()),
+                Some("https://runtime.example.com".to_string()),
+                Some("https://config.example.com".to_string()),
+            ),
+            "https://runtime.example.com"
+        );
+
+        assert_eq!(
+            select_remote_relay_url(
+                None,
+                Some("".to_string()),
+                Some("https://config.example.com".to_string()),
+            ),
+            "https://config.example.com"
+        );
+
+        assert_eq!(
+            select_remote_relay_url(None, None, None),
+            DEFAULT_REMOTE_BASE_URL
+        );
+    }
+
+    #[test]
+    fn read_configured_relay_url_uses_sync_remote_base_url_from_config_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            manager
+                .update_config(|config: &mut UnifiedConfig| {
+                    config.sync.remote_base_url = "https://config.example.com".to_string();
+                })
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            read_configured_relay_url(temp_dir.path()),
+            Some("https://config.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn read_configured_relay_url_treats_empty_config_as_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            manager
+                .update_config(|config: &mut UnifiedConfig| {
+                    config.sync.remote_base_url = "   ".to_string();
+                })
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(read_configured_relay_url(temp_dir.path()), None);
+    }
+
+    #[test]
+    fn read_configured_relay_url_returns_none_when_config_file_is_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        assert_eq!(read_configured_relay_url(temp_dir.path()), None);
     }
 }

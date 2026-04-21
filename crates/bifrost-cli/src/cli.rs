@@ -678,7 +678,7 @@ pub enum Commands {
         #[arg(
             long,
             global = true,
-            help = "Relay server URL (default: read from sync config)"
+            help = "Relay server URL (default: CLI arg > running sync config > local config > built-in default)"
         )]
         relay_url: Option<String>,
         #[arg(
@@ -1345,10 +1345,33 @@ pub enum ExportCommands {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteCommands {
-    #[command(about = "Connect to a remote Bifrost instance (first-time pairing)")]
+    #[command(
+        about = "Connect to a remote Bifrost instance (first-time pairing only)",
+        long_about = "Connect to a remote Bifrost instance using a one-time pair code.\n\n\
+            Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n\
+            The pair code is one-time and should not be reused after a successful connect.\n\
+            You can also connect with an exported SSH key file via `--ssh-key`.\n\
+            After connect succeeds, prefer `bifrost remote status` (or other read-only remote commands) instead of running `remote connect` again."
+    )]
     Connect {
-        #[arg(help = "Pair code displayed on the remote device")]
-        pair_code: String,
+        #[arg(
+            help = "One-time pair code displayed on the remote device",
+            required_unless_present = "ssh_key"
+        )]
+        pair_code: Option<String>,
+        #[arg(
+            long,
+            value_hint = ValueHint::FilePath,
+            conflicts_with = "pair_code",
+            help = "Use an exported Bifrost SSH key file, PKCS#8 Ed25519 private key, `env:NAME`, or `-` for stdin"
+        )]
+        ssh_key: Option<String>,
+        #[arg(
+            long,
+            requires = "ssh_key",
+            help = "Override the device code derived from --ssh-key (debug only)"
+        )]
+        device_code: Option<String>,
     },
     #[command(
         about = "Revoke authorization for a remote Bifrost instance",
@@ -1363,7 +1386,12 @@ pub enum RemoteCommands {
         #[arg(long, help = "Revoke a single specific grant by ID")]
         grant_id: Option<String>,
     },
-    #[command(about = "Get remote proxy status")]
+    #[command(
+        about = "Get remote proxy status",
+        long_about = "Get remote proxy status.\n\n\
+            Use this after a successful `bifrost remote connect` to verify that the saved authorization still works.\n\
+            If a reusable authorization already exists, you do not need to run `remote connect` again."
+    )]
     Status,
     #[command(about = "Search remote traffic records")]
     Search {

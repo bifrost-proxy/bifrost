@@ -13,8 +13,12 @@ import type {
   CallsQueryParams,
   ClientRegistrationChallengeResponse,
   ClientRegistrationRequest,
+  SshConnectRequest,
+  SshConnectResponse,
+  SshConnectResultRequest,
 } from './types';
 import { buildRegistrationSignaturePayload, isAllowedCommand, grantModeTtlMs } from './types';
+import { SshAuthService } from './ssh-auth';
 import {
   pushToClient,
   getClientStream,
@@ -24,11 +28,15 @@ import {
   findClientByPairCode,
   pushToPairingWatcher,
   pushToCallerStream,
+  clearCallerEventBuffer,
 } from './sse';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
 const REGISTER_CHALLENGE_TTL_MS = 60_000;
 const REGISTER_TIMESTAMP_SKEW_MS = 5 * 60_000;
+const CALL_TOKEN_GRACE_MS = 60_000;
+const SSH_CONNECT_STREAM_WAIT_MS = 10_000;
+const SSH_CONNECT_STREAM_POLL_MS = 100;
 
 function generateRelayToken(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -46,7 +54,8 @@ function constantTimeCompare(a: string, b: string): boolean {
 }
 
 export class RemoteInvokeService {
-  private callTokens = new Map<string, string>();
+  private callTokens = new Map<string, { token: string; expiresAt?: number }>();
+  private sshAuth = new SshAuthService();
   private registrationChallenges = new Map<
     string,
     {
@@ -168,6 +177,12 @@ export class RemoteInvokeService {
     };
 
     await this.storage.remoteInvoke.registerClient(record);
+    if (req.ssh_device_route !== undefined) {
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
+      if (routeState.routeChanged) {
+        await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
+      }
+    }
     return { client_auth_token: token, expires_at: expiresAt };
   }
 
@@ -480,7 +495,7 @@ export class RemoteInvokeService {
 
     const callId = nanoid();
     const relayToken = generateRelayToken();
-    this.callTokens.set(callId, relayToken);
+    this.callTokens.set(callId, { token: relayToken });
     const now = new Date().toISOString();
 
     const call: RemoteInvokeCall = {
@@ -534,13 +549,15 @@ export class RemoteInvokeService {
   }
 
   verifyCallToken(callId: string, token: string): boolean {
+    this.cleanupExpiredCallToken(callId);
     const stored = this.callTokens.get(callId);
     if (!stored) return false;
-    return constantTimeCompare(stored, token);
+    return constantTimeCompare(stored.token, token);
   }
 
   clearCallToken(callId: string): void {
     this.callTokens.delete(callId);
+    clearCallerEventBuffer(callId);
   }
 
   async postCallerInput(callId: string, envelopeJson: string): Promise<void> {
@@ -636,7 +653,7 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    this.callTokens.delete(req.call_id);
+    this.expireCallToken(req.call_id);
   }
 
   async cancelCall(callId: string): Promise<void> {
@@ -661,6 +678,8 @@ export class RemoteInvokeService {
       event_summary_json: '{}',
       create_time: now,
     });
+
+    this.expireCallToken(callId);
   }
 
   async clientHeartbeat(req: ClientHeartbeatRequest): Promise<void> {
@@ -671,6 +690,80 @@ export class RemoteInvokeService {
     await this.storage.remoteInvoke.updateClientRecord(req.client_instance_id, {
       last_heartbeat_at: new Date().toISOString(),
     });
+    if (req.ssh_device_route !== undefined) {
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
+      if (routeState.routeChanged) {
+        await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
+      }
+    }
+  }
+
+  issueSshChallenge(deviceCode: string) {
+    return this.sshAuth.issueChallenge(deviceCode);
+  }
+
+  async verifySshConnect(req: SshConnectRequest): Promise<SshConnectResponse> {
+    const verified = this.sshAuth.verifyAndPrepareConnect(req);
+    const eventPayload = {
+      connect_id: verified.connect_id,
+      device_code: req.device_code,
+      ssh_key_fingerprint: verified.ssh_key_fingerprint,
+      caller_info: req.caller_info ?? {},
+      relay_verified: true,
+    };
+    let delivered = pushToClient(verified.client_instance_id, 'ssh_connect', eventPayload);
+    if (!delivered) {
+      await this.waitForClientStream(verified.client_instance_id, SSH_CONNECT_STREAM_WAIT_MS);
+      delivered = pushToClient(verified.client_instance_id, 'ssh_connect', eventPayload);
+    }
+    if (!delivered) {
+      throw new Error('client_offline');
+    }
+    this.callTokens.set(verified.connect_id, { token: verified.relay_token });
+    return {
+      connect_id: verified.connect_id,
+      relay_token: verified.relay_token,
+      expires_at: verified.expires_at,
+    };
+  }
+
+  async submitSshConnectResult(
+    clientInstanceId: string,
+    req: SshConnectResultRequest,
+  ): Promise<void> {
+    const result = this.sshAuth.completeConnect(clientInstanceId, req);
+    if (result.status === 'approved' && result.grant_id && result.caller_fingerprint) {
+      const now = new Date().toISOString();
+      const grantMode = 'permanent';
+      const callerDisplayName =
+        result.caller_info?.hostname ||
+        result.caller_info?.username ||
+        '';
+
+      const grant: RemoteInvokeGrant = {
+        id: result.grant_id,
+        user_id: '',
+        client_instance_id: clientInstanceId,
+        caller_fingerprint: result.caller_fingerprint,
+        caller_display_name: callerDisplayName,
+        grant_mode: grantMode,
+        grant_scope: 'query',
+        status: 'active',
+        first_authorized_at: now,
+        expires_at: '',
+        last_used_at: now,
+        max_calls: 999999,
+        remaining_calls: 999999,
+        created_by: 'ssh_publickey',
+        update_time: now,
+      };
+      await this.storage.remoteInvoke.createGrant(grant);
+    }
+    pushToCallerStream(result.connect_id, 'ssh_connect_result', {
+      ...result,
+      client_instance_id: clientInstanceId,
+    });
+    this.expireCallToken(result.connect_id);
   }
 
   async removeGrant(userId: string, grantId: string, callerFingerprint: string): Promise<void> {
@@ -764,6 +857,21 @@ export class RemoteInvokeService {
   async revokeAck(_grantId: string): Promise<void> {
   }
 
+  private expireCallToken(callId: string, ttlMs: number = CALL_TOKEN_GRACE_MS): void {
+    const existing = this.callTokens.get(callId);
+    if (!existing) return;
+    existing.expiresAt = Date.now() + ttlMs;
+    this.callTokens.set(callId, existing);
+  }
+
+  private cleanupExpiredCallToken(callId: string): void {
+    const existing = this.callTokens.get(callId);
+    if (!existing?.expiresAt) return;
+    if (existing.expiresAt > Date.now()) return;
+    this.callTokens.delete(callId);
+    clearCallerEventBuffer(callId);
+  }
+
   private cleanupExpiredRegistrationChallenges(): void {
     const now = Date.now();
     for (const [challengeId, challenge] of this.registrationChallenges.entries()) {
@@ -771,6 +879,17 @@ export class RemoteInvokeService {
         this.registrationChallenges.delete(challengeId);
       }
     }
+  }
+
+  private async waitForClientStream(clientInstanceId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (getClientStream(clientInstanceId)) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, SSH_CONNECT_STREAM_POLL_MS));
+    }
+    return !!getClientStream(clientInstanceId);
   }
 }
 

@@ -523,6 +523,16 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     return result.changes > 0;
   }
 
+  async revokeSshGrantsForClient(clientInstanceId: string): Promise<number> {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `UPDATE bifrost_remote_invoke_grants
+       SET status = ?, update_time = ?
+       WHERE client_instance_id = ? AND status = ? AND created_by = ?`,
+    ).run('removed', now, clientInstanceId, 'active', 'ssh_publickey');
+    return result.changes;
+  }
+
   async touchGrantLastUsed(grantId: string, ts: string): Promise<void> {
     this.db.prepare('UPDATE bifrost_remote_invoke_grants SET last_used_at = ?, update_time = ? WHERE id = ?').run(ts, ts, grantId);
   }

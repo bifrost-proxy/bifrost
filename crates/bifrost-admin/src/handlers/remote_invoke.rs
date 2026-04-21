@@ -64,6 +64,15 @@ pub async fn handle_remote_invoke(
     if sub == "/calls" || sub == "/calls/" {
         return handle_calls_list(req, &worker).await;
     }
+    if sub == "/ssh-key"
+        || sub == "/ssh-key/"
+        || sub == "/ssh-key/private-key"
+        || sub == "/ssh-key/private-key/"
+        || sub == "/ssh-key/reset"
+        || sub == "/ssh-key/reset/"
+    {
+        return handle_ssh_key(req, &worker, sub).await;
+    }
     if let Some(rest) = sub.strip_prefix("/calls/") {
         let call_id = rest.trim_end_matches('/');
         if !call_id.is_empty() && !call_id.contains('/') {
@@ -308,4 +317,107 @@ async fn handle_call_get(
         })),
         None => error_response(StatusCode::NOT_FOUND, "Call not found"),
     }
+}
+
+async fn handle_ssh_key(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+    sub: &str,
+) -> Response<BoxBody> {
+    match (req.method().clone(), sub) {
+        (Method::GET, "/ssh-key/private-key" | "/ssh-key/private-key/") => {
+            match worker.export_active_ssh_key() {
+                Ok(Some(material)) => json_response(&material),
+                Ok(None) => json_response(&serde_json::Value::Null),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to load ssh key file: {e}"),
+                ),
+            }
+        }
+        (Method::POST, "/ssh-key/reset" | "/ssh-key/reset/") => match worker.reset_ssh_key() {
+            Ok(Some(material)) => json_response(&material),
+            Ok(None) => error_response(StatusCode::NOT_FOUND, "SSH key not found"),
+            Err(e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to reset ssh key: {e}"),
+            ),
+        },
+        (Method::GET, "/ssh-key" | "/ssh-key/") => match worker.get_active_ssh_key() {
+            Ok(Some(record)) => json_response(&record),
+            Ok(None) => json_response(&serde_json::Value::Null),
+            Err(e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load ssh key: {e}"),
+            ),
+        },
+        (Method::POST, "/ssh-key" | "/ssh-key/") => {
+            #[derive(serde::Deserialize)]
+            struct CreateBody {
+                label: String,
+                grant_mode: GrantMode,
+            }
+
+            let parsed: CreateBody = match parse_json_body(req).await {
+                Ok(body) => body,
+                Err(response) => return response,
+            };
+
+            match worker.create_ssh_key(parsed.label, parsed.grant_mode) {
+                Ok(result) => json_response(&result),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to create ssh key: {e}"),
+                ),
+            }
+        }
+        (Method::PATCH, "/ssh-key" | "/ssh-key/") => {
+            #[derive(serde::Deserialize)]
+            struct UpdateBody {
+                label: Option<String>,
+                grant_mode: Option<GrantMode>,
+            }
+
+            let parsed: UpdateBody = match parse_json_body(req).await {
+                Ok(body) => body,
+                Err(response) => return response,
+            };
+
+            match worker.update_ssh_key(parsed.label, parsed.grant_mode) {
+                Ok(Some(record)) => json_response(&record),
+                Ok(None) => error_response(StatusCode::NOT_FOUND, "SSH key not found"),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to update ssh key: {e}"),
+                ),
+            }
+        }
+        (Method::DELETE, "/ssh-key" | "/ssh-key/") => match worker.revoke_ssh_key() {
+            Ok(_) => json_response(&serde_json::json!({
+                "success": true,
+            })),
+            Err(e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to revoke ssh key: {e}"),
+            ),
+        },
+        _ => method_not_allowed(),
+    }
+}
+
+async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> std::result::Result<T, Response<BoxBody>> {
+    let body = req.collect().await.map_err(|e| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Failed to read request body: {e}"),
+        )
+    })?;
+    serde_json::from_slice(&body.to_bytes()).map_err(|e| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Invalid request body: {e}"),
+        )
+    })
 }

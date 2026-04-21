@@ -14,10 +14,13 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - 首次配对与人工授权
 - 发现模式与一次性授权码生命周期
 - 可复用授权命中与免重复授权
+- 持久化 caller identity 与 caller_fingerprint 稳定性
+- SSH 首次授权、绑定复用、冲突拒绝与撤销
 - 授权有效期调整与移除
 - 授权模式升降级（一次性→限时、永久→限时）
 - 多客户端在线管理与目标客户端选择
 - 仅允许白名单查询命令（status / traffic get / traffic search / search）
+- `shell.exec` 白名单命令、scope、auth_method、timeout 与输出限制
 - SSE/HTTP relay 正常转发、大结果流式传输与断线恢复
 - 调用方主动取消与 SSE 续流恢复
 - 端到端加密验证（Relay 不可见明文）
@@ -227,6 +230,40 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - 新终端中的 CLI 仍能直接复用该授权
 - 不需要重新输入配对码
 - relay 用户数据库中存在该授权记录
+
+---
+
+### TC-RI-回归-51：回归 — Remote Invoke 状态区合并布局在宽屏下保持高效占位
+
+**操作步骤**：
+1. 在桌面宽屏浏览器中打开 `http://127.0.0.1:8800/_bifrost/settings?tab=remote-invoke`
+2. 观察首屏顶部两列卡片布局
+3. 确认左侧卡片内同时存在 `Connection Status` 与 `Discovery Mode` 两个区块
+4. 确认右侧 `SSH Key` 卡片与左侧状态卡片处于同一行展示
+5. 观察 `Enter Discovery Mode` 按钮或发现模式操作区是否仍然清晰可点击
+
+**预期结果**：
+- 左侧顶部只展示一张状态总览卡片，不再将 `Connection Status` 与 `Discovery Mode` 拆成上下两张独立卡片
+- 合并后的状态卡片内清晰分区展示连接状态与发现模式
+- 宽屏首屏下左右卡片空间利用更均衡，不出现原先左下大块空白
+- `SSH Key` 卡片仍保持完整展示，不与左侧卡片内容重叠或挤压
+- 发现模式入口按钮或操作按钮仍可正常识别与点击
+
+---
+
+### TC-RI-回归-52：回归 — Create SSH key 弹窗提示信息合并后仍准确表达约束
+
+**操作步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=remote-invoke`
+2. 在 `SSH Key` 卡片中点击 `Create SSH Key`
+3. 观察弹窗顶部提示区域
+4. 确认表单中只保留一条蓝色提示信息，不再重复出现第二条说明卡片
+
+**预期结果**：
+- 弹窗顶部仅展示一条合并后的提示信息
+- 提示中同时说明“仅支持一个 active SSH key”以及“SSH grant 只有 rotate 或 revoke 才会失效”
+- 表单标签与输入框位置不受影响，`Label` 输入仍可正常编辑
+- 弹窗底部 `Cancel` / `Create` 按钮布局不变
 
 ---
 
@@ -2864,6 +2901,652 @@ PY
 - 第 5 步：返回 `{"code":0,"message":"ok","data":{"cancelled":1}}`
 - 第 6 步：返回 `{"code":0,"message":"ok","data":[]}`
 
+### TC-RI-回归-98：显式 `--relay-url` 优先于运行中实例与本地配置
+
+**前置条件**：
+- 本地已编译最新 `bifrost` 二进制
+- 已准备一个可用 relay 地址 `http://127.0.0.1:<explicit_port>`
+- 正在运行的本地 Bifrost `sync.remote_base_url` 指向另一地址
+- `BIFROST_DATA_DIR` 对应 `config.toml` 的 `sync.remote_base_url` 再指向第三个地址
+
+**操作步骤**：
+1. 启动本地 Bifrost，并将运行中 `sync.remote_base_url` 设置为 `http://127.0.0.1:<runtime_port>`
+2. 在单独数据目录下写入：
+   ```toml
+   [sync]
+   remote_base_url = "http://127.0.0.1:<config_port>"
+   ```
+3. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-explicit ./target/debug/bifrost remote connect <pair_code> --port <runtime_bifrost_port> --relay-url http://127.0.0.1:<explicit_port>
+   ```
+4. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- 仅显式传入的 relay 收到 `POST /v4/remote-invoke/pairings/start`
+- 运行中实例配置和本地配置文件中的 relay 均未被命中
+- `remote-connections.json` 中保存的 `relay_url` 为显式传入地址
+
+### TC-RI-回归-99：未传 `--relay-url` 时优先读取运行中实例的 `sync.remote_base_url`
+
+**前置条件**：
+- 本地 Bifrost 正在运行，且 `/_bifrost/api/sync/status` 返回非空 `remote_base_url`
+- 调用方数据目录中不存在 `config.toml`，或其中 `sync.remote_base_url` 与运行中实例不同
+
+**操作步骤**：
+1. 确认运行中实例 `sync status` 返回目标 relay URL
+2. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-runtime ./target/debug/bifrost remote connect <pair_code> --port <runtime_bifrost_port>
+   ```
+3. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- CLI 成功发起配对，不再报 `--relay-url is required`
+- 实际命中运行中实例中的 relay URL
+- `remote-connections.json` 中保存的 `relay_url` 与运行中实例 `sync.remote_base_url` 一致
+
+### TC-RI-回归-100：本地实例不可用时回退读取 `config.toml` 中的 `sync.remote_base_url`
+
+**前置条件**：
+- 本地未运行 Bifrost，或指定 `--port` 上没有可用实例
+- 调用方数据目录下存在 `config.toml`，其中配置：
+   ```toml
+   [sync]
+   remote_base_url = "http://127.0.0.1:<config_port>"
+   ```
+
+**操作步骤**：
+1. 确认没有运行中的本地 Bifrost 可提供 `sync status`
+2. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-config ./target/debug/bifrost remote connect <pair_code> --port <unused_port>
+   ```
+3. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- CLI 成功发起配对，不再报 `--relay-url is required`
+- 实际命中本地 `config.toml` 中的 relay URL
+- `remote-connections.json` 中保存的 `relay_url` 与本地配置文件一致
+
+### TC-RI-回归-101：运行中实例与本地配置均不可用时回退默认 relay
+
+**前置条件**：
+- 本地未运行 Bifrost，或指定端口没有可用实例
+- 调用方数据目录下不存在 `config.toml`，或其中 `sync.remote_base_url` 为空字符串
+
+**操作步骤**：
+1. 在全新数据目录下执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-default ./target/debug/bifrost remote connect <pair_code> --port <unused_port>
+   ```
+2. 观察命令输出、日志或抓包
+
+**预期结果**：
+- CLI 不再输出 `Error: --relay-url is required (could not detect from running proxy)`
+- relay 目标回退为默认值 `https://bifrost.bytedance.net`
+- 若默认 relay 当前不可达，错误表现为网络/业务错误，而不是缺少参数错误
+
+### TC-RI-回归-98 ~ TC-RI-回归-101 执行结果（2026-04-21）
+
+执行方式说明：
+- `TC-RI-回归-98` ~ `TC-RI-回归-100`：运行 `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+- `TC-RI-回归-101`：运行 `cargo test -p bifrost-cli select_remote_relay_url_honors_precedence_order -- --nocapture`
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-98 | 显式 `--relay-url` 优先于运行中实例与本地配置 | ✅ PASS | `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 的 Case 1 通过；仅显式 relay 收到请求，`remote-connections.json` 保存显式地址 |
+| TC-RI-回归-99 | 未传 `--relay-url` 时优先读取运行中实例的 `sync.remote_base_url` | ✅ PASS | 同一脚本 Case 2 通过；CLI 在省略 `--relay-url` 时命中运行中实例 relay，未再报缺少参数 |
+| TC-RI-回归-100 | 本地实例不可用时回退读取 `config.toml` 中的 `sync.remote_base_url` | ✅ PASS | 同一脚本 Case 3 通过；运行中实例不可用时命中本地 `config.toml`，`remote-connections.json` 保存配置地址 |
+| TC-RI-回归-101 | 运行中实例与本地配置均不可用时回退默认 relay | ✅ PASS | 执行 `BIFROST_DATA_DIR=<全新目录> ./target/release/bifrost --port 65530 remote connect 881004`；CLI 输出 `→ Initiating pairing with code 881004...` 后收到 relay 返回的 `invalid_pair_code`，未再出现 `--relay-url is required`，证明已继续走默认 relay 路径 |
+
+---
+
+### TC-RI-回归-102：Admin API 可创建当前 active SSH key
+
+**前置条件**：
+- 目标 client 已启用 Remote Invoke 并连接到本地 relay
+
+**操作步骤**：
+1. 调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key \
+     -H 'Content-Type: application/json' \
+     -d '{"label":"CI Agent","grant_mode":"30m"}'
+   ```
+2. 记录返回的 `device_code`、`ssh_key_fingerprint` 与 `bifrost_key_file`
+3. 再调用：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key
+   ```
+
+**预期结果**：
+- 创建接口返回 200
+- 响应体直接包含 `device_code`、`ssh_key_fingerprint`、`bifrost_key_file`
+- `device_code` 形如 `BF-XXXXXXXXXXXXXXXX`
+- 即使请求传入 `grant_mode=30m`，返回的 active SSH key 仍应归一化为 `grant_mode=permanent`
+- 查询当前 key 时返回同一个 active key，而不是嵌套在额外包裹字段中
+
+### TC-RI-回归-103：导出私钥文件与当前 active SSH key 保持一致
+
+**前置条件**：
+- 已完成 TC-RI-回归-102
+
+**操作步骤**：
+1. 调用：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key/private-key
+   ```
+2. 对比返回的 `device_code`、`ssh_key_fingerprint`
+3. 确认 `bifrost_key_file` 中包含 `Device-Code: <device_code>`
+
+**预期结果**：
+- 导出接口返回 200
+- 导出的 `device_code` 与当前 active key 完全一致
+- 导出的 `ssh_key_fingerprint` 与当前 active key 完全一致
+- 密钥文件是自包含 Bifrost key 格式
+
+### TC-RI-回归-104：重置 SSH key 会轮换 device_code 并更新 active key
+
+**前置条件**：
+- 已完成 TC-RI-回归-102
+
+**操作步骤**：
+1. 记录当前 `device_code`
+2. 调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key/reset
+   ```
+3. 再调用 `GET /api/remote-invoke/ssh-key`
+
+**预期结果**：
+- 重置接口返回 200
+- 新响应中的 `device_code` 与重置前不同
+- 当前 active key 已切换为新 key
+- 返回仍然带有新的 `bifrost_key_file`
+
+### TC-RI-回归-105：SSH challenge + connect 可通过签名换取 approved 结果
+
+**前置条件**：
+- 已完成 TC-RI-回归-104，且当前 active SSH key 可导出
+- 已准备可用于签名的 Ed25519 私钥（来自 `bifrost_key_file`）
+
+**操作步骤**：
+1. 调用 relay challenge：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/ssh/challenge \
+     -H 'Content-Type: application/json' \
+     -d '{"device_code":"<device_code>"}'
+   ```
+2. 按协议构造 payload：
+   ```json
+   {"challenge":"<challenge>","challenge_id":"<challenge_id>","device_code":"<device_code>","timestamp":<unix_ms>}
+   ```
+3. 使用导出的私钥对该 payload 做 Ed25519 签名，并 base64 编码
+4. 发起 `POST /v4/remote-invoke/ssh/connect`
+5. 查询：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/grants
+   ```
+
+**预期结果**：
+- challenge 返回 200，且带 `challenge_id`、`challenge`
+- connect 返回 200，且带 `connect_id`、`relay_token`
+- client 侧 grants 列表新增一条 `auth_method=ssh_publickey` 的授权记录
+- 该 SSH grant 的 `grant_mode` 为 `permanent`，`expires_at` 为空
+- active SSH key 的 `last_used_at` 被刷新
+
+### TC-RI-回归-106：撤销 SSH key 后当前 key 为空且旧 device_code 无法再发起 challenge
+
+**前置条件**：
+- 已完成 TC-RI-回归-105
+
+**操作步骤**：
+1. 记录当前 active `device_code`
+2. 调用：
+   ```bash
+   curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key
+   ```
+3. 再调用：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/remote-invoke/ssh-key
+   ```
+4. 对旧 `device_code` 再发一次 relay challenge
+
+**预期结果**：
+- DELETE 返回 `{"success":true}`
+- 当前 key 查询结果为 `null`
+- 旧 `device_code` 的 challenge 请求失败，返回 `device_code_not_found` 或等效错误
+
+### TC-RI-回归-107：SSH connect 后 relay 应能命中可复用 grant
+
+**前置条件**：
+- 已完成 TC-RI-回归-105
+- 已记录当前 `client_instance_id` 与 SSH `caller_fingerprint`
+
+**操作步骤**：
+1. 调用：
+   ```bash
+   curl -s "http://127.0.0.1:8686/v4/remote-invoke/grants/reusable?client_instance_id=<client_instance_id>&caller_fingerprint=<ssh_key_fingerprint>"
+   ```
+
+**预期结果**：
+- 返回 200
+- `data` 中包含当前 SSH connect 刚签发的 grant
+- grant 的 `grant_mode=permanent`、`status=active`，且 `expires_at` 为空；与 client 侧展示一致
+
+### TC-RI-回归-108：SSH connect 后应能通过 relay 打开 remote search 调用
+
+**前置条件**：
+- 已完成 TC-RI-回归-105
+- 目标 client 上已存在包含唯一 marker 的流量记录
+
+**操作步骤**：
+1. 使用 TC-RI-回归-105 中的 SSH grant 构造：
+   ```json
+   {
+     "grant_id":"<ssh_grant_id>",
+     "client_instance_id":"<client_instance_id>",
+     "caller_fingerprint":"<ssh_key_fingerprint>",
+     "command":{"command":"search.get","args_json":"{\"query\":\"<marker>\",\"limit\":10}"}
+   }
+   ```
+2. 调用：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/calls/open \
+     -H 'Content-Type: application/json' \
+     -d '<payload>'
+   ```
+
+**预期结果**：
+- 返回 200
+- 返回 `call_id` 与 `relay_token`
+- 后续 `events` SSE 中能收到匹配 `<marker>` 的搜索结果
+
+### TC-RI-回归-109：SSH connect 后应能通过 relay 执行 remote traffic get 并取回响应体
+
+**前置条件**：
+- 已完成 TC-RI-回归-105
+- 已知目标流量记录的 `id`
+
+**操作步骤**：
+1. 使用 SSH grant 构造：
+   ```json
+   {
+     "grant_id":"<ssh_grant_id>",
+     "client_instance_id":"<client_instance_id>",
+     "caller_fingerprint":"<ssh_key_fingerprint>",
+     "command":{"command":"traffic.get","args_json":"{\"id\":\"<traffic_id>\",\"response_body\":true}"}
+   }
+   ```
+2. 调用 `POST /v4/remote-invoke/calls/open`
+
+**预期结果**：
+- 返回 200
+- 调用链路能打开并返回目标流量详情
+- 输出中包含目标响应体 marker
+
+### TC-RI-回归-110：撤销 SSH key 后 relay 路由应在一个 heartbeat 周期内失效
+
+**前置条件**：
+- 已完成 TC-RI-回归-105
+
+**操作步骤**：
+1. 调用 `DELETE /api/remote-invoke/ssh-key`
+2. 等待一个 heartbeat 周期（30 秒量级）
+3. 对旧 `device_code` 再发一次：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8686/v4/remote-invoke/ssh/challenge \
+     -H 'Content-Type: application/json' \
+     -d '{"device_code":"<old_device_code>"}'
+   ```
+
+**预期结果**：
+- client 侧当前 active key 为空
+- client 侧 SSH grants 已被清空
+- relay 不再接受旧 `device_code`，返回 `device_code_not_found`
+
+### TC-RI-回归-111：线上 relay 的 reusable grant 查询应能命中 SSH grant
+
+**前置条件**：
+- 远端 relay 为 `https://bifrost.bytedance.net`
+- 已通过 SSH `challenge/connect` 成功建立授权
+- client 侧 `GET /api/remote-invoke/grants` 已出现 `auth_method=ssh_publickey` 的 active grant
+
+**操作步骤**：
+1. 记录本次 SSH 授权对应的 `client_instance_id`、`ssh_key_fingerprint`、`grant_id`
+2. 调用：
+   ```bash
+   curl -s "https://bifrost.bytedance.net/v4/remote-invoke/grants/reusable?client_instance_id=<client_instance_id>&caller_fingerprint=<ssh_key_fingerprint>"
+   ```
+
+**预期结果**：
+- 返回 200
+- `data.grant_id` 等于当前 SSH connect 刚签发的 grant
+- `grant_mode`、`status` 与 client 侧授权列表一致
+
+### TC-RI-回归-112：线上 relay 的 calls/open 应能复用 SSH grant 打开 remote search
+
+**前置条件**：
+- 已完成 TC-RI-回归-111
+- 目标 client 上已存在包含唯一 marker 的流量记录
+
+**操作步骤**：
+1. 使用 SSH grant 构造：
+   ```json
+   {
+     "grant_id":"<ssh_grant_id>",
+     "client_instance_id":"<client_instance_id>",
+     "caller_fingerprint":"<ssh_key_fingerprint>",
+     "command":{"command":"search.get","args_json":"{\"query\":\"<marker>\",\"limit\":10}"}
+   }
+   ```
+2. 调用：
+   ```bash
+   curl -s -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/open" \
+     -H 'Content-Type: application/json' \
+     -d '<payload>'
+   ```
+
+**预期结果**：
+- 返回 200
+- 返回 `call_id` 与 `relay_token`
+- 后续 caller `events` SSE 中能收到匹配 `<marker>` 的搜索结果
+
+### TC-RI-回归-113：回归 — caller 主动取消 remote search 后 Recent Calls 最终显示 cancelled
+
+**前置条件**：
+- 已完成一次有效的 `remote connect`
+- 目标 client 上存在足够多的流量记录，保证 `remote search` 会持续输出至少数秒
+
+**操作步骤**：
+1. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote search "<marker>" --relay-url <relay_url> --client-id <client_prefix> --limit 50
+   ```
+2. 等待终端出现 `Searching...` 或首批流式结果后，立即按 `Ctrl-C`
+3. 回到 client 管理端 `Settings -> Remote Invoke -> Recent Calls`
+4. 刷新 Recent Calls，定位刚刚这条 `search.get`
+
+**预期结果**：
+- caller 侧输出取消提示，不再继续等待到超时
+- Recent Calls 中该条调用最终状态为 `cancelled`
+- 该记录不会长期停留在 `streaming`
+
+### TC-RI-回归-114：回归 — 所有 remote invoke 命令都支持 caller 主动取消
+
+**前置条件**：
+- 已完成一次有效的 `remote connect`
+
+**操作步骤**：
+1. 在 caller 侧分别启动以下命令，并在命令执行阶段按 `Ctrl-C`
+   ```bash
+   cargo run --bin bifrost -- remote status --relay-url <relay_url> --client-id <client_prefix>
+   cargo run --bin bifrost -- remote traffic list --relay-url <relay_url> --client-id <client_prefix> --limit 50
+   cargo run --bin bifrost -- remote traffic get <traffic_id> --relay-url <relay_url> --client-id <client_prefix>
+   cargo run --bin bifrost -- remote search "<marker>" --relay-url <relay_url> --client-id <client_prefix> --limit 50
+   ```
+2. 每次取消后回到 client 管理端刷新 Recent Calls
+
+**预期结果**：
+- 每个命令在 caller 侧都能响应取消，而不是只能等待自然结束
+- 被中断的调用在 Recent Calls 中都落为 `cancelled`
+- 不出现某些命令支持取消、某些命令仍卡在 `streaming` 的分裂行为
+
+### TC-RI-回归-115：回归 — 取消后的晚到结果不能覆盖 cancelled
+
+**前置条件**：
+- 已复现一次 caller 取消中的 remote search
+
+**操作步骤**：
+1. 发起 `remote search` 并在输出进行中按 `Ctrl-C`
+2. 保持页面停留在 Recent Calls，连续点击刷新 3 次
+3. 若后台仍有执行尾包上报，观察该条调用状态是否变化
+
+**预期结果**：
+- 调用一旦变为 `cancelled`，后续刷新中仍保持 `cancelled`
+- 不会被晚到的 `completed` 或 `failed` 覆盖
+- 结束时间和持续时间可更新，但终态不回退
+
+### TC-RI-回归-116：回归 — 本地 relay 的粗粒度限流不能打断 cancel/events/exit 收尾
+
+**前置条件**：
+- 使用本地 `bifrost-sync-server`
+- 已完成一次有效的 `remote connect`
+- 目标 client 上存在足够多的流量记录，保证 `remote search` 会持续输出至少数秒
+
+**操作步骤**：
+1. 发起：
+   ```bash
+   cargo run --bin bifrost -- remote search "<marker>" --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix> --limit 500
+   ```
+2. 在输出进行中按 `Ctrl-C`
+3. 观察 caller 侧是否打印取消提示且在合理时间内退出
+4. 查询 client 侧：
+   ```bash
+   curl -s http://127.0.0.1:<admin_port>/_bifrost/api/remote-invoke/calls/<call_id> | jq .
+   ```
+
+**预期结果**：
+- caller 侧不会因为 relay 返回 `429 too many requests` 而卡死
+- client 侧调用最终状态为 `cancelled`
+- `ended_at`、`duration_ms`、`exit_code=130` 已写入
+
+### TC-RI-回归-117：回归 — 线上 relay 下 caller 主动取消后 target client 进入 cancelled 且 caller 不无限挂起
+
+**前置条件**：
+- relay 为 `https://bifrost.bytedance.net`
+- 目标 client 已保存有效 sync session
+- 已完成一次有效的 `remote connect`
+- 目标 client 上存在足够多的流量记录，保证 `remote search` 会持续输出至少数秒
+
+**操作步骤**：
+1. 发起：
+   ```bash
+   cargo run --bin bifrost -- remote search "<marker>" --relay-url https://bifrost.bytedance.net --client-id <client_prefix> --limit 500
+   ```
+2. 在 caller 终端出现持续输出后按 `Ctrl-C`
+3. 查询 target client Recent Calls / call detail
+4. 观察 caller 进程是否在合理时间内退出
+
+**预期结果**：
+- target client 上该条 `search.get` 最终为 `cancelled`
+- `ended_at`、`duration_ms`、`exit_code=130` 已稳定写入
+- caller 不会在取消后无限挂起
+
+### TC-RI-回归-121：CLI `remote connect --ssh-key` 能完成 SSH 授权并落盘后续可复用连接
+
+**前置条件**：
+- 已启动本地 relay，并启用 Remote Invoke
+- 目标 client 已连接到该 relay，且 `/_bifrost/api/remote-invoke/status` 显示 `Connected`
+- 可通过 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 获取最新导出的 `bifrost_key_file`
+- caller 使用独立 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 在 target client 上执行：
+   ```bash
+   curl -s -X POST http://127.0.0.1:<admin_port>/_bifrost/api/remote-invoke/ssh-key/reset
+   ```
+   记录返回的 `device_code`、`ssh_key_fingerprint` 与 `bifrost_key_file`。
+2. 把 `bifrost_key_file` 写入本地文件 `<caller_key_path>`。
+3. 在 caller 侧执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect --ssh-key <caller_key_path> --relay-url http://127.0.0.1:<relay_port>
+   ```
+4. 检查 `<caller_dir>/remote-connections.json`。
+5. 在同一 caller 数据目录下继续执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote status --relay-url http://127.0.0.1:<relay_port>
+   ```
+6. 在 target client 上查询：
+   ```bash
+   curl -s http://127.0.0.1:<admin_port>/_bifrost/api/remote-invoke/grants | jq .
+   ```
+
+**预期结果**：
+- 步骤 3 输出包含 `Connected with SSH key`
+- 步骤 4 中 `remote-connections.json` 写入一条 `auth_method=ssh_publickey` 连接，且 `client_instance_id`、`caller_fingerprint=<ssh_key_fingerprint>`、`device_code` 均存在
+- 步骤 5 成功执行，不再提示重新 `remote connect`
+- 步骤 6 中出现 `auth_method=ssh_publickey`、`grant_mode=permanent` 的 grant，且 fingerprint 与步骤 1 一致
+
+### TC-RI-回归-120：回归 — relay 返回 grant_not_found 时 disconnect 仍必须清掉本地连接
+
+**前置条件**：
+- 已完成一次有效的 `remote connect`
+- caller 本地 `remote-connections.json` 中至少存在 1 条连接记录
+- 已知本次连接的 `grant_id` 与 `caller_fingerprint`
+
+**操作步骤**：
+1. 先尝试直接调用 relay 删除 grant，制造 CLI 后续撤销命中 `404 grant_not_found` 的场景：
+   ```bash
+   curl -i -X DELETE "http://127.0.0.1:<relay_port>/v4/remote-invoke/grants/<grant_id>?caller_fingerprint=<caller_fingerprint>"
+   ```
+   如果本地 relay 的删除接口表现为幂等 `200`，则改为直接修改 caller 本地连接文件，把其中的 `grant_id` 替换成一个 relay 上不存在的值（例如 `missing-grant-for-disconnect-test`），以稳定复现 `grant_not_found`。
+2. 确认 caller 本地连接文件仍保留这条连接：
+   ```bash
+   jq '.connections' "$BIFROST_DATA_DIR/remote-connections.json"
+   ```
+3. 执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_data_dir> cargo run --bin bifrost -- remote disconnect --all --relay-url http://127.0.0.1:<relay_port>
+   ```
+4. 再次检查 caller 本地连接文件：
+   ```bash
+   jq '.connections | length' "$BIFROST_DATA_DIR/remote-connections.json"
+   ```
+
+**预期结果**：
+- 第 1 步 relay 删除成功；第 3 步中的 `remote disconnect --all` 不应因为后续 `404 grant_not_found` 报失败
+- CLI 输出应明确说明连接已被清理；若 grant 已不存在，可提示 `already missing on relay`
+- 第 4 步本地连接数为 `0`，不会残留幽灵连接
+- 后续执行 `bifrost remote status --relay-url ...` 时会提示没有可复用连接或需要重新 `remote connect`
+
+### TC-RI-回归-122：server-v4 SSH connect 挂起态必须保留 caller_info，确保 grant 展示调用方信息
+
+**前置条件**：
+- 已执行 `pnpm --dir bifrost-server-v4 build:local`
+- 工作区存在 `bifrost-server-v4/output/`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_server_v4_ssh_context.sh
+   ```
+2. 如需复核，检查脚本输出 JSON 中以下字段：
+   - `pendingCallerInfo.hostname`
+   - `grantCallerDisplayName`
+   - `connectResultData.client_instance_id`
+
+**预期结果**：
+- `ssh_connect` 挂起态在 Redis 中保留 `caller_info`
+- `POST /v4/remote-invoke/ssh/connect-result` 落 SSH grant 后，`caller_display_name` 取自调用方 `hostname/username`
+- 回传给 caller 的 `ssh_connect_result` 事件继续包含 `client_instance_id`，不影响 CLI 本地连接落盘
+
+### TC-RI-回归-102 ~ TC-RI-回归-106 执行结果（2026-04-21）
+
+**执行环境**：
+- Bifrost Admin：`BIFROST_DATA_DIR=./.bifrost-test-remote-invoke-ssh cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy`
+- Local relay：`pnpm --dir packages/bifrost-sync-server dev -- --data-dir /tmp/bifrost-sync-remote-invoke-ssh -p 8686 --enable-remote-invoke`
+- 调试与验证命令：`curl`、`openssl pkeyutl`、`python3`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-102 | ✅ PASS | `POST /api/remote-invoke/ssh-key` 即使传入 `grant_mode=30m`，返回和后续 `GET /api/remote-invoke/ssh-key` 中的 active key 仍统一为 `grant_mode=permanent`；响应继续保持扁平结构，包含 `device_code`、`ssh_key_fingerprint`、`bifrost_key_file`。 |
+| TC-RI-回归-103 | ✅ PASS | `GET /api/remote-invoke/ssh-key/private-key` 返回的 `device_code`、`ssh_key_fingerprint` 与 active key 一致，`bifrost_key_file` 内含对应 `Device-Code:` 头。 |
+| TC-RI-回归-104 | ✅ PASS | `POST /api/remote-invoke/ssh-key/reset` 后 `device_code` 发生轮换，新的 active key 立即可查询，且响应继续携带新的 `bifrost_key_file`。 |
+| TC-RI-回归-105 | ✅ PASS | 对 relay `ssh/challenge` 返回的 challenge 使用导出私钥完成签名后，`POST /v4/remote-invoke/ssh/connect` 成功返回 `connect_id` 与 `relay_token`；随后 `GET /api/remote-invoke/grants` 出现 `auth_method=ssh_publickey` 且 `grant_mode=permanent`、`expires_at=null` 的授权记录，active key 的 `last_used_at` 与 `last_caller_info` 均被刷新。 |
+| TC-RI-回归-106 | ✅ PASS | `DELETE /api/remote-invoke/ssh-key` 返回 `{"success":true}`；再次查询 active key 返回 `null`；使用旧 `device_code` 再请求 relay challenge 时返回 `device_code_not_found`，证明旧路由已失效。 |
+
+### TC-RI-回归-107 ~ TC-RI-回归-110 执行结果（2026-04-21）
+
+**执行环境**：
+- Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Local relay：`pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Mock target：`python3 -m http.server <随机端口> --bind 127.0.0.1 --directory <临时目录>`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-107 | ✅ PASS | SSH connect 成功后，relay `GET /v4/remote-invoke/grants/reusable?...caller_fingerprint=<ssh_key_fingerprint>` 返回当前 SSH grant，`grant_id`、`grant_mode=permanent`、`status=active` 且 `expires_at=null`，与 client 侧 `GET /api/remote-invoke/grants` 一致。 |
+| TC-RI-回归-108 | ✅ PASS | 使用 SSH grant 调用 relay `POST /v4/remote-invoke/calls/open` 执行 `search.get` 成功返回 `call_id` 与 `relay_token`；caller `events` SSE 收到搜索结果和 `exit_code=0`，输出中包含目标 marker，client 侧 `GET /api/remote-invoke/calls/<call_id>` 状态为 `Completed`。 |
+| TC-RI-回归-109 | ✅ PASS | 使用同一 SSH grant 调用 relay `POST /v4/remote-invoke/calls/open` 执行 `traffic.get` 成功返回 `call_id` 与 `relay_token`；caller `events` SSE 收到完整详情与 `response_body`，输出中同时包含目标 `traffic_id` 和响应体 marker，client 侧调用记录状态为 `Completed`。 |
+| TC-RI-回归-110 | ✅ PASS | `DELETE /api/remote-invoke/ssh-key` 后，client 侧 active key 立即为 `null`，SSH grants 被清空；5 秒后对旧 `device_code` 再发 relay challenge 返回 `device_code_not_found`，证明 revoke 已触发路由收敛删除。 |
+
+### TC-RI-回归-111 ~ TC-RI-回归-112 执行结果（2026-04-21，修复后线上 relay）
+
+**执行环境**：
+- Bifrost Admin：`cargo run --release --bin bifrost -- -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Relay Server：远端 `https://bifrost.bytedance.net`
+- Sync Session：复用本机已登录的真实线上账号 token
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-111 | ✅ PASS | 使用真实线上 relay `https://bifrost.bytedance.net` 重新执行 SSH `challenge/connect` 后，client 侧成功创建 active `ssh_publickey` grant；随后 `GET /v4/remote-invoke/grants/reusable?...caller_fingerprint=<ssh_key_fingerprint>` 正确返回该 grant，`grant_id` 与 client 侧列表一致。 |
+| TC-RI-回归-112 | ✅ PASS | 在同一组 `client_instance_id` / `grant_id` / `caller_fingerprint` 条件下，调用线上 relay `POST /v4/remote-invoke/calls/open` 执行 `search.get` 成功返回 `call_id` 与 `relay_token`，caller `events` SSE 收到包含目标 marker 的结果；继续执行 `traffic.get` 也成功返回目标 `traffic_id` 与响应体 marker，最后 `DELETE /api/remote-invoke/ssh-key` 后旧 `device_code` 再次变为 `device_code_not_found`。 |
+
+### TC-RI-回归-113 ~ TC-RI-回归-119 执行结果（2026-04-21，取消与限流收尾）
+
+**执行环境**：
+- Local relay：`pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Online relay：`https://bifrost.bytedance.net`
+- Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`target/release/bifrost remote ...`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-113 | ✅ PASS | 本地 relay 下，caller `Ctrl-C` 后 target client 不再长期停留在 `streaming`；调用最终可收敛到 terminal state。 |
+| TC-RI-回归-114 | ✅ PASS | `remote status` / `traffic list` / `traffic get` / `search` 的 caller 侧都能响应取消信号，不再只能等待自然结束。 |
+| TC-RI-回归-115 | ✅ PASS | target client 上 `cancelled` 状态连续 3 次刷新保持不变，未被晚到结果覆盖。 |
+| TC-RI-回归-116 | ⚠️ PARTIAL | 本地 relay 在大流量 `search.get` 取消场景下，caller 已不再因为 relay `429` 无限挂起，并会主动退出且打印 `Remote command 'search.get' cancelled by caller.`；但本轮本地 client 进程在收尾后未能保留到状态抓取阶段，未重新拿到 target client 上的最终 call detail，需补一轮稳定环境验证。 |
+| TC-RI-回归-117 | ✅ PASS | 线上 relay 下，caller `Ctrl-C` 后 target client 上 `search.get` 成功落为 `cancelled`，最终样本 `call_id=412ef871902f0195`，`ended_at=1776771986802`，`duration_ms=11660`，`exit_code=130`，且连续 3 次轮询稳定不变；caller 侧同步退出，输出 `remote call cancelled by caller` / `Remote command 'search.get' cancelled by caller.`，不再无限挂起。 |
+| TC-RI-回归-118 | ✅ PASS | 本地 relay 开启 `trust_forwarded_for` 后，使用相同 `x-forwarded-for=203.0.113.x` 分别为两个不同用户注册 client，并重复访问 authenticated remote invoke API 与 `client/stream` SSE；220 次 `client/active-grants` 查询全部返回 200，两个 `client/stream` 也均建立成功，证明已认证 remote invoke 不再以共享出口 IP 作为主要限流依据。 |
+| TC-RI-回归-119 | ✅ PASS | 远端 relay `bifrost-server-v4` 保持 authenticated remote invoke 主链路不在 app 内新增 pod-local limiter，只保留原有 `ssh/challenge -> device_code` 的 Redis 限制；同时 `client/stream` 直接使用 `verifyClientAuth()` 返回的 owner `user_id` 建立在线状态，不再依赖 query 透传。执行 `pnpm --dir bifrost-server-v4 build:local`、`bash e2e-tests/tests/test_remote_invoke_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 均通过，确认远端 relay 代码层没有再引入基于共享网关 IP 或单 pod 内存计数的 authenticated remote 限流。 |
+
+### TC-RI-回归-121 执行结果（2026-04-21，CLI `--ssh-key` 回归）
+
+**执行环境**：
+- Local relay：`pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller CLI：`BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect --ssh-key <key_file> --relay-url <relay_url>`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-121 | ✅ PASS | caller 使用 `--ssh-key` 成功完成 SSH connect，CLI 输出 `Connected with SSH key`；`remote-connections.json` 新增 `auth_method=ssh_publickey` 记录，包含 `client_instance_id`、`caller_fingerprint=<ssh_key_fingerprint>`、`device_code`；随后同一 `BIFROST_DATA_DIR` 下执行 `remote status` 成功复用该连接，不再要求重新 connect。 |
+
+### TC-RI-回归-122 执行结果（2026-04-21，server-v4 SSH caller 上下文）
+
+**执行环境**：
+- `pnpm --dir bifrost-server-v4 build:local`
+- `bash e2e-tests/tests/test_remote_invoke_server_v4_ssh_context.sh`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-122 | ✅ PASS | 脚本使用本地编译后的 `bifrost-server-v4` service 与 fake Redis 驱动 `syncSshDeviceRoute -> issueSshChallenge -> verifySshConnect -> submitSshConnectResult` 全链路；验证 `ri:ssh_connect:<connect_id>` 中已持久化 `caller_info.hostname=ci-host` / `username=ci-user`，最终 SSH grant 的 `caller_display_name` 恢复为 `ci-host`，且 caller 侧 `ssh_connect_result` 队列事件继续携带 `client_instance_id=client-ssh-ctx`。 |
+
+### 本轮实际执行回归（2026-04-21，远端 relay 收尾修正）
+
+**自动化回归**：
+- `e2e-tests/tests/test_remote_invoke_e2e.sh`：✅ PASS
+- `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：✅ PASS
+
+**构建校验**：
+- `pnpm --dir bifrost-server-v4 build:local`：✅ PASS
+
+**项目级校验**：
+- `cargo fmt --all -- --check`：✅ PASS
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`：✅ PASS
+- `cargo test --workspace --all-features`：⚠️ 首次执行命中 `bifrost-e2e` 既有端口占用型 flaky，失败点为 `tests::curl_mock::tests::test_curl_mock_combined` 绑定端口冲突；随后单独执行 `cargo test -p bifrost-e2e --lib tests::curl_mock::tests::test_curl_mock_combined -- --exact`：✅ PASS
+
+### TC-RI-回归-120 执行结果（2026-04-21，disconnect 幂等清理）
+
+**执行环境**：
+- Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Local relay：`pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Caller：`target/release/bifrost remote connect/disconnect --relay-url http://127.0.0.1:<relay_port>`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-120 | ✅ PASS | 本轮本地 relay 的 grant 删除接口表现为幂等 `200`，因此按用例中的兜底路径，将 caller 本地 `remote-connections.json` 里的 `grant_id` 替换为 `missing-grant-for-disconnect-test` 以稳定复现 `grant_not_found`；随后执行 `bifrost remote disconnect --all --relay-url http://127.0.0.1:<relay_port>`，CLI 输出 `relay grant already missing, local record removed`，`remote-connections.json` 中连接数从 `1` 变为 `0`，再次执行 `bifrost remote status` 时提示无可用连接，确认幽灵状态已消失。 |
+
 ---
 
 ## 清理
@@ -2875,3 +3558,25 @@ rm -rf .bifrost-test
 rm -rf /Users/eden/work/github/bifrost/.bifrost-sync-test
 rm -rf /tmp/bifrost-remote-overload.*
 ```
+
+### 本轮实际执行回归（2026-04-21，CI 失败修复）
+
+**执行环境**：
+- Local relay：`PATH=/Users/eden/.local/share/mise/installs/node/22.22.0/bin:$PATH pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller CLI：`target/release/bifrost remote ...`
+
+**实际执行结果**：
+- `TC-RI-回归-104`：✅ PASS
+  重置 SSH key 后，worker 状态先进入 `Reconnecting`，随后恢复 `Connected`；新的 `device_code` 可以稳定拿到 relay challenge。
+- `TC-RI-回归-105`：✅ PASS
+  在 reset 后立即执行 SSH connect 链路，`remote connect --ssh-key` 与后续 grant 创建都成功，不再复现“route 已同步但 client stream 尚未恢复”导致的假性失败。
+- `TC-RI-回归-113`：✅ PASS
+  本地 `bash e2e-tests/tests/test_remote_invoke_e2e.sh` 重新执行后，`TC-RI-04C` 已稳定通过，Recent Calls 最终显示 `cancelled`。
+
+**对应命令**：
+- `cargo test -p bifrost-admin test_update_call_in_history_cancelled_is_terminal -- --nocapture`：✅ PASS
+- `cargo test -p bifrost-admin test_update_call_in_history_does_not_override_completed_with_cancelled -- --nocapture`：✅ PASS
+- `cargo test -p bifrost-admin test_find_call_started_at_returns_latest_matching_call -- --nocapture`：✅ PASS
+- `bash e2e-tests/tests/test_remote_invoke_e2e.sh`：✅ PASS
+- `PATH=/Users/eden/.local/share/mise/installs/node/22.22.0/bin:$PATH bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：✅ PASS

@@ -2144,6 +2144,7 @@ async fn handle_socks5_intercepted_request(
         inject_bifrost_badge,
         &ctx,
         admin_state,
+        None,
         dns_resolver,
     )
     .await

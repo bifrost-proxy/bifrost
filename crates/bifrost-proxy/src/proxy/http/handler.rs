@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
 use base64::Engine;
-use bifrost_admin::{AdminState, RequestTiming, TrafficRecord, TrafficType};
+use bifrost_admin::{
+    AdminRouter, AdminState, RequestTiming, SharedPushManager, TrafficRecord, TrafficType,
+    ADMIN_PATH_PREFIX,
+};
 use bifrost_core::{protocol::Protocol, BifrostError, Result};
 use bifrost_script::{RequestData, ResponseData};
 use bytes::Bytes;
@@ -32,7 +36,9 @@ use super::tunnel::{
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
 };
-use crate::server::{full_body, with_trailers, BoxBody, ResolvedRules, RulesResolver};
+use crate::server::{
+    full_body, with_trailers, BoxBody, ResolvedRules, RulesResolver, ADMIN_VIRTUAL_HOST,
+};
 use crate::transform::apply_req_rules;
 use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
@@ -651,10 +657,11 @@ pub async fn handle_http_request(
     inject_bifrost_badge: bool,
     ctx: &RequestContext,
     admin_state: Option<Arc<AdminState>>,
+    push_manager: Option<SharedPushManager>,
     dns_resolver: Option<Arc<DnsResolver>>,
 ) -> Result<Response<BoxBody>> {
     if is_websocket_upgrade(&req) {
-        return handle_http_websocket(req, rules, ctx, admin_state, unsafe_ssl).await;
+        return handle_http_websocket(req, rules, ctx, admin_state, push_manager, unsafe_ssl).await;
     }
 
     let uri = req.uri().clone();
@@ -2452,6 +2459,7 @@ async fn handle_http_websocket(
     rules: Arc<dyn RulesResolver>,
     ctx: &RequestContext,
     admin_state: Option<Arc<AdminState>>,
+    push_manager: Option<SharedPushManager>,
     unsafe_ssl: bool,
 ) -> Result<Response<BoxBody>> {
     use super::websocket::websocket_bidirectional_generic_with_capture;
@@ -2502,6 +2510,14 @@ async fn handle_http_websocket(
         .port_u16()
         .or(host_port_from_header)
         .unwrap_or(if is_wss { 443 } else { 80 });
+
+    if should_route_websocket_to_local_admin(&host, port, uri.path(), ctx.port) {
+        if let (Some(state), Some(push_manager)) = (admin_state.clone(), push_manager.clone()) {
+            let req = rewrite_local_admin_websocket_request(req, &host);
+            let peer_addr = peer_addr_from_client_ip(&ctx.client_ip);
+            return Ok(AdminRouter::handle(req, state, Some(push_manager), peer_addr).await);
+        }
+    }
 
     let ws_scheme = if is_wss { "wss" } else { "ws" };
     let ws_url = if let Some(authority) = uri.authority().map(|a| a.as_str()) {
@@ -2767,6 +2783,54 @@ async fn handle_http_websocket(
     }
 
     Ok(response.body(empty_body()).unwrap())
+}
+
+fn should_route_websocket_to_local_admin(
+    host: &str,
+    port: u16,
+    path: &str,
+    listener_port: u16,
+) -> bool {
+    if host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
+        return true;
+    }
+
+    if port != listener_port || !path.starts_with(ADMIN_PATH_PREFIX) {
+        return false;
+    }
+
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn rewrite_local_admin_websocket_request<T>(req: Request<T>, host: &str) -> Request<T> {
+    let (mut parts, body) = req.into_parts();
+    let path = parts.uri.path();
+
+    if host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) && !path.starts_with(ADMIN_PATH_PREFIX) {
+        let new_path = if path == "/" {
+            format!("{ADMIN_PATH_PREFIX}/")
+        } else {
+            format!("{ADMIN_PATH_PREFIX}{path}")
+        };
+        let new_uri = if let Some(query) = parts.uri.query() {
+            format!("{new_path}?{query}")
+        } else {
+            new_path
+        };
+        if let Ok(uri) = new_uri.parse() {
+            parts.uri = uri;
+        }
+    }
+
+    Request::from_parts(parts, body)
+}
+
+fn peer_addr_from_client_ip(client_ip: &str) -> Option<SocketAddr> {
+    client_ip
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, 0))
 }
 
 fn build_http_websocket_handshake(
@@ -3288,5 +3352,59 @@ mod tests {
             ("accept".to_string(), "*/*".to_string()),
         ];
         assert!(!headers_pairs_equal_ignore_order(&a, &b));
+    }
+
+    #[test]
+    fn test_should_route_websocket_to_local_admin_for_loopback_admin_path() {
+        assert!(should_route_websocket_to_local_admin(
+            "localhost",
+            8811,
+            "/_bifrost/api/push",
+            8811
+        ));
+        assert!(should_route_websocket_to_local_admin(
+            "127.0.0.1",
+            8811,
+            "/_bifrost/api/push",
+            8811
+        ));
+    }
+
+    #[test]
+    fn test_should_not_route_websocket_to_local_admin_for_non_admin_path_or_port() {
+        assert!(!should_route_websocket_to_local_admin(
+            "localhost",
+            8811,
+            "/socket.io",
+            8811
+        ));
+        assert!(!should_route_websocket_to_local_admin(
+            "localhost",
+            8812,
+            "/_bifrost/api/push",
+            8811
+        ));
+        assert!(!should_route_websocket_to_local_admin(
+            "example.com",
+            8811,
+            "/_bifrost/api/push",
+            8811
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_local_admin_websocket_request_rewrites_virtual_host_path() {
+        let req = Request::builder()
+            .uri("/api/push?need_overview=true")
+            .body(())
+            .unwrap();
+
+        let req = rewrite_local_admin_websocket_request(req, ADMIN_VIRTUAL_HOST);
+        assert_eq!(
+            req.uri(),
+            &"/_bifrost/api/push?need_overview=true"
+                .parse::<Uri>()
+                .unwrap()
+        );
     }
 }

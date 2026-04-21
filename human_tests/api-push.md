@@ -8,13 +8,14 @@ Push WebSocket API 提供实时数据推送能力。客户端通过 WebSocket �
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保已安装 `websocat`（WebSocket 命令行客户端）或使用等效工具：
    ```bash
    brew install websocat
    ```
-3. 确保端口 8800 未被其他程序占用
+3. 确保已安装 Node.js，并已执行过仓库依赖安装（`web/node_modules` 可用）
+4. 确保端口 8800 未被其他程序占用
 
 ---
 
@@ -193,6 +194,27 @@ Push WebSocket API 提供实时数据推送能力。客户端通过 WebSocket �
 **预期结果**：
 - 返回 HTTP 400 Bad Request
 - 响应体包含错误信息 "Invalid upgrade header"
+
+---
+
+### TC-APU-11：通过 Bifrost 自身 HTTP 代理访问管理端 Push WebSocket
+
+**操作步骤**：
+1. 保持 Bifrost 运行在 `127.0.0.1:8800`，管理端地址为 `http://127.0.0.1:8800/_bifrost/`
+2. 执行以下命令，通过 `http://127.0.0.1:8800` 代理访问 `ws://localhost:8800/_bifrost/api/push`：
+   ```bash
+   node e2e-tests/test_utils/ws_via_http_proxy.js \
+     "http://127.0.0.1:8800" \
+     "ws://localhost:8800/_bifrost/api/push?x_client_id=human-proxy-regression&need_overview=true&metrics_interval_ms=500" \
+     connected \
+     overview_update
+   ```
+
+**预期结果**：
+- WebSocket 连接成功建立，不出现握手失败或立即断开的情况
+- 输出中包含 `type` 为 `"connected"` 的消息
+- 输出中包含 `type` 为 `"overview_update"` 的消息
+- 管理端不会因为该连接持续打印重连错误
 
 ---
 

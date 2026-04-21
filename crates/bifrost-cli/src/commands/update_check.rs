@@ -313,17 +313,20 @@ without proper structure
 - Third change here
 - Fourth one
 - Fifth item too
-- Sixth should not appear
+- Sixth one here
 
 **Full Changelog**: https://example.com
 "#;
         let highlights = parse_release_highlights(Some(body));
-        assert_eq!(highlights.len(), 5);
+        assert_eq!(highlights.len(), 8);
         assert_eq!(highlights[0], "Some random release notes");
         assert_eq!(highlights[1], "without proper structure");
         assert_eq!(highlights[2], "First change item");
         assert_eq!(highlights[3], "Second change item");
         assert_eq!(highlights[4], "Third change here");
+        assert_eq!(highlights[5], "Fourth one");
+        assert_eq!(highlights[6], "Fifth item too");
+        assert_eq!(highlights[7], "Sixth one here");
     }
 
     #[test]
@@ -425,10 +428,21 @@ without proper structure
 
     #[test]
     fn test_parse_release_highlights_truncation() {
-        let body = "## What's Changed\n\n### 🐛 Bug Fixes\n- fix: item 1 (abc)\n- fix: item 2 (abc)\n- fix: item 3 (abc)\n- fix: item 4 (abc)\n- fix: item 5 (abc)\n- fix: item 6 (abc)\n- fix: item 7 (abc)\n";
-        let highlights = parse_release_highlights(Some(body));
-        assert_eq!(highlights.len(), 6, "Should show top 5 + '... and N more'");
-        assert!(highlights[5].contains("... and 2 more"));
+        let mut lines = Vec::new();
+        for i in 1..=55 {
+            lines.push(format!("- fix: item {} (abc)", i));
+        }
+        let body = format!(
+            "## What's Changed\n\n### 🐛 Bug Fixes\n{}\n",
+            lines.join("\n")
+        );
+        let highlights = parse_release_highlights(Some(&body));
+        assert_eq!(
+            highlights.len(),
+            51,
+            "Should show top 50 + '... and N more'"
+        );
+        assert!(highlights[50].contains("... and 5 more"));
     }
 
     #[test]

@@ -7,7 +7,10 @@ import {
   Col,
   Descriptions,
   Empty,
+  Form,
+  Input,
   List,
+  Modal,
   Popconfirm,
   Row,
   Space,
@@ -23,33 +26,50 @@ import {
   DisconnectOutlined,
   EyeOutlined,
   HistoryOutlined,
+  KeyOutlined,
   ReloadOutlined,
   SafetyOutlined,
   ScanOutlined,
   StopOutlined,
 } from "@ant-design/icons";
 import {
+  createRemoteInvokeSshKey,
   enterDiscoveryMode,
   exitDiscoveryMode,
   getClientIdentity,
   getRemoteInvokeStatus,
+  getRemoteInvokeSshKey,
+  getRemoteInvokeSshPrivateKey,
   listCalls,
   listGrants,
   refreshPairCode,
+  resetRemoteInvokeSshKey,
   revokeGrant,
+  revokeRemoteInvokeSshKey,
+  type CreateRemoteInvokeSshKeyInput,
   type Call,
   type ClientIdentity,
   type DiscoverySession,
   type Grant,
+  type GrantMode,
+  type RemoteInvokeSshCallerInfo,
+  type RemoteInvokeSshKeyRecord,
+  type RemoteInvokeSshKeySecretPayload,
   type RemoteInvokeStatus,
 } from "../../../api/remoteInvoke";
-import { isConnectionIssueError } from "../../../api/client";
+import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
 import PairingRequestModal from "../../../components/PairingRequestModal";
 import type { PairingRequest } from "../../../api/remoteInvoke";
 
 const { Text, Title } = Typography;
+const { TextArea } = Input;
+
+const SSH_GRANT_MODE: { label: string; value: GrantMode } = {
+  label: "Permanent",
+  value: "permanent",
+};
 
 function formatFingerprint(fp: string): string {
   if (!fp || fp.length < 16) return fp || "-";
@@ -77,12 +97,61 @@ function formatBytes(bytes: number | null | undefined): string | null {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+function formatTimestamp(value: string | number | null | undefined): string {
+  if (value == null || value === "") return "-";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function formatSshFingerprint(fingerprint?: string | null): string {
+  if (!fingerprint) return "-";
+  if (fingerprint.startsWith("SHA256:")) return fingerprint;
+  return fingerprint.length > 48 ? `${fingerprint.slice(0, 24)}…` : fingerprint;
+}
+
+function formatCallerInfo(info: RemoteInvokeSshCallerInfo | null): string {
+  if (!info) return "No SSH caller has connected yet.";
+
+  const headline = [info.hostname, info.username && `as ${info.username}`]
+    .filter(Boolean)
+    .join(" ");
+  const details = [info.source_ip ?? info.ip, info.platform]
+    .filter(Boolean)
+    .join(" · ");
+
+  return [headline, details].filter(Boolean).join(" — ") || "No SSH caller has connected yet.";
+}
+
+function formatSshGrantMode(mode: GrantMode): string {
+  return mode === "permanent" ? SSH_GRANT_MODE.label : mode;
+}
+
 function formatCountdown(expiresAt: number): string {
   const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   if (remaining <= 0) return "Expired";
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function getCallStatusColor(call: Call): string {
+  switch (call.status) {
+    case "completed":
+      return call.exit_code === 0 ? "green" : "red";
+    case "cancelled":
+      return "orange";
+    case "streaming":
+    case "authorized":
+    case "key_exchanged":
+    case "pending":
+    case "running":
+      return "processing";
+    case "failed":
+    case "timeout":
+      return "red";
+    default:
+      return "default";
+  }
 }
 
 function renderStateTag(state: string) {
@@ -104,12 +173,25 @@ function renderStateTag(state: string) {
 export default function RemoteInvokeTab() {
   const [status, setStatus] = useState<RemoteInvokeStatus | null>(null);
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
+  const [sshKey, setSshKey] = useState<RemoteInvokeSshKeyRecord | null>(null);
+  const [sshApiAvailable, setSshApiAvailable] = useState(true);
+  const [sshLoading, setSshLoading] = useState(false);
+  const [sshAction, setSshAction] = useState<
+    "create" | "download" | "reset" | "revoke" | null
+  >(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [secretModal, setSecretModal] = useState<{
+    title: string;
+    description: string;
+    payload: RemoteInvokeSshKeySecretPayload;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [countdown, setCountdown] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const pollRef = useRef<number | null>(null);
+  const [sshForm] = Form.useForm<CreateRemoteInvokeSshKeyInput>();
 
   const [reviewPairing, setReviewPairing] = useState<PairingRequest | null>(null);
   const pendingPairings = usePairingRequestStore((s) => s.pendingList);
@@ -150,22 +232,57 @@ export default function RemoteInvokeTab() {
     }
   }, []);
 
+  const refreshSshKey = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setSshLoading(true);
+      }
+
+      try {
+        const currentKey = await getRemoteInvokeSshKey();
+        setSshApiAvailable(true);
+        setSshKey(currentKey);
+      } catch (e) {
+        if (isNotFoundError(e)) {
+          setSshApiAvailable(false);
+          setSshKey(null);
+          return;
+        }
+        if (!silent && !isConnectionIssueError(e)) {
+          message.error(
+            e instanceof Error ? e.message : "Failed to load SSH key status",
+          );
+        }
+      } finally {
+        if (!silent) {
+          setSshLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     void refresh();
     void refreshGrants();
     void refreshCalls();
-  }, [refresh, refreshGrants, refreshCalls]);
+    void refreshSshKey();
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
       void refresh();
       void refreshGrants();
       void refreshCalls();
+      if (sshApiAvailable) {
+        void refreshSshKey({ silent: true });
+      }
     }, 3000);
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshGrants, refreshCalls]);
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, sshApiAvailable]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -250,6 +367,105 @@ export default function RemoteInvokeTab() {
     }
   };
 
+  const openCreateModal = () => {
+    sshForm.setFieldsValue({
+      label: sshKey?.label ?? "",
+      grant_mode: "permanent",
+    });
+    setEditorOpen(true);
+  };
+
+  const presentSecretPayload = (
+    payload: RemoteInvokeSshKeySecretPayload,
+    mode: "created" | "downloaded" | "reset",
+  ) => {
+    const titleMap = {
+      created: "SSH key created",
+      downloaded: "Bifrost key file",
+      reset: "SSH key rotated",
+    } as const;
+    const descriptionMap = {
+      created:
+        "This Bifrost key file contains the device code and private key. Copy it now and store it securely.",
+      downloaded:
+        "Only trusted administrators should retrieve this file. Share it only with approved callers.",
+      reset:
+        "A new key pair is active now. Any previous SSH grants tied to the old key should be treated as revoked.",
+    } as const;
+
+    setSecretModal({
+      title: titleMap[mode],
+      description: descriptionMap[mode],
+      payload,
+    });
+  };
+
+  const handleSubmitSshForm = async () => {
+    const values = await sshForm.validateFields();
+    setSshAction("create");
+    try {
+      const payload = await createRemoteInvokeSshKey(values);
+      presentSecretPayload(payload, "created");
+      message.success("SSH key created");
+      setEditorOpen(false);
+      await refreshSshKey({ silent: true });
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to save SSH key settings",
+      );
+    } finally {
+      setSshAction(null);
+    }
+  };
+
+  const handleFetchPrivateKey = async () => {
+    setSshAction("download");
+    try {
+      const payload = await getRemoteInvokeSshPrivateKey();
+      presentSecretPayload(payload, "downloaded");
+      message.success("SSH key file loaded");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to fetch key file",
+      );
+    } finally {
+      setSshAction(null);
+    }
+  };
+
+  const handleResetSshKey = async () => {
+    setSshAction("reset");
+    try {
+      const payload = await resetRemoteInvokeSshKey();
+      presentSecretPayload(payload, "reset");
+      await refreshSshKey({ silent: true });
+      void refreshGrants();
+      message.success("SSH key rotated");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to rotate SSH key",
+      );
+    } finally {
+      setSshAction(null);
+    }
+  };
+
+  const handleRevokeSshKey = async () => {
+    setSshAction("revoke");
+    try {
+      await revokeRemoteInvokeSshKey();
+      setSshKey(null);
+      void refreshGrants();
+      message.success("SSH key revoked");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to revoke SSH key",
+      );
+    } finally {
+      setSshAction(null);
+    }
+  };
+
   const discoverySession: DiscoverySession | null =
     status?.discovery_session ?? null;
   const pairingList = pendingPairings;
@@ -266,12 +482,13 @@ export default function RemoteInvokeTab() {
           />
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24} md={12} style={{ display: "flex" }}>
           <Card
+            data-testid="settings-remote-invoke-status-card"
             title={
               <Space>
                 <ApiOutlined />
-                <span>Connection Status</span>
+                <span>Remote Status</span>
               </Space>
             }
             extra={
@@ -286,91 +503,290 @@ export default function RemoteInvokeTab() {
               />
             }
             size="small"
+            style={{ width: "100%", height: "100%" }}
+            bodyStyle={{
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
           >
-            <Descriptions size="small" column={1}>
-              <Descriptions.Item label="Relay Connection">
-                {status ? renderStateTag(status.state) : <Tag>Loading</Tag>}
-              </Descriptions.Item>
-              <Descriptions.Item label="Instance ID">
-                <Text code style={{ fontSize: 11 }}>
-                  {identity?.instance_id ?? "-"}
-                </Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="Device">
-                {identity?.device_name ?? "-"} ({identity?.platform ?? "-"})
-              </Descriptions.Item>
-              <Descriptions.Item label="Active Calls">
-                <Badge
-                  count={status?.active_call_ids?.length ?? 0}
-                  showZero
+            <div
+              data-testid="settings-remote-invoke-connection-section"
+              style={{
+                paddingBottom: 16,
+                borderBottom: "1px solid #f0f0f0",
+              }}
+            >
+              <Text strong style={{ display: "block", marginBottom: 12 }}>
+                Connection Status
+              </Text>
+              <Descriptions size="small" column={1}>
+                <Descriptions.Item label="Relay Connection">
+                  {status ? renderStateTag(status.state) : <Tag>Loading</Tag>}
+                </Descriptions.Item>
+                <Descriptions.Item label="Instance ID">
+                  <Text code style={{ fontSize: 11 }}>
+                    {identity?.instance_id ?? "-"}
+                  </Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Device">
+                  {identity?.device_name ?? "-"} ({identity?.platform ?? "-"})
+                </Descriptions.Item>
+                <Descriptions.Item label="Active Calls">
+                  <Badge
+                    count={status?.active_call_ids?.length ?? 0}
+                    showZero
+                    style={{
+                      backgroundColor:
+                        (status?.active_call_ids?.length ?? 0) > 0
+                          ? "#52c41a"
+                          : "#d9d9d9",
+                    }}
+                  />
+                </Descriptions.Item>
+              </Descriptions>
+            </div>
+
+            <div
+              data-testid="settings-remote-invoke-discovery-section"
+              style={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 180,
+              }}
+            >
+              <Text strong style={{ display: "block", marginBottom: 12 }}>
+                Discovery Mode
+              </Text>
+              {discoverySession ? (
+                <Space
+                  direction="vertical"
+                  size={12}
                   style={{
-                    backgroundColor:
-                      (status?.active_call_ids?.length ?? 0) > 0
-                        ? "#52c41a"
-                        : "#d9d9d9",
+                    width: "100%",
+                    flex: 1,
+                    justifyContent: "flex-start",
+                    paddingTop: 28,
                   }}
-                />
-              </Descriptions.Item>
-            </Descriptions>
+                >
+                  <div style={{ textAlign: "center" }}>
+                    <Title
+                      level={2}
+                      style={{
+                        fontFamily: "monospace",
+                        letterSpacing: "0.3em",
+                        margin: 0,
+                      }}
+                    >
+                      {discoverySession.pair_code}
+                    </Title>
+                    <Text type="secondary">
+                      {countdown === "Expired" ? (
+                        <Tag color="red">Expired</Tag>
+                      ) : (
+                        <>Expires in {countdown}</>
+                      )}
+                    </Text>
+                  </div>
+                  <Space wrap style={{ justifyContent: "center", width: "100%" }}>
+                    <Button
+                      icon={<CopyOutlined />}
+                      onClick={handleCopyCode}
+                      size="small"
+                    >
+                      Copy Code
+                    </Button>
+                    <Button
+                      icon={<ReloadOutlined />}
+                      onClick={handleRefreshCode}
+                      loading={discoveryLoading}
+                      size="small"
+                    >
+                      Refresh
+                    </Button>
+                    <Button
+                      icon={<StopOutlined />}
+                      onClick={handleExitDiscovery}
+                      loading={discoveryLoading}
+                      danger
+                      size="small"
+                    >
+                      Exit Discovery
+                    </Button>
+                  </Space>
+                </Space>
+              ) : (
+                <Space
+                  direction="vertical"
+                  size={12}
+                  style={{
+                    width: "100%",
+                    flex: 1,
+                    justifyContent: "flex-start",
+                    paddingTop: 20,
+                    textAlign: "center",
+                  }}
+                >
+                  <DisconnectOutlined
+                    style={{ fontSize: 32, color: "#bfbfbf" }}
+                  />
+                  <Text type="secondary">
+                    Not in discovery mode. Enter discovery to generate a pair
+                    code.
+                  </Text>
+                  <Button
+                    type="primary"
+                    icon={<ScanOutlined />}
+                    onClick={handleEnterDiscovery}
+                    loading={discoveryLoading}
+                    disabled={status?.state?.toLowerCase() !== "connected"}
+                  >
+                    Enter Discovery Mode
+                  </Button>
+                  {status?.state?.toLowerCase() !== "connected" && (
+                    <Text type="warning" style={{ fontSize: 12 }}>
+                      Relay must be connected before entering discovery mode.
+                    </Text>
+                  )}
+                </Space>
+              )}
+            </div>
           </Card>
         </Col>
 
-        <Col xs={24} md={12}>
+        <Col xs={24} md={12} style={{ display: "flex" }}>
           <Card
+            data-testid="settings-remote-invoke-ssh-card"
             title={
               <Space>
-                <ScanOutlined />
-                <span>Discovery Mode</span>
+                <KeyOutlined />
+                <span>SSH Key</span>
               </Space>
             }
+            extra={
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => void refreshSshKey()}
+                loading={sshLoading}
+              />
+            }
             size="small"
+            style={{ width: "100%", height: "100%" }}
           >
-            {discoverySession ? (
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <div style={{ textAlign: "center" }}>
-                  <Title
-                    level={2}
-                    style={{
-                      fontFamily: "monospace",
-                      letterSpacing: "0.3em",
-                      margin: 0,
-                    }}
-                  >
-                    {discoverySession.pair_code}
-                  </Title>
-                  <Text type="secondary">
-                    {countdown === "Expired" ? (
-                      <Tag color="red">Expired</Tag>
-                    ) : (
-                      <>Expires in {countdown}</>
-                    )}
-                  </Text>
-                </div>
-                <Space wrap style={{ justifyContent: "center", width: "100%" }}>
+            {!sshApiAvailable ? (
+              <Alert
+                showIcon
+                type="warning"
+                message="SSH key management is not available yet"
+                description="This client does not expose the SSH key endpoints yet. Once the backend lands, this section will light up without further UI changes."
+              />
+            ) : sshKey ? (
+              <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                <Descriptions
+                  size="small"
+                  column={1}
+                  items={[
+                    {
+                      key: "label",
+                      label: "Label",
+                      children: sshKey.label,
+                    },
+                    {
+                      key: "device_code",
+                      label: "Device Code",
+                      children: (
+                        <Space size={8} wrap>
+                          <Text code>{sshKey.device_code}</Text>
+                          <Button
+                            size="small"
+                            icon={<CopyOutlined />}
+                            onClick={() => {
+                              copyToClipboard(sshKey.device_code);
+                              message.success("Device code copied");
+                            }}
+                          >
+                            Copy
+                          </Button>
+                        </Space>
+                      ),
+                    },
+                    {
+                      key: "fingerprint",
+                      label: "Fingerprint",
+                      children: (
+                        <Text code style={{ fontSize: 11 }}>
+                          {formatSshFingerprint(sshKey.ssh_key_fingerprint)}
+                        </Text>
+                      ),
+                    },
+                    {
+                      key: "grant_mode",
+                      label: "SSH Access",
+                      children: `${formatSshGrantMode(sshKey.grant_mode)} until key revoke`,
+                    },
+                    {
+                      key: "status",
+                      label: "Status",
+                      children: (
+                        <Tag color={sshKey.status === "active" ? "green" : "default"}>
+                          {sshKey.status}
+                        </Tag>
+                      ),
+                    },
+                    {
+                      key: "last_used_at",
+                      label: "Last Used",
+                      children: formatTimestamp(sshKey.last_used_at),
+                    },
+                    {
+                      key: "last_caller",
+                      label: "Last Caller",
+                      children: (
+                        <Text type={sshKey.last_caller_info ? undefined : "secondary"}>
+                          {formatCallerInfo(sshKey.last_caller_info)}
+                        </Text>
+                      ),
+                    },
+                  ]}
+                />
+
+                <Space wrap>
                   <Button
                     icon={<CopyOutlined />}
-                    onClick={handleCopyCode}
-                    size="small"
+                    onClick={() => void handleFetchPrivateKey()}
+                    loading={sshAction === "download"}
                   >
-                    Copy Code
+                    Copy Key File
                   </Button>
-                  <Button
-                    icon={<ReloadOutlined />}
-                    onClick={handleRefreshCode}
-                    loading={discoveryLoading}
-                    size="small"
+                  <Popconfirm
+                    title="Rotate SSH key?"
+                    description="This creates a new key pair, replaces the device code, and should revoke grants tied to the old key."
+                    okText="Rotate"
+                    cancelText="Cancel"
+                    onConfirm={() => void handleResetSshKey()}
                   >
-                    Refresh
-                  </Button>
-                  <Button
-                    icon={<StopOutlined />}
-                    onClick={handleExitDiscovery}
-                    loading={discoveryLoading}
-                    danger
-                    size="small"
+                    <Button loading={sshAction === "reset"}>
+                      Reset Key
+                    </Button>
+                  </Popconfirm>
+                  <Popconfirm
+                    title="Revoke SSH key?"
+                    description="SSH callers will lose access until a new key is created."
+                    okText="Revoke"
+                    cancelText="Cancel"
+                    onConfirm={() => void handleRevokeSshKey()}
                   >
-                    Exit Discovery
-                  </Button>
+                    <Button
+                      danger
+                      icon={<DeleteOutlined />}
+                      loading={sshAction === "revoke"}
+                    >
+                      Revoke Key
+                    </Button>
+                  </Popconfirm>
                 </Space>
               </Space>
             ) : (
@@ -379,29 +795,17 @@ export default function RemoteInvokeTab() {
                 size={12}
                 style={{ width: "100%", textAlign: "center" }}
               >
-                <DisconnectOutlined
-                  style={{ fontSize: 32, color: "#bfbfbf" }}
-                />
+                <KeyOutlined style={{ fontSize: 32, color: "#bfbfbf" }} />
                 <Text type="secondary">
-                  Not in discovery mode. Enter discovery to generate a pair
-                  code.
+                  No active SSH key. Create one to provision long-lived callers without pair codes.
                 </Text>
                 <Button
                   type="primary"
-                  icon={<ScanOutlined />}
-                  onClick={handleEnterDiscovery}
-                  loading={discoveryLoading}
-                  disabled={
-                    status?.state?.toLowerCase() !== "connected"
-                  }
+                  onClick={openCreateModal}
+                  loading={sshAction === "create"}
                 >
-                  Enter Discovery Mode
+                  Create SSH Key
                 </Button>
-                {status?.state?.toLowerCase() !== "connected" && (
-                  <Text type="warning" style={{ fontSize: 12 }}>
-                    Relay must be connected before entering discovery mode.
-                  </Text>
-                )}
               </Space>
             )}
           </Card>
@@ -622,15 +1026,7 @@ export default function RemoteInvokeTab() {
                             </Tooltip>
                           )}
                           <Tag
-                            color={
-                              c.status === "completed"
-                                ? c.exit_code === 0
-                                  ? "green"
-                                  : "red"
-                                : c.status === "running"
-                                  ? "processing"
-                                  : "default"
-                            }
+                            color={getCallStatusColor(c)}
                           >
                             {c.status}
                             {c.exit_code !== undefined && c.exit_code !== null
@@ -678,6 +1074,103 @@ export default function RemoteInvokeTab() {
           void storeFetchPairings();
         }}
       />
+      <Modal
+        open={editorOpen}
+        title="Create SSH key"
+        okText="Create"
+        cancelText="Cancel"
+        onCancel={() => setEditorOpen(false)}
+        onOk={() => void handleSubmitSshForm()}
+        confirmLoading={sshAction === "create"}
+        destroyOnClose
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message="Only one active SSH key is supported, and SSH grants stay active until rotation or revoke"
+          description="Creating a new key should automatically revoke the previous SSH key and its grants on the backend. SSH mode ignores time-based grant TTL, so callers keep access until you rotate or revoke this SSH key."
+        />
+        <Form
+          form={sshForm}
+          layout="vertical"
+          initialValues={{ label: "", grant_mode: "permanent" satisfies GrantMode }}
+        >
+          <Form.Item
+            label="Label"
+            name="label"
+            rules={[
+              { required: true, message: "Please enter a label" },
+              { max: 80, message: "Label must be 80 characters or fewer" },
+            ]}
+          >
+            <Input placeholder="CI Agent" maxLength={80} />
+          </Form.Item>
+          <Form.Item name="grant_mode" hidden>
+            <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        open={secretModal !== null}
+        title={secretModal?.title}
+        okText="Close"
+        cancelButtonProps={{ style: { display: "none" } }}
+        onOk={() => setSecretModal(null)}
+        onCancel={() => setSecretModal(null)}
+        width={760}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert showIcon type="warning" message={secretModal?.description} />
+          <Descriptions
+            size="small"
+            column={1}
+            items={[
+              {
+                key: "device_code",
+                label: "Device Code",
+                children: <Text code>{secretModal?.payload.device_code ?? "-"}</Text>,
+              },
+              {
+                key: "fingerprint",
+                label: "Fingerprint",
+                children: (
+                  <Text code style={{ fontSize: 11 }}>
+                    {formatSshFingerprint(secretModal?.payload.ssh_key_fingerprint)}
+                  </Text>
+                ),
+              },
+            ]}
+          />
+          <div>
+            <Space style={{ marginBottom: 8 }}>
+              <Text strong>Bifrost key file</Text>
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                onClick={() => {
+                  if (!secretModal?.payload.bifrost_key_file) return;
+                  copyToClipboard(secretModal.payload.bifrost_key_file);
+                  message.success("Key file copied");
+                }}
+              >
+                Copy
+              </Button>
+            </Space>
+            <TextArea
+              readOnly
+              autoSize={{ minRows: 8, maxRows: 14 }}
+              value={secretModal?.payload.bifrost_key_file ?? ""}
+            />
+          </div>
+          <div>
+            <Text strong>CLI Example</Text>
+            <div style={{ marginTop: 8 }}>
+              <Text code>bifrost remote connect --ssh-key /path/to/bifrost.key</Text>
+            </div>
+          </div>
+        </Space>
+      </Modal>
     </div>
   );
 }
