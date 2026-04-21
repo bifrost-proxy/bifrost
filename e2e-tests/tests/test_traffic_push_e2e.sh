@@ -181,6 +181,25 @@ test_ws_connection() {
     fi
 }
 
+test_ws_connection_via_http_proxy_to_admin() {
+    log_info "Testing WebSocket connection to admin push via HTTP proxy..."
+
+    local output
+    if ! output=$(node "$SCRIPT_DIR/../test_utils/ws_via_http_proxy.js" \
+        "http://${ADMIN_HOST}:${PROXY_PORT}" \
+        "${WS_PUSH_URL}?x_client_id=e2e_proxy_admin_$$_$RANDOM&need_overview=true&metrics_interval_ms=500" \
+        "connected" \
+        "overview_update" 2>&1); then
+        log_fail "Proxy WebSocket connection failed: $output"
+        return 1
+    fi
+
+    log_debug "Proxy WS output: $output"
+    assert_contains "$output" '"type":"connected"' "Proxy WebSocket should receive connected message" || return 1
+    assert_contains "$output" '"type":"overview_update"' "Proxy WebSocket should receive overview update" || return 1
+    return 0
+}
+
 test_ws_traffic_delta() {
     log_info "Testing WebSocket traffic delta push..."
     
@@ -466,6 +485,7 @@ main() {
 
     if [[ "$has_websocat" == "true" ]]; then
         run_test "WebSocket Connection" test_ws_connection
+        run_test "WebSocket Admin Push Via HTTP Proxy" test_ws_connection_via_http_proxy_to_admin
         run_test "WebSocket Traffic Delta" test_ws_traffic_delta
         run_test "WebSocket Overview Push" test_ws_overview_push
         run_test "WebSocket Metrics Push" test_ws_metrics_push

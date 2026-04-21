@@ -29,6 +29,13 @@ pub enum GrantStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    PairCode,
+    SshPublickey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallStatus {
     Pending,
     Authorized,
@@ -76,6 +83,7 @@ pub enum ClientSseEventKind {
     CallFrame,
     CallCancel,
     GrantRevoked,
+    SshConnect,
     Ping,
 }
 
@@ -184,6 +192,10 @@ pub struct CallerInfo {
     pub source_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -272,6 +284,13 @@ pub enum ClientSseEvent {
         grant_id: String,
         reason: Option<String>,
     },
+    SshConnect {
+        connect_id: String,
+        device_code: String,
+        ssh_key_fingerprint: String,
+        caller_info: Option<CallerInfo>,
+        relay_verified: bool,
+    },
     Ping {
         server_time: u64,
     },
@@ -299,6 +318,8 @@ pub struct GrantInfo {
     pub caller_display_name: Option<String>,
     pub grant_mode: GrantMode,
     pub grant_scope: String,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: AuthMethod,
     pub status: GrantStatus,
     pub first_authorized_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -307,6 +328,10 @@ pub struct GrantInfo {
     pub last_used_at: Option<u64>,
     pub max_calls: Option<u32>,
     pub remaining_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +341,8 @@ pub struct CallInfo {
     pub pairing_id: Option<String>,
     pub client_instance_id: String,
     pub caller_fingerprint: String,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: AuthMethod,
     pub status: CallStatus,
     pub command_summary: CommandSummary,
     pub command: RemoteCommand,
@@ -340,6 +367,10 @@ pub struct CallInfo {
     pub bytes_in: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes_out: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_fingerprint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +399,7 @@ pub struct ClientRegistrationRequest {
     pub bifrost_version: String,
     pub signature: String,
     pub timestamp: u64,
+    pub ssh_device_route: Option<SshDeviceRoute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +461,7 @@ pub struct ClientHeartbeatRequest {
     pub stream_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_call_ids: Vec<String>,
+    pub ssh_device_route: Option<SshDeviceRoute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +499,46 @@ pub struct ClientCallExitRequest {
     pub bytes_in: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes_out: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshDeviceRoute {
+    pub device_code: String,
+    pub public_key_pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConnectEvent {
+    pub connect_id: String,
+    pub device_code: String,
+    pub ssh_key_fingerprint: String,
+    #[serde(default)]
+    pub caller_info: Option<CallerInfo>,
+    #[serde(default)]
+    pub relay_verified: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshConnectResultStatus {
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConnectResultRequest {
+    pub connect_id: String,
+    pub status: SshConnectResultStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_mode: Option<GrantMode>,
 }
 
 // ---------------------------------------------------------------------------
@@ -516,4 +589,8 @@ pub fn grant_mode_ttl_ms(mode: GrantMode) -> Option<u64> {
         GrantMode::OneDay => Some(24 * 60 * 60 * 1000),
         GrantMode::Permanent => None,
     }
+}
+
+fn default_auth_method() -> AuthMethod {
+    AuthMethod::PairCode
 }

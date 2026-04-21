@@ -292,6 +292,7 @@ dependencies = [
 name = "bifrost-cli"
 version = "0.0.57-beta"
 dependencies = [
+ "base64",
  "bcrypt",
  "bifrost-admin",
  "bifrost-core",
@@ -317,6 +318,7 @@ dependencies = [
  "ratatui",
  "regex 1.12.3",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

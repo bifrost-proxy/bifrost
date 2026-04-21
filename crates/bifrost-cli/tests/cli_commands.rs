@@ -1,5 +1,8 @@
 use std::process::Command;
 
+use bifrost_cli::cli::{Cli, Commands, RemoteCommands};
+use clap::Parser;
+
 fn bifrost_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_bifrost"))
 }
@@ -67,6 +70,10 @@ fn remote_connect_help_explains_one_time_pairing() {
     assert!(
         help.contains("remote status"),
         "remote connect help should direct users to remote status after pairing"
+    );
+    assert!(
+        help.contains("--ssh-key"),
+        "remote connect help should document --ssh-key"
     );
 }
 
@@ -215,6 +222,34 @@ fn config_performance_command_parse() {
         help.contains("disconnect-by-app"),
         "config should have disconnect-by-app"
     );
+}
+
+#[test]
+fn remote_connect_accepts_ssh_key_without_pair_code() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "connect",
+        "--ssh-key",
+        "/tmp/test.bifrost",
+    ])
+    .expect("remote connect --ssh-key should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Connect {
+                pair_code,
+                ssh_key,
+                device_code,
+            } => {
+                assert_eq!(pair_code, None);
+                assert_eq!(ssh_key.as_deref(), Some("/tmp/test.bifrost"));
+                assert_eq!(device_code, None);
+            }
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
 }
 
 #[test]

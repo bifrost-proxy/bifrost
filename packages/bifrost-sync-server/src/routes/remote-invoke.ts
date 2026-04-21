@@ -3,6 +3,7 @@ import type { RequestContext } from '../http';
 import {
   sendJson,
   sendError,
+  sendRateLimited,
   parseJsonBody,
   extractPathParam,
   requireAuth,
@@ -11,6 +12,7 @@ import {
 } from '../http';
 import type { RemoteInvokeConfig, RemoteInvokeGrant, RemoteInvokeCall } from '../types';
 import { RemoteInvokeService } from '../remote-invoke/service';
+import { RateLimiter } from '../security';
 import {
   registerClientStream,
   unregisterClientStream,
@@ -18,13 +20,23 @@ import {
   unregisterPairingWatcher,
   registerCallerEventStream,
   unregisterCallerEventStream,
+  flushCallerEventStream,
   startKeepalive,
+  getClientStream,
+  getAllClientStreams,
 } from '../remote-invoke/sse';
 import { startCleanupScheduler } from '../remote-invoke/cleanup';
 import type { ClientStreamState } from '../remote-invoke/types';
 import { customAlphabet } from 'nanoid';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
+
+const registerLimiter = new RateLimiter(60, 60_000);
+const clientQueryLimiter = new RateLimiter(240, 60_000);
+const clientDataLimiter = new RateLimiter(1_500, 10_000);
+const callerLookupLimiter = new RateLimiter(240, 60_000);
+const callerOpenLimiter = new RateLimiter(120, 60_000);
+const callerControlLimiter = new RateLimiter(240, 60_000);
 
 let serviceInstance: RemoteInvokeService | null = null;
 
@@ -63,7 +75,7 @@ let activeConfig: RemoteInvokeConfig = DEFAULT_REMOTE_INVOKE_CONFIG;
 async function requireClientAuth(
   ctx: RequestContext,
   service: RemoteInvokeService,
-): Promise<{ client_instance_id: string } | null> {
+): Promise<{ client_instance_id: string; user_id: string } | null> {
   const token = extractBearerToken(ctx) || ctx.url.searchParams.get('client_auth_token') || '';
   const clientId = ctx.url.searchParams.get('client_instance_id') || (() => {
     try {
@@ -82,10 +94,29 @@ async function requireClientAuth(
     sendError(ctx.res, 401, 'invalid_client_auth_token');
     return null;
   }
-  return { client_instance_id: record.client_instance_id };
+  return { client_instance_id: record.client_instance_id, user_id: record.user_id };
 }
 
 const pairRateLimiters = new Map<string, { count: number; resetAt: number }>();
+
+function applyRateLimit(ctx: RequestContext, limiter: RateLimiter, key: string | null | undefined): boolean {
+  const normalizedKey = key?.trim();
+  if (!normalizedKey) return true;
+  const check = limiter.check(normalizedKey);
+  if (check.allowed) return true;
+  sendRateLimited(ctx.res, check.retryAfterMs);
+  return false;
+}
+
+function syncTokenKey(ctx: RequestContext): string {
+  const token = (ctx.req.headers['x-bifrost-token'] as string | undefined)?.trim();
+  return token ? `sync:${token}` : `ip:${ctx.clientIp || 'unknown'}`;
+}
+
+function callerAccessKey(ctx: RequestContext): string {
+  const bearer = extractBearerToken(ctx)?.trim();
+  return bearer ? `bearer:${bearer}` : `ip:${ctx.clientIp || 'unknown'}`;
+}
 
 function checkPairRateLimit(ip: string): boolean {
   const limit = activeConfig.pair_rate_limit_per_ip;
@@ -99,9 +130,6 @@ function checkPairRateLimit(ip: string): boolean {
   entry.count++;
   return entry.count <= limit;
 }
-
-const clientSseCount = new Map<string, number>();
-const ipSseCount = new Map<string, number>();
 
 export async function handleRemoteInvoke(
   ctx: RequestContext,
@@ -133,16 +161,30 @@ export async function handleRemoteInvoke(
       return await handleClientRegister(ctx, service);
     }
 
+    if (pathname === '/v4/remote-invoke/ssh/challenge' && method === 'POST') {
+      return await handleSshChallenge(ctx, service);
+    }
+
+    if (pathname === '/v4/remote-invoke/ssh/connect' && method === 'POST') {
+      return await handleSshConnect(ctx, service);
+    }
+
     if (pathname === '/v4/remote-invoke/client/stream' && method === 'GET') {
       const auth = await requireClientAuth(ctx, service);
       if (!auth) return true;
-      return handleClientStream(ctx, service, auth.client_instance_id);
+      return handleClientStream(ctx, service, auth.client_instance_id, auth.user_id);
     }
 
     if (pathname === '/v4/remote-invoke/client/heartbeat' && method === 'POST') {
       const auth = await requireClientAuth(ctx, service);
       if (!auth) return true;
       return await handleClientHeartbeat(ctx, service, auth.client_instance_id);
+    }
+
+    if (pathname === '/v4/remote-invoke/ssh/connect-result' && method === 'POST') {
+      const auth = await requireClientAuth(ctx, service);
+      if (!auth) return true;
+      return await handleSshConnectResult(ctx, service, auth.client_instance_id);
     }
 
     if (pathname === '/v4/remote-invoke/client/pair-code' && method === 'POST') {
@@ -272,6 +314,9 @@ async function handleClientRegisterChallenge(
     sendError(ctx.res, 400, 'client_instance_id is required');
     return true;
   }
+  if (!applyRateLimit(ctx, registerLimiter, `${syncTokenKey(ctx)}:register_challenge:${body.client_instance_id}`)) {
+    return true;
+  }
   const result = service.issueRegistrationChallenge(ctx.user!.user_id, body.client_instance_id);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
   return true;
@@ -285,6 +330,9 @@ async function handleClientRegister(ctx: RequestContext, service: RemoteInvokeSe
   }
   if (!body?.challenge_id || !body?.client_instance_id || !body?.client_long_term_pubkey) {
     sendError(ctx.res, 400, 'challenge_id, client_instance_id and client_long_term_pubkey are required');
+    return true;
+  }
+  if (!applyRateLimit(ctx, registerLimiter, `${syncTokenKey(ctx)}:register:${body.client_instance_id}`)) {
     return true;
   }
   try {
@@ -309,24 +357,72 @@ async function handleClientRegister(ctx: RequestContext, service: RemoteInvokeSe
   return true;
 }
 
+async function handleSshChallenge(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  if (!body?.device_code) {
+    sendError(ctx.res, 400, 'device_code is required');
+    return true;
+  }
+  try {
+    const result = service.issueSshChallenge(body.device_code);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'ssh challenge failed';
+    const status = message === 'challenge_rate_limited' ? 429 : 400;
+    sendError(ctx.res, status, message);
+  }
+  return true;
+}
+
+async function handleSshConnect(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const body = parseJsonBody<any>(ctx.body);
+  if (!body?.device_code || !body?.challenge_id || !body?.signature || !Number.isFinite(body?.timestamp)) {
+    sendError(ctx.res, 400, 'device_code, challenge_id, signature and timestamp are required');
+    return true;
+  }
+  try {
+    const result = await service.verifySshConnect(body);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'ssh connect failed';
+    const status = message === 'client_offline' ? 404 : 400;
+    sendError(ctx.res, status, message);
+  }
+  return true;
+}
+
 function handleClientStream(
   ctx: RequestContext,
   service: RemoteInvokeService,
   clientId: string,
+  userId: string,
 ): boolean {
   const streamId = ctx.url.searchParams.get('stream_id') ?? nanoid();
-  const userId = ctx.url.searchParams.get('user_id') ?? '';
+  const ip = ctx.clientIp || '';
+  const existing = getClientStream(clientId);
+  const isReplacingExisting = !!existing && existing.streamId !== streamId;
 
-  const currentClientCount = clientSseCount.get(clientId) || 0;
-  if (currentClientCount >= activeConfig.max_sse_connections_per_client) {
+  if (!isReplacingExisting && existing && activeConfig.max_sse_connections_per_client <= 1) {
     sendError(ctx.res, 429, 'max SSE connections per client exceeded');
     return true;
   }
-  const ip = ctx.clientIp || '';
-  if (ip) {
-    const currentIpCount = ipSseCount.get(ip) || 0;
+  const sharedStreamKey = userId ? `user:${userId}` : (ip ? `ip:${ip}` : '');
+  if (sharedStreamKey) {
+    let currentIpCount = 0;
+    for (const state of getAllClientStreams().values()) {
+      const stateKey = state.userId ? `user:${state.userId}` : (state.clientIp ? `ip:${state.clientIp}` : '');
+      if (stateKey === sharedStreamKey) {
+        currentIpCount += 1;
+      }
+    }
+    const existingKey = existing?.userId
+      ? `user:${existing.userId}`
+      : (existing?.clientIp ? `ip:${existing.clientIp}` : '');
+    if (isReplacingExisting && existingKey === sharedStreamKey) {
+      currentIpCount = Math.max(0, currentIpCount - 1);
+    }
     if (currentIpCount >= activeConfig.max_sse_connections_per_ip) {
-      sendError(ctx.res, 429, 'max SSE connections per IP exceeded');
+      sendError(ctx.res, 429, userId ? 'max SSE connections per user exceeded' : 'max SSE connections per IP exceeded');
       return true;
     }
   }
@@ -337,6 +433,7 @@ function handleClientStream(
     clientInstanceId: clientId,
     userId,
     streamId,
+    clientIp: ip || undefined,
     res: ctx.res,
     lastHeartbeat: Date.now(),
     discoverable: false,
@@ -344,8 +441,6 @@ function handleClientStream(
   };
 
   registerClientStream(state);
-  clientSseCount.set(clientId, currentClientCount + 1);
-  if (ip) ipSseCount.set(ip, (ipSseCount.get(ip) || 0) + 1);
 
   writeSseEvent(ctx.res, 'client_hello_ack', {
     stream_id: streamId,
@@ -354,14 +449,6 @@ function handleClientStream(
 
   ctx.req.on('close', () => {
     unregisterClientStream(clientId, streamId);
-    const c = clientSseCount.get(clientId) || 0;
-    if (c <= 1) clientSseCount.delete(clientId);
-    else clientSseCount.set(clientId, c - 1);
-    if (ip) {
-      const ic = ipSseCount.get(ip) || 0;
-      if (ic <= 1) ipSseCount.delete(ip);
-      else ipSseCount.set(ip, ic - 1);
-    }
   });
 
   return true;
@@ -372,15 +459,43 @@ async function handleClientHeartbeat(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:heartbeat`)) {
+    return true;
+  }
   const body = parseJsonBody<any>(ctx.body);
 
   await service.clientHeartbeat({
     client_instance_id: clientId,
     stream_id: body?.stream_id ?? '',
     active_call_ids: body?.active_call_ids,
+    ssh_device_route: body?.ssh_device_route,
   });
 
   sendJson(ctx.res, 200, { code: 0, message: 'ok' });
+  return true;
+}
+
+async function handleSshConnectResult(
+  ctx: RequestContext,
+  service: RemoteInvokeService,
+  clientId: string,
+): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:ssh_connect_result`)) {
+    return true;
+  }
+  const body = parseJsonBody<any>(ctx.body);
+  if (!body?.connect_id || !body?.status) {
+    sendError(ctx.res, 400, 'connect_id and status are required');
+    return true;
+  }
+  try {
+    await service.submitSshConnectResult(clientId, body);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok' });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'ssh connect result failed';
+    const status = message === 'client_timeout' ? 408 : message === 'client_instance_id_mismatch' ? 403 : 400;
+    sendError(ctx.res, status, message);
+  }
   return true;
 }
 
@@ -389,6 +504,9 @@ async function handlePublishPairCode(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:publish_pair_code`)) {
+    return true;
+  }
   const body = parseJsonBody<any>(ctx.body);
   if (!body?.pair_code) {
     sendError(ctx.res, 400, 'pair_code is required');
@@ -412,6 +530,9 @@ async function handleCloseDiscovery(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:close_discovery`)) {
+    return true;
+  }
   const sessionId = extractPathParam(ctx.url.pathname, '/v4/remote-invoke/client/discovery-session/');
   await service.closeDiscoverySession(clientId, sessionId);
 
@@ -424,10 +545,12 @@ async function handleGrantDecision(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
-  const body = parseJsonBody<any>(ctx.body);
-
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/grants\/([^/]+)\/decision/);
   const pairingId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:grant_decision:${pairingId || 'unknown'}`)) {
+    return true;
+  }
+  const body = parseJsonBody<any>(ctx.body);
 
   if (!body?.decision) {
     sendError(ctx.res, 400, 'decision is required');
@@ -462,10 +585,12 @@ async function handleClientCallFrame(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
-  const body = parseJsonBody<any>(ctx.body);
-
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/frame/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientDataLimiter, `call:${callId}:frame`)) {
+    return true;
+  }
+  const body = parseJsonBody<any>(ctx.body);
 
   if (!body?.envelope_json) {
     sendError(ctx.res, 400, 'envelope_json is required');
@@ -497,10 +622,12 @@ async function handleClientCallExit(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
-  const body = parseJsonBody<any>(ctx.body);
-
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/exit/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, callerControlLimiter, `call:${callId}:exit`)) {
+    return true;
+  }
+  const body = parseJsonBody<any>(ctx.body);
 
   try {
     await service.postClientExit({
@@ -540,6 +667,9 @@ async function handleDeleteGrantByClient(
 ): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/grants\/([^/]+)$/);
   const grantId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:delete_grant:${grantId || 'unknown'}`)) {
+    return true;
+  }
 
   try {
     await service.removeGrantByClient(clientId, grantId);
@@ -562,6 +692,9 @@ async function handleListActiveGrantsForClient(
   service: RemoteInvokeService,
   clientId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:active_grants`)) {
+    return true;
+  }
   const grants = await service.listActiveGrantsForClient(clientId);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: grants.map(toGrantApi) });
   return true;
@@ -651,6 +784,9 @@ async function handleFindReusableGrant(ctx: RequestContext, service: RemoteInvok
     sendError(ctx.res, 400, 'client_instance_id and caller_fingerprint are required');
     return true;
   }
+  if (!applyRateLimit(ctx, callerLookupLimiter, `${callerAccessKey(ctx)}:reusable_grant:${clientInstanceId}:${callerFingerprint}`)) {
+    return true;
+  }
 
   const grant = await service.findReusableGrant('', clientInstanceId, callerFingerprint);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: grant ? toGrantApi(grant) : null });
@@ -664,6 +800,9 @@ async function handleDeleteGrant(ctx: RequestContext, service: RemoteInvokeServi
 
   if (!callerFingerprint) {
     sendError(ctx.res, 400, 'caller_fingerprint query parameter is required');
+    return true;
+  }
+  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:delete_grant:${grantId}:${callerFingerprint}`)) {
     return true;
   }
 
@@ -686,6 +825,9 @@ async function handleDeleteGrant(ctx: RequestContext, service: RemoteInvokeServi
 async function handleCallInput(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/input/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:call_input:${callId}`)) {
+    return true;
+  }
 
   const token = extractBearerToken(ctx);
   if (!token || !service.verifyCallToken(callId, token)) {
@@ -708,6 +850,9 @@ async function handleCallInput(ctx: RequestContext, service: RemoteInvokeService
 function handleCallEvents(ctx: RequestContext, service: RemoteInvokeService): boolean {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/events/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:call_events:${callId}`)) {
+    return true;
+  }
 
   const token = extractBearerToken(ctx);
   if (!token || !service.verifyCallToken(callId, token)) {
@@ -718,6 +863,7 @@ function handleCallEvents(ctx: RequestContext, service: RemoteInvokeService): bo
   openSse(ctx.res);
   registerCallerEventStream(callId, ctx.res);
   writeSseEvent(ctx.res, 'connected', { call_id: callId });
+  flushCallerEventStream(callId);
 
   ctx.req.on('close', () => {
     unregisterCallerEventStream(callId);
@@ -729,6 +875,9 @@ function handleCallEvents(ctx: RequestContext, service: RemoteInvokeService): bo
 async function handleCancelCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/cancel/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:cancel:${callId}`)) {
+    return true;
+  }
 
   const token = extractBearerToken(ctx);
   if (!token || !service.verifyCallToken(callId, token)) {
@@ -783,6 +932,9 @@ async function handleListCalls(
   service: RemoteInvokeService,
   clientInstanceId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientInstanceId}:list_calls`)) {
+    return true;
+  }
   const query = {
     caller_fingerprint: ctx.url.searchParams.get('caller_fingerprint') ?? undefined,
     status: ctx.url.searchParams.get('status') ?? undefined,
@@ -802,6 +954,9 @@ async function handleGetCall(
 ): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)$/);
   const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientInstanceId}:get_call:${callId}`)) {
+    return true;
+  }
 
   const call = await service.getCallForClient(clientInstanceId, callId);
   if (!call) {
@@ -818,6 +973,9 @@ async function handleGetPendingPairings(
   service: RemoteInvokeService,
   clientInstanceId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientInstanceId}:pending_pairings`)) {
+    return true;
+  }
   const pairings = await service.getPendingPairingsForClient(clientInstanceId);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: pairings });
   return true;
@@ -828,6 +986,9 @@ async function handleCancelPendingPairings(
   service: RemoteInvokeService,
   clientInstanceId: string,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientInstanceId}:cancel_pending_pairings`)) {
+    return true;
+  }
   const cancelled = await service.cancelPendingPairings(clientInstanceId);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: { cancelled } });
   return true;
@@ -837,6 +998,9 @@ async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService)
   const body = parseJsonBody<any>(ctx.body);
   if (!body?.grant_id || !body?.client_instance_id || !body?.caller_fingerprint || !body?.command) {
     sendError(ctx.res, 400, 'grant_id, client_instance_id, caller_fingerprint, and command are required');
+    return true;
+  }
+  if (!applyRateLimit(ctx, callerOpenLimiter, `${callerAccessKey(ctx)}:open:${body.grant_id}:${body.client_instance_id}:${body.caller_fingerprint}`)) {
     return true;
   }
 

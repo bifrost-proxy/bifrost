@@ -54,6 +54,34 @@ function req(
   });
 }
 
+function openSse(
+  urlPath: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; close: () => void }> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlPath, baseUrl);
+    const request = http.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      headers,
+    });
+
+    request.on('response', (res) => {
+      resolve({
+        status: res.statusCode ?? 0,
+        close: () => {
+          res.destroy();
+          request.destroy();
+        },
+      });
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 async function registerUser(userId: string, password: string): Promise<string> {
   const response = await req('POST', '/v4/sso/register', {
     user_id: userId,
@@ -145,7 +173,7 @@ beforeAll(async () => {
   fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
 
   const config: SyncServerConfig = {
-    server: { port: 0, host: '127.0.0.1' },
+    server: { port: 0, host: '127.0.0.1', trust_forwarded_for: true },
     storage: { type: 'sqlite', sqlite: { data_dir: TEST_DATA_DIR } },
     auth: { mode: 'password' },
     remote_invoke: {
@@ -208,6 +236,79 @@ describe('Remote Invoke security', () => {
       },
     );
     expect(registerResponse.status).toBe(401);
+  });
+
+  it('does not throttle authenticated remote-invoke requests by shared forwarded IP', async () => {
+    const tokenA = await registerUser('ri_shared_ip_user_a', 'password123');
+    const tokenB = await registerUser('ri_shared_ip_user_b', 'password123');
+    const { publicKey: publicKeyA, privateKey: privateKeyA } = generateClientKeypair();
+    const { publicKey: publicKeyB, privateKey: privateKeyB } = generateClientKeypair();
+
+    const publicKeyDerBase64A = publicKeyA.export({ type: 'spki', format: 'der' }).toString('base64');
+    const publicKeyDerBase64B = publicKeyB.export({ type: 'spki', format: 'der' }).toString('base64');
+
+    const clientA = await registerClient('ri-client-shared-ip-a', publicKeyDerBase64A, privateKeyA, tokenA);
+    const clientB = await registerClient('ri-client-shared-ip-b', publicKeyDerBase64B, privateKeyB, tokenB);
+
+    expect(clientA.status).toBe(200);
+    expect(clientB.status).toBe(200);
+
+    const clientAuthA = clientA.data.data.client_auth_token as string;
+    const clientAuthB = clientB.data.data.client_auth_token as string;
+    const forwardedHeaders = { 'x-forwarded-for': '203.0.113.50' };
+
+    for (let i = 0; i < 220; i++) {
+      const [clientId, clientAuth] = i % 2 === 0
+        ? ['ri-client-shared-ip-a', clientAuthA]
+        : ['ri-client-shared-ip-b', clientAuthB];
+      const response = await req(
+        'GET',
+        `/v4/remote-invoke/client/active-grants?client_instance_id=${clientId}`,
+        undefined,
+        {
+          Authorization: `Bearer ${clientAuth}`,
+          ...forwardedHeaders,
+        },
+      );
+      expect(response.status).toBe(200);
+    }
+  });
+
+  it('allows authenticated client SSE streams from different users behind the same forwarded IP', async () => {
+    const tokenA = await registerUser('ri_sse_shared_ip_user_a', 'password123');
+    const tokenB = await registerUser('ri_sse_shared_ip_user_b', 'password123');
+    const { publicKey: publicKeyA, privateKey: privateKeyA } = generateClientKeypair();
+    const { publicKey: publicKeyB, privateKey: privateKeyB } = generateClientKeypair();
+
+    const publicKeyDerBase64A = publicKeyA.export({ type: 'spki', format: 'der' }).toString('base64');
+    const publicKeyDerBase64B = publicKeyB.export({ type: 'spki', format: 'der' }).toString('base64');
+
+    const clientA = await registerClient('ri-client-sse-shared-ip-a', publicKeyDerBase64A, privateKeyA, tokenA);
+    const clientB = await registerClient('ri-client-sse-shared-ip-b', publicKeyDerBase64B, privateKeyB, tokenB);
+
+    expect(clientA.status).toBe(200);
+    expect(clientB.status).toBe(200);
+
+    const clientAuthA = clientA.data.data.client_auth_token as string;
+    const clientAuthB = clientB.data.data.client_auth_token as string;
+    const forwardedHeaders = { 'x-forwarded-for': '203.0.113.99' };
+
+    const streamA = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-a&stream_id=stream-a&client_auth_token=${encodeURIComponent(clientAuthA)}`,
+      forwardedHeaders,
+    );
+    const streamB = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-b&stream_id=stream-b&client_auth_token=${encodeURIComponent(clientAuthB)}`,
+      forwardedHeaders,
+    );
+
+    try {
+      expect(streamA.status).toBe(200);
+      expect(streamB.status).toBe(200);
+    } finally {
+      streamA.close();
+      streamB.close();
+    }
   });
 
   it('requires a valid private-key signature and rejects challenge replay', async () => {

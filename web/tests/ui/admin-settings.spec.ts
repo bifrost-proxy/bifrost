@@ -304,6 +304,30 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
   }
 });
 
+test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到同一张状态卡片", async ({
+  page,
+}) => {
+  await openPage(page, "settings");
+  await page.getByRole("tab", { name: /Remote Invoke/ }).click({ force: true });
+
+  const statusCard = page.getByTestId("settings-remote-invoke-status-card");
+  const connectionSection = page.getByTestId(
+    "settings-remote-invoke-connection-section",
+  );
+  const discoverySection = page.getByTestId(
+    "settings-remote-invoke-discovery-section",
+  );
+  const sshCard = page.getByTestId("settings-remote-invoke-ssh-card");
+
+  await expect(statusCard).toBeVisible();
+  await expect(connectionSection).toContainText("Connection Status");
+  await expect(connectionSection).toContainText("Relay Connection");
+  await expect(discoverySection).toContainText("Discovery Mode");
+  await expect(discoverySection).toContainText("Enter Discovery Mode");
+  await expect(sshCard).toBeVisible();
+  await expect(sshCard).toContainText("SSH Key");
+});
+
 test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async ({
   page,
   request,

@@ -25,6 +25,10 @@ export interface SyncServerInstance {
   close: () => Promise<void>;
 }
 
+function isRemoteInvokePath(pathname: string): boolean {
+  return pathname.startsWith('/v4/remote-invoke/');
+}
+
 export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const storage = createStorage(config.storage);
   const authMode = config.auth.mode;
@@ -54,14 +58,19 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
     }
 
     const clientIp = getClientIp(req, trustForwardedFor);
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
-    const globalCheck = globalLimiter.check(clientIp);
-    if (!globalCheck.allowed) {
-      sendRateLimited(res, globalCheck.retryAfterMs);
-      return;
+    // Remote-invoke has route-specific rate controls keyed by client/call/grant.
+    // Avoid sharing the coarse global IP limiter with those workflows, otherwise
+    // users behind the same NAT can throttle each other.
+    if (!isRemoteInvokePath(url.pathname)) {
+      const globalCheck = globalLimiter.check(clientIp);
+      if (!globalCheck.allowed) {
+        sendRateLimited(res, globalCheck.retryAfterMs);
+        return;
+      }
     }
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const isAuthPath = url.pathname === '/v4/sso/login' || url.pathname === '/v4/sso/register';
     if (isAuthPath && req.method === 'POST') {
       const authCheck = authLimiter.check(clientIp);

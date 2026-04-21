@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bifrost_core::{BifrostError, Result};
 use bifrost_sync::SyncManagerHandle;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -14,13 +14,14 @@ use tracing::{debug, error, info, warn};
 use super::executor::RemoteInvokeExecutor;
 use super::identity::Identity;
 use super::relay_client::RelayClient;
+use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use super::types::{
-    build_registration_signature_payload, grant_mode_ttl_ms, CallInfo, CallStatus, CallerInfo,
-    ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
+    build_registration_signature_payload, grant_mode_ttl_ms, AuthMethod, CallInfo, CallStatus,
+    CallerInfo, ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
     ClientRegistrationChallengeRequest, ClientRegistrationRequest, CommandSummary,
     DiscoverySession, EncryptedEnvelope, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode,
     GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig,
-    WorkerState,
+    SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus, WorkerState,
 };
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 25;
@@ -30,10 +31,43 @@ const PAIR_CODE_DIGITS: u32 = 6;
 const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
 const GRANT_CLEANUP_INTERVAL_SECS: u64 = 60;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
+const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
 
 struct TimestampedPairing {
     request: PairingRequest,
     received_at: u64,
+}
+
+struct ActiveCallControl {
+    grant_id: String,
+    started_at: u64,
+    cancelled: AtomicBool,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl ActiveCallControl {
+    fn new(grant_id: String, started_at: u64) -> Self {
+        Self {
+            grant_id,
+            started_at,
+            cancelled: AtomicBool::new(false),
+            task: Mutex::new(None),
+        }
+    }
+
+    fn mark_cancelled(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn abort_task(&self) {
+        if let Some(handle) = self.task.lock().take() {
+            handle.abort();
+        }
+    }
 }
 
 pub struct RemoteInvokeWorker {
@@ -44,10 +78,11 @@ pub struct RemoteInvokeWorker {
     executor: Arc<RemoteInvokeExecutor>,
     state: Arc<RwLock<WorkerState>>,
     pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
-    active_calls: Arc<RwLock<HashMap<String, String>>>,
+    active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
     call_history: Arc<RwLock<VecDeque<CallInfo>>>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     discovery_session: Arc<RwLock<Option<DiscoverySession>>>,
+    ssh_key_store: Arc<SshKeyStore>,
     shutdown: Arc<AtomicBool>,
     current_stream_id: Arc<RwLock<Option<String>>>,
     reconnect_notify: Arc<Notify>,
@@ -68,6 +103,7 @@ impl RemoteInvokeWorker {
             &identity.platform,
         ));
         let executor = Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port));
+        let ssh_key_store = Arc::new(SshKeyStore::new(&bifrost_storage::data_dir()));
 
         Arc::new(Self {
             config,
@@ -81,6 +117,7 @@ impl RemoteInvokeWorker {
             call_history: Arc::new(RwLock::new(VecDeque::new())),
             local_grants: Arc::new(RwLock::new(HashMap::new())),
             discovery_session: Arc::new(RwLock::new(None)),
+            ssh_key_store,
             shutdown: Arc::new(AtomicBool::new(false)),
             current_stream_id: Arc::new(RwLock::new(None)),
             reconnect_notify: Arc::new(Notify::new()),
@@ -97,6 +134,10 @@ impl RemoteInvokeWorker {
 
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        for active_call in self.active_calls.read().values() {
+            active_call.mark_cancelled();
+            active_call.abort_task();
+        }
         info!("remote invoke worker stop requested");
     }
 
@@ -157,6 +198,57 @@ impl RemoteInvokeWorker {
 
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    pub fn get_active_ssh_key(&self) -> Result<Option<SshKeyRecord>> {
+        Ok(self.ssh_key_store.get_active_key()?.map(|key| key.record))
+    }
+
+    pub fn export_active_ssh_key(&self) -> Result<Option<SshKeyMaterial>> {
+        self.ssh_key_store.export_active_key_material()
+    }
+
+    pub fn create_ssh_key(&self, label: String, grant_mode: GrantMode) -> Result<SshKeyMaterial> {
+        self.revoke_local_ssh_grants(None);
+        let result = self
+            .ssh_key_store
+            .create_or_replace_key(label, grant_mode)?;
+        self.trigger_ssh_route_refresh();
+        Ok(result)
+    }
+
+    pub fn update_ssh_key(
+        &self,
+        label: Option<String>,
+        grant_mode: Option<GrantMode>,
+    ) -> Result<Option<SshKeyRecord>> {
+        let updated = self.ssh_key_store.update_active_key(label, grant_mode)?;
+        if updated.is_some() {
+            self.trigger_ssh_route_refresh();
+        }
+        Ok(updated)
+    }
+
+    pub fn reset_ssh_key(&self) -> Result<Option<SshKeyMaterial>> {
+        let Some(active_key) = self.get_active_ssh_key()? else {
+            return Ok(None);
+        };
+
+        self.revoke_local_ssh_grants(Some(&active_key.id));
+        let reset = self
+            .ssh_key_store
+            .create_or_replace_key(active_key.label, GrantMode::Permanent)?;
+        self.trigger_ssh_route_refresh();
+        Ok(Some(reset))
+    }
+
+    pub fn revoke_ssh_key(&self) -> Result<Option<SshKeyRecord>> {
+        let revoked = self.ssh_key_store.revoke_active_key()?;
+        if revoked.is_some() {
+            self.revoke_local_ssh_grants(revoked.as_ref().map(|record| record.id.as_str()));
+            self.trigger_ssh_route_refresh();
+        }
+        Ok(revoked)
     }
 
     pub async fn enter_discovery_mode(&self) -> Result<DiscoverySession> {
@@ -337,6 +429,7 @@ impl RemoteInvokeWorker {
                 caller_display_name,
                 grant_mode,
                 grant_scope: "remote_invoke".to_string(),
+                auth_method: AuthMethod::PairCode,
                 status: GrantStatus::Active,
                 first_authorized_at: now,
                 expires_at,
@@ -351,6 +444,8 @@ impl RemoteInvokeWorker {
                 } else {
                     None
                 },
+                ssh_key_id: None,
+                ssh_key_fingerprint: None,
             };
             self.local_grants
                 .write()
@@ -490,6 +585,7 @@ impl RemoteInvokeWorker {
             bifrost_version: env!("CARGO_PKG_VERSION").to_string(),
             signature,
             timestamp: now,
+            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
         };
 
         let resp = self
@@ -577,6 +673,12 @@ impl RemoteInvokeWorker {
         let mut pending_poll_ticker = tokio::time::interval(pending_poll_interval);
         pending_poll_ticker.tick().await;
 
+        let active_call_reconcile_interval =
+            Duration::from_millis(ACTIVE_CALL_RECONCILE_INTERVAL_MS);
+        let mut active_call_reconcile_ticker =
+            tokio::time::interval(active_call_reconcile_interval);
+        active_call_reconcile_ticker.tick().await;
+
         let mut event_name = String::new();
         let mut data_buf = String::new();
 
@@ -607,6 +709,9 @@ impl RemoteInvokeWorker {
                 }
                 _ = pending_poll_ticker.tick() => {
                     self.poll_pending_pairings_from_relay().await;
+                }
+                _ = active_call_reconcile_ticker.tick() => {
+                    self.reconcile_active_calls_with_relay().await;
                 }
                 _ = self.reconnect_notify.notified() => {
                     info!("reconnect signal received during SSE session, disconnecting");
@@ -663,6 +768,7 @@ impl RemoteInvokeWorker {
             client_instance_id: self.identity.instance_id.clone(),
             stream_id: stream_id.to_string(),
             active_call_ids: active_ids,
+            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
         };
         self.relay_client.heartbeat(&req).await?;
         debug!("heartbeat sent");
@@ -742,6 +848,14 @@ impl RemoteInvokeWorker {
                     .get("platform")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                hostname: p
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                username: p
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             };
             let caller_pubkey = p
                 .get("caller_pubkey")
@@ -777,6 +891,45 @@ impl RemoteInvokeWorker {
                 added = added,
                 "added pending pairings from relay poll fallback"
             );
+        }
+    }
+
+    async fn reconcile_active_calls_with_relay(&self) {
+        let call_ids: Vec<String> = self.active_calls.read().keys().cloned().collect();
+        if call_ids.is_empty() {
+            return;
+        }
+
+        for call_id in call_ids {
+            let call = match self.relay_client.fetch_client_call(&call_id).await {
+                Ok(call) => call,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        call_id = %call_id,
+                        "fetch_client_call failed during active call reconcile"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(status) = parse_call_status_from_relay(&call) else {
+                debug!(
+                    call_id = %call_id,
+                    "fetch_client_call returned payload without status"
+                );
+                continue;
+            };
+
+            if status != CallStatus::Cancelled {
+                continue;
+            }
+
+            info!(
+                call_id = %call_id,
+                "relay already marked active call cancelled, reconciling local state"
+            );
+            self.apply_cancelled_call(&call_id);
         }
     }
 
@@ -893,7 +1046,7 @@ impl RemoteInvokeWorker {
                 Ok(v) => {
                     if let Some(call_id) = v.get("call_id").and_then(|c| c.as_str()) {
                         info!(call_id = %call_id, "call cancelled by caller");
-                        self.active_calls.write().remove(call_id);
+                        self.apply_cancelled_call(call_id);
                     }
                 }
                 Err(e) => warn!(error = %e, "failed to parse call_cancel"),
@@ -914,6 +1067,10 @@ impl RemoteInvokeWorker {
                 }
                 Err(e) => warn!(error = %e, "failed to parse grant_revoked"),
             },
+            "ssh_connect" => match serde_json::from_str::<SshConnectEvent>(data) {
+                Ok(event) => self.handle_ssh_connect(event).await,
+                Err(e) => warn!(error = %e, "failed to parse ssh_connect"),
+            },
             "ping" => {
                 debug!("ping from relay");
             }
@@ -925,6 +1082,24 @@ impl RemoteInvokeWorker {
                 debug!(event = %event_name, "unknown SSE event");
             }
         }
+    }
+
+    fn trigger_ssh_route_refresh(&self) {
+        *self.state.write() = WorkerState::Reconnecting;
+        self.reconnect_notify.notify_waiters();
+    }
+
+    fn revoke_local_ssh_grants(&self, ssh_key_id: Option<&str>) {
+        self.local_grants.write().retain(|_, grant| {
+            if grant.auth_method != AuthMethod::SshPublickey {
+                return true;
+            }
+
+            match ssh_key_id {
+                Some(id) => grant.ssh_key_id.as_deref() != Some(id),
+                None => false,
+            }
+        });
     }
 
     async fn handle_grant_created(&self, data: Value) {
@@ -944,6 +1119,128 @@ impl RemoteInvokeWorker {
             .write()
             .insert(grant_id.clone(), grant_info);
         info!(grant_id = %grant_id, "synchronized approved grant from relay");
+    }
+
+    async fn handle_ssh_connect(&self, event: SshConnectEvent) {
+        let result = self.build_ssh_connect_result(&event);
+        if let Err(error) = self.relay_client.post_ssh_connect_result(&result).await {
+            warn!(
+                error = %error,
+                connect_id = %event.connect_id,
+                "failed to post ssh connect result"
+            );
+        }
+    }
+
+    fn build_ssh_connect_result(&self, event: &SshConnectEvent) -> SshConnectResultRequest {
+        if !event.relay_verified {
+            return SshConnectResultRequest {
+                connect_id: event.connect_id.clone(),
+                status: SshConnectResultStatus::Rejected,
+                grant_id: None,
+                expires_at: None,
+                reason: Some("relay_not_verified".to_string()),
+                caller_fingerprint: None,
+                grant_mode: None,
+            };
+        }
+
+        let active_key = match self.ssh_key_store.get_active_key() {
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                return SshConnectResultRequest {
+                    connect_id: event.connect_id.clone(),
+                    status: SshConnectResultStatus::Rejected,
+                    grant_id: None,
+                    expires_at: None,
+                    reason: Some("ssh_key_not_found".to_string()),
+                    caller_fingerprint: None,
+                    grant_mode: None,
+                };
+            }
+            Err(error) => {
+                warn!(error = %error, "load active ssh key failed");
+                return SshConnectResultRequest {
+                    connect_id: event.connect_id.clone(),
+                    status: SshConnectResultStatus::Rejected,
+                    grant_id: None,
+                    expires_at: None,
+                    reason: Some("ssh_key_store_unavailable".to_string()),
+                    caller_fingerprint: None,
+                    grant_mode: None,
+                };
+            }
+        };
+
+        if active_key.record.device_code != event.device_code {
+            return SshConnectResultRequest {
+                connect_id: event.connect_id.clone(),
+                status: SshConnectResultStatus::Rejected,
+                grant_id: None,
+                expires_at: None,
+                reason: Some("ssh_key_not_found".to_string()),
+                caller_fingerprint: None,
+                grant_mode: None,
+            };
+        }
+
+        if active_key.record.ssh_key_fingerprint != event.ssh_key_fingerprint {
+            return SshConnectResultRequest {
+                connect_id: event.connect_id.clone(),
+                status: SshConnectResultStatus::Rejected,
+                grant_id: None,
+                expires_at: None,
+                reason: Some("ssh_key_fingerprint_mismatch".to_string()),
+                caller_fingerprint: None,
+                grant_mode: None,
+            };
+        }
+
+        let now = now_millis();
+        let grant_id = uuid::Uuid::new_v4().to_string();
+        let grant_mode = GrantMode::Permanent;
+        let expires_at = None;
+
+        let grant_info = GrantInfo {
+            grant_id: grant_id.clone(),
+            client_instance_id: self.identity.instance_id.clone(),
+            caller_fingerprint: active_key.record.ssh_key_fingerprint.clone(),
+            caller_display_name: event
+                .caller_info
+                .as_ref()
+                .and_then(|info| info.display_name.clone().or_else(|| info.hostname.clone())),
+            grant_mode,
+            grant_scope: "remote_invoke".to_string(),
+            auth_method: AuthMethod::SshPublickey,
+            status: GrantStatus::Active,
+            first_authorized_at: now,
+            expires_at,
+            last_used_at: Some(now),
+            max_calls: None,
+            remaining_calls: None,
+            ssh_key_id: Some(active_key.record.id.clone()),
+            ssh_key_fingerprint: Some(active_key.record.ssh_key_fingerprint.clone()),
+        };
+        self.local_grants
+            .write()
+            .insert(grant_id.clone(), grant_info);
+
+        if let Err(error) = self
+            .ssh_key_store
+            .mark_used(&event.device_code, event.caller_info.as_ref())
+        {
+            warn!(error = %error, "update ssh key usage info failed");
+        }
+
+        SshConnectResultRequest {
+            connect_id: event.connect_id.clone(),
+            status: SshConnectResultStatus::Approved,
+            grant_id: Some(grant_id),
+            expires_at,
+            reason: None,
+            caller_fingerprint: Some(active_key.record.ssh_key_fingerprint),
+            grant_mode: Some(grant_mode),
+        }
     }
 
     async fn handle_pairing_request(&self, data: Value) {
@@ -978,6 +1275,14 @@ impl RemoteInvokeWorker {
                     .map(|s| s.to_string()),
                 platform: data
                     .get("platform")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                hostname: data
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                username: data
+                    .get("username")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
             }
@@ -1066,12 +1371,15 @@ impl RemoteInvokeWorker {
                     caller_display_name: None,
                     grant_mode: GrantMode::Permanent,
                     grant_scope: "remote_invoke".to_string(),
+                    auth_method: AuthMethod::PairCode,
                     status: GrantStatus::Active,
                     first_authorized_at: now_millis(),
                     expires_at: None,
                     last_used_at: None,
                     max_calls: None,
                     remaining_calls: None,
+                    ssh_key_id: None,
+                    ssh_key_fingerprint: None,
                 };
                 self.local_grants
                     .write()
@@ -1158,9 +1466,11 @@ impl RemoteInvokeWorker {
             "executing remote command via call_open"
         );
 
+        let call_started_at = now_millis();
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.clone(), call_started_at));
         self.active_calls
             .write()
-            .insert(call_id.clone(), grant_id.clone());
+            .insert(call_id.clone(), Arc::clone(&active_call));
 
         {
             let call_info = CallInfo {
@@ -1169,6 +1479,12 @@ impl RemoteInvokeWorker {
                 pairing_id: None,
                 client_instance_id: self.identity.instance_id.clone(),
                 caller_fingerprint,
+                auth_method: self
+                    .local_grants
+                    .read()
+                    .get(&grant_id)
+                    .map(|grant| grant.auth_method)
+                    .unwrap_or(AuthMethod::PairCode),
                 status: CallStatus::Streaming,
                 command_summary: command_summary_for_call,
                 command: command.clone(),
@@ -1178,11 +1494,21 @@ impl RemoteInvokeWorker {
                 stdout_digest: None,
                 stderr_digest: None,
                 exit_code: None,
-                started_at: now_millis(),
+                started_at: call_started_at,
                 ended_at: None,
                 duration_ms: None,
                 bytes_in: None,
                 bytes_out: None,
+                ssh_key_id: self
+                    .local_grants
+                    .read()
+                    .get(&grant_id)
+                    .and_then(|grant| grant.ssh_key_id.clone()),
+                ssh_key_fingerprint: self
+                    .local_grants
+                    .read()
+                    .get(&grant_id)
+                    .and_then(|grant| grant.ssh_key_fingerprint.clone()),
             };
             let max = self.config.max_records as usize;
             let mut history = self.call_history.write();
@@ -1196,10 +1522,19 @@ impl RemoteInvokeWorker {
         let relay_client = Arc::clone(&self.relay_client);
         let instance_id = self.identity.instance_id.clone();
         let active_calls = Arc::clone(&self.active_calls);
+        let active_call_for_task = Arc::clone(&active_call);
         let call_history = Arc::clone(&self.call_history);
         let cid = call_id.clone();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+            // Give caller-initiated cancel a short window to arrive before we begin execution.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if active_call_for_task.is_cancelled() {
+                info!(call_id = %cid, "skip execution because call was cancelled before start");
+                active_calls.write().remove(&cid);
+                return;
+            }
+
             let start = std::time::Instant::now();
             let mut next_seq = 1u64;
             let result = executor
@@ -1237,6 +1572,11 @@ impl RemoteInvokeWorker {
 
             match result {
                 Ok(response) => {
+                    if active_call_for_task.is_cancelled() {
+                        info!(call_id = %cid, "skip completion update because call was cancelled");
+                        active_calls.write().remove(&cid);
+                        return;
+                    }
                     let exit_req = ClientCallExitRequest {
                         call_id: cid.clone(),
                         client_instance_id: instance_id,
@@ -1259,7 +1599,7 @@ impl RemoteInvokeWorker {
                         duration_ms = duration_ms,
                         "remote command execution completed"
                     );
-                    update_call_in_history(
+                    let _ = update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -1277,6 +1617,11 @@ impl RemoteInvokeWorker {
                     );
                 }
                 Err(e) => {
+                    if active_call_for_task.is_cancelled() {
+                        info!(call_id = %cid, "skip failure update because call was cancelled");
+                        active_calls.write().remove(&cid);
+                        return;
+                    }
                     error!(error = %e, call_id = %cid, "remote command execution failed");
                     let stderr = e.to_string();
 
@@ -1295,7 +1640,7 @@ impl RemoteInvokeWorker {
                     if let Err(e2) = relay_client.post_call_exit(&cid, &exit_req).await {
                         error!(error = %e2, call_id = %cid, "failed to post error call exit");
                     }
-                    update_call_in_history(
+                    let _ = update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -1312,6 +1657,7 @@ impl RemoteInvokeWorker {
 
             active_calls.write().remove(&cid);
         });
+        *active_call.task.lock() = Some(task);
     }
 
     async fn send_call_exit(
@@ -1351,6 +1697,32 @@ impl RemoteInvokeWorker {
             }
         }
     }
+
+    fn apply_cancelled_call(&self, call_id: &str) {
+        let active_call = self.active_calls.write().remove(call_id);
+        let started_at = active_call
+            .as_ref()
+            .map(|call| call.started_at)
+            .or_else(|| find_call_started_at(&self.call_history, call_id));
+        if let Some(active_call) = active_call {
+            active_call.mark_cancelled();
+            active_call.abort_task();
+            info!(
+                call_id = %call_id,
+                grant_id = %active_call.grant_id,
+                "remote call marked cancelled"
+            );
+        }
+        if let Some(started_at) = started_at {
+            let duration_ms = now_millis().saturating_sub(started_at);
+            let updated = force_cancel_call_in_history(&self.call_history, call_id, duration_ms);
+            if !updated {
+                debug!(call_id = %call_id, "cancel reconcile did not change local history");
+            }
+        } else {
+            debug!(call_id = %call_id, "cancel reconcile received before local history existed");
+        }
+    }
 }
 
 fn generate_pair_code() -> String {
@@ -1375,9 +1747,16 @@ struct CallResult {
     stderr_digest: Option<String>,
 }
 
-fn update_call_in_history(history: &RwLock<VecDeque<CallInfo>>, call_id: &str, result: CallResult) {
+fn update_call_in_history(
+    history: &RwLock<VecDeque<CallInfo>>,
+    call_id: &str,
+    result: CallResult,
+) -> bool {
     let mut h = history.write();
     if let Some(call) = h.iter_mut().rev().find(|c| c.call_id == call_id) {
+        if !should_apply_call_result(call.status, result.status) {
+            return false;
+        }
         call.status = result.status;
         call.exit_code = Some(result.exit_code);
         call.duration_ms = Some(result.duration_ms);
@@ -1385,7 +1764,56 @@ fn update_call_in_history(history: &RwLock<VecDeque<CallInfo>>, call_id: &str, r
         call.bytes_out = result.bytes_out;
         call.stdout_digest = result.stdout_digest;
         call.stderr_digest = result.stderr_digest;
+        return true;
     }
+    false
+}
+
+fn find_call_started_at(history: &RwLock<VecDeque<CallInfo>>, call_id: &str) -> Option<u64> {
+    history
+        .read()
+        .iter()
+        .rev()
+        .find(|c| c.call_id == call_id)
+        .map(|c| c.started_at)
+}
+
+fn force_cancel_call_in_history(
+    history: &RwLock<VecDeque<CallInfo>>,
+    call_id: &str,
+    duration_ms: u64,
+) -> bool {
+    let mut h = history.write();
+    if let Some(call) = h.iter_mut().rev().find(|c| c.call_id == call_id) {
+        call.status = CallStatus::Cancelled;
+        call.exit_code = Some(130);
+        call.duration_ms = Some(duration_ms);
+        call.ended_at = Some(now_millis());
+        return true;
+    }
+    false
+}
+
+fn parse_call_status_from_relay(call: &Value) -> Option<CallStatus> {
+    call.get("status")
+        .and_then(|status| status.as_str())
+        .and_then(|status| serde_json::from_value(Value::String(status.to_string())).ok())
+}
+
+fn should_apply_call_result(current: CallStatus, next: CallStatus) -> bool {
+    if current == CallStatus::Cancelled && next != CallStatus::Cancelled {
+        return false;
+    }
+
+    if matches!(
+        current,
+        CallStatus::Completed | CallStatus::Failed | CallStatus::Timeout
+    ) && next == CallStatus::Cancelled
+    {
+        return false;
+    }
+
+    true
 }
 
 fn is_relay_unauthorized(err: &BifrostError) -> bool {
@@ -1465,6 +1893,18 @@ fn build_grant_info_from_grant_created(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or(GrantMode::Once);
     let expires_at = data.get("expires_at").and_then(|v| v.as_u64());
+    let auth_method = data
+        .get("auth_method")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(AuthMethod::PairCode);
+    let ssh_key_id = data
+        .get("ssh_key_id")
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_string());
+    let ssh_key_fingerprint = data
+        .get("ssh_key_fingerprint")
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_string());
 
     Some(GrantInfo {
         grant_id,
@@ -1473,6 +1913,7 @@ fn build_grant_info_from_grant_created(
         caller_display_name,
         grant_mode,
         grant_scope: "remote_invoke".to_string(),
+        auth_method,
         status: GrantStatus::Active,
         first_authorized_at: authorized_at,
         expires_at,
@@ -1487,6 +1928,8 @@ fn build_grant_info_from_grant_created(
         } else {
             None
         },
+        ssh_key_id,
+        ssh_key_fingerprint,
     })
 }
 
@@ -1502,6 +1945,7 @@ mod tests {
             caller_display_name: None,
             grant_mode: mode,
             grant_scope: "remote_invoke".to_string(),
+            auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
             expires_at: None,
@@ -1516,6 +1960,8 @@ mod tests {
             } else {
                 None
             },
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
         }
     }
 
@@ -1679,6 +2125,7 @@ mod tests {
             pairing_id: None,
             client_instance_id: "test-instance".to_string(),
             caller_fingerprint: "test-fp".to_string(),
+            auth_method: AuthMethod::PairCode,
             status: CallStatus::Streaming,
             command_summary: CommandSummary {
                 command_preview: "status".to_string(),
@@ -1699,6 +2146,8 @@ mod tests {
             duration_ms: None,
             bytes_in: None,
             bytes_out: None,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
         }
     }
 
@@ -1707,7 +2156,7 @@ mod tests {
         let history = RwLock::new(VecDeque::new());
         history.write().push_back(make_call_info("c1"));
 
-        update_call_in_history(
+        let updated = update_call_in_history(
             &history,
             "c1",
             CallResult {
@@ -1720,6 +2169,7 @@ mod tests {
             },
         );
 
+        assert!(updated);
         let h = history.read();
         let call = h.front().unwrap();
         assert_eq!(call.status, CallStatus::Completed);
@@ -1735,7 +2185,7 @@ mod tests {
         let history = RwLock::new(VecDeque::new());
         history.write().push_back(make_call_info("c1"));
 
-        update_call_in_history(
+        let updated = update_call_in_history(
             &history,
             "c1",
             CallResult {
@@ -1748,6 +2198,7 @@ mod tests {
             },
         );
 
+        assert!(updated);
         let h = history.read();
         let call = h.front().unwrap();
         assert_eq!(call.status, CallStatus::Failed);
@@ -1761,7 +2212,7 @@ mod tests {
         let history = RwLock::new(VecDeque::new());
         history.write().push_back(make_call_info("c1"));
 
-        update_call_in_history(
+        let updated = update_call_in_history(
             &history,
             "nonexistent",
             CallResult {
@@ -1774,6 +2225,7 @@ mod tests {
             },
         );
 
+        assert!(!updated);
         let h = history.read();
         let call = h.front().unwrap();
         assert_eq!(call.status, CallStatus::Streaming);
@@ -1787,7 +2239,7 @@ mod tests {
         history.write().push_back(make_call_info("c2"));
         history.write().push_back(make_call_info("c3"));
 
-        update_call_in_history(
+        let updated = update_call_in_history(
             &history,
             "c2",
             CallResult {
@@ -1800,6 +2252,7 @@ mod tests {
             },
         );
 
+        assert!(updated);
         let h = history.read();
         assert_eq!(h[0].call_id, "c1");
         assert_eq!(h[0].status, CallStatus::Streaming);
@@ -1808,6 +2261,124 @@ mod tests {
         assert_eq!(h[1].exit_code, Some(0));
         assert_eq!(h[2].call_id, "c3");
         assert_eq!(h[2].status, CallStatus::Streaming);
+    }
+
+    #[test]
+    fn test_update_call_in_history_cancelled_is_terminal() {
+        let history = RwLock::new(VecDeque::new());
+        history.write().push_back(make_call_info("c1"));
+
+        let cancelled = update_call_in_history(
+            &history,
+            "c1",
+            CallResult {
+                status: CallStatus::Cancelled,
+                exit_code: 130,
+                duration_ms: 12,
+                bytes_out: None,
+                stdout_digest: None,
+                stderr_digest: None,
+            },
+        );
+        let late_completion = update_call_in_history(
+            &history,
+            "c1",
+            CallResult {
+                status: CallStatus::Completed,
+                exit_code: 0,
+                duration_ms: 99,
+                bytes_out: Some(10),
+                stdout_digest: Some("late".to_string()),
+                stderr_digest: None,
+            },
+        );
+
+        assert!(cancelled);
+        assert!(!late_completion);
+        let h = history.read();
+        let call = h.front().unwrap();
+        assert_eq!(call.status, CallStatus::Cancelled);
+        assert_eq!(call.exit_code, Some(130));
+        assert_eq!(call.duration_ms, Some(12));
+    }
+
+    #[test]
+    fn test_update_call_in_history_does_not_override_completed_with_cancelled() {
+        let history = RwLock::new(VecDeque::new());
+        history.write().push_back(make_call_info("c1"));
+
+        let completed = update_call_in_history(
+            &history,
+            "c1",
+            CallResult {
+                status: CallStatus::Completed,
+                exit_code: 0,
+                duration_ms: 30,
+                bytes_out: Some(10),
+                stdout_digest: Some("digest".to_string()),
+                stderr_digest: None,
+            },
+        );
+        let cancelled = update_call_in_history(
+            &history,
+            "c1",
+            CallResult {
+                status: CallStatus::Cancelled,
+                exit_code: 130,
+                duration_ms: 31,
+                bytes_out: None,
+                stdout_digest: None,
+                stderr_digest: None,
+            },
+        );
+
+        assert!(completed);
+        assert!(!cancelled);
+        let h = history.read();
+        let call = h.front().unwrap();
+        assert_eq!(call.status, CallStatus::Completed);
+        assert_eq!(call.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_find_call_started_at_returns_latest_matching_call() {
+        let history = RwLock::new(VecDeque::new());
+        let mut first = make_call_info("c1");
+        first.started_at = 111;
+        let mut second = make_call_info("c2");
+        second.started_at = 222;
+        let mut latest = make_call_info("c1");
+        latest.started_at = 333;
+
+        history.write().push_back(first);
+        history.write().push_back(second);
+        history.write().push_back(latest);
+
+        assert_eq!(find_call_started_at(&history, "c1"), Some(333));
+        assert_eq!(find_call_started_at(&history, "missing"), None);
+    }
+
+    #[test]
+    fn test_parse_call_status_from_relay_reads_cancelled() {
+        let call = serde_json::json!({
+            "call_id": "c1",
+            "status": "cancelled",
+        });
+
+        assert_eq!(
+            parse_call_status_from_relay(&call),
+            Some(CallStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn test_parse_call_status_from_relay_rejects_unknown_status() {
+        let call = serde_json::json!({
+            "call_id": "c1",
+            "status": "mystery",
+        });
+
+        assert_eq!(parse_call_status_from_relay(&call), None);
     }
 
     #[test]
@@ -1835,12 +2406,15 @@ mod tests {
             caller_display_name: None,
             grant_mode: GrantMode::Permanent,
             grant_scope: "remote_invoke".to_string(),
+            auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
             expires_at: None,
             last_used_at: None,
             max_calls: None,
             remaining_calls: None,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
         };
         grants.insert("auto-g".to_string(), auto_grant);
 

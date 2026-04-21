@@ -23,6 +23,7 @@ export interface ClientStreamState {
   clientInstanceId: string;
   userId: string;
   streamId: string;
+  clientIp?: string;
   res: ServerResponse;
   lastHeartbeat: number;
   discoverable: boolean;
@@ -133,6 +134,7 @@ export interface ClientHeartbeatRequest {
   client_instance_id: string;
   stream_id: string;
   active_call_ids?: string[];
+  ssh_device_route?: SshDeviceRoute | null;
 }
 
 export interface ClientCallFrameRequest {
@@ -186,6 +188,53 @@ export interface ClientRegistrationRequest {
   bifrost_version: string;
   signature: string;
   timestamp: number;
+  ssh_device_route?: SshDeviceRoute | null;
+}
+
+export interface SshDeviceRoute {
+  device_code: string;
+  public_key_pem: string;
+}
+
+export interface SshChallengeRequest {
+  device_code: string;
+}
+
+export interface SshChallengeResponse {
+  challenge_id: string;
+  challenge: string;
+  expires_at: number;
+}
+
+export interface SshCallerInfo {
+  hostname?: string;
+  username?: string;
+  platform?: string;
+  user_agent?: string;
+}
+
+export interface SshConnectRequest {
+  device_code: string;
+  challenge_id: string;
+  signature: string;
+  timestamp: number;
+  caller_info?: SshCallerInfo;
+}
+
+export interface SshConnectResponse {
+  connect_id: string;
+  relay_token: string;
+  expires_at: number;
+}
+
+export interface SshConnectResultRequest {
+  connect_id: string;
+  status: 'approved' | 'rejected';
+  grant_id?: string;
+  expires_at?: number | string | null;
+  reason?: string;
+  caller_fingerprint?: string;
+  grant_mode?: GrantMode;
 }
 
 export interface ClientRegistrationChallengeRequest {

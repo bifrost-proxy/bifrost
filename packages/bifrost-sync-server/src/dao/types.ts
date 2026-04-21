@@ -64,6 +64,7 @@ export interface IRemoteInvokeDao {
   listActiveGrantsForClient(clientInstanceId: string): Promise<import('../types').RemoteInvokeGrant[]>;
   updateGrant(grantId: string, fields: Partial<import('../types').RemoteInvokeGrant>): Promise<void>;
   deleteGrant(grantId: string): Promise<boolean>;
+  revokeSshGrantsForClient(clientInstanceId: string): Promise<number>;
   touchGrantLastUsed(grantId: string, ts: string): Promise<void>;
   consumeGrantCall(grantId: string): Promise<void>;
 

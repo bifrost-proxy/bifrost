@@ -435,6 +435,90 @@ else
 fi
 
 # =========================================================================
+# TC-RI-04B: Caller cancel should settle call as cancelled for all commands
+# =========================================================================
+log "=== TC-RI-04B: Caller cancel settles remote call as cancelled ==="
+
+for i in $(seq 1 20); do
+    curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/cancel-${RANDOM}" >/dev/null 2>&1 || true
+done
+sleep 2
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+PRE_CANCEL_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "search.get"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].started_at // 0
+')
+
+CANCEL_LOG="$(mktemp)"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "httpbin" \
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 50 >"$CANCEL_LOG" 2>&1 &
+CANCEL_PID=$!
+
+CALL_OPENED_FOR_CANCEL=0
+for i in $(seq 1 30); do
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+    assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+    LATEST_CANCEL_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+        (.calls // [])
+        | map(select((.command.command // .command) == "search.get"))
+        | sort_by(.started_at // 0)
+        | reverse
+        | .[0].started_at // 0
+    ')
+    if [[ "${LATEST_CANCEL_SEARCH_STARTED_AT:-0}" -gt "${PRE_CANCEL_SEARCH_STARTED_AT:-0}" ]]; then
+        CALL_OPENED_FOR_CANCEL=1
+        break
+    fi
+    if ! kill -0 "$CANCEL_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && kill -0 "$CANCEL_PID" 2>/dev/null; then
+    kill -INT "$CANCEL_PID" 2>/dev/null || true
+fi
+
+wait "$CANCEL_PID" 2>/dev/null || CANCEL_EXIT=$?
+CANCEL_EXIT="${CANCEL_EXIT:-0}"
+CANCEL_OUTPUT="$(cat "$CANCEL_LOG")"
+rm -f "$CANCEL_LOG"
+
+if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && [[ "$CANCEL_EXIT" -eq 130 ]] && echo "$CANCEL_OUTPUT" | grep -q "cancel"; then
+    _log_pass "TC-RI-04B: caller 侧中断后会触发远端 cancel 收尾"
+else
+    _log_fail "TC-RI-04B: caller 中断后未触发预期 cancel 收尾" "stream seen + exit 130 + cancel message" "$CANCEL_OUTPUT"
+fi
+
+CANCELLED_STATUS=""
+for i in $(seq 1 20); do
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+    assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+    CANCELLED_STATUS=$(echo "$HTTP_BODY" | jq -r '
+        (.calls // [])
+        | sort_by(.started_at // 0)
+        | reverse
+        | map(select((.command.command // .command) == "search.get"))
+        | .[0].status // ""
+    ')
+    if [[ "$CANCELLED_STATUS" == "cancelled" ]]; then
+        break
+    fi
+    sleep 1
+done
+
+if [[ "$CANCELLED_STATUS" == "cancelled" ]]; then
+    _log_pass "TC-RI-04C: client Recent Calls 最终显示 cancelled"
+else
+    _log_fail "TC-RI-04C: client Recent Calls 未显示 cancelled" "cancelled" "${CANCELLED_STATUS:-<empty>}"
+fi
+
+# =========================================================================
 # TC-RI-05: Reject pairing flow
 # =========================================================================
 log "=== TC-RI-05: Reject pairing flow ==="
@@ -539,13 +623,35 @@ fi
 # =========================================================================
 log "=== TC-RI-08: Disconnect ==="
 
+CALLER_CONNECTIONS_FILE="$(find "$CALLER_DATA_DIR" -name remote-connections.json -print -quit)"
+assert_not_empty "$CALLER_CONNECTIONS_FILE" "caller 侧 remote-connections.json 路径不应为空"
+LOCAL_GRANT_ID="$(jq -r '.connections[0].grant_id // ""' "$CALLER_CONNECTIONS_FILE")"
+LOCAL_CALLER_FINGERPRINT="$(jq -r '.connections[0].caller_fingerprint // ""' "$CALLER_CONNECTIONS_FILE")"
+assert_not_empty "$LOCAL_GRANT_ID" "disconnect 前本地 grant_id 不应为空"
+assert_not_empty "$LOCAL_CALLER_FINGERPRINT" "disconnect 前本地 caller_fingerprint 不应为空"
+
+ENCODED_CALLER_FINGERPRINT="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$LOCAL_CALLER_FINGERPRINT")"
+http_request "${RELAY_URL}/v4/remote-invoke/grants/${LOCAL_GRANT_ID}?caller_fingerprint=${ENCODED_CALLER_FINGERPRINT}" "DELETE"
+if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
+    _log_pass "TC-RI-08A: 预先删除 relay grant，制造 disconnect 404 场景"
+else
+    _log_fail "TC-RI-08A: 预先删除 relay grant 失败" "200/204" "status=$HTTP_STATUS body=$HTTP_BODY"
+fi
+
 DISCONNECT_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote disconnect --all \
     --relay-url "$RELAY_URL" 2>&1) || true
 
-if echo "$DISCONNECT_OUTPUT" | grep -qi "revoked\|disconnected\|✓"; then
-    _log_pass "TC-RI-08: disconnect --all 成功"
+if echo "$DISCONNECT_OUTPUT" | grep -qi "already missing on relay\|revoked\|disconnected\|✓"; then
+    _log_pass "TC-RI-08: disconnect --all 成功并清理本地连接"
 else
     _log_fail "TC-RI-08: disconnect 输出未包含成功标识" "revoked/disconnected" "$DISCONNECT_OUTPUT"
+fi
+
+LOCAL_CONNECTION_COUNT="$(jq -r '.connections | length' "$CALLER_CONNECTIONS_FILE" 2>/dev/null || echo 0)"
+if [[ "$LOCAL_CONNECTION_COUNT" == "0" ]]; then
+    _log_pass "TC-RI-08B: relay 404 后 caller 本地连接记录已清空"
+else
+    _log_fail "TC-RI-08B: relay 404 后 caller 本地连接记录仍残留" "0" "$LOCAL_CONNECTION_COUNT"
 fi
 
 # =========================================================================

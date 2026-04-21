@@ -49,7 +49,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [remote-invoke.md](./remote-invoke.md) | Remote Invoke 远程调用 | 118 | 发现模式与一次性授权码、人工授权、授权复用（30m/1h/1d/永久）、授权模式升降级、多客户端管理、有效期调整、移除授权、SSE/HTTP relay、大结果/大输入分片传输、主动取消、续流恢复、断线恢复、白名单命令全覆盖、端到端加密验证、客户端重启稳定性、审计历史与过滤、回归验证（含 SSE 事件去重 + 多实例 frame/exit 竞态 + 超时 pairing 自动清理 + 过期 grant 自动清理 + 客户端侧 DELETE grant + relay_token 鉴权安全加固 + calls 路由迁移 + approve_pairing fingerprint 修复 + delete_grant best-effort 修复 + call_open grant 验证安全加固 + client 注册 token/challenge/签名校验 + caller 免 token 边界 + call detail 所有权隔离 + pairing decision 所有权隔离 + call frame/exit 所有权隔离 + remote traffic get sequence 映射 + remote search 流式输出 + stderr 透传 + remote connect overload-protect 重试与提示 + grant_created/call_open 协议职责分离 + SSE 推送失败轮询容错 + pair_slot_occupied 自动清理 + pending-pairings API + relay URL 四级回退优先级）、补充覆盖（多调用方并发隔离/配对码轮换/并发冲突/traffic.clear 拒绝/once consumed/grant 上限）、全局授权弹窗（自动弹出/Dismiss/Dismiss All/Authorize 下拉/Settings 导航/Reject）、远端部署（HTTPS/SSO/多用户并发/跨公网稳定性/大结果传输/断线恢复）、交互式客户端选择（多客户端未指定 --client-id 时弹出选择菜单/模糊前缀匹配多客户端/非交互环境回退报错） |
+| [remote-invoke.md](./remote-invoke.md) | Remote Invoke 远程调用 | 141 | 发现模式与一次性授权码、人工授权、授权复用（30m/1h/1d/永久）、授权模式升降级、多客户端管理、有效期调整、移除授权、SSE/HTTP relay、大结果/大输入分片传输、主动取消、续流恢复、断线恢复、白名单命令全覆盖、端到端加密验证、客户端重启稳定性、审计历史与过滤、回归验证（含 SSE 事件去重 + 多实例 frame/exit 竞态 + 超时 pairing 自动清理 + 过期 grant 自动清理 + 客户端侧 DELETE grant + relay_token 鉴权安全加固 + calls 路由迁移 + approve_pairing fingerprint 修复 + delete_grant best-effort 修复 + call_open grant 验证安全加固 + client 注册 token/challenge/签名校验 + caller 免 token 边界 + call detail 所有权隔离 + pairing decision 所有权隔离 + call frame/exit 所有权隔离 + remote traffic get sequence 映射 + remote search 流式输出 + stderr 透传 + remote connect overload-protect 重试与提示 + grant_created/call_open 协议职责分离 + SSE 推送失败轮询容错 + pair_slot_occupied 自动清理 + pending-pairings API + relay URL 四级回退优先级 + caller identity 持久化 + SSH key 管理 API/导出/重置/撤销 + SSH 授权永久有效直到 key revoke + relay challenge/connect 最小闭环 + SSH grant relay 复用/openCall 能力验收 + revoke 后 route 收敛删除验证 + 线上 relay 的 SSH reusable/openCall 存储链路回归 + Remote Invoke 状态区合并布局回归 + Create SSH key 弹窗提示合并回归 + caller 主动取消后所有命令统一收敛为 cancelled + 本地 relay 粗粒度限流不再打断 cancel/events/exit 收尾 + 线上 relay 下 target client 取消终态稳定写入 + 共享出口 IP 下已认证 remote invoke 不再互相限流 + 远端 relay 不引入 pod-local authenticated remote limiter，`client/stream` 直接从认证结果补齐 `user_id` + relay 返回 `grant_not_found` 时 disconnect 仍删除本地连接，避免幽灵状态 + CLI `remote connect --ssh-key` 落盘与后续复用回归 + server-v4 SSH connect 挂起态持久化 caller_info，确保 SSH grant 展示调用方信息 + SSH key reset 后 worker 显式进入 reconnecting，避免 post-reset connect 命中假性离线窗口 + `call_cancel` 即使遇到本地句柄竞态也能把 Recent Calls 收敛到 `cancelled`）、补充覆盖（多调用方并发隔离/配对码轮换/并发冲突/traffic.clear 拒绝/once consumed/grant 上限）、全局授权弹窗（自动弹出/Dismiss/Dismiss All/Authorize 下拉/Settings 导航/Reject）、远端部署（HTTPS/SSO/多用户并发/跨公网稳定性/大结果传输/断线恢复）、交互式客户端选择（多客户端未指定 --client-id 时弹出选择菜单/模糊前缀匹配多客户端/非交互环境回退报错） |
 
 ### Admin API 测试
 
@@ -66,7 +66,7 @@
 | [api-metrics.md](./api-metrics.md) | Metrics API | 15 | 当前指标、历史指标、应用统计、主机统计 |
 | [api-system.md](./api-system.md) | System API | 16 | 系统信息、概览、内存诊断 |
 | [api-scripts.md](./api-scripts.md) | Scripts API | 30 | 脚本 CRUD、重命名、运行测试、名称校验、内置脚本保护 |
-| [api-push.md](./api-push.md) | Push WebSocket API | 10 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送 |
+| [api-push.md](./api-push.md) | Push WebSocket API | 11 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端回归 |
 | [api-replay.md](./api-replay.md) | Replay API | 17 | 重放集合管理、请求 CRUD、执行重放、历史查看 |
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
@@ -109,7 +109,7 @@
 
 ---
 
-**总计：57 个测试文件，1152 个测试用例**
+**总计：57 个测试文件，1169 个测试用例**
 
 ## 工作流程
 

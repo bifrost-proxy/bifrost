@@ -1350,11 +1350,28 @@ pub enum RemoteCommands {
         long_about = "Connect to a remote Bifrost instance using a one-time pair code.\n\n\
             Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n\
             The pair code is one-time and should not be reused after a successful connect.\n\
+            You can also connect with an exported SSH key file via `--ssh-key`.\n\
             After connect succeeds, prefer `bifrost remote status` (or other read-only remote commands) instead of running `remote connect` again."
     )]
     Connect {
-        #[arg(help = "One-time pair code displayed on the remote device")]
-        pair_code: String,
+        #[arg(
+            help = "One-time pair code displayed on the remote device",
+            required_unless_present = "ssh_key"
+        )]
+        pair_code: Option<String>,
+        #[arg(
+            long,
+            value_hint = ValueHint::FilePath,
+            conflicts_with = "pair_code",
+            help = "Use an exported Bifrost SSH key file, PKCS#8 Ed25519 private key, `env:NAME`, or `-` for stdin"
+        )]
+        ssh_key: Option<String>,
+        #[arg(
+            long,
+            requires = "ssh_key",
+            help = "Override the device code derived from --ssh-key (debug only)"
+        )]
+        device_code: Option<String>,
     },
     #[command(
         about = "Revoke authorization for a remote Bifrost instance",

@@ -1620,6 +1620,7 @@ async fn handle_request(
             inject_bifrost_badge,
             &ctx,
             admin_state.clone(),
+            push_manager.clone(),
             Some(dns_resolver),
         )
         .await

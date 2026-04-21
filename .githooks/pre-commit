@@ -4,17 +4,29 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "Running cargo fmt check..."
 
-if ! cargo fmt --all -- --check; then
+cargo fmt --all -- --check &
+PID_MAIN=$!
+
+cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check &
+PID_TAURI=$!
+
+FAIL=0
+
+if ! wait $PID_MAIN; then
     echo ""
     echo "ERROR: Code formatting check failed!"
     echo "Please run 'cargo fmt --all' or 'make fmt' to fix formatting issues."
-    exit 1
+    FAIL=1
 fi
 
-if ! cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check; then
+if ! wait $PID_TAURI; then
     echo ""
     echo "ERROR: Desktop Tauri code formatting check failed!"
     echo "Please run 'cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all' or 'make fmt' to fix formatting issues."
+    FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 
