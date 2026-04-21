@@ -2864,6 +2864,105 @@ PY
 - 第 5 步：返回 `{"code":0,"message":"ok","data":{"cancelled":1}}`
 - 第 6 步：返回 `{"code":0,"message":"ok","data":[]}`
 
+### TC-RI-回归-98：显式 `--relay-url` 优先于运行中实例与本地配置
+
+**前置条件**：
+- 本地已编译最新 `bifrost` 二进制
+- 已准备一个可用 relay 地址 `http://127.0.0.1:<explicit_port>`
+- 正在运行的本地 Bifrost `sync.remote_base_url` 指向另一地址
+- `BIFROST_DATA_DIR` 对应 `config.toml` 的 `sync.remote_base_url` 再指向第三个地址
+
+**操作步骤**：
+1. 启动本地 Bifrost，并将运行中 `sync.remote_base_url` 设置为 `http://127.0.0.1:<runtime_port>`
+2. 在单独数据目录下写入：
+   ```toml
+   [sync]
+   remote_base_url = "http://127.0.0.1:<config_port>"
+   ```
+3. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-explicit ./target/debug/bifrost remote connect <pair_code> --port <runtime_bifrost_port> --relay-url http://127.0.0.1:<explicit_port>
+   ```
+4. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- 仅显式传入的 relay 收到 `POST /v4/remote-invoke/pairings/start`
+- 运行中实例配置和本地配置文件中的 relay 均未被命中
+- `remote-connections.json` 中保存的 `relay_url` 为显式传入地址
+
+### TC-RI-回归-99：未传 `--relay-url` 时优先读取运行中实例的 `sync.remote_base_url`
+
+**前置条件**：
+- 本地 Bifrost 正在运行，且 `/_bifrost/api/sync/status` 返回非空 `remote_base_url`
+- 调用方数据目录中不存在 `config.toml`，或其中 `sync.remote_base_url` 与运行中实例不同
+
+**操作步骤**：
+1. 确认运行中实例 `sync status` 返回目标 relay URL
+2. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-runtime ./target/debug/bifrost remote connect <pair_code> --port <runtime_bifrost_port>
+   ```
+3. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- CLI 成功发起配对，不再报 `--relay-url is required`
+- 实际命中运行中实例中的 relay URL
+- `remote-connections.json` 中保存的 `relay_url` 与运行中实例 `sync.remote_base_url` 一致
+
+### TC-RI-回归-100：本地实例不可用时回退读取 `config.toml` 中的 `sync.remote_base_url`
+
+**前置条件**：
+- 本地未运行 Bifrost，或指定 `--port` 上没有可用实例
+- 调用方数据目录下存在 `config.toml`，其中配置：
+   ```toml
+   [sync]
+   remote_base_url = "http://127.0.0.1:<config_port>"
+   ```
+
+**操作步骤**：
+1. 确认没有运行中的本地 Bifrost 可提供 `sync status`
+2. 执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-config ./target/debug/bifrost remote connect <pair_code> --port <unused_port>
+   ```
+3. 观察 relay 命中情况与 `remote-connections.json`
+
+**预期结果**：
+- CLI 成功发起配对，不再报 `--relay-url is required`
+- 实际命中本地 `config.toml` 中的 relay URL
+- `remote-connections.json` 中保存的 `relay_url` 与本地配置文件一致
+
+### TC-RI-回归-101：运行中实例与本地配置均不可用时回退默认 relay
+
+**前置条件**：
+- 本地未运行 Bifrost，或指定端口没有可用实例
+- 调用方数据目录下不存在 `config.toml`，或其中 `sync.remote_base_url` 为空字符串
+
+**操作步骤**：
+1. 在全新数据目录下执行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-remote-relay-default ./target/debug/bifrost remote connect <pair_code> --port <unused_port>
+   ```
+2. 观察命令输出、日志或抓包
+
+**预期结果**：
+- CLI 不再输出 `Error: --relay-url is required (could not detect from running proxy)`
+- relay 目标回退为默认值 `https://bifrost.bytedance.net`
+- 若默认 relay 当前不可达，错误表现为网络/业务错误，而不是缺少参数错误
+
+### TC-RI-回归-98 ~ TC-RI-回归-101 执行结果（2026-04-21）
+
+执行方式说明：
+- `TC-RI-回归-98` ~ `TC-RI-回归-100`：运行 `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+- `TC-RI-回归-101`：运行 `cargo test -p bifrost-cli select_remote_relay_url_honors_precedence_order -- --nocapture`
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-98 | 显式 `--relay-url` 优先于运行中实例与本地配置 | ✅ PASS | `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 的 Case 1 通过；仅显式 relay 收到请求，`remote-connections.json` 保存显式地址 |
+| TC-RI-回归-99 | 未传 `--relay-url` 时优先读取运行中实例的 `sync.remote_base_url` | ✅ PASS | 同一脚本 Case 2 通过；CLI 在省略 `--relay-url` 时命中运行中实例 relay，未再报缺少参数 |
+| TC-RI-回归-100 | 本地实例不可用时回退读取 `config.toml` 中的 `sync.remote_base_url` | ✅ PASS | 同一脚本 Case 3 通过；运行中实例不可用时命中本地 `config.toml`，`remote-connections.json` 保存配置地址 |
+| TC-RI-回归-101 | 运行中实例与本地配置均不可用时回退默认 relay | ✅ PASS | 执行 `BIFROST_DATA_DIR=<全新目录> ./target/release/bifrost --port 65530 remote connect 881004`；CLI 输出 `→ Initiating pairing with code 881004...` 后收到 relay 返回的 `invalid_pair_code`，未再出现 `--relay-url is required`，证明已继续走默认 relay 路径 |
+
 ---
 
 ## 清理

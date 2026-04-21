@@ -377,6 +377,11 @@ async fn handle_connect(
                 )
                 .dimmed()
             );
+            println!(
+                "{}",
+                "  Pair codes are one-time only. After connect succeeds, use remote status or other read-only remote commands instead of reconnecting with the same code."
+                    .dimmed()
+            );
             Ok(())
         }
         "rejected" => {

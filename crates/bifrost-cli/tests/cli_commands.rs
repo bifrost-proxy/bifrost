@@ -58,6 +58,36 @@ fn sync_config_options_parse() {
 }
 
 #[test]
+fn remote_connect_help_explains_one_time_pairing() {
+    let help = run_help(&["remote", "connect"]);
+    assert!(
+        help.contains("first-time pairing"),
+        "remote connect help should describe first-time pairing"
+    );
+    assert!(
+        help.contains("one-time"),
+        "remote connect help should mention one-time pair code usage"
+    );
+    assert!(
+        help.contains("remote status"),
+        "remote connect help should direct users to remote status after pairing"
+    );
+}
+
+#[test]
+fn remote_status_help_explains_reusing_existing_authorization() {
+    let help = run_help(&["remote", "status"]);
+    assert!(
+        help.contains("saved authorization") || help.contains("reusable authorization"),
+        "remote status help should explain that existing authorization can be reused"
+    );
+    assert!(
+        help.contains("remote connect"),
+        "remote status help should reference remote connect as the initial pairing step"
+    );
+}
+
+#[test]
 fn import_command_parse() {
     let help = run_help(&["import"]);
     assert!(help.contains("file"), "import should require file arg");
