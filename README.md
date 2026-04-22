@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 方法二：使用 npm 安装
 
 ```bash
-npm i @bifrost-proxy/bifrost
+npm i -g @bifrost-proxy/bifrost
 ```
 
 更多安装方法：[`docs/getting-started.md`](docs/getting-started.md)
