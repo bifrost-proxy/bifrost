@@ -13,6 +13,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
+# Suppress interactive update notices so CLI output remains stable for JSON/table assertions.
+export CI=1
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -70,7 +73,7 @@ cleanup() {
 trap cleanup EXIT
 
 run_bifrost() {
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" "$@" 2>&1 || true
+    CI=1 BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" "$@" 2>&1 || true
 }
 
 build_bifrost() {
