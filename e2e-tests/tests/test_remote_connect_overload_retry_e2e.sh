@@ -105,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
                 "platform": "macos",
                 "grant_mode": "permanent",
                 "pair_code": meta.get("pair_code", ""),
+                "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
             }
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

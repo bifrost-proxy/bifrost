@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
 #[derive(Parser)]
@@ -1418,56 +1418,59 @@ pub enum RemoteCommands {
     },
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct RemoteTrafficListArgs {
+    #[arg(short, long, default_value = "50", help = "Maximum records")]
+    pub limit: usize,
+    #[arg(long, help = "Cursor for pagination")]
+    pub cursor: Option<u64>,
+    #[arg(
+        long,
+        default_value = "backward",
+        value_parser = ["backward", "forward"],
+        help = "Pagination direction: backward or forward"
+    )]
+    pub direction: String,
+    #[arg(long, help = "Filter by HTTP method")]
+    pub method: Option<String>,
+    #[arg(long, help = "Filter by status code")]
+    pub status: Option<u16>,
+    #[arg(long, help = "Filter by status >= value")]
+    pub status_min: Option<u16>,
+    #[arg(long, help = "Filter by status <= value")]
+    pub status_max: Option<u16>,
+    #[arg(
+        long,
+        value_parser = ["http", "https", "ws", "wss", "h3"],
+        help = "Filter by protocol (http/https/ws/wss/h3)"
+    )]
+    pub protocol: Option<String>,
+    #[arg(long, help = "Filter host contains")]
+    pub host: Option<String>,
+    #[arg(long, help = "Filter URL contains")]
+    pub url: Option<String>,
+    #[arg(long, help = "Filter path contains")]
+    pub path: Option<String>,
+    #[arg(long, help = "Filter by content type")]
+    pub content_type: Option<String>,
+    #[arg(long, help = "Filter by client IP")]
+    pub client_ip: Option<String>,
+    #[arg(long, help = "Filter by client app")]
+    pub client_app: Option<String>,
+    #[arg(long, help = "Filter by rule hit (true/false)")]
+    pub has_rule_hit: Option<bool>,
+    #[arg(long, help = "Filter websocket only (true/false)")]
+    pub is_websocket: Option<bool>,
+    #[arg(long, help = "Filter SSE only (true/false)")]
+    pub is_sse: Option<bool>,
+    #[arg(long, help = "Filter tunnel only (true/false)")]
+    pub is_tunnel: Option<bool>,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteTrafficCommands {
     #[command(about = "List remote traffic records")]
-    List {
-        #[arg(short, long, default_value = "50", help = "Maximum records")]
-        limit: usize,
-        #[arg(long, help = "Cursor for pagination")]
-        cursor: Option<u64>,
-        #[arg(
-            long,
-            default_value = "backward",
-            value_parser = ["backward", "forward"],
-            help = "Pagination direction: backward or forward"
-        )]
-        direction: String,
-        #[arg(long, help = "Filter by HTTP method")]
-        method: Option<String>,
-        #[arg(long, help = "Filter by status code")]
-        status: Option<u16>,
-        #[arg(long, help = "Filter by status >= value")]
-        status_min: Option<u16>,
-        #[arg(long, help = "Filter by status <= value")]
-        status_max: Option<u16>,
-        #[arg(
-            long,
-            value_parser = ["http", "https", "ws", "wss", "h3"],
-            help = "Filter by protocol (http/https/ws/wss/h3)"
-        )]
-        protocol: Option<String>,
-        #[arg(long, help = "Filter host contains")]
-        host: Option<String>,
-        #[arg(long, help = "Filter URL contains")]
-        url: Option<String>,
-        #[arg(long, help = "Filter path contains")]
-        path: Option<String>,
-        #[arg(long, help = "Filter by content type")]
-        content_type: Option<String>,
-        #[arg(long, help = "Filter by client IP")]
-        client_ip: Option<String>,
-        #[arg(long, help = "Filter by client app")]
-        client_app: Option<String>,
-        #[arg(long, help = "Filter by rule hit (true/false)")]
-        has_rule_hit: Option<bool>,
-        #[arg(long, help = "Filter websocket only (true/false)")]
-        is_websocket: Option<bool>,
-        #[arg(long, help = "Filter SSE only (true/false)")]
-        is_sse: Option<bool>,
-        #[arg(long, help = "Filter tunnel only (true/false)")]
-        is_tunnel: Option<bool>,
-    },
+    List(Box<RemoteTrafficListArgs>),
     #[command(about = "Get remote traffic record details")]
     Get {
         #[arg(help = "Traffic record ID")]

@@ -1434,76 +1434,58 @@ fn build_remote_command(action: &RemoteCommands) -> (CommandKind, String, Option
             )
         }
         RemoteCommands::Traffic { action } => match action {
-            RemoteTrafficCommands::List {
-                limit,
-                cursor,
-                direction,
-                method,
-                status,
-                status_min,
-                status_max,
-                protocol,
-                host,
-                url,
-                path,
-                content_type,
-                client_ip,
-                client_app,
-                has_rule_hit,
-                is_websocket,
-                is_sse,
-                is_tunnel,
-            } => {
+            RemoteTrafficCommands::List(list_args) => {
+                let list_args = list_args.as_ref();
                 let mut args = serde_json::json!({
-                    "limit": limit,
-                    "direction": direction,
+                    "limit": list_args.limit,
+                    "direction": list_args.direction,
                 });
-                if let Some(c) = cursor {
+                if let Some(c) = list_args.cursor {
                     args["cursor"] = serde_json::json!(c);
                 }
-                if let Some(m) = method {
+                if let Some(m) = &list_args.method {
                     args["method"] = serde_json::json!(m);
                 }
-                if let Some(s) = status {
+                if let Some(s) = list_args.status {
                     args["status"] = serde_json::json!(s);
                 }
-                if let Some(s) = status_min {
+                if let Some(s) = list_args.status_min {
                     args["status_min"] = serde_json::json!(s);
                 }
-                if let Some(s) = status_max {
+                if let Some(s) = list_args.status_max {
                     args["status_max"] = serde_json::json!(s);
                 }
-                if let Some(p) = protocol {
+                if let Some(p) = &list_args.protocol {
                     args["protocol"] = serde_json::json!(p);
                 }
-                if let Some(h) = host {
+                if let Some(h) = &list_args.host {
                     args["host"] = serde_json::json!(h);
                 }
-                if let Some(u) = url {
+                if let Some(u) = &list_args.url {
                     args["url"] = serde_json::json!(u);
                 }
-                if let Some(p) = path {
+                if let Some(p) = &list_args.path {
                     args["path"] = serde_json::json!(p);
                 }
-                if let Some(ct) = content_type {
+                if let Some(ct) = &list_args.content_type {
                     args["content_type"] = serde_json::json!(ct);
                 }
-                if let Some(ip) = client_ip {
+                if let Some(ip) = &list_args.client_ip {
                     args["client_ip"] = serde_json::json!(ip);
                 }
-                if let Some(app) = client_app {
+                if let Some(app) = &list_args.client_app {
                     args["client_app"] = serde_json::json!(app);
                 }
-                if let Some(v) = has_rule_hit {
+                if let Some(v) = list_args.has_rule_hit {
                     args["has_rule_hit"] = serde_json::json!(v);
                 }
-                if let Some(v) = is_websocket {
+                if let Some(v) = list_args.is_websocket {
                     args["is_websocket"] = serde_json::json!(v);
                 }
-                if let Some(v) = is_sse {
+                if let Some(v) = list_args.is_sse {
                     args["is_sse"] = serde_json::json!(v);
                 }
-                if let Some(v) = is_tunnel {
+                if let Some(v) = list_args.is_tunnel {
                     args["is_tunnel"] = serde_json::json!(v);
                 }
                 (
@@ -2765,6 +2747,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::RemoteTrafficListArgs;
     use std::sync::OnceLock;
 
     fn init_test_data_dir() {
@@ -2854,7 +2837,7 @@ mod tests {
     #[test]
     fn test_build_remote_command_for_traffic_list_includes_all_filters() {
         let (kind, command, args_json) = build_remote_command(&RemoteCommands::Traffic {
-            action: RemoteTrafficCommands::List {
+            action: RemoteTrafficCommands::List(Box::new(RemoteTrafficListArgs {
                 limit: 7,
                 cursor: Some(123),
                 direction: "forward".to_string(),
@@ -2873,7 +2856,7 @@ mod tests {
                 is_websocket: Some(false),
                 is_sse: Some(true),
                 is_tunnel: Some(false),
-            },
+            })),
         });
 
         assert_eq!(kind, CommandKind::QueryReadonly);

@@ -127,77 +127,6 @@ wait_for_worker_connected() {
     return 1
 }
 
-open_call_and_collect() {
-    local command="$1"
-    local args_json="$2"
-    local output_file="$3"
-    python3 - "$RELAY_URL" "$CLIENT_INSTANCE_ID" "$FINGERPRINT" "$MATCH_GRANT" "$command" "$args_json" "$output_file" <<'PY'
-import json
-import sys
-import urllib.request
-
-relay_url, client_id, fingerprint, grant_id, command, args_json, output_file = sys.argv[1:8]
-payload = {
-    "grant_id": grant_id,
-    "client_instance_id": client_id,
-    "caller_fingerprint": fingerprint,
-    "command": {
-        "command": command,
-        "args_json": args_json,
-    },
-}
-req = urllib.request.Request(
-    relay_url + "/v4/remote-invoke/calls/open",
-    data=json.dumps(payload).encode(),
-    headers={"Content-Type": "application/json"},
-)
-with urllib.request.urlopen(req, timeout=30) as resp:
-    opened = json.loads(resp.read().decode())["data"]
-call_id = opened["call_id"]
-token = opened["relay_token"]
-
-stream_req = urllib.request.Request(
-    relay_url + f"/v4/remote-invoke/calls/{call_id}/events",
-    headers={"Authorization": "Bearer " + token},
-)
-stdout = []
-exit_payload = None
-with urllib.request.urlopen(stream_req, timeout=120) as resp:
-    event = None
-    data_lines = []
-    while True:
-        line = resp.readline()
-        if not line:
-            break
-        text = line.decode().rstrip("\n")
-        if text.startswith("event: "):
-            event = text[7:]
-        elif text.startswith("data: "):
-            data_lines.append(text[6:])
-        elif text == "":
-            if event:
-                payload = json.loads("\n".join(data_lines))
-                if event == "frame":
-                    envelope = json.loads(payload["envelope_json"])
-                    stdout.append(envelope.get("ciphertext", ""))
-                elif event == "exit":
-                    exit_payload = payload
-                    break
-            event = None
-            data_lines = []
-
-with open(output_file, "w") as fh:
-    json.dump(
-        {
-            "call_id": call_id,
-            "stdout": "".join(stdout),
-            "exit": exit_payload,
-        },
-        fh,
-    )
-PY
-}
-
 start_local_relay
 
 log "Build bifrost (release)..."
@@ -390,24 +319,75 @@ assert obj["data"]["expires_at"] in (None, "")
 '
 
 log "Execute search.get via SSH grant"
-SEARCH_RESULT_JSON="$TMPDIR/search_result.json"
-SEARCH_ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "limit": 10}, separators=(",",":")))' "$MARKER")"
-open_call_and_collect "search.get" "$SEARCH_ARGS_JSON" "$SEARCH_RESULT_JSON"
-assert_python "$SEARCH_RESULT_JSON" 'assert obj["exit"]["exit_code"] == 0; assert "'"$MARKER"'" in obj["stdout"]'
-SEARCH_CALL_ID="$(json_get "$SEARCH_RESULT_JSON" "call_id")"
-SEARCH_CALL_INFO_JSON="$TMPDIR/search_call.json"
-curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls/${SEARCH_CALL_ID}" >"$SEARCH_CALL_INFO_JSON"
-assert_python "$SEARCH_CALL_INFO_JSON" 'assert str(obj["call"]["status"]).lower() == "completed"'
+SEARCH_CALLS_BEFORE_JSON="$TMPDIR/search_calls_before.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$SEARCH_CALLS_BEFORE_JSON"
+SEARCH_PRE_STARTED_AT="$(python3 - "$SEARCH_CALLS_BEFORE_JSON" <<'PY'
+import json
+import sys
+
+obj = json.load(open(sys.argv[1]))
+candidates = [
+    call for call in obj.get("calls", [])
+    if ((call.get("command") or {}).get("command") or call.get("command")) == "search.get"
+]
+candidates.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
+print(candidates[0].get("started_at") or 0 if candidates else 0)
+PY
+)"
+SEARCH_OUTPUT="$TMPDIR/search.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote search "$MARKER" \
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 10 \
+    >"$SEARCH_OUTPUT" 2>&1
+grep -q "$MARKER" "$SEARCH_OUTPUT"
+SEARCH_CALLS_AFTER_JSON="$TMPDIR/search_calls_after.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$SEARCH_CALLS_AFTER_JSON"
+assert_python "$SEARCH_CALLS_AFTER_JSON" '
+calls = [
+    call for call in obj.get("calls", [])
+    if ((call.get("command") or {}).get("command") or call.get("command")) == "search.get"
+    and (call.get("started_at") or 0) > int("'"$SEARCH_PRE_STARTED_AT"'")
+]
+assert calls, "应记录新的 search.get 调用"
+calls.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
+latest = calls[0]
+assert str(latest.get("status", "")).lower() == "completed"
+'
 
 log "Execute traffic.get via SSH grant"
-TRAFFIC_RESULT_JSON="$TMPDIR/traffic_result.json"
-TRAFFIC_ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "response_body": True}, separators=(",",":")))' "$TRAFFIC_ID")"
-open_call_and_collect "traffic.get" "$TRAFFIC_ARGS_JSON" "$TRAFFIC_RESULT_JSON"
-assert_python "$TRAFFIC_RESULT_JSON" 'assert obj["exit"]["exit_code"] == 0; assert "'"$MARKER"'" in obj["stdout"]; assert "'"$TRAFFIC_ID"'" in obj["stdout"]'
-TRAFFIC_CALL_ID="$(json_get "$TRAFFIC_RESULT_JSON" "call_id")"
-TRAFFIC_CALL_INFO_JSON="$TMPDIR/traffic_call.json"
-curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls/${TRAFFIC_CALL_ID}" >"$TRAFFIC_CALL_INFO_JSON"
-assert_python "$TRAFFIC_CALL_INFO_JSON" 'assert str(obj["call"]["status"]).lower() == "completed"'
+TRAFFIC_CALLS_BEFORE_JSON="$TMPDIR/traffic_calls_before.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$TRAFFIC_CALLS_BEFORE_JSON"
+TRAFFIC_PRE_STARTED_AT="$(python3 - "$TRAFFIC_CALLS_BEFORE_JSON" <<'PY'
+import json
+import sys
+
+obj = json.load(open(sys.argv[1]))
+candidates = [
+    call for call in obj.get("calls", [])
+    if ((call.get("command") or {}).get("command") or call.get("command")) == "traffic.get"
+]
+candidates.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
+print(candidates[0].get("started_at") or 0 if candidates else 0)
+PY
+)"
+TRAFFIC_OUTPUT="$TMPDIR/traffic.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic get "$TRAFFIC_ID" \
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --response-body \
+    >"$TRAFFIC_OUTPUT" 2>&1
+grep -q "$MARKER" "$TRAFFIC_OUTPUT"
+grep -q "\"id\":\"$TRAFFIC_ID\"" "$TRAFFIC_OUTPUT"
+TRAFFIC_CALLS_AFTER_JSON="$TMPDIR/traffic_calls_after.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$TRAFFIC_CALLS_AFTER_JSON"
+assert_python "$TRAFFIC_CALLS_AFTER_JSON" '
+calls = [
+    call for call in obj.get("calls", [])
+    if ((call.get("command") or {}).get("command") or call.get("command")) == "traffic.get"
+    and (call.get("started_at") or 0) > int("'"$TRAFFIC_PRE_STARTED_AT"'")
+]
+assert calls, "应记录新的 traffic.get 调用"
+calls.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
+latest = calls[0]
+assert str(latest.get("status", "")).lower() == "completed"
+'
 
 log "Revoke SSH key"
 REVOKE_JSON="$TMPDIR/revoke.json"

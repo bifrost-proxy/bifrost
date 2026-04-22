@@ -3926,6 +3926,39 @@ PY
 |---------|------|---------|
 | TC-RI-回归-126 | ✅ PASS | 先在 target client 上重新进入 discovery mode，caller 用新的 pair code `465613` 完成连接并建立 grant `d7d94397baaf6212`。随后执行 `target/debug/bifrost remote status --relay-url https://bifrost.bytedance.net` 成功返回目标设备状态 JSON。紧接着查询 `GET http://127.0.0.1:8810/_bifrost/api/remote-invoke/calls`，最新记录返回 `{ "command_summary": { "command_preview": "status" }, "command": { "command": "status", "kind": "query.readonly" }, "command_kind": "query.readonly", "status": "completed" }`。这说明 Recent Calls 已不再展示空白或协议级占位的 `query.readonly`，而是恢复为真实可读的命令摘要 `status`。 |
 
+### TC-RI-回归-127：shell E2E 夹具与当前加密协议保持一致
+
+**背景**：Remote Invoke 已切到加密 `command_encrypted` / transport context 链路后，shell E2E 中的部分 mock relay 与手工 `open_call` 夹具如果仍停留在旧协议，会把“测试桩过期”误报成产品回归。
+
+**前置条件**：
+- 仓库已完成 `cargo build --release --bin bifrost`
+- 本机可启动本地 `packages/bifrost-sync-server`
+- 测试使用独立 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
+2. 确认“短暂 overload 后 connect 成功”和“持续 overload 后给出可行动提示”两条路径都通过
+3. 执行 `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+4. 确认可显式 `--relay-url`、运行中实例 `sync.remote_base_url`、本地配置 `sync.remote_base_url` 三条优先级路径都通过
+5. 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+6. 确认 `remote connect --ssh-key` 成功后，继续通过真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再手工构造旧版明文 `calls/open` 请求
+
+**预期结果**：
+- pair-code connect 相关 shell E2E 中，mock relay 返回的批准结果可让 caller 成功落盘当前加密 transport context
+- relay URL 回退脚本的 3 个 case 全部通过，不再出现 `pairing succeeded but relay did not return client_ephemeral_pub`
+- SSH shell E2E 中，`remote search` 与 `remote traffic get` 都能经由真实 CLI 成功执行，Recent Calls 中记录的命令状态为 `completed`
+
+### TC-RI-回归-127 执行结果（2026-04-22，shell E2E 协议对齐）
+
+**执行环境**：
+- `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
+- `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+- `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-127 | ✅ PASS | `remote connect` 相关 mock relay 已补齐 `client_ephemeral_pub`，`overload retry` 与 `relay-url fallback` 两个 shell E2E 不再因旧批准 payload 报错；SSH 用例改为复用真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再命中旧版明文 `calls/open` 的 500，且 Recent Calls 中新增的 `search.get` / `traffic.get` 记录状态均为 `completed`。 |
+
 ### 本轮实际执行回归（2026-04-21，远端 relay 收尾修正）
 
 **自动化回归**：
