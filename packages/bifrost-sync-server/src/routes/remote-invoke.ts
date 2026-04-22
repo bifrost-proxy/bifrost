@@ -27,6 +27,7 @@ import {
 } from '../remote-invoke/sse';
 import { startCleanupScheduler } from '../remote-invoke/cleanup';
 import type { ClientStreamState } from '../remote-invoke/types';
+import { normalizeGrantScope, resolveCommandKind } from '../remote-invoke/types';
 import { customAlphabet } from 'nanoid';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
@@ -376,8 +377,8 @@ async function handleSshChallenge(ctx: RequestContext, service: RemoteInvokeServ
 
 async function handleSshConnect(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.device_code || !body?.challenge_id || !body?.signature || !Number.isFinite(body?.timestamp)) {
-    sendError(ctx.res, 400, 'device_code, challenge_id, signature and timestamp are required');
+  if (!body?.device_code || !body?.challenge_id || !body?.signature || !Number.isFinite(body?.timestamp) || !body?.caller_ephemeral_pub) {
+    sendError(ctx.res, 400, 'device_code, challenge_id, signature, timestamp and caller_ephemeral_pub are required');
     return true;
   }
   try {
@@ -564,6 +565,7 @@ async function handleGrantDecision(
       client_instance_id: clientId,
       decision: body.decision,
       grant_mode: body.grant_mode,
+      grant_scope: body.grant_scope,
       client_ephemeral_pub: body.client_ephemeral_pub,
     });
     sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
@@ -640,6 +642,7 @@ async function handleClientCallExit(
       stderr_digest: body?.stderr_digest,
       bytes_in: body?.bytes_in,
       bytes_out: body?.bytes_out,
+      exit_encrypted: body?.exit_encrypted,
     });
     sendJson(ctx.res, 200, { code: 0, message: 'ok' });
   } catch (e: unknown) {
@@ -702,8 +705,8 @@ async function handleListActiveGrantsForClient(
 
 async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.pair_code || !body?.caller_info) {
-    sendError(ctx.res, 400, 'pair_code and caller_info are required');
+  if (!body?.pair_code || !body?.caller_info || !body?.caller_ephemeral_pub) {
+    sendError(ctx.res, 400, 'pair_code, caller_info and caller_ephemeral_pub are required');
     return true;
   }
 
@@ -763,8 +766,10 @@ function toGrantApi(g: RemoteInvokeGrant) {
     client_instance_id: g.client_instance_id,
     caller_fingerprint: g.caller_fingerprint,
     caller_display_name: g.caller_display_name || null,
+    caller_ephemeral_pub: g.caller_ephemeral_pub || null,
+    client_ephemeral_pub: g.client_ephemeral_pub || null,
     grant_mode: g.grant_mode,
-    grant_scope: g.grant_scope,
+    grant_scope: normalizeGrantScope(g.grant_scope),
     status: g.status,
     created_at: firstAuthorizedAt,
     first_authorized_at: firstAuthorizedAt,
@@ -896,9 +901,16 @@ async function handleCancelCall(ctx: RequestContext, service: RemoteInvokeServic
 
 function toCallApi(c: RemoteInvokeCall) {
   let commandSummary = { command_preview: '' };
-  let commandObj: Record<string, unknown> = { command: '' };
+  let commandObj: Record<string, unknown> = { kind: 'query.readonly' };
   try { commandSummary = JSON.parse(c.command_summary_json); } catch { /* ignore */ }
   try { commandObj = JSON.parse(c.command_json); } catch { /* ignore */ }
+  const commandKind = resolveCommandKind(
+    typeof commandSummary === 'object' && commandSummary && 'command_kind' in commandSummary
+      ? String((commandSummary as Record<string, unknown>).command_kind ?? '')
+      : typeof commandObj.kind === 'string'
+        ? String(commandObj.kind)
+        : 'query.readonly',
+  );
   const startedAt = isoToUnixMs(c.started_at) ?? 0;
   const endedAt = isoToUnixMs(c.ended_at);
   return {
@@ -908,8 +920,8 @@ function toCallApi(c: RemoteInvokeCall) {
     client_instance_id: c.client_instance_id,
     caller_fingerprint: c.caller_fingerprint,
     status: c.status,
+    command_kind: commandKind,
     command_summary: commandSummary,
-    command: (commandObj.command as string) || '',
     command_detail: commandObj,
     source_ip: c.source_ip || null,
     caller_display_name: c.caller_display_name || null,
@@ -996,8 +1008,13 @@ async function handleCancelPendingPairings(
 
 async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
-  if (!body?.grant_id || !body?.client_instance_id || !body?.caller_fingerprint || !body?.command) {
-    sendError(ctx.res, 400, 'grant_id, client_instance_id, caller_fingerprint, and command are required');
+  const commandKind = resolveCommandKind(body?.command_kind);
+  if (!body?.grant_id || !body?.client_instance_id || !body?.caller_fingerprint) {
+    sendError(ctx.res, 400, 'grant_id, client_instance_id, and caller_fingerprint are required');
+    return true;
+  }
+  if (!body?.command_encrypted) {
+    sendError(ctx.res, 400, 'command_encrypted is required');
     return true;
   }
   if (!applyRateLimit(ctx, callerOpenLimiter, `${callerAccessKey(ctx)}:open:${body.grant_id}:${body.client_instance_id}:${body.caller_fingerprint}`)) {
@@ -1010,13 +1027,16 @@ async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService)
       client_instance_id: body.client_instance_id,
       caller_fingerprint: body.caller_fingerprint,
       caller_pubkey: body.caller_pubkey ?? '',
-      command_summary: body.command_summary ?? { command_preview: body.command.command },
-      command: body.command,
+      command_summary: body.command_summary ?? { command_preview: commandKind },
+      command_kind: commandKind,
+      command_encrypted: body.command_encrypted,
+      pty_enabled: body.pty_enabled,
+      timeout_hint_ms: body.timeout_hint_ms,
     });
     sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'open call failed';
-    if (msg === 'caller_fingerprint_mismatch' || msg === 'client_instance_id_mismatch' || msg === 'grant_expired' || msg === 'grant_not_active' || msg === 'grant_consumed') {
+    if (msg === 'caller_fingerprint_mismatch' || msg === 'client_instance_id_mismatch' || msg === 'grant_expired' || msg === 'grant_not_active' || msg === 'grant_consumed' || msg === 'grant_scope_mismatch') {
       sendError(ctx.res, 403, msg);
     } else if (msg === 'grant_not_found') {
       sendError(ctx.res, 404, msg);

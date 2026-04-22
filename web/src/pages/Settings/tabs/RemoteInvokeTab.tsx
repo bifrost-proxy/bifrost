@@ -1009,6 +1009,16 @@ export default function RemoteInvokeTab() {
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(c) => {
                   const argsPreview = formatArgsPreview(c.command_summary?.masked_args_json);
+                  const summaryPreview = c.command_summary?.command_preview?.trim();
+                  const decryptedPreview = c.command?.command?.trim();
+                  const routeOnlyPreview =
+                    summaryPreview && c.command_kind && summaryPreview === c.command_kind;
+                  const commandPreview =
+                    (!routeOnlyPreview && summaryPreview) ||
+                    decryptedPreview ||
+                    summaryPreview ||
+                    c.command_kind ||
+                    "-";
                   const bytesLabel = formatBytes(c.bytes_out);
                   return (
                   <List.Item>
@@ -1016,7 +1026,7 @@ export default function RemoteInvokeTab() {
                       title={
                         <Space>
                           <Text code style={{ fontSize: 11 }}>
-                            {c.command_summary?.command_preview ?? '-'}
+                            {commandPreview}
                           </Text>
                           {argsPreview && (
                             <Tooltip title={c.command_summary?.masked_args_json}>

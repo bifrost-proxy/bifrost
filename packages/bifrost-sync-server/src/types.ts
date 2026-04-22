@@ -159,6 +159,8 @@ export type GrantMode = 'once' | '30m' | '1h' | '1d' | 'permanent';
 export type GrantStatus = 'active' | 'expired' | 'revoked' | 'consumed' | 'removed';
 export type CallStatus = 'pending' | 'authorized' | 'key_exchanged' | 'streaming' | 'completed' | 'failed' | 'cancelled' | 'timeout';
 export type PairingStatus = 'created' | 'code_verified' | 'pending_approval' | 'approved' | 'rejected' | 'expired' | 'cancelled';
+export type RemoteInvokeGrantScope = 'remote_query' | 'remote_shell_exec' | 'remote_shell_interactive';
+export type RemoteCommandKind = 'query.readonly' | 'shell.exec';
 
 export interface RemoteInvokeConfig {
   enabled: boolean;
@@ -187,11 +189,29 @@ export interface CommandSummary {
   masked_args_json?: string;
   payload_digest?: string;
   payload_size?: number;
+  command_kind?: RemoteCommandKind;
+  encrypted_payload_present?: boolean;
+  pty_enabled?: boolean;
+  timeout_hint_ms?: number;
+  viewer_resume_ttl_ms?: number;
+  retention_ttl_ms?: number;
+  relay_token_ttl_ms?: number;
 }
 
 export interface RemoteCommand {
   command: string;
   args_json?: string;
+  kind?: RemoteCommandKind;
+  policy_id?: string;
+  exec_mode?: string;
+  argv_json?: string;
+  shell?: string | null;
+  command_text?: string | null;
+  cwd?: string;
+  env_json?: string;
+  stdin_mode?: string;
+  timeout_ms?: number;
+  pty_json?: string;
 }
 
 export interface RemoteInvokePairing {
@@ -202,7 +222,8 @@ export interface RemoteInvokePairing {
   pair_code: string;
   status: PairingStatus;
   caller_pubkey: string;
-  client_ephemeral_pub: string;
+  caller_ephemeral_pub?: string;
+  client_ephemeral_pub?: string;
   caller_info_json: string;
   command_summary_json: string;
   command_json: string;
@@ -220,8 +241,10 @@ export interface RemoteInvokeGrant {
   client_instance_id: string;
   caller_fingerprint: string;
   caller_display_name: string;
+  caller_ephemeral_pub?: string;
+  client_ephemeral_pub?: string;
   grant_mode: GrantMode;
-  grant_scope: string;
+  grant_scope: RemoteInvokeGrantScope;
   status: GrantStatus;
   first_authorized_at: string;
   expires_at: string;

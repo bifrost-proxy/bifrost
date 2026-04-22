@@ -3959,7 +3959,8 @@ E2E 加密后，Relay 能看到的信息严格限制为：
 
 实现时必须新增并执行：
 
-- `human_tests/remote-shell-exec.md`
+- 第一阶段（本轮 relay 新协议与通信加密）先复用并增量更新 `human_tests/remote-invoke.md`
+- 第二阶段（Client shell 执行、policy、sandbox、PTY）再新增 `human_tests/remote-shell-exec.md`
 
 建议至少覆盖：
 
@@ -3996,8 +3997,100 @@ E2E 加密后，Relay 能看到的信息严格限制为：
   - macOS 上 `network_scope.mode=off` 的命令确实无法发起网络连接（Seatbelt 内核级拦截）
   - macOS 上 `deny_roots` 中的路径确实不可写入（Seatbelt SBPL 文件系统策略）
   - enforcement backend 不可用时非 break-glass 命令被拒绝，且错误信息明确标识 `sandbox_enforcement_unavailable`
-  - `auto_within_profile` 模式在缺少 enforcement 时自动降级为 `manual_every_time`
-  - 审计记录中包含 `enforcement_backend`、`enforcement_status` 字段
+- `auto_within_profile` 模式在缺少 enforcement 时自动降级为 `manual_every_time`
+- 审计记录中包含 `enforcement_backend`、`enforcement_status` 字段
+
+## 第一阶段实施边界（relay 新协议 + 通信加密）
+
+### 目标
+
+本轮只落地 relay 侧的协议升级与端到端加密中转能力，确保：
+
+- relay 能接受并转发新的 `shell.exec` / `query.readonly` 加密协议信封
+- relay 对 command / frame / exit 均按密文不透明处理中转
+- relay 只持久化路由所需最小元数据，不再依赖明文 `command_json` / `command_summary_json`
+- 本地 `packages/bifrost-sync-server` 可完成自动化测试与手工验证
+- `bifrost-server-v4` 先完成同构代码改造，真实部署联调由主线程在远端环境执行
+
+### 本轮不包含
+
+- Client 侧 shell policy 匹配、沙箱 enforcement、PTY、resume 补拉
+- 远端 relay 的真实部署验证与公网稳定性验证
+- Web UI 的 shell policy 配置界面与审批弹窗细节
+- shell.exec 真正执行命令的端到端联调
+
+### 第一阶段交付拆分
+
+#### 1. Relay 数据模型最小闭环
+
+- Grant 侧统一使用 `remote_query` / `remote_shell_exec` / `remote_shell_interactive`，不再接受 `query` / `remote_invoke` 历史 alias
+- Call 侧新增或切换到 route-only 字段：
+  - `command_kind`
+  - `command_encrypted_json`
+  - `command_envelope_version`
+  - `pty_enabled`
+  - `timeout_hint_ms`
+  - `exit_encrypted_json`
+- v2 密文链路启用后，旧的明文 `command_json` / `command_summary_json` / `exit_code` / `stderr` 等字段不再作为协议来源；新请求只允许密文入口，不做历史版本兼容
+
+#### 2. API / 路由改造
+
+- `POST /v4/remote-invoke/caller/calls`
+  - 必须提供 `command_kind`
+  - 必须提供 `command_encrypted`
+  - 支持 `pty_enabled`
+  - 支持 `timeout_hint_ms`
+  - 不再读取或接受明文 `command`
+- `call_open` SSE 事件：
+  - relay 原样把 `command_encrypted`、`command_kind`、`pty_enabled`、`timeout_hint_ms` 转发给 Client
+  - 不透传可被 relay 解析的命令明细
+- `POST /v4/remote-invoke/client/calls/:id/frame`
+  - 继续只接收 `envelope_json`
+  - relay 只做 token、call_id、client_instance_id 校验与转发
+- `POST /v4/remote-invoke/client/calls/:id/exit`
+  - 支持 `exit_encrypted`
+  - relay 只记录 call 结束态与必要时间戳，原样把密文 exit 转给 Caller
+
+#### 3. 存储与审计要求
+
+- relay 数据库中不得新增可恢复命令明文或输出明文的字段
+- event summary 仅保留路由级摘要，例如 `grant_id`、`command_kind`、`frame_size`、`status`
+- 所有 shell v2 调用的人类可读预览只能在 Client 本地生成和展示
+
+#### 4. 第一阶段本地自动化测试
+
+本轮至少补齐以下本地 relay 自动化测试定义（`packages/bifrost-sync-server/src/__tests__`）：
+
+- `remote invoke relay v2 openCall stores encrypted command as opaque payload`
+- `remote invoke relay v2 call_open SSE forwards encrypted command without plaintext expansion`
+- `remote invoke relay v2 postClientExit forwards exit_encrypted without plaintext exit fields`
+- `remote invoke relay v2 list/get call API does not reconstruct plaintext command_detail for encrypted calls`
+- `remote invoke relay v2 shell scope rejects grant_scope=remote_query when command_kind=shell.exec`
+
+如当前主线程尚未完成实现，可先以 `it.todo(...)` 形式落测试定义，待实现到位后再转为可执行断言。
+
+### 第一阶段真实场景验证清单
+
+本轮主线程必须紧跟 `human_tests/remote-invoke.md` 中新增的第一阶段用例执行，至少覆盖：
+
+- 本地 relay 接受 `command_encrypted` 打开的 v2 调用
+- relay 数据库与日志不落命令/输出明文
+- `exit_encrypted` 能从 client 原样回传到 caller
+- `remote_query` grant 不可执行 `shell.exec`
+- relay 重启后 v2 路由级元数据仍可恢复，且不会回退到明文存储
+- 真实 CLI `remote connect -> remote status -> remote search -> remote traffic list` 在本地 relay 上完成一次完整加密黑盒闭环
+
+### 第一阶段实现补充（2026-04-22）
+
+结合本轮实际联调结果，第一阶段的 E2E 载荷实现再补充两条约束：
+
+- `openCall command`、`frame`、`exit` 三类密文在第一阶段统一使用 `ChaCha20-Poly1305 + 空 AAD`，避免 Caller 与 Client 因 JSON AAD 字段形状差异导致认证失败
+- Relay 继续只保留 route-level 元数据；`grant_scope`、`command_kind` 等需要路由/审计的字段由外层协议显式传递，不依赖解密密文
+- Client 侧 grant 的 ECDH `shared_secret` / `caller_ephemeral_pub` / `client_ephemeral_pub` 必须本地持久化；如果 admin 本地存储协议版本不匹配或文件损坏，直接删除并按新协议重建，不做历史兼容迁移
+- Caller 侧如果发现 relay `grants/reusable` 返回的是同一 caller/client 对下另一条旧 grant，必须整套回退到本地最后一次 connect 保存的 transport context：不仅使用保存的 `grant_id`，也要同时使用保存的 `caller_ephemeral_pub` / `client_ephemeral_pub`，禁止把旧 grant 的 ephemeral key 与新 grant 的 shared secret 交叉拼接
+- Recent Calls / 本地审计 UI 展示的命令摘要不能依赖 relay 落库明文。若 relay 下发的 `command_summary.command_preview` 为空，client 必须用解密后的 `RemoteCommand.summary_label()` 在本地补齐可展示摘要，避免 Recent Calls 出现空白标题。
+
+这样做的目的不是降低加密强度，而是把第一阶段优先级收敛到“强制密文传输 + 双端稳定互通”。待第二阶段 shell policy / PTY 演进时，如需恢复更丰富的 AAD 绑定，再以单一共享结构一次性升级。
 
 ## 校验要求
 
@@ -4043,13 +4136,13 @@ expires_at, last_used_at, max_calls, remaining_calls,
 auth_method, ssh_key_fingerprint
 ```
 
-其中 `grant_scope` 当前**硬编码为 `'query'`**（sync-server 在 `service.ts` 中 `submitGrantDecision()` 设置；v4 在 `remoteInvoke.ts` 的 `forwardDecision()` 和 `submitSshConnectResult()` 中设置）。
+其中 `grant_scope` 当前需要统一为新的 `remote_*` 枚举（sync-server 在 `service.ts` 中 `submitGrantDecision()` 设置；v4 在 `remoteInvoke.ts` 的 `forwardDecision()` 和 `submitSshConnectResult()` 中设置）。
 
 #### 2.2 需要新增的 Grant 字段
 
 | 字段 | 类型 | 说明 | 来源 |
 | --- | --- | --- | --- |
-| `grant_scope` | `string` | 从 `'query'` 扩展为 `'remote_query'` / `'remote_shell_exec'` / `'remote_shell_interactive'` | Client 在 grant decision 时传入 |
+| `grant_scope` | `string` | 使用 `'remote_query'` / `'remote_shell_exec'` / `'remote_shell_interactive'`，拒绝旧 alias | Client 在 grant decision 时传入 |
 | `policy_binding` | `string` / JSON | 允许访问的 policy 集合或 policy tag | Client 在 grant decision 时传入 |
 | `shell_policy_set_version_snapshot` | `number` | 授权时的全局策略版本快照 | Client 在 grant decision 时传入 |
 | `interactive_allowed` | `boolean` | 是否允许 PTY | Client 在 grant decision 时传入 |
@@ -4060,7 +4153,7 @@ auth_method, ssh_key_fingerprint
 - **grant decision 接口**（`POST /v4/remote-invoke/client/grants/:pairingId/decision`）：
   - body 中新增可选字段 `grant_scope`、`policy_binding`、`shell_policy_set_version_snapshot`、`interactive_allowed`、`stdin_allowed`
   - 这些字段由 Client 决定后传入，Relay 原样存储用于后续 openCall 的权限范围校验，不做业务决策
-  - `grant_scope` 不再硬编码，改为从 body 取值，缺省值为 `'remote_query'`（向后兼容）
+  - `grant_scope` 不再硬编码，改为从 body 取值，缺省值为 `'remote_query'`
 
 - **SSH connect result 接口**（`POST /v4/remote-invoke/ssh/connect-result`）：
   - body 中同样新增上述可选字段

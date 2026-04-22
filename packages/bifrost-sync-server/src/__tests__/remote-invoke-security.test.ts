@@ -82,6 +82,112 @@ function openSse(
   });
 }
 
+function openSseWithEvents(
+  urlPath: string,
+  headers: Record<string, string> = {},
+): Promise<{
+  status: number;
+  nextEvent: (eventName: string, timeoutMs?: number) => Promise<unknown>;
+  close: () => void;
+}> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlPath, baseUrl);
+    const request = http.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      headers,
+    });
+
+    request.on('response', (res) => {
+      const pending = new Map<string, Array<(data: unknown) => void>>();
+      const bufferedEvents = new Map<string, unknown[]>();
+      let buffer = '';
+      let currentEvent = 'message';
+      let closed = false;
+
+      const emit = (eventName: string, data: unknown) => {
+        const queue = pending.get(eventName);
+        const resolver = queue?.shift();
+        if (resolver) {
+          resolver(data);
+          return;
+        }
+        const buffered = bufferedEvents.get(eventName) ?? [];
+        buffered.push(data);
+        bufferedEvents.set(eventName, buffered);
+      };
+
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        buffer += chunk;
+        while (buffer.includes('\n\n')) {
+          const boundary = buffer.indexOf('\n\n');
+          const rawEvent = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+
+          let dataLines: string[] = [];
+          currentEvent = 'message';
+          for (const line of rawEvent.split('\n')) {
+            if (line.startsWith('event:')) {
+              currentEvent = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trim());
+            }
+          }
+
+          if (!dataLines.length) continue;
+          const rawData = dataLines.join('\n');
+          let parsed: unknown = rawData;
+          try {
+            parsed = JSON.parse(rawData);
+          } catch {
+            parsed = rawData;
+          }
+          emit(currentEvent, parsed);
+        }
+      });
+
+      resolve({
+        status: res.statusCode ?? 0,
+        nextEvent: (eventName: string, timeoutMs = 2_000) => new Promise((resolveEvent, rejectEvent) => {
+          if (closed) {
+            rejectEvent(new Error('sse_closed'));
+            return;
+          }
+          const buffered = bufferedEvents.get(eventName) ?? [];
+          if (buffered.length > 0) {
+            const data = buffered.shift();
+            bufferedEvents.set(eventName, buffered);
+            resolveEvent(data);
+            return;
+          }
+          const timer = setTimeout(() => {
+            const queue = pending.get(eventName) ?? [];
+            pending.set(eventName, queue.filter((entry) => entry !== wrappedResolve));
+            rejectEvent(new Error(`timeout waiting for ${eventName}`));
+          }, timeoutMs);
+          const wrappedResolve = (data: unknown) => {
+            clearTimeout(timer);
+            resolveEvent(data);
+          };
+          const queue = pending.get(eventName) ?? [];
+          queue.push(wrappedResolve);
+          pending.set(eventName, queue);
+        }),
+        close: () => {
+          closed = true;
+          res.destroy();
+          request.destroy();
+        },
+      });
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 async function registerUser(userId: string, password: string): Promise<string> {
   const response = await req('POST', '/v4/sso/register', {
     user_id: userId,
@@ -206,7 +312,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await server.close();
+  await server?.close();
   if (fs.existsSync(TEST_DATA_DIR)) {
     fs.rmSync(TEST_DATA_DIR, { recursive: true });
   }
@@ -560,5 +666,139 @@ describe('Remote Invoke security', () => {
       { Authorization: `Bearer ${clientAToken}` },
     );
     expect(ownerFrame.status).toBe(200);
+  });
+
+  it('rejects shell.exec openCall when the grant scope is only remote_query', async () => {
+    const now = new Date().toISOString();
+    await server.storage.remoteInvoke.createGrant({
+      id: 'ri-remote-query-grant',
+      user_id: 'ri-owner-query-only',
+      client_instance_id: 'ri-query-client',
+      caller_fingerprint: 'caller-query-only',
+      caller_display_name: 'caller-query-only',
+      grant_mode: 'permanent',
+      grant_scope: 'remote_query',
+      status: 'active',
+      first_authorized_at: now,
+      expires_at: '',
+      last_used_at: now,
+      max_calls: 999999,
+      remaining_calls: 999999,
+      created_by: 'test',
+      update_time: now,
+    });
+
+    const response = await req('POST', '/v4/remote-invoke/calls/open', {
+      grant_id: 'ri-remote-query-grant',
+      client_instance_id: 'ri-query-client',
+      caller_fingerprint: 'caller-query-only',
+      command_kind: 'shell.exec',
+      command_encrypted: {
+        version: 1,
+        nonce: 'abc',
+        ciphertext: 'cipher',
+        tag: 'tag',
+      },
+      command_summary: {
+        command_preview: 'deploy api',
+      },
+      timeout_hint_ms: 120_000,
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.data.message).toBe('grant_scope_mismatch');
+  });
+
+  it('passes through shell.exec encrypted openCall payloads and shell grant scope metadata', async () => {
+    const token = await registerUser('ri_shell_exec_owner', 'password123');
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const registration = await registerClient(
+      'ri-shell-client',
+      clientPubkey,
+      clientKeys.privateKey,
+      token,
+      { device_name: 'shell-client' },
+    );
+    const clientAuthToken = registration.data.data.client_auth_token as string;
+
+    const clientStream = await openSseWithEvents(
+      `/v4/remote-invoke/client/stream?client_instance_id=ri-shell-client&stream_id=ri-shell-stream&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+    );
+    expect(clientStream.status).toBe(200);
+    await clientStream.nextEvent('client_hello_ack');
+
+    const now = new Date().toISOString();
+    await server.storage.remoteInvoke.createGrant({
+      id: 'ri-shell-grant',
+      user_id: 'ri_shell_exec_owner',
+      client_instance_id: 'ri-shell-client',
+      caller_fingerprint: 'caller-shell-exec',
+      caller_display_name: 'shell-caller',
+      grant_mode: 'permanent',
+      grant_scope: 'remote_shell_exec',
+      status: 'active',
+      first_authorized_at: now,
+      expires_at: '',
+      last_used_at: now,
+      max_calls: 999999,
+      remaining_calls: 999999,
+      created_by: 'test',
+      update_time: now,
+    });
+
+    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
+      grant_id: 'ri-shell-grant',
+      client_instance_id: 'ri-shell-client',
+      caller_fingerprint: 'caller-shell-exec',
+      caller_pubkey: 'caller-pubkey',
+      command_kind: 'shell.exec',
+      command_encrypted: {
+        version: 1,
+        nonce: 'nonce-1',
+        ciphertext: 'ciphertext-1',
+        tag: 'tag-1',
+        aad: { policy_id: 'deploy-api' },
+      },
+      command_summary: {
+        command_preview: 'deploy api',
+      },
+      pty_enabled: true,
+      timeout_hint_ms: 120_000,
+    });
+
+    expect(openResponse.status).toBe(200);
+    expect(openResponse.data.data.call_meta.command_kind).toBe('shell.exec');
+    expect(openResponse.data.data.call_meta.pty_enabled).toBe(true);
+    expect(openResponse.data.data.call_meta.timeout_hint_ms).toBe(120_000);
+    expect(openResponse.data.data.call_meta.relay_token_ttl_ms).toBe(24 * 60 * 60 * 1000);
+
+    const callOpenEvent = await clientStream.nextEvent('call_open');
+    expect(callOpenEvent).toMatchObject({
+      grant_id: 'ri-shell-grant',
+      grant_scope: 'remote_shell_exec',
+      caller_fingerprint: 'caller-shell-exec',
+      command_kind: 'shell.exec',
+      pty_enabled: true,
+      timeout_hint_ms: 120_000,
+      command_encrypted: {
+        version: 1,
+        nonce: 'nonce-1',
+        ciphertext: 'ciphertext-1',
+        tag: 'tag-1',
+      },
+    });
+
+    const storedCall = await server.storage.remoteInvoke.getCall(openResponse.data.data.call_id);
+    expect(storedCall).toBeTruthy();
+    const commandSummary = JSON.parse(storedCall!.command_summary_json);
+    const commandDetail = JSON.parse(storedCall!.command_json);
+    expect(commandSummary.command_kind).toBe('shell.exec');
+    expect(commandSummary.encrypted_payload_present).toBe(true);
+    expect(commandSummary.pty_enabled).toBe(true);
+    expect(commandSummary.timeout_hint_ms).toBe(120_000);
+    expect(commandDetail).toEqual({ kind: 'shell.exec' });
+
+    clientStream.close();
   });
 });

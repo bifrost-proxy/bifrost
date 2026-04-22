@@ -33,6 +33,7 @@ export interface CommandSummary {
 }
 
 export interface RemoteCommand {
+  kind?: string;
   command: string;
   args_json?: string;
 }
@@ -150,8 +151,9 @@ export interface Call {
   ssh_key_id?: string | null;
   ssh_key_fingerprint?: string | null;
   caller_info_json?: Record<string, unknown> | string | null;
-  command: string;
+  command: RemoteCommand;
   command_summary: { command_preview: string; masked_args_json?: string | null };
+  command_kind?: string;
   command_detail?: Record<string, unknown>;
   status: string;
   source_ip?: string;
