@@ -8,7 +8,11 @@ use bifrost_core::{direct_reqwest_client_builder, BifrostError};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305, NONCE_LEN};
+use ring::agreement::{self, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
+use ring::hkdf;
+use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +26,7 @@ const CANCEL_SETTLE_TIMEOUT_SECS: u64 = 10;
 const CANCEL_SETTLE_TOTAL_TIMEOUT_SECS: u64 = 15;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
 const CONNECTIONS_FILE: &str = "remote-connections.json";
+const CONNECTIONS_KEY_FILE: &str = "remote-connections.key";
 const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 const CANCEL_SETTLE_RETRY_DELAYS_MS: [u64; 4] = [200, 500, 1000, 2000];
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -29,6 +34,11 @@ const BIFROST_KEY_BEGIN: &str = "-----BEGIN BIFROST KEY-----";
 const BIFROST_KEY_END: &str = "-----END BIFROST KEY-----";
 const PKCS8_KEY_BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
 const PKCS8_KEY_END: &str = "-----END PRIVATE KEY-----";
+const TRANSPORT_CONTEXT_VERSION: u32 = 2;
+const ENCRYPTED_OPEN_CALL_VERSION: u32 = 2;
+const LOCAL_SECRET_FORMAT_VERSION: u32 = 1;
+const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
+const CALL_EVENT_HKDF_INFO_PREFIX: &[u8] = b"bifrost-e2e-v1";
 
 #[derive(Debug)]
 pub struct RemoteOptions {
@@ -55,6 +65,14 @@ struct LocalConnection {
     ssh_key_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport_context_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_ephemeral_pub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_ephemeral_pub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_secret_encrypted: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +83,10 @@ struct ConnectionsFile {
 
 fn connections_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONNECTIONS_FILE)
+}
+
+fn connections_key_path() -> PathBuf {
+    bifrost_storage::data_dir().join(CONNECTIONS_KEY_FILE)
 }
 
 fn load_connections() -> bifrost_core::Result<Vec<LocalConnection>> {
@@ -94,7 +116,7 @@ fn save_connections(connections: &[LocalConnection]) -> bifrost_core::Result<()>
         })?;
     }
     let file = ConnectionsFile {
-        version: 1,
+        version: 2,
         connections: connections.to_vec(),
     };
     let content = serde_json::to_string_pretty(&file)
@@ -205,6 +227,577 @@ fn resolve_local_connection(
     }
 }
 
+#[derive(Debug, Clone)]
+struct StoredTransportContext {
+    caller_ephemeral_pub: String,
+    client_ephemeral_pub: String,
+    shared_secret_encrypted: String,
+}
+
+#[derive(Debug)]
+struct PendingCallerTransport {
+    private_key: agreement::EphemeralPrivateKey,
+    caller_ephemeral_pub: String,
+}
+
+impl PendingCallerTransport {
+    fn generate() -> bifrost_core::Result<Self> {
+        let rng = SystemRandom::new();
+        let private_key =
+            agreement::EphemeralPrivateKey::generate(&X25519, &rng).map_err(|_| {
+                BifrostError::Config("generate caller ephemeral key failed".to_string())
+            })?;
+        let caller_ephemeral_pub = base64::engine::general_purpose::STANDARD.encode(
+            private_key
+                .compute_public_key()
+                .map_err(|_| {
+                    BifrostError::Config("compute caller ephemeral public key failed".to_string())
+                })?
+                .as_ref(),
+        );
+        Ok(Self {
+            private_key,
+            caller_ephemeral_pub,
+        })
+    }
+
+    fn finalize(self, client_ephemeral_pub: &str) -> bifrost_core::Result<StoredTransportContext> {
+        let client_pub_raw = base64::engine::general_purpose::STANDARD
+            .decode(client_ephemeral_pub)
+            .map_err(|e| {
+                BifrostError::Config(format!("decode client_ephemeral_pub from relay: {e}"))
+            })?;
+
+        let peer_public = UnparsedPublicKey::new(&X25519, client_pub_raw);
+        let shared_secret =
+            agreement::agree_ephemeral(self.private_key, &peer_public, |secret| secret.to_vec())
+                .map_err(|_| {
+                    BifrostError::Config(
+                        "derive encrypted transport shared secret failed".to_string(),
+                    )
+                })?;
+
+        Ok(StoredTransportContext {
+            caller_ephemeral_pub: self.caller_ephemeral_pub,
+            client_ephemeral_pub: client_ephemeral_pub.to_string(),
+            shared_secret_encrypted: encrypt_local_secret(&shared_secret)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OpenCallTransportContext {
+    caller_ephemeral_pub: String,
+    client_ephemeral_pub: String,
+    shared_secret: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum CommandKind {
+    #[serde(rename = "query.readonly")]
+    QueryReadonly,
+    #[serde(rename = "shell.exec")]
+    ShellExec,
+}
+
+impl CommandKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::QueryReadonly => "query.readonly",
+            Self::ShellExec => "shell.exec",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedPayload {
+    #[serde(default = "default_encrypted_open_call_version")]
+    version: u32,
+    nonce: String,
+    ciphertext: String,
+    tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aad: Option<FrameEnvelopeAad>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommandEnvelope {
+    kind: String,
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FrameEnvelopeAad {
+    version: u32,
+    call_id: String,
+    seq: u64,
+    direction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedFramePayload {
+    chunk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedExitPayload {
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalSecretEnvelope {
+    version: u32,
+    nonce: String,
+    ciphertext: String,
+}
+
+fn default_encrypted_open_call_version() -> u32 {
+    ENCRYPTED_OPEN_CALL_VERSION
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HkdfLen(usize);
+
+impl hkdf::KeyType for HkdfLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+fn load_or_create_connections_key() -> bifrost_core::Result<[u8; 32]> {
+    let path = connections_key_path();
+    if path.exists() {
+        let encoded = std::fs::read_to_string(&path).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "read {}: {e}",
+                path.display()
+            )))
+        })?;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .map_err(|e| BifrostError::Config(format!("parse {}: {e}", path.display())))?;
+        let key: [u8; 32] = raw.try_into().map_err(|_| {
+            BifrostError::Config(format!("{} must contain a 32-byte key", path.display()))
+        })?;
+        return Ok(key);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "mkdir {}: {e}",
+                parent.display()
+            )))
+        })?;
+    }
+
+    let mut key = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut key)
+        .map_err(|_| BifrostError::Config("generate local transport key failed".to_string()))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+    std::fs::write(&path, format!("{encoded}\n")).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "write {}: {e}",
+            path.display()
+        )))
+    })?;
+    Ok(key)
+}
+
+fn encrypt_local_secret(plaintext: &[u8]) -> bifrost_core::Result<String> {
+    let key_bytes = load_or_create_connections_key()?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
+        BifrostError::Config("initialize local transport secret encryption failed".to_string())
+    })?;
+    let key = LessSafeKey::new(unbound);
+    let mut nonce = [0u8; NONCE_LEN];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| BifrostError::Config("generate local transport nonce failed".to_string()))?;
+    let mut ciphertext = plaintext.to_vec();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::empty(),
+        &mut ciphertext,
+    )
+    .map_err(|_| BifrostError::Config("encrypt local transport secret failed".to_string()))?;
+
+    serde_json::to_string(&LocalSecretEnvelope {
+        version: LOCAL_SECRET_FORMAT_VERSION,
+        nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+        ciphertext: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+    })
+    .map_err(|e| BifrostError::Config(format!("serialize local transport secret failed: {e}")))
+}
+
+fn decrypt_local_secret(encoded: &str) -> bifrost_core::Result<Vec<u8>> {
+    let envelope: LocalSecretEnvelope = serde_json::from_str(encoded)
+        .map_err(|e| BifrostError::Config(format!("parse local transport secret failed: {e}")))?;
+    if envelope.version != LOCAL_SECRET_FORMAT_VERSION {
+        return Err(BifrostError::Config(format!(
+            "unsupported local transport secret version: {}",
+            envelope.version
+        )));
+    }
+
+    let key_bytes = load_or_create_connections_key()?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
+        BifrostError::Config("initialize local transport secret decryption failed".to_string())
+    })?;
+    let key = LessSafeKey::new(unbound);
+    let nonce_raw = base64::engine::general_purpose::STANDARD
+        .decode(envelope.nonce)
+        .map_err(|e| BifrostError::Config(format!("decode local transport nonce failed: {e}")))?;
+    let nonce: [u8; NONCE_LEN] = nonce_raw
+        .try_into()
+        .map_err(|_| BifrostError::Config("local transport nonce must be 12 bytes".to_string()))?;
+    let mut ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(envelope.ciphertext)
+        .map_err(|e| {
+            BifrostError::Config(format!("decode local transport ciphertext failed: {e}"))
+        })?;
+    let plaintext = key
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::empty(),
+            &mut ciphertext,
+        )
+        .map_err(|_| BifrostError::Config("decrypt local transport secret failed".to_string()))?;
+    Ok(plaintext.to_vec())
+}
+
+fn merge_transport_context(
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+) -> bifrost_core::Result<OpenCallTransportContext> {
+    let caller_ephemeral_pub = conn
+        .caller_ephemeral_pub
+        .clone()
+        .or_else(|| grant.caller_ephemeral_pub.clone())
+        .ok_or_else(|| {
+            BifrostError::Config(
+                "saved connection is missing caller_ephemeral_pub; reconnect to refresh encrypted transport context".to_string(),
+            )
+        })?;
+    let client_ephemeral_pub = conn
+        .client_ephemeral_pub
+        .clone()
+        .or_else(|| grant.client_ephemeral_pub.clone())
+        .ok_or_else(|| {
+            BifrostError::Config(
+                "saved connection is missing client_ephemeral_pub; reconnect to refresh encrypted transport context".to_string(),
+            )
+        })?;
+    let shared_secret_encrypted = conn.shared_secret_encrypted.clone().ok_or_else(|| {
+        BifrostError::Config(
+            "saved connection is missing encrypted transport secret; reconnect to refresh encrypted transport context".to_string(),
+        )
+    })?;
+
+    if let Some(grant_caller_pub) = &grant.caller_ephemeral_pub {
+        if grant_caller_pub != &caller_ephemeral_pub {
+            return Err(BifrostError::Config(
+                "relay grant caller_ephemeral_pub does not match saved encrypted transport context; reconnect required".to_string(),
+            ));
+        }
+    }
+    if let Some(grant_client_pub) = &grant.client_ephemeral_pub {
+        if grant_client_pub != &client_ephemeral_pub {
+            return Err(BifrostError::Config(
+                "relay grant client_ephemeral_pub does not match saved encrypted transport context; reconnect required".to_string(),
+            ));
+        }
+    }
+
+    Ok(OpenCallTransportContext {
+        caller_ephemeral_pub,
+        client_ephemeral_pub,
+        shared_secret: decrypt_local_secret(&shared_secret_encrypted)?,
+    })
+}
+
+fn prefer_saved_grant_for_transport(conn: &LocalConnection, mut grant: GrantInfo) -> GrantInfo {
+    if conn.grant_id.is_empty() || grant.grant_id == conn.grant_id {
+        return grant;
+    }
+
+    warn!(
+        saved_grant_id = %conn.grant_id,
+        relay_grant_id = %grant.grant_id,
+        "relay returned a different reusable grant than the saved encrypted transport context; preferring saved grant_id"
+    );
+    grant.grant_id = conn.grant_id.clone();
+    grant.caller_ephemeral_pub = conn.caller_ephemeral_pub.clone();
+    grant.client_ephemeral_pub = conn.client_ephemeral_pub.clone();
+    grant
+}
+
+fn derive_open_call_key(
+    shared_secret: &[u8],
+    grant_id: &str,
+    caller_ephemeral_pub: &str,
+    client_ephemeral_pub: &str,
+    command_kind: CommandKind,
+) -> bifrost_core::Result<[u8; 32]> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, grant_id.as_bytes());
+    let prk = salt.extract(shared_secret);
+    let caller_pub = decode_base64_or_raw(caller_ephemeral_pub);
+    let client_pub = decode_base64_or_raw(client_ephemeral_pub);
+    let info = [
+        OPEN_CALL_HKDF_INFO_PREFIX,
+        caller_pub.as_slice(),
+        client_pub.as_slice(),
+        command_kind.as_str().as_bytes(),
+    ];
+    let okm = prk
+        .expand(&info, HkdfLen(32))
+        .map_err(|_| BifrostError::Config("derive open_call session key failed".to_string()))?;
+    let mut key = [0u8; 32];
+    okm.fill(&mut key)
+        .map_err(|_| BifrostError::Config("fill open_call session key failed".to_string()))?;
+    Ok(key)
+}
+
+fn derive_call_event_key(
+    shared_secret: &[u8],
+    call_id: &str,
+    caller_ephemeral_pub: &str,
+    client_ephemeral_pub: &str,
+) -> bifrost_core::Result<[u8; 32]> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, call_id.as_bytes());
+    let prk = salt.extract(shared_secret);
+    let caller_pub = decode_base64_or_raw(caller_ephemeral_pub);
+    let client_pub = decode_base64_or_raw(client_ephemeral_pub);
+    let info = [
+        CALL_EVENT_HKDF_INFO_PREFIX,
+        caller_pub.as_slice(),
+        client_pub.as_slice(),
+    ];
+    let okm = prk
+        .expand(&info, HkdfLen(32))
+        .map_err(|_| BifrostError::Config("derive call event session key failed".to_string()))?;
+    let mut key = [0u8; 32];
+    okm.fill(&mut key)
+        .map_err(|_| BifrostError::Config("fill call event session key failed".to_string()))?;
+    Ok(key)
+}
+
+fn decode_base64_or_raw(value: &str) -> Vec<u8> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+
+    match base64::engine::general_purpose::STANDARD.decode(value) {
+        Ok(decoded) if !decoded.is_empty() => decoded,
+        _ => value.as_bytes().to_vec(),
+    }
+}
+
+fn short_fingerprint(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes).as_ref()[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn encrypt_remote_command(
+    command_kind: CommandKind,
+    command: &str,
+    args_json: Option<&str>,
+    grant_id: &str,
+    transport: &OpenCallTransportContext,
+) -> bifrost_core::Result<EncryptedPayload> {
+    let key_bytes = derive_open_call_key(
+        &transport.shared_secret,
+        grant_id,
+        &transport.caller_ephemeral_pub,
+        &transport.client_ephemeral_pub,
+        command_kind,
+    )?;
+    debug!(
+        grant_id = %grant_id,
+        command_kind = %command_kind.as_str(),
+        shared_secret_fp = %short_fingerprint(&transport.shared_secret),
+        open_call_key_fp = %short_fingerprint(&key_bytes),
+        "derived caller open_call encryption key"
+    );
+    let unbound = UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).map_err(|_| {
+        BifrostError::Config("initialize open_call command encryption failed".to_string())
+    })?;
+    let key = LessSafeKey::new(unbound);
+    let mut nonce = [0u8; NONCE_LEN];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| BifrostError::Config("generate open_call nonce failed".to_string()))?;
+
+    let plaintext = serde_json::to_vec(&CommandEnvelope {
+        kind: command_kind.as_str().to_string(),
+        command: command.to_string(),
+        args_json: args_json.map(ToOwned::to_owned),
+    })
+    .map_err(|e| {
+        BifrostError::Config(format!("serialize encrypted command payload failed: {e}"))
+    })?;
+    let mut sealed = plaintext;
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::empty(),
+        &mut sealed,
+    )
+    .map_err(|_| BifrostError::Config("encrypt remote command payload failed".to_string()))?;
+    let tag = sealed.split_off(sealed.len().saturating_sub(16));
+
+    Ok(EncryptedPayload {
+        version: ENCRYPTED_OPEN_CALL_VERSION,
+        nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+        ciphertext: base64::engine::general_purpose::STANDARD.encode(sealed),
+        tag: base64::engine::general_purpose::STANDARD.encode(tag),
+        aad: None,
+    })
+}
+
+fn decrypt_payload_bytes(
+    payload: &EncryptedPayload,
+    key_bytes: &[u8; 32],
+    aad_bytes: Option<&[u8]>,
+) -> bifrost_core::Result<Vec<u8>> {
+    let nonce_raw = base64::engine::general_purpose::STANDARD
+        .decode(&payload.nonce)
+        .map_err(|e| BifrostError::Config(format!("decode encrypted payload nonce failed: {e}")))?;
+    let nonce: [u8; NONCE_LEN] = nonce_raw.try_into().map_err(|_| {
+        BifrostError::Config("encrypted payload nonce must be 12 bytes".to_string())
+    })?;
+
+    let mut sealed = base64::engine::general_purpose::STANDARD
+        .decode(&payload.ciphertext)
+        .map_err(|e| {
+            BifrostError::Config(format!("decode encrypted payload ciphertext failed: {e}"))
+        })?;
+    let tag = base64::engine::general_purpose::STANDARD
+        .decode(&payload.tag)
+        .map_err(|e| BifrostError::Config(format!("decode encrypted payload tag failed: {e}")))?;
+    sealed.extend_from_slice(&tag);
+
+    let unbound = UnboundKey::new(&CHACHA20_POLY1305, key_bytes).map_err(|_| {
+        BifrostError::Config("initialize encrypted payload decrypt key failed".to_string())
+    })?;
+    let key = LessSafeKey::new(unbound);
+    let plaintext = match aad_bytes {
+        Some(aad_bytes) => key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad_bytes),
+                &mut sealed,
+            )
+            .map_err(|_| {
+                BifrostError::Config("encrypted payload authentication failed".to_string())
+            })?,
+        None => key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::empty(),
+                &mut sealed,
+            )
+            .map_err(|_| {
+                BifrostError::Config("encrypted payload authentication failed".to_string())
+            })?,
+    };
+    Ok(plaintext.to_vec())
+}
+
+fn decrypt_frame_chunk(
+    transport: &OpenCallTransportContext,
+    call_id: &str,
+    envelope: &Value,
+) -> bifrost_core::Result<String> {
+    let payload = EncryptedPayload {
+        version: envelope
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as u32,
+        nonce: envelope
+            .get("nonce")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        ciphertext: envelope
+            .get("ciphertext")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        tag: envelope
+            .get("tag")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        aad: envelope
+            .get("aad")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+    };
+    if payload.nonce.is_empty() || payload.tag.is_empty() {
+        return Ok(payload.ciphertext);
+    }
+
+    let key = derive_call_event_key(
+        &transport.shared_secret,
+        call_id,
+        &transport.caller_ephemeral_pub,
+        &transport.client_ephemeral_pub,
+    )?;
+    let aad_bytes = if let Some(aad) = &payload.aad {
+        Some(
+            serde_json::to_vec(aad)
+                .map_err(|e| BifrostError::Config(format!("serialize frame aad failed: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let plaintext = decrypt_payload_bytes(&payload, &key, aad_bytes.as_deref())?;
+    let frame: EncryptedFramePayload = serde_json::from_slice(&plaintext)
+        .map_err(|e| BifrostError::Config(format!("decode encrypted frame payload failed: {e}")))?;
+    Ok(frame.chunk)
+}
+
+fn decrypt_exit_payload(
+    transport: &OpenCallTransportContext,
+    call_id: &str,
+    payload: &EncryptedPayload,
+) -> bifrost_core::Result<EncryptedExitPayload> {
+    let key = derive_call_event_key(
+        &transport.shared_secret,
+        call_id,
+        &transport.caller_ephemeral_pub,
+        &transport.client_ephemeral_pub,
+    )?;
+    let aad_bytes = if let Some(aad) = &payload.aad {
+        Some(
+            serde_json::to_vec(aad)
+                .map_err(|e| BifrostError::Config(format!("serialize exit aad failed: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let plaintext = decrypt_payload_bytes(payload, &key, aad_bytes.as_deref())?;
+    serde_json::from_slice(&plaintext)
+        .map_err(|e| BifrostError::Config(format!("decode encrypted exit payload failed: {e}")))
+}
+
 pub fn handle_remote_command(opts: RemoteOptions) -> bifrost_core::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -274,11 +867,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         conn.caller_fingerprint.clone()
     };
 
-    let (command, args_json) = build_remote_command(&opts.action);
-    let command_summary = CommandSummary {
-        command_preview: command.clone(),
-        masked_args_json: args_json.clone(),
-    };
+    let (command_kind, command, args_json) = build_remote_command(&opts.action);
 
     let grant = caller
         .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
@@ -296,6 +885,8 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         }
     };
 
+    let grant = prefer_saved_grant_for_transport(&conn, grant);
+
     info!(grant_id = %grant.grant_id, "found reusable grant");
     println!(
         "{}",
@@ -306,16 +897,22 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         .bright_green()
     );
 
+    let transport = merge_transport_context(&conn, &grant)?;
+    let command_encrypted = encrypt_remote_command(
+        command_kind,
+        &command,
+        args_json.as_deref(),
+        &grant.grant_id,
+        &transport,
+    )?;
+
     let call_result = caller
         .open_call(&OpenCallRequest {
             grant_id: grant.grant_id.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             caller_fingerprint: caller_fingerprint.clone(),
-            command: RemoteCommand {
-                command: command.clone(),
-                args_json: args_json.clone(),
-            },
-            command_summary,
+            command_kind,
+            command_encrypted,
         })
         .await?;
 
@@ -327,6 +924,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         result = caller.subscribe_call_events(
             &call_result.call_id,
             &call_result.relay_token,
+            &transport,
             stream_stdout,
             CALL_EVENT_TIMEOUT_SECS,
         ) => result?,
@@ -344,6 +942,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 caller.settle_cancelled_call(
                     &call_result.call_id,
                     &call_result.relay_token,
+                    &transport,
                     stream_stdout,
                     cancel_requested,
                 ),
@@ -377,6 +976,7 @@ async fn handle_connect(
     caller_info: &CallerInfo,
     relay_url: &str,
 ) -> bifrost_core::Result<()> {
+    let pending_transport = PendingCallerTransport::generate()?;
     println!(
         "{}",
         format!(
@@ -391,6 +991,7 @@ async fn handle_connect(
         &StartPairingRequest {
             pair_code: pair_code.to_string(),
             caller_info: caller_info.clone(),
+            caller_ephemeral_pub: pending_transport.caller_ephemeral_pub.clone(),
         },
     )
     .await?;
@@ -411,6 +1012,12 @@ async fn handle_connect(
                 .unwrap_or_else(|| "unknown".to_string());
             let platform = approval.platform.unwrap_or_else(|| "unknown".to_string());
             let grant_mode = approval.grant_mode.unwrap_or_else(|| "unknown".to_string());
+            let client_ephemeral_pub = approval.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                BifrostError::Config(
+                    "pairing succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
+                )
+            })?;
+            let transport = pending_transport.finalize(client_ephemeral_pub)?;
 
             let new_conn = LocalConnection {
                 client_instance_id: client_instance_id.clone(),
@@ -428,6 +1035,10 @@ async fn handle_connect(
                 ssh_key_fingerprint: None,
                 ssh_key_source: None,
                 device_code: None,
+                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+                client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+                shared_secret_encrypted: Some(transport.shared_secret_encrypted),
             };
 
             let mut connections = load_connections().unwrap_or_default();
@@ -491,6 +1102,7 @@ async fn handle_connect_with_ssh(
     caller_info: &CallerInfo,
     relay_url: &str,
 ) -> bifrost_core::Result<()> {
+    let pending_transport = PendingCallerTransport::generate()?;
     let loaded_key = load_ssh_key(ssh_key, device_code_override)?;
 
     println!(
@@ -522,6 +1134,7 @@ async fn handle_connect_with_ssh(
             signature,
             timestamp,
             caller_info: Some(caller_info.clone()),
+            caller_ephemeral_pub: Some(pending_transport.caller_ephemeral_pub.clone()),
         })
         .await?;
 
@@ -546,6 +1159,12 @@ async fn handle_connect_with_ssh(
             let caller_fingerprint = result
                 .caller_fingerprint
                 .unwrap_or_else(|| loaded_key.ssh_key_fingerprint.clone());
+            let client_ephemeral_pub = result.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                BifrostError::Config(
+                    "ssh connect succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
+                )
+            })?;
+            let transport = pending_transport.finalize(client_ephemeral_pub)?;
 
             let new_conn = LocalConnection {
                 client_instance_id: client_instance_id.clone(),
@@ -560,6 +1179,10 @@ async fn handle_connect_with_ssh(
                 ssh_key_fingerprint: Some(loaded_key.ssh_key_fingerprint.clone()),
                 ssh_key_source: Some(loaded_key.source_label.clone()),
                 device_code: Some(loaded_key.device_code.clone()),
+                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+                client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+                shared_secret_encrypted: Some(transport.shared_secret_encrypted),
             };
 
             let mut connections = load_connections().unwrap_or_default();
@@ -789,38 +1412,87 @@ async fn handle_disconnect(
     Ok(())
 }
 
-fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
+fn build_remote_command(action: &RemoteCommands) -> (CommandKind, String, Option<String>) {
     match action {
         RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
         RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
-        RemoteCommands::Status => ("status".to_string(), None),
-        RemoteCommands::Search { keyword, limit } => {
+        RemoteCommands::Status => (CommandKind::QueryReadonly, "status".to_string(), None),
+        RemoteCommands::Search {
+            keyword,
+            max_results,
+            max_scan,
+        } => {
             let args = serde_json::json!({
                 "query": keyword,
-                "limit": limit,
+                "max_results": max_results,
+                "max_scan": max_scan,
             });
-            ("search.get".to_string(), Some(args.to_string()))
+            (
+                CommandKind::QueryReadonly,
+                "search.get".to_string(),
+                Some(args.to_string()),
+            )
         }
         RemoteCommands::Traffic { action } => match action {
-            RemoteTrafficCommands::List {
-                limit,
-                cursor,
-                method,
-                status,
-            } => {
+            RemoteTrafficCommands::List(list_args) => {
+                let list_args = list_args.as_ref();
                 let mut args = serde_json::json!({
-                    "limit": limit,
+                    "limit": list_args.limit,
+                    "direction": list_args.direction,
                 });
-                if let Some(c) = cursor {
+                if let Some(c) = list_args.cursor {
                     args["cursor"] = serde_json::json!(c);
                 }
-                if let Some(m) = method {
+                if let Some(m) = &list_args.method {
                     args["method"] = serde_json::json!(m);
                 }
-                if let Some(s) = status {
+                if let Some(s) = list_args.status {
                     args["status"] = serde_json::json!(s);
                 }
-                ("traffic.list".to_string(), Some(args.to_string()))
+                if let Some(s) = list_args.status_min {
+                    args["status_min"] = serde_json::json!(s);
+                }
+                if let Some(s) = list_args.status_max {
+                    args["status_max"] = serde_json::json!(s);
+                }
+                if let Some(p) = &list_args.protocol {
+                    args["protocol"] = serde_json::json!(p);
+                }
+                if let Some(h) = &list_args.host {
+                    args["host"] = serde_json::json!(h);
+                }
+                if let Some(u) = &list_args.url {
+                    args["url"] = serde_json::json!(u);
+                }
+                if let Some(p) = &list_args.path {
+                    args["path"] = serde_json::json!(p);
+                }
+                if let Some(ct) = &list_args.content_type {
+                    args["content_type"] = serde_json::json!(ct);
+                }
+                if let Some(ip) = &list_args.client_ip {
+                    args["client_ip"] = serde_json::json!(ip);
+                }
+                if let Some(app) = &list_args.client_app {
+                    args["client_app"] = serde_json::json!(app);
+                }
+                if let Some(v) = list_args.has_rule_hit {
+                    args["has_rule_hit"] = serde_json::json!(v);
+                }
+                if let Some(v) = list_args.is_websocket {
+                    args["is_websocket"] = serde_json::json!(v);
+                }
+                if let Some(v) = list_args.is_sse {
+                    args["is_sse"] = serde_json::json!(v);
+                }
+                if let Some(v) = list_args.is_tunnel {
+                    args["is_tunnel"] = serde_json::json!(v);
+                }
+                (
+                    CommandKind::QueryReadonly,
+                    "traffic.list".to_string(),
+                    Some(args.to_string()),
+                )
             }
             RemoteTrafficCommands::Get {
                 id,
@@ -832,14 +1504,27 @@ fn build_remote_command(action: &RemoteCommands) -> (String, Option<String>) {
                     "request_body": request_body,
                     "response_body": response_body,
                 });
-                ("traffic.get".to_string(), Some(args.to_string()))
+                (
+                    CommandKind::QueryReadonly,
+                    "traffic.get".to_string(),
+                    Some(args.to_string()),
+                )
             }
-            RemoteTrafficCommands::Search { keyword, limit } => {
+            RemoteTrafficCommands::Search {
+                keyword,
+                max_results,
+                max_scan,
+            } => {
                 let args = serde_json::json!({
                     "query": keyword,
-                    "limit": limit,
+                    "max_results": max_results,
+                    "max_scan": max_scan,
                 });
-                ("traffic.search".to_string(), Some(args.to_string()))
+                (
+                    CommandKind::QueryReadonly,
+                    "traffic.search".to_string(),
+                    Some(args.to_string()),
+                )
             }
         },
     }
@@ -987,23 +1672,10 @@ struct CallerInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CommandSummary {
-    command_preview: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    masked_args_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteCommand {
-    command: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    args_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StartPairingRequest {
     pair_code: String,
     caller_info: CallerInfo,
+    caller_ephemeral_pub: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1026,6 +1698,10 @@ struct PairingWatchResult {
     platform: Option<String>,
     #[serde(default)]
     grant_mode: Option<String>,
+    #[serde(default)]
+    caller_ephemeral_pub: Option<String>,
+    #[serde(default)]
+    client_ephemeral_pub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1049,6 +1725,8 @@ struct SshConnectRequest {
     timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     caller_info: Option<CallerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_ephemeral_pub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1072,6 +1750,10 @@ struct SshConnectResult {
     grant_mode: Option<String>,
     #[serde(default)]
     client_instance_id: Option<String>,
+    #[serde(default)]
+    caller_ephemeral_pub: Option<String>,
+    #[serde(default)]
+    client_ephemeral_pub: Option<String>,
 }
 
 struct LoadedSshKey {
@@ -1086,6 +1768,10 @@ struct GrantInfo {
     grant_id: String,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    caller_ephemeral_pub: Option<String>,
+    #[serde(default)]
+    client_ephemeral_pub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1093,8 +1779,8 @@ struct OpenCallRequest {
     grant_id: String,
     client_instance_id: String,
     caller_fingerprint: String,
-    command: RemoteCommand,
-    command_summary: CommandSummary,
+    command_kind: CommandKind,
+    command_encrypted: EncryptedPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1293,6 +1979,12 @@ impl CallerRelayClient {
                                                     let grant_mode = v.get("grant_mode")
                                                         .and_then(|g| g.as_str())
                                                         .map(|s| s.to_string());
+                                                    let caller_ephemeral_pub = v.get("caller_ephemeral_pub")
+                                                        .and_then(|g| g.as_str())
+                                                        .map(|s| s.to_string());
+                                                    let client_ephemeral_pub = v.get("client_ephemeral_pub")
+                                                        .and_then(|g| g.as_str())
+                                                        .map(|s| s.to_string());
 
                                                     if status == "approved" || status == "rejected" || status == "expired" || status == "cancelled" {
                                                         return Ok(PairingWatchResult {
@@ -1302,6 +1994,8 @@ impl CallerRelayClient {
                                                             device_name,
                                                             platform,
                                                             grant_mode,
+                                                            caller_ephemeral_pub,
+                                                            client_ephemeral_pub,
                                                         });
                                                     }
                                                 }
@@ -1488,6 +2182,7 @@ impl CallerRelayClient {
         &self,
         call_id: &str,
         relay_token: &str,
+        transport: &OpenCallTransportContext,
         stream_stdout: bool,
         timeout_secs: u64,
     ) -> bifrost_core::Result<CallResult> {
@@ -1566,12 +2261,13 @@ impl CallerRelayClient {
                                                         if let Ok(envelope) = serde_json::from_str::<Value>(envelope_json) {
                                                             let seq = envelope.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
                                                             if seen_frame_seqs.insert(seq) {
-                                                                if let Some(ct) = envelope.get("ciphertext").and_then(|c| c.as_str()) {
+                                                                let chunk = decrypt_frame_chunk(transport, call_id, &envelope)?;
+                                                                if !chunk.is_empty() {
                                                                     if stream_stdout {
-                                                                        print!("{ct}");
+                                                                        print!("{chunk}");
                                                                         std::io::stdout().flush().ok();
                                                                     } else {
-                                                                        stdout_parts.push(ct.to_string());
+                                                                        stdout_parts.push(chunk);
                                                                     }
                                                                 }
                                                             } else {
@@ -1594,15 +2290,26 @@ impl CallerRelayClient {
                                             }
                                             "exit" => {
                                                 if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
-                                                    result.exit_code = v.get("exit_code")
-                                                        .and_then(|c| c.as_i64())
-                                                        .unwrap_or(0) as i32;
-                                                    result.duration_ms = v.get("duration_ms")
-                                                        .and_then(|d| d.as_u64());
-                                                    result.stderr = v.get("stderr")
-                                                        .and_then(|s| s.as_str())
-                                                        .filter(|s| !s.is_empty())
-                                                        .map(|s| s.to_string());
+                                                    if let Some(exit_payload) = v
+                                                        .get("exit_encrypted")
+                                                        .cloned()
+                                                        .and_then(|value| serde_json::from_value::<EncryptedPayload>(value).ok())
+                                                    {
+                                                        let decrypted = decrypt_exit_payload(transport, call_id, &exit_payload)?;
+                                                        result.exit_code = decrypted.exit_code;
+                                                        result.duration_ms = decrypted.duration_ms;
+                                                        result.stderr = decrypted.stderr.filter(|s| !s.is_empty());
+                                                    } else {
+                                                        result.exit_code = v.get("exit_code")
+                                                            .and_then(|c| c.as_i64())
+                                                            .unwrap_or(0) as i32;
+                                                        result.duration_ms = v.get("duration_ms")
+                                                            .and_then(|d| d.as_u64());
+                                                        result.stderr = v.get("stderr")
+                                                            .and_then(|s| s.as_str())
+                                                            .filter(|s| !s.is_empty())
+                                                            .map(|s| s.to_string());
+                                                    }
                                                 }
                                                 if !stream_stdout && !stdout_parts.is_empty() {
                                                     result.stdout = Some(stdout_parts.join(""));
@@ -1679,12 +2386,19 @@ impl CallerRelayClient {
         &self,
         call_id: &str,
         relay_token: &str,
+        transport: &OpenCallTransportContext,
         stream_stdout: bool,
         cancel_requested: bool,
     ) -> bifrost_core::Result<CallResult> {
         if !cancel_requested {
             return self
-                .subscribe_call_events(call_id, relay_token, stream_stdout, CALL_EVENT_TIMEOUT_SECS)
+                .subscribe_call_events(
+                    call_id,
+                    relay_token,
+                    transport,
+                    stream_stdout,
+                    CALL_EVENT_TIMEOUT_SECS,
+                )
                 .await;
         }
 
@@ -1700,6 +2414,7 @@ impl CallerRelayClient {
                 .subscribe_call_events(
                     call_id,
                     relay_token,
+                    transport,
                     stream_stdout,
                     CANCEL_SETTLE_TIMEOUT_SECS,
                 )
@@ -2032,36 +2747,161 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::RemoteTrafficListArgs;
+    use std::sync::OnceLock;
+
+    fn init_test_data_dir() {
+        static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir = TEST_DATA_DIR.get_or_init(|| tempfile::tempdir().expect("create temp dir"));
+        bifrost_storage::set_data_dir(dir.path().to_path_buf());
+    }
+
+    fn decrypt_remote_command_for_test(
+        payload: &EncryptedPayload,
+        shared_secret: &[u8],
+        grant_id: &str,
+        caller_ephemeral_pub: &str,
+        client_ephemeral_pub: &str,
+        command_kind: CommandKind,
+    ) -> CommandEnvelope {
+        let key_bytes = derive_open_call_key(
+            shared_secret,
+            grant_id,
+            caller_ephemeral_pub,
+            client_ephemeral_pub,
+            command_kind,
+        )
+        .expect("derive key");
+        let unbound =
+            UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).expect("build decryption key");
+        let key = LessSafeKey::new(unbound);
+        let nonce_raw = base64::engine::general_purpose::STANDARD
+            .decode(&payload.nonce)
+            .expect("decode nonce");
+        let nonce: [u8; NONCE_LEN] = nonce_raw.try_into().expect("nonce length");
+        let mut sealed = base64::engine::general_purpose::STANDARD
+            .decode(&payload.ciphertext)
+            .expect("decode ciphertext");
+        sealed.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(&payload.tag)
+                .expect("decode tag"),
+        );
+        let plaintext = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::empty(),
+                &mut sealed,
+            )
+            .expect("decrypt payload");
+        serde_json::from_slice(plaintext).expect("parse command envelope")
+    }
 
     #[test]
     fn test_build_remote_command_for_search_uses_streaming_command() {
-        let (command, args_json) = build_remote_command(&RemoteCommands::Search {
+        let (kind, command, args_json) = build_remote_command(&RemoteCommands::Search {
             keyword: "nextoncall".to_string(),
-            limit: 7,
+            max_results: 7,
+            max_scan: Some(12),
         });
 
+        assert_eq!(kind, CommandKind::QueryReadonly);
         assert_eq!(command, "search.get");
         let args = args_json.expect("search args_json should exist");
         let parsed: Value = serde_json::from_str(&args).expect("search args_json should be valid");
         assert_eq!(parsed["query"], "nextoncall");
-        assert_eq!(parsed["limit"], 7);
+        assert_eq!(parsed["max_results"], 7);
+        assert_eq!(parsed["max_scan"], 12);
     }
 
     #[test]
     fn test_build_remote_command_for_traffic_search_uses_streaming_command() {
-        let (command, args_json) = build_remote_command(&RemoteCommands::Traffic {
+        let (kind, command, args_json) = build_remote_command(&RemoteCommands::Traffic {
             action: RemoteTrafficCommands::Search {
                 keyword: "token".to_string(),
-                limit: 3,
+                max_results: 3,
+                max_scan: Some(9),
             },
         });
 
+        assert_eq!(kind, CommandKind::QueryReadonly);
         assert_eq!(command, "traffic.search");
         let args = args_json.expect("traffic search args_json should exist");
         let parsed: Value =
             serde_json::from_str(&args).expect("traffic search args_json should be valid");
         assert_eq!(parsed["query"], "token");
-        assert_eq!(parsed["limit"], 3);
+        assert_eq!(parsed["max_results"], 3);
+        assert_eq!(parsed["max_scan"], 9);
+    }
+
+    #[test]
+    fn test_build_remote_command_for_traffic_list_includes_all_filters() {
+        let (kind, command, args_json) = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::List(Box::new(RemoteTrafficListArgs {
+                limit: 7,
+                cursor: Some(123),
+                direction: "forward".to_string(),
+                method: Some("POST".to_string()),
+                status: Some(201),
+                status_min: Some(200),
+                status_max: Some(299),
+                protocol: Some("https".to_string()),
+                host: Some("api.example.com".to_string()),
+                url: Some("/v1/chat".to_string()),
+                path: Some("/v1".to_string()),
+                content_type: Some("application/json".to_string()),
+                client_ip: Some("127.0.0.1".to_string()),
+                client_app: Some("curl".to_string()),
+                has_rule_hit: Some(true),
+                is_websocket: Some(false),
+                is_sse: Some(true),
+                is_tunnel: Some(false),
+            })),
+        });
+
+        assert_eq!(kind, CommandKind::QueryReadonly);
+        assert_eq!(command, "traffic.list");
+        let args = args_json.expect("traffic list args_json should exist");
+        let parsed: Value =
+            serde_json::from_str(&args).expect("traffic list args_json should be valid");
+        assert_eq!(parsed["limit"], 7);
+        assert_eq!(parsed["cursor"], 123);
+        assert_eq!(parsed["direction"], "forward");
+        assert_eq!(parsed["method"], "POST");
+        assert_eq!(parsed["status"], 201);
+        assert_eq!(parsed["status_min"], 200);
+        assert_eq!(parsed["status_max"], 299);
+        assert_eq!(parsed["protocol"], "https");
+        assert_eq!(parsed["host"], "api.example.com");
+        assert_eq!(parsed["url"], "/v1/chat");
+        assert_eq!(parsed["path"], "/v1");
+        assert_eq!(parsed["content_type"], "application/json");
+        assert_eq!(parsed["client_ip"], "127.0.0.1");
+        assert_eq!(parsed["client_app"], "curl");
+        assert_eq!(parsed["has_rule_hit"], true);
+        assert_eq!(parsed["is_websocket"], false);
+        assert_eq!(parsed["is_sse"], true);
+        assert_eq!(parsed["is_tunnel"], false);
+    }
+
+    #[test]
+    fn test_build_remote_command_for_traffic_get_includes_body_flags() {
+        let (kind, command, args_json) = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Get {
+                id: "REQ-69e304e7-000033".to_string(),
+                request_body: true,
+                response_body: false,
+            },
+        });
+
+        assert_eq!(kind, CommandKind::QueryReadonly);
+        assert_eq!(command, "traffic.get");
+        let args = args_json.expect("traffic get args_json should exist");
+        let parsed: Value =
+            serde_json::from_str(&args).expect("traffic get args_json should be valid");
+        assert_eq!(parsed["id"], "REQ-69e304e7-000033");
+        assert_eq!(parsed["request_body"], true);
+        assert_eq!(parsed["response_body"], false);
     }
 
     #[test]
@@ -2193,5 +3033,143 @@ mod tests {
 
         assert_eq!(device_code, "BF-0123456789ABCDEF");
         assert_eq!(parsed_pkcs8, pkcs8.as_ref());
+    }
+
+    #[test]
+    fn test_encrypt_local_secret_roundtrip() {
+        init_test_data_dir();
+        let plaintext = b"shared-secret-test";
+
+        let encrypted = encrypt_local_secret(plaintext).expect("encrypt local secret");
+        let decrypted = decrypt_local_secret(&encrypted).expect("decrypt local secret");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_remote_command_uses_encrypted_only_payload() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+
+        let payload = encrypt_remote_command(
+            CommandKind::QueryReadonly,
+            "status",
+            None,
+            "grant-123",
+            &transport,
+        )
+        .expect("encrypt command");
+
+        assert_eq!(payload.version, ENCRYPTED_OPEN_CALL_VERSION);
+        let decrypted = decrypt_remote_command_for_test(
+            &payload,
+            &transport.shared_secret,
+            "grant-123",
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+            CommandKind::QueryReadonly,
+        );
+        assert_eq!(decrypted.kind, "query.readonly");
+        assert_eq!(decrypted.command, "status");
+        assert_eq!(decrypted.args_json, None);
+    }
+
+    #[test]
+    fn test_open_call_request_serialization_omits_plaintext_command_fields() {
+        let request = OpenCallRequest {
+            grant_id: "grant-1".to_string(),
+            client_instance_id: "client-1".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            command_kind: CommandKind::QueryReadonly,
+            command_encrypted: EncryptedPayload {
+                version: ENCRYPTED_OPEN_CALL_VERSION,
+                nonce: "nonce".to_string(),
+                ciphertext: "ciphertext".to_string(),
+                tag: "tag".to_string(),
+                aad: None,
+            },
+        };
+
+        let json = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(json["command_kind"], "query.readonly");
+        assert!(json.get("command_encrypted").is_some());
+        assert!(json.get("command").is_none());
+        assert!(json.get("command_summary").is_none());
+    }
+
+    #[test]
+    fn test_merge_transport_context_requires_encrypted_context() {
+        let conn = LocalConnection {
+            client_instance_id: "client-1".to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            relay_url: "https://relay".to_string(),
+            grant_id: "grant-1".to_string(),
+            grant_mode: "permanent".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            connected_at: 1,
+            auth_method: Some("pair_code".to_string()),
+            ssh_key_fingerprint: None,
+            ssh_key_source: None,
+            device_code: None,
+            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+            caller_ephemeral_pub: Some("caller-epk".to_string()),
+            client_ephemeral_pub: Some("client-epk".to_string()),
+            shared_secret_encrypted: None,
+        };
+        let grant = GrantInfo {
+            grant_id: "grant-1".to_string(),
+            status: "active".to_string(),
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+        };
+
+        let err = merge_transport_context(&conn, &grant).expect_err("should require shared secret");
+        assert!(err
+            .to_string()
+            .contains("saved connection is missing encrypted transport secret"));
+    }
+
+    #[test]
+    fn test_prefer_saved_grant_for_transport_replaces_full_transport_context_on_mismatch() {
+        let conn = LocalConnection {
+            client_instance_id: "client-1".to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            relay_url: "https://relay".to_string(),
+            grant_id: "saved-grant".to_string(),
+            grant_mode: "permanent".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            connected_at: 1,
+            auth_method: Some("pair_code".to_string()),
+            ssh_key_fingerprint: None,
+            ssh_key_source: None,
+            device_code: None,
+            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+            client_ephemeral_pub: Some("saved-client-epk".to_string()),
+            shared_secret_encrypted: Some("secret".to_string()),
+        };
+        let relay_grant = GrantInfo {
+            grant_id: "relay-grant".to_string(),
+            status: "active".to_string(),
+            caller_ephemeral_pub: Some("relay-caller-epk".to_string()),
+            client_ephemeral_pub: Some("relay-client-epk".to_string()),
+        };
+
+        let preferred = prefer_saved_grant_for_transport(&conn, relay_grant);
+
+        assert_eq!(preferred.grant_id, "saved-grant");
+        assert_eq!(
+            preferred.caller_ephemeral_pub.as_deref(),
+            Some("saved-caller-epk")
+        );
+        assert_eq!(
+            preferred.client_ephemeral_pub.as_deref(),
+            Some("saved-client-epk")
+        );
     }
 }

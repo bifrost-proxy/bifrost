@@ -1,5 +1,6 @@
 pub mod config;
 pub mod executor;
+pub mod grant_crypto_store;
 pub mod identity;
 pub mod relay_client;
 pub mod ssh_keys;

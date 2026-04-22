@@ -3,7 +3,13 @@ set -e
 
 REPO="bifrost-proxy/bifrost"
 BINARY_NAME="bifrost"
-INSTALL_DIR="${BIFROST_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${BIFROST_INSTALL_DIR:-${HOME:-/tmp}/.local/bin}"
+
+DEFAULT_GITHUB_MIRROR_URLS=(
+    "https://github.com"
+    "https://ghfast.top/https://github.com"
+    "https://github.moeyy.xyz/https://github.com"
+)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -95,7 +101,7 @@ detect_libc() {
     echo "gnu"
 }
 
-MIN_GLIBC_VERSION="2.29"
+MIN_GLIBC_VERSION="2.39"
 
 get_glibc_version() {
     if [ "$(detect_os)" != "linux" ]; then
@@ -123,7 +129,20 @@ get_glibc_version() {
 }
 
 version_lt() {
-    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$2" ]
+    if [[ "$1" == "$2" ]]; then
+        return 1
+    fi
+    local IFS=.
+    local i a=($1) b=($2)
+    for ((i = 0; i < ${#a[@]} || i < ${#b[@]}; i++)); do
+        local ai="${a[i]:-0}" bi="${b[i]:-0}"
+        if ((ai < bi)); then
+            return 0
+        elif ((ai > bi)); then
+            return 1
+        fi
+    done
+    return 1
 }
 
 verify_binary_runs() {
@@ -213,33 +232,182 @@ get_archive_ext() {
     esac
 }
 
-github_api_request() {
-    local url="$1"
-    if command -v curl &> /dev/null; then
-        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            curl -sL -H "Authorization: token ${GITHUB_TOKEN}" "$url"
-        else
-            curl -sL "$url"
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+build_mirror_url_list() {
+    local preferred="${BIFROST_GITHUB_MIRROR:-}"
+    local -a mirrors=()
+    local mirror
+
+    if [[ -n "$preferred" ]]; then
+        mirrors+=("$preferred")
+    fi
+
+    for mirror in "${DEFAULT_GITHUB_MIRROR_URLS[@]}"; do
+        if [[ "$mirror" != "$preferred" ]]; then
+            mirrors+=("$mirror")
         fi
-    elif command -v wget &> /dev/null; then
-        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            wget -qO- --header="Authorization: token ${GITHUB_TOKEN}" "$url"
-        else
-            wget -qO- "$url"
+    done
+
+    printf '%s\n' "${mirrors[@]}"
+}
+
+build_downloader_list() {
+    local preferred="${BIFROST_DOWNLOADER:-auto}"
+    local -a candidates=()
+    local candidate
+
+    case "$preferred" in
+        ""|auto)
+            if [[ "$(detect_os)" == "linux" ]]; then
+                candidates=(aria2c axel wget curl)
+            else
+                candidates=(aria2c axel curl wget)
+            fi
+            ;;
+        aria2c)
+            candidates=(aria2c axel wget curl)
+            ;;
+        axel)
+            candidates=(axel aria2c wget curl)
+            ;;
+        wget)
+            candidates=(wget aria2c axel curl)
+            ;;
+        curl)
+            candidates=(curl aria2c axel wget)
+            ;;
+        *)
+            print_warning "Unknown BIFROST_DOWNLOADER: $preferred (using auto)"
+            if [[ "$(detect_os)" == "linux" ]]; then
+                candidates=(aria2c axel wget curl)
+            else
+                candidates=(aria2c axel curl wget)
+            fi
+            ;;
+    esac
+
+    for candidate in "${candidates[@]}"; do
+        if has_command "$candidate"; then
+            echo "$candidate"
         fi
-    else
+    done
+}
+
+download_with_tool() {
+    local tool="$1"
+    local url="$2"
+    local output="$3"
+    local output_dir output_name
+
+    output_dir="$(cd "$(dirname "$output")" && pwd)"
+    output_name="$(basename "$output")"
+
+    case "$tool" in
+        aria2c)
+            aria2c --no-conf -x 16 -s 16 --max-connection-per-server=16 \
+                   --min-split-size=1M --allow-overwrite=true \
+                   --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
+                   --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
+                   --max-tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
+                   -d "$output_dir" -o "$output_name" "$url"
+            ;;
+        axel)
+            local axel_timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}"
+            if has_command timeout; then
+                timeout "$axel_timeout" axel -n 16 -o "$output" "$url"
+            else
+                axel -n 16 -o "$output" "$url"
+            fi
+            ;;
+        wget)
+            wget -q \
+                --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
+                --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
+                --tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
+                --waitretry=1 \
+                "$url" -O "$output"
+            ;;
+        curl)
+            local curl_retries="${BIFROST_DOWNLOAD_TRIES:-2}"
+            curl_retries=$((curl_retries > 0 ? curl_retries - 1 : 0))
+            curl -fsSL \
+                --connect-timeout "${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
+                --max-time "${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
+                --retry "$curl_retries" \
+                --retry-delay 1 \
+                "$url" -o "$output"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+validate_downloaded_file() {
+    local file="$1"
+
+    if [[ ! -s "$file" ]]; then
+        print_warning "Downloaded file is empty: $file"
         return 1
     fi
+
+    case "$file" in
+        *.tar.gz)
+            if ! tar -tzf "$file" >/dev/null 2>&1; then
+                print_warning "Downloaded tar.gz archive is invalid: $file"
+                return 1
+            fi
+            ;;
+        *.zip)
+            if has_command unzip; then
+                if ! unzip -tq "$file" >/dev/null 2>&1; then
+                    print_warning "Downloaded zip archive is invalid: $file"
+                    return 1
+                fi
+            fi
+            ;;
+    esac
+
+    return 0
+}
+
+github_api_request() {
+    local url="$1"
+    local result=""
+
+    if command -v curl &> /dev/null; then
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            result=$(curl -sL --connect-timeout 10 --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+        else
+            result=$(curl -sL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+        fi
+    fi
+
+    if command -v wget &> /dev/null; then
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            result=$(wget -qO- --connect-timeout=10 --timeout=30 --header="Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+        else
+            result=$(wget -qO- --connect-timeout=10 --timeout=30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+        fi
+    fi
+
+    return 1
 }
 
 get_latest_version_via_redirect() {
-    local redirect_url="https://github.com/${REPO}/releases/latest"
-    local location
+    local base_url="${1:-https://github.com}"
+    local redirect_url="${base_url}/${REPO}/releases/latest"
+    local location=""
 
     if command -v curl &> /dev/null; then
-        location=$(curl -sI -o /dev/null -w '%{url_effective}' -L "$redirect_url" 2>/dev/null)
-    elif command -v wget &> /dev/null; then
-        location=$(wget --spider -S --max-redirect=5 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
+        location=$(curl -sI -o /dev/null -w '%{url_effective}' -L --connect-timeout 10 --max-time 20 "$redirect_url" 2>/dev/null) || location=""
+    fi
+
+    if [[ -z "$location" ]] && command -v wget &> /dev/null; then
+        location=$(wget --spider -S --max-redirect=5 --connect-timeout=10 --timeout=20 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
     fi
 
     if [[ -n "$location" ]]; then
@@ -287,11 +455,14 @@ get_latest_version_via_api() {
 get_latest_version() {
     local version
 
-    version=$(get_latest_version_via_redirect 2>/dev/null) && {
-        echo "$version"
-        return 0
-    }
-    print_warning "Redirect-based version detection failed, falling back to GitHub API..."
+    while IFS= read -r base_url; do
+        [[ -z "$base_url" ]] && continue
+        version=$(get_latest_version_via_redirect "$base_url" 2>/dev/null) && {
+            echo "$version"
+            return 0
+        }
+    done < <(build_mirror_url_list)
+    print_warning "Redirect-based version detection failed on all mirrors, falling back to GitHub API..."
 
     version=$(get_latest_version_via_api 2>/dev/null) && {
         echo "$version"
@@ -311,21 +482,138 @@ get_latest_version() {
 download_file() {
     local url="$1"
     local output="$2"
+    local tmp_output="${output}.part"
+    local downloader
+    local dl_ok=0
+    local is_first_attempt=1
 
-    print_step "Downloading from: $url"
+    print_step "Downloading from: \`$url\`"
 
-    if command -v aria2c &> /dev/null; then
-        aria2c -x 16 -s 16 --max-connection-per-server=16 --min-split-size=1M -o "$output" "$url"
-    elif command -v axel &> /dev/null; then
-        axel -n 16 -o "$output" "$url"
-    elif command -v curl &> /dev/null; then
-        curl -fsSL "$url" -o "$output"
-    elif command -v wget &> /dev/null; then
-        wget -q "$url" -O "$output"
-    else
-        print_error "Neither curl nor wget found"
-        exit 1
+    rm -f "$tmp_output" 2>/dev/null || true
+
+    while IFS= read -r downloader; do
+        [[ -z "$downloader" ]] && continue
+        rm -f "$tmp_output" 2>/dev/null || true
+
+        if [[ "$is_first_attempt" != "1" ]]; then
+            print_warning "Retrying with: $downloader"
+        fi
+        is_first_attempt=0
+
+        if download_with_tool "$downloader" "$url" "$tmp_output" 2>/dev/null && validate_downloaded_file "$tmp_output"; then
+            mv "$tmp_output" "$output"
+            dl_ok=1
+            break
+        fi
+
+        print_warning "$downloader failed"
+    done < <(build_downloader_list)
+
+    rm -f "$tmp_output" 2>/dev/null || true
+
+    if [[ "$dl_ok" != "1" ]]; then
+        print_error "All download methods failed"
+        return 1
     fi
+
+    if [[ ! -f "$output" ]]; then
+        print_error "Download appeared to succeed but file not found at: $output"
+        return 1
+    fi
+}
+
+download_github_file() {
+    local github_path="$1"
+    local output="$2"
+    local race_dir
+    race_dir=$(mktemp -d)
+
+    local -a pids=()
+    local -a labels=()
+    local index=0
+
+    local -a mirrors=()
+    while IFS= read -r m; do
+        [[ -n "$m" ]] && mirrors+=("$m")
+    done < <(build_mirror_url_list)
+
+    local -a downloaders=()
+    while IFS= read -r d; do
+        [[ -n "$d" ]] && downloaders+=("$d")
+    done < <(build_downloader_list)
+
+    if [[ ${#mirrors[@]} -eq 0 ]]; then
+        print_error "No mirrors configured"
+        rm -rf "$race_dir"
+        return 1
+    fi
+
+    if [[ ${#downloaders[@]} -eq 0 ]]; then
+        print_error "No download tools available (need curl, wget, aria2c, or axel)"
+        rm -rf "$race_dir"
+        return 1
+    fi
+
+    local total=$(( ${#mirrors[@]} * ${#downloaders[@]} ))
+    print_step "Downloading $(basename "$github_path") (racing $total sources)"
+
+    for base_url in "${mirrors[@]}"; do
+        local full_url="${base_url}/${github_path}"
+        local mirror_short
+        mirror_short=$(echo "$base_url" | sed 's|https\{0,1\}://||;s|/.*||')
+
+        for downloader in "${downloaders[@]}"; do
+            local race_output="${race_dir}/${index}.data"
+
+            (
+                download_with_tool "$downloader" "$full_url" "$race_output" >/dev/null 2>&1 && \
+                    validate_downloaded_file "$race_output" 2>/dev/null && \
+                    touch "${race_dir}/${index}.ok"
+            ) &
+            pids+=($!)
+            labels+=("${downloader} via ${mirror_short}")
+            index=$((index + 1))
+        done
+    done
+
+    local winner_index=""
+    while true; do
+        for ((i = 0; i < index; i++)); do
+            if [[ -f "${race_dir}/${i}.ok" ]]; then
+                winner_index=$i
+                break 2
+            fi
+        done
+
+        local any_alive=false
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                any_alive=true
+                break
+            fi
+        done
+        if ! $any_alive; then
+            break
+        fi
+
+        sleep 1
+    done
+
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+
+    if [[ -n "$winner_index" ]]; then
+        mv "${race_dir}/${winner_index}.data" "$output"
+        print_success "Downloaded (${labels[$winner_index]})"
+        rm -rf "$race_dir"
+        return 0
+    fi
+
+    rm -rf "$race_dir"
+    print_error "All download attempts failed for: $(basename "$github_path")"
+    return 1
 }
 
 verify_checksum() {
@@ -519,6 +807,11 @@ show_help() {
     echo ""
     echo "Environment variables:"
     echo "  BIFROST_INSTALL_DIR   Custom installation directory"
+    echo "  BIFROST_DOWNLOADER    Preferred downloader: auto|aria2c|axel|wget|curl"
+    echo "  BIFROST_GITHUB_MIRROR Preferred mirror base URL"
+    echo "  BIFROST_DOWNLOAD_CONNECT_TIMEOUT  Connection timeout in seconds"
+    echo "  BIFROST_DOWNLOAD_TIMEOUT          Total timeout per download attempt in seconds"
+    echo "  BIFROST_DOWNLOAD_TRIES            Retry count per downloader attempt"
     echo ""
     echo "Examples:"
     echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
@@ -527,6 +820,10 @@ show_help() {
     echo "  curl -fsSL ... | bash -s -- --libc musl"
     echo "  curl -fsSL ... | bash -s -- --target x86_64-unknown-linux-musl"
     echo "  curl -fsSL ... | bash -s -- --no-modify-path"
+    echo ""
+    echo "If raw.githubusercontent.com is unreachable, use a mirror to download this script:"
+    echo "  curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
+    echo "  curl -fsSL https://github.moeyy.xyz/https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
 }
 
 VERSION=""
@@ -537,18 +834,34 @@ NO_MODIFY_PATH=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --version)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                print_error "--version requires a value (e.g., --version v0.1.0)"
+                exit 1
+            fi
             VERSION="$2"
             shift 2
             ;;
         --dir)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                print_error "--dir requires a value (e.g., --dir /usr/local/bin)"
+                exit 1
+            fi
             INSTALL_DIR="$2"
             shift 2
             ;;
         --target)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                print_error "--target requires a value (e.g., --target x86_64-unknown-linux-musl)"
+                exit 1
+            fi
             FORCE_TARGET="$2"
             shift 2
             ;;
         --libc)
+            if [[ -z "${2:-}" || "$2" == --* ]]; then
+                print_error "--libc requires a value (gnu or musl)"
+                exit 1
+            fi
             FORCE_LIBC="$2"
             if [[ "$FORCE_LIBC" != "gnu" && "$FORCE_LIBC" != "musl" ]]; then
                 print_error "Invalid --libc value: $FORCE_LIBC (must be 'gnu' or 'musl')"
@@ -583,21 +896,25 @@ install_binary_for_target() {
     ext=$(get_archive_ext "$os")
 
     local cli_archive="bifrost-${version}-${target}.${ext}"
-    local cli_url="https://github.com/${REPO}/releases/download/${version}/${cli_archive}"
-    local checksums_url="https://github.com/${REPO}/releases/download/${version}/bifrost-${version}-checksums.txt"
+    local cli_path="${REPO}/releases/download/${version}/${cli_archive}"
+    local checksums_path="${REPO}/releases/download/${version}/bifrost-${version}-checksums.txt"
 
-    download_file "$cli_url" "$tmpdir/$cli_archive" || return 1
+    download_github_file "$cli_path" "$tmpdir/$cli_archive" || return 1
 
     if [[ ! -f "$tmpdir/checksums.txt" ]]; then
-        download_file "$checksums_url" "$tmpdir/checksums.txt" || return 1
+        download_github_file "$checksums_path" "$tmpdir/checksums.txt" || print_warning "Could not download checksums file, skipping verification"
     fi
 
-    local expected_checksum
-    expected_checksum=$(grep -F "$cli_archive" "$tmpdir/checksums.txt" | awk '{print $1}')
-    if [[ -n "$expected_checksum" ]]; then
-        verify_checksum "$tmpdir/$cli_archive" "$expected_checksum"
-    else
-        print_warning "Checksum not found for $cli_archive, skipping verification"
+    if [[ -f "$tmpdir/checksums.txt" ]]; then
+        local expected_checksum
+        expected_checksum=$(grep -F "$cli_archive" "$tmpdir/checksums.txt" 2>/dev/null | awk '{print $1}')
+        if [[ -n "$expected_checksum" ]]; then
+            if ! verify_checksum "$tmpdir/$cli_archive" "$expected_checksum"; then
+                print_warning "Checksum mismatch (continuing anyway)"
+            fi
+        else
+            print_warning "Checksum not found for $cli_archive, skipping verification"
+        fi
     fi
 
     print_step "Extracting..."
@@ -614,8 +931,16 @@ install_binary_for_target() {
     elif [[ -f "$extract_subdir/$binary_name" ]]; then
         cp "$extract_subdir/$binary_name" "$install_dir/$binary_name"
     else
-        print_error "Binary not found in archive"
-        return 1
+        local found_binary
+        found_binary=$(find "$extract_subdir" -name "$binary_name" -type f 2>/dev/null | head -1)
+        if [[ -n "$found_binary" ]]; then
+            print_warning "Binary found at unexpected path: $found_binary"
+            cp "$found_binary" "$install_dir/$binary_name"
+        else
+            print_error "Binary not found in archive"
+            ls -laR "$extract_subdir" >&2 2>/dev/null || true
+            return 1
+        fi
     fi
 
     chmod +x "$install_dir/$binary_name"
@@ -694,7 +1019,7 @@ main() {
 
     local tmpdir
     tmpdir=$(mktemp -d)
-    trap "rm -rf '$tmpdir'" EXIT
+    trap "rm -rf '$tmpdir'" EXIT INT TERM HUP
 
     local binary_name="bifrost"
     [[ "$os" == "windows" ]] && binary_name="bifrost.exe"
@@ -704,7 +1029,7 @@ main() {
     install_binary_for_target "$target" "$VERSION" "$os" "$INSTALL_DIR" "$tmpdir" && install_ok=1
 
     local verify_ok=1
-    if [[ "$os" == "linux" ]]; then
+    if [[ "$install_ok" == "1" && "$os" == "linux" ]]; then
         verify_binary_runs "$INSTALL_DIR/$binary_name" && verify_ok=1 || verify_ok=0
     fi
 

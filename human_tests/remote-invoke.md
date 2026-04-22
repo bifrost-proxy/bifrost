@@ -24,6 +24,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - SSE/HTTP relay 正常转发、大结果流式传输与断线恢复
 - 调用方主动取消与 SSE 续流恢复
 - 端到端加密验证（Relay 不可见明文）
+- 第一阶段 relay v2 协议升级：`command_encrypted` / `exit_encrypted` / route-only metadata
 - 客户端重启后 instance_id 稳定性
 - 审计历史、摘要脱敏、过滤查询、数据保留与清理
 - 远端部署场景：HTTPS 安全传输、SSO 鉴权、多用户并发、跨公网稳定性
@@ -762,6 +763,172 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 - relay 日志中不出现命令原始参数明文或输出结果明文
 - 数据库中只存储摘要、digest 和状态信息
 - 数据库中不存储完整命令明文、完整输出明文或会话密钥
+
+---
+
+### TC-RI-回归-53：第一阶段回归 — 本地 relay 接受 `command_encrypted` 的 v2 openCall
+
+**前置条件**：
+- 主线程已完成本地 relay 对 v2 openCall 的实现
+- 已存在一个可复用 grant
+
+**操作步骤**：
+1. 构造一个 `command_kind = "shell.exec"`、包含唯一关键字（例如 `PHASE1-OPAQUE-CMD`）的加密命令请求
+2. 通过 caller API 发起 openCall，确认请求体中只包含 `command_encrypted`，不再提交明文 `command`
+3. 观察 caller 返回值与 client 侧收到的 `call_open` 事件
+4. 在 relay 日志和 SQLite 中搜索 `PHASE1-OPAQUE-CMD`
+
+**预期结果**：
+- openCall 返回成功，生成新的 `call_id` 与 `relay_token`
+- client 收到的 `call_open` 事件包含 `command_encrypted`、`command_kind`、`pty_enabled`、`timeout_hint_ms`
+- relay 端不要求明文 `command.command`
+- relay 日志和数据库中搜索不到 `PHASE1-OPAQUE-CMD` 明文
+
+---
+
+### TC-RI-回归-54：第一阶段回归 — `grant_scope=remote_query` 不得打开 `shell.exec`
+
+**前置条件**：
+- 已存在一个仅允许查询的 grant（通过 SQL / API 人工构造 `grant_scope = remote_query` 的授权）
+
+**操作步骤**：
+1. 使用该查询授权发起 `command_kind = "shell.exec"` 的 openCall
+2. 观察 caller API 响应
+3. 刷新管理端 History 或查询 relay 数据库中的 call / event 记录
+
+**预期结果**：
+- openCall 被拒绝，返回明确的 scope 不匹配错误（如 `grant_scope_mismatch`）
+- 不创建进入执行阶段的 call 记录，或只留下被拒绝的审计摘要
+- 管理端不会把该请求展示成可执行的 shell 调用
+- 如果请求体发送旧版明文 `command` 或旧 alias `grant_scope=query`，relay 直接报协议错误，不做兼容兜底
+
+---
+
+### TC-RI-回归-55：第一阶段回归 — `exit_encrypted` 原样从 client 回传到 caller
+
+**前置条件**：
+- 已有一个通过 v2 协议打开的 call
+- client 能构造并上报 `exit_encrypted`
+
+**操作步骤**：
+1. 让 client 为该 call 上报一个包含唯一关键字（例如 `PHASE1-OPAQUE-EXIT`）的 `exit_encrypted`
+2. 在 caller 侧订阅该 call 的 SSE 事件流并等待 `exit`
+3. 检查 relay 数据库和日志中是否出现 `PHASE1-OPAQUE-EXIT`
+
+**预期结果**：
+- caller 收到 `exit` 事件，事件体中携带 `exit_encrypted`
+- relay 将 call 标记为结束，但不需要解析出明文 `exit_code` / `stderr`
+- relay 日志和数据库中搜索不到 `PHASE1-OPAQUE-EXIT` 明文
+
+---
+
+### TC-RI-回归-56：第一阶段回归 — 加密调用详情 API 只返回 route-level 元数据
+
+**前置条件**：已至少存在 1 条通过 v2 打开的加密调用记录
+
+**操作步骤**：
+1. 调用 relay 的 call detail / call list API 查询该调用
+2. 检查返回 JSON 中的字段
+3. 确认 API 返回体中未重建命令明细或输出明细
+
+**预期结果**：
+- 返回结果保留 `call_id`、`grant_id`、`client_instance_id`、`status`、`command_kind`、时间戳、字节数等路由级信息
+- 不返回可恢复明文命令的 `command_detail`
+- 不返回明文 `stderr`、明文输出摘要或可逆的加密材料
+
+---
+
+### TC-RI-回归-57：第一阶段回归 — relay 重启后 v2 调用记录保持可读但不回退为明文模型
+
+**前置条件**：本地 relay 已产生至少 1 条 v2 加密调用记录
+
+**操作步骤**：
+1. 停止本地 `bifrost-sync-server`
+2. 保留临时数据目录并重新启动 relay
+3. 重新查询 call list / call detail
+4. 再次在数据库中搜索先前用过的命令关键字或输出关键字
+
+**预期结果**：
+- relay 重启后仍能列出该调用的 route-level 记录
+- 数据库内容未因重启被回写为旧的明文 `command_json` / `command_summary_json`
+- 关键字搜索仍找不到原始命令或输出明文
+
+---
+
+### TC-RI-回归-58：第一阶段补测 — 远端 relay 部署后复测本地通过的 v2 加密链路
+
+**前置条件**：
+- 远端 `bifrost-server-v4` 已部署本轮代码
+- 可从调用方访问远端 relay
+
+**操作步骤**：
+1. 重复执行 TC-RI-回归-53、TC-RI-回归-55、TC-RI-回归-56 的同类操作，但将 relay 地址替换为远端地址
+2. 额外验证远端实例重启或切流后，已有 v2 调用记录仍可查询
+3. 检查远端 relay 日志与存储中不存在明文命令关键字
+
+**预期结果**：
+- 远端 relay 与本地 relay 在 v2 openCall、`exit_encrypted` 转发、call detail 脱敏上的行为一致
+- 部署后的多实例或重启流程不引入明文回写
+- 如远端环境存在额外鉴权/网关层，也不会把命令明文打印到日志
+
+---
+
+### TC-RI-回归-59：第一阶段回归 — 本地 relay 完成 caller 与 client 双端加密 roundtrip
+
+**前置条件**：
+- 本地 relay 已启动，client 已完成注册并保持 SSE 在线
+- 已存在一个 `grant_scope = remote_query` 的授权
+
+**操作步骤**：
+1. 调用方使用 `command_kind = "query.readonly"` 和 `command_encrypted` 发起 openCall，不提交明文 `command`
+2. 确认 client 侧收到 `call_open` 事件，事件中包含 `command_encrypted`，且不包含明文字段
+3. client 通过 `/client/calls/:id/frame` 上报一段带唯一关键字的加密 frame，再让 caller 连接 `/calls/:id/events`
+4. 确认 caller 能收到该 frame 事件，说明 relay 已完成双端路由与 caller 侧缓冲补发
+5. client 通过 `/client/calls/:id/exit` 上报带唯一关键字的 `exit_encrypted`
+6. 检查 caller 收到 `exit` 事件，并检查 relay 数据库 / event summary 中不存在上述关键字
+
+**预期结果**：
+- openCall、call_open、call frame、call exit 全链路均能在本地 relay 打通
+- caller 与 client 双端连接都工作正常，frame/exit 顺序正确
+- relay 对 `command_encrypted`、frame 密文、`exit_encrypted` 都只做不透明转发
+- 数据库与 event summary 中不存在可恢复明文的命令、输出或退出内容
+
+---
+
+### TC-RI-回归-60：第一阶段回归 — 真实 CLI 在本地 relay 上完成完整加密远程调用流程
+
+**前置条件**：
+- 本地 `bifrost-sync-server` 已启动并开启 remote invoke
+- 本地 Bifrost client 已连接到该 relay，且发现模式可用
+- 调用方使用新的空目录作为 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 在 client 端进入 discovery mode，记录最新 pair code
+2. 调用方执行：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/ri-caller cargo run --bin bifrost -- remote connect <pair_code> --relay-url http://127.0.0.1:8686
+   ```
+3. 在 client 端审批该 pairing，授予永久或限时 query grant
+4. 调用方执行：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/ri-caller cargo run --bin bifrost -- remote status --relay-url http://127.0.0.1:8686
+   ```
+5. 调用方继续执行：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/ri-caller cargo run --bin bifrost -- remote search bifrost --limit 3 --relay-url http://127.0.0.1:8686
+   ```
+6. 调用方继续执行：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/ri-caller cargo run --bin bifrost -- remote traffic list --limit 3 --relay-url http://127.0.0.1:8686
+   ```
+7. 检查 caller 本地连接文件、client 日志与 relay 日志，确认三次调用都经由 `command_encrypted` / 加密 frame / `exit_encrypted` 完成闭环
+
+**预期结果**：
+- `remote connect` 成功落盘本地连接，连接记录中包含 `caller_ephemeral_pub`、`client_ephemeral_pub` 与本地加密保存的 `shared_secret`
+- `remote status` 成功返回目标 client 的运行状态 JSON，不再出现 `command_encrypted is required` 或 `encrypted payload authentication failed`
+- `remote search` 与 `remote traffic list` 都能成功返回结果；即使结果为空，也必须完成正常的加密调用闭环
+- client 日志显示 `open_call` 解密成功并完成执行；caller 不需要回退到任何明文协议
+- relay 侧仍只转发密文与 route-level metadata，不泄露命令明文或输出明文
 
 ---
 
@@ -1964,6 +2131,80 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+### TC-RI-86：回归 — `remote search` 的 `--max-results` / `--max-scan` 在执行端生效
+
+**前置条件**：
+- 已有可复用授权
+- client 侧存在包含唯一 marker 的 traffic
+
+**操作步骤**：
+1. 记录当前 `Recent Calls` 中最新一条 `search.get` 的 `started_at`
+2. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote search "<marker>" --relay http://127.0.0.1:8686 --client-id <client_prefix> --max-results 5 --max-scan 50
+   ```
+3. 命令完成后，在 client 管理端查询 `Recent Calls` 或调用明细，定位这次新的 `search.get`
+4. 查看该次调用保存的参数信息（如 `command.args_json`）
+
+**预期结果**：
+- 命令成功退出，并返回 `<marker>` 对应命中记录
+- 终端仍然显示流式搜索进度
+- 新生成的 `search.get` 调用参数中包含 `max_results=5`
+- 新生成的 `search.get` 调用参数中包含 `max_scan=50`
+- 限制参数来自执行端保存的调用参数，而不是 caller 侧本地截断输出
+
+---
+
+### TC-RI-87：回归 — `remote traffic list` 的过滤参数完整透传并执行正确
+
+**前置条件**：
+- 已有可复用授权
+- client 侧存在一条包含唯一 marker 的 HTTP 流量
+
+**操作步骤**：
+1. 记录当前 `Recent Calls` 中最新一条 `traffic.list` 的 `started_at`
+2. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote traffic list --relay http://127.0.0.1:8686 --client-id <client_prefix> \
+     --limit 7 --cursor 123 --direction forward --method GET \
+     --status-min 200 --status-max 299 --protocol http --host httpbin \
+     --url "/anything/<marker>" --path "/anything" --content-type application/json \
+     --client-app curl --has-rule-hit false --is-websocket false --is-sse false --is-tunnel false
+   ```
+3. 验证命令输出中出现目标流量记录或列表表头
+4. 在 client 管理端查询新的 `traffic.list` 调用，读取其 `command.args_json`
+
+**预期结果**：
+- `remote traffic list` 成功执行
+- 输出与过滤条件相匹配，不出现参数导致的执行错误
+- `command.args_json` 中完整包含本次传入的 list/filter 参数
+- 参数来自执行端落库的调用记录，而不是 caller 本地日志推断
+
+---
+
+### TC-RI-88：回归 — `remote traffic search` 的 `--max-results` / `--max-scan` 透传后结果正确
+
+**前置条件**：
+- 已有可复用授权
+- client 侧存在一条包含唯一 marker 的 HTTP 流量
+
+**操作步骤**：
+1. 记录当前 `Recent Calls` 中最新一条 `traffic.search` 的 `started_at`
+2. 在 caller 侧执行：
+   ```bash
+   cargo run --bin bifrost -- remote traffic search "<marker>" --relay http://127.0.0.1:8686 --client-id <client_prefix> --max-results 3 --max-scan 30
+   ```
+3. 观察 caller 终端是否先输出 `Searching...`，随后返回 `<marker>` 命中
+4. 在 client 管理端查询新的 `traffic.search` 调用，读取其 `command.args_json`
+
+**预期结果**：
+- `remote traffic search` 成功执行，且结果中包含 `<marker>`
+- caller 侧输出包含流式进度
+- `command.args_json` 中包含 `query=<marker>`、`max_results=3`、`max_scan=30`
+- 执行结果与参数约束一致，不出现 caller 本地假截断
+
+---
+
 ## connect exit_code 与调用记录展示修复测试执行结果（TC-RI-81 ~ TC-RI-82）
 
 测试环境：
@@ -1976,7 +2217,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 | TC-RI-81 | connect 授权通过后 exit_code 应为 0 | ✅ PASS | connect 记录显示绿色 completed (0)，旧记录仍为 -1（历史数据） |
 | TC-RI-82 | 调用记录展示完整参数信息和响应数据量 | ✅ PASS | search.get 显示 limit=50 query=测试关键词 及 ↓ 122B；status 显示 ↓ 110B |
 
-## remote traffic get/search/stderr 回归测试执行结果（TC-RI-83 ~ TC-RI-85）
+## remote traffic/get/search 参数透传与错误回归测试执行结果（TC-RI-83 ~ TC-RI-88）
 
 测试环境：
 - Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
@@ -1985,9 +2226,12 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
 |---------|---------|------|------|
-| TC-RI-83 | `remote traffic get <sequence>` 按 sequence 正确返回详情 | ✅ PASS | 通过 `seq=1` 成功返回 `remote-invoke-19370` 对应请求详情；输出字段为 legacy `sequence=1`，但 sequence 查询链路已恢复 |
-| TC-RI-84 | `remote search` 采用流式输出并返回命中结果 | ✅ PASS | caller 终端先看到 `Searching...`，随后输出 `remote-invoke-19370` 命中记录，summary 为 `Found 1 matches` |
-| TC-RI-85 | 远程命令失败时 caller 能看到真实错误文本 | ✅ PASS | `remote traffic get 999999999` 终端明确显示 `No traffic record with sequence suffix '999999999' found`，不再只有 exit code -1 |
+| TC-RI-83 | `remote traffic get <sequence>` 按 sequence 正确返回详情 | ✅ PASS | 本轮 E2E 通过真实 `seq` 调用 `remote traffic get --request-body --response-body`，成功返回目标 marker 对应详情，且 `Recent Calls` 中 `traffic.get` 的 `args_json` 正确记录 `id`、`request_body=true`、`response_body=true`。 |
+| TC-RI-84 | `remote search` 采用流式输出并返回命中结果 | ✅ PASS | caller 终端先看到 `Searching...`，随后输出目标 `remote-invoke-*` 命中记录，summary 为 `Found 1 matches`。 |
+| TC-RI-85 | 远程命令失败时 caller 能看到真实错误文本 | ✅ PASS | `remote traffic get 999999999` 终端明确显示 `No traffic record with sequence suffix '999999999' found`，不再只有 exit code -1。 |
+| TC-RI-86 | `remote search` 将 `--max-results` / `--max-scan` 透传到执行端 | ✅ PASS | 本轮 `bash e2e-tests/tests/test_remote_invoke_e2e.sh` 中 `search.get` 的 `args_json` 记录 `max_results=5`、`max_scan=50`，caller 输出与命中结果一致。 |
+| TC-RI-87 | `remote traffic list` 将 list/filter 参数透传到执行端 | ✅ PASS | 本轮 E2E 使用 `limit/cursor/direction/method/status_min/status_max/protocol/host/url/path/content_type/client_app/has_rule_hit/is_websocket/is_sse/is_tunnel` 发起 `traffic.list`，`Recent Calls` 中 `args_json` 完整记录这些参数，命令执行成功并返回流量列表。 |
+| TC-RI-88 | `remote traffic search` 将 `query/max_results/max_scan` 透传到执行端 | ✅ PASS | 本轮 E2E 使用 `<marker> + max_results=3 + max_scan=30` 发起 `traffic.search`，caller 侧先看到 `Searching...` 再返回目标命中，`Recent Calls` 中 `args_json` 正确记录 `query`、`max_results`、`max_scan`。 |
 
 ---
 
@@ -3442,6 +3686,122 @@ PY
 - `POST /v4/remote-invoke/ssh/connect-result` 落 SSH grant 后，`caller_display_name` 取自调用方 `hostname/username`
 - 回传给 caller 的 `ssh_connect_result` 事件继续包含 `client_instance_id`，不影响 CLI 本地连接落盘
 
+### TC-RI-回归-123：远端 relay 下 client 重启后已落盘的加密 grant 仍可继续执行 remote status
+
+**前置条件**：
+- 远端 relay 使用 `https://bifrost.bytedance.net`
+- target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
+- caller 已通过 `pair-code` 或 `--ssh-key` 完成一次有效的 `remote connect`
+- caller 和 client 都使用独立数据目录，便于确认落盘文件
+
+**操作步骤**：
+1. 在 caller 侧先执行一次：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   ```
+2. 在 target client 上确认 admin 数据目录下已生成 grant crypto 持久化文件：
+   ```bash
+   ls <client_data_dir>/admin/remote_invoke_grant_crypto.*
+   ```
+3. 重启 target client：
+   ```bash
+   BIFROST_DATA_DIR=<client_data_dir> cargo run --bin bifrost -- start -p <admin_port> --unsafe-ssl --no-system-proxy
+   ```
+4. 等待 `/_bifrost/api/remote-invoke/status` 再次恢复为 `Connected`。
+5. 不重新执行 `remote connect`，直接在同一 caller 数据目录下再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   ```
+
+**预期结果**：
+- 步骤 1 首次 `remote status` 成功
+- 步骤 2 中存在 `remote_invoke_grant_crypto.json` 与对应 key 文件
+- 步骤 5 在不重新配对/不重新 SSH connect 的情况下仍成功返回远端状态
+- 整个过程中不再出现 `missing grant shared secret for encrypted remote command` / `reconnect is required`
+
+### TC-RI-回归-124：同一远端连续两次 pair-code connect 后 caller 必须只使用最后一次连接的 grant
+
+**前置条件**：
+- 远端 relay 使用 `https://bifrost.bytedance.net`
+- target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
+- caller 使用独立 `BIFROST_DATA_DIR`
+- 允许在 target client 上查看当前 grants
+
+**操作步骤**：
+1. 在 target client 上进入 discovery mode，记录第一个 pair code。
+2. caller 使用独立数据目录执行第一次连接：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_1> --relay-url https://bifrost.bytedance.net
+   ```
+3. 记录 caller 本地 `remote-connections.json` 中第一次连接得到的 `grant_id`。
+4. 再次进入 discovery mode，记录第二个 pair code。
+5. 使用同一个 caller 数据目录执行第二次连接：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_2> --relay-url https://bifrost.bytedance.net
+   ```
+6. 再次检查同一 caller 数据目录下的 `remote-connections.json`。
+7. 在 target client 上查询 grants 列表，确认是否同时存在两条 pair-code grant。
+8. 使用同一 caller 数据目录直接执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   ```
+
+**预期结果**：
+- 第 5 步后 caller 本地连接记录被第二次连接覆盖，只保留第二次 connect 的 `grant_id` 与加密上下文
+- 即使 target client / relay 侧仍同时存在多条 active pair-code grant，第 8 步 `remote status` 仍成功
+- 第 8 步实际使用的 grant 应与 caller 本地最后一次 connect 保存的 `grant_id` 一致，不会误用第一次连接留下的旧 grant
+- 整个流程不再出现 `missing grant shared secret for encrypted remote command`
+
+### TC-RI-回归-125：同一远端同一 caller 先用 SSH key 再用 pair-code connect 时必须稳定切换到最后一次连接
+
+**前置条件**：
+- 远端 relay 使用 `https://bifrost.bytedance.net`
+- target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
+- caller 使用独立 `BIFROST_DATA_DIR`
+- target client 已可导出可用的 SSH key
+
+**操作步骤**：
+1. 在 target client 上重置或导出当前 SSH key，得到可用的 `bifrost_key_file`。
+2. caller 使用独立数据目录执行 SSH 连接：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect --ssh-key <bifrost_key_file> --relay-url https://bifrost.bytedance.net
+   ```
+3. 记录 caller 本地 `remote-connections.json` 中 SSH 连接得到的 `grant_id`、`auth_method` 与加密上下文。
+4. 在同一个 target client 上进入 discovery mode，记录 pair code。
+5. 使用同一个 caller 数据目录执行 pair-code 连接：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code> --relay-url https://bifrost.bytedance.net
+   ```
+6. 再次检查同一 caller 数据目录下的 `remote-connections.json`。
+7. 在 target client 上查询 grants 列表，确认是否同时存在 `ssh_publickey` 与 `pair_code` 两条 active grant。
+8. 使用同一 caller 数据目录直接执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   ```
+
+**预期结果**：
+- 第 5 步后 caller 本地连接记录被 pair-code 连接覆盖，只保留最后一次 connect 的 `grant_id`、`auth_method=pair_code` 与对应加密上下文
+- target client / relay 侧可以同时存在 `ssh_publickey` 与 `pair_code` 两条 active grant
+- 第 8 步 `remote status` 成功，且实际使用的是 caller 本地最后一次 connect 保存的加密上下文
+- 整个流程不出现“无法判断当前加密方案”“shared secret 对不上”“caller/client ephemeral_pub 不匹配”之类串线错误
+
+### TC-RI-回归-126：Recent Calls 必须展示可读的命令摘要而不是空白
+
+**前置条件**：
+- target client 已连接 relay，Settings -> Remote Invoke 页面可正常打开
+- caller 已完成至少一次有效授权
+
+**操作步骤**：
+1. caller 执行一次 `remote status`。
+2. 刷新 target client 的 Settings -> Remote Invoke 页面。
+3. 在 `Recent Calls` 卡片中查看最新一条 `status` 调用记录。
+4. 如需进一步确认，调用 `GET /api/remote-invoke/calls`，检查最新 `status` 记录中的 `command_summary.command_preview`。
+
+**预期结果**：
+- `Recent Calls` 最新记录标题中能看到 `status` 之类可读命令摘要，而不是空白
+- 即使 relay 返回的 `command_summary.command_preview` 为空字符串，client 本地仍会用解密后的命令摘要补齐展示
+- `GET /api/remote-invoke/calls` 中对应记录的 `command_summary.command_preview` 非空，且与实际执行命令一致
+
 ### TC-RI-回归-102 ~ TC-RI-回归-106 执行结果（2026-04-21）
 
 **执行环境**：
@@ -3521,6 +3881,83 @@ PY
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-122 | ✅ PASS | 脚本使用本地编译后的 `bifrost-server-v4` service 与 fake Redis 驱动 `syncSshDeviceRoute -> issueSshChallenge -> verifySshConnect -> submitSshConnectResult` 全链路；验证 `ri:ssh_connect:<connect_id>` 中已持久化 `caller_info.hostname=ci-host` / `username=ci-user`，最终 SSH grant 的 `caller_display_name` 恢复为 `ci-host`，且 caller 侧 `ssh_connect_result` 队列事件继续携带 `client_instance_id=client-ssh-ctx`。 |
+
+### TC-RI-回归-123 执行结果（2026-04-22，远端 relay + client 重启后 grant crypto 持续可用）
+
+**执行环境**：
+- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-restart-ssh-caller cargo run --bin bifrost -- remote ...`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-123 | ✅ PASS | 先通过 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，caller 执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立新 grant `57a4c4ee-5810-4573-8014-171f39cb85f0`；首次 `remote status` 成功返回目标状态。随后确认 client 数据目录下已生成 `admin/remote_invoke_grant_crypto.json` 与 `.key`，其中记录了该 grant 的 `caller_ephemeral_pub` / `client_ephemeral_pub` / 加密后的 `shared_secret`。重启 target client 后，不重新 `remote connect`，直接复用同一 caller 目录再次执行 `remote status` 仍成功返回状态；client 日志显示已用持久化恢复的 grant crypto 派生 open_call key 并完成解密执行，整个流程未再出现 `missing grant shared secret for encrypted remote command`。 |
+
+### TC-RI-回归-124 执行结果（2026-04-22，远端 relay + 同一 caller 连续两次 pair-code connect）
+
+**执行环境**：
+- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-repeat-pair-caller cargo run --bin bifrost -- remote ...`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-124 | ✅ PASS | 同一 target client 先后用两个 pair code 完成两次 `remote connect`，第一次 grant 为 `1f43205651506fe6`，第二次 grant 为 `12e91b6bef344396`。第二次 connect 后，caller 本地 [remote-connections.json](/Users/eden/work/github/bifrost/.tmp-remote-repeat-pair-caller/remote-connections.json) 已被覆盖为第二次 grant，并落盘新的 `caller_ephemeral_pub` / `client_ephemeral_pub` / `shared_secret_encrypted`；同时 client 侧 `GET /api/remote-invoke/grants` 仍可看到两条 active pair-code grant 并存，证明“服务端多 grant 并存 + caller 本地只保留最后一次连接”这一高风险场景已真实出现。随后直接用同一 caller 目录执行 `cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net`，日志先告警 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，caller 改为整套使用本地最后一次连接保存的 `grant_id=12e91b6bef344396` 与对应 ephemeral pub，最终 `remote status` 成功返回目标设备状态 JSON，不再出现 `missing grant shared secret` 或 `caller_ephemeral_pub does not match saved encrypted transport context`。 |
+
+### TC-RI-回归-125 执行结果（2026-04-22，远端 relay + 同一 caller 先 SSH key 后 pair-code）
+
+**执行环境**：
+- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-mixed-auth-caller cargo run --bin bifrost -- remote ...`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-125 | ✅ PASS | 先在 target client 上 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，同一 caller 目录执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立 `ssh_publickey` grant `5f25ecf0-8b1a-4804-9f47-b379a212e58a`，caller 本地 [remote-connections.json](/Users/eden/work/github/bifrost/.tmp-remote-mixed-auth-caller/remote-connections.json) 记录为 `auth_method=ssh_publickey` 且落盘对应加密上下文，随后 `remote status` 成功返回目标状态。接着在同一 target client 上开启 discovery mode，并继续用同一个 caller 目录执行 pair-code connect，成功建立 `pair_code` grant `208006cff246d9b2`；此时 caller 本地连接记录被新连接覆盖为 `auth_method=pair_code`，而 client 侧 `GET /api/remote-invoke/grants` 同时存在一条 `ssh_publickey` active grant 和一条 `pair_code` active grant。最后再用同一 caller 目录执行 `remote status`，CLI 明确按本地最后一次连接的 pair-code transport context 工作，虽然 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，但 caller 仍稳定回退到本地保存的 `grant_id=208006cff246d9b2` 与对应 ephemeral pub，命令成功返回目标设备状态 JSON。结论是：同一 client 上两种 grant 可以同时在服务端共存并都有效，但同一个 caller 数据目录只保存最后一次 connect 的那一种模式，不会同时保留两套本地加密上下文。 |
+
+### TC-RI-回归-126 执行结果（2026-04-22，Recent Calls 命令摘要恢复）
+
+**执行环境**：
+- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client target/debug/bifrost -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-human-recentcalls-caller target/debug/bifrost remote ...`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-126 | ✅ PASS | 先在 target client 上重新进入 discovery mode，caller 用新的 pair code `465613` 完成连接并建立 grant `d7d94397baaf6212`。随后执行 `target/debug/bifrost remote status --relay-url https://bifrost.bytedance.net` 成功返回目标设备状态 JSON。紧接着查询 `GET http://127.0.0.1:8810/_bifrost/api/remote-invoke/calls`，最新记录返回 `{ "command_summary": { "command_preview": "status" }, "command": { "command": "status", "kind": "query.readonly" }, "command_kind": "query.readonly", "status": "completed" }`。这说明 Recent Calls 已不再展示空白或协议级占位的 `query.readonly`，而是恢复为真实可读的命令摘要 `status`。 |
+
+### TC-RI-回归-127：shell E2E 夹具与当前加密协议保持一致
+
+**背景**：Remote Invoke 已切到加密 `command_encrypted` / transport context 链路后，shell E2E 中的部分 mock relay 与手工 `open_call` 夹具如果仍停留在旧协议，会把“测试桩过期”误报成产品回归。
+
+**前置条件**：
+- 仓库已完成 `cargo build --release --bin bifrost`
+- 本机可启动本地 `packages/bifrost-sync-server`
+- 测试使用独立 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
+2. 确认“短暂 overload 后 connect 成功”和“持续 overload 后给出可行动提示”两条路径都通过
+3. 执行 `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+4. 确认可显式 `--relay-url`、运行中实例 `sync.remote_base_url`、本地配置 `sync.remote_base_url` 三条优先级路径都通过
+5. 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+6. 确认 `remote connect --ssh-key` 成功后，继续通过真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再手工构造旧版明文 `calls/open` 请求
+
+**预期结果**：
+- pair-code connect 相关 shell E2E 中，mock relay 返回的批准结果可让 caller 成功落盘当前加密 transport context
+- relay URL 回退脚本的 3 个 case 全部通过，不再出现 `pairing succeeded but relay did not return client_ephemeral_pub`
+- SSH shell E2E 中，`remote search` 与 `remote traffic get` 都能经由真实 CLI 成功执行，Recent Calls 中记录的命令状态为 `completed`
+
+### TC-RI-回归-127 执行结果（2026-04-22，shell E2E 协议对齐）
+
+**执行环境**：
+- `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
+- `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
+- `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-127 | ✅ PASS | `remote connect` 相关 mock relay 已补齐 `client_ephemeral_pub`，`overload retry` 与 `relay-url fallback` 两个 shell E2E 不再因旧批准 payload 报错；SSH 用例改为复用真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再命中旧版明文 `calls/open` 的 500，且 Recent Calls 中新增的 `search.get` / `traffic.get` 记录状态均为 `completed`。 |
 
 ### 本轮实际执行回归（2026-04-21，远端 relay 收尾修正）
 

@@ -72,11 +72,10 @@ install-deps:
 	cd web && npm install
 
 # Setup development environment (install git hooks)
-setup:
-	@echo "Setting up git hooks..."
-	@git config core.hooksPath .githooks
-	@echo "Git hooks configured successfully!"
-	@echo "Pre-commit hook should cover both workspace and desktop Tauri fmt checks before each commit."
+setup: setup-hooks
+
+setup-hooks:
+	@bash scripts/setup-git-hooks.sh
 
 # Create release artifacts
 release: build-release

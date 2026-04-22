@@ -418,8 +418,8 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.client_ephemeral_pub, p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.expires_at, p.create_time, p.update_time);
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.expires_at, p.create_time, p.update_time);
     return p;
   }
 
@@ -460,8 +460,8 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.caller_ephemeral_pub ?? '', g.client_ephemeral_pub ?? '', g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
     return g;
   }
 
@@ -732,6 +732,7 @@ export class SqliteStorage implements IStorage {
         pair_code             TEXT NOT NULL DEFAULT '',
         status                TEXT NOT NULL DEFAULT 'created',
         caller_pubkey         TEXT NOT NULL DEFAULT '',
+        caller_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         caller_info_json      TEXT NOT NULL DEFAULT '{}',
         command_summary_json  TEXT NOT NULL DEFAULT '{}',
@@ -751,8 +752,10 @@ export class SqliteStorage implements IStorage {
         client_instance_id    TEXT NOT NULL,
         caller_fingerprint    TEXT NOT NULL DEFAULT '',
         caller_display_name   TEXT NOT NULL DEFAULT '',
+        caller_ephemeral_pub  TEXT NOT NULL DEFAULT '',
+        client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         grant_mode            TEXT NOT NULL DEFAULT 'once',
-        grant_scope           TEXT NOT NULL DEFAULT 'query',
+        grant_scope           TEXT NOT NULL DEFAULT 'remote_query',
         status                TEXT NOT NULL DEFAULT 'active',
         first_authorized_at   TEXT NOT NULL DEFAULT '',
         expires_at            TEXT NOT NULL DEFAULT '',

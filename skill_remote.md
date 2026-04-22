@@ -186,8 +186,14 @@ bifrost remote status
 ### 2. 搜索远端流量
 
 ```bash
-bifrost remote search <keyword> --limit 50
+bifrost remote search <keyword> --max-results 50 --max-scan 200
 ```
+
+其中：
+
+- `--max-results` 控制最多返回多少条命中结果
+- `--max-scan` 控制远端执行端最多扫描多少条记录
+- `--limit` 仍可作为 `--max-results` 的兼容别名使用
 
 ### 3. 列出远端流量记录
 
@@ -216,7 +222,7 @@ bifrost remote traffic get <id> --request-body --response-body
 ### 5. 搜索远端流量详情
 
 ```bash
-bifrost remote traffic search <keyword> --limit 50
+bifrost remote traffic search <keyword> --max-results 50 --max-scan 200
 ```
 
 ### 6. 撤销远端授权

@@ -64,10 +64,15 @@ assert_proxy_request_debug_logs() {
 
     assert_status_2xx "${http_status}" "proxy request via daemon should succeed" || return 1
 
-    if grep -R -n "DEBUG" "${LOG_DIR}"/bifrost*.log > "${TEST_DATA_DIR}/debug-lines.log" 2>/dev/null; then
-        _log_pass "daemon log file contains DEBUG lines"
+    # Hit an admin route so the daemon definitely handles at least one admin
+    # request during the assertion window.
+    curl -sS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/app-icon/does-not-exist" >/dev/null 2>&1 || true
+    sleep 1
+
+    if grep -R -nE '^[0-9T:\.-]+Z (TRACE|DEBUG|INFO|WARN|ERROR) .+\.rs:[0-9]+:' "${LOG_DIR}"/bifrost*.log > "${TEST_DATA_DIR}/debug-lines.log" 2>/dev/null; then
+        _log_pass "daemon log file contains structured tracing lines"
     else
-        _log_fail "daemon log file contains DEBUG lines" "at least one DEBUG entry" "none found"
+        _log_fail "daemon log file contains structured tracing lines" "at least one tracing entry with file/line metadata" "none found"
         find "${LOG_DIR}" -maxdepth 1 -type f -print || true
         return 1
     fi

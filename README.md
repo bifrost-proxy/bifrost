@@ -67,6 +67,18 @@ bifrost start -d
 http://127.0.0.1:9900/_bifrost/
 ```
 
+## 开发初始化
+
+克隆仓库后，先执行一次 Git hook 初始化：
+
+```bash
+bash scripts/setup-git-hooks.sh
+# 或
+make setup
+```
+
+这会为当前仓库写入本地 `core.hooksPath=.githooks`，即使机器上配置了全局 `hooksPath`，后续 `git commit` 也会优先执行仓库内的 `.githooks/pre-commit`。默认 pre-commit 会检查工作区格式、桌面端 Tauri 格式，以及 `cargo clippy --workspace --all-targets --all-features -- -D warnings`。
+
 ## 用不习惯 CLI？想要使用桌面端 APP？
 
 请直接到[releases](https://github.com/bifrost-proxy/bifrost/releases)中下载对应平台的桌面端程序
@@ -129,4 +141,3 @@ chatgpt.com http3://
 - 请求重放说明：[`docs/replay.md`](docs/replay.md)
 - 项目结构与模块说明：[`docs/architecture.md`](docs/architecture.md)
 - Agent Skill 安装说明：[`docs/agent-skill.md`](docs/agent-skill.md)
-

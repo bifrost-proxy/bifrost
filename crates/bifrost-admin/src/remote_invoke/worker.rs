@@ -3,25 +3,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use bifrost_core::{BifrostError, Result};
 use bifrost_sync::SyncManagerHandle;
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
+use ring::agreement::{agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, X25519};
+use ring::digest::{digest, SHA256};
+use ring::rand::SystemRandom;
 use serde_json::Value;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
 use super::executor::RemoteInvokeExecutor;
+use super::grant_crypto_store::{GrantCryptoStore, StoredGrantCryptoMaterial};
 use super::identity::Identity;
 use super::relay_client::RelayClient;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use super::types::{
-    build_registration_signature_payload, grant_mode_ttl_ms, AuthMethod, CallInfo, CallStatus,
-    CallerInfo, ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
-    ClientRegistrationChallengeRequest, ClientRegistrationRequest, CommandSummary,
-    DiscoverySession, EncryptedEnvelope, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode,
-    GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig,
-    SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus, WorkerState,
+    build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
+    derive_open_call_session_key, encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms,
+    AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
+    ClientHeartbeatRequest, ClientRegistrationChallengeRequest, ClientRegistrationRequest,
+    CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope, EncryptedPayload,
+    EnvelopeAad, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode,
+    GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
+    RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
+    WorkerState,
 };
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 25;
@@ -70,6 +78,20 @@ impl ActiveCallControl {
     }
 }
 
+fn short_fingerprint(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes).as_ref()[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Clone)]
+struct GrantCryptoMaterial {
+    shared_secret: Vec<u8>,
+    caller_ephemeral_pub: String,
+    client_ephemeral_pub: String,
+}
+
 pub struct RemoteInvokeWorker {
     config: RemoteInvokeConfig,
     identity: Identity,
@@ -81,6 +103,8 @@ pub struct RemoteInvokeWorker {
     active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
     call_history: Arc<RwLock<VecDeque<CallInfo>>>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
+    grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
+    grant_crypto_store: Arc<GrantCryptoStore>,
     discovery_session: Arc<RwLock<Option<DiscoverySession>>>,
     ssh_key_store: Arc<SshKeyStore>,
     shutdown: Arc<AtomicBool>,
@@ -103,7 +127,29 @@ impl RemoteInvokeWorker {
             &identity.platform,
         ));
         let executor = Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port));
-        let ssh_key_store = Arc::new(SshKeyStore::new(&bifrost_storage::data_dir()));
+        let data_dir = bifrost_storage::data_dir();
+        let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
+        let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
+        let restored_grant_crypto =
+            match grant_crypto_store.load_for_relay(&relay_client.base_url()) {
+                Ok(restored) => restored
+                    .into_iter()
+                    .map(|(grant_id, material)| {
+                        (
+                            grant_id,
+                            GrantCryptoMaterial {
+                                shared_secret: material.shared_secret,
+                                caller_ephemeral_pub: material.caller_ephemeral_pub,
+                                client_ephemeral_pub: material.client_ephemeral_pub,
+                            },
+                        )
+                    })
+                    .collect(),
+                Err(error) => {
+                    warn!(error = %error, "load persisted grant crypto failed");
+                    HashMap::new()
+                }
+            };
 
         Arc::new(Self {
             config,
@@ -116,6 +162,8 @@ impl RemoteInvokeWorker {
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             call_history: Arc::new(RwLock::new(VecDeque::new())),
             local_grants: Arc::new(RwLock::new(HashMap::new())),
+            grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
+            grant_crypto_store,
             discovery_session: Arc::new(RwLock::new(None)),
             ssh_key_store,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -193,6 +241,26 @@ impl RemoteInvokeWorker {
         *self.discovery_session.write() = None;
         self.pending_pairings.write().clear();
         self.local_grants.write().clear();
+        let restored_grant_crypto = match self.grant_crypto_store.load_for_relay(new_normalized) {
+            Ok(restored) => restored
+                .into_iter()
+                .map(|(grant_id, material)| {
+                    (
+                        grant_id,
+                        GrantCryptoMaterial {
+                            shared_secret: material.shared_secret,
+                            caller_ephemeral_pub: material.caller_ephemeral_pub,
+                            client_ephemeral_pub: material.client_ephemeral_pub,
+                        },
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                warn!(error = %error, relay_url = %new_normalized, "reload persisted grant crypto after relay switch failed");
+                HashMap::new()
+            }
+        };
+        *self.grant_crypto.write() = restored_grant_crypto;
         self.reconnect_notify.notify_waiters();
     }
 
@@ -367,12 +435,31 @@ impl RemoteInvokeWorker {
             )));
         }
 
+        let caller_ephemeral_pub = {
+            self.pending_pairings
+                .read()
+                .get(pairing_id)
+                .and_then(|tp| tp.request.caller_ephemeral_pub.clone())
+        }
+        .ok_or_else(|| {
+            BifrostError::Config(
+                "pairing request is missing caller_ephemeral_pub required for encrypted remote commands"
+                    .to_string(),
+            )
+        })?;
+        let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
+
         let req = GrantDecisionRequest {
             pairing_id: pairing_id.to_string(),
             client_instance_id: self.identity.instance_id.clone(),
             decision: GrantDecision::Approve,
             grant_mode: Some(grant_mode),
-            client_ephemeral_pub: None,
+            grant_scope: Some(GrantScope::RemoteQuery),
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
         };
 
         let result = self
@@ -401,6 +488,10 @@ impl RemoteInvokeWorker {
             .unwrap_or("")
             .to_string();
         if !grant_id.is_empty() {
+            self.grant_crypto
+                .write()
+                .insert(grant_id.clone(), crypto_material.clone());
+            self.persist_grant_crypto(&grant_id, &crypto_material);
             let caller_fingerprint = result
                 .get("caller_fingerprint")
                 .and_then(|v| v.as_str())
@@ -428,7 +519,7 @@ impl RemoteInvokeWorker {
                 caller_fingerprint,
                 caller_display_name,
                 grant_mode,
-                grant_scope: "remote_invoke".to_string(),
+                grant_scope: GrantScope::RemoteQuery,
                 auth_method: AuthMethod::PairCode,
                 status: GrantStatus::Active,
                 first_authorized_at: now,
@@ -446,6 +537,12 @@ impl RemoteInvokeWorker {
                 },
                 ssh_key_id: None,
                 ssh_key_fingerprint: None,
+                caller_ephemeral_pub: None,
+                client_ephemeral_pub: None,
+                policy_binding: None,
+                shell_policy_set_version_snapshot: None,
+                interactive_allowed: None,
+                stdin_allowed: None,
             };
             self.local_grants
                 .write()
@@ -481,6 +578,11 @@ impl RemoteInvokeWorker {
             client_instance_id: self.identity.instance_id.clone(),
             decision: GrantDecision::Reject,
             grant_mode: None,
+            grant_scope: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
             client_ephemeral_pub: None,
         };
 
@@ -862,6 +964,14 @@ impl RemoteInvokeWorker {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let caller_ephemeral_pub = p
+                .get("caller_ephemeral_pub")
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string());
+            let client_ephemeral_pub = p
+                .get("client_ephemeral_pub")
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string());
 
             let request = PairingRequest {
                 pairing_id: pairing_id.clone(),
@@ -869,6 +979,8 @@ impl RemoteInvokeWorker {
                 command_summary: Default::default(),
                 command: Default::default(),
                 caller_pubkey,
+                client_ephemeral_pub,
+                caller_ephemeral_pub,
             };
 
             info!(
@@ -952,9 +1064,13 @@ impl RemoteInvokeWorker {
             for id in &dead_ids {
                 grants.remove(id);
             }
+            drop(grants);
+            for id in &dead_ids {
+                self.remove_grant_crypto(id);
+            }
             debug!(
                 removed = count,
-                remaining = grants.len(),
+                remaining = self.local_grants.read().len(),
                 "cleaned up expired/dead grants from local_grants"
             );
         }
@@ -973,6 +1089,7 @@ impl RemoteInvokeWorker {
     pub async fn delete_grant(&self, grant_id: &str) -> Result<()> {
         let relay_result = self.relay_client.delete_grant(grant_id).await;
         self.local_grants.write().remove(grant_id);
+        self.remove_grant_crypto(grant_id);
         match relay_result {
             Ok(_) => {
                 info!(grant_id = %grant_id, "grant deleted from local and relay");
@@ -982,6 +1099,27 @@ impl RemoteInvokeWorker {
             }
         }
         Ok(())
+    }
+
+    fn persist_grant_crypto(&self, grant_id: &str, material: &GrantCryptoMaterial) {
+        let stored = StoredGrantCryptoMaterial {
+            shared_secret: material.shared_secret.clone(),
+            caller_ephemeral_pub: material.caller_ephemeral_pub.clone(),
+            client_ephemeral_pub: material.client_ephemeral_pub.clone(),
+        };
+        if let Err(error) =
+            self.grant_crypto_store
+                .upsert(&self.relay_client.base_url(), grant_id, &stored)
+        {
+            warn!(error = %error, grant_id = %grant_id, "persist grant crypto failed");
+        }
+    }
+
+    fn remove_grant_crypto(&self, grant_id: &str) {
+        self.grant_crypto.write().remove(grant_id);
+        if let Err(error) = self.grant_crypto_store.remove(grant_id) {
+            warn!(error = %error, grant_id = %grant_id, "remove persisted grant crypto failed");
+        }
     }
 
     async fn maybe_refresh_pair_code(&self) {
@@ -1056,6 +1194,7 @@ impl RemoteInvokeWorker {
                     if let Some(grant_id) = v.get("grant_id").and_then(|g| g.as_str()) {
                         info!(grant_id = %grant_id, "grant revoked, sending ack");
                         self.local_grants.write().remove(grant_id);
+                        self.remove_grant_crypto(grant_id);
                         let rc = Arc::clone(&self.relay_client);
                         let gid = grant_id.to_string();
                         tokio::spawn(async move {
@@ -1090,16 +1229,24 @@ impl RemoteInvokeWorker {
     }
 
     fn revoke_local_ssh_grants(&self, ssh_key_id: Option<&str>) {
-        self.local_grants.write().retain(|_, grant| {
+        let mut revoked_grant_ids = Vec::new();
+        self.local_grants.write().retain(|grant_id, grant| {
             if grant.auth_method != AuthMethod::SshPublickey {
                 return true;
             }
 
-            match ssh_key_id {
+            let keep = match ssh_key_id {
                 Some(id) => grant.ssh_key_id.as_deref() != Some(id),
                 None => false,
+            };
+            if !keep {
+                revoked_grant_ids.push(grant_id.clone());
             }
+            keep
         });
+        for grant_id in revoked_grant_ids {
+            self.remove_grant_crypto(&grant_id);
+        }
     }
 
     async fn handle_grant_created(&self, data: Value) {
@@ -1142,6 +1289,13 @@ impl RemoteInvokeWorker {
                 reason: Some("relay_not_verified".to_string()),
                 caller_fingerprint: None,
                 grant_mode: None,
+                grant_scope: None,
+                caller_ephemeral_pub: None,
+                client_ephemeral_pub: None,
+                policy_binding: None,
+                shell_policy_set_version_snapshot: None,
+                interactive_allowed: None,
+                stdin_allowed: None,
             };
         }
 
@@ -1156,6 +1310,13 @@ impl RemoteInvokeWorker {
                     reason: Some("ssh_key_not_found".to_string()),
                     caller_fingerprint: None,
                     grant_mode: None,
+                    grant_scope: None,
+                    caller_ephemeral_pub: None,
+                    client_ephemeral_pub: None,
+                    policy_binding: None,
+                    shell_policy_set_version_snapshot: None,
+                    interactive_allowed: None,
+                    stdin_allowed: None,
                 };
             }
             Err(error) => {
@@ -1168,6 +1329,13 @@ impl RemoteInvokeWorker {
                     reason: Some("ssh_key_store_unavailable".to_string()),
                     caller_fingerprint: None,
                     grant_mode: None,
+                    grant_scope: None,
+                    caller_ephemeral_pub: None,
+                    client_ephemeral_pub: None,
+                    policy_binding: None,
+                    shell_policy_set_version_snapshot: None,
+                    interactive_allowed: None,
+                    stdin_allowed: None,
                 };
             }
         };
@@ -1181,6 +1349,13 @@ impl RemoteInvokeWorker {
                 reason: Some("ssh_key_not_found".to_string()),
                 caller_fingerprint: None,
                 grant_mode: None,
+                grant_scope: None,
+                caller_ephemeral_pub: None,
+                client_ephemeral_pub: None,
+                policy_binding: None,
+                shell_policy_set_version_snapshot: None,
+                interactive_allowed: None,
+                stdin_allowed: None,
             };
         }
 
@@ -1193,10 +1368,62 @@ impl RemoteInvokeWorker {
                 reason: Some("ssh_key_fingerprint_mismatch".to_string()),
                 caller_fingerprint: None,
                 grant_mode: None,
+                grant_scope: None,
+                caller_ephemeral_pub: None,
+                client_ephemeral_pub: None,
+                policy_binding: None,
+                shell_policy_set_version_snapshot: None,
+                interactive_allowed: None,
+                stdin_allowed: None,
             };
         }
 
         let now = now_millis();
+        let crypto_material = match event.caller_ephemeral_pub.as_deref() {
+            Some(caller_ephemeral_pub) => match build_grant_crypto_material(caller_ephemeral_pub) {
+                Ok(material) => material,
+                Err(error) => {
+                    warn!(error = %error, "build ssh connect encrypted transport failed");
+                    return SshConnectResultRequest {
+                        connect_id: event.connect_id.clone(),
+                        status: SshConnectResultStatus::Rejected,
+                        grant_id: None,
+                        expires_at: None,
+                        reason: Some("invalid_caller_ephemeral_pub".to_string()),
+                        caller_fingerprint: None,
+                        grant_mode: None,
+                        grant_scope: None,
+                        caller_ephemeral_pub: None,
+                        client_ephemeral_pub: None,
+                        policy_binding: None,
+                        shell_policy_set_version_snapshot: None,
+                        interactive_allowed: None,
+                        stdin_allowed: None,
+                    };
+                }
+            },
+            None => {
+                return SshConnectResultRequest {
+                    connect_id: event.connect_id.clone(),
+                    status: SshConnectResultStatus::Rejected,
+                    grant_id: None,
+                    expires_at: None,
+                    reason: Some(
+                        "caller_ephemeral_pub is required for encrypted ssh remote commands"
+                            .to_string(),
+                    ),
+                    caller_fingerprint: None,
+                    grant_mode: None,
+                    grant_scope: None,
+                    caller_ephemeral_pub: None,
+                    client_ephemeral_pub: None,
+                    policy_binding: None,
+                    shell_policy_set_version_snapshot: None,
+                    interactive_allowed: None,
+                    stdin_allowed: None,
+                };
+            }
+        };
         let grant_id = uuid::Uuid::new_v4().to_string();
         let grant_mode = GrantMode::Permanent;
         let expires_at = None;
@@ -1210,7 +1437,7 @@ impl RemoteInvokeWorker {
                 .as_ref()
                 .and_then(|info| info.display_name.clone().or_else(|| info.hostname.clone())),
             grant_mode,
-            grant_scope: "remote_invoke".to_string(),
+            grant_scope: GrantScope::RemoteQuery,
             auth_method: AuthMethod::SshPublickey,
             status: GrantStatus::Active,
             first_authorized_at: now,
@@ -1220,10 +1447,20 @@ impl RemoteInvokeWorker {
             remaining_calls: None,
             ssh_key_id: Some(active_key.record.id.clone()),
             ssh_key_fingerprint: Some(active_key.record.ssh_key_fingerprint.clone()),
+            caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub.clone()),
+            client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
         };
         self.local_grants
             .write()
             .insert(grant_id.clone(), grant_info);
+        self.grant_crypto
+            .write()
+            .insert(grant_id.clone(), crypto_material.clone());
+        self.persist_grant_crypto(&grant_id, &crypto_material);
 
         if let Err(error) = self
             .ssh_key_store
@@ -1240,6 +1477,13 @@ impl RemoteInvokeWorker {
             reason: None,
             caller_fingerprint: Some(active_key.record.ssh_key_fingerprint),
             grant_mode: Some(grant_mode),
+            grant_scope: Some(GrantScope::RemoteQuery),
+            caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub),
+            client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub),
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
         }
     }
 
@@ -1295,6 +1539,14 @@ impl RemoteInvokeWorker {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let caller_ephemeral_pub = data
+            .get("caller_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
+        let client_ephemeral_pub = data
+            .get("client_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
 
         let command_summary = serde_json::from_value(command_summary_val).unwrap_or_default();
         let command = serde_json::from_value(command_val).unwrap_or_default();
@@ -1305,6 +1557,8 @@ impl RemoteInvokeWorker {
             command_summary,
             command,
             caller_pubkey,
+            client_ephemeral_pub,
+            caller_ephemeral_pub,
         };
 
         info!(
@@ -1370,7 +1624,7 @@ impl RemoteInvokeWorker {
                     caller_fingerprint: caller_fp,
                     caller_display_name: None,
                     grant_mode: GrantMode::Permanent,
-                    grant_scope: "remote_invoke".to_string(),
+                    grant_scope: GrantScope::RemoteQuery,
                     auth_method: AuthMethod::PairCode,
                     status: GrantStatus::Active,
                     first_authorized_at: now_millis(),
@@ -1380,6 +1634,18 @@ impl RemoteInvokeWorker {
                     remaining_calls: None,
                     ssh_key_id: None,
                     ssh_key_fingerprint: None,
+                    caller_ephemeral_pub: data
+                        .get("caller_ephemeral_pub")
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.to_string()),
+                    client_ephemeral_pub: data
+                        .get("client_ephemeral_pub")
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.to_string()),
+                    policy_binding: None,
+                    shell_policy_set_version_snapshot: None,
+                    interactive_allowed: None,
+                    stdin_allowed: None,
                 };
                 self.local_grants
                     .write()
@@ -1416,23 +1682,79 @@ impl RemoteInvokeWorker {
             "grant validated for call_open"
         );
 
-        let command: RemoteCommand = match data.get("command") {
-            Some(v) => match serde_json::from_value(v.clone()) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(error = %e, call_id = %call_id, "failed to parse command in call_open");
-                    let stderr = format!("failed to parse command: {}", e);
-                    self.send_call_exit(&call_id, -1, Some(stderr), None, None, 0)
-                        .await;
-                    return;
-                }
-            },
+        let grant_scope = self
+            .local_grants
+            .read()
+            .get(&grant_id)
+            .map(|grant| grant.grant_scope)
+            .unwrap_or_default();
+
+        let transport_command_kind = data
+            .get("command_kind")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+
+        if data.get("command").is_some() {
+            warn!(
+                call_id = %call_id,
+                grant_id = %grant_id,
+                "legacy plaintext command payload is no longer accepted"
+            );
+            self.send_call_exit(
+                &call_id,
+                -2,
+                Some("plaintext command payload is no longer supported".to_string()),
+                None,
+                None,
+                0,
+            )
+            .await;
+            return;
+        }
+
+        if data.get("command_encrypted").is_none() {
+            warn!(call_id = %call_id, "call_open missing command_encrypted field");
+            self.send_call_exit(
+                &call_id,
+                -1,
+                Some("missing command_encrypted field in call_open".to_string()),
+                None,
+                None,
+                0,
+            )
+            .await;
+            return;
+        }
+
+        let command_kind = transport_command_kind;
+
+        if !grant_scope.allows_command(command_kind) {
+            let reason = format!(
+                "grant scope {:?} does not allow command kind {:?}",
+                grant_scope, command_kind
+            );
+            warn!(
+                call_id = %call_id,
+                grant_id = %grant_id,
+                %reason,
+                "SECURITY: call_open rejected due to grant scope mismatch"
+            );
+            self.send_call_exit(&call_id, -2, Some(reason), None, None, 0)
+                .await;
+            return;
+        }
+
+        let encrypted_payload: EncryptedPayload = match data
+            .get("command_encrypted")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+        {
+            Some(payload) => payload,
             None => {
-                warn!(call_id = %call_id, "call_open missing command field");
                 self.send_call_exit(
                     &call_id,
                     -1,
-                    Some("missing command field in call_open".to_string()),
+                    Some("invalid command_encrypted payload in call_open".to_string()),
                     None,
                     None,
                     0,
@@ -1442,13 +1764,40 @@ impl RemoteInvokeWorker {
             }
         };
 
-        let command_summary_for_call: CommandSummary = data
-            .get("command_summary")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(|| CommandSummary {
-                command_preview: command.command.clone(),
-                ..Default::default()
-            });
+        let command = match self.decrypt_call_command(
+            &grant_id,
+            &call_id,
+            command_kind,
+            grant_scope,
+            &encrypted_payload,
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                warn!(
+                    call_id = %call_id,
+                    grant_id = %grant_id,
+                    error = %error,
+                    "failed to decrypt call_open command payload"
+                );
+                self.send_call_exit(&call_id, -2, Some(error.to_string()), None, None, 0)
+                    .await;
+                return;
+            }
+        };
+
+        if command.kind != command_kind {
+            let reason = format!(
+                "decrypted command kind {:?} does not match transport kind {:?}",
+                command.kind, command_kind
+            );
+            warn!(call_id = %call_id, grant_id = %grant_id, %reason, "SECURITY: command kind mismatch");
+            self.send_call_exit(&call_id, -2, Some(reason), None, None, 0)
+                .await;
+            return;
+        }
+
+        let command_summary_for_call =
+            build_call_command_summary(data.get("command_summary"), &command, command_kind);
 
         let (caller_fingerprint, caller_display_name) = {
             let grants = self.local_grants.read();
@@ -1461,7 +1810,7 @@ impl RemoteInvokeWorker {
         info!(
             call_id = %call_id,
             grant_id = %grant_id,
-            command = %command.command,
+            command = %command.summary_label(),
             args_json = ?command.args_json,
             "executing remote command via call_open"
         );
@@ -1485,9 +1834,25 @@ impl RemoteInvokeWorker {
                     .get(&grant_id)
                     .map(|grant| grant.auth_method)
                     .unwrap_or(AuthMethod::PairCode),
+                command_kind,
                 status: CallStatus::Streaming,
                 command_summary: command_summary_for_call,
-                command: command.clone(),
+                command: RemoteCommand {
+                    kind: command.kind,
+                    command: command.command.clone(),
+                    args_json: command.args_json.clone(),
+                    policy_id: command.policy_id.clone(),
+                    exec_mode: command.exec_mode,
+                    argv: command.argv.clone(),
+                    shell: command.shell.clone(),
+                    command_text: command.command_text.clone(),
+                    cwd: command.cwd.clone(),
+                    env: command.env.clone(),
+                    stdin_mode: command.stdin_mode,
+                    timeout_ms: command.timeout_ms,
+                    pty: command.pty.clone(),
+                    output_mode: command.output_mode,
+                },
                 source_ip: None,
                 caller_display_name,
                 payload_digest: None,
@@ -1509,6 +1874,10 @@ impl RemoteInvokeWorker {
                     .read()
                     .get(&grant_id)
                     .and_then(|grant| grant.ssh_key_fingerprint.clone()),
+                policy_id: None,
+                exec_mode: None,
+                output_mode: None,
+                pty_enabled: None,
             };
             let max = self.config.max_records as usize;
             let mut history = self.call_history.write();
@@ -1518,6 +1887,26 @@ impl RemoteInvokeWorker {
             }
         }
 
+        let grant_crypto_lookup = { self.grant_crypto.read().get(&grant_id).cloned() };
+        let grant_crypto = match grant_crypto_lookup {
+            Some(crypto) => crypto,
+            None => {
+                self.send_call_exit(
+                    &call_id,
+                    -2,
+                    Some(
+                        "missing grant shared secret for encrypted remote command stream; reconnect is required"
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    0,
+                )
+                .await;
+                return;
+            }
+        };
+
         let executor = Arc::clone(&self.executor);
         let relay_client = Arc::clone(&self.relay_client);
         let instance_id = self.identity.instance_id.clone();
@@ -1525,6 +1914,8 @@ impl RemoteInvokeWorker {
         let active_call_for_task = Arc::clone(&active_call);
         let call_history = Arc::clone(&self.call_history);
         let cid = call_id.clone();
+        let command_kind_for_stream = command.kind;
+        let grant_scope_for_stream = grant_scope;
 
         let task = tokio::spawn(async move {
             // Give caller-initiated cancel a short window to arrive before we begin execution.
@@ -1542,20 +1933,19 @@ impl RemoteInvokeWorker {
                     let relay_client = Arc::clone(&relay_client);
                     let cid = cid.clone();
                     let instance_id = instance_id.clone();
+                    let grant_crypto = grant_crypto.clone();
                     let seq = next_seq;
                     next_seq += 1;
 
                     async move {
-                        let envelope = EncryptedEnvelope {
-                            version: 1,
-                            call_id: cid.clone(),
+                        let envelope = Self::encrypt_call_frame(
+                            &grant_crypto,
+                            &cid,
                             seq,
-                            direction: super::types::FrameDirection::ClientToCaller,
-                            nonce: String::new(),
-                            ciphertext: chunk,
-                            tag: String::new(),
-                            aad: None,
-                        };
+                            chunk,
+                            command_kind_for_stream,
+                            grant_scope_for_stream,
+                        )?;
 
                         let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                         let frame_req = ClientCallFrameRequest {
@@ -1577,16 +1967,36 @@ impl RemoteInvokeWorker {
                         active_calls.write().remove(&cid);
                         return;
                     }
+                    let exit_encrypted = match Self::encrypt_call_exit(
+                        &grant_crypto,
+                        &cid,
+                        response.exit_code,
+                        Some(duration_ms),
+                        response.stderr.clone(),
+                        response.stdout_digest.clone(),
+                        response.stderr_digest.clone(),
+                    ) {
+                        Ok(payload) => Some(payload),
+                        Err(error) => {
+                            error!(
+                                error = %error,
+                                call_id = %cid,
+                                "failed to encrypt call exit payload"
+                            );
+                            None
+                        }
+                    };
                     let exit_req = ClientCallExitRequest {
                         call_id: cid.clone(),
                         client_instance_id: instance_id,
                         exit_code: response.exit_code,
                         duration_ms: Some(duration_ms),
-                        stderr: response.stderr.clone(),
+                        stderr: None,
                         stdout_digest: response.stdout_digest.clone(),
                         stderr_digest: response.stderr_digest.clone(),
                         bytes_in: Some(0),
                         bytes_out: response.stdout.as_ref().map(|s| s.len() as u64),
+                        exit_encrypted,
                     };
 
                     if let Err(e) = relay_client.post_call_exit(&cid, &exit_req).await {
@@ -1624,17 +2034,37 @@ impl RemoteInvokeWorker {
                     }
                     error!(error = %e, call_id = %cid, "remote command execution failed");
                     let stderr = e.to_string();
+                    let exit_encrypted = match Self::encrypt_call_exit(
+                        &grant_crypto,
+                        &cid,
+                        -1,
+                        Some(duration_ms),
+                        Some(stderr.clone()),
+                        None,
+                        Some(crate::remote_invoke::executor::sha1_hex(&stderr)),
+                    ) {
+                        Ok(payload) => Some(payload),
+                        Err(error) => {
+                            error!(
+                                error = %error,
+                                call_id = %cid,
+                                "failed to encrypt error exit payload"
+                            );
+                            None
+                        }
+                    };
 
                     let exit_req = ClientCallExitRequest {
                         call_id: cid.clone(),
                         client_instance_id: instance_id,
                         exit_code: -1,
                         duration_ms: Some(duration_ms),
-                        stderr: Some(stderr.clone()),
+                        stderr: None,
                         stdout_digest: None,
                         stderr_digest: Some(crate::remote_invoke::executor::sha1_hex(&stderr)),
                         bytes_in: Some(0),
                         bytes_out: Some(0),
+                        exit_encrypted,
                     };
 
                     if let Err(e2) = relay_client.post_call_exit(&cid, &exit_req).await {
@@ -1660,6 +2090,121 @@ impl RemoteInvokeWorker {
         *active_call.task.lock() = Some(task);
     }
 
+    fn decrypt_call_command(
+        &self,
+        grant_id: &str,
+        call_id: &str,
+        command_kind: CommandKind,
+        grant_scope: GrantScope,
+        payload: &EncryptedPayload,
+    ) -> Result<RemoteCommand> {
+        let crypto = self
+            .grant_crypto
+            .read()
+            .get(grant_id)
+            .cloned()
+            .ok_or_else(|| {
+                BifrostError::Config(
+                    "missing grant shared secret for encrypted remote command; reconnect is required"
+                        .to_string(),
+                )
+            })?;
+
+        let session_key = derive_open_call_session_key(
+            &crypto.shared_secret,
+            grant_id,
+            Some(&crypto.caller_ephemeral_pub),
+            Some(&crypto.client_ephemeral_pub),
+            command_kind,
+        )?;
+        debug!(
+            grant_id = %grant_id,
+            command_kind = %command_kind.as_str(),
+            shared_secret_fp = %short_fingerprint(&crypto.shared_secret),
+            open_call_key_fp = %short_fingerprint(&session_key),
+            "derived client open_call decryption key"
+        );
+
+        let fallback_aad = EnvelopeAad {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 0,
+            direction: super::types::FrameDirection::CallerToClient,
+            token_hash: None,
+            frame_type: Some("command".to_string()),
+            command_kind: Some(command_kind),
+            grant_scope: Some(grant_scope),
+            sender_key_id: None,
+            metadata: None,
+        };
+
+        let mut command = decrypt_remote_command_payload(payload, &session_key, fallback_aad)?;
+        if command.command.is_empty() {
+            command.command = command.kind.as_str().to_string();
+        }
+        Ok(command)
+    }
+
+    fn encrypt_call_frame(
+        crypto: &GrantCryptoMaterial,
+        call_id: &str,
+        seq: u64,
+        chunk: String,
+        _command_kind: CommandKind,
+        _grant_scope: GrantScope,
+    ) -> Result<EncryptedEnvelope> {
+        let session_key = derive_call_session_key(
+            &crypto.shared_secret,
+            call_id,
+            Some(&crypto.caller_ephemeral_pub),
+            Some(&crypto.client_ephemeral_pub),
+        )?;
+        let payload = encrypt_encrypted_payload_without_aad(
+            &serde_json::json!({ "chunk": chunk }),
+            &session_key,
+            2,
+        )?;
+
+        Ok(EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq,
+            direction: FrameDirection::ClientToCaller,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        })
+    }
+
+    fn encrypt_call_exit(
+        crypto: &GrantCryptoMaterial,
+        call_id: &str,
+        exit_code: i32,
+        duration_ms: Option<u64>,
+        stderr: Option<String>,
+        stdout_digest: Option<String>,
+        stderr_digest: Option<String>,
+    ) -> Result<EncryptedPayload> {
+        let session_key = derive_call_session_key(
+            &crypto.shared_secret,
+            call_id,
+            Some(&crypto.caller_ephemeral_pub),
+            Some(&crypto.client_ephemeral_pub),
+        )?;
+        encrypt_encrypted_payload_without_aad(
+            &serde_json::json!({
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "stderr": stderr,
+                "stdout_digest": stdout_digest,
+                "stderr_digest": stderr_digest,
+            }),
+            &session_key,
+            2,
+        )
+    }
+
     async fn send_call_exit(
         &self,
         call_id: &str,
@@ -1679,6 +2224,7 @@ impl RemoteInvokeWorker {
             stderr_digest,
             bytes_in: Some(0),
             bytes_out: Some(0),
+            exit_encrypted: None,
         };
 
         if let Err(e) = self.relay_client.post_call_exit(call_id, &req).await {
@@ -1767,6 +2313,28 @@ fn update_call_in_history(
         return true;
     }
     false
+}
+
+fn build_call_command_summary(
+    summary_value: Option<&Value>,
+    command: &RemoteCommand,
+    command_kind: CommandKind,
+) -> CommandSummary {
+    let mut summary: CommandSummary = summary_value
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+
+    let preview = summary.command_preview.trim();
+    let fallback = command.summary_label().trim();
+    if preview.is_empty() || (preview == command_kind.as_str() && !fallback.is_empty()) {
+        summary.command_preview = if fallback.is_empty() {
+            command_kind.as_str().to_string()
+        } else {
+            fallback.to_string()
+        };
+    }
+
+    summary
 }
 
 fn find_call_started_at(history: &RwLock<VecDeque<CallInfo>>, call_id: &str) -> Option<u64> {
@@ -1870,6 +2438,31 @@ fn validate_grant_for_call(
     }
 }
 
+fn build_grant_crypto_material(caller_ephemeral_pub: &str) -> Result<GrantCryptoMaterial> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let caller_public_key = engine.decode(caller_ephemeral_pub).map_err(|e| {
+        BifrostError::Config(format!("invalid caller_ephemeral_pub encoding: {}", e))
+    })?;
+
+    let rng = SystemRandom::new();
+    let my_private = EphemeralPrivateKey::generate(&X25519, &rng)
+        .map_err(|_| BifrostError::Config("generate client ephemeral key failed".to_string()))?;
+    let my_public = my_private
+        .compute_public_key()
+        .map_err(|_| BifrostError::Config("compute client ephemeral pubkey failed".to_string()))?;
+    let client_ephemeral_pub = engine.encode(my_public.as_ref());
+
+    let peer = UnparsedPublicKey::new(&X25519, caller_public_key);
+    let shared_secret = agree_ephemeral(my_private, &peer, |shared_secret| shared_secret.to_vec())
+        .map_err(|_| BifrostError::Config("derive grant shared secret failed".to_string()))?;
+
+    Ok(GrantCryptoMaterial {
+        shared_secret,
+        caller_ephemeral_pub: caller_ephemeral_pub.to_string(),
+        client_ephemeral_pub,
+    })
+}
+
 fn build_grant_info_from_grant_created(
     data: &Value,
     client_instance_id: &str,
@@ -1912,7 +2505,10 @@ fn build_grant_info_from_grant_created(
         caller_fingerprint,
         caller_display_name,
         grant_mode,
-        grant_scope: "remote_invoke".to_string(),
+        grant_scope: data
+            .get("grant_scope")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         auth_method,
         status: GrantStatus::Active,
         first_authorized_at: authorized_at,
@@ -1930,12 +2526,29 @@ fn build_grant_info_from_grant_created(
         },
         ssh_key_id,
         ssh_key_fingerprint,
+        caller_ephemeral_pub: data
+            .get("caller_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string()),
+        client_ephemeral_pub: data
+            .get("client_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string()),
+        policy_binding: data.get("policy_binding").cloned(),
+        shell_policy_set_version_snapshot: data
+            .get("shell_policy_set_version_snapshot")
+            .and_then(|v| v.as_u64()),
+        interactive_allowed: data.get("interactive_allowed").and_then(|v| v.as_bool()),
+        stdin_allowed: data.get("stdin_allowed").and_then(|v| v.as_bool()),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use ring::agreement::EphemeralPrivateKey;
+    use ring::rand::SystemRandom;
 
     fn make_active_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
         GrantInfo {
@@ -1944,7 +2557,7 @@ mod tests {
             caller_fingerprint: "test-fp".to_string(),
             caller_display_name: None,
             grant_mode: mode,
-            grant_scope: "remote_invoke".to_string(),
+            grant_scope: GrantScope::RemoteQuery,
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
@@ -1962,6 +2575,12 @@ mod tests {
             },
             ssh_key_id: None,
             ssh_key_fingerprint: None,
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
         }
     }
 
@@ -2118,6 +2737,68 @@ mod tests {
         assert!(build_grant_info_from_grant_created(&payload, "client-c", 42).is_none());
     }
 
+    #[test]
+    fn test_build_call_command_summary_falls_back_to_decrypted_command_when_preview_blank() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "status".to_string(),
+            args_json: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "",
+                "masked_args_json": "[\"--json\"]"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(summary.command_preview, "status");
+        assert_eq!(summary.masked_args_json.as_deref(), Some("[\"--json\"]"));
+    }
+
+    #[test]
+    fn test_build_call_command_summary_replaces_route_level_preview_with_decrypted_command() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "status".to_string(),
+            args_json: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "query.readonly"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(summary.command_preview, "status");
+    }
+
     fn make_call_info(call_id: &str) -> CallInfo {
         CallInfo {
             call_id: call_id.to_string(),
@@ -2126,14 +2807,27 @@ mod tests {
             client_instance_id: "test-instance".to_string(),
             caller_fingerprint: "test-fp".to_string(),
             auth_method: AuthMethod::PairCode,
+            command_kind: CommandKind::QueryReadonly,
             status: CallStatus::Streaming,
             command_summary: CommandSummary {
                 command_preview: "status".to_string(),
                 ..Default::default()
             },
             command: RemoteCommand {
+                kind: CommandKind::QueryReadonly,
                 command: "status".to_string(),
                 args_json: None,
+                policy_id: None,
+                exec_mode: None,
+                argv: None,
+                shell: None,
+                command_text: None,
+                cwd: None,
+                env: None,
+                stdin_mode: None,
+                timeout_ms: None,
+                pty: None,
+                output_mode: None,
             },
             source_ip: None,
             caller_display_name: Some("TestCaller".to_string()),
@@ -2148,6 +2842,10 @@ mod tests {
             bytes_out: None,
             ssh_key_id: None,
             ssh_key_fingerprint: None,
+            policy_id: None,
+            exec_mode: None,
+            output_mode: None,
+            pty_enabled: None,
         }
     }
 
@@ -2405,7 +3103,7 @@ mod tests {
             caller_fingerprint: "fp".to_string(),
             caller_display_name: None,
             grant_mode: GrantMode::Permanent,
-            grant_scope: "remote_invoke".to_string(),
+            grant_scope: GrantScope::RemoteQuery,
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
@@ -2415,6 +3113,12 @@ mod tests {
             remaining_calls: None,
             ssh_key_id: None,
             ssh_key_fingerprint: None,
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
         };
         grants.insert("auto-g".to_string(), auto_grant);
 
@@ -2424,5 +3128,53 @@ mod tests {
             "auto-recovered grant should pass validation"
         );
         assert_eq!(grants["auto-g"].last_used_at, Some(5000));
+    }
+
+    #[test]
+    fn test_build_grant_info_from_grant_created_parses_shell_exec_scope_and_keys() {
+        let payload = serde_json::json!({
+            "grant_id": "grant-shell",
+            "caller_fingerprint": "caller-shell",
+            "grant_mode": "permanent",
+            "grant_scope": "remote_shell_exec",
+            "caller_ephemeral_pub": "caller-epk",
+            "client_ephemeral_pub": "client-epk",
+            "interactive_allowed": false,
+            "stdin_allowed": true,
+            "shell_policy_set_version_snapshot": 3
+        });
+
+        let grant = build_grant_info_from_grant_created(&payload, "client-shell", 777)
+            .expect("grant should parse");
+
+        assert_eq!(grant.grant_scope, GrantScope::RemoteShellExec);
+        assert_eq!(grant.caller_ephemeral_pub.as_deref(), Some("caller-epk"));
+        assert_eq!(grant.client_ephemeral_pub.as_deref(), Some("client-epk"));
+        assert_eq!(grant.interactive_allowed, Some(false));
+        assert_eq!(grant.stdin_allowed, Some(true));
+        assert_eq!(grant.shell_policy_set_version_snapshot, Some(3));
+    }
+
+    #[test]
+    fn test_grant_scope_rejects_shell_exec_for_query_scope() {
+        assert!(!GrantScope::RemoteQuery.allows_command(CommandKind::ShellExec));
+        assert!(GrantScope::RemoteShellExec.allows_command(CommandKind::ShellExec));
+    }
+
+    #[test]
+    fn test_build_grant_crypto_material_derives_x25519_secret() {
+        let rng = SystemRandom::new();
+        let caller_private =
+            EphemeralPrivateKey::generate(&X25519, &rng).expect("caller private key");
+        let caller_public = caller_private
+            .compute_public_key()
+            .expect("caller public key");
+        let caller_public_b64 =
+            base64::engine::general_purpose::STANDARD.encode(caller_public.as_ref());
+
+        let material = build_grant_crypto_material(&caller_public_b64).expect("grant crypto");
+        assert_eq!(material.caller_ephemeral_pub, caller_public_b64);
+        assert!(!material.client_ephemeral_pub.is_empty());
+        assert_eq!(material.shared_secret.len(), 32);
     }
 }

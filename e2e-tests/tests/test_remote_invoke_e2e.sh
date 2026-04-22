@@ -347,6 +347,21 @@ else
     _log_fail "TC-RI-02: remote status 未返回预期的设备信息" "包含 proxy_address/instance_id" "$STATUS_OUTPUT"
 fi
 
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+LATEST_STATUS_PREVIEW=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "status"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command_summary.command_preview // ""
+')
+if [[ "$LATEST_STATUS_PREVIEW" == "status" ]]; then
+    _log_pass "TC-RI-02A: client Recent Calls 展示 status 命令摘要"
+else
+    _log_fail "TC-RI-02A: client Recent Calls 命令摘要为空或错误" "status" "${LATEST_STATUS_PREVIEW:-<empty>}"
+fi
+
 # =========================================================================
 # TC-RI-03: Remote traffic list command
 # =========================================================================
@@ -357,14 +372,61 @@ REMOTE_MARKER="remote-invoke-${RANDOM}"
 curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/${REMOTE_MARKER}" >/dev/null 2>&1 || true
 sleep 2
 
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+PRE_TRAFFIC_LIST_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.list"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].started_at // 0
+')
+
 TRAFFIC_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic list \
-    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 5 2>&1) || true
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    --limit 7 --cursor 123 --direction forward --method GET \
+    --status-min 200 --status-max 299 --protocol http --host httpbin \
+    --url "/anything/${REMOTE_MARKER}" --path "/anything" --content-type application/json \
+    --client-app curl --has-rule-hit false --is-websocket false --is-sse false --is-tunnel false 2>&1) || true
 
 if echo "$TRAFFIC_OUTPUT" | grep -qiE "Seq|Host|Method|Status|httpbin"; then
     _log_pass "TC-RI-03: remote traffic list 返回了流量记录"
 else
     _log_warning "TC-RI-03: traffic list 可能为空（无匹配规则时无流量）: $(echo "$TRAFFIC_OUTPUT" | head -3)"
     _log_pass "TC-RI-03: remote traffic list 命令执行成功（数据取决于规则配置）"
+fi
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+LATEST_TRAFFIC_LIST_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_LIST_STARTED_AT:-0}" '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.list" and (.started_at // 0) > $prev_started_at))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+')
+
+if echo "$LATEST_TRAFFIC_LIST_ARGS_JSON" | jq -e --arg marker "$REMOTE_MARKER" '
+    .limit == 7
+    and .cursor == 123
+    and .direction == "forward"
+    and .method == "GET"
+    and .status_min == 200
+    and .status_max == 299
+    and .protocol == "http"
+    and .host == "httpbin"
+    and .url == ("/anything/" + $marker)
+    and .path == "/anything"
+    and .content_type == "application/json"
+    and .client_app == "curl"
+    and .has_rule_hit == false
+    and .is_websocket == false
+    and .is_sse == false
+    and .is_tunnel == false
+' >/dev/null 2>&1; then
+    _log_pass "TC-RI-03A: remote traffic list 将全部过滤参数透传到执行端"
+else
+    _log_fail "TC-RI-03A: remote traffic list 未透传完整过滤参数" "args_json 包含 list/filter 参数" "${LATEST_TRAFFIC_LIST_ARGS_JSON:-<empty>}"
 fi
 
 http_get "${CLIENT_ADMIN_URL}/api/traffic?limit=20"
@@ -376,23 +438,51 @@ TARGET_SEQ=$(echo "$HTTP_BODY" | jq -r --arg marker "$REMOTE_MARKER" '
 ' | head -n 1)
 assert_not_empty "$TARGET_SEQ" "用于 remote traffic get 的 sequence 不应为空"
 
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+PRE_TRAFFIC_GET_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.get"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].started_at // 0
+')
+
 REMOTE_GET_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic get "$TARGET_SEQ" \
-    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --request-body --response-body 2>&1) || true
 
 if [[ "$REMOTE_GET_OUTPUT" == *"\"seq\":${TARGET_SEQ}"* || "$REMOTE_GET_OUTPUT" == *"\"sequence\":${TARGET_SEQ}"* ]] \
     && [[ "$REMOTE_GET_OUTPUT" == *"$REMOTE_MARKER"* ]]; then
-    _log_pass "TC-RI-03A: remote traffic get 支持 sequence 查询并返回详情"
+    _log_pass "TC-RI-03B: remote traffic get 支持 sequence 查询并返回详情"
 else
-    _log_fail "TC-RI-03A: remote traffic get 未返回目标 sequence 的详情" "包含 seq/sequence=${TARGET_SEQ} 与 marker=${REMOTE_MARKER}" "$REMOTE_GET_OUTPUT"
+    _log_fail "TC-RI-03B: remote traffic get 未返回目标 sequence 的详情" "包含 seq/sequence=${TARGET_SEQ} 与 marker=${REMOTE_MARKER}" "$REMOTE_GET_OUTPUT"
+fi
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+LATEST_TRAFFIC_GET_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_GET_STARTED_AT:-0}" '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.get" and (.started_at // 0) > $prev_started_at))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+')
+
+if echo "$LATEST_TRAFFIC_GET_ARGS_JSON" | grep -q "\"id\":\"${TARGET_SEQ}\"" \
+    && echo "$LATEST_TRAFFIC_GET_ARGS_JSON" | grep -q '"request_body":true' \
+    && echo "$LATEST_TRAFFIC_GET_ARGS_JSON" | grep -q '"response_body":true'; then
+    _log_pass "TC-RI-03C: remote traffic get 将 id/body 标志透传到执行端"
+else
+    _log_fail "TC-RI-03C: remote traffic get 未透传完整参数" "args_json 包含 id/request_body/response_body" "${LATEST_TRAFFIC_GET_ARGS_JSON:-<empty>}"
 fi
 
 REMOTE_GET_MISSING_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic get 999999999 \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
 
 if echo "$REMOTE_GET_MISSING_OUTPUT" | grep -q "No traffic record with sequence suffix '999999999' found"; then
-    _log_pass "TC-RI-03B: remote traffic get 失败时会透出真实错误"
+    _log_pass "TC-RI-03D: remote traffic get 失败时会透出真实错误"
 else
-    _log_fail "TC-RI-03B: remote traffic get 失败时未透出真实错误" "包含 sequence suffix not found 错误" "$REMOTE_GET_MISSING_OUTPUT"
+    _log_fail "TC-RI-03D: remote traffic get 失败时未透出真实错误" "包含 sequence suffix not found 错误" "$REMOTE_GET_MISSING_OUTPUT"
 fi
 
 # =========================================================================
@@ -401,8 +491,18 @@ fi
 log "=== TC-RI-04: Remote search command ==="
 
 SEARCH_LOG="$(mktemp)"
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+PRE_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "search.get"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].started_at // 0
+')
+
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$REMOTE_MARKER" \
-    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 5 >"$SEARCH_LOG" 2>&1 &
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --max-results 5 --max-scan 50 >"$SEARCH_LOG" 2>&1 &
 SEARCH_PID=$!
 
 SEARCH_STREAM_SEEN=0
@@ -434,10 +534,93 @@ else
     _log_fail "TC-RI-04A: remote search 未输出流式进度" "输出包含 Searching..." "$SEARCH_OUTPUT"
 fi
 
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+LATEST_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_SEARCH_STARTED_AT:-0}" '
+    (.calls // [])
+    | map(select((.command.command // .command) == "search.get" and (.started_at // 0) > $prev_started_at))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+')
+
+if echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_results":5' && echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_scan":50'; then
+    _log_pass "TC-RI-04B: remote search 将 max_results/max_scan 透传到执行端"
+else
+    _log_fail "TC-RI-04B: remote search 未透传 max_results/max_scan" 'args_json 包含 "max_results":5 和 "max_scan":50' "${LATEST_SEARCH_ARGS_JSON:-<empty>}"
+fi
+
 # =========================================================================
-# TC-RI-04B: Caller cancel should settle call as cancelled for all commands
+# TC-RI-04C: Remote traffic search command
 # =========================================================================
-log "=== TC-RI-04B: Caller cancel settles remote call as cancelled ==="
+log "=== TC-RI-04C: Remote traffic search command ==="
+
+TRAFFIC_SEARCH_LOG="$(mktemp)"
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+PRE_TRAFFIC_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.search"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].started_at // 0
+')
+
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$REMOTE_MARKER" \
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --max-results 3 --max-scan 30 >"$TRAFFIC_SEARCH_LOG" 2>&1 &
+TRAFFIC_SEARCH_PID=$!
+
+TRAFFIC_SEARCH_STREAM_SEEN=0
+for i in $(seq 1 20); do
+    if grep -qE "Searching\\.\.\.|${REMOTE_MARKER}|Found [0-9]+ matches" "$TRAFFIC_SEARCH_LOG" 2>/dev/null; then
+        TRAFFIC_SEARCH_STREAM_SEEN=1
+        break
+    fi
+    if ! kill -0 "$TRAFFIC_SEARCH_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+wait "$TRAFFIC_SEARCH_PID"
+TRAFFIC_SEARCH_EXIT=$?
+TRAFFIC_SEARCH_OUTPUT="$(cat "$TRAFFIC_SEARCH_LOG")"
+rm -f "$TRAFFIC_SEARCH_LOG"
+
+if [[ "$TRAFFIC_SEARCH_EXIT" -eq 0 ]] && echo "$TRAFFIC_SEARCH_OUTPUT" | grep -q "$REMOTE_MARKER" && echo "$TRAFFIC_SEARCH_OUTPUT" | grep -q "Found 1 matches"; then
+    _log_pass "TC-RI-04C: remote traffic search 返回了目标结果"
+else
+    _log_fail "TC-RI-04C: remote traffic search 未返回目标结果" "包含 marker=${REMOTE_MARKER} 与 Found 1 matches" "$TRAFFIC_SEARCH_OUTPUT"
+fi
+
+if [[ "$TRAFFIC_SEARCH_STREAM_SEEN" -eq 1 ]] && echo "$TRAFFIC_SEARCH_OUTPUT" | grep -q "Searching..."; then
+    _log_pass "TC-RI-04D: remote traffic search 输出包含流式进度"
+else
+    _log_fail "TC-RI-04D: remote traffic search 未输出流式进度" "输出包含 Searching..." "$TRAFFIC_SEARCH_OUTPUT"
+fi
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
+LATEST_TRAFFIC_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_SEARCH_STARTED_AT:-0}" '
+    (.calls // [])
+    | map(select((.command.command // .command) == "traffic.search" and (.started_at // 0) > $prev_started_at))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+')
+
+if echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q "\"query\":\"${REMOTE_MARKER}\"" \
+    && echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_results":3' \
+    && echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_scan":30'; then
+    _log_pass "TC-RI-04E: remote traffic search 将 max_results/max_scan 透传到执行端"
+else
+    _log_fail "TC-RI-04E: remote traffic search 未透传 max_results/max_scan" "args_json 包含 query/max_results/max_scan" "${LATEST_TRAFFIC_SEARCH_ARGS_JSON:-<empty>}"
+fi
+
+# =========================================================================
+# TC-RI-04F: Caller cancel should settle call as cancelled for all commands
+# =========================================================================
+log "=== TC-RI-04F: Caller cancel settles remote call as cancelled ==="
 
 for i in $(seq 1 20); do
     curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/cancel-${RANDOM}" >/dev/null 2>&1 || true
@@ -490,9 +673,9 @@ CANCEL_OUTPUT="$(cat "$CANCEL_LOG")"
 rm -f "$CANCEL_LOG"
 
 if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && [[ "$CANCEL_EXIT" -eq 130 ]] && echo "$CANCEL_OUTPUT" | grep -q "cancel"; then
-    _log_pass "TC-RI-04B: caller 侧中断后会触发远端 cancel 收尾"
+    _log_pass "TC-RI-04F: caller 侧中断后会触发远端 cancel 收尾"
 else
-    _log_fail "TC-RI-04B: caller 中断后未触发预期 cancel 收尾" "stream seen + exit 130 + cancel message" "$CANCEL_OUTPUT"
+    _log_fail "TC-RI-04F: caller 中断后未触发预期 cancel 收尾" "stream seen + exit 130 + cancel message" "$CANCEL_OUTPUT"
 fi
 
 CANCELLED_STATUS=""
@@ -513,9 +696,9 @@ for i in $(seq 1 20); do
 done
 
 if [[ "$CANCELLED_STATUS" == "cancelled" ]]; then
-    _log_pass "TC-RI-04C: client Recent Calls 最终显示 cancelled"
+    _log_pass "TC-RI-04G: client Recent Calls 最终显示 cancelled"
 else
-    _log_fail "TC-RI-04C: client Recent Calls 未显示 cancelled" "cancelled" "${CANCELLED_STATUS:-<empty>}"
+    _log_fail "TC-RI-04G: client Recent Calls 未显示 cancelled" "cancelled" "${CANCELLED_STATUS:-<empty>}"
 fi
 
 # =========================================================================

@@ -131,6 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 "platform": "macos",
                 "grant_mode": "permanent",
                 "pair_code": pairings.get(pairing_id, ""),
+                "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
             }
             self.wfile.write(b"event: approved\n")
             self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())

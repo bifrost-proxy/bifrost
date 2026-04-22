@@ -4,6 +4,8 @@ import type {
   GrantStatus,
   CallStatus,
   PairingStatus,
+  RemoteInvokeGrantScope,
+  RemoteCommandKind,
   CallerInfo,
   CommandSummary,
   RemoteCommand,
@@ -14,10 +16,21 @@ export type {
   GrantStatus,
   CallStatus,
   PairingStatus,
+  RemoteInvokeGrantScope,
+  RemoteCommandKind,
   CallerInfo,
   CommandSummary,
   RemoteCommand,
 };
+
+export interface CommandEncryptedPayload {
+  version?: number;
+  nonce?: string;
+  ciphertext?: string;
+  tag?: string;
+  aad?: Record<string, unknown>;
+  [key: string]: unknown;
+}
 
 export interface ClientStreamState {
   clientInstanceId: string;
@@ -41,6 +54,7 @@ export interface PairingSessionRecord {
   pairCode: string;
   status: PairingStatus;
   callerPubkey: string;
+  callerEphemeralPub: string;
   clientEphemeralPub: string;
   callerInfo: CallerInfo;
   commandSummary: CommandSummary;
@@ -57,6 +71,8 @@ export interface GrantRecord {
   userId: string;
   clientInstanceId: string;
   callerFingerprint: string;
+  callerEphemeralPub: string;
+  clientEphemeralPub: string;
   grantMode: GrantMode;
   grantScope: string;
   status: GrantStatus;
@@ -113,6 +129,7 @@ export interface EncryptedEnvelope {
 export interface StartPairingRequest {
   pair_code: string;
   caller_info: CallerInfo;
+  caller_ephemeral_pub?: string;
 }
 
 export interface GrantDecisionRequest {
@@ -120,6 +137,7 @@ export interface GrantDecisionRequest {
   client_instance_id: string;
   decision: 'approve' | 'reject';
   grant_mode?: GrantMode;
+  grant_scope?: RemoteInvokeGrantScope;
   client_ephemeral_pub?: string;
 }
 
@@ -153,6 +171,7 @@ export interface ClientCallExitRequest {
   stderr_digest?: string;
   bytes_in?: number;
   bytes_out?: number;
+  exit_encrypted?: CommandEncryptedPayload;
 }
 
 export interface OpenCallRequest {
@@ -161,7 +180,10 @@ export interface OpenCallRequest {
   caller_fingerprint: string;
   caller_pubkey: string;
   command_summary: CommandSummary;
-  command: RemoteCommand;
+  command_kind: RemoteCommandKind;
+  command_encrypted: CommandEncryptedPayload;
+  pty_enabled?: boolean;
+  timeout_hint_ms?: number;
 }
 
 export interface CallsQueryParams {
@@ -218,6 +240,7 @@ export interface SshConnectRequest {
   challenge_id: string;
   signature: string;
   timestamp: number;
+  caller_ephemeral_pub?: string;
   caller_info?: SshCallerInfo;
 }
 
@@ -235,6 +258,9 @@ export interface SshConnectResultRequest {
   reason?: string;
   caller_fingerprint?: string;
   grant_mode?: GrantMode;
+  grant_scope?: RemoteInvokeGrantScope;
+  caller_ephemeral_pub?: string;
+  client_ephemeral_pub?: string;
 }
 
 export interface ClientRegistrationChallengeRequest {
@@ -271,17 +297,40 @@ export function buildRegistrationSignaturePayload(
   ]);
 }
 
-export const ALLOWED_COMMANDS = new Set([
-  'connect',
-  'status',
-  'traffic.list',
-  'traffic.get',
-  'traffic.search',
-  'search.get',
-]);
+export function normalizeGrantScope(scope?: string | null): RemoteInvokeGrantScope {
+  switch (scope) {
+    case 'remote_shell_exec':
+    case 'remote_shell_interactive':
+      return scope;
+    case 'remote_query':
+    case undefined:
+    case null:
+    case '':
+      return 'remote_query';
+    default:
+      throw new Error('invalid_grant_scope');
+  }
+}
 
-export function isAllowedCommand(command: string): boolean {
-  return ALLOWED_COMMANDS.has(command);
+export function isShellCommandKind(kind?: string | null): kind is 'shell.exec' {
+  return kind === 'shell.exec';
+}
+
+export function resolveCommandKind(
+  explicitKind?: string | null,
+): RemoteCommandKind {
+  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly') {
+    return explicitKind;
+  }
+  throw new Error('command_kind_required');
+}
+
+export function grantScopeAllowsCommand(scope: string | undefined, commandKind: RemoteCommandKind): boolean {
+  const normalizedScope = normalizeGrantScope(scope);
+  if (commandKind === 'shell.exec') {
+    return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
+  }
+  return normalizedScope === 'remote_query' || normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
 }
 
 export function grantModeTtlMs(mode: GrantMode): number | null {

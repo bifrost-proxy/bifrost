@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
 use futures_util::StreamExt;
 use sha1::{Digest, Sha1};
+use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
 
-use super::types::{is_allowed_command, RemoteCommand, RemoteInvokeResponse};
+use super::types::{is_allowed_command, RemoteCommand, RemoteInvokeResponse, ShellExecMode};
 
 const MAX_ID_LEN: usize = 20;
 const MAX_QUERY_LEN: usize = 500;
@@ -44,6 +45,10 @@ struct CommandArgs {
     response_body: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    max_scan: Option<usize>,
+    #[serde(default)]
+    max_results: Option<usize>,
     #[serde(default)]
     cursor: Option<u64>,
     #[serde(default)]
@@ -152,28 +157,27 @@ impl RemoteInvokeExecutor {
         F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        if !is_allowed_command(&command.command) {
-            warn!(
-                command = %command.command,
-                "remote invoke rejected: command not in whitelist"
-            );
-            let stderr = format!("command '{}' is not allowed", command.command);
-            return Ok(RemoteInvokeResponse {
-                exit_code: -1,
-                stdout: None,
-                stderr_digest: Some(sha1_hex(&stderr)),
-                stderr: Some(stderr),
-                stdout_digest: None,
-                duration_ms: 0,
-            });
-        }
-
         let args = self.parse_and_validate_args(command)?;
 
         let start = Instant::now();
-        let result = self
-            .dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
-            .await;
+        let result = match command.kind {
+            super::types::CommandKind::QueryReadonly => {
+                if !is_allowed_command(&command.command) {
+                    let stderr = format!("command '{}' is not allowed", command.command);
+                    warn!(
+                        command = %command.command,
+                        "remote invoke rejected: command not in whitelist"
+                    );
+                    Err(BifrostError::Config(stderr))
+                } else {
+                    self.dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
+                        .await
+                }
+            }
+            super::types::CommandKind::ShellExec => {
+                self.execute_shell_exec(command, &mut on_stdout).await
+            }
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
@@ -215,6 +219,10 @@ impl RemoteInvokeExecutor {
     }
 
     fn parse_and_validate_args(&self, command: &RemoteCommand) -> Result<CommandArgs> {
+        if command.kind == super::types::CommandKind::ShellExec {
+            return Ok(CommandArgs::default());
+        }
+
         let args: CommandArgs = match &command.args_json {
             Some(json_str) => serde_json::from_str(json_str)
                 .map_err(|e| BifrostError::Config(format!("invalid args_json: {}", e)))?,
@@ -318,6 +326,83 @@ impl RemoteInvokeExecutor {
         Ok(args)
     }
 
+    async fn execute_shell_exec<F, Fut>(
+        &self,
+        command: &RemoteCommand,
+        on_stdout: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false) {
+            return Err(BifrostError::Config(
+                "shell.exec with PTY is not implemented on client yet".to_string(),
+            ));
+        }
+
+        let timeout_ms = command.timeout_ms.unwrap_or(REQUEST_TIMEOUT_SECS * 1000);
+        let mut process = self.build_shell_exec_process(command)?;
+        let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
+            .await
+            .map_err(|_| BifrostError::Network("shell.exec timed out".to_string()))?
+            .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !stdout.is_empty() {
+            on_stdout(stdout.clone()).await?;
+        }
+
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            Err(BifrostError::Network(if stderr.is_empty() {
+                format!(
+                    "shell.exec exited with status {}",
+                    output.status.code().unwrap_or(-1)
+                )
+            } else {
+                stderr
+            }))
+        }
+    }
+
+    fn build_shell_exec_process(&self, command: &RemoteCommand) -> Result<TokioCommand> {
+        let exec_mode = command
+            .exec_mode
+            .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
+
+        let mut process = match exec_mode {
+            ShellExecMode::ArgvExec => {
+                let argv = command.argv.as_ref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires argv".to_string())
+                })?;
+                let (program, args) = argv.split_first().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires non-empty argv".to_string())
+                })?;
+                let mut process = TokioCommand::new(program);
+                process.args(args);
+                process
+            }
+            ShellExecMode::ShellText | ShellExecMode::Template => {
+                let shell_text = command.command_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec requires command_text".to_string())
+                })?;
+                build_shell_text_process(command.shell.as_deref(), shell_text)
+            }
+        };
+
+        if let Some(cwd) = &command.cwd {
+            process.current_dir(cwd);
+        }
+        if let Some(env) = &command.env {
+            process.envs(env);
+        }
+
+        Ok(process)
+    }
+
     async fn dispatch_with_stdout_sink<F, Fut>(
         &self,
         command: &str,
@@ -348,7 +433,14 @@ impl RemoteInvokeExecutor {
                 let query = args.query.as_deref().ok_or_else(|| {
                     BifrostError::Config(format!("{} requires 'query' arg", command))
                 })?;
-                self.search_stream(query, args.limit, on_stdout).await
+                self.search_stream(
+                    query,
+                    args.limit,
+                    args.max_results,
+                    args.max_scan,
+                    on_stdout,
+                )
+                .await
             }
             _ => Err(BifrostError::Config(format!(
                 "unhandled command: {}",
@@ -589,7 +681,9 @@ impl RemoteInvokeExecutor {
     async fn search_stream<F, Fut>(
         &self,
         query: &str,
-        limit: Option<usize>,
+        legacy_limit: Option<usize>,
+        max_results: Option<usize>,
+        max_scan: Option<usize>,
         on_stdout: &mut F,
     ) -> Result<String>
     where
@@ -597,11 +691,14 @@ impl RemoteInvokeExecutor {
         Fut: Future<Output = Result<()>>,
     {
         let url = format!("{}/_bifrost/api/search/stream", self.base_url());
-        let search_limit = limit.unwrap_or(50).min(MAX_TRAFFIC_LIST_LIMIT);
+        let search_limit = max_results
+            .or(legacy_limit)
+            .unwrap_or(50)
+            .min(MAX_TRAFFIC_LIST_LIMIT);
         let payload = serde_json::json!({
             "keyword": query,
-            "limit": search_limit,
             "max_results": search_limit,
+            "max_scan": max_scan,
         });
         let resp = self
             .http
@@ -793,6 +890,29 @@ impl RemoteInvokeExecutor {
         }
 
         Ok(full_output)
+    }
+}
+
+fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
+    #[cfg(windows)]
+    {
+        if let Some(shell) = shell {
+            let mut command = TokioCommand::new(shell);
+            command.arg("/C").arg(shell_text);
+            return command;
+        }
+
+        let mut command = TokioCommand::new("cmd");
+        command.arg("/C").arg(shell_text);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let shell = shell.unwrap_or("/bin/sh");
+        let mut command = TokioCommand::new(shell);
+        command.arg("-lc").arg(shell_text);
+        command
     }
 }
 
@@ -1035,6 +1155,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.get".to_string(),
             args_json: Some(r#"{"id":"REQ-69e304e7-000033"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_ok());
@@ -1047,6 +1168,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.get".to_string(),
             args_json: Some(r#"{"id":"abc;DROP"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_err());
@@ -1059,6 +1181,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.get".to_string(),
             args_json: Some(format!(r#"{{"id":"{}"}}"#, long_id)),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_err());
@@ -1070,6 +1193,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
             args_json: Some(r#"{"query":"example.com/api-v2:443"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_ok());
@@ -1085,6 +1209,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
             args_json: Some(r#"{"query":"hello\u0000world"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_err());
@@ -1096,6 +1221,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
             args_json: Some(r#"{"query":"测试中文搜索"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_ok());
@@ -1108,6 +1234,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
             args_json: Some(r#"{"query":"example.com/path?key=value&foo=bar"}"#.to_string()),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_ok());
@@ -1120,9 +1247,42 @@ mod tests {
         let cmd = RemoteCommand {
             command: "traffic.search".to_string(),
             args_json: Some(format!(r#"{{"query":"{}"}}"#, long_query)),
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_err());
+    }
+
+    #[test]
+    fn test_validate_args_search_accepts_max_scan_and_max_results() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            command: "traffic.search".to_string(),
+            args_json: Some(r#"{"query":"hello","max_results":7,"max_scan":23}"#.to_string()),
+            ..Default::default()
+        };
+        let args = executor
+            .parse_and_validate_args(&cmd)
+            .expect("args should parse");
+        assert_eq!(args.query.as_deref(), Some("hello"));
+        assert_eq!(args.max_results, Some(7));
+        assert_eq!(args.max_scan, Some(23));
+    }
+
+    #[test]
+    fn test_validate_args_search_keeps_legacy_limit_compatibility() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            command: "search.get".to_string(),
+            args_json: Some(r#"{"query":"hello","limit":5}"#.to_string()),
+            ..Default::default()
+        };
+        let args = executor
+            .parse_and_validate_args(&cmd)
+            .expect("args should parse");
+        assert_eq!(args.query.as_deref(), Some("hello"));
+        assert_eq!(args.limit, Some(5));
+        assert_eq!(args.max_results, None);
     }
 
     #[test]
@@ -1131,6 +1291,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "status".to_string(),
             args_json: None,
+            ..Default::default()
         };
         let args = executor.parse_and_validate_args(&cmd);
         assert!(args.is_ok());
@@ -1142,6 +1303,7 @@ mod tests {
         let cmd = RemoteCommand {
             command: "rm -rf".to_string(),
             args_json: None,
+            ..Default::default()
         };
         let resp = executor.execute(&cmd).await.unwrap();
         assert_eq!(resp.exit_code, -1);
@@ -1149,9 +1311,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_shell_exec_shell_text() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("printf hello".to_string()),
+            ..Default::default()
+        };
+
+        let resp = executor.execute(&cmd).await.expect("shell exec response");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
     async fn test_resolve_traffic_id_accepts_numeric_sequence() {
         let (_server, host, port) = spawn_mock_http_server(vec![MockResponse {
             path_contains: "/_bifrost/api/traffic?limit=1&cursor=567&direction=backward",
+            body_contains: None,
             content_type: "application/json".to_string(),
             body: serde_json::json!({
                 "records": [{
@@ -1177,6 +1355,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_traffic_forwards_all_supported_query_params() {
+        let (_server, host, port) = spawn_mock_http_server(vec![MockResponse {
+            path_contains: "/_bifrost/api/traffic?limit=7&cursor=123&direction=forward&method=POST&status=201&status_min=200&status_max=299&protocol=https&host_contains=api.example.com&url_contains=%2Fv1%2Fchat&path_contains=%2Fv1&content_type=application%2Fjson&client_ip=127.0.0.1&client_app=curl&has_rule_hit=true&is_websocket=false&is_sse=true&is_tunnel=false",
+            body_contains: None,
+            content_type: "application/json".to_string(),
+            body: r#"{"records":[],"server_sequence":0}"#.to_string(),
+        }])
+        .await;
+
+        let executor = RemoteInvokeExecutor::new(&host, port);
+        let args = CommandArgs {
+            limit: Some(7),
+            cursor: Some(123),
+            direction: Some("forward".to_string()),
+            method: Some("POST".to_string()),
+            status: Some(201),
+            status_min: Some(200),
+            status_max: Some(299),
+            protocol: Some("https".to_string()),
+            host: Some("api.example.com".to_string()),
+            url: Some("/v1/chat".to_string()),
+            path: Some("/v1".to_string()),
+            content_type: Some("application/json".to_string()),
+            client_ip: Some("127.0.0.1".to_string()),
+            client_app: Some("curl".to_string()),
+            has_rule_hit: Some(true),
+            is_websocket: Some(false),
+            is_sse: Some(true),
+            is_tunnel: Some(false),
+            ..Default::default()
+        };
+
+        let body = executor.list_traffic(&args).await.unwrap();
+        assert!(body.contains("\"records\":[]"));
+    }
+
+    #[tokio::test]
+    async fn test_get_traffic_fetches_request_and_response_bodies_when_requested() {
+        let (_server, host, port) = spawn_mock_http_server(vec![
+            MockResponse {
+                path_contains: "/_bifrost/api/traffic/REQ-69e304e7-000033",
+                body_contains: None,
+                content_type: "application/json".to_string(),
+                body: r#"{"id":"REQ-69e304e7-000033","seq":33}"#.to_string(),
+            },
+            MockResponse {
+                path_contains: "/_bifrost/api/traffic/REQ-69e304e7-000033/request-body",
+                body_contains: None,
+                content_type: "application/json".to_string(),
+                body: r#"{"text":"request body"}"#.to_string(),
+            },
+            MockResponse {
+                path_contains: "/_bifrost/api/traffic/REQ-69e304e7-000033/response-body",
+                body_contains: None,
+                content_type: "application/json".to_string(),
+                body: r#"{"text":"response body"}"#.to_string(),
+            },
+        ])
+        .await;
+
+        let executor = RemoteInvokeExecutor::new(&host, port);
+        let args = CommandArgs {
+            id: Some("REQ-69e304e7-000033".to_string()),
+            request_body: Some(true),
+            response_body: Some(true),
+            ..Default::default()
+        };
+
+        let body = executor
+            .get_traffic("REQ-69e304e7-000033", &args)
+            .await
+            .unwrap();
+        assert!(body.contains("\"request_body\":{\"text\":\"request body\"}"));
+        assert!(body.contains("\"response_body\":{\"text\":\"response body\"}"));
+    }
+
+    #[tokio::test]
     async fn test_search_stream_formats_incremental_output() {
         let sse_body = concat!(
             "event: progress\n",
@@ -1188,6 +1443,7 @@ mod tests {
         );
         let (_server, host, port) = spawn_mock_http_server(vec![MockResponse {
             path_contains: "/_bifrost/api/search/stream",
+            body_contains: Some("\"max_results\":5"),
             content_type: "text/event-stream".to_string(),
             body: sse_body.to_string(),
         }])
@@ -1197,7 +1453,7 @@ mod tests {
         let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&chunks);
         let stdout = executor
-            .search_stream("nextoncall", Some(5), &mut |chunk| {
+            .search_stream("nextoncall", None, Some(5), None, &mut |chunk| {
                 let sink = Arc::clone(&sink);
                 async move {
                     sink.lock().unwrap().push(chunk);
@@ -1215,8 +1471,35 @@ mod tests {
         assert_eq!(stdout, joined_chunks);
     }
 
+    #[tokio::test]
+    async fn test_search_stream_forwards_max_scan_to_executor() {
+        let sse_body = concat!(
+            "event: done\n",
+            "data: {\"total_searched\":20,\"total_matched\":0,\"has_more\":true}\n\n"
+        );
+        let (_server, host, port) = spawn_mock_http_server(vec![MockResponse {
+            path_contains: "/_bifrost/api/search/stream",
+            body_contains: Some("\"max_scan\":20"),
+            content_type: "text/event-stream".to_string(),
+            body: sse_body.to_string(),
+        }])
+        .await;
+
+        let executor = RemoteInvokeExecutor::new(&host, port);
+        let stdout = executor
+            .search_stream("nextoncall", None, Some(2), Some(20), &mut |_chunk| async {
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(stdout.contains("Scanned 20 records"));
+        assert!(stdout.contains("limit: 2"));
+    }
+
     struct MockResponse {
         path_contains: &'static str,
+        body_contains: Option<&'static str>,
         content_type: String,
         body: String,
     }
@@ -1249,6 +1532,14 @@ mod tests {
                     response.path_contains,
                     request_text.lines().next().unwrap_or_default()
                 );
+                if let Some(body_contains) = response.body_contains {
+                    assert!(
+                        request_text.contains(body_contains),
+                        "expected request body to contain {:?}, got {:?}",
+                        body_contains,
+                        request_text
+                    );
+                }
 
                 let http_response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

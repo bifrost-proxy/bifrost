@@ -16,8 +16,15 @@ import type {
   SshConnectRequest,
   SshConnectResponse,
   SshConnectResultRequest,
+  RemoteCommandKind,
 } from './types';
-import { buildRegistrationSignaturePayload, isAllowedCommand, grantModeTtlMs } from './types';
+import {
+  buildRegistrationSignaturePayload,
+  grantModeTtlMs,
+  normalizeGrantScope,
+  resolveCommandKind,
+  grantScopeAllowsCommand,
+} from './types';
 import { SshAuthService } from './ssh-auth';
 import {
   pushToClient,
@@ -35,8 +42,20 @@ const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm
 const REGISTER_CHALLENGE_TTL_MS = 60_000;
 const REGISTER_TIMESTAMP_SKEW_MS = 5 * 60_000;
 const CALL_TOKEN_GRACE_MS = 60_000;
+const SHELL_CALL_TOKEN_GRACE_MS = 24 * 60 * 60 * 1000;
+const SHELL_VIEWER_RESUME_TTL_MS = 10 * 60 * 1000;
+const SHELL_RETENTION_TTL_MS = 24 * 60 * 60 * 1000;
 const SSH_CONNECT_STREAM_WAIT_MS = 10_000;
 const SSH_CONNECT_STREAM_POLL_MS = 100;
+
+interface CallRuntimeMeta {
+  commandKind: RemoteCommandKind;
+  viewerResumeTtlMs: number;
+  retentionTtlMs: number;
+  relayTokenTtlMs: number;
+  timeoutHintMs: number;
+  ptyEnabled: boolean;
+}
 
 function generateRelayToken(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -55,6 +74,7 @@ function constantTimeCompare(a: string, b: string): boolean {
 
 export class RemoteInvokeService {
   private callTokens = new Map<string, { token: string; expiresAt?: number }>();
+  private callRuntimeMeta = new Map<string, CallRuntimeMeta>();
   private sshAuth = new SshAuthService();
   private registrationChallenges = new Map<
     string,
@@ -278,6 +298,7 @@ export class RemoteInvokeService {
       pair_code: req.pair_code,
       status: 'pending_approval',
       caller_pubkey: '',
+      caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       client_ephemeral_pub: '',
       caller_info_json: JSON.stringify(req.caller_info),
       command_summary_json: '{}',
@@ -298,6 +319,7 @@ export class RemoteInvokeService {
       pairing_id: pairingId,
       caller_fingerprint: req.caller_info.fingerprint,
       caller_display_name: req.caller_info.display_name ?? '',
+      caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       source_ip: sourceIp,
       user_agent: req.caller_info.user_agent ?? '',
       expires_at: expiresAt,
@@ -346,6 +368,12 @@ export class RemoteInvokeService {
     }
 
     const grantMode = req.grant_mode ?? 'once';
+    if (!pairing.caller_ephemeral_pub) {
+      throw new Error('caller_ephemeral_pub_required');
+    }
+    if (!req.client_ephemeral_pub) {
+      throw new Error('client_ephemeral_pub_required');
+    }
     const grantId = nanoid();
 
     const activeGrantCount = await this.storage.remoteInvoke.countActiveGrantsForClient(pairing.client_instance_id);
@@ -371,8 +399,10 @@ export class RemoteInvokeService {
       client_instance_id: pairing.client_instance_id,
       caller_fingerprint: pairing.caller_fingerprint,
       caller_display_name: callerDisplayName,
+      caller_ephemeral_pub: pairing.caller_ephemeral_pub,
+      client_ephemeral_pub: req.client_ephemeral_pub,
       grant_mode: grantMode as any,
-      grant_scope: 'query',
+      grant_scope: normalizeGrantScope(req.grant_scope),
       status: 'active',
       first_authorized_at: now,
       expires_at: grantExpiresAt,
@@ -402,12 +432,17 @@ export class RemoteInvokeService {
       device_name: deviceName,
       platform,
       grant_mode: grantMode,
+      caller_ephemeral_pub: pairing.caller_ephemeral_pub,
+      client_ephemeral_pub: req.client_ephemeral_pub,
     });
 
     pushToClient(pairing.client_instance_id, 'grant_created', {
       grant_id: grantId,
       caller_fingerprint: pairing.caller_fingerprint,
       grant_mode: grantMode,
+      grant_scope: normalizeGrantScope(req.grant_scope),
+      caller_ephemeral_pub: pairing.caller_ephemeral_pub,
+      client_ephemeral_pub: req.client_ephemeral_pub,
     });
 
     await this.storage.remoteInvoke.appendEvent({
@@ -465,7 +500,21 @@ export class RemoteInvokeService {
     return active;
   }
 
-  async openCall(userId: string, req: OpenCallRequest): Promise<{ call_id: string; relay_token: string }> {
+  async openCall(
+    userId: string,
+    req: OpenCallRequest,
+  ): Promise<{
+    call_id: string;
+    relay_token: string;
+    call_meta: {
+      command_kind: RemoteCommandKind;
+      pty_enabled: boolean;
+      timeout_hint_ms: number;
+      viewer_resume_ttl_ms: number;
+      retention_ttl_ms: number;
+      relay_token_ttl_ms: number;
+    };
+  }> {
     const grant = await this.storage.remoteInvoke.getGrant(req.grant_id);
     if (!grant) throw new Error('grant_not_found');
 
@@ -489,14 +538,48 @@ export class RemoteInvokeService {
       throw new Error('grant_consumed');
     }
 
-    if (!isAllowedCommand(req.command.command)) {
-      throw new Error('unsupported_command');
+    const commandKind = resolveCommandKind(req.command_kind);
+    if (!grantScopeAllowsCommand(grant.grant_scope, commandKind)) {
+      throw new Error('grant_scope_mismatch');
     }
+
+    if (!req.command_encrypted) {
+      throw new Error('command_encrypted_required');
+    }
+
+    const ptyEnabled = !!req.pty_enabled;
+    const timeoutHintMs = Number.isFinite(req.timeout_hint_ms) && (req.timeout_hint_ms ?? 0) > 0
+      ? Math.trunc(req.timeout_hint_ms!)
+      : 0;
+    const viewerResumeTtlMs = commandKind === 'shell.exec' ? SHELL_VIEWER_RESUME_TTL_MS : CALL_TOKEN_GRACE_MS;
+    const retentionTtlMs = commandKind === 'shell.exec' ? SHELL_RETENTION_TTL_MS : CALL_TOKEN_GRACE_MS;
+    const relayTokenTtlMs = commandKind === 'shell.exec'
+      ? Math.max(timeoutHintMs * 2, SHELL_CALL_TOKEN_GRACE_MS)
+      : Math.max(timeoutHintMs * 2, CALL_TOKEN_GRACE_MS);
+    const commandSummary = {
+      ...(req.command_summary ?? { command_preview: commandKind }),
+      command_kind: commandKind,
+      encrypted_payload_present: true,
+      pty_enabled: ptyEnabled,
+      timeout_hint_ms: timeoutHintMs,
+      viewer_resume_ttl_ms: viewerResumeTtlMs,
+      retention_ttl_ms: retentionTtlMs,
+      relay_token_ttl_ms: relayTokenTtlMs,
+    };
 
     const callId = nanoid();
     const relayToken = generateRelayToken();
     this.callTokens.set(callId, { token: relayToken });
+    this.callRuntimeMeta.set(callId, {
+      commandKind,
+      viewerResumeTtlMs,
+      retentionTtlMs,
+      relayTokenTtlMs,
+      timeoutHintMs,
+      ptyEnabled,
+    });
     const now = new Date().toISOString();
+    const storedCommand = { kind: commandKind };
 
     const call: RemoteInvokeCall = {
       id: callId,
@@ -508,8 +591,8 @@ export class RemoteInvokeService {
       source_ip: '',
       caller_display_name: grant.caller_display_name || '',
       status: 'authorized',
-      command_summary_json: JSON.stringify(req.command_summary),
-      command_json: JSON.stringify(req.command),
+      command_summary_json: JSON.stringify(commandSummary),
+      command_json: JSON.stringify(storedCommand),
       payload_digest: '',
       stdout_digest: '',
       stderr_digest: '',
@@ -528,10 +611,17 @@ export class RemoteInvokeService {
     pushToClient(req.client_instance_id, 'call_open', {
       call_id: callId,
       grant_id: grant.id,
+      grant_scope: normalizeGrantScope(grant.grant_scope),
       caller_fingerprint: grant.caller_fingerprint,
       caller_pubkey: req.caller_pubkey,
-      command: req.command,
-      command_summary: req.command_summary,
+      command_kind: commandKind,
+      command_encrypted: req.command_encrypted,
+      command_summary: commandSummary,
+      pty_enabled: ptyEnabled,
+      timeout_hint_ms: timeoutHintMs,
+      viewer_resume_ttl_ms: viewerResumeTtlMs,
+      retention_ttl_ms: retentionTtlMs,
+      relay_token_ttl_ms: relayTokenTtlMs,
       relay_token: relayToken,
     });
 
@@ -545,7 +635,18 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    return { call_id: callId, relay_token: relayToken };
+    return {
+      call_id: callId,
+      relay_token: relayToken,
+      call_meta: {
+        command_kind: commandKind,
+        pty_enabled: ptyEnabled,
+        timeout_hint_ms: timeoutHintMs,
+        viewer_resume_ttl_ms: viewerResumeTtlMs,
+        retention_ttl_ms: retentionTtlMs,
+        relay_token_ttl_ms: relayTokenTtlMs,
+      },
+    };
   }
 
   verifyCallToken(callId: string, token: string): boolean {
@@ -557,6 +658,7 @@ export class RemoteInvokeService {
 
   clearCallToken(callId: string): void {
     this.callTokens.delete(callId);
+    this.callRuntimeMeta.delete(callId);
     clearCallerEventBuffer(callId);
   }
 
@@ -636,6 +738,7 @@ export class RemoteInvokeService {
       stderr: req.stderr,
       stdout_digest: req.stdout_digest,
       stderr_digest: req.stderr_digest,
+      exit_encrypted: req.exit_encrypted,
     });
 
     const grant = await this.storage.remoteInvoke.getGrant(call.grant_id);
@@ -653,7 +756,7 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    this.expireCallToken(req.call_id);
+    this.expireCallToken(req.call_id, this.callRuntimeMeta.get(req.call_id)?.relayTokenTtlMs);
   }
 
   async cancelCall(callId: string): Promise<void> {
@@ -679,7 +782,7 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    this.expireCallToken(callId);
+    this.expireCallToken(callId, this.callRuntimeMeta.get(callId)?.relayTokenTtlMs);
   }
 
   async clientHeartbeat(req: ClientHeartbeatRequest): Promise<void> {
@@ -708,6 +811,7 @@ export class RemoteInvokeService {
       connect_id: verified.connect_id,
       device_code: req.device_code,
       ssh_key_fingerprint: verified.ssh_key_fingerprint,
+      caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       caller_info: req.caller_info ?? {},
       relay_verified: true,
     };
@@ -746,8 +850,10 @@ export class RemoteInvokeService {
         client_instance_id: clientInstanceId,
         caller_fingerprint: result.caller_fingerprint,
         caller_display_name: callerDisplayName,
+        caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
+        client_ephemeral_pub: req.client_ephemeral_pub ?? '',
         grant_mode: grantMode,
-        grant_scope: 'query',
+        grant_scope: normalizeGrantScope(req.grant_scope),
         status: 'active',
         first_authorized_at: now,
         expires_at: '',
@@ -762,6 +868,8 @@ export class RemoteInvokeService {
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {
       ...result,
       client_instance_id: clientInstanceId,
+      caller_ephemeral_pub: req.caller_ephemeral_pub ?? null,
+      client_ephemeral_pub: req.client_ephemeral_pub ?? null,
     });
     this.expireCallToken(result.connect_id);
   }
@@ -869,6 +977,7 @@ export class RemoteInvokeService {
     if (!existing?.expiresAt) return;
     if (existing.expiresAt > Date.now()) return;
     this.callTokens.delete(callId);
+    this.callRuntimeMeta.delete(callId);
     clearCallerEventBuffer(callId);
   }
 

@@ -221,9 +221,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - `dead_code`: 删除未使用的代码或添加 `#[allow(dead_code)]` 并注释原因
 - 本地开发时建议在 IDE 中启用 clippy 实时检查
 - **绝对不要在未通过** **`cargo clippy -- -D warnings`** **的情况下推送代码到远端**
-- 项目提供了 `scripts/pre-commit` 钩子脚本，自动执行 fmt + clippy 检查。安装方式：
+- 项目提供了 `.githooks/pre-commit` 钩子脚本，自动执行 workspace fmt、desktop fmt 与 clippy 检查。初始化方式：
   ```bash
-  cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+  bash scripts/setup-git-hooks.sh
+  # 或
+  make setup
   ```
 
 ## 代码格式化要求（Cargo Fmt）
