@@ -118,7 +118,8 @@ pub struct AdminState {
     pub sync_manager: Option<SharedSyncManager>,
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
-    pub remote_invoke_worker: Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>,
+    remote_invoke_worker:
+        parking_lot::RwLock<Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
     group_cache_resolved: AtomicBool,
     badge_rules_cache: parking_lot::RwLock<String>,
@@ -161,7 +162,7 @@ impl AdminState {
             sync_manager: None,
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
-            remote_invoke_worker: None,
+            remote_invoke_worker: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
             badge_rules_cache: parking_lot::RwLock::new(
@@ -834,11 +835,24 @@ impl AdminState {
     }
 
     pub fn with_remote_invoke_worker(
-        mut self,
+        self,
         worker: crate::handlers::remote_invoke::SharedRemoteInvokeWorker,
     ) -> Self {
-        self.remote_invoke_worker = Some(worker);
+        self.set_remote_invoke_worker(worker);
         self
+    }
+
+    pub fn set_remote_invoke_worker(
+        &self,
+        worker: crate::handlers::remote_invoke::SharedRemoteInvokeWorker,
+    ) {
+        *self.remote_invoke_worker.write() = Some(worker);
+    }
+
+    pub fn remote_invoke_worker(
+        &self,
+    ) -> Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker> {
+        self.remote_invoke_worker.read().clone()
     }
 
     pub fn set_replay_executor(&self, executor: SharedReplayExecutor) {

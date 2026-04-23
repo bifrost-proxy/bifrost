@@ -40,7 +40,8 @@ pub use status_tui::*;
 pub use stop::*;
 pub use system_proxy::*;
 pub use traffic::{
-    run_traffic_clear, run_traffic_get, run_traffic_list, TrafficGetOptions, TrafficListOptions,
+    render_traffic_detail_body, render_traffic_list_body, run_traffic_clear, run_traffic_get,
+    run_traffic_list, TrafficGetOptions, TrafficListOptions,
 };
 pub use update_check::*;
 pub use upgrade::*;

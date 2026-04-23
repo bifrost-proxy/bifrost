@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use base64::Engine;
+use bifrost_command::CanonicalQueryCommand;
 use bifrost_core::{BifrostError, Result};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::hkdf::{Salt, HKDF_SHA256};
@@ -282,6 +283,8 @@ pub struct RemoteCommand {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<CanonicalQueryCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<ShellExecMode>,
@@ -311,6 +314,10 @@ pub struct RemoteCommand {
 
 impl RemoteCommand {
     pub fn summary_label(&self) -> &str {
+        if let Some(query) = &self.query {
+            return query.command_id();
+        }
+
         if !self.command.is_empty() {
             return self.command.as_str();
         }
@@ -706,7 +713,7 @@ pub enum ClientSseEvent {
         pairing_id: String,
         caller_info: CallerInfo,
         command_summary: CommandSummary,
-        command: RemoteCommand,
+        command: Box<RemoteCommand>,
         caller_pubkey: String,
         client_ephemeral_pub: Option<String>,
         caller_ephemeral_pub: Option<String>,
@@ -1119,13 +1126,7 @@ pub struct RemoteInvokeResponse {
 // Allowed commands
 // ---------------------------------------------------------------------------
 
-pub const ALLOWED_COMMANDS: &[&str] = &[
-    "status",
-    "traffic.list",
-    "traffic.get",
-    "traffic.search",
-    "search.get",
-];
+pub const ALLOWED_COMMANDS: &[&str] = &["status", "search.stream", "traffic.list", "traffic.get"];
 
 pub fn is_allowed_command(command: &str) -> bool {
     ALLOWED_COMMANDS.contains(&command)

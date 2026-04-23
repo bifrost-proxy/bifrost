@@ -31,6 +31,7 @@ use super::types::{
     RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
     WorkerState,
 };
+use crate::state::SharedAdminState;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 25;
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
@@ -117,6 +118,7 @@ impl RemoteInvokeWorker {
         config: RemoteInvokeConfig,
         identity: Identity,
         sync_manager: Option<SyncManagerHandle>,
+        state: SharedAdminState,
         admin_host: &str,
         admin_port: u16,
     ) -> Arc<Self> {
@@ -126,7 +128,9 @@ impl RemoteInvokeWorker {
             &identity.device_name,
             &identity.platform,
         ));
-        let executor = Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port));
+        let executor = Arc::new(RemoteInvokeExecutor::new_with_state(
+            admin_host, admin_port, state,
+        ));
         let data_dir = bifrost_storage::data_dir();
         let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
@@ -1796,6 +1800,21 @@ impl RemoteInvokeWorker {
             return;
         }
 
+        if let Some(query) = &command.query {
+            if command_kind == CommandKind::QueryReadonly
+                && query.capability() == bifrost_command::CommandCapability::Mutating
+            {
+                let reason = format!(
+                    "query '{}' requires a mutating transport kind, but caller declared query.readonly",
+                    query.command_id()
+                );
+                warn!(call_id = %call_id, grant_id = %grant_id, %reason, "SECURITY: mutating query kind mismatch");
+                self.send_call_exit(&call_id, -2, Some(reason), None, None, 0)
+                    .await;
+                return;
+            }
+        }
+
         let command_summary_for_call =
             build_call_command_summary(data.get("command_summary"), &command, command_kind);
 
@@ -1812,6 +1831,7 @@ impl RemoteInvokeWorker {
             grant_id = %grant_id,
             command = %command.summary_label(),
             args_json = ?command.args_json,
+            query = ?command.query,
             "executing remote command via call_open"
         );
 
@@ -1841,6 +1861,7 @@ impl RemoteInvokeWorker {
                     kind: command.kind,
                     command: command.command.clone(),
                     args_json: command.args_json.clone(),
+                    query: command.query.clone(),
                     policy_id: command.policy_id.clone(),
                     exec_mode: command.exec_mode,
                     argv: command.argv.clone(),
@@ -2743,6 +2764,7 @@ mod tests {
             kind: CommandKind::QueryReadonly,
             command: "status".to_string(),
             args_json: None,
+            query: None,
             policy_id: None,
             exec_mode: None,
             argv: None,
@@ -2775,6 +2797,7 @@ mod tests {
             kind: CommandKind::QueryReadonly,
             command: "status".to_string(),
             args_json: None,
+            query: None,
             policy_id: None,
             exec_mode: None,
             argv: None,
@@ -2817,6 +2840,7 @@ mod tests {
                 kind: CommandKind::QueryReadonly,
                 command: "status".to_string(),
                 args_json: None,
+                query: None,
                 policy_id: None,
                 exec_mode: None,
                 argv: None,

@@ -1394,23 +1394,7 @@ pub enum RemoteCommands {
     )]
     Status,
     #[command(about = "Search remote traffic records")]
-    Search {
-        #[arg(help = "Search keyword")]
-        keyword: String,
-        #[arg(
-            short = 'l',
-            long = "limit",
-            alias = "max-results",
-            default_value = "50",
-            help = "Maximum matching results to return"
-        )]
-        max_results: usize,
-        #[arg(
-            long = "max-scan",
-            help = "Maximum records to scan on the remote executor"
-        )]
-        max_scan: Option<usize>,
-    },
+    Search(Box<RemoteSearchArgs>),
     #[command(about = "Inspect remote traffic records")]
     Traffic {
         #[command(subcommand)]
@@ -1465,6 +1449,103 @@ pub struct RemoteTrafficListArgs {
     pub is_sse: Option<bool>,
     #[arg(long, help = "Filter tunnel only (true/false)")]
     pub is_tunnel: Option<bool>,
+    #[arg(
+        short,
+        long,
+        default_value = "table",
+        value_parser = ["table", "compact", "json", "json-pretty"],
+        help = "Output format: table, compact, json, json-pretty"
+    )]
+    pub format: String,
+    #[arg(long, help = "Disable colored output")]
+    pub no_color: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RemoteSearchArgs {
+    #[arg(help = "Search keyword")]
+    pub keyword: Option<String>,
+    #[arg(short, long, default_value = "50", help = "Maximum results to return")]
+    pub limit: usize,
+    #[arg(
+        short,
+        long,
+        default_value = "table",
+        value_parser = ["table", "compact", "json", "json-pretty"],
+        help = "Output format: table, compact, json, json-pretty"
+    )]
+    pub format: String,
+    #[arg(long, help = "Disable colored output")]
+    pub no_color: bool,
+    #[arg(long, help = "Search only in URL/path")]
+    pub url: bool,
+    #[arg(long, help = "Search only in headers")]
+    pub headers: bool,
+    #[arg(long, help = "Search only in body")]
+    pub body: bool,
+    #[arg(long = "req-header", help = "Search only in request headers")]
+    pub req_header: bool,
+    #[arg(long = "res-header", help = "Search only in response headers")]
+    pub res_header: bool,
+    #[arg(long = "req-body", help = "Search only in request body")]
+    pub req_body: bool,
+    #[arg(long = "res-body", help = "Search only in response body")]
+    pub res_body: bool,
+    #[arg(
+        long,
+        value_parser = ["2xx", "3xx", "4xx", "5xx", "error"],
+        help = "Filter by status: 2xx, 3xx, 4xx, 5xx, error"
+    )]
+    pub status: Option<String>,
+    #[arg(
+        long,
+        value_parser = [
+            "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"
+        ],
+        help = "Filter by HTTP method: GET, POST, PUT, DELETE, etc."
+    )]
+    pub method: Option<String>,
+    #[arg(long, help = "Filter host contains")]
+    pub host: Option<String>,
+    #[arg(long, help = "Filter path contains")]
+    pub path: Option<String>,
+    #[arg(
+        long,
+        value_parser = ["HTTP", "HTTPS", "WS", "WSS"],
+        help = "Filter by protocol: HTTP, HTTPS, WS, WSS"
+    )]
+    pub protocol: Option<String>,
+    #[arg(
+        long,
+        value_parser = [
+            "json",
+            "xml",
+            "html",
+            "form",
+            "text",
+            "javascript",
+            "css",
+            "image",
+            "font",
+            "binary"
+        ],
+        help = "Filter by content type: json, xml, html, form, etc."
+    )]
+    pub content_type: Option<String>,
+    #[arg(long, help = "Filter by domain pattern")]
+    pub domain: Option<String>,
+    #[arg(
+        long = "max-scan",
+        default_value = "10000",
+        help = "Maximum records to scan (default: 10000, use larger value for broader search)"
+    )]
+    pub max_scan: Option<usize>,
+    #[arg(
+        long = "max-results",
+        default_value = "100",
+        help = "Maximum matching results to return (default: 100)"
+    )]
+    pub max_results: Option<usize>,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -1479,24 +1560,25 @@ pub enum RemoteTrafficCommands {
         request_body: bool,
         #[arg(long, help = "Include response body")]
         response_body: bool,
+        #[arg(
+            short,
+            long,
+            default_value = "json-pretty",
+            value_parser = ["table", "compact", "json", "json-pretty"],
+            help = "Output format: table, compact, json, json-pretty"
+        )]
+        format: String,
+        #[arg(long, help = "Disable colored output")]
+        no_color: bool,
     },
     #[command(about = "Search remote traffic records")]
-    Search {
-        #[arg(help = "Search keyword")]
-        keyword: String,
-        #[arg(
-            short = 'l',
-            long = "limit",
-            alias = "max-results",
-            default_value = "50",
-            help = "Maximum matching results to return"
-        )]
-        max_results: usize,
-        #[arg(
-            long = "max-scan",
-            help = "Maximum records to scan on the remote executor"
-        )]
-        max_scan: Option<usize>,
+    Search(Box<RemoteSearchArgs>),
+    #[command(about = "Clear remote traffic records")]
+    Clear {
+        #[arg(long, help = "Delete specific records by ID (comma-separated)")]
+        ids: Option<String>,
+        #[arg(short = 'y', long, help = "Skip confirmation prompt")]
+        yes: bool,
     },
 }
 

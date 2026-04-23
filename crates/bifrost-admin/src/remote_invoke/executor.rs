@@ -1,11 +1,17 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use bifrost_command::{
+    CanonicalQueryCommand, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
+};
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
 use futures_util::StreamExt;
 use sha1::{Digest, Sha1};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
+
+use crate::query_service::AdminQueryService;
+use crate::state::SharedAdminState;
 
 use super::types::{is_allowed_command, RemoteCommand, RemoteInvokeResponse, ShellExecMode};
 
@@ -31,6 +37,7 @@ pub struct RemoteInvokeExecutor {
     admin_host: String,
     admin_port: u16,
     http: reqwest::Client,
+    query_service: Option<AdminQueryService>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -45,10 +52,6 @@ struct CommandArgs {
     response_body: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
-    #[serde(default)]
-    max_scan: Option<usize>,
-    #[serde(default)]
-    max_results: Option<usize>,
     #[serde(default)]
     cursor: Option<u64>,
     #[serde(default)]
@@ -104,29 +107,38 @@ struct TrafficSummaryRow {
     proto: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchResultRow {
     record: TrafficSummaryRow,
     matches: Vec<SearchMatchRow>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchMatchRow {
     field: String,
     preview: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchProgressPayload {
     total_searched: usize,
     total_matched: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchDonePayload {
     total_searched: usize,
     total_matched: usize,
     has_more: bool,
+}
+
+enum SearchServiceEvent {
+    Result(Box<crate::search::SearchResultItem>),
+    Progress(crate::search::SearchProgress),
 }
 
 impl RemoteInvokeExecutor {
@@ -140,7 +152,14 @@ impl RemoteInvokeExecutor {
             admin_host: admin_host.to_string(),
             admin_port,
             http,
+            query_service: None,
         }
+    }
+
+    pub fn new_with_state(admin_host: &str, admin_port: u16, state: SharedAdminState) -> Self {
+        let mut executor = Self::new(admin_host, admin_port);
+        executor.query_service = Some(AdminQueryService::new(state));
+        executor
     }
 
     pub async fn execute(&self, command: &RemoteCommand) -> Result<RemoteInvokeResponse> {
@@ -157,26 +176,41 @@ impl RemoteInvokeExecutor {
         F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let args = self.parse_and_validate_args(command)?;
-
         let start = Instant::now();
-        let result = match command.kind {
-            super::types::CommandKind::QueryReadonly => {
-                if !is_allowed_command(&command.command) {
-                    let stderr = format!("command '{}' is not allowed", command.command);
-                    warn!(
-                        command = %command.command,
-                        "remote invoke rejected: command not in whitelist"
-                    );
-                    Err(BifrostError::Config(stderr))
-                } else {
-                    self.dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
-                        .await
+        let transport_validation = match command.query.as_ref() {
+            Some(query) => self.validate_query_transport_kind(command.kind, query),
+            None => Ok(()),
+        };
+        let result = match transport_validation {
+            Err(error) => Err(error),
+            Ok(()) => match command.kind {
+                super::types::CommandKind::QueryReadonly => {
+                    let command_label = command.summary_label().to_string();
+                    if !is_allowed_command(&command_label) {
+                        let stderr = format!("command '{}' is not allowed", command_label);
+                        warn!(
+                            command = %command_label,
+                            "remote invoke rejected: command not in whitelist"
+                        );
+                        Err(BifrostError::Config(stderr))
+                    } else if let Some(query) = &command.query {
+                        self.validate_query(query)?;
+                        self.dispatch_query_with_stdout_sink(query, &mut on_stdout)
+                            .await
+                    } else if command.command == "status" {
+                        let args = self.parse_and_validate_args(command)?;
+                        self.dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
+                            .await
+                    } else {
+                        Err(BifrostError::Config(
+                            "legacy remote query commands are not supported".to_string(),
+                        ))
+                    }
                 }
-            }
-            super::types::CommandKind::ShellExec => {
-                self.execute_shell_exec(command, &mut on_stdout).await
-            }
+                super::types::CommandKind::ShellExec => {
+                    self.execute_shell_exec(command, &mut on_stdout).await
+                }
+            },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -184,7 +218,7 @@ impl RemoteInvokeExecutor {
             Ok(body) => {
                 let stdout_digest = (!body.is_empty()).then(|| sha1_hex(&body));
                 debug!(
-                    command = %command.command,
+                    command = %command.summary_label(),
                     duration_ms,
                     body_len = body.len(),
                     "remote invoke completed"
@@ -201,7 +235,7 @@ impl RemoteInvokeExecutor {
             Err(e) => {
                 let stderr = e.to_string();
                 warn!(
-                    command = %command.command,
+                    command = %command.summary_label(),
                     duration_ms,
                     error = %stderr,
                     "remote invoke failed"
@@ -326,6 +360,260 @@ impl RemoteInvokeExecutor {
         Ok(args)
     }
 
+    fn validate_query(&self, query: &CanonicalQueryCommand) -> Result<()> {
+        match query {
+            CanonicalQueryCommand::Search(args) => self.validate_search_args(args),
+            CanonicalQueryCommand::TrafficList(args) => self.validate_traffic_list_args(args),
+            CanonicalQueryCommand::TrafficGet(args) => self.validate_traffic_get_args(args),
+            CanonicalQueryCommand::TrafficClear(_) => Err(BifrostError::Config(
+                "traffic.clear is not enabled for remote invoke".to_string(),
+            )),
+        }
+    }
+
+    fn validate_query_transport_kind(
+        &self,
+        kind: super::types::CommandKind,
+        query: &CanonicalQueryCommand,
+    ) -> Result<()> {
+        if kind == super::types::CommandKind::QueryReadonly
+            && query.capability() == bifrost_command::CommandCapability::Mutating
+        {
+            return Err(BifrostError::Config(format!(
+                "mutating query '{}' cannot be sent as query.readonly",
+                query.command_id()
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_search_args(&self, args: &SearchArgs) -> Result<()> {
+        if args.keyword.len() > MAX_QUERY_LEN {
+            return Err(BifrostError::Config(format!(
+                "query param too long: {} > {}",
+                args.keyword.len(),
+                MAX_QUERY_LEN
+            )));
+        }
+        if args.keyword.chars().any(|c| c.is_ascii_control()) {
+            return Err(BifrostError::Config(
+                "query param must not contain ASCII control characters".to_string(),
+            ));
+        }
+        for domain in &args.filters.domains {
+            validate_string_param(&Some(domain.clone()), "domain", MAX_HOST_LEN, is_host_char)?;
+        }
+        for content_type in &args.filters.content_types {
+            validate_string_param(
+                &Some(content_type.clone()),
+                "content_type",
+                MAX_CONTENT_TYPE_LEN,
+                is_content_type_char,
+            )?;
+        }
+        for protocol in &args.filters.protocols {
+            let protocol = protocol.to_lowercase();
+            if !ALLOWED_PROTOCOLS.contains(&protocol.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported protocol filter '{}'",
+                    protocol
+                )));
+            }
+        }
+        for status_range in &args.filters.status_ranges {
+            if !matches!(
+                status_range.as_str(),
+                "2xx" | "3xx" | "4xx" | "5xx" | "error"
+            ) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported status filter '{}'",
+                    status_range
+                )));
+            }
+        }
+        for condition in &args.filters.conditions {
+            match condition.field.as_str() {
+                "method" if !ALLOWED_METHODS.contains(&condition.value.as_str()) => {
+                    return Err(BifrostError::Config(format!(
+                        "unsupported method filter '{}'",
+                        condition.value
+                    )));
+                }
+                "method" => {}
+                "host" => validate_string_param(
+                    &Some(condition.value.clone()),
+                    "host",
+                    MAX_HOST_LEN,
+                    is_host_char,
+                )?,
+                "path" => validate_string_param(
+                    &Some(condition.value.clone()),
+                    "path",
+                    MAX_PATH_LEN,
+                    is_path_char,
+                )?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_traffic_list_args(&self, args: &TrafficListArgs) -> Result<()> {
+        validate_string_param(&args.method, "method", 16, |c| c.is_ascii_uppercase())?;
+        validate_string_param(&args.protocol, "protocol", 8, |c| c.is_ascii_lowercase())?;
+        validate_string_param(&args.host, "host", MAX_HOST_LEN, is_host_char)?;
+        validate_string_param(&args.url, "url", MAX_URL_LEN, is_url_char)?;
+        validate_string_param(&args.path, "path", MAX_PATH_LEN, is_path_char)?;
+        validate_string_param(
+            &args.content_type,
+            "content_type",
+            MAX_CONTENT_TYPE_LEN,
+            is_content_type_char,
+        )?;
+        validate_string_param(
+            &args.client_ip,
+            "client_ip",
+            MAX_CLIENT_IP_LEN,
+            is_client_ip_char,
+        )?;
+        validate_string_param(
+            &args.client_app,
+            "client_app",
+            MAX_CLIENT_APP_LEN,
+            is_client_app_char,
+        )?;
+
+        if let Some(method) = &args.method {
+            if !ALLOWED_METHODS.contains(&method.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported method '{}'",
+                    method
+                )));
+            }
+        }
+        if let Some(protocol) = &args.protocol {
+            if !ALLOWED_PROTOCOLS.contains(&protocol.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported protocol '{}'",
+                    protocol
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_traffic_get_args(&self, args: &TrafficGetArgs) -> Result<()> {
+        if args.id.len() > MAX_ID_LEN {
+            return Err(BifrostError::Config(format!(
+                "id param too long: {} > {}",
+                args.id.len(),
+                MAX_ID_LEN
+            )));
+        }
+        if !args
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(BifrostError::Config(
+                "id param must contain only alphanumeric characters and hyphens".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn dispatch_query_with_stdout_sink<F, Fut>(
+        &self,
+        query: &CanonicalQueryCommand,
+        on_stdout: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        match query {
+            CanonicalQueryCommand::Search(args) => {
+                if self.query_service.is_some() {
+                    self.search_stream_via_service(args, on_stdout).await
+                } else {
+                    self.search_stream(
+                        &args.keyword,
+                        args.limit,
+                        args.max_results,
+                        args.max_scan,
+                        on_stdout,
+                    )
+                    .await
+                }
+            }
+            CanonicalQueryCommand::TrafficList(args) => {
+                if let Some(service) = &self.query_service {
+                    let body =
+                        serde_json::to_string(&service.list_traffic(args).await?).map_err(|e| {
+                            BifrostError::Config(format!("serialize traffic list: {e}"))
+                        })?;
+                    self.emit_stdout(on_stdout, body).await
+                } else {
+                    let legacy_args = self.command_args_from_traffic_list(args);
+                    let body = self.list_traffic(&legacy_args).await?;
+                    self.emit_stdout(on_stdout, body).await
+                }
+            }
+            CanonicalQueryCommand::TrafficGet(args) => {
+                if let Some(service) = &self.query_service {
+                    let body = serde_json::to_string(&service.get_traffic_json(args).await?)
+                        .map_err(|e| {
+                            BifrostError::Config(format!("serialize traffic detail: {e}"))
+                        })?;
+                    self.emit_stdout(on_stdout, body).await
+                } else {
+                    let legacy_args = self.command_args_from_traffic_get(args);
+                    let body = self.get_traffic(&args.id, &legacy_args).await?;
+                    self.emit_stdout(on_stdout, body).await
+                }
+            }
+            CanonicalQueryCommand::TrafficClear(_) => Err(BifrostError::Config(
+                "traffic.clear is not enabled for remote invoke".to_string(),
+            )),
+        }
+    }
+
+    fn command_args_from_traffic_list(&self, args: &TrafficListArgs) -> CommandArgs {
+        CommandArgs {
+            limit: args.limit,
+            cursor: args.cursor,
+            direction: Some(match args.direction {
+                TrafficListDirection::Backward => "backward".to_string(),
+                TrafficListDirection::Forward => "forward".to_string(),
+            }),
+            method: args.method.clone(),
+            status: args.status,
+            status_min: args.status_min,
+            status_max: args.status_max,
+            protocol: args.protocol.clone(),
+            host: args.host.clone(),
+            url: args.url.clone(),
+            path: args.path.clone(),
+            content_type: args.content_type.clone(),
+            client_ip: args.client_ip.clone(),
+            client_app: args.client_app.clone(),
+            has_rule_hit: args.has_rule_hit,
+            is_websocket: args.is_websocket,
+            is_sse: args.is_sse,
+            is_tunnel: args.is_tunnel,
+            ..CommandArgs::default()
+        }
+    }
+
+    fn command_args_from_traffic_get(&self, args: &TrafficGetArgs) -> CommandArgs {
+        CommandArgs {
+            id: Some(args.id.clone()),
+            request_body: Some(args.request_body),
+            response_body: Some(args.response_body),
+            ..CommandArgs::default()
+        }
+    }
+
     async fn execute_shell_exec<F, Fut>(
         &self,
         command: &RemoteCommand,
@@ -406,7 +694,7 @@ impl RemoteInvokeExecutor {
     async fn dispatch_with_stdout_sink<F, Fut>(
         &self,
         command: &str,
-        args: &CommandArgs,
+        _args: &CommandArgs,
         on_stdout: &mut F,
     ) -> Result<String>
     where
@@ -417,30 +705,6 @@ impl RemoteInvokeExecutor {
             "status" => {
                 let body = self.get_status().await?;
                 self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.list" => {
-                let body = self.list_traffic(args).await?;
-                self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.get" => {
-                let id = args.id.as_deref().ok_or_else(|| {
-                    BifrostError::Config("traffic.get requires 'id' arg".to_string())
-                })?;
-                let body = self.get_traffic(id, args).await?;
-                self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.search" | "search.get" => {
-                let query = args.query.as_deref().ok_or_else(|| {
-                    BifrostError::Config(format!("{} requires 'query' arg", command))
-                })?;
-                self.search_stream(
-                    query,
-                    args.limit,
-                    args.max_results,
-                    args.max_scan,
-                    on_stdout,
-                )
-                .await
             }
             _ => Err(BifrostError::Config(format!(
                 "unhandled command: {}",
@@ -678,6 +942,105 @@ impl RemoteInvokeExecutor {
             .map(|record| record.id))
     }
 
+    async fn search_stream_via_service<F, Fut>(
+        &self,
+        args: &SearchArgs,
+        on_stdout: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let service = self
+            .query_service
+            .as_ref()
+            .ok_or_else(|| BifrostError::Config("query service not available".to_string()))?
+            .clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SearchServiceEvent>(64);
+        let service_args = args.clone();
+        let tx_results = tx.clone();
+        let tx_progress = tx.clone();
+
+        let worker = tokio::spawn(async move {
+            service
+                .search_stream(
+                    &service_args,
+                    move |item| {
+                        let _ = tx_results
+                            .blocking_send(SearchServiceEvent::Result(Box::new(item.clone())));
+                    },
+                    move |progress| {
+                        let _ = tx_progress
+                            .blocking_send(SearchServiceEvent::Progress(progress.clone()));
+                    },
+                )
+                .await
+        });
+        drop(tx);
+
+        let mut full_output = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                SearchServiceEvent::Result(item) => {
+                    let payload = serde_json::to_string(&item).map_err(|e| {
+                        BifrostError::Config(format!("serialize search result event: {e}"))
+                    })?;
+                    emit_search_chunk(&mut full_output, on_stdout, sse_event("result", &payload))
+                        .await?;
+                }
+                SearchServiceEvent::Progress(progress) => {
+                    let payload = serde_json::json!({
+                        "total_searched": progress.total_searched,
+                        "total_matched": progress.total_matched,
+                        "next_cursor": progress.cursor,
+                        "has_more_hint": progress.has_more_hint,
+                        "iterations": progress.iterations,
+                    });
+                    emit_search_chunk(
+                        &mut full_output,
+                        on_stdout,
+                        sse_event("progress", &payload.to_string()),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        let response = worker
+            .await
+            .map_err(|e| BifrostError::Config(format!("search stream worker join failed: {e}")))?;
+
+        match response {
+            Ok(response) => {
+                let payload = serde_json::json!({
+                    "total_searched": response.total_searched,
+                    "total_matched": response.total_matched,
+                    "next_cursor": response.next_cursor,
+                    "has_more": response.has_more,
+                    "search_id": response.search_id,
+                });
+                emit_search_chunk(
+                    &mut full_output,
+                    on_stdout,
+                    sse_event("done", &payload.to_string()),
+                )
+                .await?;
+            }
+            Err(error) => {
+                let payload = serde_json::json!({ "message": error.to_string() });
+                emit_search_chunk(
+                    &mut full_output,
+                    on_stdout,
+                    sse_event("error", &payload.to_string()),
+                )
+                .await?;
+            }
+        }
+
+        Ok(full_output)
+    }
+
     async fn search_stream<F, Fut>(
         &self,
         query: &str,
@@ -732,159 +1095,14 @@ impl RemoteInvokeExecutor {
 
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut partial_line = String::new();
-        let mut event_name = String::new();
-        let mut data_buf = String::new();
-        let mut printed_header = false;
-        let mut progress_visible = false;
-        let mut total_searched = 0usize;
-        let mut total_matched = 0usize;
-        let mut has_more = false;
-        let mut saw_done = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk
                 .map_err(|e| BifrostError::Network(format!("search stream read failed: {}", e)))?;
-            partial_line.push_str(&String::from_utf8_lossy(&bytes));
-
-            while let Some(pos) = partial_line.find('\n') {
-                let line = partial_line[..pos].trim_end_matches('\r').to_string();
-                partial_line = partial_line[pos + 1..].to_string();
-
-                if line.is_empty() {
-                    if event_name.is_empty() || data_buf.is_empty() {
-                        continue;
-                    }
-
-                    match event_name.as_str() {
-                        "result" => {
-                            let item: SearchResultRow =
-                                serde_json::from_str(&data_buf).map_err(|e| {
-                                    BifrostError::Parse(format!(
-                                        "failed to parse search result event: {}",
-                                        e
-                                    ))
-                                })?;
-                            if progress_visible {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    "\r\x1b[K".to_string(),
-                                )
-                                .await?;
-                                progress_visible = false;
-                            }
-                            if !printed_header {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    format!(
-                                        "\n{:>10}  {:>6}  {:>6}  {:7}  {:40}  {:46}  {:>10}  {:>8}\n{}\n",
-                                        "SEQ",
-                                        "STATUS",
-                                        "METHOD",
-                                        "PROTO",
-                                        "HOST",
-                                        "PATH",
-                                        "SIZE",
-                                        "TIME",
-                                        "─".repeat(150)
-                                    ),
-                                )
-                                .await?;
-                                printed_header = true;
-                            }
-
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                render_search_result(&item, query),
-                            )
-                            .await?;
-                        }
-                        "progress" => {
-                            let progress: SearchProgressPayload = serde_json::from_str(&data_buf)
-                                .map_err(|e| {
-                                BifrostError::Parse(format!(
-                                    "failed to parse search progress event: {}",
-                                    e
-                                ))
-                            })?;
-                            total_searched = progress.total_searched;
-                            total_matched = progress.total_matched;
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                format!(
-                                    "\r  Searching... {} records scanned, {} matched",
-                                    format_number(progress.total_searched),
-                                    progress.total_matched
-                                ),
-                            )
-                            .await?;
-                            progress_visible = true;
-                        }
-                        "done" => {
-                            let done: SearchDonePayload =
-                                serde_json::from_str(&data_buf).map_err(|e| {
-                                    BifrostError::Parse(format!(
-                                        "failed to parse search done event: {}",
-                                        e
-                                    ))
-                                })?;
-                            total_searched = done.total_searched;
-                            total_matched = done.total_matched;
-                            has_more = done.has_more;
-                            saw_done = true;
-
-                            if progress_visible {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    "\r\x1b[K".to_string(),
-                                )
-                                .await?;
-                                progress_visible = false;
-                            }
-
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                render_search_summary(
-                                    query,
-                                    search_limit,
-                                    total_searched,
-                                    total_matched,
-                                    has_more,
-                                ),
-                            )
-                            .await?;
-                        }
-                        _ => {}
-                    }
-
-                    event_name.clear();
-                    data_buf.clear();
-                } else if let Some(rest) = line.strip_prefix("event:") {
-                    event_name = rest.trim().to_string();
-                } else if let Some(rest) = line.strip_prefix("data:") {
-                    if !data_buf.is_empty() {
-                        data_buf.push('\n');
-                    }
-                    data_buf.push_str(rest.trim());
-                }
-            }
-        }
-
-        if progress_visible {
-            emit_search_chunk(&mut full_output, on_stdout, "\r\x1b[K".to_string()).await?;
-        }
-
-        if !saw_done {
             emit_search_chunk(
                 &mut full_output,
                 on_stdout,
-                render_search_summary(query, search_limit, total_searched, total_matched, has_more),
+                String::from_utf8_lossy(&bytes).into_owned(),
             )
             .await?;
         }
@@ -954,6 +1172,11 @@ fn validate_string_param(
     Ok(())
 }
 
+fn sse_event(event: &str, json_data: &str) -> String {
+    let data = json_data.replace('\n', "\\n");
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
 fn is_host_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '*')
 }
@@ -1008,6 +1231,7 @@ pub(crate) fn sha1_hex(input: &str) -> String {
     })
 }
 
+#[allow(dead_code)]
 fn render_search_result(item: &SearchResultRow, query: &str) -> String {
     let record = &item.record;
     let mut out = format!(
@@ -1033,6 +1257,7 @@ fn render_search_result(item: &SearchResultRow, query: &str) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn render_search_summary(
     query: &str,
     limit: usize,
@@ -1093,6 +1318,7 @@ fn format_duration(duration_ms: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_number(value: usize) -> String {
     let s = value.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -1254,22 +1480,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_args_search_accepts_max_scan_and_max_results() {
-        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
-        let cmd = RemoteCommand {
-            command: "traffic.search".to_string(),
-            args_json: Some(r#"{"query":"hello","max_results":7,"max_scan":23}"#.to_string()),
-            ..Default::default()
-        };
-        let args = executor
-            .parse_and_validate_args(&cmd)
-            .expect("args should parse");
-        assert_eq!(args.query.as_deref(), Some("hello"));
-        assert_eq!(args.max_results, Some(7));
-        assert_eq!(args.max_scan, Some(23));
-    }
-
-    #[test]
     fn test_validate_args_search_keeps_legacy_limit_compatibility() {
         let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
         let cmd = RemoteCommand {
@@ -1282,7 +1492,6 @@ mod tests {
             .expect("args should parse");
         assert_eq!(args.query.as_deref(), Some("hello"));
         assert_eq!(args.limit, Some(5));
-        assert_eq!(args.max_results, None);
     }
 
     #[test]
@@ -1308,6 +1517,49 @@ mod tests {
         let resp = executor.execute(&cmd).await.unwrap();
         assert_eq!(resp.exit_code, -1);
         assert!(resp.stderr.unwrap().contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_legacy_query_command_at_allowlist_boundary() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            command: "traffic.search".to_string(),
+            args_json: Some(r#"{"query":"example.com"}"#.to_string()),
+            ..Default::default()
+        };
+
+        let resp = executor
+            .execute(&cmd)
+            .await
+            .expect("legacy command response");
+        assert_eq!(resp.exit_code, -1);
+        assert_eq!(
+            resp.stderr.as_deref(),
+            Some("Config error: command 'traffic.search' is not allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_mutating_query_declared_as_readonly() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            query: Some(CanonicalQueryCommand::TrafficClear(
+                bifrost_command::TrafficClearArgs {
+                    ids: Some(vec!["REQ-1".to_string()]),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let resp = executor
+            .execute(&cmd)
+            .await
+            .expect("traffic clear response");
+        assert_eq!(resp.exit_code, -1);
+        assert_eq!(
+            resp.stderr.as_deref(),
+            Some("Config error: mutating query 'traffic.clear' cannot be sent as query.readonly")
+        );
     }
 
     #[tokio::test]
@@ -1464,10 +1716,13 @@ mod tests {
             .unwrap();
 
         let joined_chunks = chunks.lock().unwrap().join("");
-        assert!(joined_chunks.contains("Searching... 12 records scanned, 0 matched"));
-        assert!(joined_chunks.contains("566961"));
+        assert!(joined_chunks.contains("event: progress"));
+        assert!(joined_chunks.contains("\"total_searched\":12"));
+        assert!(joined_chunks.contains("event: result"));
+        assert!(joined_chunks.contains("\"seq\":566961"));
         assert!(joined_chunks.contains("/nextoncall/profile"));
-        assert!(joined_chunks.contains("Found 1 matches"));
+        assert!(joined_chunks.contains("event: done"));
+        assert!(joined_chunks.contains("\"total_matched\":1"));
         assert_eq!(stdout, joined_chunks);
     }
 
@@ -1493,8 +1748,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(stdout.contains("Scanned 20 records"));
-        assert!(stdout.contains("limit: 2"));
+        assert!(stdout.contains("event: done"));
+        assert!(stdout.contains("\"total_searched\":20"));
+        assert!(stdout.contains("\"has_more\":true"));
     }
 
     struct MockResponse {

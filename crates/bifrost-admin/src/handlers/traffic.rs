@@ -8,6 +8,7 @@ use super::{
 };
 use crate::body_store::BodyRef;
 use crate::push::{SharedPushManager, MAX_ID_LEN, MAX_SUBSCRIBED_IDS};
+use crate::query_service::AdminQueryService;
 use crate::state::{AdminState, SharedAdminState};
 use crate::traffic_db::{QueryParams, TrafficSummaryCompact};
 
@@ -753,69 +754,29 @@ async fn query_traffic(req: Request<Incoming>, state: SharedAdminState) -> Respo
         }
     };
 
-    if let Some(ref db_store) = state.traffic_db_store {
-        let db_store = db_store.clone();
-        let query_result =
-            tokio::task::spawn_blocking(move || db_store.query_with_exact_total(&params)).await;
-
-        let mut result = match query_result {
-            Ok(r) => r,
-            Err(e) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Query failed: {}", e),
-                );
-            }
-        };
-
-        for record in &mut result.records {
-            enrich_compact_frame_info(record, &state);
-        }
-        json_response(&result)
-    } else {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Traffic database not available",
-        )
+    let service = AdminQueryService::new(state);
+    match service.query_traffic_params(params).await {
+        Ok(result) => json_response(&result),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Query failed: {}", e),
+        ),
     }
 }
 
 async fn list_traffic(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
     let query = req.uri().query().unwrap_or("");
-
-    if let Some(ref db_store) = state.traffic_db_store {
-        let params = parse_query_params_from_query_string(query);
-        let needs_exact_total = params.has_filters();
-        let db_store = db_store.clone();
-        let query_result = tokio::task::spawn_blocking(move || {
-            if needs_exact_total {
-                db_store.query_with_exact_total(&params)
-            } else {
-                db_store.query(&params)
-            }
-        })
-        .await;
-
-        let mut result = match query_result {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("[TRAFFIC_API] Query task failed: {}", e);
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Query failed: {}", e),
-                );
-            }
-        };
-
-        for record in &mut result.records {
-            enrich_compact_frame_info(record, &state);
+    let params = parse_query_params_from_query_string(query);
+    let service = AdminQueryService::new(state);
+    match service.query_traffic_params(params).await {
+        Ok(result) => json_response(&result),
+        Err(e) => {
+            tracing::error!("[TRAFFIC_API] Query task failed: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Query failed: {}", e),
+            )
         }
-        json_response(&result)
-    } else {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Traffic database not available",
-        )
     }
 }
 
@@ -1007,19 +968,9 @@ fn parse_query_params_from_query_string(query: &str) -> QueryParams {
 }
 
 async fn get_traffic_detail(state: SharedAdminState, id: &str) -> Response<BoxBody> {
-    let record = if let Some(ref db_store) = state.traffic_db_store {
-        let db_clone = db_store.clone();
-        let id_owned = id.to_string();
-        tokio::task::spawn_blocking(move || db_clone.get_by_id(&id_owned))
-            .await
-            .unwrap_or_default()
-    } else {
-        None
-    };
-
-    match record {
-        Some(mut record) => {
-            state.reconcile_traffic_record(&mut record);
+    let service = AdminQueryService::new(state.clone());
+    match service.get_traffic_record(id).await {
+        Ok(mut record) => {
             if let Some(ref socket_status) = record.socket_status {
                 let total = socket_status.send_bytes + socket_status.receive_bytes;
                 if !socket_status.is_open {
@@ -1041,7 +992,7 @@ async fn get_traffic_detail(state: SharedAdminState, id: &str) -> Response<BoxBo
             }
             json_response(&record)
         }
-        None => error_response(
+        Err(_) => error_response(
             StatusCode::NOT_FOUND,
             &format!("Traffic record '{}' not found", id),
         ),

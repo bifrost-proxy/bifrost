@@ -228,6 +228,7 @@ version = "0.0.58-beta"
 dependencies = [
  "base64",
  "bcrypt",
+ "bifrost-command",
  "bifrost-core",
  "bifrost-script",
  "bifrost-storage",
@@ -295,6 +296,7 @@ dependencies = [
  "base64",
  "bcrypt",
  "bifrost-admin",
+ "bifrost-command",
  "bifrost-core",
  "bifrost-proxy",
  "bifrost-script",
@@ -329,6 +331,14 @@ dependencies = [
  "ureq",
  "urlencoding",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "bifrost-command"
+version = "0.0.58-beta"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

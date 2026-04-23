@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/bifrost-command",
   "crates/bifrost-core",
   "crates/bifrost-proxy",
   "crates/bifrost-tls",

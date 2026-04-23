@@ -106,7 +106,7 @@ struct TrafficDetail {
     is_tunnel: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
     Table,
     Compact,
@@ -136,10 +136,16 @@ struct SseDonePayload {
     search_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SseErrorPayload {
+    message: String,
+}
+
 enum SseEvent {
     Result(Box<SearchResultItem>),
     Progress(SseProgressPayload),
     Done(SseDonePayload),
+    Error(SseErrorPayload),
 }
 
 fn parse_sse_events(reader: impl std::io::Read) -> impl Iterator<Item = SseEvent> {
@@ -164,6 +170,9 @@ fn parse_sse_events(reader: impl std::io::Read) -> impl Iterator<Item = SseEvent
                             "done" => serde_json::from_str::<SseDonePayload>(&data_text)
                                 .ok()
                                 .map(SseEvent::Done),
+                            "error" => serde_json::from_str::<SseErrorPayload>(&data_text)
+                                .ok()
+                                .map(SseEvent::Error),
                             _ => None,
                         };
                         event_name.clear();
@@ -337,6 +346,7 @@ fn stream_table_output(
     let mut total_matched = 0usize;
     let mut total_searched = 0usize;
     let mut has_more = false;
+    let mut error_message: Option<String> = None;
 
     for event in parse_sse_events(reader) {
         match event {
@@ -381,7 +391,19 @@ fn stream_table_output(
                     eprint!("\r\x1b[K");
                 }
             }
+            SseEvent::Error(error) => {
+                if use_color {
+                    eprint!("\r\x1b[K");
+                }
+                error_message = Some(error.message);
+                break;
+            }
         }
+    }
+
+    if let Some(error_message) = error_message {
+        eprintln!("\x1b[31m✗\x1b[0m Search failed: {}", error_message);
+        return 1;
     }
 
     if total_matched == 0 {
@@ -541,32 +563,46 @@ fn stream_compact_output(
     _options: &SearchOptions,
     use_color: bool,
 ) -> i32 {
-    for event in parse_sse_events(reader) {
-        if let SseEvent::Result(item) = event {
-            let r = &item.record;
-            let status = if r.s == 0 {
-                "...".to_string()
-            } else {
-                r.s.to_string()
-            };
+    let mut error_message: Option<String> = None;
 
-            if use_color {
-                let status_color = match r.s {
-                    0 => "\x1b[90m",
-                    200..=299 => "\x1b[32m",
-                    300..=399 => "\x1b[33m",
-                    400..=499 => "\x1b[31m",
-                    500..=599 => "\x1b[1;31m",
-                    _ => "\x1b[37m",
+    for event in parse_sse_events(reader) {
+        match event {
+            SseEvent::Result(item) => {
+                let r = &item.record;
+                let status = if r.s == 0 {
+                    "...".to_string()
+                } else {
+                    r.s.to_string()
                 };
-                println!(
-                    "\x1b[90m{:>10}\x1b[0m {}{}\x1b[0m {} \x1b[36m{}\x1b[0m{}",
-                    r.seq, status_color, status, r.m, r.h, r.p
-                );
-            } else {
-                println!("{:>10} {} {} {}{}", r.seq, status, r.m, r.h, r.p);
+
+                if use_color {
+                    let status_color = match r.s {
+                        0 => "\x1b[90m",
+                        200..=299 => "\x1b[32m",
+                        300..=399 => "\x1b[33m",
+                        400..=499 => "\x1b[31m",
+                        500..=599 => "\x1b[1;31m",
+                        _ => "\x1b[37m",
+                    };
+                    println!(
+                        "\x1b[90m{:>10}\x1b[0m {}{}\x1b[0m {} \x1b[36m{}\x1b[0m{}",
+                        r.seq, status_color, status, r.m, r.h, r.p
+                    );
+                } else {
+                    println!("{:>10} {} {} {}{}", r.seq, status, r.m, r.h, r.p);
+                }
             }
+            SseEvent::Error(error) => {
+                error_message = Some(error.message);
+                break;
+            }
+            SseEvent::Progress(_) | SseEvent::Done(_) => {}
         }
+    }
+
+    if let Some(error_message) = error_message {
+        eprintln!("\x1b[31m✗\x1b[0m Search failed: {}", error_message);
+        return 1;
     }
 
     0
@@ -578,6 +614,7 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
     let mut total_matched = 0;
     let mut total_searched = 0;
     let mut has_more = false;
+    let mut error_message: Option<String> = None;
 
     for event in parse_sse_events(reader) {
         match event {
@@ -607,8 +644,31 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
                 total_searched = d.total_searched;
                 has_more = d.has_more;
             }
-            _ => {}
+            SseEvent::Progress(progress) => {
+                total_matched = progress.total_matched;
+                total_searched = progress.total_searched;
+            }
+            SseEvent::Error(error) => {
+                error_message = Some(error.message);
+                break;
+            }
         }
+    }
+
+    if let Some(error_message) = error_message {
+        let output = serde_json::json!({
+            "error": error_message,
+            "results": results,
+            "total_matched": total_matched,
+            "total_searched": total_searched,
+            "has_more": has_more,
+        });
+        if pretty {
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        } else {
+            println!("{}", output);
+        }
+        return 1;
     }
 
     let output = serde_json::json!({
@@ -879,6 +939,11 @@ impl InteractiveApp {
                             self.has_more = d.has_more;
                             self.next_cursor = d.next_cursor;
                         }
+                        SseEvent::Error(error) => {
+                            self.error_message = Some(error.message);
+                            self.results.clear();
+                            break;
+                        }
                     }
                 }
 
@@ -915,6 +980,10 @@ impl InteractiveApp {
                             self.total_searched = d.total_searched;
                             self.has_more = d.has_more;
                             self.next_cursor = d.next_cursor;
+                        }
+                        SseEvent::Error(error) => {
+                            self.error_message = Some(error.message);
+                            break;
                         }
                     }
                 }
@@ -1739,7 +1808,7 @@ fn draw_status_bar(f: &mut Frame, app: &InteractiveApp, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_request_body, SearchOptions};
+    use super::{build_search_request_body, parse_sse_events, SearchOptions, SseEvent};
 
     #[test]
     fn build_search_request_body_includes_basic_conditions() {
@@ -1837,5 +1906,17 @@ mod tests {
                 "response_body": true,
             })
         );
+    }
+
+    #[test]
+    fn parse_sse_events_supports_error_payload() {
+        let sse = b"event: error\ndata: {\"message\":\"search stream failed\"}\n\n";
+        let events: Vec<_> = parse_sse_events(&sse[..]).collect();
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Error(error) => assert_eq!(error.message, "search stream failed"),
+            other => panic!("unexpected event: {:?}", std::mem::discriminant(other)),
+        }
     }
 }
