@@ -67,6 +67,38 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 - 第一步在 CLI 解析阶段直接失败，明确提示 `pwd` 是意外参数，不会真正发起远端 `shell.exec`
 - 第二步仍按 `argv_exec` 正常解析
 
+### TC-RSE-14：长时间命令的 stdout 会流式到 caller，而不是等进程结束后一次性返回
+
+步骤：
+1. 在 target 侧启用允许执行 `python3` / `top` 的 shell 策略，或直接切到 `Full Access`
+2. 在 caller 侧执行一个分两段输出的命令，并把输出写入日志文件：
+   ```bash
+   STREAM_LOG="$(mktemp)"
+   (
+     BIFROST_DATA_DIR="$CALLER_DATA_DIR" cargo run --bin bifrost -- remote command exec \
+       --relay-url "http://127.0.0.1:${RELAY_PORT}" \
+       -- /usr/bin/python3 -u -c 'import sys,time;print("stream-one", end="", flush=True); time.sleep(1.2); print("stream-two", end="", flush=True)'
+   ) | tee "$STREAM_LOG"
+   ```
+3. 在命令尚未结束时（例如启动后约 0.4 秒）检查日志文件：
+   ```bash
+   sleep 0.4
+   cat "$STREAM_LOG"
+   ```
+4. 命令结束后再次检查日志文件，确认完整输出
+5. 再执行：
+   ```bash
+   BIFROST_DATA_DIR="$CALLER_DATA_DIR" cargo run --bin bifrost -- remote command exec \
+     --relay-url "http://127.0.0.1:${RELAY_PORT}" \
+     -- /usr/bin/top -l 2 -s 1
+   ```
+
+预期：
+- 第 3 步在命令尚未结束时，日志文件里已经能看到 `stream-one`
+- 命令结束后日志文件完整变为 `stream-onestream-two`
+- 执行 `top -l 2 -s 1` 时，caller 会连续收到输出，不再卡到最后一次性打印
+- Recent Calls 最终仍正常写入 exit_code / duration / stdout_digest
+
 ### TC-RSE-02：read-only grant 不能执行 shell.exec
 
 步骤：
@@ -246,3 +278,4 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-11 | ✅ PASS | 2026-04-23 在隔离环境 `target=65461`、`relay=65462`、`TARGET_DATA_DIR=/var/folders/2k/nc0_nn9976l02sftpyhc9tz40000gn/T/bifrost-rse11-target-1ol13h2w`、`CALLER_DATA_DIR=/var/folders/2k/nc0_nn9976l02sftpyhc9tz40000gn/T/bifrost-rse11-caller-099y45el`、`RELAY_DATA_DIR=/var/folders/2k/nc0_nn9976l02sftpyhc9tz40000gn/T/bifrost-rse11-relay-4wrcjkru` 真实执行。对同一 `client_instance_id=a32cac09-ce8c-4ebf-8e9f-43238cd189ff` 和 caller 指纹连续完成两次 pair-code connect，第一次 grant 为 `p8DEHNdigh_dKEud4kOT6`，第二次 grant 为 `hOpA0_uoFILU5WqDFMJ4a`。第二次 connect 后直接执行 `target/debug/bifrost remote status --relay-url http://127.0.0.1:65462`，成功返回远端状态 JSON，不再出现 `saved connection transport no longer matches relay reusable authorization`。随后查询 relay `grants/reusable`，返回的正是第二次最新 grant `hOpA0_uoFILU5WqDFMJ4a`。再执行 `target/debug/bifrost remote disconnect --all --relay-url http://127.0.0.1:65462`，CLI 输出 `Revoking 1 connection(s)… ✓ hOpA0_uoFILU (eden)`；之后再次查询 `grants/reusable` 返回 `data=null`。最后直接检查 relay SQLite，两个 grant 都存在但状态均为 `removed`：`p8DEHNdigh_dKEud4kOT6 -> removed`、`hOpA0_uoFILU5WqDFMJ4a -> removed`，证明 reconnect 会覆盖旧 grant，而 `disconnect --all` 会清空该 caller 在该设备上的全部残留 reusable grants。 |
 | TC-RSE-12 | ✅ PASS | 2026-04-23 本地验证。**根因**：旧版 `full-access` 策略 metadata 中无 `allowed_exec_modes` 字段，回退逻辑仅添加 `exec_mode=shell_text`，导致 `argv_exec` 被拒绝（`Config error: policy 'full-access' allows exec_mode [shell_text], got argv_exec`），且错误信息存在双重 `Config error:` 前缀。**修复**：`resolve_shell_policy_from_set` 中当 `allowed_exec_modes` 为空时，从 `allow_any_executable`/`allowed_executables` 推断 `argv_exec`，从 `allowed_shell_patterns` 推断 `shell_text`，保证向后兼容。同时修复 `select_policy_id_for_command` 中单候选错误被双重包装的问题（保留原始 `BifrostError` 而非 `.to_string()` 后重新包装）。**验证方式**：(1) 写入旧版 `full-access` 配置到 `TARGET_DATA_DIR=/tmp/bifrost-rse12-target-oC8W5Llv/remote_shell.json`，仅含 `exec_mode=shell_text`、`allowed_shell_patterns=["^(?s:.*)$"]`、`allow_any_executable=true`、`shell=/bin/bash`、`inherit_env=true`，无 `allowed_exec_modes`。通过 CLI `remote shell list` 确认 target 加载了 `full-access (mode: shell_text)` 单策略。(2) 单元测试 `test_legacy_full_access_without_allowed_exec_modes_permits_argv`：模拟旧格式策略，`select_policy_id_for_command` 对 `argv_exec` 和 `shell_text` 均返回 `Ok("full-access")`。(3) 真实执行测试 `test_legacy_full_access_argv_exec_actually_runs`：同旧格式策略，通过 `executor.execute()` 以 `argv_exec` 模式执行 `/bin/pwd`，exit_code=0，stdout 输出非空目录路径。(4) 单元测试 `test_select_policy_single_rejection_has_no_double_error_prefix`：验证单候选拒绝时错误信息为 `Config error: policy '...'` 而非 `Config error: Config error: policy '...'`。全部 27 个 executor 测试通过。 |
 | TC-RSE-13 | ✅ PASS | 2026-04-23 本地验证。执行 `cargo run --bin bifrost -- remote command exec pwd` 时，CLI 直接报 `unexpected argument 'pwd' found`，并提示查看 `--help`，不会再把裸参数静默解析成 `argv_exec` 然后打到远端策略层。随后执行 `cargo run --bin bifrost -- remote command exec -- /bin/pwd`，仍按 `argv_exec` 正常解析。 |
+| TC-RSE-14 | ✅ PASS | 2026-04-23 本地真实链路验证。隔离启动 target / relay / caller 后，将 target Shell Access 切到 `Full Access`。第一轮执行 `python3 -u -c 'print(\"stream-one\", end=\"\", flush=True); time.sleep(1.2); print(\"stream-two\", end=\"\", flush=True)'`：命令启动约 0.4 秒时检查 caller 输出文件，已提前看到 `stream-one`，且进程仍在运行；命令结束后完整输出为 `stream-onestream-two`。第二轮单独执行 `/usr/bin/top -l 2 -s 1`：在命令启动约 1.4 秒时，caller 输出文件已写入 211457 字节，首屏包含 `Processes:` / 时间 / `Load Avg`，且进程仍在运行；命令结束后总输出增长到 434068 字节，`Processes:` 采样头共出现 2 次。证明 caller 在进程退出前已经收到 stdout frame，而不是等到 `top` 整体结束后一次性打印。Recent Calls 最终仍正常记录 exit_code / stdout_digest。 |

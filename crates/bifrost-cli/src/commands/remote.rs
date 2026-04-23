@@ -71,6 +71,13 @@ struct BuiltRemoteCommand {
     render: RemoteRenderMode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenCallCommandSummary {
+    command_preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masked_args_json: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ShellExecPayload {
     exec_mode: String,
@@ -1137,6 +1144,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
     let mut transport = merge_transport_context(&conn, &grant)?;
     let mut active_grant_id = grant.grant_id.clone();
+    let command_summary = build_open_call_command_summary(&command);
     let command_encrypted = encrypt_remote_command(
         command.kind,
         command.command.as_deref(),
@@ -1152,6 +1160,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             grant_id: grant.grant_id.clone(),
             client_instance_id: conn.client_instance_id.clone(),
             caller_fingerprint: caller_fingerprint.clone(),
+            command_summary: command_summary.clone(),
             command_kind: command.kind,
             command_encrypted,
         })
@@ -1213,6 +1222,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                     grant_id: refreshed_grant.grant_id.clone(),
                     client_instance_id: conn.client_instance_id.clone(),
                     caller_fingerprint: refreshed_fingerprint,
+                    command_summary: command_summary.clone(),
                     command_kind: command.kind,
                     command_encrypted: refreshed_command_encrypted,
                 })
@@ -1901,6 +1911,13 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                 }
             }
         },
+    }
+}
+
+fn build_open_call_command_summary(command: &BuiltRemoteCommand) -> OpenCallCommandSummary {
+    OpenCallCommandSummary {
+        command_preview: command.label.clone(),
+        masked_args_json: command.args_json.clone(),
     }
 }
 
@@ -2789,6 +2806,7 @@ struct OpenCallRequest {
     grant_id: String,
     client_instance_id: String,
     caller_fingerprint: String,
+    command_summary: OpenCallCommandSummary,
     command_kind: CommandKind,
     command_encrypted: EncryptedPayload,
 }
@@ -4506,6 +4524,12 @@ mod tests {
             grant_id: "grant-1".to_string(),
             client_instance_id: "client-1".to_string(),
             caller_fingerprint: "fp-1".to_string(),
+            command_summary: OpenCallCommandSummary {
+                command_preview: "traffic.get".to_string(),
+                masked_args_json: Some(
+                    r#"{"id":"REQ-1","request_body":true,"response_body":true}"#.to_string(),
+                ),
+            },
             command_kind: CommandKind::QueryReadonly,
             command_encrypted: EncryptedPayload {
                 version: ENCRYPTED_OPEN_CALL_VERSION,
@@ -4520,7 +4544,31 @@ mod tests {
         assert_eq!(json["command_kind"], "query.readonly");
         assert!(json.get("command_encrypted").is_some());
         assert!(json.get("command").is_none());
-        assert!(json.get("command_summary").is_none());
+        assert_eq!(json["command_summary"]["command_preview"], "traffic.get");
+        assert_eq!(
+            json["command_summary"]["masked_args_json"],
+            r#"{"id":"REQ-1","request_body":true,"response_body":true}"#
+        );
+    }
+
+    #[test]
+    fn test_build_open_call_command_summary_uses_label_and_args_json() {
+        let command = BuiltRemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            label: "traffic.list".to_string(),
+            command: Some("traffic.list".to_string()),
+            args_json: Some(r#"{"limit":7,"host":"127.0.0.1"}"#.to_string()),
+            query: None,
+            shell_exec: None,
+            render: RemoteRenderMode::Raw,
+        };
+
+        let summary = build_open_call_command_summary(&command);
+        assert_eq!(summary.command_preview, "traffic.list");
+        assert_eq!(
+            summary.masked_args_json.as_deref(),
+            Some(r#"{"limit":7,"host":"127.0.0.1"}"#)
+        );
     }
 
     #[test]

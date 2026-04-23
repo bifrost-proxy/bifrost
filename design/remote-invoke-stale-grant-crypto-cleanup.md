@@ -20,6 +20,7 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
    - 清理本地残留的 `grant_crypto`
 
 这样 caller 下一次执行 `remote status` 时，会在授权发现阶段直接看到 grant 已失效并提示重新 `remote connect`，而不会把请求发到远端后才报 `missing grant shared secret`。
+同时，caller 本地这条 stale `remote-connections.json` 记录也会被同步移除，避免后续流程继续拿着已经被 relay 回收的 grant 去做 `disconnect` 或其他命令。
 
 ## 测试方案
 
@@ -38,12 +39,14 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
 - 删除 target client 数据目录下的 `admin/remote_invoke_grant_crypto.*`
 - 重启 target client 触发 SSE 重连和 active grant 同步
 - 断言旧 grant 被清理，caller 再次执行 `remote status` 时提示授权已失效/需要重新连接，而不是远端返回 `missing grant shared secret`
+- 断言 caller 本地 stale connection 也被清空；如果后续还要验证 `disconnect`，必须先重新建立一条 fresh grant，再制造 relay `grant_not_found` 场景
 
 ### 真实场景测试（human_tests）
 
 更新 `human_tests/remote-invoke.md`，新增回归用例：
 
 - `TC-RI-回归-131`：client 本地 grant crypto 丢失后，旧授权会在重连时自动收敛删除
+- 同一用例补充验证 caller 本地 stale connection 会被删除，`disconnect` 回归需基于 fresh reconnect 继续执行
 
 同步更新 `human_tests/readme.md`。
 

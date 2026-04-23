@@ -394,7 +394,7 @@ export class RemoteInvokeService {
     return { pairing_id: pairingId, status: 'pending_approval' };
   }
 
-  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string }> {
+  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
     if (this.isPendingPairingExpired(pairing)) {
@@ -925,20 +925,20 @@ export class RemoteInvokeService {
         caller_display_name: callerDisplayName,
         caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
         client_ephemeral_pub: req.client_ephemeral_pub ?? '',
-      grant_mode: grantMode,
-      grant_scope: normalizeGrantScope(req.grant_scope),
-      ssh_key_id: '',
-      ssh_key_fingerprint: verified.ssh_key_fingerprint,
-      status: 'active',
+        grant_mode: grantMode,
+        grant_scope: normalizeGrantScope(req.grant_scope),
+        ssh_key_id: '',
+        ssh_key_fingerprint: result.ssh_key_fingerprint,
+        status: 'active',
         first_authorized_at: now,
         expires_at: '',
         last_used_at: now,
         max_calls: 999999,
-      remaining_calls: 999999,
-      created_by: 'ssh_publickey',
-      update_time: now,
-    };
-    await this.storage.remoteInvoke.createGrant(grant);
+        remaining_calls: 999999,
+        created_by: 'ssh_publickey',
+        update_time: now,
+      };
+      await this.storage.remoteInvoke.createGrant(grant);
     }
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {
       ...result,

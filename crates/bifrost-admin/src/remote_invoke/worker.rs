@@ -826,9 +826,6 @@ impl RemoteInvokeWorker {
             )));
         }
 
-        *self.state.write() = WorkerState::Connected;
-        info!(stream_id = %stream_id, "SSE stream connected");
-
         if let Err(e) = self.relay_client.cancel_pending_pairings().await {
             debug!(error = %e, "cancel_pending_pairings on SSE connect (non-fatal)");
         } else {
@@ -921,6 +918,9 @@ impl RemoteInvokeWorker {
                 debug!(error = %e, "fetch_active_grants on SSE connect (non-fatal, relay may not support this endpoint)");
             }
         }
+
+        *self.state.write() = WorkerState::Connected;
+        info!(stream_id = %stream_id, "SSE stream connected");
 
         let heartbeat_interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
         let mut heartbeat_ticker = tokio::time::interval(heartbeat_interval);
@@ -1450,7 +1450,6 @@ impl RemoteInvokeWorker {
         match event_name {
             "client_hello_ack" => {
                 info!("received client_hello_ack from relay");
-                *self.state.write() = WorkerState::Connected;
             }
             "pairing_request" => match serde_json::from_str::<Value>(data) {
                 Ok(v) => self.handle_pairing_request(v).await,

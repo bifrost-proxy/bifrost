@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use bifrost_command::{
@@ -10,6 +11,7 @@ use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use futures_util::StreamExt;
 use regex::Regex;
 use sha1::{Digest, Sha1};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
 
@@ -697,24 +699,100 @@ impl RemoteInvokeExecutor {
             .unwrap_or(policy.max_timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS))
             .min(policy.max_timeout_ms.unwrap_or(u64::MAX));
         let mut process = self.build_shell_exec_process(command, &policy)?;
-        let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
-            .await
-            .map_err(|_| {
-                BifrostError::Network(format!(
-                    "shell.exec timed out after {} ms (policy '{}')",
-                    timeout_ms, policy.policy_id
-                ))
-            })?
-            .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        process.stdin(Stdio::null());
+        process.kill_on_drop(true);
 
-        let stdout = truncate_utf8_bytes(&output.stdout, policy.max_output_bytes);
-        let stderr = truncate_utf8_bytes(&output.stderr, policy.max_output_bytes);
-        if !stdout.is_empty() {
-            on_stdout(stdout.clone()).await?;
+        let mut child = process
+            .spawn()
+            .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
+        let mut stdout_reader = child.stdout.take().ok_or_else(|| {
+            BifrostError::Network("shell.exec stdout pipe unavailable".to_string())
+        })?;
+        let mut stderr_reader = child.stderr.take().ok_or_else(|| {
+            BifrostError::Network("shell.exec stderr pipe unavailable".to_string())
+        })?;
+
+        let mut stdout_buf = [0u8; 4096];
+        let mut stderr_buf = [0u8; 4096];
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut exit_status = None;
+        let mut stdout_preview = Vec::new();
+        let mut stderr_preview = Vec::new();
+        let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec timed out after {} ms (policy '{}')",
+                        timeout_ms, policy.policy_id
+                    )));
+                }
+                wait_result = child.wait(), if exit_status.is_none() => {
+                    exit_status = Some(wait_result.map_err(|e| {
+                        BifrostError::Network(format!("wait shell.exec failed: {}", e))
+                    })?);
+                    if !stdout_open && !stderr_open {
+                        break;
+                    }
+                }
+                read = stdout_reader.read(&mut stdout_buf), if stdout_open => {
+                    let read = read.map_err(|e| {
+                        BifrostError::Network(format!("read shell.exec stdout failed: {}", e))
+                    })?;
+                    if read == 0 {
+                        stdout_open = false;
+                        if exit_status.is_some() && !stderr_open {
+                            break;
+                        }
+                    } else {
+                        append_truncated_bytes(
+                            &mut stdout_preview,
+                            &stdout_buf[..read],
+                            policy.max_output_bytes,
+                        );
+                        on_stdout(String::from_utf8_lossy(&stdout_buf[..read]).into_owned()).await?;
+                    }
+                }
+                read = stderr_reader.read(&mut stderr_buf), if stderr_open => {
+                    let read = read.map_err(|e| {
+                        BifrostError::Network(format!("read shell.exec stderr failed: {}", e))
+                    })?;
+                    if read == 0 {
+                        stderr_open = false;
+                        if exit_status.is_some() && !stdout_open {
+                            break;
+                        }
+                    } else {
+                        append_truncated_bytes(
+                            &mut stderr_preview,
+                            &stderr_buf[..read],
+                            policy.max_output_bytes,
+                        );
+                    }
+                }
+            }
         }
 
+        let status = if let Some(status) = exit_status {
+            status
+        } else {
+            child
+                .wait()
+                .await
+                .map_err(|e| BifrostError::Network(format!("wait shell.exec failed: {}", e)))?
+        };
+        let stdout = String::from_utf8_lossy(&stdout_preview).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr_preview).into_owned();
+
         Ok(RemoteInvokeResponse {
-            exit_code: output.status.code().unwrap_or(-1),
+            exit_code: status.code().unwrap_or(-1),
             stdout: (!stdout.is_empty()).then_some(stdout.clone()),
             stderr: (!stderr.is_empty()).then_some(stderr.clone()),
             stdout_digest: (!stdout.is_empty()).then(|| sha1_hex(&stdout)),
@@ -1623,11 +1701,12 @@ fn validate_string_param(
     Ok(())
 }
 
-fn truncate_utf8_bytes(bytes: &[u8], max_bytes: usize) -> String {
-    if bytes.len() <= max_bytes {
-        return String::from_utf8_lossy(bytes).into_owned();
+fn append_truncated_bytes(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) {
+    if target.len() >= max_bytes {
+        return;
     }
-    String::from_utf8_lossy(&bytes[..max_bytes]).into_owned()
+    let remaining = max_bytes.saturating_sub(target.len());
+    target.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 }
 
 fn path_is_within(path: &str, allowed_prefix: &str) -> bool {
@@ -1823,6 +1902,7 @@ fn highlight_keyword(text: &str, keyword: &str) -> String {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::*;
     use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
@@ -1857,6 +1937,28 @@ mod tests {
             })
             .expect("save remote shell store");
         (guard, dir)
+    }
+
+    fn streaming_shell_command() -> (&'static str, &'static [&'static str]) {
+        if cfg!(target_os = "windows") {
+            (
+                "<nul set /p =first & powershell -NoLogo -NoProfile -Command \"Start-Sleep -Milliseconds 350\" & <nul set /p =second",
+                &["first", "second"],
+            )
+        } else {
+            (
+                "printf first; sleep 0.35; printf second",
+                &["first", "second"],
+            )
+        }
+    }
+
+    fn streaming_shell_program() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "/bin/sh"
+        }
     }
 
     #[test]
@@ -2076,6 +2178,82 @@ mod tests {
             .expect("shell exec response");
         assert_eq!(resp.exit_code, 0);
         assert_eq!(resp.stdout.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_execute_shell_exec_streams_stdout_before_exit() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let (shell_text, expected_chunks) = streaming_shell_command();
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "stream-test".to_string(),
+                    name: "stream-test".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "shell": streaming_shell_program(),
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("stream-test".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some(shell_text.to_string()),
+            ..Default::default()
+        };
+
+        let received_at: Arc<Mutex<Vec<(String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received_at);
+        let started = Instant::now();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute_with_stdout_sink(&cmd, |chunk| {
+                let sink = Arc::clone(&sink);
+                let elapsed = started.elapsed();
+                async move {
+                    sink.lock().expect("sink lock").push((chunk, elapsed));
+                    Ok(())
+                }
+            }))
+            .expect("streaming shell exec response");
+
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("firstsecond"));
+        let received = received_at.lock().expect("received lock");
+        assert!(
+            received.len() >= 2,
+            "expected multiple streamed chunks, got {:?}",
+            *received
+        );
+        assert_eq!(received[0].0, expected_chunks[0]);
+        assert_eq!(received[1].0, expected_chunks[1]);
+        assert!(
+            received[0].1 < Duration::from_millis(250),
+            "first chunk should arrive before the command exits, got {:?}",
+            received[0].1
+        );
+        assert!(
+            received[1].1 >= Duration::from_millis(250),
+            "second chunk should arrive after the intentional delay, got {:?}",
+            received[1].1
+        );
     }
 
     #[test]

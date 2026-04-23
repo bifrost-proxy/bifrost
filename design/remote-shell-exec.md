@@ -171,6 +171,38 @@ bifrost remote command exec --shell-text "printf hello && /bin/pwd"
   - Settings 页 `Pending Pairing Requests -> Review` 详细审批弹窗仍有真实可见性问题
   - caller CLI 仍未公开 PTY / stdin payload 入口
 
+## 2026-04-23 补充修复：shell.exec 流式 stdout
+
+### 问题
+
+在 target 侧，`shell.exec` 之前通过 `tokio::process::Command::output()` 一次性等待子进程退出后再返回 `stdout/stderr`。这会导致：
+
+- caller 在命令运行期间收不到任何 `frame`
+- `bifrost remote command exec` 对长时间输出的命令表现为“卡住直到结束”
+- 像 `top -l 2 -s 1`、`python3 -u ...` 这类会持续产出 stdout 的命令，即使 relay / caller 已支持 frame 流式打印，也无法真正实时显示
+
+### 修复方案
+
+- target 执行器改为 `spawn + piped stdout/stderr + 增量 read`
+- 每次读取到 stdout chunk 后，立即通过现有 `on_stdout -> call_frame` 链路发给 caller
+- stderr 继续在 target 侧聚合，并通过最终 `exit_encrypted` 返回，避免本轮协议变更
+- 保留现有输出摘要语义：
+  - `stdout/stderr` 最终响应仍受 `max_output_bytes` 限制
+  - caller 实时看到的 stdout 不再必须等待进程退出
+- 子进程启用 `kill_on_drop(true)`，避免 timeout / task 取消后把长命令遗留在目标机上
+
+### 验证计划
+
+- 单元测试：
+  - `test_execute_shell_exec_streams_stdout_before_exit`
+    验证第一段 stdout 在命令结束前就通过 sink 发出，并且延迟后的第二段 stdout 分批到达
+- E2E 测试：
+  - `remote_shell_exec_streams_stdout`
+    通过 `crates/bifrost-e2e` 验证 shell.exec 在真实执行器路径上会分多段推送 stdout
+- 真实场景测试：
+  - 更新 `human_tests/remote-shell-exec.md`
+  - 新增流式输出回归用例，真实跑通 `python3 -u ...` 和 `top -l 2 -s 1` 类命令在 caller 侧的增量显示
+
 ## 说明
 
 后文保留了较多长期方案、历史探索和结构化设计草案，其中有些段落仍提到 caller 传 `policy_id`。这些内容暂未全部清理，但不代表当前实现；如与上面的“当前生效契约”冲突，请以上面的契约为准。

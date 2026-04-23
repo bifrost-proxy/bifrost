@@ -35,6 +35,7 @@ type PendingConnectEntry = {
   relayToken: string;
   expiresAt: number;
   callerInfo?: SshConnectRequest['caller_info'];
+  sshKeyFingerprint: string;
 };
 
 function exportPublicKeyDer(publicKeyPem: string): Buffer {
@@ -192,6 +193,7 @@ export class SshAuthService {
       relayToken,
       expiresAt,
       callerInfo: body.caller_info,
+      sshKeyFingerprint: fingerprint,
     });
 
     return {
@@ -225,6 +227,7 @@ export class SshAuthService {
     caller_fingerprint?: string;
     grant_mode?: SshConnectResultRequest['grant_mode'];
     caller_info?: SshConnectRequest['caller_info'];
+    ssh_key_fingerprint: string;
   } {
     this.cleanupExpiredState();
     const pending = this.pendingConnects.get(body.connect_id);
@@ -248,6 +251,7 @@ export class SshAuthService {
       caller_fingerprint: body.caller_fingerprint,
       grant_mode: body.grant_mode,
       caller_info: pending.callerInfo,
+      ssh_key_fingerprint: pending.sshKeyFingerprint,
     };
   }
 

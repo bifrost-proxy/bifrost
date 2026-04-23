@@ -8,9 +8,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/sync_server.sh"
 
 SYNC_SERVER_DIR="$REPO_DIR/packages/bifrost-sync-server"
-SYNC_SERVER_ENTRY="$SYNC_SERVER_DIR/dist/cli.js"
 RELAY_PORT=""
 RELAY_PID=""
 RELAY_LOG=""
@@ -18,32 +18,16 @@ MOCK_HTTP_PORT=""
 MOCK_HTTP_PID=""
 MOCK_HTTP_LOG=""
 
-resolve_node_bin() {
-    local candidate
-    for candidate in \
-        "${NODE_BIN:-}" \
-        "$HOME/.local/share/mise/installs/node/22.22.0/bin/node" \
-        "$HOME/.local/share/mise/installs/node/22/bin/node" \
-        "$(command -v node 2>/dev/null || true)"; do
-        if [[ -n "$candidate" && -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    echo "node"
-}
-
-NODE_BIN="$(resolve_node_bin)"
-
 start_local_relay() {
     RELAY_PORT="$(pick_free_port)"
     RELAY_LOG="$(mktemp)"
     local relay_data_dir
     relay_data_dir="$(mktemp -d)"
-
     log "Starting local bifrost-sync-server on port $RELAY_PORT..."
+    local relay_exec
+    relay_exec="$(sync_server_exec "$SYNC_SERVER_DIR")"
     (cd "$SYNC_SERVER_DIR" && \
-        "$NODE_BIN" "$SYNC_SERVER_ENTRY" -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke \
+        eval "$relay_exec" -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke \
     ) > "$RELAY_LOG" 2>&1 &
     RELAY_PID=$!
 
@@ -203,11 +187,16 @@ export BIFROST_DATA_DIR
 CALLER_DATA_DIR="$(mktemp -d)"
 CALLER_CONNECT_PID=""
 CALLER_CONNECT_LOG=""
+CALLER_RECONNECT_PID=""
 
 cleanup() {
     if [[ -n "$CALLER_CONNECT_PID" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
         wait "$CALLER_CONNECT_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$CALLER_RECONNECT_PID" ]] && kill -0 "$CALLER_RECONNECT_PID" 2>/dev/null; then
+        kill "$CALLER_RECONNECT_PID" 2>/dev/null || true
+        wait "$CALLER_RECONNECT_PID" 2>/dev/null || true
     fi
     admin_cleanup_bifrost || true
     if [[ -n "$RELAY_PID" ]] && kill -0 "$RELAY_PID" 2>/dev/null; then
@@ -261,8 +250,20 @@ start_local_mock_http
 
 log "Prepare bifrost binary..."
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
-if [[ ! -x "$BIFROST_BIN" && "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" ]]; then
-    (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+if [[ "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" && "${SKIP_BUILD:-}" != "true" ]]; then
+    NEED_BUILD=0
+    if [[ ! -x "$BIFROST_BIN" ]] \
+        || [[ "$REPO_DIR/Cargo.toml" -nt "$BIFROST_BIN" ]] \
+        || [[ "$REPO_DIR/Cargo.lock" -nt "$BIFROST_BIN" ]]; then
+        NEED_BUILD=1
+    elif find "$REPO_DIR/crates" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$BIFROST_BIN" -print -quit | grep -q .; then
+        NEED_BUILD=1
+    fi
+
+    if [[ "$NEED_BUILD" -eq 1 ]]; then
+        log "Building release bifrost..."
+        (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+    fi
 fi
 if [[ ! -x "$BIFROST_BIN" ]]; then
     echo "bifrost binary not found at $BIFROST_BIN" >&2
@@ -493,10 +494,16 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_TRAFFIC_LIST_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_LIST_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "traffic.list" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command_summary.command_preview // "") == "traffic.list" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
-    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+    | (
+        .[0].command_summary.masked_args_json
+        // .[0].command.args_json
+        // .[0].args_json
+        // (.[0].command.query.args | tojson)
+        // ""
+      )
 ')
 
 if echo "$LATEST_TRAFFIC_LIST_ARGS_JSON" | jq -e --arg marker "$REMOTE_MARKER" '
@@ -557,10 +564,16 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_TRAFFIC_GET_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_GET_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "traffic.get" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command_summary.command_preview // "") == "traffic.get" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
-    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+    | (
+        .[0].command_summary.masked_args_json
+        // .[0].command.args_json
+        // .[0].args_json
+        // (.[0].command.query.args | tojson)
+        // ""
+      )
 ')
 
 if echo "$LATEST_TRAFFIC_GET_ARGS_JSON" | grep -q "\"id\":\"${TARGET_SEQ}\"" \
@@ -633,10 +646,16 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_SEARCH_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "search.stream" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command_summary.command_preview // "") == "search.stream" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
-    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+    | (
+        .[0].command_summary.masked_args_json
+        // .[0].command.args_json
+        // .[0].args_json
+        // (.[0].command.query.args | tojson)
+        // ""
+      )
 ')
 
 if echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_results":5' && echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_scan":50'; then
@@ -698,10 +717,16 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_TRAFFIC_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_SEARCH_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "search.stream" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command_summary.command_preview // "") == "search.stream" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
-    | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
+    | (
+        .[0].command_summary.masked_args_json
+        // .[0].command.args_json
+        // .[0].args_json
+        // (.[0].command.query.args | tojson)
+        // ""
+      )
 ')
 
 if echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q "\"query\":\"${REMOTE_MARKER}\"" \
@@ -721,9 +746,18 @@ fi
 # =========================================================================
 log "=== TC-RI-04F: Caller cancel settles remote call as cancelled ==="
 
-for i in $(seq 1 20); do
-    curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/cancel-${RANDOM}" >/dev/null 2>&1 || true
+cancel_batch_pids=()
+for i in $(seq 1 120); do
+    curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/cancel-${RANDOM}" >/dev/null 2>&1 &
+    cancel_batch_pids+=($!)
+    if (( i % 12 == 0 )); then
+        wait "${cancel_batch_pids[@]}"
+        cancel_batch_pids=()
+    fi
 done
+if [[ "${#cancel_batch_pids[@]}" -gt 0 ]]; then
+    wait "${cancel_batch_pids[@]}"
+fi
 sleep 2
 
 http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
@@ -738,7 +772,8 @@ PRE_CANCEL_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
 
 CANCEL_LOG="$(mktemp)"
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "httpbin" \
-    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 50 >"$CANCEL_LOG" 2>&1 &
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    --limit 500 --max-results 500 --max-scan 2000 >"$CANCEL_LOG" 2>&1 &
 CANCEL_PID=$!
 
 CALL_OPENED_FOR_CANCEL=0
@@ -762,7 +797,21 @@ for i in $(seq 1 30); do
     sleep 0.1
 done
 
-if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && kill -0 "$CANCEL_PID" 2>/dev/null; then
+STREAM_SEEN_FOR_CANCEL=0
+if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]]; then
+    for i in $(seq 1 30); do
+        if [[ -s "$CANCEL_LOG" ]]; then
+            STREAM_SEEN_FOR_CANCEL=1
+            break
+        fi
+        if ! kill -0 "$CANCEL_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
+if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && [[ "$STREAM_SEEN_FOR_CANCEL" -eq 1 ]] && kill -0 "$CANCEL_PID" 2>/dev/null; then
     kill -INT "$CANCEL_PID" 2>/dev/null || true
 fi
 
@@ -771,7 +820,7 @@ CANCEL_EXIT="${CANCEL_EXIT:-0}"
 CANCEL_OUTPUT="$(cat "$CANCEL_LOG")"
 rm -f "$CANCEL_LOG"
 
-if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && [[ "$CANCEL_EXIT" -eq 130 ]] && echo "$CANCEL_OUTPUT" | grep -q "cancel"; then
+if [[ "$CALL_OPENED_FOR_CANCEL" -eq 1 ]] && [[ "$STREAM_SEEN_FOR_CANCEL" -eq 1 ]] && [[ "$CANCEL_EXIT" -eq 130 ]] && echo "$CANCEL_OUTPUT" | grep -qi "cancel"; then
     _log_pass "TC-RI-04F: caller 侧中断后会触发远端 cancel 收尾"
 else
     _log_fail "TC-RI-04F: caller 中断后未触发预期 cancel 收尾" "stream seen + exit 130 + cancel message" "$CANCEL_OUTPUT"
@@ -931,6 +980,84 @@ if echo "$STATUS_AFTER_CRYPTO_LOSS" | grep -qiE "expired|revoked|connect"; then
 else
     _log_fail "TC-RI-07A: caller 侧未返回预期的失效提示" "expired/revoked/connect" "$STATUS_AFTER_CRYPTO_LOSS"
 fi
+
+CALLER_CONNECTIONS_FILE_AFTER_CRYPTO_LOSS="$(find "$CALLER_DATA_DIR" -name remote-connections.json -print -quit)"
+if [[ -n "$CALLER_CONNECTIONS_FILE_AFTER_CRYPTO_LOSS" && -f "$CALLER_CONNECTIONS_FILE_AFTER_CRYPTO_LOSS" ]]; then
+    LOCAL_CONNECTION_COUNT_AFTER_CRYPTO_LOSS="$(jq '.connections | length' "$CALLER_CONNECTIONS_FILE_AFTER_CRYPTO_LOSS")"
+else
+    LOCAL_CONNECTION_COUNT_AFTER_CRYPTO_LOSS=0
+fi
+
+if [[ "$LOCAL_CONNECTION_COUNT_AFTER_CRYPTO_LOSS" -eq 0 ]]; then
+    _log_pass "TC-RI-07A: stale 授权失效后 caller 本地连接记录已清空"
+else
+    _log_fail "TC-RI-07A: stale 授权失效后 caller 本地连接记录仍残留" "0" "$LOCAL_CONNECTION_COUNT_AFTER_CRYPTO_LOSS"
+fi
+
+log "Re-create a fresh reusable grant for disconnect regression..."
+http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/discovery/enter" "{}"
+assert_status "200" "$HTTP_STATUS" "重新进入 discovery 模式应返回 200"
+PAIR_CODE_3=$(echo "$HTTP_BODY" | jq -r '.session.pair_code')
+assert_not_empty "$PAIR_CODE_3" "disconnect 回归前新的 pair_code 不应为空"
+
+CALLER_RECONNECT_LOG="$(mktemp)"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE_3" --relay-url "$RELAY_URL" \
+    > "$CALLER_RECONNECT_LOG" 2>&1 &
+CALLER_RECONNECT_PID=$!
+
+PAIRING_FOUND_3=0
+for i in $(seq 1 30); do
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/pending"
+    PENDING_COUNT_3=$(echo "$HTTP_BODY" | jq '.pairings | length')
+    if [[ "$PENDING_COUNT_3" -gt 0 ]]; then
+        PAIRING_FOUND_3=1
+        break
+    fi
+    sleep 1
+done
+
+if [[ "$PAIRING_FOUND_3" -eq 1 ]]; then
+    PAIRING_ID_3=$(echo "$HTTP_BODY" | jq -r '.pairings[0].pairing_id')
+    assert_not_empty "$PAIRING_ID_3" "disconnect 回归前新的 pairing_id 不应为空"
+    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID_3}/approve" '{"grant_mode":"permanent"}'
+    assert_status "200" "$HTTP_STATUS" "disconnect 回归前审批新的配对应返回 200"
+
+    RECONNECT_OK=0
+    for i in $(seq 1 30); do
+        if ! kill -0 "$CALLER_RECONNECT_PID" 2>/dev/null; then
+            wait "$CALLER_RECONNECT_PID" 2>/dev/null
+            RECONNECT_EXIT=$?
+            if [[ "$RECONNECT_EXIT" -eq 0 ]]; then
+                RECONNECT_OK=1
+            fi
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ "$RECONNECT_OK" -eq 1 ]]; then
+        _log_pass "TC-RI-07B: stale 连接清理后 caller 可重新 connect"
+    else
+        _log_fail "TC-RI-07B: stale 连接清理后 caller 重新 connect 失败" "exit_code=0" "exit_code=${RECONNECT_EXIT:-timeout}"
+        log "Caller reconnect log:"
+        cat "$CALLER_RECONNECT_LOG" 2>/dev/null || true
+    fi
+else
+    _log_fail "TC-RI-07B: stale 连接清理后新的配对请求未到达" "pending>0" "0"
+    kill "$CALLER_RECONNECT_PID" 2>/dev/null || true
+    wait "$CALLER_RECONNECT_PID" 2>/dev/null || true
+fi
+CALLER_RECONNECT_PID=""
+
+if grep -q "Connected! Authorization granted" "$CALLER_RECONNECT_LOG" 2>/dev/null; then
+    _log_pass "TC-RI-07B-1: reconnect 日志包含授权成功提示"
+else
+    _log_fail "TC-RI-07B-1: reconnect 日志缺少授权成功提示" "包含 Connected! Authorization granted" "$(cat "$CALLER_RECONNECT_LOG" 2>/dev/null || true)"
+fi
+rm -f "$CALLER_RECONNECT_LOG" 2>/dev/null || true
+
+http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/discovery/exit" "{}"
+assert_status "200" "$HTTP_STATUS" "disconnect 回归前退出 discovery 模式应返回 200"
 
 # =========================================================================
 # TC-RI-08: Disconnect

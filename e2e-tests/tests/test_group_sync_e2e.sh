@@ -8,6 +8,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 source "$SCRIPT_DIR/../test_utils/http_client.sh"
+source "$SCRIPT_DIR/../test_utils/sync_server.sh"
 
 # 确保本脚本中的所有直接 curl 调用（针对 sync-server 和 mock-server）都不受环境代理干扰
 # 对于需要走代理的请求，http_client.sh 已被修改为显式清除这些变量
@@ -126,8 +127,9 @@ if [[ ! -d "$SYNC_SERVER_DIR/node_modules" ]]; then
 fi
 
 echo "=== Starting sync-server on port ${SYNC_PORT} ==="
+SYNC_SERVER_EXEC="$(sync_server_exec "$SYNC_SERVER_DIR")"
 (cd "$SYNC_SERVER_DIR" && \
-    npx tsx src/cli.ts \
+    eval "$SYNC_SERVER_EXEC" \
         -p "$SYNC_PORT" \
         -H 127.0.0.1 \
         -d "$SYNC_DATA_DIR" \

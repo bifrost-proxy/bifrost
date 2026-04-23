@@ -8,6 +8,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/sync_server.sh"
 
 SYNC_SERVER_DIR="$REPO_DIR/packages/bifrost-sync-server"
 
@@ -117,7 +118,8 @@ cleanup() {
 trap cleanup EXIT
 
 log "Starting local relay on port $RELAY_PORT"
-(cd "$SYNC_SERVER_DIR" && npx tsx src/cli.ts -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke) >"$RELAY_LOG" 2>&1 &
+RELAY_EXEC="$(sync_server_exec "$SYNC_SERVER_DIR")"
+(cd "$SYNC_SERVER_DIR" && eval "$RELAY_EXEC" -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke) >"$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
 
 for _ in $(seq 1 40); do
@@ -132,8 +134,21 @@ if ! kill -0 "$RELAY_PID" 2>/dev/null; then
     exit 1
 fi
 
-log "Building release bifrost"
-(cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null)
+if [[ "${SKIP_BUILD:-}" != "true" ]]; then
+    NEED_BUILD=0
+    if [[ ! -x "$REPO_DIR/target/release/bifrost" ]] \
+        || [[ "$REPO_DIR/Cargo.toml" -nt "$REPO_DIR/target/release/bifrost" ]] \
+        || [[ "$REPO_DIR/Cargo.lock" -nt "$REPO_DIR/target/release/bifrost" ]]; then
+        NEED_BUILD=1
+    elif find "$REPO_DIR/crates" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$REPO_DIR/target/release/bifrost" -print -quit | grep -q .; then
+        NEED_BUILD=1
+    fi
+
+    if [[ "$NEED_BUILD" -eq 1 ]]; then
+        log "Building release bifrost"
+        (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null)
+    fi
+fi
 BIFROST_BIN="$REPO_DIR/target/release/bifrost"
 
 mkdir -p "$BIFROST_DATA_DIR"

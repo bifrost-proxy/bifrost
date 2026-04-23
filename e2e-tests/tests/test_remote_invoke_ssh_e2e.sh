@@ -9,6 +9,7 @@ SYNC_SERVER_DIR="$REPO_DIR/packages/bifrost-sync-server"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
+source "$SCRIPT_DIR/../test_utils/sync_server.sh"
 
 pick_free_port() {
     python3 - <<'PY'
@@ -56,9 +57,11 @@ log() { echo "[remote-invoke-ssh-e2e] $*"; }
 
 start_local_relay() {
     log "Starting local bifrost-sync-server on port $RELAY_PORT..."
+    local relay_exec
+    relay_exec="$(sync_server_exec "$SYNC_SERVER_DIR")"
     (
         cd "$SYNC_SERVER_DIR" && \
-            npx tsx src/cli.ts -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke
+            eval "$relay_exec" -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke
     ) >"$RELAY_LOG" 2>&1 &
     RELAY_PID=$!
 
@@ -129,8 +132,21 @@ wait_for_worker_connected() {
 
 start_local_relay
 
-log "Build bifrost (release)..."
-(cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+if [[ "${SKIP_BUILD:-}" != "true" ]]; then
+    NEED_BUILD=0
+    if [[ ! -x "$REPO_DIR/target/release/bifrost" ]] \
+        || [[ "$REPO_DIR/Cargo.toml" -nt "$REPO_DIR/target/release/bifrost" ]] \
+        || [[ "$REPO_DIR/Cargo.lock" -nt "$REPO_DIR/target/release/bifrost" ]]; then
+        NEED_BUILD=1
+    elif find "$REPO_DIR/crates" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$REPO_DIR/target/release/bifrost" -print -quit | grep -q .; then
+        NEED_BUILD=1
+    fi
+
+    if [[ "$NEED_BUILD" -eq 1 ]]; then
+        log "Build bifrost (release)..."
+        (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+    fi
+fi
 
 log "Start bifrost client on port $ADMIN_PORT..."
 mkdir -p "$BIFROST_DATA_DIR"

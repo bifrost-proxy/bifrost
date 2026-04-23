@@ -8,6 +8,7 @@ SYNC_SERVER_DIR="${ROOT_DIR}/packages/bifrost-sync-server"
 
 source "${ROOT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${ROOT_DIR}/e2e-tests/test_utils/process.sh"
+source "${ROOT_DIR}/e2e-tests/test_utils/sync_server.sh"
 
 PROXY_PORT="${PROXY_PORT:-$(allocate_free_port)}"
 HTTP_PORT="${HTTP_PORT:-$(allocate_free_port)}"
@@ -122,9 +123,11 @@ start_mock_servers() {
 
 start_relay() {
     header "Start local relay"
+    local relay_exec
+    relay_exec="$(sync_server_exec "$SYNC_SERVER_DIR")"
     (
         cd "$SYNC_SERVER_DIR"
-        pnpm exec tsx src/cli.ts -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke
+        eval "$relay_exec" -p "$RELAY_PORT" -d "$RELAY_DATA_DIR" --enable-remote-invoke
     ) >"$RELAY_LOG_FILE" 2>&1 &
     RELAY_PID=$!
 
