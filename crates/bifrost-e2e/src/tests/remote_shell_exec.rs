@@ -7,6 +7,49 @@ use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
 
 use crate::runner::TestCase;
 
+fn platform_echo_executable() -> String {
+    if cfg!(target_os = "windows") {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        format!(r"{}\System32\cmd.exe", windir)
+    } else {
+        "/bin/echo".to_string()
+    }
+}
+
+fn platform_echo_argv() -> Vec<String> {
+    if cfg!(target_os = "windows") {
+        let exe = platform_echo_executable();
+        vec![
+            exe,
+            "/C".to_string(),
+            "echo".to_string(),
+            "hello-e2e".to_string(),
+        ]
+    } else {
+        vec!["/bin/echo".to_string(), "hello-e2e".to_string()]
+    }
+}
+
+fn platform_denied_executable() -> String {
+    if cfg!(target_os = "windows") {
+        r"C:\Windows\System32\where.exe".to_string()
+    } else {
+        "/bin/date".to_string()
+    }
+}
+
+fn platform_cwd() -> String {
+    std::env::temp_dir().to_string_lossy().to_string()
+}
+
+fn platform_expected_stdout() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "hello-e2e\r\n"
+    } else {
+        "hello-e2e\n"
+    }
+}
+
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![TestCase::standalone(
         "remote_shell_exec_policy_guard",
@@ -23,6 +66,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
             fs::create_dir_all(&base).map_err(|e| e.to_string())?;
             bifrost_storage::set_data_dir(base.clone());
 
+            let echo_exe = platform_echo_executable();
+            let cwd = platform_cwd();
+
             let store = RemoteShellStore::new().map_err(|e| e.to_string())?;
             store
                 .save(&RemoteShellSet {
@@ -36,8 +82,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         profile_id: None,
                         metadata: serde_json::json!({
                             "exec_mode": "argv_exec",
-                            "allowed_executables": ["/bin/echo"],
-                            "cwd_allowlist": ["/tmp"],
+                            "allowed_executables": [echo_exe],
+                            "cwd_allowlist": [cwd],
                             "env_allowlist": ["LANG"],
                             "max_timeout_ms": 5000
                         }),
@@ -51,8 +97,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 kind: CommandKind::ShellExec,
                 policy_id: Some("echo-argv".to_string()),
                 exec_mode: Some(ShellExecMode::ArgvExec),
-                argv: Some(vec!["/bin/echo".to_string(), "hello-e2e".to_string()]),
-                cwd: Some("/tmp".to_string()),
+                argv: Some(platform_echo_argv()),
+                cwd: Some(cwd.clone()),
                 ..Default::default()
             };
 
@@ -61,18 +107,26 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 .await
                 .map_err(|e| e.to_string())?;
             if response.exit_code != 0 {
-                return Err(format!("expected exit code 0, got {}", response.exit_code));
+                return Err(format!(
+                    "expected exit code 0, got {} (stderr: {:?})",
+                    response.exit_code, response.stderr
+                ));
             }
-            if response.stdout.as_deref() != Some("hello-e2e\n") {
-                return Err(format!("unexpected stdout: {:?}", response.stdout));
+            let expected_stdout = platform_expected_stdout();
+            if response.stdout.as_deref() != Some(expected_stdout) {
+                return Err(format!(
+                    "unexpected stdout: {:?}, expected {:?}",
+                    response.stdout, expected_stdout
+                ));
             }
 
+            let denied_exe = platform_denied_executable();
             let denied = RemoteCommand {
                 kind: CommandKind::ShellExec,
                 policy_id: Some("echo-argv".to_string()),
                 exec_mode: Some(ShellExecMode::ArgvExec),
-                argv: Some(vec!["/bin/date".to_string()]),
-                cwd: Some("/tmp".to_string()),
+                argv: Some(vec![denied_exe]),
+                cwd: Some(cwd),
                 ..Default::default()
             };
             match executor.execute(&denied).await {

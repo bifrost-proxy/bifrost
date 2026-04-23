@@ -48,7 +48,6 @@ pub struct RemoteInvokeExecutor {
 #[derive(Debug, Clone)]
 struct ResolvedShellPolicy {
     policy_id: String,
-    exec_mode: ShellExecMode,
     allowed_exec_modes: Vec<ShellExecMode>,
     reject_reason: Option<String>,
     allow_any_executable: bool,
@@ -788,13 +787,13 @@ impl RemoteInvokeExecutor {
         let set = store.load()?;
         let candidate_ids = Self::candidate_policy_ids(&set, binding)?;
         let mut matching_ids = Vec::new();
-        let mut candidate_errors = Vec::new();
+        let mut candidate_errors: Vec<(String, BifrostError)> = Vec::new();
 
         for policy_id in candidate_ids {
             let policy = Self::resolve_shell_policy_from_set(&set, &policy_id)?;
             match Self::validate_shell_command_against_policy(&policy, command) {
                 Ok(()) => matching_ids.push(policy.policy_id),
-                Err(error) => candidate_errors.push((policy_id, error.to_string())),
+                Err(error) => candidate_errors.push((policy_id, error)),
             }
         }
 
@@ -802,7 +801,7 @@ impl RemoteInvokeExecutor {
             1 => Ok(matching_ids.remove(0)),
             0 => {
                 if candidate_errors.len() == 1 {
-                    return Err(BifrostError::Config(candidate_errors.remove(0).1));
+                    return Err(candidate_errors.remove(0).1);
                 }
                 let candidate_list = candidate_errors
                     .iter()
@@ -943,14 +942,29 @@ impl RemoteInvokeExecutor {
             policy_meta.allowed_exec_modes
         };
         if allowed_exec_modes.is_empty() {
-            allowed_exec_modes.push(exec_mode);
+            let can_argv = policy_meta
+                .allow_any_executable
+                .or(profile_meta.allow_any_executable)
+                .unwrap_or(false)
+                || !policy_meta.allowed_executables.is_empty()
+                || !profile_meta.allowed_executables.is_empty();
+            let can_shell = !policy_meta.allowed_shell_patterns.is_empty()
+                || !profile_meta.allowed_shell_patterns.is_empty();
+            if can_argv {
+                allowed_exec_modes.push(ShellExecMode::ArgvExec);
+            }
+            if can_shell {
+                allowed_exec_modes.push(ShellExecMode::ShellText);
+            }
+            if !allowed_exec_modes.contains(&exec_mode) {
+                allowed_exec_modes.push(exec_mode);
+            }
         } else {
             dedupe_shell_exec_modes(&mut allowed_exec_modes);
         }
 
-        let mut resolved = ResolvedShellPolicy {
+        let resolved = ResolvedShellPolicy {
             policy_id: policy_id.to_string(),
-            exec_mode,
             allowed_exec_modes,
             reject_reason: policy_meta.reject_reason.or(profile_meta.reject_reason),
             allow_any_executable: policy_meta
@@ -1620,7 +1634,7 @@ fn path_is_within(path: &str, allowed_prefix: &str) -> bool {
     path == allowed_prefix
         || path
             .strip_prefix(allowed_prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
+            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
 }
 
 fn sse_event(event: &str, json_data: &str) -> String {
@@ -2395,5 +2409,171 @@ mod tests {
         });
 
         (handle, addr.ip().to_string(), addr.port())
+    }
+
+    #[test]
+    fn test_legacy_full_access_argv_exec_actually_runs() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "full-access".to_string(),
+                    name: "Full Access".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "allow_any_executable": true,
+                        "shell": "/bin/bash",
+                        "inherit_env": true
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("full-access".to_string()),
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute(&cmd))
+            .expect("old-format full-access should execute argv_exec /bin/pwd");
+        assert_eq!(resp.exit_code, 0, "exit_code should be 0");
+        assert!(
+            !resp.stdout.as_deref().unwrap_or("").trim().is_empty(),
+            "stdout should contain cwd path"
+        );
+    }
+
+    #[test]
+    fn test_legacy_full_access_without_allowed_exec_modes_permits_argv() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "full-access".to_string(),
+                    name: "Full Access".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "allow_any_executable": true,
+                        "shell": "/bin/bash",
+                        "inherit_env": true,
+                        "stdin_allowed": true,
+                        "interactive_allowed": true
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let argv_command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+        let result = executor
+            .select_policy_id_for_command(
+                &argv_command,
+                Some(&serde_json::json!({ "mode": "all" })),
+            )
+            .expect("legacy full-access should accept argv_exec");
+        assert_eq!(result, "full-access");
+
+        let shell_command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("pwd".to_string()),
+            ..Default::default()
+        };
+        let result = executor
+            .select_policy_id_for_command(
+                &shell_command,
+                Some(&serde_json::json!({ "mode": "all" })),
+            )
+            .expect("legacy full-access should accept shell_text");
+        assert_eq!(result, "full-access");
+    }
+
+    #[test]
+    fn test_select_policy_single_rejection_has_no_double_error_prefix() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "shell-only".to_string(),
+                    name: "Shell Only".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_exec_modes": ["shell_text"],
+                        "allowed_shell_patterns": ["^(?s:.*)$"]
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+
+        let error = executor
+            .select_policy_id_for_command(&command, Some(&serde_json::json!({ "mode": "all" })))
+            .expect_err("should reject argv_exec for shell-only policy");
+        let msg = error.to_string();
+        assert!(
+            !msg.contains("Config error: Config error:"),
+            "error message must not double-wrap: {msg}"
+        );
+        assert!(
+            msg.starts_with("Config error: "),
+            "must have one prefix: {msg}"
+        );
+        assert!(
+            msg.contains("policy 'shell-only'"),
+            "must mention policy: {msg}"
+        );
     }
 }
