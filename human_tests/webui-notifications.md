@@ -8,7 +8,7 @@
 2. `TLS Trust`
 3. `Authorization`
 
-每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页只允许默认翻页，不允许切换 page size。
+每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页固定为每页 `10` 条，只允许默认翻页，不允许切换 page size。
 
 ## 前置条件
 

@@ -347,7 +347,7 @@ function NotificationsTable({
         loading={loading}
         size="small"
         scroll={{ x: 1340 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No notifications" /> }}
       />
     </div>
@@ -449,7 +449,7 @@ function ClientTrustTable() {
         rowKey={(r) => `${r.identifier_type}-${r.identifier}`}
         size="small"
         scroll={{ x: 900 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No client trust data" /> }}
       />
     </div>

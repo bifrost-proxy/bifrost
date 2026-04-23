@@ -8,7 +8,7 @@
   - `Authorization`
 - 每个表顶部提供 `All`、`Read`、`Unread` 三个筛选项。
 - 每个表首次进入时默认选中 `Unread`，优先展示待处理消息。
-- 通知页表格分页保持默认页大小，不允许用户切换 page size。
+- 通知页表格分页固定为每页 `10` 条，不允许用户切换 page size。
 
 ## 实现逻辑
 
@@ -17,7 +17,7 @@
   - `NotificationsTable` 内部维护局部 `statusFilter` 状态，默认值为 `unread`。
   - 当当前 Tab 激活或筛选项变更时，调用 `fetchNotifications(tabKey, statusFilter)` 拉取对应数据。
   - 顶部新增 `Segmented` 筛选控件，切换 `All / Read / Unread` 时刷新当前表格。
-  - 表格分页显式设置 `showSizeChanger: false`，固定使用默认 `pageSize: 20`。
+  - 表格分页显式设置 `showSizeChanger: false`，固定使用 `pageSize: 10`。
 - `web/src/stores/useNotificationStore.ts`
   - `fetchNotifications` 支持同时透传通知类型与状态筛选。
   - `handleMarkAllRead`、`handleUpdateStatus` 支持按当前 Tab 与当前状态筛选刷新，避免操作后回退成未筛选列表。
