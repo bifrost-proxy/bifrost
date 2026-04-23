@@ -4022,6 +4022,104 @@ PY
 
 ---
 
+### TC-RI-回归-129：超时后的旧 pending pairing 不应继续占用 pair slot
+
+**背景**：如果第一次 `remote connect` 发起后无人审批直至超时，旧 pairing 必须从 relay 的“活跃待审批”集合里移除。否则用户重新获取新的 pair code 后，第二次 `remote connect` 会被误判为 `pair_slot_occupied`。
+
+**前置条件**：
+- 使用本地 relay，且将 `pair_code_ttl_secs` 调小到 2~5 秒，便于快速验证超时收敛
+- target client 已完成 sync 登录并处于 `Remote Invoke` 可用状态
+
+**操作步骤**：
+1. 在 target client 上进入 discovery mode，拿到第一组 `pair_code_1`
+2. 在 caller 侧执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect <pair_code_1> --relay-url http://127.0.0.1:<relay_port>
+   ```
+3. 在 target client 的 `Pending Pairing Requests` 中确认出现该请求，但**不要**审批
+4. 等待超过 `pair_code_ttl_secs`，确认该请求从 Pending 列表消失
+5. 在 target client 上刷新 discovery mode，拿到新的 `pair_code_2`
+6. 再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect <pair_code_2> --relay-url http://127.0.0.1:<relay_port>
+   ```
+7. 在 target client 上批准第二次请求
+
+**预期结果**：
+- 第 4 步：旧请求会自动从 Pending 列表消失
+- 第 6 步：第二次 `remote connect` 不会返回 `pair_slot_occupied`
+- 第 7 步：新的 pairing 可以正常审批并建立连接
+
+### TC-RI-回归-130：超时 pairing 在 Pending 列表里不会复活，点击审批也不再报 500
+
+**背景**：修复前，relay 的 pending 列表和审批接口对超时 pairing 的语义不一致，前端可能反复看到已经超时的请求，点击 Authorize / Reject 时还会报 500。
+
+**前置条件**：
+- 使用本地 relay，且将 `pair_code_ttl_secs` 调小到 2~5 秒
+- target client 已打开 `Settings > Remote Invoke`
+
+**操作步骤**：
+1. 创建一个新的 pairing 请求，并在 Pending Pairing Requests 中确认它已出现
+2. 等待该 pairing 超时
+3. 反复观察 Pending Pairing Requests 列表至少 10 秒，确认旧请求没有再次出现
+4. 如果列表仍短暂展示旧请求，在它消失前立刻点击 `Authorize` 或 `Reject`
+5. 重新请求 `GET /_bifrost/api/remote-invoke/pairings/pending`
+
+**预期结果**：
+- 第 3 步：超时 pairing 不会因 relay 轮询再次回到 Pending 列表
+- 第 4 步：前端最多显示 warning 提示 `Request may have expired and was removed`，不再出现 500
+- 第 5 步：接口返回中不再包含该 pairing；relay 存储中的该记录状态应已收敛为 `expired`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-129 | ✅ PASS | 2026-04-23 在本地隔离环境执行：relay `pair_code_ttl_secs=3`、target admin `8812`、relay `8688`。第一次 pairing `WHjmo7NTGwQTJaMl9B3Bm` 超时后，`GET /_bifrost/api/remote-invoke/pairings/pending` 返回 `0` 条，relay SQLite 中该记录状态为 `expired`。随后使用新 pair code 发起第二次连接，审批接口返回 `200`，caller `remote connect` 退出码为 `0`，日志中未出现 `pair_slot_occupied`。 |
+| TC-RI-回归-130 | ✅ PASS | 同一轮本地隔离环境中，第三次 pairing `dsnDosyo_FLdrCeF_XRF5` 超时后再次触发审批，target admin 返回 `404`，响应体为 `Failed to approve pairing: Network error: pairing dsnDosyo_FLdrCeF_XRF5 not found or expired`，不再出现 `500`。随后 `GET /_bifrost/api/remote-invoke/pairings/pending` 仍返回 `0` 条，relay SQLite 中该 pairing 状态为 `expired`。 |
+
+---
+
+### TC-RI-回归-131：client 本地 grant crypto 丢失后，重连必须主动清理幽灵授权
+
+**背景**：修复前，如果 target client 本地 `admin/remote_invoke_grant_crypto.json(.key)` 丢失，但 relay 上仍保留 active grant，client SSE 重连后会重新展示这条 grant，caller 再执行 `remote status` 时会把命令发到远端，最终在 target 侧报 `missing grant shared secret for encrypted remote command; reconnect is required`。这会把本应在“授权发现阶段”暴露的问题拖到真正执行命令时才失败。
+
+**前置条件**：
+- 使用本地 relay
+- target client 与 caller 已经通过 `remote connect` 建立一条可复用授权
+- caller 本地 `remote-connections.json` 仍保留这条连接，便于验证“旧连接再次执行命令”的表现
+
+**操作步骤**：
+1. 用真实 CLI 跑通一次完整闭环，至少覆盖：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote connect <pair_code> --relay-url http://127.0.0.1:<relay_port>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote traffic list --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote search <keyword> --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   ```
+2. 删除 target client 数据目录下的 grant crypto 持久化文件：
+   ```bash
+   rm -f <client_data_dir>/admin/remote_invoke_grant_crypto.json <client_data_dir>/admin/remote_invoke_grant_crypto.key
+   ```
+3. 重启 target client，等待 `/_bifrost/api/remote-invoke/status` 恢复 `Connected`
+4. 查询 target client 的 grants 列表：
+   ```bash
+   curl -sS http://127.0.0.1:<admin_port>/_bifrost/api/remote-invoke/grants
+   ```
+5. 不重新 `remote connect`，直接用原 caller 数据目录再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   ```
+
+**预期结果**：
+- 第 3 步重连后，target client 不会继续保留这条缺少本地加密材料的 grant
+- 第 4 步 grants 列表为空，不再展示幽灵授权
+- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect
+- 第 5 步不再出现 `missing grant shared secret for encrypted remote command`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-131 | ✅ PASS | 2026-04-23 使用本地隔离环境执行：relay `http://127.0.0.1:56618`，target admin `56617`，caller 独立 `BIFROST_DATA_DIR`。先后真实执行 `./target/debug/bifrost remote connect`、`remote status`、`remote traffic list`、`remote traffic get`、`remote search`、`remote traffic search`、caller 侧取消、reject pairing、disconnect，全链路自动化断言共 `64` 项全部通过。随后手动删除 target client 数据目录下的 `admin/remote_invoke_grant_crypto.json` 与 `.key`，重启 target client 后再次请求 `GET /_bifrost/api/remote-invoke/grants` 返回 `0` 条；继续复用旧 caller 连接执行 `remote status`，CLI 直接提示重新 connect，不再命中 `missing grant shared secret for encrypted remote command`。这说明缺少本地加密材料的旧 grant 已在 client 重连时被主动收敛删除。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

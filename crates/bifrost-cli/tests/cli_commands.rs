@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use bifrost_cli::cli::{Cli, Commands, RemoteCommands};
+use bifrost_cli::cli::{Cli, Commands, RemoteCommandCommands, RemoteCommands};
 use clap::Parser;
 
 fn bifrost_cmd() -> Command {
@@ -88,6 +88,228 @@ fn remote_status_help_explains_reusing_existing_authorization() {
         help.contains("remote connect"),
         "remote status help should reference remote connect as the initial pairing step"
     );
+}
+
+#[test]
+fn remote_command_exec_help_lists_shell_exec_options() {
+    let help = run_help(&["remote", "command", "exec"]);
+    assert!(
+        help.contains("--cwd"),
+        "remote command exec help should contain --cwd"
+    );
+    assert!(
+        help.contains("--env"),
+        "remote command exec help should contain --env"
+    );
+    assert!(
+        help.contains("--timeout-ms"),
+        "remote command exec help should contain --timeout-ms"
+    );
+    assert!(
+        help.contains("--shell-text"),
+        "remote command exec help should contain --shell-text"
+    );
+}
+
+#[test]
+fn remote_command_exec_parses_shell_text_mode() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "command",
+        "exec",
+        "--cwd",
+        "/srv/api",
+        "--env",
+        "NODE_ENV=production",
+        "--env",
+        "REGION=sg",
+        "--timeout-ms",
+        "600000",
+        "--shell-text",
+        "printf hello",
+    ])
+    .expect("remote command exec --shell-text should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Command { action } => match action {
+                RemoteCommandCommands::Exec(exec) => {
+                    assert_eq!(exec.cwd.as_deref(), Some("/srv/api"));
+                    assert_eq!(exec.timeout_ms, Some(600000));
+                    assert_eq!(exec.shell_text.as_deref(), Some("printf hello"));
+                    assert!(exec.argv.is_empty());
+                    assert_eq!(
+                        exec.env,
+                        vec![
+                            ("NODE_ENV".to_string(), "production".to_string()),
+                            ("REGION".to_string(), "sg".to_string())
+                        ]
+                    );
+                }
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_command_exec_parses_argv_after_double_dash() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "command",
+        "exec",
+        "--timeout-ms",
+        "5000",
+        "--",
+        "/bin/echo",
+        "hello",
+        "--flag",
+    ])
+    .expect("remote command exec argv mode should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Command { action } => match action {
+                RemoteCommandCommands::Exec(exec) => {
+                    assert_eq!(exec.timeout_ms, Some(5000));
+                    assert_eq!(exec.shell_text, None);
+                    assert_eq!(
+                        exec.argv,
+                        vec![
+                            "/bin/echo".to_string(),
+                            "hello".to_string(),
+                            "--flag".to_string()
+                        ]
+                    );
+                }
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_shell_help_lists_management_subcommands() {
+    let help = run_help(&["remote", "shell"]);
+    assert!(
+        help.contains("list"),
+        "remote shell help should contain list"
+    );
+    assert!(
+        help.contains("show"),
+        "remote shell help should contain show"
+    );
+    assert!(
+        help.contains("apply"),
+        "remote shell help should contain apply"
+    );
+    assert!(
+        help.contains("profile"),
+        "remote shell help should contain profile"
+    );
+    assert!(
+        help.contains("policy"),
+        "remote shell help should contain policy"
+    );
+}
+
+#[test]
+fn remote_grant_help_lists_management_subcommands() {
+    let help = run_help(&["remote", "grant"]);
+    assert!(
+        help.contains("list"),
+        "remote grant help should contain list"
+    );
+    assert!(
+        help.contains("update"),
+        "remote grant help should contain update"
+    );
+    assert!(
+        help.contains("revoke"),
+        "remote grant help should contain revoke"
+    );
+}
+
+#[test]
+fn remote_grant_update_parses_access_and_policy_flags() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "grant",
+        "update",
+        "grant-123",
+        "--access",
+        "selected",
+        "--policy",
+        "pwd-argv",
+        "--policy",
+        "echo-argv",
+        "--stdin",
+        "true",
+        "--interactive",
+        "false",
+    ])
+    .expect("remote grant update should parse");
+
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Grant { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("grant-123"));
+                assert!(rendered.contains("selected"));
+                assert!(rendered.contains("pwd-argv"));
+                assert!(rendered.contains("echo-argv"));
+            }
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_shell_policy_add_parses_semantic_flags() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "shell",
+        "policy",
+        "add",
+        "--id",
+        "pwd-argv",
+        "--name",
+        "Pwd argv",
+        "--mode",
+        "argv_exec",
+        "--profile",
+        "repo-default",
+        "--program",
+        "/bin/pwd",
+        "--cwd",
+        "/Users/eden/work/github/bifrost",
+        "--timeout-ms",
+        "5000",
+    ])
+    .expect("remote shell policy add should parse");
+
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Shell { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("pwd-argv"));
+                assert!(rendered.contains("argv_exec"));
+                assert!(rendered.contains("/bin/pwd"));
+                assert!(rendered.contains("repo-default"));
+            }
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
 }
 
 #[test]

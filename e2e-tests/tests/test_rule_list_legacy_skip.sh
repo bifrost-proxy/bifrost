@@ -69,8 +69,27 @@ main() {
     "${BIFROST_BIN}" rule add valid --content "example.com host://127.0.0.1:3000" >/dev/null
 
     mkdir -p "${TEST_DATA_DIR}/rules"
-    cat > "${TEST_DATA_DIR}/rules/broken.json" <<'EOF'
-{"content":"broken.example.com host://127.0.0.1:4000","enabled":true}
+    cat > "${TEST_DATA_DIR}/rules/.group_cache" <<'EOF'
+{"group_id":"debug2","rules":["cached-only"]}
+EOF
+
+    mkdir -p "${TEST_DATA_DIR}/rules/demo-group"
+    cat > "${TEST_DATA_DIR}/rules/demo-group/group-rule.bifrost" <<'EOF'
+01 rules
+[meta]
+name = "group-rule"
+enabled = true
+sort_order = 0
+version = "1.0.0"
+created_at = "2026-04-23T00:00:00Z"
+updated_at = "2026-04-23T00:00:00Z"
+[meta.sync]
+rule_id = "rl_demo_group_rule"
+status = "local_only"
+[options]
+rule_count = 1
+---
+group.example.com host://127.0.0.1:4100
 EOF
 
     local output
@@ -78,9 +97,12 @@ EOF
 
     assert_contains "${output}" "Rules (1):" "rule list counts only valid local rules"
     assert_contains "${output}" "valid [enabled]" "rule list keeps valid local rule"
-    assert_not_contains "${output}" "Error:" "rule list does not fail on broken legacy file"
+    assert_not_contains "${output}" ".group_cache" "rule list ignores non-bifrost cache file"
+    assert_not_contains "${output}" "Failed to load rule file" "rule list avoids parse warnings for ignored files"
+    assert_not_contains "${output}" "missing field \`name\`" "rule list no longer parses cache files as legacy rules"
+    assert_not_contains "${output}" "demo-group" "rule list keeps group subdirectories out of local file scan"
 
-    echo "All rule list legacy skip checks passed."
+    echo "All rule list bifrost-filter checks passed."
 }
 
 main "$@"

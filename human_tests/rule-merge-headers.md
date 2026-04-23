@@ -108,8 +108,82 @@ cargo test -p bifrost-e2e -- test_reqheaders_same_key_override --no-capture
 - 规则按顺序依次 insert 到 HeaderMap，后设置覆盖先设置
 - 最终远端只收到一个 `X-Same-Key: second`
 
+### TC-RMH-06: HTTPS passthrough/tunnel 下客户端同名 header 会被规则覆盖而不是重复发送
+
+**操作步骤**：
+1. 生成临时证书并启动本地 HTTPS 回显服务（服务会把 `X-Same-Key` 收到的全部值写回响应体）：
+```bash
+mkdir -p ./.bifrost-test-rmh/certs
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout ./.bifrost-test-rmh/certs/key.pem \
+  -out ./.bifrost-test-rmh/certs/cert.pem \
+  -days 1 -subj "/CN=127.0.0.1"
+
+python3 - <<'PY'
+import json
+import ssl
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        values = self.headers.get_all("X-Same-Key") or []
+        body = json.dumps({
+            "x_same_key_values": values,
+            "x_same_key_count": len(values),
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+httpd = HTTPServer(("127.0.0.1", 9443), Handler)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(
+    "./.bifrost-test-rmh/certs/cert.pem",
+    "./.bifrost-test-rmh/certs/key.pem",
+)
+httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+httpd.serve_forever()
+PY
+```
+2. 使用临时数据目录启动 Bifrost（禁止使用 9900，且必须禁用系统代理）：
+```bash
+BIFROST_DATA_DIR=./.bifrost-test-rmh cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy \
+  --rules "https://127.0.0.1:9443/ passthrough://" \
+  --rules "https://127.0.0.1:9443/ reqHeaders://X-Same-Key=rule-value"
+```
+3. 发送一个本身已经带了同名 header 的请求：
+```bash
+curl -sk -x http://127.0.0.1:8800 https://127.0.0.1:9443/ \
+  -H "X-Same-Key: client-original" \
+  -H "Content-Type: application/json" \
+  -d '{"ping":true}'
+```
+4. 检查回显服务响应：
+```bash
+curl -sk -x http://127.0.0.1:8800 https://127.0.0.1:9443/ \
+  -H "X-Same-Key: client-original" \
+  -H "Content-Type: application/json" \
+  -d '{"ping":true}' | jq
+```
+5. 找到最新流量并检查请求详情：
+```bash
+cargo run --bin bifrost -- -p 8800 traffic list --limit 1
+cargo run --bin bifrost -- -p 8800 traffic get <sequence>
+```
+
+**预期结果**：
+- 回显响应中的 `x_same_key_count` 为 `1`
+- 回显响应中的 `x_same_key_values` 仅包含 `rule-value`
+- `traffic get` 的 `request_headers` 中 `x-same-key` 只出现 1 次
+- 最终发往上游的值等于规则值，不会保留客户端原始重复值
+
 ## 清理步骤
 
-1. 删除测试创建的规则和 values
+1. 停止本地 HTTPS 回显服务
 2. 停止测试服务：`cargo run --bin bifrost -- stop -p 8800`
-3. 删除临时数据目录：`rm -rf ./.bifrost-test`
+3. 删除临时数据目录：`rm -rf ./.bifrost-test ./.bifrost-test-rmh`

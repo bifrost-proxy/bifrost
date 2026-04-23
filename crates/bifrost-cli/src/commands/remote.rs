@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,7 +24,10 @@ use tracing::{debug, error, warn};
 
 use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
-use crate::cli::{RemoteCommands, RemoteSearchArgs, RemoteTrafficCommands};
+use crate::cli::{
+    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteSearchArgs,
+    RemoteTrafficCommands,
+};
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 const CALL_EVENT_TIMEOUT_SECS: u64 = 120;
@@ -64,7 +67,18 @@ struct BuiltRemoteCommand {
     command: Option<String>,
     args_json: Option<String>,
     query: Option<CanonicalQueryCommand>,
+    shell_exec: Option<ShellExecPayload>,
     render: RemoteRenderMode,
+}
+
+#[derive(Debug, Clone)]
+struct ShellExecPayload {
+    exec_mode: String,
+    argv: Option<Vec<String>>,
+    command_text: Option<String>,
+    cwd: Option<String>,
+    env: Option<BTreeMap<String, String>>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +239,14 @@ fn save_connections(connections: &[LocalConnection]) -> bifrost_core::Result<()>
         )))
     })?;
     Ok(())
+}
+
+fn upsert_local_connection(connections: &mut Vec<LocalConnection>, new_conn: LocalConnection) {
+    connections.retain(|existing| {
+        !(existing.client_instance_id == new_conn.client_instance_id
+            && existing.relay_url == new_conn.relay_url)
+    });
+    connections.push(new_conn);
 }
 
 fn resolve_local_connection(
@@ -427,6 +449,18 @@ struct CommandEnvelope {
     args_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<CanonicalQueryCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exec_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    argv: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,20 +666,81 @@ fn merge_transport_context(
     })
 }
 
-fn prefer_saved_grant_for_transport(conn: &LocalConnection, mut grant: GrantInfo) -> GrantInfo {
+fn reconcile_reusable_grant_for_transport(
+    conn: &mut LocalConnection,
+    grant: GrantInfo,
+) -> bifrost_core::Result<GrantInfo> {
     if conn.grant_id.is_empty() || grant.grant_id == conn.grant_id {
-        return grant;
+        return Ok(grant);
+    }
+
+    let saved_caller_pub = conn.caller_ephemeral_pub.as_deref().unwrap_or_default();
+    let saved_client_pub = conn.client_ephemeral_pub.as_deref().unwrap_or_default();
+    let relay_caller_pub = grant
+        .caller_ephemeral_pub
+        .as_deref()
+        .unwrap_or(saved_caller_pub);
+    let relay_client_pub = grant
+        .client_ephemeral_pub
+        .as_deref()
+        .unwrap_or(saved_client_pub);
+
+    if !saved_caller_pub.is_empty()
+        && !relay_caller_pub.is_empty()
+        && relay_caller_pub != saved_caller_pub
+    {
+        return Err(BifrostError::Config(
+            "saved connection transport no longer matches relay reusable authorization; reconnect required"
+                .to_string(),
+        ));
+    }
+
+    if !saved_client_pub.is_empty()
+        && !relay_client_pub.is_empty()
+        && relay_client_pub != saved_client_pub
+    {
+        return Err(BifrostError::Config(
+            "saved connection transport no longer matches relay reusable authorization; reconnect required"
+                .to_string(),
+        ));
     }
 
     warn!(
         saved_grant_id = %conn.grant_id,
         relay_grant_id = %grant.grant_id,
-        "relay returned a different reusable grant than the saved encrypted transport context; preferring saved grant_id"
+        "relay returned a newer reusable grant with the same encrypted transport; updating saved grant_id"
     );
-    grant.grant_id = conn.grant_id.clone();
-    grant.caller_ephemeral_pub = conn.caller_ephemeral_pub.clone();
-    grant.client_ephemeral_pub = conn.client_ephemeral_pub.clone();
-    grant
+    conn.grant_id = grant.grant_id.clone();
+    if grant.caller_ephemeral_pub.is_some() {
+        conn.caller_ephemeral_pub = grant.caller_ephemeral_pub.clone();
+    }
+    if grant.client_ephemeral_pub.is_some() {
+        conn.client_ephemeral_pub = grant.client_ephemeral_pub.clone();
+    }
+    Ok(grant)
+}
+
+fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
+    matches!(err, BifrostError::Network(msg)
+        if msg.contains("open_call failed with status 403")
+            && msg.contains("grant_scope_mismatch"))
+}
+
+fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
+    if conn.auth_method.as_deref() == Some("ssh_publickey")
+        && conn.ssh_key_source.is_some()
+        && conn.device_code.is_some()
+    {
+        return BifrostError::Config(
+            "saved remote authorization does not allow shell.exec. Re-run the command to trigger a fresh SSH authorization prompt on the remote device."
+                .to_string(),
+        );
+    }
+
+    BifrostError::Config(
+        "saved remote authorization is read-only and does not allow shell.exec. Run `bifrost remote connect <pair-code>` again and approve shell access on the remote device."
+            .to_string(),
+    )
 }
 
 fn derive_open_call_key(
@@ -721,6 +816,7 @@ fn encrypt_remote_command(
     command: Option<&str>,
     args_json: Option<&str>,
     query: Option<&CanonicalQueryCommand>,
+    shell_exec: Option<&ShellExecPayload>,
     grant_id: &str,
     transport: &OpenCallTransportContext,
 ) -> bifrost_core::Result<EncryptedPayload> {
@@ -752,6 +848,12 @@ fn encrypt_remote_command(
         command: command.unwrap_or_default().to_string(),
         args_json: args_json.map(ToOwned::to_owned),
         query: query.cloned(),
+        exec_mode: shell_exec.map(|payload| payload.exec_mode.clone()),
+        argv: shell_exec.and_then(|payload| payload.argv.clone()),
+        command_text: shell_exec.and_then(|payload| payload.command_text.clone()),
+        cwd: shell_exec.and_then(|payload| payload.cwd.clone()),
+        env: shell_exec.and_then(|payload| payload.env.clone()),
+        timeout_ms: shell_exec.and_then(|payload| payload.timeout_ms),
     })
     .map_err(|e| {
         BifrostError::Config(format!("serialize encrypted command payload failed: {e}"))
@@ -950,7 +1052,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         return handle_connect(&caller, pair_code, &caller_info, &opts.relay_url).await;
     }
 
-    let connections = load_connections()?;
+    let mut connections = load_connections()?;
 
     if let RemoteCommands::Disconnect { all, grant_id } = &opts.action {
         return handle_disconnect(
@@ -963,7 +1065,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         .await;
     }
 
-    let conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
+    let mut conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
     let caller_fingerprint = if conn.caller_fingerprint.is_empty() {
         caller_fingerprint
     } else {
@@ -980,16 +1082,46 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let grant = match grant {
         Some(g) => g,
         None => {
+            let conn_label = if conn.device_name.is_empty() {
+                &conn.client_instance_id
+            } else {
+                &conn.device_name
+            };
             eprintln!(
                 "{}",
-                "✗ Authorization expired or revoked. Please run `bifrost remote connect <pair-code>` again."
-                    .bright_red()
+                format!(
+                    "✗ Authorization for '{}' expired or revoked on the relay.",
+                    conn_label
+                )
+                .bright_red()
+            );
+            connections.retain(|c| {
+                !(c.client_instance_id == conn.client_instance_id && c.relay_url == conn.relay_url)
+            });
+            if let Err(error) = save_connections(&connections) {
+                warn!(error = %error, "failed to remove stale connection");
+            } else {
+                eprintln!(
+                    "  {} Stale connection removed from local cache.",
+                    "→".bright_yellow()
+                );
+            }
+            eprintln!(
+                "  {} Run `bifrost remote connect <pair-code>` to re-authorize.",
+                "→".bright_yellow()
             );
             std::process::exit(1);
         }
     };
 
-    let grant = prefer_saved_grant_for_transport(&conn, grant);
+    let grant = reconcile_reusable_grant_for_transport(&mut conn, grant)?;
+    if let Some(existing) = connections.iter_mut().find(|existing| {
+        existing.client_instance_id == conn.client_instance_id
+            && existing.relay_url == conn.relay_url
+    }) {
+        *existing = conn.clone();
+        save_connections(&connections)?;
+    }
 
     debug!(grant_id = %grant.grant_id, "found reusable grant");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
@@ -1003,13 +1135,15 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         );
     }
 
-    let transport = merge_transport_context(&conn, &grant)?;
+    let mut transport = merge_transport_context(&conn, &grant)?;
+    let mut active_grant_id = grant.grant_id.clone();
     let command_encrypted = encrypt_remote_command(
         command.kind,
         command.command.as_deref(),
         command.args_json.as_deref(),
         command.query.as_ref(),
-        &grant.grant_id,
+        command.shell_exec.as_ref(),
+        &active_grant_id,
         &transport,
     )?;
 
@@ -1021,9 +1155,81 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             command_kind: command.kind,
             command_encrypted,
         })
-        .await?;
+        .await;
 
-    debug!(call_id = %call_result.call_id, grant_id = %grant.grant_id, "call opened, subscribing to events");
+    let call_result = match call_result {
+        Ok(result) => result,
+        Err(err)
+            if command.kind == CommandKind::ShellExec
+                && is_grant_scope_mismatch_error(&err)
+                && conn.auth_method.as_deref() == Some("ssh_publickey")
+                && conn.ssh_key_source.is_some()
+                && conn.device_code.is_some() =>
+        {
+            println!(
+                "{}",
+                "→ Saved authorization is missing shell.exec scope; requesting fresh SSH approval..."
+                    .bright_yellow()
+            );
+            handle_connect_with_ssh(
+                &caller,
+                conn.ssh_key_source.as_deref().unwrap_or_default(),
+                conn.device_code.as_deref(),
+                &caller_info,
+                &conn.relay_url,
+            )
+            .await?;
+
+            let reloaded_connections = load_connections()?;
+            conn = resolve_local_connection(&reloaded_connections, Some(&conn.client_instance_id))?;
+            let refreshed_fingerprint = if conn.caller_fingerprint.is_empty() {
+                caller_fingerprint.clone()
+            } else {
+                conn.caller_fingerprint.clone()
+            };
+            let refreshed_grant = caller
+                .find_reusable_grant(&conn.client_instance_id, &refreshed_fingerprint)
+                .await?
+                .ok_or_else(|| {
+                    BifrostError::Config(
+                        "fresh SSH authorization was approved but no reusable grant was returned"
+                            .to_string(),
+                    )
+                })?;
+            let refreshed_grant =
+                reconcile_reusable_grant_for_transport(&mut conn, refreshed_grant)?;
+            let refreshed_transport = merge_transport_context(&conn, &refreshed_grant)?;
+            let refreshed_command_encrypted = encrypt_remote_command(
+                command.kind,
+                command.command.as_deref(),
+                command.args_json.as_deref(),
+                command.query.as_ref(),
+                command.shell_exec.as_ref(),
+                &refreshed_grant.grant_id,
+                &refreshed_transport,
+            )?;
+            let retried = caller
+                .open_call(&OpenCallRequest {
+                    grant_id: refreshed_grant.grant_id.clone(),
+                    client_instance_id: conn.client_instance_id.clone(),
+                    caller_fingerprint: refreshed_fingerprint,
+                    command_kind: command.kind,
+                    command_encrypted: refreshed_command_encrypted,
+                })
+                .await?;
+            active_grant_id = refreshed_grant.grant_id;
+            transport = refreshed_transport;
+            retried
+        }
+        Err(err)
+            if command.kind == CommandKind::ShellExec && is_grant_scope_mismatch_error(&err) =>
+        {
+            return Err(shell_scope_upgrade_error(&conn));
+        }
+        Err(err) => return Err(err),
+    };
+
+    debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
     }
@@ -1178,14 +1384,7 @@ async fn handle_connect(
             };
 
             let mut connections = load_connections().unwrap_or_default();
-            if let Some(existing) = connections
-                .iter_mut()
-                .find(|c| c.client_instance_id == client_instance_id && c.relay_url == relay_url)
-            {
-                *existing = new_conn;
-            } else {
-                connections.push(new_conn);
-            }
+            upsert_local_connection(&mut connections, new_conn);
             save_connections(&connections)?;
 
             let short_id = &client_instance_id[..client_instance_id.len().min(12)];
@@ -1322,14 +1521,7 @@ async fn handle_connect_with_ssh(
             };
 
             let mut connections = load_connections().unwrap_or_default();
-            if let Some(existing) = connections
-                .iter_mut()
-                .find(|c| c.client_instance_id == client_instance_id && c.relay_url == relay_url)
-            {
-                *existing = new_conn;
-            } else {
-                connections.push(new_conn);
-            }
+            upsert_local_connection(&mut connections, new_conn);
             save_connections(&connections)?;
 
             let short_id = &client_instance_id[..client_instance_id.len().min(12)];
@@ -1466,25 +1658,18 @@ async fn handle_disconnect(
 
         for (i, conn) in connections.iter().enumerate() {
             let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
-            match caller
-                .delete_grant(&conn.grant_id, &conn.caller_fingerprint)
-                .await
+            match revoke_all_matching_grants(
+                caller,
+                &conn.client_instance_id,
+                &conn.caller_fingerprint,
+            )
+            .await
             {
-                Ok(DeleteGrantOutcome::Deleted) => {
+                Ok(_revoked) => {
                     deleted += 1;
                     to_remove.push(i);
                     println!(
                         "  {} {} ({})",
-                        "✓".bright_green(),
-                        short_id,
-                        conn.device_name
-                    );
-                }
-                Ok(DeleteGrantOutcome::AlreadyMissing) => {
-                    deleted += 1;
-                    to_remove.push(i);
-                    println!(
-                        "  {} {} ({}) — relay grant already missing, local record removed",
                         "✓".bright_green(),
                         short_id,
                         conn.device_name
@@ -1517,9 +1702,7 @@ async fn handle_disconnect(
     let conn = resolve_local_connection(connections, client_id)?;
     let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
 
-    let outcome = caller
-        .delete_grant(&conn.grant_id, &conn.caller_fingerprint)
-        .await?;
+    revoke_all_matching_grants(caller, &conn.client_instance_id, &conn.caller_fingerprint).await?;
 
     let mut conns = connections.to_vec();
     conns.retain(|c| {
@@ -1527,25 +1710,51 @@ async fn handle_disconnect(
     });
     save_connections(&conns)?;
 
-    match outcome {
-        DeleteGrantOutcome::Deleted => println!(
-            "{}",
-            format!(
-                "✓ Disconnected from {} (grant: {short_id})",
-                conn.device_name
-            )
-            .bright_green()
-        ),
-        DeleteGrantOutcome::AlreadyMissing => println!(
-            "{}",
-            format!(
-                "✓ Disconnected from {} (grant: {short_id}, already missing on relay; local record removed)",
-                conn.device_name
-            )
-            .bright_green()
-        ),
-    }
+    println!(
+        "{}",
+        format!(
+            "✓ Disconnected from {} (grant: {short_id})",
+            conn.device_name
+        )
+        .bright_green()
+    );
     Ok(())
+}
+
+async fn revoke_all_matching_grants(
+    caller: &CallerRelayClient,
+    client_instance_id: &str,
+    caller_fingerprint: &str,
+) -> bifrost_core::Result<usize> {
+    let mut revoked = 0usize;
+    let mut seen = HashSet::new();
+
+    loop {
+        let grant = caller
+            .find_reusable_grant(client_instance_id, caller_fingerprint)
+            .await?;
+        let Some(grant) = grant else {
+            break;
+        };
+
+        if !seen.insert(grant.grant_id.clone()) {
+            return Err(BifrostError::Config(
+                "relay reusable grant lookup returned the same grant repeatedly during disconnect cleanup"
+                    .to_string(),
+            ));
+        }
+
+        match caller
+            .delete_grant(&grant.grant_id, caller_fingerprint)
+            .await?
+        {
+            DeleteGrantOutcome::Deleted | DeleteGrantOutcome::AlreadyMissing => {
+                revoked += 1;
+            }
+        }
+    }
+
+    Ok(revoked)
 }
 
 fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
@@ -1558,16 +1767,24 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             command: Some("status".to_string()),
             args_json: None,
             query: None,
+            shell_exec: None,
             render: RemoteRenderMode::Raw,
         },
+        RemoteCommands::Command { action } => match action {
+            RemoteCommandCommands::Exec(exec_args) => build_remote_shell_exec_command(exec_args),
+        },
+        RemoteCommands::Shell { .. } => unreachable!("shell handled separately"),
+        RemoteCommands::Grant { .. } => unreachable!("grant handled separately"),
         RemoteCommands::Search(search_args) => {
             let query = CanonicalQueryCommand::Search(command_search_args(search_args));
+            let command_id = query.command_id().to_string();
             BuiltRemoteCommand {
                 kind: CommandKind::QueryReadonly,
                 label: "search.stream".to_string(),
-                command: None,
+                command: Some(command_id),
                 args_json: query_args_json(&query),
                 query: Some(query),
+                shell_exec: None,
                 render: RemoteRenderMode::Search {
                     format: search_args.format.parse().unwrap_or(OutputFormat::Table),
                     no_color: search_args.no_color,
@@ -1604,12 +1821,14 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     is_sse: list_args.is_sse,
                     is_tunnel: list_args.is_tunnel,
                 });
+                let command_id = query.command_id().to_string();
                 BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.list".to_string(),
-                    command: None,
+                    command: Some(command_id),
                     args_json: query_args_json(&query),
                     query: Some(query),
+                    shell_exec: None,
                     render: RemoteRenderMode::TrafficList {
                         format: list_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: list_args.no_color,
@@ -1628,12 +1847,14 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     request_body: *request_body,
                     response_body: *response_body,
                 });
+                let command_id = query.command_id().to_string();
                 BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.get".to_string(),
-                    command: None,
+                    command: Some(command_id),
                     args_json: query_args_json(&query),
                     query: Some(query),
+                    shell_exec: None,
                     render: RemoteRenderMode::TrafficGet {
                         format: format.parse().unwrap_or(OutputFormat::JsonPretty),
                         no_color: *no_color,
@@ -1642,12 +1863,14 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             }
             RemoteTrafficCommands::Search(search_args) => {
                 let query = CanonicalQueryCommand::Search(command_search_args(search_args));
+                let command_id = query.command_id().to_string();
                 BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "search.stream".to_string(),
-                    command: None,
+                    command: Some(command_id),
                     args_json: query_args_json(&query),
                     query: Some(query),
+                    shell_exec: None,
                     render: RemoteRenderMode::Search {
                         format: search_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: search_args.no_color,
@@ -1666,17 +1889,65 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                             .collect()
                     }),
                 });
+                let command_id = query.command_id().to_string();
                 BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.clear".to_string(),
-                    command: None,
+                    command: Some(command_id),
                     args_json: query_args_json(&query),
                     query: Some(query),
+                    shell_exec: None,
                     render: RemoteRenderMode::Raw,
                 }
             }
         },
     }
+}
+
+fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRemoteCommand {
+    let shell_exec = if let Some(shell_text) = &exec_args.shell_text {
+        ShellExecPayload {
+            exec_mode: "shell_text".to_string(),
+            argv: None,
+            command_text: Some(shell_text.clone()),
+            cwd: exec_args.cwd.clone(),
+            env: remote_shell_exec_env(&exec_args.env),
+            timeout_ms: exec_args.timeout_ms,
+        }
+    } else {
+        ShellExecPayload {
+            exec_mode: "argv_exec".to_string(),
+            argv: Some(exec_args.argv.clone()),
+            command_text: None,
+            cwd: exec_args.cwd.clone(),
+            env: remote_shell_exec_env(&exec_args.env),
+            timeout_ms: exec_args.timeout_ms,
+        }
+    };
+
+    let preview = exec_args
+        .shell_text
+        .clone()
+        .or_else(|| exec_args.argv.first().cloned())
+        .unwrap_or_else(|| "shell.exec".to_string());
+
+    BuiltRemoteCommand {
+        kind: CommandKind::ShellExec,
+        label: "shell.exec".to_string(),
+        command: Some(preview),
+        args_json: None,
+        query: None,
+        shell_exec: Some(shell_exec),
+        render: RemoteRenderMode::Raw,
+    }
+}
+
+fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<String, String>> {
+    if env_pairs.is_empty() {
+        return None;
+    }
+
+    Some(env_pairs.iter().cloned().collect())
 }
 
 fn query_args_json(query: &CanonicalQueryCommand) -> Option<String> {
@@ -3492,7 +3763,9 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{RemoteSearchArgs, RemoteTrafficListArgs};
+    use crate::cli::{
+        RemoteCommandCommands, RemoteCommandExecArgs, RemoteSearchArgs, RemoteTrafficListArgs,
+    };
     use std::sync::OnceLock;
 
     fn init_test_data_dir() {
@@ -3569,6 +3842,7 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "search.stream");
+        assert_eq!(built.command.as_deref(), Some("search.stream"));
         let raw_args = built.args_json.as_deref().expect("args_json should exist");
         let args: SearchArgs = serde_json::from_str(raw_args).expect("search args json");
         assert_eq!(args.max_results, Some(7));
@@ -3648,6 +3922,7 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "search.stream");
+        assert_eq!(built.command.as_deref(), Some("search.stream"));
         let raw_args = built.args_json.as_deref().expect("args_json should exist");
         let args: SearchArgs = serde_json::from_str(raw_args).expect("traffic search args json");
         assert_eq!(args.max_results, Some(3));
@@ -3751,6 +4026,7 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.list");
+        assert_eq!(built.command.as_deref(), Some("traffic.list"));
         let raw_args = built.args_json.as_deref().expect("args_json should exist");
         let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic list json");
         assert_eq!(json.get("limit").and_then(|v| v.as_u64()), Some(7));
@@ -3812,6 +4088,7 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.get");
+        assert_eq!(built.command.as_deref(), Some("traffic.get"));
         let raw_args = built.args_json.as_deref().expect("args_json should exist");
         let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic get json");
         assert_eq!(
@@ -3854,6 +4131,7 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.clear");
+        assert_eq!(built.command.as_deref(), Some("traffic.clear"));
         let raw_args = built.args_json.as_deref().expect("args_json should exist");
         let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic clear json");
         assert_eq!(
@@ -3874,6 +4152,68 @@ mod tests {
     }
 
     #[test]
+    fn test_build_remote_command_for_shell_exec_shell_text_uses_shell_exec_kind() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: Some("/srv/api".to_string()),
+                env: vec![
+                    ("NODE_ENV".to_string(), "production".to_string()),
+                    ("REGION".to_string(), "sg".to_string()),
+                ],
+                timeout_ms: Some(600_000),
+                shell_text: Some("printf hello".to_string()),
+                argv: Vec::new(),
+            })),
+        });
+
+        assert_eq!(built.kind, CommandKind::ShellExec);
+        assert_eq!(built.label, "shell.exec");
+        assert_eq!(built.command.as_deref(), Some("printf hello"));
+        assert!(built.args_json.is_none());
+        assert!(built.query.is_none());
+        let shell_exec = built.shell_exec.expect("shell_exec payload should exist");
+        assert_eq!(shell_exec.exec_mode, "shell_text");
+        assert_eq!(shell_exec.command_text.as_deref(), Some("printf hello"));
+        assert_eq!(shell_exec.cwd.as_deref(), Some("/srv/api"));
+        assert_eq!(shell_exec.timeout_ms, Some(600_000));
+        assert_eq!(
+            shell_exec.env.as_ref().and_then(|env| env.get("NODE_ENV")),
+            Some(&"production".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_remote_command_for_shell_exec_argv_uses_program_preview() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: None,
+                env: vec![("A".to_string(), "1".to_string())],
+                timeout_ms: Some(5_000),
+                shell_text: None,
+                argv: vec![
+                    "/bin/echo".to_string(),
+                    "hello".to_string(),
+                    "--flag".to_string(),
+                ],
+            })),
+        });
+
+        assert_eq!(built.kind, CommandKind::ShellExec);
+        assert_eq!(built.command.as_deref(), Some("/bin/echo"));
+        let shell_exec = built.shell_exec.expect("shell_exec payload should exist");
+        assert_eq!(shell_exec.exec_mode, "argv_exec");
+        assert_eq!(
+            shell_exec.argv,
+            Some(vec![
+                "/bin/echo".to_string(),
+                "hello".to_string(),
+                "--flag".to_string()
+            ])
+        );
+        assert_eq!(shell_exec.timeout_ms, Some(5_000));
+    }
+
+    #[test]
     fn test_should_print_remote_progress_banner_for_terminal_output() {
         assert!(should_print_remote_progress_banner(true));
     }
@@ -3891,6 +4231,7 @@ mod tests {
             command: None,
             args_json: None,
             query: Some(CanonicalQueryCommand::Search(SearchArgs::default())),
+            shell_exec: None,
             render: RemoteRenderMode::Search {
                 format: OutputFormat::Table,
                 no_color: false,
@@ -3905,6 +4246,7 @@ mod tests {
             command: Some("status".to_string()),
             args_json: None,
             query: None,
+            shell_exec: None,
             render: RemoteRenderMode::Raw,
         };
         let get = BuiltRemoteCommand {
@@ -3917,6 +4259,7 @@ mod tests {
                 request_body: false,
                 response_body: false,
             })),
+            shell_exec: None,
             render: RemoteRenderMode::TrafficGet {
                 format: OutputFormat::JsonPretty,
                 no_color: false,
@@ -4074,6 +4417,7 @@ mod tests {
             Some("status"),
             None,
             None,
+            None,
             "grant-123",
             &transport,
         )
@@ -4092,6 +4436,68 @@ mod tests {
         assert_eq!(decrypted.command, "status");
         assert_eq!(decrypted.args_json, None);
         assert_eq!(decrypted.query, None);
+    }
+
+    #[test]
+    fn test_encrypt_remote_command_includes_shell_exec_fields() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+
+        let shell_exec = ShellExecPayload {
+            exec_mode: "argv_exec".to_string(),
+            argv: Some(vec![
+                "./deploy.sh".to_string(),
+                "--env".to_string(),
+                "prod".to_string(),
+            ]),
+            command_text: None,
+            cwd: Some("/srv/api".to_string()),
+            env: Some(BTreeMap::from([(
+                "NODE_ENV".to_string(),
+                "production".to_string(),
+            )])),
+            timeout_ms: Some(600_000),
+        };
+
+        let payload = encrypt_remote_command(
+            CommandKind::ShellExec,
+            Some("./deploy.sh"),
+            None,
+            None,
+            Some(&shell_exec),
+            "grant-123",
+            &transport,
+        )
+        .expect("encrypt command");
+
+        let decrypted = decrypt_remote_command_for_test(
+            &payload,
+            &transport.shared_secret,
+            "grant-123",
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+            CommandKind::ShellExec,
+        );
+        assert_eq!(decrypted.kind, "shell.exec");
+        assert_eq!(decrypted.command, "./deploy.sh");
+        assert_eq!(decrypted.exec_mode.as_deref(), Some("argv_exec"));
+        assert_eq!(
+            decrypted.argv,
+            Some(vec![
+                "./deploy.sh".to_string(),
+                "--env".to_string(),
+                "prod".to_string()
+            ])
+        );
+        assert_eq!(decrypted.cwd.as_deref(), Some("/srv/api"));
+        assert_eq!(decrypted.timeout_ms, Some(600_000));
+        assert_eq!(
+            decrypted.env.as_ref().and_then(|env| env.get("NODE_ENV")),
+            Some(&"production".to_string())
+        );
     }
 
     #[test]
@@ -4151,8 +4557,42 @@ mod tests {
     }
 
     #[test]
-    fn test_prefer_saved_grant_for_transport_replaces_full_transport_context_on_mismatch() {
-        let conn = LocalConnection {
+    fn test_reconcile_reusable_grant_updates_saved_grant_when_transport_matches() {
+        let mut conn = LocalConnection {
+            client_instance_id: "client-1".to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            relay_url: "https://relay".to_string(),
+            grant_id: "saved-grant".to_string(),
+            grant_mode: "permanent".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            connected_at: 1,
+            auth_method: Some("pair_code".to_string()),
+            ssh_key_fingerprint: None,
+            ssh_key_source: None,
+            device_code: None,
+            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+            client_ephemeral_pub: Some("saved-client-epk".to_string()),
+            shared_secret_encrypted: Some("secret".to_string()),
+        };
+        let relay_grant = GrantInfo {
+            grant_id: "relay-grant".to_string(),
+            status: "active".to_string(),
+            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+            client_ephemeral_pub: Some("saved-client-epk".to_string()),
+        };
+
+        let preferred = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
+            .expect("matching transport should reconcile");
+
+        assert_eq!(preferred.grant_id, "relay-grant");
+        assert_eq!(conn.grant_id, "relay-grant");
+    }
+
+    #[test]
+    fn test_reconcile_reusable_grant_rejects_transport_mismatch() {
+        let mut conn = LocalConnection {
             client_instance_id: "client-1".to_string(),
             device_name: "device".to_string(),
             platform: "macos".to_string(),
@@ -4174,19 +4614,94 @@ mod tests {
             grant_id: "relay-grant".to_string(),
             status: "active".to_string(),
             caller_ephemeral_pub: Some("relay-caller-epk".to_string()),
-            client_ephemeral_pub: Some("relay-client-epk".to_string()),
+            client_ephemeral_pub: Some("saved-client-epk".to_string()),
         };
 
-        let preferred = prefer_saved_grant_for_transport(&conn, relay_grant);
+        let err = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
+            .expect_err("mismatched transport should require reconnect");
+        assert!(err
+            .to_string()
+            .contains("saved connection transport no longer matches relay reusable authorization"));
+    }
 
-        assert_eq!(preferred.grant_id, "saved-grant");
-        assert_eq!(
-            preferred.caller_ephemeral_pub.as_deref(),
-            Some("saved-caller-epk")
+    #[test]
+    fn test_upsert_local_connection_replaces_duplicate_client_entries() {
+        let mut connections = vec![
+            LocalConnection {
+                client_instance_id: "client-1".to_string(),
+                device_name: "old".to_string(),
+                platform: "macos".to_string(),
+                relay_url: "https://relay".to_string(),
+                grant_id: "grant-old".to_string(),
+                grant_mode: "permanent".to_string(),
+                caller_fingerprint: "fp-1".to_string(),
+                connected_at: 1,
+                auth_method: Some("pair_code".to_string()),
+                ssh_key_fingerprint: None,
+                ssh_key_source: None,
+                device_code: None,
+                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                caller_ephemeral_pub: Some("old-caller".to_string()),
+                client_ephemeral_pub: Some("old-client".to_string()),
+                shared_secret_encrypted: Some("secret-1".to_string()),
+            },
+            LocalConnection {
+                client_instance_id: "client-2".to_string(),
+                device_name: "other".to_string(),
+                platform: "linux".to_string(),
+                relay_url: "https://relay".to_string(),
+                grant_id: "grant-other".to_string(),
+                grant_mode: "permanent".to_string(),
+                caller_fingerprint: "fp-2".to_string(),
+                connected_at: 2,
+                auth_method: Some("pair_code".to_string()),
+                ssh_key_fingerprint: None,
+                ssh_key_source: None,
+                device_code: None,
+                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                caller_ephemeral_pub: Some("other-caller".to_string()),
+                client_ephemeral_pub: Some("other-client".to_string()),
+                shared_secret_encrypted: Some("secret-2".to_string()),
+            },
+        ];
+
+        upsert_local_connection(
+            &mut connections,
+            LocalConnection {
+                client_instance_id: "client-1".to_string(),
+                device_name: "new".to_string(),
+                platform: "macos".to_string(),
+                relay_url: "https://relay".to_string(),
+                grant_id: "grant-new".to_string(),
+                grant_mode: "permanent".to_string(),
+                caller_fingerprint: "fp-1".to_string(),
+                connected_at: 3,
+                auth_method: Some("pair_code".to_string()),
+                ssh_key_fingerprint: None,
+                ssh_key_source: None,
+                device_code: None,
+                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                caller_ephemeral_pub: Some("new-caller".to_string()),
+                client_ephemeral_pub: Some("new-client".to_string()),
+                shared_secret_encrypted: Some("secret-3".to_string()),
+            },
         );
-        assert_eq!(
-            preferred.client_ephemeral_pub.as_deref(),
-            Some("saved-client-epk")
+
+        assert_eq!(connections.len(), 2);
+        let replaced = connections
+            .iter()
+            .find(|conn| conn.client_instance_id == "client-1")
+            .expect("replaced connection should remain");
+        assert_eq!(replaced.device_name, "new");
+        assert_eq!(replaced.grant_id, "grant-new");
+    }
+
+    #[test]
+    fn test_is_grant_scope_mismatch_error_detects_open_call_403() {
+        let err = BifrostError::Network(
+            "open_call failed with status 403 Forbidden: {\"code\":403,\"message\":\"grant_scope_mismatch\",\"data\":null}".to_string(),
         );
+
+        assert!(is_grant_scope_mismatch_error(&err));
     }
 }

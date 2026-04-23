@@ -13,6 +13,7 @@ pub mod matchers;
 pub mod mock_traffic;
 pub mod protocols;
 pub mod public;
+pub mod remote_shell_exec;
 pub mod replay_sse;
 pub mod request;
 pub mod request_modification;
@@ -44,6 +45,7 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(response::tests());
     tests.extend(template::tests());
     tests.extend(public::tests());
+    tests.extend(remote_shell_exec::get_all_tests());
     tests.extend(curl_mock::get_all_tests());
     tests.extend(https::get_all_tests());
     tests.extend(protocols::get_all_tests());

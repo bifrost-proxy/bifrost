@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
@@ -5,7 +6,9 @@ use bifrost_command::{
     CanonicalQueryCommand, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
 };
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use futures_util::StreamExt;
+use regex::Regex;
 use sha1::{Digest, Sha1};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
@@ -26,6 +29,8 @@ const MAX_CLIENT_APP_LEN: usize = 200;
 const MAX_TRAFFIC_LIST_LIMIT: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const SEARCH_STREAM_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_SHELL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 
 const ALLOWED_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
@@ -38,6 +43,48 @@ pub struct RemoteInvokeExecutor {
     admin_port: u16,
     http: reqwest::Client,
     query_service: Option<AdminQueryService>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedShellPolicy {
+    policy_id: String,
+    exec_mode: ShellExecMode,
+    allowed_exec_modes: Vec<ShellExecMode>,
+    reject_reason: Option<String>,
+    allow_any_executable: bool,
+    allowed_executables: Vec<String>,
+    allowed_shell_patterns: Vec<String>,
+    cwd_allowlist: Vec<String>,
+    env_allowlist: Vec<String>,
+    default_cwd: Option<String>,
+    shell: Option<String>,
+    max_timeout_ms: Option<u64>,
+    max_output_bytes: usize,
+    stdin_allowed: bool,
+    interactive_allowed: bool,
+    inherit_env: bool,
+    default_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[serde(default)]
+struct ShellPolicyMetadata {
+    exec_mode: Option<ShellExecMode>,
+    allowed_exec_modes: Vec<ShellExecMode>,
+    reject_reason: Option<String>,
+    allow_any_executable: Option<bool>,
+    allowed_executables: Vec<String>,
+    allowed_shell_patterns: Vec<String>,
+    cwd_allowlist: Vec<String>,
+    env_allowlist: Vec<String>,
+    default_cwd: Option<String>,
+    shell: Option<String>,
+    max_timeout_ms: Option<u64>,
+    max_output_bytes: Option<usize>,
+    stdin_allowed: Option<bool>,
+    interactive_allowed: Option<bool>,
+    inherit_env: Option<bool>,
+    default_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -181,7 +228,7 @@ impl RemoteInvokeExecutor {
             Some(query) => self.validate_query_transport_kind(command.kind, query),
             None => Ok(()),
         };
-        let result = match transport_validation {
+        let query_result = match transport_validation {
             Err(error) => Err(error),
             Ok(()) => match command.kind {
                 super::types::CommandKind::QueryReadonly => {
@@ -208,13 +255,13 @@ impl RemoteInvokeExecutor {
                     }
                 }
                 super::types::CommandKind::ShellExec => {
-                    self.execute_shell_exec(command, &mut on_stdout).await
+                    return self.execute_shell_exec(command, &mut on_stdout).await;
                 }
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        match result {
+        match query_result {
             Ok(body) => {
                 let stdout_digest = (!body.is_empty()).then(|| sha1_hex(&body));
                 debug!(
@@ -243,9 +290,9 @@ impl RemoteInvokeExecutor {
                 Ok(RemoteInvokeResponse {
                     exit_code: -1,
                     stdout: None,
-                    stderr: Some(stderr),
+                    stderr: Some(stderr.clone()),
                     stdout_digest: None,
-                    stderr_digest: Some(sha1_hex(&e.to_string())),
+                    stderr_digest: Some(sha1_hex(&stderr)),
                     duration_ms,
                 })
             }
@@ -618,45 +665,78 @@ impl RemoteInvokeExecutor {
         &self,
         command: &RemoteCommand,
         on_stdout: &mut F,
-    ) -> Result<String>
+    ) -> Result<RemoteInvokeResponse>
     where
         F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false) {
-            return Err(BifrostError::Config(
-                "shell.exec with PTY is not implemented on client yet".to_string(),
-            ));
+        let policy = self.resolve_shell_policy(command)?;
+
+        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false)
+            && !policy.interactive_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow PTY/interactive shell execution",
+                policy.policy_id
+            )));
         }
 
-        let timeout_ms = command.timeout_ms.unwrap_or(REQUEST_TIMEOUT_SECS * 1000);
-        let mut process = self.build_shell_exec_process(command)?;
+        if command
+            .stdin_mode
+            .is_some_and(|mode| mode != super::types::StdinMode::None)
+            && !policy.stdin_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow stdin for shell.exec",
+                policy.policy_id
+            )));
+        }
+
+        let start = Instant::now();
+        let timeout_ms = command
+            .timeout_ms
+            .unwrap_or(policy.max_timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS))
+            .min(policy.max_timeout_ms.unwrap_or(u64::MAX));
+        let mut process = self.build_shell_exec_process(command, &policy)?;
         let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
             .await
-            .map_err(|_| BifrostError::Network("shell.exec timed out".to_string()))?
+            .map_err(|_| {
+                BifrostError::Network(format!(
+                    "shell.exec timed out after {} ms (policy '{}')",
+                    timeout_ms, policy.policy_id
+                ))
+            })?
             .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stdout = truncate_utf8_bytes(&output.stdout, policy.max_output_bytes);
+        let stderr = truncate_utf8_bytes(&output.stderr, policy.max_output_bytes);
         if !stdout.is_empty() {
             on_stdout(stdout.clone()).await?;
         }
 
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(BifrostError::Network(if stderr.is_empty() {
-                format!(
-                    "shell.exec exited with status {}",
-                    output.status.code().unwrap_or(-1)
-                )
-            } else {
-                stderr
-            }))
-        }
+        Ok(RemoteInvokeResponse {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: (!stdout.is_empty()).then_some(stdout.clone()),
+            stderr: (!stderr.is_empty()).then_some(stderr.clone()),
+            stdout_digest: (!stdout.is_empty()).then(|| sha1_hex(&stdout)),
+            stderr_digest: (!stderr.is_empty()).then(|| sha1_hex(&stderr)),
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
     }
 
-    fn build_shell_exec_process(&self, command: &RemoteCommand) -> Result<TokioCommand> {
+    fn build_shell_exec_process(
+        &self,
+        command: &RemoteCommand,
+        policy: &ResolvedShellPolicy,
+    ) -> Result<TokioCommand> {
+        Self::validate_shell_command_against_policy(policy, command)?;
+        if let Some(reason) = &policy.reject_reason {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' is not executable: {}",
+                policy.policy_id, reason
+            )));
+        }
+
         let exec_mode = command
             .exec_mode
             .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
@@ -677,18 +757,357 @@ impl RemoteInvokeExecutor {
                 let shell_text = command.command_text.as_deref().ok_or_else(|| {
                     BifrostError::Config("shell.exec requires command_text".to_string())
                 })?;
-                build_shell_text_process(command.shell.as_deref(), shell_text)
+                build_shell_text_process(
+                    command.shell.as_deref().or(policy.shell.as_deref()),
+                    shell_text,
+                )
             }
         };
 
-        if let Some(cwd) = &command.cwd {
+        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+        if let Some(cwd) = effective_cwd {
             process.current_dir(cwd);
         }
+        if !policy.inherit_env {
+            process.env_clear();
+        }
+        process.envs(policy.default_env.clone());
         if let Some(env) = &command.env {
             process.envs(env);
         }
 
         Ok(process)
+    }
+
+    pub fn select_policy_id_for_command(
+        &self,
+        command: &RemoteCommand,
+        binding: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let store = RemoteShellStore::new()?;
+        let set = store.load()?;
+        let candidate_ids = Self::candidate_policy_ids(&set, binding)?;
+        let mut matching_ids = Vec::new();
+        let mut candidate_errors = Vec::new();
+
+        for policy_id in candidate_ids {
+            let policy = Self::resolve_shell_policy_from_set(&set, &policy_id)?;
+            match Self::validate_shell_command_against_policy(&policy, command) {
+                Ok(()) => matching_ids.push(policy.policy_id),
+                Err(error) => candidate_errors.push((policy_id, error.to_string())),
+            }
+        }
+
+        match matching_ids.len() {
+            1 => Ok(matching_ids.remove(0)),
+            0 => {
+                if candidate_errors.len() == 1 {
+                    return Err(BifrostError::Config(candidate_errors.remove(0).1));
+                }
+                let candidate_list = candidate_errors
+                    .iter()
+                    .map(|(policy_id, _)| policy_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(BifrostError::Config(format!(
+                    "target Shell Access did not find a unique policy for this command among [{}]",
+                    candidate_list
+                )))
+            }
+            _ => Err(BifrostError::Config(format!(
+                "target Shell Access matched multiple policies for this command: {}",
+                matching_ids.join(", ")
+            ))),
+        }
+    }
+
+    fn resolve_shell_policy(&self, command: &RemoteCommand) -> Result<ResolvedShellPolicy> {
+        let policy_id = command
+            .policy_id
+            .as_deref()
+            .ok_or_else(|| BifrostError::Config("shell.exec requires policy_id".to_string()))?;
+        let store = RemoteShellStore::new()?;
+        let set = store.load()?;
+        Self::resolve_shell_policy_from_set(&set, policy_id)
+    }
+
+    fn candidate_policy_ids(
+        set: &RemoteShellSet,
+        binding: Option<&serde_json::Value>,
+    ) -> Result<Vec<String>> {
+        let enabled_policy_ids = set
+            .policies
+            .iter()
+            .filter(|policy| policy.enabled)
+            .map(|policy| policy.id.clone())
+            .collect::<Vec<_>>();
+        if enabled_policy_ids.is_empty() {
+            return Err(BifrostError::Config(
+                "no enabled shell policy exists on this device".to_string(),
+            ));
+        }
+
+        let Some(binding) = binding else {
+            return Ok(enabled_policy_ids);
+        };
+
+        let mode = binding
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("all");
+        if mode == "all" {
+            return Ok(enabled_policy_ids);
+        }
+
+        let Some(policy_ids) = binding.get("policy_ids").and_then(|value| value.as_array()) else {
+            return Err(BifrostError::Config(
+                "shell policy binding requires a non-empty policy_ids array".to_string(),
+            ));
+        };
+
+        let selected = policy_ids
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(BifrostError::Config(
+                "shell policy binding requires at least one policy id".to_string(),
+            ));
+        }
+
+        Ok(selected)
+    }
+
+    fn resolve_shell_policy_from_set(
+        set: &RemoteShellSet,
+        policy_id: &str,
+    ) -> Result<ResolvedShellPolicy> {
+        let policy = set.find_policy(policy_id).ok_or_else(|| {
+            BifrostError::Config(format!("remote shell policy '{}' not found", policy_id))
+        })?;
+        if !policy.enabled {
+            return Err(BifrostError::Config(format!(
+                "remote shell policy '{}' is disabled",
+                policy_id
+            )));
+        }
+
+        let policy_meta: ShellPolicyMetadata = serde_json::from_value(policy.metadata.clone())
+            .map_err(|error| {
+                BifrostError::Config(format!(
+                    "parse metadata for remote shell policy '{}': {}",
+                    policy_id, error
+                ))
+            })?;
+        let profile_meta = if let Some(profile_id) = policy.profile_id.as_deref() {
+            let profile = set.find_profile(profile_id).ok_or_else(|| {
+                BifrostError::Config(format!(
+                    "remote shell profile '{}' referenced by policy '{}' was not found",
+                    profile_id, policy_id
+                ))
+            })?;
+            if !profile.enabled {
+                return Err(BifrostError::Config(format!(
+                    "remote shell profile '{}' is disabled",
+                    profile_id
+                )));
+            }
+            serde_json::from_value::<ShellPolicyMetadata>(profile.metadata.clone()).map_err(
+                |error| {
+                    BifrostError::Config(format!(
+                        "parse metadata for remote shell profile '{}': {}",
+                        profile_id, error
+                    ))
+                },
+            )?
+        } else {
+            ShellPolicyMetadata::default()
+        };
+
+        let exec_mode = policy_meta
+            .exec_mode
+            .or(profile_meta.exec_mode)
+            .ok_or_else(|| {
+                BifrostError::Config(format!(
+                    "remote shell policy '{}' is missing metadata.exec_mode",
+                    policy_id
+                ))
+            })?;
+
+        let mut allowed_exec_modes = if policy_meta.allowed_exec_modes.is_empty() {
+            profile_meta.allowed_exec_modes
+        } else {
+            policy_meta.allowed_exec_modes
+        };
+        if allowed_exec_modes.is_empty() {
+            allowed_exec_modes.push(exec_mode);
+        } else {
+            dedupe_shell_exec_modes(&mut allowed_exec_modes);
+        }
+
+        let mut resolved = ResolvedShellPolicy {
+            policy_id: policy_id.to_string(),
+            exec_mode,
+            allowed_exec_modes,
+            reject_reason: policy_meta.reject_reason.or(profile_meta.reject_reason),
+            allow_any_executable: policy_meta
+                .allow_any_executable
+                .or(profile_meta.allow_any_executable)
+                .unwrap_or(false),
+            allowed_executables: if policy_meta.allowed_executables.is_empty() {
+                profile_meta.allowed_executables
+            } else {
+                policy_meta.allowed_executables
+            },
+            allowed_shell_patterns: if policy_meta.allowed_shell_patterns.is_empty() {
+                profile_meta.allowed_shell_patterns
+            } else {
+                policy_meta.allowed_shell_patterns
+            },
+            cwd_allowlist: if policy_meta.cwd_allowlist.is_empty() {
+                profile_meta.cwd_allowlist
+            } else {
+                policy_meta.cwd_allowlist
+            },
+            env_allowlist: if policy_meta.env_allowlist.is_empty() {
+                profile_meta.env_allowlist
+            } else {
+                policy_meta.env_allowlist
+            },
+            default_cwd: policy_meta.default_cwd.or(profile_meta.default_cwd),
+            shell: policy_meta.shell.or(profile_meta.shell),
+            max_timeout_ms: policy_meta.max_timeout_ms.or(profile_meta.max_timeout_ms),
+            max_output_bytes: policy_meta
+                .max_output_bytes
+                .or(profile_meta.max_output_bytes)
+                .unwrap_or(DEFAULT_SHELL_OUTPUT_MAX_BYTES),
+            stdin_allowed: policy_meta
+                .stdin_allowed
+                .unwrap_or(profile_meta.stdin_allowed.unwrap_or(false)),
+            interactive_allowed: policy_meta
+                .interactive_allowed
+                .unwrap_or(profile_meta.interactive_allowed.unwrap_or(false)),
+            inherit_env: policy_meta
+                .inherit_env
+                .unwrap_or(profile_meta.inherit_env.unwrap_or(false)),
+            default_env: if policy_meta.default_env.is_empty() {
+                profile_meta.default_env
+            } else {
+                policy_meta.default_env
+            },
+        };
+
+        Ok(resolved)
+    }
+
+    fn validate_shell_command_against_policy(
+        policy: &ResolvedShellPolicy,
+        command: &RemoteCommand,
+    ) -> Result<()> {
+        let exec_mode = command
+            .exec_mode
+            .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
+        if !policy.allowed_exec_modes.contains(&exec_mode) {
+            let allowed_modes = policy
+                .allowed_exec_modes
+                .iter()
+                .map(shell_exec_mode_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(BifrostError::Config(format!(
+                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote command exec -- <program> [args...]' for argv execution.",
+                policy.policy_id,
+                allowed_modes,
+                shell_exec_mode_label(&exec_mode)
+            )));
+        }
+        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false)
+            && !policy.interactive_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow PTY/interactive shell execution",
+                policy.policy_id
+            )));
+        }
+        if command
+            .stdin_mode
+            .is_some_and(|mode| mode != super::types::StdinMode::None)
+            && !policy.stdin_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow stdin for shell.exec",
+                policy.policy_id
+            )));
+        }
+
+        match exec_mode {
+            ShellExecMode::ArgvExec => {
+                let argv = command.argv.as_ref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires argv".to_string())
+                })?;
+                let (program, _) = argv.split_first().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires non-empty argv".to_string())
+                })?;
+                if !policy.allow_any_executable
+                    && !policy
+                        .allowed_executables
+                        .iter()
+                        .any(|allowed| allowed == program)
+                {
+                    return Err(BifrostError::Config(format!(
+                        "program '{}' is not allowed by policy '{}'",
+                        program, policy.policy_id
+                    )));
+                }
+            }
+            ShellExecMode::ShellText | ShellExecMode::Template => {
+                let shell_text = command.command_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec requires command_text".to_string())
+                })?;
+                let allowed = policy
+                    .allowed_shell_patterns
+                    .iter()
+                    .any(|pattern| Regex::new(pattern).is_ok_and(|re| re.is_match(shell_text)));
+                if !allowed {
+                    return Err(BifrostError::Config(format!(
+                        "shell_text does not match any allowlist rule in policy '{}'",
+                        policy.policy_id
+                    )));
+                }
+            }
+        }
+
+        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+        if let Some(cwd) = effective_cwd {
+            if !policy.cwd_allowlist.is_empty()
+                && !policy
+                    .cwd_allowlist
+                    .iter()
+                    .any(|allowed| path_is_within(cwd, allowed))
+            {
+                return Err(BifrostError::Config(format!(
+                    "cwd '{}' is not allowed by policy '{}'",
+                    cwd, policy.policy_id
+                )));
+            }
+        }
+        if let Some(env) = &command.env {
+            for key in env.keys() {
+                if !policy.env_allowlist.is_empty()
+                    && !policy.env_allowlist.iter().any(|allowed| allowed == key)
+                {
+                    return Err(BifrostError::Config(format!(
+                        "environment key '{}' is not allowed by policy '{}'",
+                        key, policy.policy_id
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn dispatch_with_stdout_sink<F, Fut>(
@@ -1111,6 +1530,24 @@ impl RemoteInvokeExecutor {
     }
 }
 
+fn shell_exec_mode_label(mode: &ShellExecMode) -> &'static str {
+    match mode {
+        ShellExecMode::ArgvExec => "argv_exec",
+        ShellExecMode::ShellText => "shell_text",
+        ShellExecMode::Template => "template",
+    }
+}
+
+fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
+    let mut deduped = Vec::new();
+    for mode in modes.drain(..) {
+        if !deduped.contains(&mode) {
+            deduped.push(mode);
+        }
+    }
+    *modes = deduped;
+}
+
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
     #[cfg(windows)]
     {
@@ -1170,6 +1607,20 @@ fn validate_string_param(
         }
     }
     Ok(())
+}
+
+fn truncate_utf8_bytes(bytes: &[u8], max_bytes: usize) -> String {
+    if bytes.len() <= max_bytes {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    String::from_utf8_lossy(&bytes[..max_bytes]).into_owned()
+}
+
+fn path_is_within(path: &str, allowed_prefix: &str) -> bool {
+    path == allowed_prefix
+        || path
+            .strip_prefix(allowed_prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn sse_event(event: &str, json_data: &str) -> String {
@@ -1360,8 +1811,39 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
+    use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    fn setup_remote_shell_store() -> (std::sync::MutexGuard<'static, ()>, TempDir) {
+        let guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let store = RemoteShellStore::new().expect("remote shell store");
+        store
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "test-shell".to_string(),
+                    name: "test-shell".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^printf hello$"],
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+        (guard, dir)
+    }
 
     #[test]
     fn test_sha1_hex_known_value() {
@@ -1562,19 +2044,124 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_execute_shell_exec_shell_text() {
+    #[test]
+    fn test_execute_shell_exec_shell_text() {
+        let (_guard, _data_dir) = setup_remote_shell_store();
         let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
         let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("test-shell".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("printf hello".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute(&cmd))
+            .expect("shell exec response");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_execute_shell_exec_rejects_unimplemented_sandbox_policy() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let store = RemoteShellStore::new().expect("remote shell store");
+        store
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "default-sandbox".to_string(),
+                    name: "Default Sandbox".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "reject_reason": "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies"
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("default-sandbox".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("printf hello".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(executor.execute(&cmd))
+            .expect_err("shell exec should reject");
+        assert_eq!(
+            error.to_string(),
+            "Config error: policy 'default-sandbox' is not executable: sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies"
+        );
+    }
+
+    #[test]
+    fn test_select_policy_id_for_command_rejects_ambiguous_target_match() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![
+                    RemoteShellPolicy {
+                        id: "full-a".to_string(),
+                        name: "full-a".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "shell_text",
+                            "allowed_shell_patterns": ["^(?s:.*)$"]
+                        }),
+                    },
+                    RemoteShellPolicy {
+                        id: "full-b".to_string(),
+                        name: "full-b".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "shell_text",
+                            "allowed_shell_patterns": ["^(?s:.*)$"]
+                        }),
+                    },
+                ],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let command = RemoteCommand {
             kind: super::super::types::CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ShellText),
             command_text: Some("printf hello".to_string()),
             ..Default::default()
         };
 
-        let resp = executor.execute(&cmd).await.expect("shell exec response");
-        assert_eq!(resp.exit_code, 0);
-        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+        let error = executor
+            .select_policy_id_for_command(&command, Some(&serde_json::json!({ "mode": "all" })))
+            .expect_err("ambiguous match should fail");
+        assert!(error.to_string().contains("matched multiple policies"));
     }
 
     #[tokio::test]

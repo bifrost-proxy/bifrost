@@ -245,6 +245,8 @@ export interface RemoteInvokeGrant {
   client_ephemeral_pub?: string;
   grant_mode: GrantMode;
   grant_scope: RemoteInvokeGrantScope;
+  ssh_key_id?: string;
+  ssh_key_fingerprint?: string;
   status: GrantStatus;
   first_authorized_at: string;
   expires_at: string;

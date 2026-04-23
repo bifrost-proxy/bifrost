@@ -1,10 +1,14 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 
+use bifrost_core::BifrostError;
+
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
-use crate::remote_invoke::types::GrantMode;
+use crate::remote_invoke::types::{GrantMode, GrantScope};
 use crate::remote_invoke::worker::RemoteInvokeWorker;
 
 pub type SharedRemoteInvokeWorker = Arc<RemoteInvokeWorker>;
@@ -54,6 +58,9 @@ pub async fn handle_remote_invoke(
     }
     if sub == "/grants" || sub == "/grants/" {
         return handle_grants_list(req, &worker).await;
+    }
+    if sub == "/shell-config" || sub == "/shell-config/" {
+        return handle_shell_config(req).await;
     }
     if let Some(rest) = sub.strip_prefix("/grants/") {
         let grant_id = rest.trim_end_matches('/');
@@ -210,6 +217,14 @@ async fn handle_pairing_approve(
     #[derive(serde::Deserialize)]
     struct ApproveBody {
         grant_mode: GrantMode,
+        #[serde(default)]
+        grant_scope: Option<GrantScope>,
+        #[serde(default)]
+        policy_binding: Option<serde_json::Value>,
+        #[serde(default)]
+        interactive_allowed: Option<bool>,
+        #[serde(default)]
+        stdin_allowed: Option<bool>,
     }
 
     let parsed: ApproveBody = match serde_json::from_slice(&body) {
@@ -222,13 +237,23 @@ async fn handle_pairing_approve(
         }
     };
 
-    match worker.approve_pairing(pairing_id, parsed.grant_mode).await {
+    match worker
+        .approve_pairing(
+            pairing_id,
+            parsed.grant_mode,
+            parsed.grant_scope,
+            parsed.policy_binding,
+            parsed.interactive_allowed,
+            parsed.stdin_allowed,
+        )
+        .await
+    {
         Ok(result) => json_response(&serde_json::json!({
             "success": true,
             "data": result,
         })),
         Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            pairing_action_status_code(&e),
             &format!("Failed to approve pairing: {e}"),
         ),
     }
@@ -249,10 +274,23 @@ async fn handle_pairing_reject(
             "data": result,
         })),
         Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            pairing_action_status_code(&e),
             &format!("Failed to reject pairing: {e}"),
         ),
     }
+}
+
+fn pairing_action_status_code(error: &BifrostError) -> StatusCode {
+    if let BifrostError::Network(message) = error {
+        if message.contains("not found or expired")
+            || message.contains("pairing_expired")
+            || message.contains("pairing_not_found")
+            || message.contains("pairing_not_pending")
+        {
+            return StatusCode::NOT_FOUND;
+        }
+    }
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 async fn handle_grants_list(
@@ -269,12 +307,143 @@ async fn handle_grants_list(
     }))
 }
 
+async fn handle_shell_config(req: Request<Incoming>) -> Response<BoxBody> {
+    match *req.method() {
+        Method::GET => {
+            let store = match RemoteShellStore::new() {
+                Ok(store) => store,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to open remote shell store: {error}"),
+                    );
+                }
+            };
+
+            match store.load() {
+                Ok(set) => json_response(&set),
+                Err(error) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to load remote shell config: {error}"),
+                ),
+            }
+        }
+        Method::PUT => {
+            let body = match req.collect().await {
+                Ok(body) => body.to_bytes(),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {error}"),
+                    );
+                }
+            };
+
+            let requested: RemoteShellSet = match serde_json::from_slice(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {error}"),
+                    );
+                }
+            };
+
+            if let Err(message) = validate_remote_shell_set(&requested) {
+                return error_response(StatusCode::BAD_REQUEST, &message);
+            }
+
+            let store = match RemoteShellStore::new() {
+                Ok(store) => store,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to open remote shell store: {error}"),
+                    );
+                }
+            };
+            let current = match store.load() {
+                Ok(current) => current,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to load current remote shell config: {error}"),
+                    );
+                }
+            };
+
+            let next = prepare_remote_shell_set_for_save(current, requested);
+            match store.save(&next) {
+                Ok(()) => json_response(&next),
+                Err(error) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to save remote shell config: {error}"),
+                ),
+            }
+        }
+        _ => method_not_allowed(),
+    }
+}
+
 async fn handle_grant_action(
     req: Request<Incoming>,
     worker: &RemoteInvokeWorker,
     grant_id: &str,
 ) -> Response<BoxBody> {
     match *req.method() {
+        Method::PATCH => {
+            let body = match req.collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {e}"),
+                    );
+                }
+            };
+
+            #[derive(serde::Deserialize)]
+            struct UpdateGrantBody {
+                #[serde(default)]
+                grant_scope: Option<GrantScope>,
+                #[serde(default)]
+                policy_binding: Option<serde_json::Value>,
+                #[serde(default)]
+                interactive_allowed: Option<bool>,
+                #[serde(default)]
+                stdin_allowed: Option<bool>,
+            }
+
+            let parsed: UpdateGrantBody = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {e}"),
+                    );
+                }
+            };
+
+            match worker
+                .update_grant(
+                    grant_id,
+                    parsed.grant_scope,
+                    parsed.policy_binding,
+                    parsed.interactive_allowed,
+                    parsed.stdin_allowed,
+                )
+                .await
+            {
+                Ok(result) => json_response(&serde_json::json!({
+                    "success": true,
+                    "data": result,
+                })),
+                Err(e) => error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Failed to update grant: {e}"),
+                ),
+            }
+        }
         Method::DELETE => match worker.delete_grant(grant_id).await {
             Ok(()) => json_response(&serde_json::json!({
                 "success": true,
@@ -420,4 +589,154 @@ async fn parse_json_body<T: serde::de::DeserializeOwned>(
             &format!("Invalid request body: {e}"),
         )
     })
+}
+
+fn validate_remote_shell_set(set: &RemoteShellSet) -> Result<(), String> {
+    let mut policy_ids = HashSet::new();
+    let mut profile_ids = HashSet::new();
+
+    for profile in &set.profiles {
+        let profile_id = profile.id.trim();
+        if profile_id.is_empty() {
+            return Err("remote shell profile id cannot be empty".to_string());
+        }
+        if profile.name.trim().is_empty() {
+            return Err(format!(
+                "remote shell profile '{profile_id}' name cannot be empty"
+            ));
+        }
+        if !profile_ids.insert(profile_id.to_string()) {
+            return Err(format!("duplicate remote shell profile id '{profile_id}'"));
+        }
+    }
+
+    for policy in &set.policies {
+        let policy_id = policy.id.trim();
+        if policy_id.is_empty() {
+            return Err("remote shell policy id cannot be empty".to_string());
+        }
+        if policy.name.trim().is_empty() {
+            return Err(format!(
+                "remote shell policy '{policy_id}' name cannot be empty"
+            ));
+        }
+        if !policy_ids.insert(policy_id.to_string()) {
+            return Err(format!("duplicate remote shell policy id '{policy_id}'"));
+        }
+        if let Some(profile_id) = policy.profile_id.as_deref().map(str::trim) {
+            if !profile_id.is_empty() && !profile_ids.contains(profile_id) {
+                return Err(format!(
+                    "remote shell policy '{policy_id}' references missing profile '{profile_id}'"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn prepare_remote_shell_set_for_save(
+    current: RemoteShellSet,
+    mut requested: RemoteShellSet,
+) -> RemoteShellSet {
+    const DEFAULT_SCHEMA_VERSION: u64 = 1;
+
+    if requested.schema_version == 0 {
+        requested.schema_version = current.schema_version.max(DEFAULT_SCHEMA_VERSION);
+    }
+
+    let same_payload = {
+        let mut lhs = requested.clone();
+        let mut rhs = current.clone();
+        lhs.version = 0;
+        rhs.version = 0;
+        lhs == rhs
+    };
+
+    requested.version = if same_payload {
+        current.version.max(requested.version)
+    } else if requested.version <= current.version {
+        current.version.saturating_add(1)
+    } else {
+        requested.version
+    };
+
+    requested
+}
+
+#[cfg(test)]
+mod tests {
+    use bifrost_core::BifrostError;
+    use bifrost_storage::{RemoteShellPolicy, RemoteShellProfile};
+    use serde_json::json;
+
+    use super::{
+        pairing_action_status_code, prepare_remote_shell_set_for_save, validate_remote_shell_set,
+    };
+    use bifrost_storage::RemoteShellSet;
+    use hyper::StatusCode;
+
+    fn sample_set() -> RemoteShellSet {
+        RemoteShellSet {
+            schema_version: 1,
+            version: 2,
+            policies: vec![RemoteShellPolicy {
+                id: "echo-argv".to_string(),
+                name: "Echo argv".to_string(),
+                description: None,
+                enabled: true,
+                profile_id: Some("safe".to_string()),
+                metadata: json!({ "exec_mode": "argv_exec" }),
+            }],
+            profiles: vec![RemoteShellProfile {
+                id: "safe".to_string(),
+                name: "Safe".to_string(),
+                description: None,
+                enabled: true,
+                metadata: json!({ "cwd_allowlist": ["/tmp"] }),
+            }],
+        }
+    }
+
+    #[test]
+    fn validate_remote_shell_set_rejects_missing_profile_reference() {
+        let mut set = sample_set();
+        set.policies[0].profile_id = Some("missing".to_string());
+
+        let error = validate_remote_shell_set(&set).expect_err("should reject missing profile");
+        assert!(error.contains("references missing profile"));
+    }
+
+    #[test]
+    fn prepare_remote_shell_set_for_save_bumps_version_when_payload_changes() {
+        let current = sample_set();
+        let mut requested = current.clone();
+        requested.policies[0].name = "Echo argv updated".to_string();
+        requested.version = current.version;
+
+        let prepared = prepare_remote_shell_set_for_save(current, requested);
+        assert_eq!(prepared.version, 3);
+    }
+
+    #[test]
+    fn prepare_remote_shell_set_for_save_keeps_version_when_payload_is_same() {
+        let current = sample_set();
+        let requested = current.clone();
+
+        let prepared = prepare_remote_shell_set_for_save(current, requested);
+        assert_eq!(prepared.version, 2);
+    }
+
+    #[test]
+    fn pairing_action_status_code_maps_stale_pairings_to_not_found() {
+        let stale = BifrostError::Network("pairing abc not found or expired".to_string());
+        let internal =
+            BifrostError::Network("relay submit_grant_decision unauthorized".to_string());
+
+        assert_eq!(pairing_action_status_code(&stale), StatusCode::NOT_FOUND);
+        assert_eq!(
+            pairing_action_status_code(&internal),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

@@ -5,6 +5,7 @@ import type { RemoteInvokeConfig, RemoteInvokeGrant, RemoteInvokeCall, RemoteInv
 import type {
   StartPairingRequest,
   GrantDecisionRequest,
+  UpdateGrantRequest,
   PublishPairCodeRequest,
   ClientHeartbeatRequest,
   ClientCallFrameRequest,
@@ -70,6 +71,12 @@ function constantTimeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8');
   const bufB = Buffer.from(b, 'utf8');
   return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function isoTimestampToMillis(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const millis = new Date(value).getTime();
+  return Number.isNaN(millis) ? null : millis;
 }
 
 export class RemoteInvokeService {
@@ -227,6 +234,53 @@ export class RemoteInvokeService {
     clearClientDiscovery(clientInstanceId);
   }
 
+  private isPendingPairingExpired(pairing: RemoteInvokePairing, nowMs = Date.now()): boolean {
+    if (pairing.status !== 'pending_approval') {
+      return false;
+    }
+    const expiresAtMs = isoTimestampToMillis(pairing.expires_at);
+    return expiresAtMs !== null && expiresAtMs <= nowMs;
+  }
+
+  private async expirePendingPairing(pairing: RemoteInvokePairing, reason = 'pairing_expired'): Promise<void> {
+    const now = new Date().toISOString();
+    await this.storage.remoteInvoke.updatePairing(pairing.id, {
+      status: 'expired',
+      update_time: now,
+    });
+
+    pushToPairingWatcher(pairing.id, 'expired', {
+      pairing_id: pairing.id,
+      reason,
+    });
+
+    await this.storage.remoteInvoke.appendEvent({
+      id: nanoid(),
+      call_id: '',
+      event_type: 'pairing_expired',
+      seq: 0,
+      direction: '',
+      event_summary_json: JSON.stringify({ pairing_id: pairing.id, reason }),
+      create_time: now,
+    });
+  }
+
+  private async loadActivePendingPairings(clientInstanceId: string): Promise<RemoteInvokePairing[]> {
+    const nowMs = Date.now();
+    const pairings = await this.storage.remoteInvoke.listPendingPairings(clientInstanceId);
+    const active: RemoteInvokePairing[] = [];
+
+    for (const pairing of pairings) {
+      if (this.isPendingPairingExpired(pairing, nowMs)) {
+        await this.expirePendingPairing(pairing);
+        continue;
+      }
+      active.push(pairing);
+    }
+
+    return active;
+  }
+
   async getPendingPairingsForClient(clientInstanceId: string): Promise<Array<{
     pairing_id: string;
     caller_fingerprint: string;
@@ -234,8 +288,9 @@ export class RemoteInvokeService {
     source_ip: string;
     user_agent: string;
     status: string;
+    expires_at: string;
   }>> {
-    const pairings = await this.storage.remoteInvoke.listPendingPairings(clientInstanceId);
+    const pairings = await this.loadActivePendingPairings(clientInstanceId);
     return pairings.map((p) => {
       let callerInfo: any = {};
       try { callerInfo = JSON.parse(p.caller_info_json || '{}'); } catch { /* ignore */ }
@@ -246,12 +301,13 @@ export class RemoteInvokeService {
         source_ip: callerInfo.source_ip || '',
         user_agent: callerInfo.user_agent || '',
         status: p.status,
+        expires_at: p.expires_at,
       };
     });
   }
 
   async cancelPendingPairings(clientInstanceId: string): Promise<number> {
-    const pairings = await this.storage.remoteInvoke.listPendingPairings(clientInstanceId);
+    const pairings = await this.loadActivePendingPairings(clientInstanceId);
     for (const p of pairings) {
       pushToPairingWatcher(p.id, 'rejected', {
         pairing_id: p.id,
@@ -281,8 +337,8 @@ export class RemoteInvokeService {
 
     const resolvedClientId = clientStream.clientInstanceId;
 
-    const pendingCount = await this.storage.remoteInvoke.countPendingPairings(resolvedClientId);
-    if (pendingCount > 0) {
+    const pendingPairings = await this.loadActivePendingPairings(resolvedClientId);
+    if (pendingPairings.length > 0) {
       throw new Error('pair_slot_occupied');
     }
 
@@ -341,6 +397,10 @@ export class RemoteInvokeService {
   async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
+    if (this.isPendingPairingExpired(pairing)) {
+      await this.expirePendingPairing(pairing);
+      throw new Error('pairing_expired');
+    }
     if (pairing.status !== 'pending_approval') throw new Error('pairing_not_pending');
     if (pairing.client_instance_id !== req.client_instance_id) throw new Error('client_mismatch');
 
@@ -376,6 +436,11 @@ export class RemoteInvokeService {
     }
     const grantId = nanoid();
 
+    await this.storage.remoteInvoke.revokeActiveGrantsForCaller(
+      pairing.client_instance_id,
+      pairing.caller_fingerprint,
+    );
+
     const activeGrantCount = await this.storage.remoteInvoke.countActiveGrantsForClient(pairing.client_instance_id);
     if (activeGrantCount >= this.config.max_grants_per_client) {
       throw new Error('max_grants_exceeded');
@@ -403,6 +468,8 @@ export class RemoteInvokeService {
       client_ephemeral_pub: req.client_ephemeral_pub,
       grant_mode: grantMode as any,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      ssh_key_id: '',
+      ssh_key_fingerprint: '',
       status: 'active',
       first_authorized_at: now,
       expires_at: grantExpiresAt,
@@ -462,6 +529,7 @@ export class RemoteInvokeService {
       device_name: deviceName,
       platform,
       grant_mode: grantMode,
+      grant_scope: normalizeGrantScope(req.grant_scope),
     };
   }
 
@@ -844,6 +912,11 @@ export class RemoteInvokeService {
         result.caller_info?.username ||
         '';
 
+      await this.storage.remoteInvoke.revokeActiveGrantsForCaller(
+        clientInstanceId,
+        result.caller_fingerprint,
+      );
+
       const grant: RemoteInvokeGrant = {
         id: result.grant_id,
         user_id: '',
@@ -852,18 +925,20 @@ export class RemoteInvokeService {
         caller_display_name: callerDisplayName,
         caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
         client_ephemeral_pub: req.client_ephemeral_pub ?? '',
-        grant_mode: grantMode,
-        grant_scope: normalizeGrantScope(req.grant_scope),
-        status: 'active',
+      grant_mode: grantMode,
+      grant_scope: normalizeGrantScope(req.grant_scope),
+      ssh_key_id: '',
+      ssh_key_fingerprint: verified.ssh_key_fingerprint,
+      status: 'active',
         first_authorized_at: now,
         expires_at: '',
         last_used_at: now,
         max_calls: 999999,
-        remaining_calls: 999999,
-        created_by: 'ssh_publickey',
-        update_time: now,
-      };
-      await this.storage.remoteInvoke.createGrant(grant);
+      remaining_calls: 999999,
+      created_by: 'ssh_publickey',
+      update_time: now,
+    };
+    await this.storage.remoteInvoke.createGrant(grant);
     }
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {
       ...result,
@@ -999,6 +1074,51 @@ export class RemoteInvokeService {
       await new Promise((resolve) => setTimeout(resolve, SSH_CONNECT_STREAM_POLL_MS));
     }
     return !!getClientStream(clientInstanceId);
+  }
+
+  async updateGrantByClient(
+    clientInstanceId: string,
+    grantId: string,
+    req: UpdateGrantRequest,
+  ): Promise<RemoteInvokeGrant> {
+    const grant = await this.storage.remoteInvoke.getGrant(grantId);
+    if (!grant) throw new Error('grant_not_found');
+    if (grant.client_instance_id !== clientInstanceId) {
+      throw new Error('client_instance_id_mismatch');
+    }
+    if (grant.status !== 'active') {
+      throw new Error('grant_not_active');
+    }
+
+    const normalizedScope = normalizeGrantScope(req.grant_scope ?? grant.grant_scope);
+    const now = new Date().toISOString();
+
+    await this.storage.remoteInvoke.updateGrant(grantId, {
+      grant_scope: normalizedScope,
+      update_time: now,
+    });
+
+    const updated = await this.storage.remoteInvoke.getGrant(grantId);
+    if (!updated) {
+      throw new Error('grant_not_found_after_update');
+    }
+
+    pushToClient(updated.client_instance_id, 'grant_updated', {
+      grant_id: grantId,
+      grant_scope: normalizedScope,
+    });
+
+    await this.storage.remoteInvoke.appendEvent({
+      id: nanoid(),
+      call_id: '',
+      event_type: 'grant_updated',
+      seq: 0,
+      direction: '',
+      event_summary_json: JSON.stringify({ grant_id: grantId }),
+      create_time: now,
+    });
+
+    return updated;
   }
 }
 

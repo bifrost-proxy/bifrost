@@ -8,7 +8,7 @@ use super::types::{
     ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
     ClientRegistrationChallengeRequest, ClientRegistrationChallengeResponse,
     ClientRegistrationRequest, ClientRegistrationResponse, GrantDecisionRequest,
-    PublishPairCodeRequest, SshConnectResultRequest,
+    PublishPairCodeRequest, SshConnectResultRequest, UpdateGrantRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +262,28 @@ impl RelayClient {
         self.parse_response_empty(response, "delete_grant").await
     }
 
+    pub async fn update_grant(
+        &self,
+        grant_id: &str,
+        req: &UpdateGrantRequest,
+    ) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/grants/{}",
+            self.base_url(),
+            grant_id
+        );
+        let response = self
+            .authorized_patch(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!("relay update grant request failed: {e}"))
+            })?;
+        self.parse_response_with_data::<serde_json::Value>(response, "update_grant")
+            .await
+    }
+
     pub async fn poll_pending_pairings(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!(
             "{}/v4/remote-invoke/client/pending-pairings?client_instance_id={}",
@@ -356,6 +378,14 @@ impl RelayClient {
 
     fn authorized_delete(&self, url: &str) -> reqwest::RequestBuilder {
         let mut builder = self.http.delete(url);
+        if let Some(token) = self.client_auth_token.read().as_deref() {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        builder
+    }
+
+    fn authorized_patch(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut builder = self.http.patch(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }

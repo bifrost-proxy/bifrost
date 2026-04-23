@@ -396,15 +396,21 @@ impl RulesStorage {
         for entry in fs::read_dir(&self.base_dir)? {
             let entry = entry?;
             let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
             let ext = path.extension().and_then(|s| s.to_str());
-            if ext == Some("bifrost") || ext == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let decoded = urlencoding::decode(stem)
-                        .map(|value| value.into_owned())
-                        .unwrap_or_else(|_| stem.to_string());
-                    if !names.contains(&decoded) {
-                        names.push(decoded);
-                    }
+            if ext != Some("bifrost") {
+                continue;
+            }
+
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                let decoded = urlencoding::decode(stem)
+                    .map(|value| value.into_owned())
+                    .unwrap_or_else(|_| stem.to_string());
+                if !names.contains(&decoded) {
+                    names.push(decoded);
                 }
             }
         }
@@ -727,6 +733,21 @@ mod tests {
     }
 
     #[test]
+    fn test_list_ignores_non_bifrost_files() {
+        let (temp_dir, storage) = setup();
+        storage.save(&RuleFile::new("valid", "content")).unwrap();
+        fs::write(temp_dir.path().join(".group_cache"), "{\"cached\":true}").unwrap();
+        fs::write(
+            temp_dir.path().join("legacy.json"),
+            r#"{"name":"legacy","content":"legacy.example.com host://127.0.0.1:4000","enabled":true}"#,
+        )
+        .unwrap();
+
+        let names = storage.list().unwrap();
+        assert_eq!(names, vec!["valid"]);
+    }
+
+    #[test]
     fn test_delete() {
         let (_temp_dir, storage) = setup();
         storage.save(&RuleFile::new("test", "content")).unwrap();
@@ -879,15 +900,15 @@ mod tests {
     }
 
     #[test]
-    fn test_load_all_skips_invalid_legacy_rule_file() {
+    fn test_load_all_ignores_non_bifrost_files() {
         let (temp_dir, storage) = setup();
         storage
             .save(&RuleFile::new("valid", "example.com host://127.0.0.1:3000"))
             .unwrap();
+        fs::write(temp_dir.path().join(".group_cache"), "{\"cached\":true}").unwrap();
 
-        let broken_legacy =
-            r#"{"content":"broken.example.com host://127.0.0.1:4000","enabled":true}"#;
-        fs::write(temp_dir.path().join("broken.json"), broken_legacy).unwrap();
+        let legacy_rule = r#"{"name":"legacy","content":"broken.example.com host://127.0.0.1:4000","enabled":true}"#;
+        fs::write(temp_dir.path().join("legacy.json"), legacy_rule).unwrap();
 
         let rules = storage.load_all().unwrap();
         assert_eq!(rules.len(), 1);
@@ -895,19 +916,44 @@ mod tests {
     }
 
     #[test]
-    fn test_list_summaries_skips_invalid_legacy_rule_file() {
+    fn test_list_summaries_ignores_non_bifrost_files() {
         let (temp_dir, storage) = setup();
         storage
             .save(&RuleFile::new("valid", "example.com host://127.0.0.1:3000"))
             .unwrap();
+        fs::write(temp_dir.path().join(".group_cache"), "{\"cached\":true}").unwrap();
 
-        let broken_legacy =
-            r#"{"content":"broken.example.com host://127.0.0.1:4000","enabled":true}"#;
-        fs::write(temp_dir.path().join("broken.json"), broken_legacy).unwrap();
+        let legacy_rule = r#"{"name":"legacy","content":"broken.example.com host://127.0.0.1:4000","enabled":true}"#;
+        fs::write(temp_dir.path().join("legacy.json"), legacy_rule).unwrap();
 
         let summaries = storage.list_summaries().unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].name, "valid");
+    }
+
+    #[test]
+    fn test_load_enabled_with_subdirs_keeps_group_directories() {
+        let (temp_dir, storage) = setup();
+        storage
+            .save(&RuleFile::new(
+                "local",
+                "local.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+
+        let group_dir = temp_dir.path().join("my-group");
+        let group_storage = RulesStorage::with_dir(group_dir).unwrap();
+        group_storage
+            .save(&RuleFile::new(
+                "group",
+                "group.example.com host://127.0.0.1:4000",
+            ))
+            .unwrap();
+
+        let enabled = storage.load_enabled_with_subdirs().unwrap();
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(enabled[0].name, "local");
+        assert_eq!(enabled[1].name, "group");
     }
 
     #[test]

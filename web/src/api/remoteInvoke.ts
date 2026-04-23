@@ -1,4 +1,4 @@
-import { get, post, del, patch } from "./client";
+import { get, post, del, patch, put } from "./client";
 
 export type WorkerState =
   | "disconnected"
@@ -8,6 +8,10 @@ export type WorkerState =
   | "reconnecting";
 
 export type GrantMode = "once" | "30m" | "1h" | "1d" | "permanent";
+export type GrantScope =
+  | "remote_query"
+  | "remote_shell_exec"
+  | "remote_shell_interactive";
 export type RemoteInvokeAuthMethod = "pair_code" | "ssh_publickey";
 
 export interface DiscoverySession {
@@ -106,13 +110,21 @@ export async function getPendingPairings(): Promise<PendingPairingsResponse> {
   return get<PendingPairingsResponse>("/remote-invoke/pairings/pending");
 }
 
+export interface PairingApprovalInput {
+  grant_mode: GrantMode;
+  grant_scope?: GrantScope;
+  policy_binding?: Record<string, unknown> | null;
+  interactive_allowed?: boolean;
+  stdin_allowed?: boolean;
+}
+
 export async function approvePairing(
   pairingId: string,
-  grantMode: GrantMode,
+  input: GrantMode | PairingApprovalInput,
 ): Promise<ApproveResponse> {
-  return post<ApproveResponse>(`/remote-invoke/pairings/${pairingId}/approve`, {
-    grant_mode: grantMode,
-  });
+  const payload: PairingApprovalInput =
+    typeof input === "string" ? { grant_mode: input } : input;
+  return post<ApproveResponse>(`/remote-invoke/pairings/${pairingId}/approve`, payload);
 }
 
 export async function rejectPairing(
@@ -139,6 +151,10 @@ export interface Grant {
   max_calls: number;
   remaining_calls: number;
   use_count: number;
+  policy_binding?: Record<string, unknown> | null;
+  shell_policy_set_version_snapshot?: number | null;
+  interactive_allowed?: boolean | null;
+  stdin_allowed?: boolean | null;
 }
 
 export interface GrantsListResponse {
@@ -169,6 +185,8 @@ export interface Call {
   duration_ms: number | null;
   bytes_in?: number | null;
   bytes_out?: number | null;
+  policy_id?: string | null;
+  exec_mode?: string | null;
 }
 
 export interface CallsListResponse {
@@ -229,6 +247,40 @@ export async function getCall(
   callId: string,
 ): Promise<CallDetailResponse> {
   return get<CallDetailResponse>(`/remote-invoke/calls/${callId}`);
+}
+
+export interface RemoteShellPolicy {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  profile_id?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface RemoteShellProfile {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  metadata: Record<string, unknown>;
+}
+
+export interface RemoteShellSet {
+  schema_version: number;
+  version: number;
+  policies: RemoteShellPolicy[];
+  profiles: RemoteShellProfile[];
+}
+
+export async function getRemoteShellConfig(): Promise<RemoteShellSet> {
+  return get<RemoteShellSet>("/remote-invoke/shell-config");
+}
+
+export async function updateRemoteShellConfig(
+  input: RemoteShellSet,
+): Promise<RemoteShellSet> {
+  return put<RemoteShellSet>("/remote-invoke/shell-config", input);
 }
 
 export interface RemoteInvokeSshCallerInfo {

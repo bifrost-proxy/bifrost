@@ -803,6 +803,8 @@ pub struct PairingRequest {
     pub command: RemoteCommand,
     pub caller_pubkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_ephemeral_pub: Option<String>,
@@ -996,15 +998,14 @@ pub struct GrantDecisionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_scope: Option<GrantScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_binding: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_policy_set_version_snapshot: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interactive_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdin_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateGrantRequest {
+    pub client_instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_scope: Option<GrantScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1081,14 +1082,6 @@ pub struct SshConnectResultRequest {
     pub caller_ephemeral_pub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_binding: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_policy_set_version_snapshot: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interactive_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdin_allowed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

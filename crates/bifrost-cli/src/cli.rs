@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
 #[derive(Parser)]
@@ -1393,6 +1393,21 @@ pub enum RemoteCommands {
             If a reusable authorization already exists, you do not need to run `remote connect` again."
     )]
     Status,
+    #[command(about = "Execute a remote shell command")]
+    Command {
+        #[command(subcommand)]
+        action: RemoteCommandCommands,
+    },
+    #[command(about = "Manage local Shell Access policies and profiles")]
+    Shell {
+        #[command(subcommand)]
+        action: Box<RemoteShellCommands>,
+    },
+    #[command(about = "Manage local remote-invoke grants")]
+    Grant {
+        #[command(subcommand)]
+        action: Box<RemoteGrantCommands>,
+    },
     #[command(about = "Search remote traffic records")]
     Search(Box<RemoteSearchArgs>),
     #[command(about = "Inspect remote traffic records")]
@@ -1400,6 +1415,208 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: RemoteTrafficCommands,
     },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteCommandCommands {
+    #[command(
+        about = "Execute a remote command via the encrypted shell.exec channel",
+        trailing_var_arg = true
+    )]
+    Exec(Box<RemoteCommandExecArgs>),
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteShellCommands {
+    #[command(about = "List configured shell policies and profiles")]
+    List,
+    #[command(about = "Show shell config summary or raw JSON")]
+    Show {
+        #[arg(long, help = "Print the full JSON payload")]
+        json: bool,
+    },
+    #[command(about = "Apply a full shell config JSON file")]
+    Apply {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to remote_shell.json payload")]
+        file: PathBuf,
+    },
+    #[command(about = "Manage shell profiles")]
+    Profile {
+        #[command(subcommand)]
+        action: RemoteShellProfileCommands,
+    },
+    #[command(about = "Manage shell policies")]
+    Policy {
+        #[command(subcommand)]
+        action: Box<RemoteShellPolicyCommands>,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteGrantCommands {
+    #[command(about = "List local active grants")]
+    List {
+        #[arg(long, help = "Print the full JSON payload")]
+        json: bool,
+    },
+    #[command(about = "Update a grant's access scope and policy binding")]
+    Update {
+        #[arg(help = "Grant ID to update")]
+        grant_id: String,
+        #[arg(long, value_parser = ["query", "selected", "all"], help = "Grant access mode")]
+        access: String,
+        #[arg(long = "policy", action = ArgAction::Append, help = "Bind to this shell policy id (repeatable for selected access)")]
+        policy: Vec<String>,
+        #[arg(long, help = "Allow stdin: true or false")]
+        stdin: Option<bool>,
+        #[arg(long, help = "Allow interactive shell: true or false")]
+        interactive: Option<bool>,
+    },
+    #[command(about = "Revoke a grant")]
+    Revoke {
+        #[arg(help = "Grant ID to revoke")]
+        grant_id: String,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteShellProfileCommands {
+    #[command(about = "Add a shell profile")]
+    Add {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long = "cwd", action = ArgAction::Append, help = "Allow cwd under this path")]
+        cwd: Vec<String>,
+        #[arg(long = "env", action = ArgAction::Append, help = "Allow this environment key")]
+        env: Vec<String>,
+        #[arg(long)]
+        default_cwd: Option<String>,
+        #[arg(long = "timeout-ms")]
+        timeout_ms: Option<u64>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        interactive: bool,
+        #[arg(long)]
+        inherit_env: bool,
+        #[arg(long, help = "Create the profile disabled")]
+        disabled: bool,
+    },
+    #[command(about = "Delete a shell profile")]
+    Delete { id: String },
+    #[command(about = "Enable a shell profile")]
+    Enable { id: String },
+    #[command(about = "Disable a shell profile")]
+    Disable { id: String },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteShellPolicyCommands {
+    #[command(about = "Add a shell policy")]
+    Add(Box<RemoteShellPolicyAddArgs>),
+    #[command(about = "Delete a shell policy")]
+    Delete { id: String },
+    #[command(about = "Enable a shell policy")]
+    Enable { id: String },
+    #[command(about = "Disable a shell policy")]
+    Disable { id: String },
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RemoteShellPolicyAddArgs {
+    #[arg(long)]
+    pub id: String,
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[arg(long, default_value = "argv_exec", help = "argv_exec or shell_text")]
+    pub mode: String,
+    #[arg(long, help = "Bind to an existing shell profile")]
+    pub profile: Option<String>,
+    #[arg(
+        long = "program",
+        action = ArgAction::Append,
+        help = "Allow this executable path"
+    )]
+    pub program: Vec<String>,
+    #[arg(
+        long = "pattern",
+        action = ArgAction::Append,
+        help = "Allow this shell regex"
+    )]
+    pub pattern: Vec<String>,
+    #[arg(long = "cwd", action = ArgAction::Append, help = "Allow cwd under this path")]
+    pub cwd: Vec<String>,
+    #[arg(
+        long = "env",
+        action = ArgAction::Append,
+        help = "Allow this environment key"
+    )]
+    pub env: Vec<String>,
+    #[arg(long)]
+    pub default_cwd: Option<String>,
+    #[arg(long = "timeout-ms")]
+    pub timeout_ms: Option<u64>,
+    #[arg(long, help = "Shell binary for shell_text mode")]
+    pub shell: Option<String>,
+    #[arg(long)]
+    pub stdin: bool,
+    #[arg(long)]
+    pub interactive: bool,
+    #[arg(long)]
+    pub inherit_env: bool,
+    #[arg(long, help = "Create the policy disabled")]
+    pub disabled: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+#[command(group(
+    ArgGroup::new("command_input")
+        .required(true)
+        .args(["shell_text", "argv"])
+))]
+pub struct RemoteCommandExecArgs {
+    #[arg(long, help = "Working directory on the remote host")]
+    pub cwd: Option<String>,
+    #[arg(
+        long = "env",
+        value_name = "KEY=VALUE",
+        value_parser = parse_env_assignment,
+        action = ArgAction::Append,
+        help = "Environment variable assignment (repeatable)"
+    )]
+    pub env: Vec<(String, String)>,
+    #[arg(long = "timeout-ms", help = "Remote command timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[arg(
+        long = "shell-text",
+        value_name = "TEXT",
+        conflicts_with = "argv",
+        help = "Execute the given shell text on the remote host"
+    )]
+    pub shell_text: Option<String>,
+    #[arg(
+        value_name = "PROGRAM [ARGS...]",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        help = "Program and arguments to execute after `--`"
+    )]
+    pub argv: Vec<String>,
+}
+
+fn parse_env_assignment(value: &str) -> Result<(String, String), String> {
+    let Some((key, val)) = value.split_once('=') else {
+        return Err("expected KEY=VALUE".to_string());
+    };
+    if key.is_empty() {
+        return Err("environment variable name cannot be empty".to_string());
+    }
+    Ok((key.to_string(), val.to_string()))
 }
 
 #[derive(Args, Clone, Debug)]

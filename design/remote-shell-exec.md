@@ -1,6 +1,178 @@
 # 基于现有 Remote 方案的 Shell 远程执行设计
 
-> 状态：实施方案 | 更新时间：2026-04-23
+> 状态：实施中
+> 更新时间：2026-04-23
+
+## 当前生效契约
+
+以下约束是 2026-04-23 之后的当前实现真相，优先级高于后文仍保留的历史探索内容：
+
+- `remote caller` 不再决定使用哪条 shell policy
+- caller 侧 `bifrost remote command exec` 只表达“要执行什么命令”
+- shell policy 的选择、拒绝、命中日志，全部只发生在执行侧 target
+- 如果命令不满足 target 本地 `Shell Access` 配置，caller 接收到的只能是 target 返回的拒绝结果
+- 如果某个 caller 只能使用特定策略范围，这个约束也只由执行侧保存：
+  - grant scope
+  - grant `policy_binding`
+  - `shell_policy_set_version_snapshot`
+
+也就是说，当前安全边界是：
+
+- caller 负责发起命令
+- relay 只负责最小授权路由与加密转发
+- target 负责选策略、做校验、决定放行或拒绝
+
+补充说明：
+
+- relay 只保留最小 `grant_scope`，用于阻止 `remote_query` grant 直接打开 `shell.exec`
+- `policy_binding` / `shell_policy_set_version_snapshot` / `stdin_allowed` / `interactive_allowed` 不再存储在 relay
+- 上述策略细节只保存在 target 本地，并由 target 本地 admin / worker 读取和更新
+- grant 的 WebUI / CLI 编辑，本质上都是在修改 target 本地 grant policy overlay；relay 仅同步最小 scope
+- 同一 `client_instance_id + caller_fingerprint` 在重新 connect / approve 后会覆盖旧授权：
+  - relay 会把该 caller 在该设备上的旧 active grants 标记为 `removed`
+  - caller 本地 `remote-connections.json` 会按 `client_instance_id + relay_url` 去重覆盖，避免残留旧 transport
+- `bifrost remote disconnect --all` 与按设备 `disconnect` 会循环清理该 caller 在目标设备上的全部 reusable grants，而不是只删除本地文件中最后一条已知 grant
+- target 侧两类配置入口已经分工明确：
+  - `bifrost remote shell ...` 直接编辑目标设备本地数据目录中的 `remote_shell.json`
+  - `bifrost remote grant ...` 与 Settings Grants `Edit Access` 走目标设备本地 admin API，更新本地 grant overlay
+- relay 的 `PATCH /v4/remote-invoke/client/grants/:id` 只接受最小字段：
+  - `client_instance_id`
+  - `grant_scope`
+  用于客户端鉴权和最小 scope 同步，不承载任何策略细节
+
+## 本轮交付范围
+
+本轮已经落地的能力包括：
+
+- caller 侧统一入口：`bifrost remote command exec ...`
+- target 本地独立 `remote_shell.json` store
+- shell grant 与 query grant 明确隔离
+- 执行前基础限制：
+  - executable allowlist
+  - shell_text regex allowlist
+  - cwd allowlist
+  - env key allowlist
+  - stdin / pty 开关
+  - timeout 上限
+  - 输出截断
+- grant 与 `shell_policy_set_version_snapshot` 绑定
+- Recent Calls / call history 记录 target 最终命中的 `policy_id` / `exec_mode`
+- Settings `Remote Invoke` 页提供可视化 Shell Access 管理
+- 本地 CLI 提供 `bifrost remote shell ...` 的脚本化配置能力
+
+## 策略归属模型
+
+### caller 侧
+
+caller 只允许指定：
+
+- `--cwd`
+- `--env`
+- `--timeout-ms`
+- `--shell-text`
+- `-- <program> [args...]`
+
+caller 不允许指定：
+
+- `policy_id`
+- `policy selector`
+- “这次必须走 full-access / pwd-argv / bash-safe-text” 之类的本地策略选择
+
+如果旧 caller 仍试图发送 `policy_id`，target 会直接拒绝：
+
+- `shell.exec caller must not specify policy_id; the target device selects policy`
+
+### target 侧
+
+target 基于两类本地信息自动决定有效策略：
+
+1. Shell Access 配置
+- 全局 `remote_shell.json`
+- 其中包含 policy / profile / allowlist / timeout / stdin / interactive 等约束
+
+2. 当前 caller 的授权绑定
+- `grant_scope`
+- `policy_binding`
+- `shell_policy_set_version_snapshot`
+
+执行时的选择规则是：
+
+1. 先检查 grant scope 是否允许 `shell.exec`
+2. 再检查 shell policy version 是否仍与授权快照一致
+3. 然后只在 target 允许的候选 policy 集合里做匹配
+4. 如果没有任何 policy 命中，target 拒绝
+5. 如果命中了多条 policy，target 也拒绝，要求执行侧收紧配置
+6. 只有唯一命中时才真正执行
+
+## 简化配置模式
+
+为了避免 target owner 一上来就面对全部低层字段，Settings `Manage Shell Access` 现在提供三档模式：
+
+### 1. Default Sandbox
+
+- 预设 `default-sandbox`
+- 当前语义是“明确拒绝执行”
+- 因为真正的沙箱后端尚未实现，所以用户选择这档时，target 会返回清晰拒绝，而不是偷偷放行
+
+### 2. Full Access
+
+- 预设 `full-access`
+- 允许广义 `shell_text` 与 `argv_exec` 执行
+- 继承环境
+- 可开启 `stdin` / interactive
+
+### 3. Custom Policies
+
+- 继续保留完整的 policy / profile 编辑能力
+- 适合需要精细 allowlist 或按 caller grant 绑定范围的场景
+
+## CLI 形态
+
+目标设备本地策略管理：
+
+```bash
+bifrost remote shell list
+bifrost remote shell show --json
+bifrost remote shell apply ./remote_shell.json
+bifrost remote shell profile add --id repo-default --name "Repo Default" --cwd /srv/app --env PATH
+bifrost remote shell policy add --id pwd-argv --name "Pwd argv" --mode argv_exec --profile repo-default --program /bin/pwd
+```
+
+caller 侧统一入口：
+
+```bash
+bifrost remote command exec -- /bin/pwd
+bifrost remote command exec --shell-text "printf hello && /bin/pwd"
+```
+
+参数约定：
+
+- `--cwd <path>`：候选策略仍需允许
+- `--env KEY=VALUE`：候选策略仍需允许
+- `--timeout-ms <n>`：最终会被 target 侧策略上限裁剪
+- `--shell-text <text>`：target 会在允许的 shell_text policy 中自动匹配
+- `-- <program> [args...]`：target 会在允许的 argv_exec policy 中自动匹配
+
+## 最新真实验证结论（2026-04-23）
+
+基于隔离 relay / target / caller 的真实验证，当前实现状态可以明确拆成两部分：
+
+- 已真实跑通：
+  - caller 不带 `--policy` 的 shell.exec 命令
+  - target 基于 grant binding 自动选择唯一命中的 policy
+  - caller 伪造 `policy_id` 时，target 直接拒绝
+  - `selected policy` grant 下的允许 / 拒绝链路
+  - `mode=all` grant 下的 full access 执行链路
+  - target 删除 policy 后，旧 grant 因 version snapshot 变化失效
+  - 同一 target 上两个 caller 并存时，只撤销一个 grant 不影响另一个
+  - reconnect 会覆盖同 caller/device 的旧 grant，避免 reusable grant 继续返回过期 transport
+- 仍然存在的产品缺口：
+  - Settings 页 `Pending Pairing Requests -> Review` 详细审批弹窗仍有真实可见性问题
+  - caller CLI 仍未公开 PTY / stdin payload 入口
+
+## 说明
+
+后文保留了较多长期方案、历史探索和结构化设计草案，其中有些段落仍提到 caller 传 `policy_id`。这些内容暂未全部清理，但不代表当前实现；如与上面的“当前生效契约”冲突，请以上面的契约为准。
 
 ## 背景
 

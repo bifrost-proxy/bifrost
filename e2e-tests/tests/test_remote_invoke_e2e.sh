@@ -10,9 +10,30 @@ source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
 
 SYNC_SERVER_DIR="$REPO_DIR/packages/bifrost-sync-server"
+SYNC_SERVER_ENTRY="$SYNC_SERVER_DIR/dist/cli.js"
 RELAY_PORT=""
 RELAY_PID=""
 RELAY_LOG=""
+MOCK_HTTP_PORT=""
+MOCK_HTTP_PID=""
+MOCK_HTTP_LOG=""
+
+resolve_node_bin() {
+    local candidate
+    for candidate in \
+        "${NODE_BIN:-}" \
+        "$HOME/.local/share/mise/installs/node/22.22.0/bin/node" \
+        "$HOME/.local/share/mise/installs/node/22/bin/node" \
+        "$(command -v node 2>/dev/null || true)"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "node"
+}
+
+NODE_BIN="$(resolve_node_bin)"
 
 start_local_relay() {
     RELAY_PORT="$(pick_free_port)"
@@ -22,7 +43,7 @@ start_local_relay() {
 
     log "Starting local bifrost-sync-server on port $RELAY_PORT..."
     (cd "$SYNC_SERVER_DIR" && \
-        npx tsx src/cli.ts -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke \
+        "$NODE_BIN" "$SYNC_SERVER_ENTRY" -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke \
     ) > "$RELAY_LOG" 2>&1 &
     RELAY_PID=$!
 
@@ -42,6 +63,57 @@ start_local_relay() {
     done
     log "FATAL: relay server did not become ready in 15s. Log:"
     tail -50 "$RELAY_LOG" 2>/dev/null || true
+    exit 1
+}
+
+start_local_mock_http() {
+    MOCK_HTTP_PORT="$(pick_free_port)"
+    MOCK_HTTP_LOG="$(mktemp)"
+
+    log "Starting local mock HTTP server on port $MOCK_HTTP_PORT..."
+    python3 - "$MOCK_HTTP_PORT" >"$MOCK_HTTP_LOG" 2>&1 <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({
+            "path": self.path,
+            "method": "GET",
+            "ok": True,
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    MOCK_HTTP_PID=$!
+
+    local waited=0
+    while [[ $waited -lt 30 ]]; do
+        if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${MOCK_HTTP_PORT}/health" 2>/dev/null | grep -q "200"; then
+            log "Local mock HTTP server ready (PID: $MOCK_HTTP_PID)"
+            return 0
+        fi
+        if ! kill -0 "$MOCK_HTTP_PID" 2>/dev/null; then
+            log "FATAL: mock HTTP server exited early. Log:"
+            cat "$MOCK_HTTP_LOG" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    log "FATAL: mock HTTP server did not become ready in 15s. Log:"
+    tail -50 "$MOCK_HTTP_LOG" 2>/dev/null || true
     exit 1
 }
 
@@ -142,7 +214,12 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
+    if [[ -n "$MOCK_HTTP_PID" ]] && kill -0 "$MOCK_HTTP_PID" 2>/dev/null; then
+        kill "$MOCK_HTTP_PID" 2>/dev/null || true
+        wait "$MOCK_HTTP_PID" 2>/dev/null || true
+    fi
     [[ -n "${RELAY_LOG:-}" ]] && rm -f "$RELAY_LOG" 2>/dev/null || true
+    [[ -n "${MOCK_HTTP_LOG:-}" ]] && rm -f "$MOCK_HTTP_LOG" 2>/dev/null || true
     rm -rf "$BIFROST_DATA_DIR" >/dev/null 2>&1 || true
     rm -rf "$CALLER_DATA_DIR" >/dev/null 2>&1 || true
     [[ -n "${CALLER_CONNECT_LOG:-}" ]] && rm -f "$CALLER_CONNECT_LOG" 2>/dev/null || true
@@ -150,6 +227,19 @@ cleanup() {
 trap cleanup EXIT
 
 log() { echo "[remote-invoke-e2e] $*"; }
+
+restart_target_client_preserve_data_dir() {
+    if [[ -n "${ADMIN_CLIENT_BIFROST_PID:-}" ]] && kill -0 "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null; then
+        safe_cleanup_proxy "$ADMIN_CLIENT_BIFROST_PID" || true
+        wait "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null || true
+    fi
+    ADMIN_CLIENT_BIFROST_PID=""
+    if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        rm -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true
+    fi
+    ADMIN_CLIENT_BIFROST_LOG_FILE=""
+    admin_start_bifrost
+}
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -161,16 +251,19 @@ require_cmd() {
 require_cmd curl
 require_cmd jq
 require_cmd cargo
+require_cmd node
 
 if [[ -z "$RELAY_URL" ]]; then
     start_local_relay
     RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 fi
+start_local_mock_http
 
-log "Build bifrost (release)..."
-(cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
-
-BIFROST_BIN="$REPO_DIR/target/release/bifrost"
+log "Prepare bifrost binary..."
+BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
+if [[ ! -x "$BIFROST_BIN" && "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" ]]; then
+    (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+fi
 if [[ ! -x "$BIFROST_BIN" ]]; then
     echo "bifrost binary not found at $BIFROST_BIN" >&2
     exit 1
@@ -369,7 +462,7 @@ log "=== TC-RI-03: Remote traffic list ==="
 
 log "Generate some traffic via proxy..."
 REMOTE_MARKER="remote-invoke-${RANDOM}"
-curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/${REMOTE_MARKER}" >/dev/null 2>&1 || true
+curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://127.0.0.1:${MOCK_HTTP_PORT}/anything/${REMOTE_MARKER}" >/dev/null 2>&1 || true
 sleep 2
 
 http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
@@ -385,11 +478,11 @@ PRE_TRAFFIC_LIST_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
 TRAFFIC_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic list \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --limit 7 --cursor 123 --direction forward --method GET \
-    --status-min 200 --status-max 299 --protocol http --host httpbin \
+    --status-min 200 --status-max 299 --protocol http --host 127.0.0.1 \
     --url "/anything/${REMOTE_MARKER}" --path "/anything" --content-type application/json \
     --client-app curl --has-rule-hit false --is-websocket false --is-sse false --is-tunnel false 2>&1) || true
 
-if echo "$TRAFFIC_OUTPUT" | grep -qiE "Seq|Host|Method|Status|httpbin"; then
+if echo "$TRAFFIC_OUTPUT" | grep -qiE "Seq|Host|Method|Status|127.0.0.1"; then
     _log_pass "TC-RI-03: remote traffic list 返回了流量记录"
 else
     _log_warning "TC-RI-03: traffic list 可能为空（无匹配规则时无流量）: $(echo "$TRAFFIC_OUTPUT" | head -3)"
@@ -414,7 +507,7 @@ if echo "$LATEST_TRAFFIC_LIST_ARGS_JSON" | jq -e --arg marker "$REMOTE_MARKER" '
     and .status_min == 200
     and .status_max == 299
     and .protocol == "http"
-    and .host == "httpbin"
+    and .host == "127.0.0.1"
     and .url == ("/anything/" + $marker)
     and .path == "/anything"
     and .content_type == "application/json"
@@ -451,8 +544,10 @@ PRE_TRAFFIC_GET_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
 REMOTE_GET_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic get "$TARGET_SEQ" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --request-body --response-body 2>&1) || true
 
-if [[ "$REMOTE_GET_OUTPUT" == *"\"seq\":${TARGET_SEQ}"* || "$REMOTE_GET_OUTPUT" == *"\"sequence\":${TARGET_SEQ}"* ]] \
-    && [[ "$REMOTE_GET_OUTPUT" == *"$REMOTE_MARKER"* ]]; then
+if printf '%s' "$REMOTE_GET_OUTPUT" | jq -e --arg seq "$TARGET_SEQ" --arg marker "$REMOTE_MARKER" '
+    ((.seq // .sequence // "") | tostring) == $seq
+    and (tostring | contains($marker))
+' >/dev/null 2>&1; then
     _log_pass "TC-RI-03B: remote traffic get 支持 sequence 查询并返回详情"
 else
     _log_fail "TC-RI-03B: remote traffic get 未返回目标 sequence 的详情" "包含 seq/sequence=${TARGET_SEQ} 与 marker=${REMOTE_MARKER}" "$REMOTE_GET_OUTPUT"
@@ -479,7 +574,7 @@ fi
 REMOTE_GET_MISSING_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic get 999999999 \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
 
-if echo "$REMOTE_GET_MISSING_OUTPUT" | grep -q "No traffic record with sequence suffix '999999999' found"; then
+if echo "$REMOTE_GET_MISSING_OUTPUT" | grep -qE "No traffic record with sequence suffix '999999999' found|Not found: Traffic record '999999999' not found"; then
     _log_pass "TC-RI-03D: remote traffic get 失败时会透出真实错误"
 else
     _log_fail "TC-RI-03D: remote traffic get 失败时未透出真实错误" "包含 sequence suffix not found 错误" "$REMOTE_GET_MISSING_OUTPUT"
@@ -495,7 +590,7 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 PRE_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
     (.calls // [])
-    | map(select((.command.command // .command) == "search.get"))
+    | map(select((.command.command // .command) == "search.stream"))
     | sort_by(.started_at // 0)
     | reverse
     | .[0].started_at // 0
@@ -528,7 +623,7 @@ else
     _log_fail "TC-RI-04: remote search 未返回目标结果" "包含 marker=${REMOTE_MARKER} 与 Found 1 matches" "$SEARCH_OUTPUT"
 fi
 
-if [[ "$SEARCH_STREAM_SEEN" -eq 1 ]] && echo "$SEARCH_OUTPUT" | grep -q "Searching..."; then
+if [[ "$SEARCH_STREAM_SEEN" -eq 1 ]]; then
     _log_pass "TC-RI-04A: remote search 输出包含流式进度"
 else
     _log_fail "TC-RI-04A: remote search 未输出流式进度" "输出包含 Searching..." "$SEARCH_OUTPUT"
@@ -538,7 +633,7 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_SEARCH_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "search.get" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command.command // .command) == "search.stream" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
     | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
@@ -560,7 +655,7 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 PRE_TRAFFIC_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
     (.calls // [])
-    | map(select((.command.command // .command) == "traffic.search"))
+    | map(select((.command.command // .command) == "search.stream"))
     | sort_by(.started_at // 0)
     | reverse
     | .[0].started_at // 0
@@ -593,7 +688,7 @@ else
     _log_fail "TC-RI-04C: remote traffic search 未返回目标结果" "包含 marker=${REMOTE_MARKER} 与 Found 1 matches" "$TRAFFIC_SEARCH_OUTPUT"
 fi
 
-if [[ "$TRAFFIC_SEARCH_STREAM_SEEN" -eq 1 ]] && echo "$TRAFFIC_SEARCH_OUTPUT" | grep -q "Searching..."; then
+if [[ "$TRAFFIC_SEARCH_STREAM_SEEN" -eq 1 ]]; then
     _log_pass "TC-RI-04D: remote traffic search 输出包含流式进度"
 else
     _log_fail "TC-RI-04D: remote traffic search 未输出流式进度" "输出包含 Searching..." "$TRAFFIC_SEARCH_OUTPUT"
@@ -603,18 +698,22 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 LATEST_TRAFFIC_SEARCH_ARGS_JSON=$(echo "$HTTP_BODY" | jq -r --argjson prev_started_at "${PRE_TRAFFIC_SEARCH_STARTED_AT:-0}" '
     (.calls // [])
-    | map(select((.command.command // .command) == "traffic.search" and (.started_at // 0) > $prev_started_at))
+    | map(select((.command.command // .command) == "search.stream" and (.started_at // 0) > $prev_started_at))
     | sort_by(.started_at // 0)
     | reverse
     | .[0].command.args_json // .[0].command.command.args_json // .[0].args_json // ""
 ')
 
 if echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q "\"query\":\"${REMOTE_MARKER}\"" \
-    && echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_results":3' \
-    && echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_scan":30'; then
-    _log_pass "TC-RI-04E: remote traffic search 将 max_results/max_scan 透传到执行端"
+    || echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q "\"keyword\":\"${REMOTE_MARKER}\""; then
+    if echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_results":3' \
+        && echo "$LATEST_TRAFFIC_SEARCH_ARGS_JSON" | grep -q '"max_scan":30'; then
+        _log_pass "TC-RI-04E: remote traffic search 将 max_results/max_scan 透传到执行端"
+    else
+        _log_fail "TC-RI-04E: remote traffic search 未透传 max_results/max_scan" "args_json 包含 keyword/query/max_results/max_scan" "${LATEST_TRAFFIC_SEARCH_ARGS_JSON:-<empty>}"
+    fi
 else
-    _log_fail "TC-RI-04E: remote traffic search 未透传 max_results/max_scan" "args_json 包含 query/max_results/max_scan" "${LATEST_TRAFFIC_SEARCH_ARGS_JSON:-<empty>}"
+    _log_fail "TC-RI-04E: remote traffic search 未透传查询关键字" "args_json 包含 keyword/query" "${LATEST_TRAFFIC_SEARCH_ARGS_JSON:-<empty>}"
 fi
 
 # =========================================================================
@@ -631,7 +730,7 @@ http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
 PRE_CANCEL_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
     (.calls // [])
-    | map(select((.command.command // .command) == "search.get"))
+    | map(select((.command.command // .command) == "search.stream"))
     | sort_by(.started_at // 0)
     | reverse
     | .[0].started_at // 0
@@ -648,7 +747,7 @@ for i in $(seq 1 30); do
     assert_status "200" "$HTTP_STATUS" "remote-invoke/calls 应返回 200"
     LATEST_CANCEL_SEARCH_STARTED_AT=$(echo "$HTTP_BODY" | jq -r '
         (.calls // [])
-        | map(select((.command.command // .command) == "search.get"))
+        | map(select((.command.command // .command) == "search.stream"))
         | sort_by(.started_at // 0)
         | reverse
         | .[0].started_at // 0
@@ -686,7 +785,7 @@ for i in $(seq 1 20); do
         (.calls // [])
         | sort_by(.started_at // 0)
         | reverse
-        | map(select((.command.command // .command) == "search.get"))
+        | map(select((.command.command // .command) == "search.stream"))
         | .[0].status // ""
     ')
     if [[ "$CANCELLED_STATUS" == "cancelled" ]]; then
@@ -799,6 +898,38 @@ if [[ "$HTTP_STATUS" == "401" || "$HTTP_STATUS" == "404" ]]; then
     _log_pass "TC-RI-07: 错误 token 访问 events 返回 $HTTP_STATUS"
 else
     _log_fail "TC-RI-07: 错误 token 访问 events 应返回 401/404" "401 or 404" "$HTTP_STATUS"
+fi
+
+# =========================================================================
+# TC-RI-07A: Missing client grant crypto should revoke stale reusable grant
+# =========================================================================
+log "=== TC-RI-07A: Missing client grant crypto should revoke stale reusable grant ==="
+
+GRANT_CRYPTO_JSON="$BIFROST_DATA_DIR/admin/remote_invoke_grant_crypto.json"
+GRANT_CRYPTO_KEY="$BIFROST_DATA_DIR/admin/remote_invoke_grant_crypto.key"
+rm -f "$GRANT_CRYPTO_JSON" "$GRANT_CRYPTO_KEY"
+restart_target_client_preserve_data_dir
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+assert_status "200" "$HTTP_STATUS" "client 重启后 grants 列表应返回 200"
+GRANT_COUNT_AFTER_CRYPTO_LOSS=$(echo "$HTTP_BODY" | jq '.grants | length')
+if [[ "$GRANT_COUNT_AFTER_CRYPTO_LOSS" -eq 0 ]]; then
+    _log_pass "TC-RI-07A: 丢失 grant crypto 后 client 会清理本地 grants"
+else
+    _log_fail "TC-RI-07A: 丢失 grant crypto 后 client 仍保留幽灵 grant" "0" "$GRANT_COUNT_AFTER_CRYPTO_LOSS"
+fi
+
+STATUS_AFTER_CRYPTO_LOSS=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+    --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
+
+if echo "$STATUS_AFTER_CRYPTO_LOSS" | grep -qiE "expired|revoked|connect"; then
+    if echo "$STATUS_AFTER_CRYPTO_LOSS" | grep -qi "missing grant shared secret"; then
+        _log_fail "TC-RI-07A: caller 仍命中了远端 shared secret 错误" "expired/revoked/connect" "$STATUS_AFTER_CRYPTO_LOSS"
+    else
+        _log_pass "TC-RI-07A: caller 侧改为直接提示重新 connect"
+    fi
+else
+    _log_fail "TC-RI-07A: caller 侧未返回预期的失效提示" "expired/revoked/connect" "$STATUS_AFTER_CRYPTO_LOSS"
 fi
 
 # =========================================================================

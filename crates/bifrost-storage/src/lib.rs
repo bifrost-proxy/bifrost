@@ -1,6 +1,7 @@
 mod config;
 mod config_manager;
 mod data_dir;
+mod remote_shell;
 mod rules;
 mod state;
 mod unified_config;
@@ -9,6 +10,7 @@ mod values;
 pub(crate) use config::BifrostConfig as LegacyBifrostConfig;
 pub use config_manager::{ConfigChangeEvent, ConfigManager, SharedConfigManager};
 pub use data_dir::{data_dir, set_data_dir};
+pub use remote_shell::{RemoteShellPolicy, RemoteShellProfile, RemoteShellSet, RemoteShellStore};
 pub use rules::{
     content_hash, RuleFile, RuleSummary, RuleSyncMetadata, RuleSyncStatus, RulesStorage,
 };

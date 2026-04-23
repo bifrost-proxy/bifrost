@@ -318,6 +318,7 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
     "settings-remote-invoke-discovery-section",
   );
   const sshCard = page.getByTestId("settings-remote-invoke-ssh-card");
+  const shellCard = page.getByTestId("settings-remote-invoke-shell-card");
 
   await expect(statusCard).toBeVisible();
   await expect(connectionSection).toContainText("Connection Status");
@@ -326,6 +327,10 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
   await expect(discoverySection).toContainText("Enter Discovery Mode");
   await expect(sshCard).toBeVisible();
   await expect(sshCard).toContainText("SSH Key");
+  await expect(shellCard).toBeVisible();
+  await expect(shellCard).toContainText("Shell Access");
+  await expect(shellCard).toContainText("Configuration Mode");
+  await expect(shellCard).toContainText("Policy Set Version");
 });
 
 test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async ({

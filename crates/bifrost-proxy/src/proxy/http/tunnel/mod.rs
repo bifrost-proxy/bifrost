@@ -14,6 +14,7 @@ use bifrost_core::{BifrostError, Protocol, Result};
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+use hyper::header::{HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Request, Response};
@@ -2163,13 +2164,6 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    for (name, value) in &resolved_rules.req_headers {
-        if verbose_logging {
-            info!("[{}] [REQ_HEADER] {} = {}", req_id, name, value);
-        }
-        new_req = new_req.header(name.as_str(), value.as_str());
-    }
-
     let request_body_is_streaming = streaming_body.is_some();
     let outgoing_body = match streaming_body {
         Some(body) => body,
@@ -2186,6 +2180,18 @@ async fn handle_intercepted_request_with_protocol(
                 .unwrap());
         }
     };
+    if let Err(err) = apply_resolved_req_headers_to_outgoing_request(
+        req_id,
+        &mut outgoing_req,
+        &resolved_rules.req_headers,
+        verbose_logging,
+    ) {
+        error!("[{}] Failed to apply request headers: {}", req_id, err);
+        return Ok(Response::builder()
+            .status(502)
+            .body(full_body(b"Bad Gateway".to_vec()))
+            .unwrap());
+    }
     sanitize_upstream_headers(outgoing_req.headers_mut());
     outgoing_req.headers_mut().remove(hyper::header::HOST);
 
@@ -4124,6 +4130,25 @@ async fn serve_mock_file(
     }
 }
 
+fn apply_resolved_req_headers_to_outgoing_request<B>(
+    req_id: &str,
+    outgoing_req: &mut Request<B>,
+    req_headers: &[(String, String)],
+    verbose_logging: bool,
+) -> std::result::Result<(), String> {
+    for (name, value) in req_headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("invalid request header name: {name}"))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|_| format!("invalid request header value for header: {name}"))?;
+        if verbose_logging {
+            info!("[{}] [REQ_HEADER] {} = {}", req_id, name, value);
+        }
+        outgoing_req.headers_mut().insert(header_name, header_value);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4296,6 +4321,31 @@ mod tests {
         assert_eq!(socket_status.receive_bytes, 64);
 
         cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn apply_resolved_req_headers_replaces_existing_header_values() {
+        let mut req = Request::builder()
+            .uri("http://example.com")
+            .header("x-same-key", "client-original")
+            .body(())
+            .unwrap();
+
+        apply_resolved_req_headers_to_outgoing_request(
+            "test-req",
+            &mut req,
+            &[("x-same-key".to_string(), "rule-value".to_string())],
+            false,
+        )
+        .expect("request headers should be applied");
+
+        let values: Vec<_> = req
+            .headers()
+            .get_all("x-same-key")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["rule-value".to_string()]);
     }
 
     fn make_tls_config_with_ca() -> TlsConfig {

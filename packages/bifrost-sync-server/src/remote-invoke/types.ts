@@ -141,6 +141,11 @@ export interface GrantDecisionRequest {
   client_ephemeral_pub?: string;
 }
 
+export interface UpdateGrantRequest {
+  client_instance_id?: string;
+  grant_scope?: RemoteInvokeGrantScope;
+}
+
 export interface PublishPairCodeRequest {
   client_instance_id: string;
   pair_code: string;

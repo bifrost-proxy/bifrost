@@ -339,7 +339,7 @@ import sys
 obj = json.load(open(sys.argv[1]))
 candidates = [
     call for call in obj.get("calls", [])
-    if ((call.get("command") or {}).get("command") or call.get("command")) == "search.get"
+    if ((call.get("command") or {}).get("command") or call.get("command")) in ("search.get", "search.stream")
 ]
 candidates.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
 print(candidates[0].get("started_at") or 0 if candidates else 0)
@@ -355,10 +355,10 @@ curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$SEARCH_CALLS_AFTER_JSON"
 assert_python "$SEARCH_CALLS_AFTER_JSON" '
 calls = [
     call for call in obj.get("calls", [])
-    if ((call.get("command") or {}).get("command") or call.get("command")) == "search.get"
+    if ((call.get("command") or {}).get("command") or call.get("command")) in ("search.get", "search.stream")
     and (call.get("started_at") or 0) > int("'"$SEARCH_PRE_STARTED_AT"'")
 ]
-assert calls, "应记录新的 search.get 调用"
+assert calls, "应记录新的 search 调用"
 calls.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
 latest = calls[0]
 assert str(latest.get("status", "")).lower() == "completed"
@@ -384,8 +384,17 @@ TRAFFIC_OUTPUT="$TMPDIR/traffic.out"
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic get "$TRAFFIC_ID" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --response-body \
     >"$TRAFFIC_OUTPUT" 2>&1
-grep -q "$MARKER" "$TRAFFIC_OUTPUT"
-grep -q "\"id\":\"$TRAFFIC_ID\"" "$TRAFFIC_OUTPUT"
+python3 - "$TRAFFIC_OUTPUT" "$TRAFFIC_ID" "$MARKER" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    obj = json.load(fh)
+
+assert obj["id"] == sys.argv[2]
+payload = json.dumps(obj, ensure_ascii=False)
+assert sys.argv[3] in payload
+PY
 TRAFFIC_CALLS_AFTER_JSON="$TMPDIR/traffic_calls_after.json"
 curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$TRAFFIC_CALLS_AFTER_JSON"
 assert_python "$TRAFFIC_CALLS_AFTER_JSON" '
