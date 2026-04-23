@@ -20,7 +20,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
@@ -286,15 +286,17 @@ fn resolve_local_connection(
         )),
         1 => {
             let conn = &connections[0];
-            let short_id = &conn.client_instance_id[..conn.client_instance_id.len().min(12)];
-            println!(
-                "{}",
-                format!(
-                    "→ Using saved connection: {} ({short_id})",
-                    conn.device_name
-                )
-                .dimmed()
-            );
+            if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
+                let short_id = &conn.client_instance_id[..conn.client_instance_id.len().min(12)];
+                println!(
+                    "{}",
+                    format!(
+                        "→ Using saved connection: {} ({short_id})",
+                        conn.device_name
+                    )
+                    .dimmed()
+                );
+            }
             Ok(conn.clone())
         }
         n => {
@@ -989,7 +991,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
     let grant = prefer_saved_grant_for_transport(&conn, grant);
 
-    info!(grant_id = %grant.grant_id, "found reusable grant");
+    debug!(grant_id = %grant.grant_id, "found reusable grant");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!(
             "{}",
@@ -1558,54 +1560,56 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             query: None,
             render: RemoteRenderMode::Raw,
         },
-        RemoteCommands::Search(search_args) => BuiltRemoteCommand {
-            kind: CommandKind::QueryReadonly,
-            label: "search.stream".to_string(),
-            command: None,
-            args_json: None,
-            query: Some(CanonicalQueryCommand::Search(command_search_args(
-                search_args,
-            ))),
-            render: RemoteRenderMode::Search {
-                format: search_args.format.parse().unwrap_or(OutputFormat::Table),
-                no_color: search_args.no_color,
-                keyword: search_args.keyword.clone().unwrap_or_default(),
-                max_scan: search_args.max_scan,
-                max_results: search_args.max_results,
-            },
-        },
+        RemoteCommands::Search(search_args) => {
+            let query = CanonicalQueryCommand::Search(command_search_args(search_args));
+            BuiltRemoteCommand {
+                kind: CommandKind::QueryReadonly,
+                label: "search.stream".to_string(),
+                command: None,
+                args_json: query_args_json(&query),
+                query: Some(query),
+                render: RemoteRenderMode::Search {
+                    format: search_args.format.parse().unwrap_or(OutputFormat::Table),
+                    no_color: search_args.no_color,
+                    keyword: search_args.keyword.clone().unwrap_or_default(),
+                    max_scan: search_args.max_scan,
+                    max_results: search_args.max_results,
+                },
+            }
+        }
         RemoteCommands::Traffic { action } => match action {
             RemoteTrafficCommands::List(list_args) => {
                 let list_args = list_args.as_ref();
+                let query = CanonicalQueryCommand::TrafficList(TrafficListArgs {
+                    limit: Some(list_args.limit),
+                    cursor: list_args.cursor,
+                    direction: if list_args.direction == "forward" {
+                        TrafficListDirection::Forward
+                    } else {
+                        TrafficListDirection::Backward
+                    },
+                    method: list_args.method.clone(),
+                    status: list_args.status,
+                    status_min: list_args.status_min,
+                    status_max: list_args.status_max,
+                    protocol: list_args.protocol.clone(),
+                    host: list_args.host.clone(),
+                    url: list_args.url.clone(),
+                    path: list_args.path.clone(),
+                    content_type: list_args.content_type.clone(),
+                    client_ip: list_args.client_ip.clone(),
+                    client_app: list_args.client_app.clone(),
+                    has_rule_hit: list_args.has_rule_hit,
+                    is_websocket: list_args.is_websocket,
+                    is_sse: list_args.is_sse,
+                    is_tunnel: list_args.is_tunnel,
+                });
                 BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.list".to_string(),
                     command: None,
-                    args_json: None,
-                    query: Some(CanonicalQueryCommand::TrafficList(TrafficListArgs {
-                        limit: Some(list_args.limit),
-                        cursor: list_args.cursor,
-                        direction: if list_args.direction == "forward" {
-                            TrafficListDirection::Forward
-                        } else {
-                            TrafficListDirection::Backward
-                        },
-                        method: list_args.method.clone(),
-                        status: list_args.status,
-                        status_min: list_args.status_min,
-                        status_max: list_args.status_max,
-                        protocol: list_args.protocol.clone(),
-                        host: list_args.host.clone(),
-                        url: list_args.url.clone(),
-                        path: list_args.path.clone(),
-                        content_type: list_args.content_type.clone(),
-                        client_ip: list_args.client_ip.clone(),
-                        client_app: list_args.client_app.clone(),
-                        has_rule_hit: list_args.has_rule_hit,
-                        is_websocket: list_args.is_websocket,
-                        is_sse: list_args.is_sse,
-                        is_tunnel: list_args.is_tunnel,
-                    })),
+                    args_json: query_args_json(&query),
+                    query: Some(query),
                     render: RemoteRenderMode::TrafficList {
                         format: list_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: list_args.no_color,
@@ -1618,53 +1622,69 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                 response_body,
                 format,
                 no_color,
-            } => BuiltRemoteCommand {
-                kind: CommandKind::QueryReadonly,
-                label: "traffic.get".to_string(),
-                command: None,
-                args_json: None,
-                query: Some(CanonicalQueryCommand::TrafficGet(TrafficGetArgs {
+            } => {
+                let query = CanonicalQueryCommand::TrafficGet(TrafficGetArgs {
                     id: id.clone(),
                     request_body: *request_body,
                     response_body: *response_body,
-                })),
-                render: RemoteRenderMode::TrafficGet {
-                    format: format.parse().unwrap_or(OutputFormat::JsonPretty),
-                    no_color: *no_color,
-                },
-            },
-            RemoteTrafficCommands::Search(search_args) => BuiltRemoteCommand {
-                kind: CommandKind::QueryReadonly,
-                label: "search.stream".to_string(),
-                command: None,
-                args_json: None,
-                query: Some(CanonicalQueryCommand::Search(command_search_args(
-                    search_args,
-                ))),
-                render: RemoteRenderMode::Search {
-                    format: search_args.format.parse().unwrap_or(OutputFormat::Table),
-                    no_color: search_args.no_color,
-                    keyword: search_args.keyword.clone().unwrap_or_default(),
-                    max_scan: search_args.max_scan,
-                    max_results: search_args.max_results,
-                },
-            },
-            RemoteTrafficCommands::Clear { ids, yes: _ } => BuiltRemoteCommand {
-                kind: CommandKind::QueryReadonly,
-                label: "traffic.clear".to_string(),
-                command: None,
-                args_json: None,
-                query: Some(CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
+                });
+                BuiltRemoteCommand {
+                    kind: CommandKind::QueryReadonly,
+                    label: "traffic.get".to_string(),
+                    command: None,
+                    args_json: query_args_json(&query),
+                    query: Some(query),
+                    render: RemoteRenderMode::TrafficGet {
+                        format: format.parse().unwrap_or(OutputFormat::JsonPretty),
+                        no_color: *no_color,
+                    },
+                }
+            }
+            RemoteTrafficCommands::Search(search_args) => {
+                let query = CanonicalQueryCommand::Search(command_search_args(search_args));
+                BuiltRemoteCommand {
+                    kind: CommandKind::QueryReadonly,
+                    label: "search.stream".to_string(),
+                    command: None,
+                    args_json: query_args_json(&query),
+                    query: Some(query),
+                    render: RemoteRenderMode::Search {
+                        format: search_args.format.parse().unwrap_or(OutputFormat::Table),
+                        no_color: search_args.no_color,
+                        keyword: search_args.keyword.clone().unwrap_or_default(),
+                        max_scan: search_args.max_scan,
+                        max_results: search_args.max_results,
+                    },
+                }
+            }
+            RemoteTrafficCommands::Clear { ids, yes: _ } => {
+                let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
                     ids: ids.as_ref().map(|value| {
                         value
                             .split(',')
                             .map(|item| item.trim().to_string())
                             .collect()
                     }),
-                })),
-                render: RemoteRenderMode::Raw,
-            },
+                });
+                BuiltRemoteCommand {
+                    kind: CommandKind::QueryReadonly,
+                    label: "traffic.clear".to_string(),
+                    command: None,
+                    args_json: query_args_json(&query),
+                    query: Some(query),
+                    render: RemoteRenderMode::Raw,
+                }
+            }
         },
+    }
+}
+
+fn query_args_json(query: &CanonicalQueryCommand) -> Option<String> {
+    match query {
+        CanonicalQueryCommand::Search(args) => serde_json::to_string(args).ok(),
+        CanonicalQueryCommand::TrafficList(args) => serde_json::to_string(args).ok(),
+        CanonicalQueryCommand::TrafficGet(args) => serde_json::to_string(args).ok(),
+        CanonicalQueryCommand::TrafficClear(args) => serde_json::to_string(args).ok(),
     }
 }
 
@@ -3095,7 +3115,7 @@ impl CallerRelayClient {
                             return Err(BifrostError::Network(format!("call events SSE error: {e}")));
                         }
                         None => {
-                            info!("call events stream closed");
+                            debug!("call events stream closed");
                             if !stream_stdout {
                                 result.stdout = Some(stdout_parts.join(""));
                             }
@@ -3549,7 +3569,10 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "search.stream");
-        assert!(built.args_json.is_none());
+        let raw_args = built.args_json.as_deref().expect("args_json should exist");
+        let args: SearchArgs = serde_json::from_str(raw_args).expect("search args json");
+        assert_eq!(args.max_results, Some(7));
+        assert_eq!(args.max_scan, Some(12));
         match &built.render {
             RemoteRenderMode::Search {
                 format,
@@ -3625,7 +3648,10 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "search.stream");
-        assert!(built.args_json.is_none());
+        let raw_args = built.args_json.as_deref().expect("args_json should exist");
+        let args: SearchArgs = serde_json::from_str(raw_args).expect("traffic search args json");
+        assert_eq!(args.max_results, Some(3));
+        assert_eq!(args.max_scan, Some(9));
         match &built.render {
             RemoteRenderMode::Search {
                 format,
@@ -3725,7 +3751,21 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.list");
-        assert!(built.args_json.is_none());
+        let raw_args = built.args_json.as_deref().expect("args_json should exist");
+        let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic list json");
+        assert_eq!(json.get("limit").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(json.get("cursor").and_then(|v| v.as_u64()), Some(123));
+        assert_eq!(
+            json.get("direction").and_then(|v| v.as_str()),
+            Some("forward")
+        );
+        assert_eq!(json.get("method").and_then(|v| v.as_str()), Some("POST"));
+        assert_eq!(json.get("status_min").and_then(|v| v.as_u64()), Some(200));
+        assert_eq!(json.get("status_max").and_then(|v| v.as_u64()), Some(299));
+        assert_eq!(
+            json.get("client_app").and_then(|v| v.as_str()),
+            Some("curl")
+        );
         match &built.render {
             RemoteRenderMode::TrafficList { format, no_color } => {
                 assert_eq!(*format, OutputFormat::Compact);
@@ -3772,7 +3812,20 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.get");
-        assert!(built.args_json.is_none());
+        let raw_args = built.args_json.as_deref().expect("args_json should exist");
+        let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic get json");
+        assert_eq!(
+            json.get("id").and_then(|v| v.as_str()),
+            Some("REQ-69e304e7-000033")
+        );
+        assert_eq!(
+            json.get("request_body").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            json.get("response_body").and_then(|v| v.as_bool()),
+            Some(false)
+        );
         match &built.render {
             RemoteRenderMode::TrafficGet { format, no_color } => {
                 assert_eq!(*format, OutputFormat::Table);
@@ -3801,7 +3854,14 @@ mod tests {
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "traffic.clear");
-        assert!(built.args_json.is_none());
+        let raw_args = built.args_json.as_deref().expect("args_json should exist");
+        let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic clear json");
+        assert_eq!(
+            json.get("ids")
+                .and_then(|v| v.as_array())
+                .map(|ids| ids.len()),
+            Some(2)
+        );
         match built.query.expect("query should exist") {
             CanonicalQueryCommand::TrafficClear(args) => {
                 assert_eq!(

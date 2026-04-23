@@ -36,6 +36,10 @@ export interface RemoteCommand {
   kind?: string;
   command: string;
   args_json?: string;
+  query?: {
+    type?: string;
+    args?: unknown;
+  } | null;
 }
 
 export interface PairingRequest {
@@ -173,6 +177,31 @@ export interface CallsListResponse {
 
 export interface CallDetailResponse {
   call: Call;
+}
+
+export function getCallArgsPreviewSource(
+  call: Pick<Call, "command_summary" | "command">,
+): string | null {
+  const summaryArgs = call.command_summary?.masked_args_json?.trim();
+  if (summaryArgs) {
+    return summaryArgs;
+  }
+
+  const commandArgs = call.command?.args_json?.trim();
+  if (commandArgs) {
+    return commandArgs;
+  }
+
+  const queryArgs = call.command?.query?.args;
+  if (queryArgs == null) {
+    return null;
+  }
+
+  try {
+    return JSON.stringify(queryArgs);
+  } catch {
+    return null;
+  }
 }
 
 export async function listGrants(): Promise<GrantsListResponse> {

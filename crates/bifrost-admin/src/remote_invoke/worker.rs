@@ -2355,6 +2355,15 @@ fn build_call_command_summary(
         };
     }
 
+    let has_masked_args = summary
+        .masked_args_json
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !has_masked_args {
+        summary.masked_args_json = command.summary_args_json();
+    }
+
     summary
 }
 
@@ -2568,6 +2577,7 @@ fn build_grant_info_from_grant_created(
 mod tests {
     use super::*;
     use base64::Engine;
+    use bifrost_command::{CanonicalQueryCommand, SearchArgs};
     use ring::agreement::EphemeralPrivateKey;
     use ring::rand::SystemRandom;
 
@@ -2820,6 +2830,114 @@ mod tests {
         );
 
         assert_eq!(summary.command_preview, "status");
+    }
+
+    #[test]
+    fn test_build_call_command_summary_falls_back_to_decrypted_args_json_when_masked_args_missing()
+    {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "search.get".to_string(),
+            args_json: Some(r#"{"query":"needle","max_results":5,"max_scan":50}"#.to_string()),
+            query: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "search.get"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(
+            summary.masked_args_json.as_deref(),
+            Some(r#"{"query":"needle","max_results":5,"max_scan":50}"#)
+        );
+    }
+
+    #[test]
+    fn test_build_call_command_summary_preserves_existing_masked_args_json() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "search.get".to_string(),
+            args_json: Some(r#"{"query":"needle","max_results":5}"#.to_string()),
+            query: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "search.get",
+                "masked_args_json": "{\"query\":\"***\"}"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(
+            summary.masked_args_json.as_deref(),
+            Some("{\"query\":\"***\"}")
+        );
+    }
+
+    #[test]
+    fn test_build_call_command_summary_falls_back_to_query_args_when_args_json_missing() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: String::new(),
+            args_json: None,
+            query: Some(CanonicalQueryCommand::Search(SearchArgs {
+                keyword: "needle".to_string(),
+                limit: Some(5),
+                max_scan: Some(50),
+                max_results: Some(5),
+                ..SearchArgs::default()
+            })),
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(None, &command, CommandKind::QueryReadonly);
+
+        let masked = summary
+            .masked_args_json
+            .as_deref()
+            .expect("query args should be serialized");
+        assert!(masked.contains("\"keyword\":\"needle\""));
+        assert!(masked.contains("\"limit\":5"));
+        assert!(masked.contains("\"max_scan\":50"));
+        assert!(masked.contains("\"max_results\":5"));
     }
 
     fn make_call_info(call_id: &str) -> CallInfo {

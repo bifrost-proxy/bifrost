@@ -80,7 +80,7 @@ fn resolve_remote_relay_url(explicit: Option<String>, cli_port: u16) -> String {
 }
 
 fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>) -> bool {
-    if !stdout_is_terminal {
+    if !stdout_is_terminal && std::env::var_os("BIFROST_FORCE_UPDATE_CHECK").is_none() {
         return false;
     }
 
@@ -474,6 +474,27 @@ mod tests {
     use super::*;
     use bifrost_storage::UnifiedConfig;
     use tempfile::TempDir;
+
+    #[test]
+    fn should_run_update_notice_when_forced_even_without_tty() {
+        let previous = std::env::var_os("BIFROST_FORCE_UPDATE_CHECK");
+        unsafe {
+            std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", "1");
+        }
+
+        let should_run = should_run_update_notice(false, Some(&Commands::Status { tui: false }));
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", value);
+            },
+            None => unsafe {
+                std::env::remove_var("BIFROST_FORCE_UPDATE_CHECK");
+            },
+        }
+
+        assert!(should_run);
+    }
 
     #[test]
     fn normalize_relay_url_trims_and_rejects_empty_values() {

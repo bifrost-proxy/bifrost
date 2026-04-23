@@ -46,6 +46,7 @@ import {
   resetRemoteInvokeSshKey,
   revokeGrant,
   revokeRemoteInvokeSshKey,
+  getCallArgsPreviewSource,
   type CreateRemoteInvokeSshKeyInput,
   type Call,
   type ClientIdentity,
@@ -1008,7 +1009,8 @@ export default function RemoteInvokeTab() {
                 size="small"
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(c) => {
-                  const argsPreview = formatArgsPreview(c.command_summary?.masked_args_json);
+                  const argsPreviewSource = getCallArgsPreviewSource(c);
+                  const argsPreview = formatArgsPreview(argsPreviewSource);
                   const summaryPreview = c.command_summary?.command_preview?.trim();
                   const decryptedPreview = c.command?.command?.trim();
                   const routeOnlyPreview =
@@ -1029,7 +1031,7 @@ export default function RemoteInvokeTab() {
                             {commandPreview}
                           </Text>
                           {argsPreview && (
-                            <Tooltip title={c.command_summary?.masked_args_json}>
+                            <Tooltip title={argsPreviewSource}>
                               <Text type="secondary" style={{ fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
                                 {argsPreview}
                               </Text>

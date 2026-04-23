@@ -3959,6 +3959,42 @@ PY
 |---------|------|---------|
 | TC-RI-回归-127 | ✅ PASS | `remote connect` 相关 mock relay 已补齐 `client_ephemeral_pub`，`overload retry` 与 `relay-url fallback` 两个 shell E2E 不再因旧批准 payload 报错；SSH 用例改为复用真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再命中旧版明文 `calls/open` 的 500，且 Recent Calls 中新增的 `search.get` / `traffic.get` 记录状态均为 `completed`。 |
 
+### TC-RI-回归-128：Recent Calls 必须展示参数预览并支持完整 Tooltip
+
+**背景**：Remote Invoke `openCall` 切换到密文 `command_encrypted` 后，relay 不再稳定下发明文 `command_summary.masked_args_json`。如果 client 本地没有用解密后的 `command.args_json` 做回退，Web UI 的 `Recent Calls` 就会只显示命令名，不显示参数详情。
+
+**前置条件**：
+- 已完成可复用授权
+- target client 已启动 Web Admin，且使用独立 `BIFROST_DATA_DIR`
+- 本机可以执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+2. 在脚本跑完 `remote search "$REMOTE_MARKER" --max-results 5 --max-scan 50` 后，调用 `GET /_bifrost/api/remote-invoke/calls`
+3. 定位最新一条 `search.get` 调用
+4. 检查该记录的 `command_summary.masked_args_json`
+5. 打开 target client Web UI 的 `Settings -> Remote Invoke -> Recent Calls`，查看同一条记录
+6. 确认标题行展示参数预览，并 hover 参数区域查看 Tooltip
+
+**预期结果**：
+- `command_summary.masked_args_json` 非空
+- `masked_args_json` 中包含 `query=<marker>`、`max_results=5`、`max_scan=50`
+- Recent Calls 标题行在 `search.get` 后展示参数预览
+- hover 参数预览时，Tooltip 展示完整 JSON
+- connect / status 等无参数命令仍不展示多余参数占位
+
+### TC-RI-回归-128 执行结果（2026-04-23，Recent Calls 参数预览恢复）
+
+**执行环境**：
+- Local relay：`npx tsx packages/bifrost-sync-server/src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Target client：`target/release/bifrost -H 0.0.0.0 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`target/release/bifrost remote connect/search --relay-url http://127.0.0.1:<relay_port>`
+- 前端单测：`pnpm --dir web test:unit -- src/api/remoteInvoke.test.ts`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-128 | ✅ PASS | 本轮执行 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 完成 `remote connect -> remote search` 最短闭环。脚本在 target client 上读取 `GET /_bifrost/api/remote-invoke/calls`，成功定位最新 `search.stream` 记录，并拿到非空 `command_summary.masked_args_json`，其 JSON 实际包含 `keyword=<marker>`、`max_results=5`、`max_scan=50`。同时执行 `pnpm --dir web test:unit -- src/api/remoteInvoke.test.ts`，验证 Recent Calls 前端优先使用 `command_summary.masked_args_json`，缺失时回退到 `command.args_json` / `command.query.args`，且标题预览与 Tooltip 共用同一来源。结合 API E2E 与前端单测，确认 Recent Calls 参数预览已恢复，不再出现只有命令名、没有参数详情的退化。 |
+
 ### 本轮实际执行回归（2026-04-21，远端 relay 收尾修正）
 
 **自动化回归**：

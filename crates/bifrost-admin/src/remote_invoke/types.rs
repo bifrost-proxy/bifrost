@@ -327,6 +327,25 @@ impl RemoteCommand {
             CommandKind::ShellExec => "shell.exec",
         }
     }
+
+    pub fn summary_args_json(&self) -> Option<String> {
+        if let Some(args_json) = self
+            .args_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(args_json.to_string());
+        }
+
+        match &self.query {
+            Some(CanonicalQueryCommand::Search(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficList(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficGet(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficClear(args)) => serde_json::to_string(args).ok(),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

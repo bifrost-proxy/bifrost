@@ -17,11 +17,17 @@ interface NotificationState {
   total: number;
   activeTab: string;
   loading: boolean;
-  fetchNotifications: (type?: string) => Promise<void>;
+  fetchNotifications: (type?: string, status?: string) => Promise<void>;
   fetchClientTrust: () => Promise<void>;
   fetchUnreadCount: () => Promise<void>;
-  handleMarkAllRead: (type?: string) => Promise<void>;
-  handleUpdateStatus: (id: number, status: string, action?: string) => Promise<void>;
+  handleMarkAllRead: (type?: string, status?: string) => Promise<void>;
+  handleUpdateStatus: (
+    id: number,
+    status: string,
+    action?: string,
+    type?: string,
+    filterStatus?: string,
+  ) => Promise<void>;
   setActiveTab: (tab: string) => void;
 }
 
@@ -34,10 +40,14 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
   activeTab: 'all',
   loading: false,
 
-  fetchNotifications: async (type?: string) => {
+  fetchNotifications: async (type?: string, status?: string) => {
     set({ loading: true });
     try {
-      const res = await getNotifications({ type: type === 'all' ? undefined : type, limit: 100 });
+      const res = await getNotifications({
+        type: type === 'all' ? undefined : type,
+        status: status === 'all' ? undefined : status,
+        limit: 100,
+      });
       set({
         notifications: res.items,
         total: Number(res.total),
@@ -74,10 +84,10 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     }
   },
 
-  handleMarkAllRead: async (type?: string) => {
+  handleMarkAllRead: async (type?: string, status?: string) => {
     try {
       await markAllRead(type);
-      await get().fetchNotifications(get().activeTab);
+      await get().fetchNotifications(type ?? get().activeTab, status);
     } catch (e) {
       if (!isConnectionIssueError(e)) {
         console.error('Failed to mark all read:', e);
@@ -85,10 +95,16 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     }
   },
 
-  handleUpdateStatus: async (id: number, status: string, action?: string) => {
+  handleUpdateStatus: async (
+    id: number,
+    status: string,
+    action?: string,
+    type?: string,
+    filterStatus?: string,
+  ) => {
     try {
       await updateNotificationStatus(id, status, action);
-      await get().fetchNotifications(get().activeTab);
+      await get().fetchNotifications(type ?? get().activeTab, filterStatus);
     } catch (e) {
       if (!isConnectionIssueError(e)) {
         console.error('Failed to update notification status:', e);
@@ -98,6 +114,5 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   setActiveTab: (tab: string) => {
     set({ activeTab: tab });
-    get().fetchNotifications(tab);
   },
 }));

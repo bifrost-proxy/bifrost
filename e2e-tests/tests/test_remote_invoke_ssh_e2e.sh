@@ -272,7 +272,18 @@ log "Execute remote status via saved SSH connection"
 CLI_STATUS_OUTPUT="$TMPDIR/cli_status.out"
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote status --relay-url "$RELAY_URL" \
     >"$CLI_STATUS_OUTPUT" 2>&1
-grep -q "Using authorization" "$CLI_STATUS_OUTPUT"
+python3 - "$CLI_STATUS_OUTPUT" "$CLIENT_INSTANCE_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    content = fh.read().strip()
+obj = json.loads(content)
+assert obj["version"]
+assert obj["os"]
+assert obj["arch"]
+assert isinstance(obj["uptime_secs"], int)
+PY
 
 log "Generate proxied traffic for search.get and traffic.get"
 MARKER="remote-invoke-ssh-${RANDOM}-${RANDOM}"
