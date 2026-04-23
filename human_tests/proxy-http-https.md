@@ -547,6 +547,51 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PHT-25：host 规则路径前缀回归（避免重复拼接）
+
+**前置条件**：
+1. 启动 Bifrost，使用临时数据目录、非 `9900` 端口，并开启 TLS 拦截：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test-host-path cargo run --bin bifrost -- --port 8800 start --unsafe-ssl --intercept --no-system-proxy
+   ```
+2. 启动本地 echo 服务：
+   ```bash
+   HTTP_PORT=3000 HTTPS_PORT=3443 WS_PORT=3020 WSS_PORT=3021 SSE_PORT=3003 PROXY_PORT=9999 bash e2e-tests/mock_servers/start_servers.sh start-bg
+   ```
+3. 创建规则：
+   ```bash
+   curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name":"test-host-path-prefix","content":"https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:3000/labor_cost/static/","enabled":true}'
+   ```
+
+**操作步骤**：
+1. 执行命令：
+   ```bash
+   curl -x http://127.0.0.1:8800 -k "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1"
+   ```
+2. 检查响应 JSON 中的 `request.parsed_path` 和 `request.query_string`
+3. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-host-path-prefix
+   HTTP_PORT=3000 HTTPS_PORT=3443 WS_PORT=3020 WSS_PORT=3021 SSE_PORT=3003 PROXY_PORT=9999 bash e2e-tests/mock_servers/start_servers.sh stop
+   rm -rf ./.bifrost-test-host-path
+   ```
+
+**预期结果**：
+- 请求返回 `200`
+- 上游收到的 `request.parsed_path` 必须等于：
+  ```text
+  /labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
+  ```
+- 上游收到的 `request.query_string` 必须等于 `v=1`
+- 路径中不能出现：
+  ```text
+  /labor_cost/static/labor_cost/static/
+  ```
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

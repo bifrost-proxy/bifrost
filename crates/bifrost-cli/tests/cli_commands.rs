@@ -193,6 +193,24 @@ fn remote_command_exec_parses_argv_after_double_dash() {
 }
 
 #[test]
+fn remote_command_exec_rejects_argv_without_double_dash() {
+    let err = match Cli::try_parse_from(["bifrost", "remote", "command", "exec", "pwd"]) {
+        Ok(_) => panic!("bare argv without `--` should be rejected"),
+        Err(err) => err,
+    };
+    let rendered = err.to_string();
+
+    assert!(
+        rendered.contains("unexpected argument 'pwd'"),
+        "expected clap to reject bare argv, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("--shell-text"),
+        "error should still point users at the explicit shell_text flag: {rendered}"
+    );
+}
+
+#[test]
 fn remote_shell_help_lists_management_subcommands() {
     let help = run_help(&["remote", "shell"]);
     assert!(

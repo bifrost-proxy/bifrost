@@ -139,6 +139,94 @@ pub fn apply_url_rules(
     apply_url_replace(&uri, rules, verbose_logging, ctx)
 }
 
+pub fn extract_path_from_pattern(pattern: &str) -> Option<String> {
+    let s = pattern
+        .strip_prefix("http://")
+        .or_else(|| pattern.strip_prefix("https://"))
+        .or_else(|| pattern.strip_prefix("ws://"))
+        .or_else(|| pattern.strip_prefix("wss://"))
+        .unwrap_or(pattern);
+
+    s.find('/')
+        .map(|pos| s[pos..].to_string())
+        .filter(|p| p != "/")
+}
+
+pub fn find_host_rule_source_path(
+    rules: &[crate::server::RuleValue],
+    host_protocol: bifrost_core::Protocol,
+    host_rule: &str,
+) -> Option<String> {
+    use bifrost_core::Protocol;
+    rules.iter().find_map(|rule| {
+        if matches!(
+            rule.protocol,
+            Protocol::Host
+                | Protocol::XHost
+                | Protocol::Http
+                | Protocol::Https
+                | Protocol::Ws
+                | Protocol::Wss
+        ) && rule.protocol == host_protocol
+            && rule.value == host_rule
+        {
+            extract_path_from_pattern(&rule.pattern)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn rewrite_path_with_prefix(
+    request_path: &str,
+    source_path: Option<&str>,
+    target_path: &str,
+) -> String {
+    if let Some(source) = source_path {
+        let source_trimmed = source.trim_end_matches('/');
+        if let Some(remaining) = request_path.strip_prefix(source_trimmed) {
+            let target = target_path.trim_end_matches('/');
+            if remaining.is_empty() {
+                format!("{}/", target)
+            } else if remaining.starts_with('/') || remaining.starts_with('?') {
+                format!("{}{}", target, remaining)
+            } else {
+                format!("{}/{}", target, remaining)
+            }
+        } else {
+            request_path.to_string()
+        }
+    } else {
+        let target = target_path.trim_end_matches('/');
+        if request_path == "/" {
+            format!("{}/", target)
+        } else if request_path.starts_with('/') {
+            format!("{}{}", target, request_path)
+        } else {
+            format!("{}/{}", target, request_path)
+        }
+    }
+}
+
+pub fn extract_target_path_from_host_rule(host_rule: &str) -> Option<String> {
+    let mut s = host_rule.trim();
+    if s.is_empty() {
+        return None;
+    }
+    for prefix in [
+        "http://", "https://", "ws://", "wss://", "host://", "xhost://", "proxy://", "pac://",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    let uri: Uri = format!("http://{}", s).parse().ok()?;
+    uri.path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .filter(|pq| pq != "/")
+}
+
 pub fn build_redirect_uri(base_uri: &Uri, redirect_target: &str) -> Option<String> {
     if redirect_target.starts_with("http://") || redirect_target.starts_with("https://") {
         return Some(redirect_target.to_string());
@@ -318,5 +406,166 @@ mod tests {
         let base: Uri = "http://example.com:80/path".parse().unwrap();
         let result = build_redirect_uri(&base, "/new");
         assert_eq!(result, Some("http://example.com/new".to_string()));
+    }
+
+    #[test]
+    fn test_extract_path_from_pattern_https_with_path() {
+        assert_eq!(
+            extract_path_from_pattern("https://example.com/labor_cost/static/"),
+            Some("/labor_cost/static/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_path_from_pattern_http_with_path() {
+        assert_eq!(
+            extract_path_from_pattern("http://example.com/api/v1"),
+            Some("/api/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_path_from_pattern_domain_with_path() {
+        assert_eq!(
+            extract_path_from_pattern("example.com/api/"),
+            Some("/api/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_path_from_pattern_domain_only() {
+        assert_eq!(extract_path_from_pattern("example.com"), None);
+    }
+
+    #[test]
+    fn test_extract_path_from_pattern_https_root_path() {
+        assert_eq!(extract_path_from_pattern("https://example.com/"), None);
+    }
+
+    #[test]
+    fn test_find_host_rule_source_path_uses_selected_rule_not_later_host_rule() {
+        use crate::server::RuleValue;
+        use std::collections::HashMap;
+
+        let rules = vec![
+            RuleValue {
+                pattern: "https://example.com/labor_cost/static/".to_string(),
+                protocol: bifrost_core::Protocol::Http,
+                value: "http://127.0.0.1:9000/labor_cost/static/".to_string(),
+                options: HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+            },
+            RuleValue {
+                pattern: "https://example.com/other/".to_string(),
+                protocol: bifrost_core::Protocol::Http,
+                value: "http://127.0.0.1:9000/other/".to_string(),
+                options: HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+            },
+            RuleValue {
+                pattern: "https://example.com/labor_cost/static/".to_string(),
+                protocol: bifrost_core::Protocol::Https,
+                value: "https://127.0.0.1:9443/labor_cost/static/".to_string(),
+                options: HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+            },
+        ];
+
+        let path = find_host_rule_source_path(
+            &rules,
+            bifrost_core::Protocol::Http,
+            "http://127.0.0.1:9000/labor_cost/static/",
+        );
+        assert_eq!(path, Some("/labor_cost/static/".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_path_same_source_target() {
+        let result = rewrite_path_with_prefix(
+            "/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg",
+            Some("/labor_cost/static/"),
+            "/labor_cost/static/",
+        );
+        assert_eq!(
+            result,
+            "/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_path_different_source_target() {
+        let result = rewrite_path_with_prefix("/old/api/users", Some("/old/api/"), "/new/api/");
+        assert_eq!(result, "/new/api/users");
+    }
+
+    #[test]
+    fn test_rewrite_path_with_query_string() {
+        let result = rewrite_path_with_prefix(
+            "/labor_cost/static/file.svg?v=1",
+            Some("/labor_cost/static/"),
+            "/labor_cost/static/",
+        );
+        assert_eq!(result, "/labor_cost/static/file.svg?v=1");
+    }
+
+    #[test]
+    fn test_rewrite_path_source_without_trailing_slash() {
+        let result = rewrite_path_with_prefix("/api/v1/users", Some("/api/v1"), "/api/v2");
+        assert_eq!(result, "/api/v2/users");
+    }
+
+    #[test]
+    fn test_rewrite_path_no_source_path() {
+        let result = rewrite_path_with_prefix("/users", None, "/api/");
+        assert_eq!(result, "/api/users");
+    }
+
+    #[test]
+    fn test_rewrite_path_no_source_path_root_request() {
+        let result = rewrite_path_with_prefix("/", None, "/api/");
+        assert_eq!(result, "/api/");
+    }
+
+    #[test]
+    fn test_rewrite_path_exact_match() {
+        let result = rewrite_path_with_prefix(
+            "/labor_cost/static/",
+            Some("/labor_cost/static/"),
+            "/labor_cost/static/",
+        );
+        assert_eq!(result, "/labor_cost/static/");
+    }
+
+    #[test]
+    fn test_rewrite_path_source_no_match_fallback() {
+        let result = rewrite_path_with_prefix("/other/path/file.txt", Some("/api/"), "/new/");
+        assert_eq!(result, "/other/path/file.txt");
+    }
+
+    #[test]
+    fn test_extract_target_path_from_host_rule_with_port_and_path() {
+        assert_eq!(
+            extract_target_path_from_host_rule("localhost:9000/labor_cost/static/"),
+            Some("/labor_cost/static/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_target_path_from_host_rule_no_path() {
+        assert_eq!(extract_target_path_from_host_rule("localhost:9000"), None);
+    }
+
+    #[test]
+    fn test_extract_target_path_from_host_rule_with_scheme() {
+        assert_eq!(
+            extract_target_path_from_host_rule("http://localhost:9000/api/"),
+            Some("/api/".to_string())
+        );
     }
 }

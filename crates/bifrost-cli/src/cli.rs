@@ -1419,10 +1419,7 @@ pub enum RemoteCommands {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteCommandCommands {
-    #[command(
-        about = "Execute a remote command via the encrypted shell.exec channel",
-        trailing_var_arg = true
-    )]
+    #[command(about = "Execute a remote command via the encrypted shell.exec channel")]
     Exec(Box<RemoteCommandExecArgs>),
 }
 
@@ -1603,6 +1600,7 @@ pub struct RemoteCommandExecArgs {
     #[arg(
         value_name = "PROGRAM [ARGS...]",
         num_args = 1..,
+        last = true,
         allow_hyphen_values = true,
         help = "Program and arguments to execute after `--`"
     )]

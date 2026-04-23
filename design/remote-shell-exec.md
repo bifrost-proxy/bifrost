@@ -152,6 +152,7 @@ bifrost remote command exec --shell-text "printf hello && /bin/pwd"
 - `--timeout-ms <n>`：最终会被 target 侧策略上限裁剪
 - `--shell-text <text>`：target 会在允许的 shell_text policy 中自动匹配
 - `-- <program> [args...]`：target 会在允许的 argv_exec policy 中自动匹配
+- 裸参数（例如 `bifrost remote command exec pwd`）在 CLI 层直接拒绝，避免把原本想走 `shell_text` 的输入静默解释成 `argv_exec`
 
 ## 最新真实验证结论（2026-04-23）
 
