@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::types::{CallInfo, CallStatus, CommandSummary, RemoteCommand};
+use super::types::{CallInfo, CallStatus};
 
 const CALL_HISTORY_STORE_FILE: &str = "remote_invoke_call_history.json";
 const CALL_HISTORY_STORE_VERSION: u32 = 2;
@@ -433,7 +433,7 @@ mod tests {
     use bifrost_command::{CanonicalQueryCommand, SearchArgs};
     use tempfile::TempDir;
 
-    use super::super::types::{AuthMethod, CommandKind};
+    use super::super::types::{AuthMethod, CommandKind, CommandSummary, RemoteCommand};
 
     fn make_call_info(call_id: &str) -> CallInfo {
         CallInfo {

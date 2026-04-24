@@ -281,5 +281,175 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
+        TestCase::standalone(
+            "remote_shell_exec_unix_shell_path_fallback",
+            "shell_text with /bin/bash shell path works cross-platform (fallback to cmd on Windows)",
+            "remote_shell_exec",
+            || async {
+                let base = std::env::temp_dir().join(format!(
+                    "bifrost-remote-shell-unix-path-e2e-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| e.to_string())?
+                        .as_nanos()
+                ));
+                fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                bifrost_storage::set_data_dir(base.clone());
+
+                let store = RemoteShellStore::new().map_err(|e| e.to_string())?;
+                // Policy uses "/bin/bash" as shell — a Unix-only path.
+                // On macOS/Linux this works natively; on Windows it should fallback to cmd.
+                store
+                    .save(&RemoteShellSet {
+                        schema_version: 1,
+                        version: 1,
+                        policies: vec![RemoteShellPolicy {
+                            id: "unix-shell".to_string(),
+                            name: "unix-shell".to_string(),
+                            description: None,
+                            enabled: true,
+                            profile_id: None,
+                            metadata: serde_json::json!({
+                                "exec_mode": "shell_text",
+                                "allowed_shell_patterns": ["^echo .*"],
+                                "shell": "/bin/bash",
+                                "inherit_env": true,
+                                "max_timeout_ms": 5000
+                            }),
+                        }],
+                        profiles: vec![],
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                let executor = RemoteInvokeExecutor::new("127.0.0.1", 18080);
+                let command = RemoteCommand {
+                    kind: CommandKind::ShellExec,
+                    policy_id: Some("unix-shell".to_string()),
+                    exec_mode: Some(ShellExecMode::ShellText),
+                    command_text: Some("echo hello-unix-path".to_string()),
+                    ..Default::default()
+                };
+
+                let response = executor
+                    .execute(&command)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if response.exit_code != 0 {
+                    return Err(format!(
+                        "expected exit code 0, got {} (stderr: {:?})",
+                        response.exit_code, response.stderr
+                    ));
+                }
+                let stdout = response.stdout.as_deref().unwrap_or("");
+                if !stdout.contains("hello-unix-path") {
+                    return Err(format!(
+                        "unexpected stdout: {:?}, expected to contain 'hello-unix-path'",
+                        stdout
+                    ));
+                }
+
+                let _ = fs::remove_dir_all(&base);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "remote_shell_policy_update_preserves_execution",
+            "Updating a policy's metadata preserves its executability",
+            "remote_shell_exec",
+            || async {
+                let base = std::env::temp_dir().join(format!(
+                    "bifrost-remote-shell-update-e2e-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| e.to_string())?
+                        .as_nanos()
+                ));
+                fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                bifrost_storage::set_data_dir(base.clone());
+
+                let store = RemoteShellStore::new().map_err(|e| e.to_string())?;
+                let echo_exe = platform_echo_executable();
+                let cwd = platform_cwd();
+                store
+                    .save(&RemoteShellSet {
+                        schema_version: 1,
+                        version: 1,
+                        policies: vec![RemoteShellPolicy {
+                            id: "updatable".to_string(),
+                            name: "original-name".to_string(),
+                            description: None,
+                            enabled: true,
+                            profile_id: None,
+                            metadata: serde_json::json!({
+                                "exec_mode": "argv_exec",
+                                "allowed_executables": [echo_exe],
+                                "cwd_allowlist": [cwd],
+                                "max_timeout_ms": 5000
+                            }),
+                        }],
+                        profiles: vec![],
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                // Execute before update
+                let executor = RemoteInvokeExecutor::new("127.0.0.1", 18080);
+                let command = RemoteCommand {
+                    kind: CommandKind::ShellExec,
+                    policy_id: Some("updatable".to_string()),
+                    exec_mode: Some(ShellExecMode::ArgvExec),
+                    argv: Some(platform_echo_argv()),
+                    cwd: Some(cwd.clone()),
+                    ..Default::default()
+                };
+                let r1 = executor
+                    .execute(&command)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if r1.exit_code != 0 {
+                    return Err(format!("pre-update exec failed: exit {}", r1.exit_code));
+                }
+
+                // Update policy metadata (name change only, no structural change)
+                let mut set = store.load().map_err(|e| e.to_string())?;
+                let policy = set
+                    .policies
+                    .iter_mut()
+                    .find(|p| p.id == "updatable")
+                    .ok_or("policy not found")?;
+                policy.name = "updated-name".to_string();
+                set.version = set.version.saturating_add(1);
+                store.save(&set).map_err(|e| e.to_string())?;
+
+                // Execute after update — should still work
+                let r2 = executor
+                    .execute(&command)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if r2.exit_code != 0 {
+                    return Err(format!("post-update exec failed: exit {}", r2.exit_code));
+                }
+                let expected_stdout = platform_expected_stdout();
+                if r2.stdout.as_deref() != Some(expected_stdout) {
+                    return Err(format!(
+                        "post-update stdout: {:?}, expected {:?}",
+                        r2.stdout, expected_stdout
+                    ));
+                }
+
+                // Verify the policy name was actually updated
+                let reloaded = store.load().map_err(|e| e.to_string())?;
+                let p = reloaded
+                    .policies
+                    .iter()
+                    .find(|p| p.id == "updatable")
+                    .ok_or("policy missing after update")?;
+                if p.name != "updated-name" {
+                    return Err(format!("expected name 'updated-name', got '{}'", p.name));
+                }
+
+                let _ = fs::remove_dir_all(&base);
+                Ok(())
+            },
+        ),
     ]
 }

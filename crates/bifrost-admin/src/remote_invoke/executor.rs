@@ -2793,6 +2793,89 @@ mod tests {
     }
 
     #[test]
+    fn test_build_shell_text_process_default_shell() {
+        // When shell is None, should default to /bin/sh on non-windows
+        let cmd = build_shell_text_process(None, "echo hi");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        #[cfg(not(windows))]
+        assert_eq!(prog, "/bin/sh", "default shell should be /bin/sh");
+        #[cfg(windows)]
+        assert_eq!(prog, "cmd", "default shell on windows should be cmd");
+    }
+
+    #[test]
+    fn test_build_shell_text_process_explicit_shell() {
+        // When an explicit shell is given, it should be used directly
+        #[cfg(not(windows))]
+        {
+            let cmd = build_shell_text_process(Some("/bin/bash"), "echo test");
+            let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+            assert_eq!(prog, "/bin/bash");
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert_eq!(args, vec!["-lc", "echo test"]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_shell_text_process_unix_path_fallback_on_windows() {
+        // Unix-style paths like /bin/bash should be ignored on Windows, falling back to cmd
+        let cmd = build_shell_text_process(Some("/bin/bash"), "echo hi");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(
+            prog, "cmd",
+            "unix shell path should fallback to cmd on windows"
+        );
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "/C");
+        assert!(args[1].contains("chcp 65001"), "should prepend chcp 65001");
+        assert!(
+            args[1].contains("echo hi"),
+            "should contain original command"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_shell_text_process_powershell_utf8_prefix() {
+        let cmd = build_shell_text_process(Some("powershell.exe"), "ipconfig");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(prog, "powershell.exe");
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"-Command".to_string()));
+        let cmd_arg = args.last().expect("should have command arg");
+        assert!(
+            cmd_arg.contains("[Console]::OutputEncoding"),
+            "should set UTF-8 encoding"
+        );
+        assert!(cmd_arg.contains("ipconfig"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_unix_only_shell_path() {
+        assert!(is_unix_only_shell_path("/bin/bash"));
+        assert!(is_unix_only_shell_path("/usr/bin/zsh"));
+        assert!(is_unix_only_shell_path("/bin/sh"));
+        assert!(!is_unix_only_shell_path("cmd.exe"));
+        assert!(!is_unix_only_shell_path("powershell.exe"));
+        assert!(!is_unix_only_shell_path(r"C:\Windows\System32\cmd.exe"));
+        assert!(!is_unix_only_shell_path("bash"));
+    }
+
+    #[test]
     fn test_select_policy_single_rejection_has_no_double_error_prefix() {
         let _guard = crate::remote_invoke::remote_shell_test_guard();
         let dir = TempDir::new().expect("tempdir");
