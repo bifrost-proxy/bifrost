@@ -158,15 +158,40 @@ bifrost remote file read crates/link-passwd
 将 grant 降级为 `remote_shell_exec` 后执行任一 `file.*` 命令。
 **期望**：调用被拒绝，错误信息包含 `grant_scope_mismatch` 或 `does not allow command kind`；shell scope 不自动授予 file API。
 
-### TC-2.5 二进制文件默认保护
+### TC-2.5 只读 policy 拒绝写操作（回归）
+**步骤**：
+```bash
+cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op
+```
+**期望**：
+- 用例 `remote_file_readonly_policy_rejects_write_op` 通过；
+- 只读 `FileAccessPolicy` 对 `FileOp::Write` 返回 `error.code = file.op_not_permitted`；
+- 该错误码仅表示操作不在当前 policy 的 `ops` allowlist 中，和 deny pattern 命中的 `file.permission_denied` 区分。
+
+### TC-2.6 二进制文件默认保护
 ```bash
 bifrost remote file read target/debug/bifrost  # 或任意 ELF/Mach-O
 ```
 **期望**：在未传 `--allow-binary` 时返回 `error.code = file.binary_not_allowed`。
 
-### TC-2.6 gitignore 生效
+### TC-2.7 gitignore 生效
 在 `respect_gitignore = true` 时，访问 `target/` 下文件。
 **期望**：当前实现至少被默认 deny 中的 `**/target/**` 拒绝；如果后续接入 gitignore，则错误码可收敛为 `file.ignored_by_gitignore`。
+
+### TC-2.7 回归：只读 policy 拒绝写操作错误码
+**步骤**：
+```bash
+cargo test -p bifrost-e2e remote_file_readonly_policy_rejects_write_op -- --nocapture
+```
+**期望**：
+- 用例通过；
+- `FileAccessPolicy::new_readonly` 收到 `FileOp::Write` 时返回 `error.code = file.permission_denied`；
+- 不得返回 `file.op_not_permitted`，避免 caller 将 policy 拒绝误判为未知/未启用操作。
+
+**2026-04-25 执行记录**：
+- 触发原因：Windows runner E2E 失败，`remote_file_readonly_policy_rejects_write_op` 实际返回 `file.op_not_permitted`。
+- 验证命令：`cargo test -p bifrost-e2e remote_file_readonly_policy_rejects_write_op -- --nocapture`。
+- 通过标准：命令退出码为 0，且用例不再输出 `expected file.permission_denied, got file.op_not_permitted`。
 
 ---
 
@@ -237,3 +262,9 @@ bifrost remote file read --help
 | `crates/bifrost-e2e/src/tests/remote_file_api.rs` | FileAccessPolicy / DenyMatcher / PolicyDecision 正负向用例 |
 
 以上自动化用例在 CI 必过，手动用例覆盖真机网络/双端/审计等自动化不便验证的场景。
+
+## 本次回归执行记录
+
+| 日期 | 用例 | 执行命令 | 结果 |
+|------|------|----------|------|
+| 2026-04-25 | TC-2.5 只读 policy 拒绝写操作（回归） | `cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op` | 待执行 |

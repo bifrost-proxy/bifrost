@@ -167,6 +167,11 @@ impl FileAccessPolicy {
     ) -> Result<PolicyDecision, FileAccessError> {
         // 1. op allowlist
         if !self.ops.contains(&op) {
+            if op.is_write() && self.ops.iter().all(|allowed| !allowed.is_write()) {
+                return Err(FileAccessError::PermissionDenied {
+                    reason: "readonly policy does not allow write operations",
+                });
+            }
             return Err(FileAccessError::OpNotPermitted { op: op.as_str() });
         }
 
@@ -321,6 +326,16 @@ mod tests {
             .check(Path::new("Cargo.toml"), &tmp, FileOp::Read)
             .unwrap_err();
         assert_eq!(err.code(), "file.op_not_permitted");
+    }
+
+    #[test]
+    fn readonly_policy_rejects_write_as_permission_denied() {
+        let tmp = std::env::temp_dir();
+        let policy = FileAccessPolicy::new_readonly("t", vec![tmp.clone()]);
+        let err = policy
+            .check(Path::new("Cargo.toml"), &tmp, FileOp::Write)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.permission_denied");
     }
 
     #[test]

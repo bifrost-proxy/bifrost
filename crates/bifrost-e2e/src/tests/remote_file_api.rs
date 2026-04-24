@@ -197,7 +197,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         // ---------------------------------------------------------------
         TestCase::standalone(
             "remote_file_readonly_policy_rejects_write_op",
-            "readonly policy denies Write operations",
+            "readonly policy rejects Write operations not present in the op allowlist",
             "remote_file_api",
             || async {
                 let root = unique_tmp("ro-write");
@@ -211,9 +211,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .ok_or_else(|| "expected error for write on readonly policy".to_string())?;
 
                 let _ = fs::remove_dir_all(&root);
-                if err.code() != "file.permission_denied" {
+                if err.code() != "file.op_not_permitted" {
                     return Err(format!(
-                        "expected file.permission_denied, got {}",
+                        "expected file.op_not_permitted, got {}",
                         err.code()
                     ));
                 }

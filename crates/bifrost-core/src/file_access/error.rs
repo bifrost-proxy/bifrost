@@ -21,6 +21,9 @@ pub enum FileAccessError {
     #[error("path matched a deny pattern ({pattern}): {path}")]
     DenyPattern { path: PathBuf, pattern: String },
 
+    #[error("permission denied by policy: {reason}")]
+    PermissionDenied { reason: &'static str },
+
     #[error("symlink target escapes the configured roots: {path} -> {target}")]
     SymlinkEscape { path: PathBuf, target: PathBuf },
 
@@ -54,6 +57,7 @@ impl FileAccessError {
         match self {
             FileAccessError::OutOfScope { .. } => "file.out_of_scope",
             FileAccessError::DenyPattern { .. } => "file.permission_denied",
+            FileAccessError::PermissionDenied { .. } => "file.permission_denied",
             FileAccessError::SymlinkEscape { .. } => "file.symlink_escape",
             FileAccessError::IgnoredByGitignore { .. } => "file.ignored_by_gitignore",
             FileAccessError::BinaryNotAllowed { .. } => "file.binary_not_allowed",

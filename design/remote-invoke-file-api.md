@@ -342,12 +342,13 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 | code                    | 触发场景                                  |
 | ----------------------- | ----------------------------------------- |
 | `file.not_found`        | 路径不存在                                |
-| `file.permission_denied`| 未授权 / policy 拒绝                      |
+| `file.permission_denied`| 未授权 / deny pattern 等 policy 拒绝       |
 | `file.scope_required`   | grant_scope 未包含 `remote_file_read/write` |
 | `file.too_large`        | 超过 `max_read_bytes` / `max_edit_bytes`  |
 | `file.invalid_encoding` | encoding 声明与实际内容不符               |
 | `file.invalid_argument` | 参数缺失/非法（例如 offset < 0）          |
 | `file.io_error`         | 底层 IO 错误，保留 message                |
+| `file.op_not_permitted` | 请求的 file op 不在当前 policy ops 中，例如只读 policy 拒绝 write/edit/mkdir/move/delete/apply_patch |
 | `file.sha_mismatch`     | （Phase 2）`if_match_sha256` 不符         |
 | `file.patch_rejected`   | （Phase 3）所有 hunk 均未应用             |
 | `file.partial_applied`  | （Phase 3）部分 hunk 应用                 |
@@ -461,6 +462,7 @@ Phase 2 将引入**写能力**，但遵循与 Phase 1 相同的铁律：任何�
 - **Symlink**：通过符号链接写入 roots 外目标，`file.symlink_escape`；
 - **大文件拒绝**：超过 `max_write_bytes` 必须拒绝，且不在磁盘留下临时残片（原子写：`tmpfile + rename`）；
 - **mkdir/rename/delete 的 deny 拦截**。
+- **只读 policy 写操作拒绝**：`FileAccessPolicy::new_readonly` 对 `write/edit/mkdir/move/delete/apply_patch` 等写操作必须返回 `file.op_not_permitted`，与 deny pattern 命中的 `file.permission_denied` 区分。
 
 ---
 
