@@ -32,7 +32,13 @@ const MAX_TRAFFIC_LIST_LIMIT: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const SEARCH_STREAM_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_SHELL_OUTPUT_MAX_BYTES: usize = 4 * 1024 * 1024; // PR#2: bumped 64 KiB -> 4 MiB; binary-safe stream path lands in PR#3
+#[allow(dead_code)]
+// Retained for backward-compat reference; PR#3a switched to idle-timeout primary liveness.
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
+/// PR#3a: default idle timeout for shell.exec.
+const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
+/// PR#3a: heartbeat tick interval (floor of idle-timeout granularity).
+const HEARTBEAT_INTERVAL_MS: u64 = 10_000;
 
 const ALLOWED_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
@@ -60,6 +66,8 @@ struct ResolvedShellPolicy {
     default_cwd: Option<String>,
     shell: Option<String>,
     max_timeout_ms: Option<u64>,
+    /// PR#3a: idle timeout (None => DEFAULT_IDLE_TIMEOUT_MS)
+    max_idle_ms: Option<u64>,
     max_output_bytes: usize,
     stdin_allowed: bool,
     interactive_allowed: bool,
@@ -81,6 +89,7 @@ struct ShellPolicyMetadata {
     default_cwd: Option<String>,
     shell: Option<String>,
     max_timeout_ms: Option<u64>,
+    max_idle_ms: Option<u64>,
     max_output_bytes: Option<usize>,
     stdin_allowed: Option<bool>,
     interactive_allowed: Option<bool>,
@@ -696,10 +705,15 @@ impl RemoteInvokeExecutor {
         }
 
         let start = Instant::now();
-        let timeout_ms = command
-            .timeout_ms
-            .unwrap_or(policy.max_timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS))
-            .min(policy.max_timeout_ms.unwrap_or(u64::MAX));
+        // PR#3a: split single wall-clock timeout into (wall_clock, idle).
+        let wall_clock_timeout_ms: Option<u64> = match (command.timeout_ms, policy.max_timeout_ms) {
+            (Some(c), Some(p)) => Some(c.min(p)),
+            (Some(c), None) => Some(c),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+        let idle_timeout_ms: u64 = policy.max_idle_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
+        let timeout_ms = wall_clock_timeout_ms.unwrap_or(u64::MAX);
         let mut process = self.build_shell_exec_process(command, &policy)?;
         process.stdout(Stdio::piped());
         process.stderr(Stdio::piped());
@@ -732,18 +746,44 @@ impl RemoteInvokeExecutor {
         let mut stderr_total_bytes: u64 = 0;
         let mut stdout_hasher = ring::digest::Context::new(&ring::digest::SHA256);
         let mut stderr_hasher = ring::digest::Context::new(&ring::digest::SHA256);
-        let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
-        tokio::pin!(timeout);
+        // PR#3a: wall-clock future (optional) + idle future + heartbeat tick.
+        let wall_clock = async {
+            match wall_clock_timeout_ms {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(wall_clock);
+        let mut idle_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(idle_timeout_ms);
+        let idle_sleep = tokio::time::sleep_until(idle_deadline);
+        tokio::pin!(idle_sleep);
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = heartbeat.tick().await; // swallow immediate tick
 
         loop {
             tokio::select! {
-                _ = &mut timeout => {
+                _ = &mut wall_clock => {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     return Err(BifrostError::Network(format!(
-                        "shell.exec timed out after {} ms (policy '{}')",
+                        "shell.exec wall-clock timeout after {} ms (policy '{}')",
                         timeout_ms, policy.policy_id
                     )));
+                }
+                _ = &mut idle_sleep => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec idle timeout after {} ms of no output (policy '{}')",
+                        idle_timeout_ms, policy.policy_id
+                    )));
+                }
+                _ = heartbeat.tick() => {
+                    // PR#3a: hook for PR#3b StreamFrame::Heartbeat. Does
+                    // NOT reset idle_deadline — liveness must come from
+                    // actual process output, not from our own tick.
                 }
                 wait_result = child.wait(), if exit_status.is_none() => {
                     exit_status = Some(wait_result.map_err(|e| {
@@ -763,7 +803,11 @@ impl RemoteInvokeExecutor {
                             break;
                         }
                     } else {
-                        // PR#2: hash + total BEFORE the cap so we retain truth even on overflow
+                        // PR#3a: real stdout read resets the idle deadline.
+                        idle_deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(idle_timeout_ms);
+                        idle_sleep.as_mut().reset(idle_deadline);
+                        // PR#2: hash + total BEFORE the cap
                         stdout_total_bytes += read as u64;
                         stdout_hasher.update(&stdout_buf[..read]);
                         append_truncated_bytes(
@@ -784,6 +828,10 @@ impl RemoteInvokeExecutor {
                             break;
                         }
                     } else {
+                        // PR#3a: real stderr read resets the idle deadline.
+                        idle_deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(idle_timeout_ms);
+                        idle_sleep.as_mut().reset(idle_deadline);
                         // PR#2: hash + total BEFORE the cap
                         stderr_total_bytes += read as u64;
                         stderr_hasher.update(&stderr_buf[..read]);
@@ -1132,6 +1180,7 @@ impl RemoteInvokeExecutor {
             default_cwd: policy_meta.default_cwd.or(profile_meta.default_cwd),
             shell: policy_meta.shell.or(profile_meta.shell),
             max_timeout_ms: policy_meta.max_timeout_ms.or(profile_meta.max_timeout_ms),
+            max_idle_ms: policy_meta.max_idle_ms.or(profile_meta.max_idle_ms),
             max_output_bytes: policy_meta
                 .max_output_bytes
                 .or(profile_meta.max_output_bytes)
@@ -2976,6 +3025,131 @@ mod tests {
         assert!(
             msg.contains("policy 'shell-only'"),
             "must mention policy: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_execute_shell_exec_idle_timeout_kills_stuck_child() {
+        // PR#3a: child sleeps longer than idle timeout without emitting output
+        //        -> must be killed with "idle timeout" error.
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "idle-test".to_string(),
+                    name: "idle-test".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "shell": streaming_shell_program(),
+                        // No wall-clock timeout; idle should kick in first.
+                        "max_idle_ms": 300u64
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("idle-test".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            // Sleep ~5s without printing anything. Idle timeout 300ms must kill.
+            command_text: Some("sleep 5".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(executor.execute(&cmd))
+            .expect_err("idle timeout must produce an error");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(2_000),
+            "idle timeout should have killed within a second or two, elapsed={:?}",
+            elapsed
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("idle timeout"),
+            "expected idle timeout error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_execute_shell_exec_wall_clock_timeout_still_enforced() {
+        // PR#3a: when command.timeout_ms is set, wall-clock must still kill
+        //        even if output keeps streaming (idle deadline refreshed).
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "wall-test".to_string(),
+                    name: "wall-test".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "shell": streaming_shell_program(),
+                        // Large idle; small wall-clock should win.
+                        "max_idle_ms": 60_000u64
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("wall-test".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            // Print a dot every 50ms forever -> never idle; wall-clock must trip.
+            command_text: Some(
+                "i=0; while [ $i -lt 200 ]; do printf .; sleep 0.05; i=$((i+1)); done".to_string(),
+            ),
+            timeout_ms: Some(400),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(executor.execute(&cmd))
+            .expect_err("wall-clock timeout must produce an error");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(2_000),
+            "wall-clock should have killed within 2s, elapsed={:?}",
+            elapsed
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("wall-clock timeout"),
+            "expected wall-clock timeout error, got: {msg}"
         );
     }
 }
