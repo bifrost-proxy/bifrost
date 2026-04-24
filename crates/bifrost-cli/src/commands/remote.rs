@@ -104,20 +104,16 @@ struct ShellExecPayload {
 /// session (PR #5e-3).
 #[derive(Debug, Clone, Default)]
 struct StreamingPrefs {
-    #[allow(dead_code)]
     pub stream: bool,
-    #[allow(dead_code)]
     pub output_file: Option<std::path::PathBuf>,
     #[allow(dead_code)]
     pub resume_call_id: Option<String>,
-    #[allow(dead_code)]
     pub no_verify_digest: bool,
 }
 
 impl StreamingPrefs {
     /// Effective streaming mode: explicit --stream, or implied by --output-file
     /// or --resume-call-id.
-    #[allow(dead_code)]
     pub fn is_streaming(&self) -> bool {
         self.stream || self.output_file.is_some() || self.resume_call_id.is_some()
     }
@@ -1284,6 +1280,38 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
+    }
+
+    let streaming_enabled = command
+        .streaming_prefs
+        .as_ref()
+        .map(|p| p.is_streaming())
+        .unwrap_or(false);
+
+    if streaming_enabled {
+        let prefs = command
+            .streaming_prefs
+            .as_ref()
+            .expect("streaming_prefs present when streaming_enabled");
+        let stream_result = tokio::select! {
+            result = run_streaming_dispatch(
+                &caller,
+                &call_result.call_id,
+                &call_result.relay_token,
+                prefs,
+            ) => result?,
+            _ = wait_for_remote_call_cancel_signal() => {
+                eprintln!("{}", "→ Cancellation requested, notifying remote device...".bright_yellow());
+                let _ = caller
+                    .cancel_call(&call_result.call_id, &call_result.relay_token)
+                    .await;
+                synthesized_cancelled_result()
+            }
+        };
+        if stream_result.exit_code != 0 {
+            std::process::exit(stream_result.exit_code);
+        }
+        return Ok(());
     }
 
     let result = tokio::select! {
@@ -3549,7 +3577,6 @@ impl CallerRelayClient {
     ///
     /// The `resume_from` parameter, when Some, pre-positions the state
     /// machine heads so duplicate bytes across a reconnect are deduped.
-    #[allow(dead_code)]
     async fn subscribe_call_events_streaming<W: std::io::Write, E: std::io::Write>(
         &self,
         call_id: &str,
@@ -3998,6 +4025,133 @@ fn parse_call_terminal_status(payload: &Value) -> Option<&str> {
         .get("status")
         .and_then(|status| status.as_str())
         .filter(|status| matches!(*status, "cancelled" | "completed" | "failed" | "timeout"))
+}
+
+/// PR #5e-2: pure helper that converts a [`StreamingSubscriptionOutcome`]
+/// into the next dispatch step taken by [`run_streaming_dispatch`].
+#[derive(Debug)]
+enum StreamingDispatchStep {
+    Complete(CallResult),
+    Reconnect((u64, u64), String),
+    DisconnectResume((u64, u64), String),
+    Error(String),
+    Cancelled,
+}
+
+fn streaming_result_from_outcome(
+    outcome: StreamingSubscriptionOutcome,
+    verify: bool,
+    current_heads: (u64, u64),
+) -> StreamingDispatchStep {
+    match outcome {
+        StreamingSubscriptionOutcome::Completed {
+            exit_code,
+            duration_ms,
+            digest_ok,
+        } => {
+            if verify && !digest_ok {
+                StreamingDispatchStep::Error("stream digest mismatch".to_string())
+            } else {
+                StreamingDispatchStep::Complete(CallResult {
+                    exit_code,
+                    stdout: None,
+                    stderr: None,
+                    duration_ms,
+                    cancelled: false,
+                })
+            }
+        }
+        StreamingSubscriptionOutcome::ReconnectNeeded {
+            stdout_offset,
+            stderr_offset,
+            reason,
+        } => StreamingDispatchStep::Reconnect((stdout_offset, stderr_offset), reason),
+        StreamingSubscriptionOutcome::Disconnected { reason } => {
+            StreamingDispatchStep::DisconnectResume(current_heads, reason)
+        }
+        StreamingSubscriptionOutcome::ErrorFrame { code, message } => {
+            StreamingDispatchStep::Error(format!("remote error frame {code}: {message}"))
+        }
+        StreamingSubscriptionOutcome::Cancelled => StreamingDispatchStep::Cancelled,
+    }
+}
+
+/// PR #5e-2: route a call through [`CallerRelayClient::subscribe_call_events_streaming`]
+/// with an outer reconnect-with-offset loop. stdout is written to either the
+/// caller-provided `--output-file` or to this process's stdout. stderr is
+/// always forwarded to this process's stderr.
+async fn run_streaming_dispatch(
+    caller: &CallerRelayClient,
+    call_id: &str,
+    relay_token: &str,
+    prefs: &StreamingPrefs,
+) -> bifrost_core::Result<CallResult> {
+    let stdout_sink: Box<dyn std::io::Write + Send> = match prefs.output_file.as_ref() {
+        Some(path) => Box::new(std::fs::File::create(path).map_err(|e| {
+            BifrostError::Network(format!("open --output-file {}: {}", path.display(), e))
+        })?),
+        None => Box::new(std::io::stdout()),
+    };
+    let stderr_sink: Box<dyn std::io::Write + Send> = Box::new(std::io::stderr());
+    let verify_digest = !prefs.no_verify_digest;
+    let mut state = CallerStreamState::new(stdout_sink, stderr_sink, verify_digest);
+
+    let max_reconnects: u32 = 16;
+    let mut attempt: u32 = 0;
+    let mut resume_from: Option<(u64, u64)> = None;
+
+    loop {
+        let outcome = caller
+            .subscribe_call_events_streaming(
+                call_id,
+                relay_token,
+                &mut state,
+                resume_from,
+                CALL_EVENT_TIMEOUT_SECS,
+            )
+            .await?;
+
+        let current_heads = (state.stdout_head(), state.stderr_head());
+        match streaming_result_from_outcome(outcome, verify_digest, current_heads) {
+            StreamingDispatchStep::Complete(result) => return Ok(result),
+            StreamingDispatchStep::Reconnect(offsets, reason) => {
+                warn!(
+                    call_id = %call_id,
+                    reason = %reason,
+                    stdout_offset = offsets.0,
+                    stderr_offset = offsets.1,
+                    "streaming dispatch reconnect requested"
+                );
+                attempt += 1;
+                if attempt > max_reconnects {
+                    return Err(BifrostError::Network(
+                        "exceeded max reconnect attempts".to_string(),
+                    ));
+                }
+                resume_from = Some(offsets);
+            }
+            StreamingDispatchStep::DisconnectResume(offsets, reason) => {
+                warn!(
+                    call_id = %call_id,
+                    reason = %reason,
+                    stdout_head = offsets.0,
+                    stderr_head = offsets.1,
+                    "streaming dispatch disconnected, resuming"
+                );
+                attempt += 1;
+                if attempt > max_reconnects {
+                    return Err(BifrostError::Network(
+                        "exceeded max reconnect attempts".to_string(),
+                    ));
+                }
+                resume_from = Some(offsets);
+            }
+            StreamingDispatchStep::Error(message) => {
+                return Err(BifrostError::Network(message));
+            }
+            StreamingDispatchStep::Cancelled => return Ok(synthesized_cancelled_result()),
+        }
+    }
 }
 
 fn synthesized_cancelled_result() -> CallResult {
@@ -5072,5 +5226,131 @@ mod tests {
         );
 
         assert!(is_grant_scope_mismatch_error(&err));
+    }
+
+    #[test]
+    fn streaming_result_completed_ok() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 0,
+                duration_ms: Some(42),
+                digest_ok: true,
+            },
+            true,
+            (10, 20),
+        );
+        match step {
+            StreamingDispatchStep::Complete(r) => {
+                assert_eq!(r.exit_code, 0);
+                assert_eq!(r.duration_ms, Some(42));
+                assert!(!r.cancelled);
+                assert!(r.stdout.is_none());
+                assert!(r.stderr.is_none());
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_completed_digest_mismatch_with_verify_errs() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 0,
+                duration_ms: Some(1),
+                digest_ok: false,
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Error(msg) => assert!(msg.contains("digest")),
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_completed_digest_mismatch_without_verify_completes() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 7,
+                duration_ms: Some(2),
+                digest_ok: false,
+            },
+            false,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Complete(r) => assert_eq!(r.exit_code, 7),
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_reconnect_propagates_offsets() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::ReconnectNeeded {
+                stdout_offset: 123,
+                stderr_offset: 456,
+                reason: "gap".to_string(),
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Reconnect((so, se), reason) => {
+                assert_eq!(so, 123);
+                assert_eq!(se, 456);
+                assert_eq!(reason, "gap");
+            }
+            other => panic!("expected Reconnect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_disconnected_uses_current_heads() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Disconnected {
+                reason: "sse closed".to_string(),
+            },
+            true,
+            (11, 22),
+        );
+        match step {
+            StreamingDispatchStep::DisconnectResume((so, se), reason) => {
+                assert_eq!(so, 11);
+                assert_eq!(se, 22);
+                assert_eq!(reason, "sse closed");
+            }
+            other => panic!("expected DisconnectResume, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_error_frame_maps_to_error() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::ErrorFrame {
+                code: "E_FOO".to_string(),
+                message: "boom".to_string(),
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Error(msg) => {
+                assert!(msg.contains("E_FOO"));
+                assert!(msg.contains("boom"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_cancelled_maps_to_cancelled() {
+        let step =
+            streaming_result_from_outcome(StreamingSubscriptionOutcome::Cancelled, true, (0, 0));
+        match step {
+            StreamingDispatchStep::Cancelled => {}
+            other => panic!("expected Cancelled, got {:?}", other),
+        }
     }
 }
