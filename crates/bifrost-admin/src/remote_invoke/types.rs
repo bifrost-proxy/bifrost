@@ -1017,6 +1017,16 @@ pub struct ClientCallFrameRequest {
     pub envelope_json: String,
 }
 
+/// PR#6c: wire payload for POST /v4/remote-invoke/client/calls/:id/stream-frame.
+/// `frame_json` is the canonical JSON serialization of a `StreamFrame`
+/// (see `stream_emit::frame_to_json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientCallStreamFrameRequest {
+    pub call_id: String,
+    pub client_instance_id: String,
+    pub frame_json: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientCallExitRequest {
     pub call_id: String,

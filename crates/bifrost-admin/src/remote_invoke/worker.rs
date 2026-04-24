@@ -28,14 +28,15 @@ use super::identity::Identity;
 use super::relay_client::RelayClient;
 use super::session_ring;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
+use super::stream_emit;
 use super::types::{
     build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
     derive_open_call_session_key, encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms,
     AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
-    ClientHeartbeatRequest, ClientRegistrationChallengeRequest, ClientRegistrationRequest,
-    CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope, EncryptedPayload,
-    EnvelopeAad, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode,
-    GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
+    ClientCallStreamFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
+    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
+    EncryptedPayload, EnvelopeAad, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo,
+    GrantMode, GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
     RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
     UpdateGrantRequest, WorkerState,
 };
@@ -2430,6 +2431,9 @@ impl RemoteInvokeWorker {
                         // PR #4c-2: mirror stdout bytes into the session ring
                         // for resume. Silent no-op if cid is not a UUID.
                         session_ring::tee_stdout_str(&cid, chunk.as_bytes());
+                        // PR#6c: clone before chunk/instance_id get moved into legacy path
+                        let chunk_bytes_for_stream = chunk.as_bytes().to_vec();
+                        let instance_id_for_stream = instance_id.clone();
                         let envelope = Self::encrypt_call_frame(
                             &grant_crypto,
                             &cid,
@@ -2446,7 +2450,31 @@ impl RemoteInvokeWorker {
                             envelope_json,
                         };
 
-                        relay_client.post_call_frame(&cid, &frame_req).await
+                        let legacy_result = relay_client.post_call_frame(&cid, &frame_req).await;
+                        // PR#6c: parallel emission to the new /stream-frame
+                        // endpoint. Offset is left at 0 for now; a follow-up
+                        // PR will thread the pre-tee absolute head in. Failure
+                        // on this path is swallowed so it never breaks the
+                        // legacy envelope path (which `legacy_result` tracks).
+                        let stream_frame =
+                            stream_emit::build_stdout_frame(seq, 0u64, &chunk_bytes_for_stream);
+                        if let Some(frame_json) = stream_emit::frame_to_json(&stream_frame) {
+                            let stream_req = ClientCallStreamFrameRequest {
+                                call_id: cid.clone(),
+                                client_instance_id: instance_id_for_stream,
+                                frame_json,
+                            };
+                            if let Err(err) =
+                                relay_client.post_call_stream_frame(&cid, &stream_req).await
+                            {
+                                tracing::debug!(
+                                    call_id = %cid,
+                                    ?err,
+                                    "parallel stream_frame post failed"
+                                );
+                            }
+                        }
+                        legacy_result
                     }
                 })
                 .await;
