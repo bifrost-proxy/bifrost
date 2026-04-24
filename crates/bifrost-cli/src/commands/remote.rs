@@ -75,6 +75,9 @@ struct BuiltRemoteCommand {
     query: Option<CanonicalQueryCommand>,
     shell_exec: Option<ShellExecPayload>,
     render: RemoteRenderMode,
+    /// PR #5e-1: populated only for shell.exec; None otherwise.
+    #[allow(dead_code)]
+    streaming_prefs: Option<StreamingPrefs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +95,32 @@ struct ShellExecPayload {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
+}
+
+/// PR #5e-1: caller-side streaming preferences derived from CLI flags.
+/// `stream=true` routes the call through `subscribe_call_events_streaming`.
+/// `output_file=Some(..)` implies streaming and writes stdout to that file.
+/// `resume_call_id=Some(..)` bypasses open_call and rejoins an existing
+/// session (PR #5e-3).
+#[derive(Debug, Clone, Default)]
+struct StreamingPrefs {
+    #[allow(dead_code)]
+    pub stream: bool,
+    #[allow(dead_code)]
+    pub output_file: Option<std::path::PathBuf>,
+    #[allow(dead_code)]
+    pub resume_call_id: Option<String>,
+    #[allow(dead_code)]
+    pub no_verify_digest: bool,
+}
+
+impl StreamingPrefs {
+    /// Effective streaming mode: explicit --stream, or implied by --output-file
+    /// or --resume-call-id.
+    #[allow(dead_code)]
+    pub fn is_streaming(&self) -> bool {
+        self.stream || self.output_file.is_some() || self.resume_call_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1827,6 +1856,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         },
         RemoteCommands::Command { action } => match action {
             RemoteCommandCommands::Exec(exec_args) => build_remote_shell_exec_command(exec_args),
@@ -1850,6 +1880,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     max_scan: search_args.max_scan,
                     max_results: search_args.max_results,
                 },
+                streaming_prefs: None,
             }
         }
         RemoteCommands::Traffic { action } => match action {
@@ -1891,6 +1922,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: list_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: list_args.no_color,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Get {
@@ -1917,6 +1949,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: format.parse().unwrap_or(OutputFormat::JsonPretty),
                         no_color: *no_color,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Search(search_args) => {
@@ -1936,6 +1969,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         max_scan: search_args.max_scan,
                         max_results: search_args.max_results,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Clear { ids, yes: _ } => {
@@ -1956,6 +1990,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     query: Some(query),
                     shell_exec: None,
                     render: RemoteRenderMode::Raw,
+                    streaming_prefs: None,
                 }
             }
         },
@@ -1996,6 +2031,13 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         .or_else(|| exec_args.argv.first().cloned())
         .unwrap_or_else(|| "shell.exec".to_string());
 
+    let streaming_prefs = StreamingPrefs {
+        stream: exec_args.stream,
+        output_file: exec_args.output_file.as_ref().map(std::path::PathBuf::from),
+        resume_call_id: exec_args.resume_call_id.clone(),
+        no_verify_digest: exec_args.no_verify_digest,
+    };
+
     BuiltRemoteCommand {
         kind: CommandKind::ShellExec,
         label: "shell.exec".to_string(),
@@ -2004,6 +2046,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         query: None,
         shell_exec: Some(shell_exec),
         render: RemoteRenderMode::Raw,
+        streaming_prefs: Some(streaming_prefs),
     }
 }
 
@@ -4457,6 +4500,55 @@ mod tests {
     }
 
     #[test]
+    fn test_build_remote_command_populates_streaming_prefs_from_exec_args() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: None,
+                env: vec![],
+                timeout_ms: None,
+                shell_text: Some("yes".to_string()),
+                argv: Vec::new(),
+                stream: true,
+                output_file: Some("/tmp/out.bin".to_string()),
+                resume_call_id: Some("ab12cd34".to_string()),
+                no_verify_digest: true,
+            })),
+        });
+
+        let prefs = built
+            .streaming_prefs
+            .expect("streaming_prefs should be populated for shell.exec");
+        assert!(prefs.stream);
+        assert_eq!(
+            prefs.output_file,
+            Some(std::path::PathBuf::from("/tmp/out.bin"))
+        );
+        assert_eq!(prefs.resume_call_id.as_deref(), Some("ab12cd34"));
+        assert!(prefs.no_verify_digest);
+        assert!(prefs.is_streaming());
+    }
+
+    #[test]
+    fn test_streaming_prefs_is_streaming_implied_by_output_or_resume() {
+        let mut p = StreamingPrefs::default();
+        assert!(!p.is_streaming());
+        p.output_file = Some(std::path::PathBuf::from("/tmp/x"));
+        assert!(p.is_streaming());
+        let mut p2 = StreamingPrefs::default();
+        p2.resume_call_id = Some("abc".to_string());
+        assert!(p2.is_streaming());
+        let mut p3 = StreamingPrefs::default();
+        p3.stream = true;
+        assert!(p3.is_streaming());
+    }
+
+    #[test]
+    fn test_build_remote_command_non_shell_exec_has_no_streaming_prefs() {
+        let built = build_remote_command(&RemoteCommands::Status);
+        assert!(built.streaming_prefs.is_none());
+    }
+
+    #[test]
     fn test_should_print_remote_progress_banner_for_terminal_output() {
         assert!(should_print_remote_progress_banner(true));
     }
@@ -4482,6 +4574,7 @@ mod tests {
                 max_scan: None,
                 max_results: None,
             },
+            streaming_prefs: None,
         };
         let status = BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
@@ -4491,6 +4584,7 @@ mod tests {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         };
         let get = BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
@@ -4507,6 +4601,7 @@ mod tests {
                 format: OutputFormat::JsonPretty,
                 no_color: false,
             },
+            streaming_prefs: None,
         };
         assert!(should_stream_remote_command(&search));
         assert!(!should_stream_remote_command(&status));
@@ -4786,6 +4881,7 @@ mod tests {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         };
 
         let summary = build_open_call_command_summary(&command);
