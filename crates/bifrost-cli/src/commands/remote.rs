@@ -4230,6 +4230,10 @@ mod tests {
                 timeout_ms: Some(600_000),
                 shell_text: Some("printf hello".to_string()),
                 argv: Vec::new(),
+                stream: false,
+                output_file: None,
+                resume_call_id: None,
+                no_verify_digest: false,
             })),
         });
 
@@ -4262,6 +4266,10 @@ mod tests {
                     "hello".to_string(),
                     "--flag".to_string(),
                 ],
+                stream: false,
+                output_file: None,
+                resume_call_id: None,
+                no_verify_digest: false,
             })),
         });
 
