@@ -86,6 +86,18 @@ impl GrantScope {
                 | (Self::RemoteFileRead, CommandKind::FileGlob)
                 | (Self::RemoteFileRead, CommandKind::FileSearch)
                 | (Self::RemoteFileRead, CommandKind::FileHash)
+                | (Self::RemoteFileWrite, CommandKind::FileRead)
+                | (Self::RemoteFileWrite, CommandKind::FileList)
+                | (Self::RemoteFileWrite, CommandKind::FileStat)
+                | (Self::RemoteFileWrite, CommandKind::FileGlob)
+                | (Self::RemoteFileWrite, CommandKind::FileSearch)
+                | (Self::RemoteFileWrite, CommandKind::FileHash)
+                | (Self::RemoteFileWrite, CommandKind::FileWrite)
+                | (Self::RemoteFileWrite, CommandKind::FileEdit)
+                | (Self::RemoteFileWrite, CommandKind::FileMkdir)
+                | (Self::RemoteFileWrite, CommandKind::FileMove)
+                | (Self::RemoteFileWrite, CommandKind::FileDelete)
+                | (Self::RemoteFileWrite, CommandKind::FileApplyPatch)
         )
     }
 }
@@ -109,6 +121,18 @@ pub enum CommandKind {
     FileSearch,
     #[serde(rename = "file.hash")]
     FileHash,
+    #[serde(rename = "file.write")]
+    FileWrite,
+    #[serde(rename = "file.edit")]
+    FileEdit,
+    #[serde(rename = "file.mkdir")]
+    FileMkdir,
+    #[serde(rename = "file.move")]
+    FileMove,
+    #[serde(rename = "file.delete")]
+    FileDelete,
+    #[serde(rename = "file.apply_patch")]
+    FileApplyPatch,
 }
 
 impl CommandKind {
@@ -122,6 +146,12 @@ impl CommandKind {
             Self::FileGlob => "file.glob",
             Self::FileSearch => "file.search",
             Self::FileHash => "file.hash",
+            Self::FileWrite => "file.write",
+            Self::FileEdit => "file.edit",
+            Self::FileMkdir => "file.mkdir",
+            Self::FileMove => "file.move",
+            Self::FileDelete => "file.delete",
+            Self::FileApplyPatch => "file.apply_patch",
         }
     }
 }
@@ -371,6 +401,12 @@ impl RemoteCommand {
             CommandKind::FileGlob => "file.glob",
             CommandKind::FileSearch => "file.search",
             CommandKind::FileHash => "file.hash",
+            CommandKind::FileWrite => "file.write",
+            CommandKind::FileEdit => "file.edit",
+            CommandKind::FileMkdir => "file.mkdir",
+            CommandKind::FileMove => "file.move",
+            CommandKind::FileDelete => "file.delete",
+            CommandKind::FileApplyPatch => "file.apply_patch",
         }
     }
 
