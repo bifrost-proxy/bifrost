@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Alert,
   Badge,
@@ -17,6 +17,7 @@ import {
   Row,
   Select,
   Space,
+  Spin,
   Switch,
   Tag,
   Tooltip,
@@ -39,6 +40,7 @@ import {
   StopOutlined,
 } from "@ant-design/icons";
 import {
+  clearCalls,
   createRemoteInvokeSshKey,
   enterDiscoveryMode,
   exitDiscoveryMode,
@@ -56,6 +58,7 @@ import {
   updateGrant,
   updateRemoteShellConfig,
   getCallArgsPreviewSource,
+  getCall,
   type CreateRemoteInvokeSshKeyInput,
   type Call,
   type ClientIdentity,
@@ -77,6 +80,51 @@ import type { PairingRequest } from "../../../api/remoteInvoke";
 const { Text, Title } = Typography;
 const { TextArea } = Input;
 const { Option } = Select;
+
+const recentCallItemStyle: CSSProperties = {
+  cursor: "pointer",
+  display: "block",
+  paddingInline: 0,
+};
+
+const recentCallRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto auto",
+  alignItems: "center",
+  gap: 8,
+  width: "100%",
+};
+
+const recentCallPrimaryStyle: CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  overflow: "hidden",
+};
+
+const recentCallMetaStyle: CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  overflow: "hidden",
+};
+
+const recentCallTextEllipsisStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const callDetailPreStyle: CSSProperties = {
+  margin: 0,
+  maxHeight: 220,
+  overflow: "auto",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+};
 
 const SSH_GRANT_MODE: { label: string; value: GrantMode } = {
   label: "Permanent",
@@ -100,6 +148,47 @@ function formatArgsPreview(argsJson?: string | null): string {
   } catch {
     return argsJson.length > 60 ? argsJson.slice(0, 60) + "…" : argsJson;
   }
+}
+
+function getCallCommandPreview(call: Call): string {
+  const summaryPreview = call.command_summary?.command_preview?.trim();
+  const decryptedPreview = call.command?.command?.trim();
+  const routeOnlyPreview =
+    summaryPreview && call.command_kind && summaryPreview === call.command_kind;
+
+  return (
+    (!routeOnlyPreview && summaryPreview) ||
+    decryptedPreview ||
+    summaryPreview ||
+    call.command_kind ||
+    "-"
+  );
+}
+
+function formatJsonForDisplay(value: unknown): string {
+  if (value == null) return "-";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "-";
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function renderCallDetailBlock(value: unknown) {
+  return (
+    <pre style={callDetailPreStyle}>
+      <Text code>{formatJsonForDisplay(value)}</Text>
+    </pre>
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -615,6 +704,9 @@ export default function RemoteInvokeTab() {
   const [grantEditorStdinAllowed, setGrantEditorStdinAllowed] = useState(false);
   const [grantEditorInteractiveAllowed, setGrantEditorInteractiveAllowed] = useState(false);
   const [grantSaveLoading, setGrantSaveLoading] = useState(false);
+  const [callDetailOpen, setCallDetailOpen] = useState(false);
+  const [callDetailLoading, setCallDetailLoading] = useState(false);
+  const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const pollRef = useRef<number | null>(null);
   const [sshForm] = Form.useForm<CreateRemoteInvokeSshKeyInput>();
 
@@ -655,6 +747,35 @@ export default function RemoteInvokeTab() {
       setCalls(sorted);
     } catch {
       // ignore
+    }
+  }, []);
+
+  const handleClearCalls = useCallback(async () => {
+    try {
+      const res = await clearCalls();
+      setCalls([]);
+      setSelectedCall(null);
+      message.success(`Cleared ${res.removed ?? 0} recent calls`);
+    } catch {
+      message.error("Failed to clear recent calls");
+    }
+  }, []);
+
+  const handleOpenCallDetail = useCallback(async (call: Call) => {
+    setSelectedCall(call);
+    setCallDetailOpen(true);
+    setCallDetailLoading(true);
+    try {
+      const res = await getCall(call.call_id);
+      setSelectedCall(res.call);
+    } catch (e) {
+      message.warning(
+        e instanceof Error
+          ? `Failed to refresh call detail: ${e.message}`
+          : "Failed to refresh call detail",
+      );
+    } finally {
+      setCallDetailLoading(false);
     }
   }, []);
 
@@ -1831,11 +1952,26 @@ export default function RemoteInvokeTab() {
               </Space>
             }
             extra={
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                onClick={() => void refreshCalls()}
-              />
+              <Space size={4}>
+                <Popconfirm
+                  title="Clear recent calls?"
+                  okText="Clear"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => void handleClearCalls()}
+                >
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    disabled={calls.length === 0}
+                  />
+                </Popconfirm>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void refreshCalls()}
+                />
+              </Space>
             }
             size="small"
           >
@@ -1852,72 +1988,124 @@ export default function RemoteInvokeTab() {
                 renderItem={(c) => {
                   const argsPreviewSource = getCallArgsPreviewSource(c);
                   const argsPreview = formatArgsPreview(argsPreviewSource);
-                  const summaryPreview = c.command_summary?.command_preview?.trim();
-                  const decryptedPreview = c.command?.command?.trim();
-                  const routeOnlyPreview =
-                    summaryPreview && c.command_kind && summaryPreview === c.command_kind;
-                  const commandPreview =
-                    (!routeOnlyPreview && summaryPreview) ||
-                    decryptedPreview ||
-                    summaryPreview ||
-                    c.command_kind ||
-                    "-";
+                  const commandPreview = getCallCommandPreview(c);
                   const bytesLabel = formatBytes(c.bytes_out);
                   return (
-                  <List.Item>
-                    <List.Item.Meta
-                      title={
-                        <Space>
-                          <Text code style={{ fontSize: 11 }}>
-                            {commandPreview}
-                          </Text>
-                          {argsPreview && (
-                            <Tooltip title={argsPreviewSource}>
-                              <Text type="secondary" style={{ fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
-                                {argsPreview}
+                      <List.Item
+                        style={recentCallItemStyle}
+                        onClick={() => void handleOpenCallDetail(c)}
+                      >
+                        <div style={recentCallRowStyle}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={recentCallPrimaryStyle}>
+                              <Tooltip title={commandPreview}>
+                                <Text
+                                  code
+                                  style={{
+                                    ...recentCallTextEllipsisStyle,
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  {commandPreview}
+                                </Text>
+                              </Tooltip>
+                              {argsPreview && (
+                                <Tooltip title={argsPreviewSource}>
+                                  <Text
+                                    type="secondary"
+                                    style={{
+                                      ...recentCallTextEllipsisStyle,
+                                      flex: "0 1 260px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {argsPreview}
+                                  </Text>
+                                </Tooltip>
+                              )}
+                            </div>
+                            <Space size={4} style={{ marginTop: 4 }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {new Date(c.started_at).toLocaleString()}
                               </Text>
-                            </Tooltip>
-                          )}
-                          <Tag
-                            color={getCallStatusColor(c)}
-                          >
-                            {c.status}
-                            {c.exit_code !== undefined && c.exit_code !== null
-                              ? ` (${c.exit_code})`
-                              : ""}
-                          </Tag>
-                          {c.caller_display_name && (
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              by {c.caller_display_name}
-                            </Text>
-                          )}
-                          {c.policy_id && (
-                            <Tag color="purple">{c.policy_id}</Tag>
-                          )}
-                          {c.exec_mode && (
-                            <Tag color="blue">{c.exec_mode}</Tag>
-                          )}
-                        </Space>
-                      }
-                      description={
-                        <Space size={4}>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            {new Date(c.started_at).toLocaleString()}
-                          </Text>
-                          {c.duration_ms != null && (
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              · {c.duration_ms}ms
-                            </Text>
-                          )}
-                          {bytesLabel && (
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              · ↓ {bytesLabel}
-                            </Text>
-                          )}
-                        </Space>
-                      }
-                    />
-                  </List.Item>
+                              {c.duration_ms != null && (
+                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                  · {c.duration_ms}ms
+                                </Text>
+                              )}
+                              {bytesLabel && (
+                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                  · ↓ {bytesLabel}
+                                </Text>
+                              )}
+                            </Space>
+                          </div>
+
+                          <div style={recentCallMetaStyle}>
+                            <Tag color={getCallStatusColor(c)}>
+                              {c.status}
+                              {c.exit_code !== undefined && c.exit_code !== null
+                                ? ` (${c.exit_code})`
+                                : ""}
+                            </Tag>
+                            {c.caller_display_name && (
+                              <Tooltip title={c.caller_display_name}>
+                                <Text
+                                  type="secondary"
+                                  style={{
+                                    ...recentCallTextEllipsisStyle,
+                                    maxWidth: 220,
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  by {c.caller_display_name}
+                                </Text>
+                              </Tooltip>
+                            )}
+                            {c.policy_id && (
+                              <Tooltip title={c.policy_id}>
+                                <Tag
+                                  color="purple"
+                                  style={{
+                                    maxWidth: 120,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {c.policy_id}
+                                </Tag>
+                              </Tooltip>
+                            )}
+                            {c.exec_mode && (
+                              <Tooltip title={c.exec_mode}>
+                                <Tag
+                                  color="blue"
+                                  style={{
+                                    maxWidth: 120,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {c.exec_mode}
+                                </Tag>
+                              </Tooltip>
+                            )}
+                          </div>
+
+                          <Tooltip title="View call detail">
+                            <Button
+                              size="small"
+                              icon={<EyeOutlined />}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleOpenCallDetail(c);
+                              }}
+                            />
+                          </Tooltip>
+                        </div>
+                      </List.Item>
                   );
                 }}
               />
@@ -1934,6 +2122,124 @@ export default function RemoteInvokeTab() {
           void storeFetchPairings();
         }}
       />
+      <Modal
+        open={callDetailOpen}
+        title="Call Detail"
+        footer={null}
+        width={820}
+        onCancel={() => {
+          setCallDetailOpen(false);
+          setSelectedCall(null);
+        }}
+        destroyOnClose
+      >
+        <Spin spinning={callDetailLoading}>
+          {selectedCall && (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Descriptions
+                size="small"
+                column={2}
+                bordered
+                items={[
+                  {
+                    key: "call_id",
+                    label: "Call ID",
+                    span: 2,
+                    children: <Text code copyable>{selectedCall.call_id}</Text>,
+                  },
+                  {
+                    key: "status",
+                    label: "Status",
+                    children: (
+                      <Tag color={getCallStatusColor(selectedCall)}>
+                        {selectedCall.status}
+                        {selectedCall.exit_code !== undefined &&
+                        selectedCall.exit_code !== null
+                          ? ` (${selectedCall.exit_code})`
+                          : ""}
+                      </Tag>
+                    ),
+                  },
+                  {
+                    key: "started_at",
+                    label: "Started",
+                    children: new Date(selectedCall.started_at).toLocaleString(),
+                  },
+                  {
+                    key: "duration",
+                    label: "Duration",
+                    children:
+                      selectedCall.duration_ms != null
+                        ? `${selectedCall.duration_ms}ms`
+                        : "-",
+                  },
+                  {
+                    key: "bytes_out",
+                    label: "Bytes Out",
+                    children: formatBytes(selectedCall.bytes_out) ?? "-",
+                  },
+                  {
+                    key: "grant_id",
+                    label: "Grant",
+                    span: 2,
+                    children: <Text code>{selectedCall.grant_id}</Text>,
+                  },
+                  {
+                    key: "client",
+                    label: "Client",
+                    span: 2,
+                    children: <Text code>{selectedCall.client_instance_id}</Text>,
+                  },
+                  {
+                    key: "caller",
+                    label: "Caller",
+                    span: 2,
+                    children:
+                      selectedCall.caller_display_name ||
+                      formatFingerprint(selectedCall.caller_fingerprint),
+                  },
+                  {
+                    key: "policy",
+                    label: "Policy",
+                    children: selectedCall.policy_id ? (
+                      <Tag color="purple">{selectedCall.policy_id}</Tag>
+                    ) : (
+                      "-"
+                    ),
+                  },
+                  {
+                    key: "exec_mode",
+                    label: "Exec Mode",
+                    children: selectedCall.exec_mode ? (
+                      <Tag color="blue">{selectedCall.exec_mode}</Tag>
+                    ) : (
+                      "-"
+                    ),
+                  },
+                ]}
+              />
+              <div>
+                <Text strong>Command</Text>
+                {renderCallDetailBlock(getCallCommandPreview(selectedCall))}
+              </div>
+              <div>
+                <Text strong>Arguments</Text>
+                {renderCallDetailBlock(getCallArgsPreviewSource(selectedCall))}
+              </div>
+              {selectedCall.command_detail && (
+                <div>
+                  <Text strong>Command Detail</Text>
+                  {renderCallDetailBlock(selectedCall.command_detail)}
+                </div>
+              )}
+              <div>
+                <Text strong>Raw Command</Text>
+                {renderCallDetailBlock(selectedCall.command)}
+              </div>
+            </Space>
+          )}
+        </Spin>
+      </Modal>
       <Modal
         open={grantEditorOpen}
         title="Edit Grant Access"

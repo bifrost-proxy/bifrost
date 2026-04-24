@@ -243,6 +243,10 @@ export async function listCalls(): Promise<CallsListResponse> {
   return get<CallsListResponse>("/remote-invoke/calls");
 }
 
+export async function clearCalls(): Promise<{ success: boolean; removed: number }> {
+  return del<{ success: boolean; removed: number }>("/remote-invoke/calls");
+}
+
 export async function getCall(
   callId: string,
 ): Promise<CallDetailResponse> {
