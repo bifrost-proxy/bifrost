@@ -226,6 +226,21 @@ impl SessionRegistry {
     pub fn is_empty(&self) -> bool {
         self.inner.lock().expect("registry lock").is_empty()
     }
+
+    /// PR #4c-1: insert a session keyed by a caller-specified id so the
+    /// relay's canonical call_id stays the primary handle. No-op if an
+    /// entry already exists.
+    pub fn insert_with_id(&self, id: Uuid, capacity: usize) {
+        let mut map = self.inner.lock().expect("registry lock");
+        map.entry(id).or_insert_with(|| {
+            Arc::new(Mutex::new(SessionState {
+                call_id: id,
+                stdout: ByteRing::new(capacity),
+                stderr: ByteRing::new(capacity),
+                status: SessionStatus::Running,
+            }))
+        });
+    }
 }
 
 // PR #4b: process-global singleton registry + tee helpers.
@@ -317,6 +332,55 @@ pub fn resume_stderr(
     let n = state.stderr.read_from(from_offset, &mut out)?;
     out.truncate(n);
     Ok((out, head, state.status.clone()))
+}
+
+// ---------- PR #4c-1: &str-keyed convenience wrappers ----------
+//
+// worker.rs carries call_id as a String (the relay's canonical form). These
+// wrappers parse on demand and delegate to the Uuid-keyed helpers, so
+// malformed or non-UUID ids are treated as a silent no-op (same contract as
+// the Uuid helpers for unknown ids).
+
+/// Parse `call_id` and mirror a stdout chunk if valid. Silent no-op on
+/// parse failure or unknown call_id.
+pub fn tee_stdout_str(call_id: &str, bytes: &[u8]) {
+    if let Ok(id) = Uuid::parse_str(call_id) {
+        tee_stdout(&id, bytes);
+    }
+}
+
+/// Parse `call_id` and mirror a stderr chunk if valid. Silent no-op on
+/// parse failure or unknown call_id.
+pub fn tee_stderr_str(call_id: &str, bytes: &[u8]) {
+    if let Ok(id) = Uuid::parse_str(call_id) {
+        tee_stderr(&id, bytes);
+    }
+}
+
+/// Parse `call_id` and finalize the session if valid. Silent no-op on
+/// parse failure or unknown call_id.
+pub fn finalize_session_str(call_id: &str, status: SessionStatus) {
+    if let Ok(id) = Uuid::parse_str(call_id) {
+        finalize_session(&id, status);
+    }
+}
+
+/// Register a session keyed by the relay-assigned string call_id. Returns
+/// true on success, false if the id cannot be parsed (silent no-op) or
+/// an entry already exists for that id (idempotent replay safe). Uses
+/// [`DEFAULT_SESSION_RING_CAPACITY`] for both stdout and stderr.
+pub fn register_session_str(call_id: &str) -> bool {
+    if let Ok(id) = Uuid::parse_str(call_id) {
+        let reg = global_registry();
+        if reg.get(&id).is_some() {
+            return false;
+        }
+        // Note: SessionRegistry::create() mints its own Uuid. To key by the
+        // relay's id, insert manually using the public inner via a helper.
+        reg.insert_with_id(id, DEFAULT_SESSION_RING_CAPACITY);
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -506,5 +570,50 @@ mod tests {
         assert_eq!(bytes, b"89ABCDEF");
         assert_eq!(head, 16);
         global_registry().remove(&call_id);
+    }
+
+    #[test]
+    fn str_wrappers_roundtrip_stdout() {
+        // Valid str-form UUID registered, tee'd, drained.
+        let id = Uuid::new_v4();
+        let sid = id.to_string();
+        assert!(register_session_str(&sid));
+        // Duplicate register is idempotent.
+        assert!(!register_session_str(&sid));
+        tee_stdout_str(&sid, b"hello ");
+        tee_stdout_str(&sid, b"world");
+        finalize_session_str(&sid, SessionStatus::Done { exit_code: 0 });
+        let (bytes, head, status) = resume_stdout(&id, 0).expect("resume");
+        assert_eq!(bytes, b"hello world");
+        assert_eq!(head, 11);
+        assert!(matches!(status, SessionStatus::Done { exit_code: 0 }));
+    }
+
+    #[test]
+    fn str_wrappers_noop_on_invalid_or_unknown_id() {
+        // Invalid format: silent no-op, no panic.
+        tee_stdout_str("not-a-uuid", b"ignored");
+        tee_stderr_str("not-a-uuid", b"ignored");
+        finalize_session_str("not-a-uuid", SessionStatus::Abandoned);
+        assert!(!register_session_str("not-a-uuid"));
+
+        // Valid UUID format but unknown: silent no-op for tee, finalize.
+        let ghost = Uuid::new_v4().to_string();
+        tee_stdout_str(&ghost, b"ignored");
+        tee_stderr_str(&ghost, b"ignored");
+        // Resume on unknown id yields UnknownCallId.
+        let parsed = Uuid::parse_str(&ghost).unwrap();
+        assert_eq!(resume_stdout(&parsed, 0), Err(ResumeError::UnknownCallId));
+    }
+
+    #[test]
+    fn insert_with_id_keeps_existing_entry() {
+        let id = Uuid::new_v4();
+        global_registry().insert_with_id(id, 1024);
+        tee_stdout(&id, b"first");
+        // Second insert is a no-op: bytes must persist.
+        global_registry().insert_with_id(id, 1024);
+        let (bytes, _, _) = resume_stdout(&id, 0).unwrap();
+        assert_eq!(bytes, b"first");
     }
 }
