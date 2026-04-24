@@ -287,6 +287,36 @@ test_host_rule() {
     fi
 }
 
+test_path_prefix_forward_rule() {
+    echo ""
+    echo "=== Test: Path Prefix Forward Rule ==="
+
+    local asset_path="/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg"
+    local url="https://ejt9lgzgu9.feishu-boe.cn${asset_path}?v=1"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture path_prefix_forward.txt "MOCK_HTTP_PORT=${MOCK_HTTP_PORT}")
+
+    local response
+    response=$(replay_request "$url" "GET" '[["Accept", "application/json"]]' "" "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+
+    local received_path
+    received_path=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.parsed_path // empty')
+
+    local received_query
+    received_query=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.query_string // empty')
+
+    if [ "$status" = "200" ] && [ "$received_path" = "$asset_path" ] && [ "$received_query" = "v=1" ]; then
+        _log_pass "Path prefix forward rule applied without duplicated path"
+        passed=$((passed + 1))
+    else
+        _log_fail "Path prefix forward rule duplicated or lost path/query" "path=$asset_path query=v=1" "status=$status, path=$received_path, query=$received_query"
+        failed=$((failed + 1))
+    fi
+}
+
 test_method_rule() {
     echo ""
     echo "=== Test: Method Rule ==="
@@ -623,6 +653,54 @@ test_response_modification_rules() {
     fi
 }
 
+test_forward_localhost_api_rule() {
+    echo ""
+    echo "=== Test: Replay HTTPS API Forwarded to Local HTTP ==="
+
+    local url="https://bifrost.local/api/nextagent/v1/sessions?source=replay"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture forward_localhost_api.txt "MOCK_HTTP_PORT=${MOCK_HTTP_PORT}")
+
+    local response
+    response=$(replay_request "$url" "POST" '[["Host", "bifrost.local"], ["Connection", "keep-alive"], ["Content-Type", "application/json"]]' "{}" "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+
+    local parsed_path
+    parsed_path=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.parsed_path // empty')
+
+    local host_header
+    host_header=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.headers | to_entries[]? | select(.key | ascii_downcase == "host") | .value' | head -1)
+
+    local connection_header
+    connection_header=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.headers | to_entries[]? | select(.key | ascii_downcase == "connection") | .value' | head -1)
+
+    if [ "$status" = "200" ] && [ "$parsed_path" = "/api/nextagent/v1/sessions" ]; then
+        _log_pass "Replay forwarding: nextoncall API path reached local HTTP upstream"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay forwarding failed" "status=200 parsed_path=/api/nextagent/v1/sessions" "status=$status parsed_path=$parsed_path response=$response"
+        failed=$((failed + 1))
+    fi
+
+    if [ "$host_header" != "bifrost.local" ] && [ -n "$host_header" ]; then
+        _log_pass "Replay forwarding regenerated Host header for local upstream: $host_header"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay forwarding leaked stale Host header" "local upstream host" "$host_header"
+        failed=$((failed + 1))
+    fi
+
+    if [ -z "$connection_header" ]; then
+        _log_pass "Replay forwarding dropped hop-by-hop Connection header"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay forwarding leaked Connection header" "empty" "$connection_header"
+        failed=$((failed + 1))
+    fi
+}
+
 test_websocket_replay_with_rules() {
     echo ""
     echo "=== Test: WebSocket Replay with Rules ==="
@@ -696,6 +774,7 @@ main() {
     
     test_reqHeaders_rule
     test_host_rule
+    test_path_prefix_forward_rule
     test_method_rule
     test_ua_rule
     test_referer_rule
@@ -707,6 +786,7 @@ main() {
     test_no_rules_mode
     test_sse_replay_with_rules
     test_response_modification_rules
+    test_forward_localhost_api_rule
     test_websocket_replay_with_rules
     
     echo ""

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use base64::Engine;
-use bifrost_core::{parse_rules, RequestContext, Rule, RulesResolver, ValueStore};
+use bifrost_core::{RequestContext, Rule, RuleParser, RulesResolver, ValueStore};
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -43,6 +43,47 @@ fn get_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
+}
+
+fn effective_authority(url: &str) -> Option<String> {
+    let uri: Uri = url.parse().ok()?;
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let host = uri.host()?.to_ascii_lowercase();
+    let port = uri.port_u16().or(match scheme {
+        "https" | "wss" => Some(443),
+        "http" | "ws" => Some(80),
+        _ => None,
+    })?;
+    Some(format!("{}:{}", host, port))
+}
+
+fn replay_target_authority_changed(original_url: &str, applied_url: &str) -> bool {
+    match (
+        effective_authority(original_url),
+        effective_authority(applied_url),
+    ) {
+        (Some(original), Some(applied)) => original != applied,
+        _ => original_url != applied_url,
+    }
+}
+
+fn should_skip_http_forward_header(name: &str, target_authority_changed: bool) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    if n.is_empty() || n.starts_with(':') {
+        return true;
+    }
+
+    matches!(
+        n.as_str(),
+        "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "proxy-connection"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    ) || (target_authority_changed && n == "host")
 }
 
 fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<String> {
@@ -87,7 +128,9 @@ fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<Strin
 
 #[cfg(test)]
 mod replay_body_decode_tests {
-    use super::decode_replay_body;
+    use super::{
+        decode_replay_body, replay_target_authority_changed, should_skip_http_forward_header,
+    };
 
     #[test]
     fn decode_gzip_response_body() {
@@ -103,6 +146,44 @@ mod replay_body_decode_tests {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
         let decoded = decode_replay_body(&headers, &gz).unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn replay_forward_skips_stale_host_when_rule_changes_target() {
+        assert!(replay_target_authority_changed(
+            "https://bifrost.local/api/nextagent/v1/sessions",
+            "http://localhost:5173/api/nextagent/v1/sessions"
+        ));
+        assert!(should_skip_http_forward_header("Host", true));
+    }
+
+    #[test]
+    fn replay_forward_keeps_custom_host_when_authority_is_unchanged() {
+        assert!(!replay_target_authority_changed(
+            "https://bifrost.local/api/nextagent/v1/sessions",
+            "https://bifrost.local/api/nextagent/v1/sessions"
+        ));
+        assert!(!should_skip_http_forward_header("Host", false));
+    }
+
+    #[test]
+    fn replay_forward_skips_hop_by_hop_headers_and_pseudo_headers() {
+        for name in [
+            "Connection",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Proxy-Connection",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            ":authority",
+        ] {
+            assert!(
+                should_skip_http_forward_header(name, false),
+                "{name} should not be forwarded by unified replay"
+            );
+        }
     }
 }
 
@@ -290,7 +371,12 @@ async fn execute_replay_unified(
         _ => client.get(&applied_request.url),
     };
 
+    let target_authority_changed =
+        replay_target_authority_changed(&unified_req.url, &applied_request.url);
     for (key, value) in &applied_request.headers {
+        if should_skip_http_forward_header(key, target_authority_changed) {
+            continue;
+        }
         req_builder = req_builder.header(key, value);
     }
 
@@ -2260,23 +2346,30 @@ fn resolve_custom_rules(
     url: &str,
     method: &str,
 ) -> (bifrost_core::ResolvedRules, Vec<MatchedRule>) {
-    let rules = match parse_rules(custom_rules) {
-        Ok(r) => r
-            .into_iter()
-            .enumerate()
-            .map(|(i, r)| r.with_source("custom".to_string(), i + 1))
-            .collect::<Vec<_>>(),
+    let mut values = load_values(state);
+    let parser = RuleParser::with_values(values.clone());
+    let parsed_rules = match parser.parse_rules_with_inline_values(custom_rules) {
+        Ok((r, inline_values)) => {
+            for (key, value) in inline_values {
+                values.entry(key).or_insert(value);
+            }
+            r
+        }
         Err(e) => {
             warn!(error = %e, "[REPLAY] Failed to parse custom rules");
             return (bifrost_core::ResolvedRules::default(), vec![]);
         }
     };
+    let rules = parsed_rules
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| r.with_source("custom".to_string(), i + 1))
+        .collect::<Vec<_>>();
 
     if rules.is_empty() {
         return (bifrost_core::ResolvedRules::default(), vec![]);
     }
 
-    let values = load_values(state);
     let resolver = RulesResolver::new(rules).with_values(values);
     let ctx = RequestContext::from_url(url).with_method(method);
     let resolved = resolver.resolve(&ctx);
@@ -2305,6 +2398,7 @@ fn resolve_from_storage(
 ) -> (bifrost_core::ResolvedRules, Vec<MatchedRule>) {
     let rules_storage = &state.rules_storage;
     let mut all_rules: Vec<Rule> = vec![];
+    let mut values = load_values(state);
 
     let rule_files = match rules_storage.load_all() {
         Ok(files) => files,
@@ -2325,7 +2419,13 @@ fn resolve_from_storage(
             }
         }
 
-        if let Ok(parsed) = parse_rules(&rule_file.content) {
+        let parser = RuleParser::with_values(values.clone());
+        if let Ok((parsed, inline_values)) =
+            parser.parse_rules_with_inline_values(&rule_file.content)
+        {
+            for (key, value) in inline_values {
+                values.entry(key).or_insert(value);
+            }
             let rules_with_source: Vec<Rule> = parsed
                 .into_iter()
                 .enumerate()
@@ -2339,7 +2439,6 @@ fn resolve_from_storage(
         return (bifrost_core::ResolvedRules::default(), vec![]);
     }
 
-    let values = load_values(state);
     let resolver = RulesResolver::new(all_rules).with_values(values);
     let ctx = RequestContext::from_url(url).with_method(method);
     let resolved = resolver.resolve(&ctx);

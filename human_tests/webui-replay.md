@@ -8,7 +8,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/replay`
 3. 确保端口 8800 未被防火墙阻止
@@ -376,6 +376,71 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 - JSON 内容有语法高亮（关键字、字符串、数字不同颜色）
 - 响应体内容可以复制
 - 支持搜索响应内容
+
+---
+
+### TC-WRP-23：Replay HTTPS API 请求经 localhost 规则转发/透传不返回 502
+
+**前置条件**：
+1. 启动一个本地 HTTP echo 服务，例如：
+   ```bash
+   python3 e2e-tests/mock_servers/http_echo_server.py 15173
+   ```
+2. 在 Rules 页面或通过 API 启用规则：
+   ```text
+   bifrost.local http://127.0.0.1:15173/
+   ```
+3. 对 nextoncall PPE 规则回归，启用如下完整规则，验证 API passthrough 优先于域名级 localhost 转发：
+   ````text
+   https://nextoncall-bd.byteintl.net/ reqHeaders://{ppe_i18n}
+   ```ppe_i18n
+   x-tt-env: ppe_next_agent_new
+   x-use-ppe: 1
+   ```
+
+   https://bifrost.local/ reqHeaders://{ppe2}
+   ```ppe2
+   x-tt-env: ppe_next_agent_new
+   x-use-ppe: 1
+   ```
+   https://bifrost.local/app/ passthrough://
+   https://bifrost.local/api/v1 passthrough://
+   https://bifrost.local/api/nextagent/ passthrough://
+   bifrost.local http://localhost:5173/
+   ````
+
+**操作步骤**：
+1. 打开 Replay 页面 `http://127.0.0.1:8800/_bifrost/replay`
+2. 创建一个新请求：
+   - Method: `POST`
+   - URL: `https://bifrost.local/api/nextagent/v1/sessions`
+   - Header: `Host: bifrost.local`
+   - Header: `Connection: keep-alive`
+   - Header: `Content-Type: application/json`
+   - Body: `{}`
+3. 确认 Replay 的 rule mode 使用 Enabled/当前启用规则
+4. 点击 Send
+5. 查看响应 Body 中 echo 服务返回的 request 信息
+
+**预期结果**：
+- Replay 请求成功完成，不返回管理端 `502 Bad Gateway`
+- localhost echo 服务场景响应状态码为 `200`
+- echo 服务看到的 `parsed_path` 为 `/api/nextagent/v1/sessions`
+- echo 服务收到的 `Host` 不再是 `bifrost.local`，而是本地上游地址（如 `127.0.0.1:15173`）
+- echo 服务不再收到原始 `Connection: keep-alive` 传输级头
+- 完整 nextoncall PPE 规则下，`/api/nextagent/` replay 命中 `passthrough://` 后不再被 `bifrost.local http://localhost:5173/` 覆盖。
+- 完整 nextoncall PPE 规则下，返回真实上游响应（例如未登录时为 `401` 而不是管理端 `502`）；Traffic 详情中的 `actual_url` / `actual_host` 为空，request headers 包含 `x-tt-env: ppe_next_agent_new` 与 `x-use-ppe: 1`。
+
+**本轮执行记录（2026-04-24）**：
+- 先执行 `bifrost status`，确认正式代理运行在 `0.0.0.0:9900`，当前 active rules 包含 `bifrost.local http://localhost:5173/`；验证过程未使用 9900 作为测试代理端口。
+- 使用临时数据目录 `/tmp/bifrost-replay-e2e.LJSQRS`、测试代理端口 `18889`、mock HTTP/SSE/WS 端口 `13010/13011/13012` 执行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_replay_rules.sh`。
+- `test_forward_localhost_api_rule` PASS：Replay 将 `https://bifrost.local/api/nextagent/v1/sessions?source=replay` 通过 `bifrost.local http://127.0.0.1:13010/` 规则转发到本地 HTTP 上游，状态码为 `200`，上游 `parsed_path` 为 `/api/nextagent/v1/sessions`。
+- 上游实际收到的 `Host` 为 `127.0.0.1:13010`，没有泄漏旧的 `Host: bifrost.local`；上游也没有收到原始 `Connection: keep-alive`。
+- 脚本总结果 `Passed: 21`、`Failed: 0`，并完成清理测试代理与 mock 服务进程。
+- 使用临时数据目录 `/tmp/bifrost-exact-replay.wRjIWf` 与测试代理端口 `9901` 启动新编译二进制：`target/debug/bifrost start -H 127.0.0.1 -p 9901 --unsafe-ssl --skip-cert-check --no-system-proxy`。
+- 导入本用例中的完整 nextoncall PPE 规则后，通过 `POST /_bifrost/api/replay/execute/unified` 重放 `https://bifrost.local/api/nextagent/v1/sessions`，结果 `success=true`、`status=401`、`error=null`，不再返回 `502`。`401` 为真实上游鉴权响应。
+- Replay applied rules 包含 `passthrough`、展开后的 `reqHeaders` 以及域名级 `http` 匹配记录；实际请求未被转发到 `localhost:5173`。
+- Traffic 详情验证 `url=https://bifrost.local/api/nextagent/v1/sessions`、`host=bifrost.local`、`actual_url=null`、`actual_host=null`，request headers 包含 `x-tt-env: ppe_next_agent_new` 与 `x-use-ppe: 1`。
 
 ---
 

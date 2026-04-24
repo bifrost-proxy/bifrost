@@ -1,0 +1,2 @@
+# 测试目标: 验证 Replay custom rules 模式下，带路径前缀的转发规则只追加原请求相对匹配前缀的 suffix，避免目标路径重复。
+https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:__MOCK_HTTP_PORT__/labor_cost/static/

@@ -180,14 +180,20 @@ jobs:
           if-no-files-found: ignore
 
   e2e-shell:
-    name: E2E Shell (Linux)
+    name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
     needs: [build-e2e]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "8"
+      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
+      BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -236,7 +242,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-linux
+          name: e2e-shell-logs-linux-shard-${{ matrix.shard }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
@@ -431,52 +437,57 @@ jobs:
           CARGO_TARGET_DIR: target/cross-musl-aarch64
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-musl
 
-  build-desktop-macos:
-    name: Build macOS (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+  build-cli-macos-aarch64:
+    name: Build macOS CLI (aarch64-apple-darwin)
+    runs-on: macos-15
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            web/pnpm-lock.yaml
-      - name: Install root dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-build-${{ matrix.target }}
+          key: cli-build-aarch64-apple-darwin
           save-if: always()
-      - name: Build workspace
-        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Build CLI
+        env:
+          SKIP_FRONTEND_BUILD: "1"
+        run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
-          name: bifrost-release-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/bifrost
+          name: bifrost-release-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/bifrost
+          retention-days: 1
+
+  build-cli-macos-x86_64:
+    name: Build macOS CLI (x86_64-apple-darwin)
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-build-x86_64-apple-darwin
+          save-if: always()
+      - name: Build CLI
+        env:
+          SKIP_FRONTEND_BUILD: "1"
+        run: cargo build -p bifrost-cli --release --target x86_64-apple-darwin
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-release-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release/bifrost
           retention-days: 1
 
   e2e-macos-rules:
     name: E2E Rules (aarch64-apple-darwin)
-    needs: [build-desktop-macos]
+    needs: [build-cli-macos-aarch64]
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -538,14 +549,20 @@ jobs:
           if-no-files-found: ignore
 
   e2e-macos-shell:
-    name: E2E Shell (aarch64-apple-darwin)
-    needs: [build-desktop-macos]
+    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
+    needs: [build-cli-macos-aarch64]
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "8"
+      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
+      BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -596,7 +613,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-aarch64-apple-darwin
+          name: e2e-shell-logs-aarch64-apple-darwin-shard-${{ matrix.shard }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
@@ -660,7 +677,7 @@ jobs:
 
   bundle-desktop-macos:
     name: Bundle macOS (${{ matrix.target }})
-    needs: [build-desktop-macos]
+    needs: [build-cli-macos-aarch64, build-cli-macos-x86_64]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:

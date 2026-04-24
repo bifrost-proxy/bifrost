@@ -1,0 +1,2 @@
+# 测试目标: 验证 replay unified 模式下，HTTPS API 请求经 http://localhost 风格规则转发到本地 HTTP 服务时，不会携带旧 Host/传输级头导致 502。
+bifrost.local http://127.0.0.1:__MOCK_HTTP_PORT__/

@@ -8,7 +8,7 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 未被其他程序占用
 
@@ -354,6 +354,38 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 - 响应体包含成功消息 "Request moved"
 - 再次查询 `GROUP_A` 的请求列表，该请求不存在
 - 查询 `GROUP_B` 的请求列表，该请求已出现在其中
+
+---
+
+### TC-ARP-18：带路径前缀的转发规则不会重复拼接路径
+
+**前置条件**：
+1. 启动一个本地 HTTP Echo 服务，监听 `9000` 端口，响应体包含收到的请求 path 和 query。
+2. Bifrost 使用临时数据目录启动在 `8800` 端口，并携带 `--no-system-proxy`。
+
+**操作步骤**：
+1. 使用 Replay Admin API 执行带 custom rules 的请求：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/replay/execute/unified \
+     -H "Content-Type: application/json" \
+     -d '{
+       "url": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
+       "method": "GET",
+       "headers": [["Accept","application/json"]],
+       "rule_config": {
+         "mode": "custom",
+         "custom_rules": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:9000/labor_cost/static/"
+       },
+       "timeout_ms": 15000
+     }'
+   ```
+
+**预期结果**：
+- 返回 HTTP 200，响应体包含 `success: true`
+- `data.status` 为 `200`
+- Echo 服务收到的请求 path 为 `/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg`
+- Echo 服务收到的 query 为 `v=1`
+- Echo 服务没有收到重复路径 `/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg`
 
 ---
 

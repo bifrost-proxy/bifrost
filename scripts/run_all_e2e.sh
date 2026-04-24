@@ -12,8 +12,11 @@ RUN_SHELL=1
 RUN_RUNNER=1
 RUN_UI=1
 SKIP_RELEASE_BUILD=0
+LIST_SHELL_TESTS=0
 PLATFORM="$(uname -s)"
 REPORT_DIR=""
+SHARD_INDEX="${BIFROST_E2E_SHARD_INDEX:-0}"
+SHARD_TOTAL="${BIFROST_E2E_SHARD_TOTAL:-0}"
 
 declare -a SUITE_NAMES=()
 declare -a SUITE_STATUSES=()
@@ -93,7 +96,13 @@ Options:
   --skip-runner       Skip cargo run -p bifrost-e2e
   --skip-ui           Skip Playwright UI E2E
   --skip-build        Skip release binary compilation (use pre-built binary)
+  --shard N/M         Run only shard N of M (1-indexed). E.g. --shard 1/3
+  --list-shell-tests  Print the shell tests selected by the current mode/shard and exit
   -h, --help          Show this help
+
+Environment variables:
+  BIFROST_E2E_SHARD_INDEX  Shard index (1-indexed), same as N in --shard N/M
+  BIFROST_E2E_SHARD_TOTAL  Total shards, same as M in --shard N/M
 EOF
 }
 
@@ -127,6 +136,19 @@ while [[ $# -gt 0 ]]; do
     --skip-build)
       SKIP_RELEASE_BUILD=1
       shift
+      ;;
+    --list-shell-tests)
+      LIST_SHELL_TESTS=1
+      shift
+      ;;
+    --shard)
+      if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
+        echo "Error: --shard requires N/M format (e.g. --shard 1/3)" >&2
+        exit 1
+      fi
+      SHARD_INDEX="${2%%/*}"
+      SHARD_TOTAL="${2##*/}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -198,6 +220,9 @@ print_runtime_context() {
   echo "Run runner   : $RUN_RUNNER"
   echo "Run UI       : $RUN_UI"
   echo "Skip build   : $SKIP_RELEASE_BUILD"
+  if [[ "$SHARD_TOTAL" -gt 0 ]]; then
+    echo "Shard        : $SHARD_INDEX/$SHARD_TOTAL"
+  fi
 }
 
 stream_command_output() {
@@ -458,6 +483,12 @@ run_and_capture() {
 
 SKIP_IN_CI_TESTS=(
   "test_memory_pressure_e2e.sh"
+  # System proxy tests mutate host network settings and are too flaky in
+  # ephemeral CI runners. Keep them as local-only full-shell coverage.
+  "test_system_proxy_e2e.sh"
+  # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
+  # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
+  "test_tls_logic_simple.sh"
 )
 
 is_skipped_in_ci() {
@@ -469,21 +500,38 @@ is_skipped_in_ci() {
 }
 
 collect_shell_tests() {
+  local all_tests=()
   if [[ "$SHELL_MODE" == "full" ]]; then
-    find "$E2E_DIR/tests" -maxdepth 1 -type f -name 'test_*.sh' -print \
-      | sort \
-      | while IFS= read -r script_path; do
-          local name
-          name="$(basename "$script_path")"
-          if [[ "$MODE" == "ci" ]] && is_skipped_in_ci "$name"; then
-            continue
-          fi
-          printf '%s\n' "$name"
-        done
+    while IFS= read -r script_path; do
+      local name
+      name="$(basename "$script_path")"
+      if [[ "$MODE" == "ci" ]] && is_skipped_in_ci "$name"; then
+        continue
+      fi
+      all_tests+=("$name")
+    done < <(find "$E2E_DIR/tests" -maxdepth 1 -type f -name 'test_*.sh' -print | sort)
   else
-    printf '%s\n' "${STABLE_SHELL_TESTS[@]}"
+    all_tests=("${STABLE_SHELL_TESTS[@]}")
+  fi
+
+  # Apply sharding if configured
+  if [[ "$SHARD_TOTAL" -gt 0 && "$SHARD_INDEX" -gt 0 ]]; then
+    local i=0
+    for name in "${all_tests[@]}"; do
+      if [[ $(( (i % SHARD_TOTAL) + 1 )) -eq "$SHARD_INDEX" ]]; then
+        printf '%s\n' "$name"
+      fi
+      i=$((i + 1))
+    done
+  else
+    printf '%s\n' "${all_tests[@]}"
   fi
 }
+
+if [[ "$LIST_SHELL_TESTS" -eq 1 ]]; then
+  collect_shell_tests
+  exit 0
+fi
 
 skip_suite() {
   local name="$1"

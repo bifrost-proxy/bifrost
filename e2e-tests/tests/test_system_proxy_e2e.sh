@@ -29,7 +29,7 @@ failed=0
 
 cleanup() {
     if [[ -n "$PROXY_PID" ]]; then
-        safe_cleanup_proxy "$PROXY_PID"
+        cleanup_system_proxy_process "$PROXY_PID"
     fi
     if [[ -n "$ECHO_PID" ]]; then
         kill_pid "$ECHO_PID"
@@ -41,6 +41,30 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+cleanup_system_proxy_process() {
+    local pid="$1"
+    if [[ -z "$pid" ]]; then
+        return 0
+    fi
+
+    kill_pid "$pid"
+
+    local timeout=60
+    local elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5
+        elapsed=$((elapsed + 1))
+        if [[ "$elapsed" -ge "$((timeout * 2))" ]]; then
+            break
+        fi
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill_pid_force "$pid"
+        sleep 0.5
+    fi
+}
 
 build_bifrost() {
     if [[ -f "$BIFROST_BIN" ]] && [[ "${SKIP_BUILD:-false}" == "true" ]]; then
@@ -64,7 +88,7 @@ start_echo() {
 
 stop_proxy() {
     if [[ -n "$PROXY_PID" ]]; then
-        safe_cleanup_proxy "$PROXY_PID"
+        cleanup_system_proxy_process "$PROXY_PID"
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
@@ -194,6 +218,15 @@ macos_check_proxy_enabled_for_any_service() {
     [[ "$found" == "true" ]]
 }
 
+macos_proxy_snapshot() {
+    local svc
+    while IFS= read -r svc; do
+        echo "service=${svc}"
+        networksetup -getwebproxy "$svc" 2>/dev/null | sed 's/^/  web: /' || true
+        networksetup -getsecurewebproxy "$svc" 2>/dev/null | sed 's/^/  secure: /' || true
+    done < <(macos_find_services)
+}
+
 macos_check_proxy_disabled_for_all_services() {
     local all_disabled="true"
     while IFS= read -r svc; do
@@ -207,22 +240,80 @@ macos_check_proxy_disabled_for_all_services() {
     [[ "$all_disabled" == "true" ]]
 }
 
+wait_for_condition() {
+    local timeout="$1"
+    local interval="${2:-1}"
+    shift 2
+    local waited=0
+
+    while [[ "$waited" -le "$timeout" ]]; do
+        if "$@"; then
+            return 0
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+
+    return 1
+}
+
+macos_wait_proxy_enabled() {
+    local expected_host="$1"
+    local expected_port="$2"
+    local timeout="${3:-30}"
+    wait_for_condition "$timeout" 1 macos_check_proxy_enabled_for_any_service "$expected_host" "$expected_port"
+}
+
+macos_wait_proxy_disabled() {
+    local timeout="${1:-30}"
+    wait_for_condition "$timeout" 1 macos_check_proxy_disabled_for_all_services
+}
+
+windows_wait_proxy_enabled() {
+    local expected="$1"
+    local timeout="${2:-30}"
+    local waited=0
+    local server
+    while [[ "$waited" -le "$timeout" ]]; do
+        server="$(windows_proxy_server)"
+        if windows_proxy_enabled && windows_proxy_matches "$server" "$expected"; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+windows_wait_proxy_disabled() {
+    local timeout="${1:-30}"
+    local waited=0
+    while [[ "$waited" -le "$timeout" ]]; do
+        if ! windows_proxy_enabled; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 test_enable_on_startup() {
     start_proxy_with_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
+            if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
                 _log_pass "macOS: 系统代理设置正确"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "networksetup 状态不匹配"
+                _log_fail "macOS: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
             local server
             server="$(windows_proxy_server)"
-            if windows_proxy_enabled && windows_proxy_matches "$server" "127.0.0.1:${PROXY_PORT}"; then
+            if windows_wait_proxy_enabled "127.0.0.1:${PROXY_PORT}" 45; then
                 _log_pass "Windows: 系统代理设置正确"
                 passed=$((passed + 1))
             else
@@ -238,16 +329,16 @@ test_disable_on_startup() {
     start_proxy_without_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if macos_check_proxy_disabled_for_all_services; then
+            if macos_wait_proxy_disabled 45; then
                 _log_pass "macOS: 未启用系统代理（符合预期）"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 未启用系统代理检查失败" "Disabled" "存在 Enabled=Yes"
+                _log_fail "macOS: 未启用系统代理检查失败" "Disabled" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            if ! windows_proxy_enabled; then
+            if windows_wait_proxy_disabled 45; then
                 _log_pass "Windows: 未启用系统代理（符合预期）"
                 passed=$((passed + 1))
             else
@@ -260,23 +351,23 @@ test_disable_on_startup() {
 
 test_restore_on_exit() {
     if [[ -n "$PROXY_PID" ]]; then
-        safe_cleanup_proxy "$PROXY_PID"
+        cleanup_system_proxy_process "$PROXY_PID"
     fi
     PROXY_PID=""
     rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
     sleep 2
     case "$PLATFORM" in
         Darwin)
-            if macos_check_proxy_disabled_for_all_services; then
+            if macos_wait_proxy_disabled 45; then
                 _log_pass "macOS: 代理退出后系统代理已恢复"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 代理退出后系统代理未恢复" "全部服务 Disabled" "存在 Enabled=Yes"
+                _log_fail "macOS: 代理退出后系统代理未恢复" "全部服务 Disabled" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            if ! windows_proxy_enabled; then
+            if windows_wait_proxy_disabled 45; then
                 _log_pass "Windows: 代理退出后系统代理已恢复"
                 passed=$((passed + 1))
             else
@@ -299,16 +390,16 @@ test_crash_recovery() {
     sleep 2
     case "$PLATFORM" in
         Darwin)
-            if macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
+            if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
                 _log_pass "macOS: 崩溃后系统代理仍保持启用（符合预期）"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 崩溃后系统代理未保持启用" "保持启用" "未启用或端口不匹配"
+                _log_fail "macOS: 崩溃后系统代理未保持启用" "保持启用" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            if windows_proxy_enabled && windows_proxy_matches "$(windows_proxy_server)" "127.0.0.1:${PROXY_PORT}"; then
+            if windows_wait_proxy_enabled "127.0.0.1:${PROXY_PORT}" 45; then
                 _log_pass "Windows: 崩溃后系统代理仍保持启用（符合预期）"
                 passed=$((passed + 1))
             else
@@ -320,16 +411,16 @@ test_crash_recovery() {
     start_proxy_without_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if macos_check_proxy_disabled_for_all_services; then
+            if macos_wait_proxy_disabled 45; then
                 _log_pass "macOS: 再次启动未启用系统代理，崩溃恢复生效"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 崩溃恢复未生效" "Disabled" "存在 Enabled=Yes"
+                _log_fail "macOS: 崩溃恢复未生效" "Disabled" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            if ! windows_proxy_enabled; then
+            if windows_wait_proxy_disabled 45; then
                 _log_pass "Windows: 再次启动未启用系统代理，崩溃恢复生效"
                 passed=$((passed + 1))
             else
