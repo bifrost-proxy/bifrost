@@ -236,6 +236,45 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 - `pwd` 作为 `argv_exec` 成功执行
 - caller 不需要先回到 WebUI 重新保存一次 `Full Access`
 
+### TC-RSE-17：Windows shell_text Unix 路径 fallback 与 UTF-8 编码回归
+
+步骤：
+1. 运行单元测试（macOS/Linux 可执行部分）：
+   ```bash
+   cargo test -p bifrost-admin test_build_shell_text_process -- --nocapture
+   ```
+2. 运行 E2E 测试：
+   ```bash
+   cargo test -p bifrost-e2e remote_shell_exec_unix_shell_path_fallback -- --exact --nocapture
+   ```
+3. Windows CI 补验以下单元测试：
+   - `test_build_shell_text_process_unix_path_fallback_on_windows`：Unix 路径 `/bin/bash` 被过滤，fallback 到 `cmd` + `chcp 65001`
+   - `test_build_shell_text_process_powershell_utf8_prefix`：PowerShell 命令前置 `[Console]::OutputEncoding = [Text.Encoding]::UTF8`
+   - `test_is_unix_only_shell_path`：以 `/` 开头的路径被识别为 Unix-only
+
+预期：
+- macOS 上 `test_build_shell_text_process_default_shell` 验证默认 shell 为 `/bin/sh`
+- macOS 上 `test_build_shell_text_process_explicit_shell` 验证显式 `/bin/bash` 使用 `-lc` 传参
+- E2E `remote_shell_exec_unix_shell_path_fallback` 使用 `/bin/bash` shell 设置的 policy 执行 `echo hello-unix-path` 成功
+- Windows CI 上 fallback 到 `cmd`，不会报 "系统找不到指定的路径"
+
+### TC-RSE-18：`policy update` 命令不破坏 grant 有效性
+
+步骤：
+1. 运行 CLI 解析测试：
+   ```bash
+   cargo test -p bifrost-cli remote_shell_policy_update -- --nocapture
+   ```
+2. 运行 E2E 测试：
+   ```bash
+   cargo test -p bifrost-e2e remote_shell_policy_update_preserves_execution -- --exact --nocapture
+   ```
+
+预期：
+- `remote_shell_policy_update_parses_all_flags`：全参数（`--name`/`--mode`/`--shell`/`--program`/`--pattern`/`--timeout-ms`/`--stdin`/`--interactive`/`--inherit-env`）解析正确
+- `remote_shell_policy_update_minimal_args`：仅传 positional ID 也能解析
+- E2E `remote_shell_policy_update_preserves_execution`：创建 policy → 执行成功 → 更新 name → 再次执行仍成功，验证 policy 存储一致性
+
 ### TC-RSE-08：策略版本变化后旧 grant 失效
 
 步骤：
@@ -316,3 +355,5 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-14 | ✅ PASS | 2026-04-23 本地真实链路验证。隔离启动 target / relay / caller 后，将 target Shell Access 切到 `Full Access`。第一轮执行 `python3 -u -c 'print(\"stream-one\", end=\"\", flush=True); time.sleep(1.2); print(\"stream-two\", end=\"\", flush=True)'`：命令启动约 0.4 秒时检查 caller 输出文件，已提前看到 `stream-one`，且进程仍在运行；命令结束后完整输出为 `stream-onestream-two`。第二轮单独执行 `/usr/bin/top -l 2 -s 1`：在命令启动约 1.4 秒时，caller 输出文件已写入 211457 字节，首屏包含 `Processes:` / 时间 / `Load Avg`，且进程仍在运行；命令结束后总输出增长到 434068 字节，`Processes:` 采样头共出现 2 次。证明 caller 在进程退出前已经收到 stdout frame，而不是等到 `top` 整体结束后一次性打印。Recent Calls 最终仍正常记录 exit_code / stdout_digest。 |
 | TC-RSE-15 | ✅ PASS | 2026-04-24 再次本地执行 `bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`。脚本自动隔离启动 relay / target / caller，`shell_text` 场景继续稳定在命令退出前输出 `shell-one`，随后完整收敛为 `shell-oneshell-two`；`argv_exec` 场景同样先观察到 `argv-one`，最终完整输出 `argv-oneargv-two`。两条链路都继续校验 target `/_bifrost/api/remote-invoke/calls` 中最新 `shell.exec` 记录，确认 `policy_id=stream-shell/stream-argv`、`exec_mode=shell_text/argv_exec`、`exit_code=0`、`stdout_digest` 为有效 SHA1，脚本 summary 33/33 全部通过。 |
 | TC-RSE-16 | ⚠️ PARTIAL | 2026-04-24 经 10+ 轮 Windows CI 迭代，完成全部根因修复：1) `inherit_env=true` 保留 PATH 解决命令查找问题；2) 使用裸 `cmd.exe` + 裸 `ping` 避免绝对路径与引号解析问题；3) 末尾追加 `&exit /b 0` 解决 `set /p` 从 nul 读取返回 exit code 1 的问题。macOS 本地验证 E2E 与单元测试全部通过，Windows 真机状态待 CI 补验。 |
+| TC-RSE-17 | ✅ PASS | 2026-04-24 本地验证。`build_shell_text_process` 添加了 Unix 路径 fallback 和 UTF-8 编码处理。macOS 单元测试 `test_build_shell_text_process_default_shell`（验证默认 shell 为 `/bin/sh`）、`test_build_shell_text_process_explicit_shell`（验证显式 `/bin/bash` 正确传递）通过。Windows 专属测试 `test_build_shell_text_process_unix_path_fallback_on_windows`、`test_build_shell_text_process_powershell_utf8_prefix`、`test_is_unix_only_shell_path` 已添加，待 Windows CI 验证。E2E `remote_shell_exec_unix_shell_path_fallback` 在 macOS 上通过（直接使用 `/bin/bash`），Windows CI 将验证 fallback 到 `cmd` 行为。 |
+| TC-RSE-18 | ✅ PASS | 2026-04-24 本地验证。CLI `policy update` 命令解析测试：`remote_shell_policy_update_parses_all_flags`（全参数解析）和 `remote_shell_policy_update_minimal_args`（仅必需 ID）均通过。87 个 CLI 测试全部 OK。E2E `remote_shell_policy_update_preserves_execution` 验证更新 policy name 后命令仍可执行，通过。 |
