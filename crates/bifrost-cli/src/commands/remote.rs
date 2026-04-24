@@ -733,6 +733,13 @@ fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
             && msg.contains("grant_scope_mismatch"))
 }
 
+fn is_stale_grant_crypto_error(result: &CallResult) -> bool {
+    if let Some(ref stderr) = result.stderr {
+        return stderr.contains("missing grant shared secret");
+    }
+    false
+}
+
 fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
     if conn.auth_method.as_deref() == Some("ssh_publickey")
         && conn.ssh_key_source.is_some()
@@ -1284,6 +1291,41 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             }
         }
     };
+
+    // If the remote client lost its grant crypto (e.g. data corruption / reinstall),
+    // the call will fail with a "missing grant shared secret" error.
+    // Treat this as an expired/revoked grant: clean up the stale local connection.
+    if is_stale_grant_crypto_error(&result) {
+        let conn_label = if conn.device_name.is_empty() {
+            &conn.client_instance_id
+        } else {
+            &conn.device_name
+        };
+        eprintln!(
+            "{}",
+            format!(
+                "✗ Authorization for '{}' expired or revoked on the relay.",
+                conn_label
+            )
+            .bright_red()
+        );
+        connections.retain(|c| {
+            !(c.client_instance_id == conn.client_instance_id && c.relay_url == conn.relay_url)
+        });
+        if let Err(error) = save_connections(&connections) {
+            warn!(error = %error, "failed to remove stale connection");
+        } else {
+            eprintln!(
+                "  {} Stale connection removed from local cache.",
+                "→".bright_yellow()
+            );
+        }
+        eprintln!(
+            "  {} Run `bifrost remote connect <pair-code>` to re-authorize.",
+            "→".bright_yellow()
+        );
+        std::process::exit(1);
+    }
 
     print_remote_result(&command, &result);
 

@@ -181,7 +181,26 @@ impl RemoteInvokeWorker {
                 }
             };
         let restored_grant_info = match grant_info_store.load_for_relay(&relay_client.base_url()) {
-            Ok(restored) => {
+            Ok(mut restored) => {
+                // Remove grants whose crypto material is missing (e.g. crypto files were deleted).
+                // These orphaned grants cannot decrypt any incoming commands and will be revoked
+                // on the relay during the next SSE reconciliation.
+                let before = restored.len();
+                restored.retain(|grant_id, _| restored_grant_crypto.contains_key(grant_id));
+                let removed = before - restored.len();
+                if removed > 0 {
+                    warn!(
+                        removed = removed,
+                        remaining = restored.len(),
+                        "removed orphaned grants with missing crypto material on startup"
+                    );
+                    if let Err(error) = grant_info_store.retain_only(
+                        &relay_client.base_url(),
+                        &restored.keys().cloned().collect(),
+                    ) {
+                        warn!(error = %error, "failed to persist orphaned grant cleanup");
+                    }
+                }
                 if !restored.is_empty() {
                     info!(
                         count = restored.len(),
@@ -309,7 +328,7 @@ impl RemoteInvokeWorker {
                 HashMap::new()
             }
         };
-        *self.grant_crypto.write() = restored_grant_crypto;
+        *self.grant_crypto.write() = restored_grant_crypto.clone();
         let restored_grant_policy = match self.grant_policy_store.load_for_relay(new_normalized) {
             Ok(restored) => restored,
             Err(error) => {
@@ -319,7 +338,25 @@ impl RemoteInvokeWorker {
         };
         *self.grant_policy.write() = restored_grant_policy;
         let restored_grant_info = match self.grant_info_store.load_for_relay(new_normalized) {
-            Ok(restored) => restored,
+            Ok(mut restored) => {
+                let before = restored.len();
+                restored.retain(|grant_id, _| restored_grant_crypto.contains_key(grant_id));
+                let removed = before - restored.len();
+                if removed > 0 {
+                    warn!(
+                        removed = removed,
+                        remaining = restored.len(),
+                        "removed orphaned grants with missing crypto material on relay switch"
+                    );
+                    if let Err(error) = self
+                        .grant_info_store
+                        .retain_only(new_normalized, &restored.keys().cloned().collect())
+                    {
+                        warn!(error = %error, "failed to persist orphaned grant cleanup on relay switch");
+                    }
+                }
+                restored
+            }
             Err(error) => {
                 warn!(error = %error, relay_url = %new_normalized, "reload persisted grant info after relay switch failed");
                 HashMap::new()
