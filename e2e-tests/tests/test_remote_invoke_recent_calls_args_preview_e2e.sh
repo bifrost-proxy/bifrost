@@ -354,7 +354,7 @@ LONG_REMOTE_MARKER="recent-calls-long-$(python3 - <<'PY'
 print("x" * 240)
 PY
 )"
-LONG_REMOTE_MARKER_PREFIX="${LONG_REMOTE_MARKER:0:120}"
+LONG_REMOTE_MARKER_PREFIX="${LONG_REMOTE_MARKER:0:100}"
 LONG_TRAFFIC_URL="http://127.0.0.1:${MOCK_HTTP_PORT}/anything/${LONG_REMOTE_MARKER}"
 if ! curl -fsS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "$LONG_TRAFFIC_URL" >/dev/null 2>&1; then
     _log_fail "通过本地 echo fixture 生成长参数 Recent Calls 流量失败" "$LONG_TRAFFIC_URL 返回 2xx" "$(cat "$MOCK_SERVER_LOG")"
@@ -382,12 +382,12 @@ LATEST_LONG_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r '
 ')"
 assert_not_empty "$LATEST_LONG_SEARCH_MASKED_ARGS_JSON" "长参数 search.stream 的 masked_args_json 不应为空"
 LONG_MASKED_KEYWORD="$(echo "$LATEST_LONG_SEARCH_MASKED_ARGS_JSON" | jq -r '.keyword // ""')"
-if [[ "${#LONG_MASKED_KEYWORD}" -le 200 ]] \
+if [[ "${#LONG_MASKED_KEYWORD}" -le 120 ]] \
     && [[ "$LONG_MASKED_KEYWORD" == *"$LONG_REMOTE_MARKER_PREFIX"* ]]; then
-    _log_pass "TC-RI-ARGS-02: Recent Calls 命令参数超过 200 字符会直接截断"
+    _log_pass "TC-RI-ARGS-02: Recent Calls 命令参数超过 120 字符会直接截断"
 else
-    _log_fail "TC-RI-ARGS-02: Recent Calls 长命令参数未按 200 字符截断" \
-        "keyword length<=200 and contains prefix" \
+    _log_fail "TC-RI-ARGS-02: Recent Calls 长命令参数未按 120 字符截断" \
+        "keyword length<=120 and contains prefix" \
         "keyword_length=${#LONG_MASKED_KEYWORD}; value=$LATEST_LONG_SEARCH_MASKED_ARGS_JSON"
     exit 1
 fi
@@ -402,7 +402,7 @@ if ! jq -e --arg call_id "$LATEST_SEARCH_CALL_ID" '.entries[] | select(.call_id 
     exit 1
 fi
 if grep -Fq "$LONG_REMOTE_MARKER" "$STORE_FILE"; then
-    _log_fail "Recent Calls 落盘文件不应保存超过 200 字符的完整参数" "full long marker absent" "$(cat "$STORE_FILE")"
+    _log_fail "Recent Calls 落盘文件不应保存超过 120 字符的完整参数" "full long marker absent" "$(cat "$STORE_FILE")"
     exit 1
 fi
 _log_pass "TC-RI-ARGS-03: Recent Calls 已写入本地落盘文件且未保存完整长参数"

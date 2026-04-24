@@ -204,7 +204,10 @@ export class RemoteInvokeService {
     };
 
     await this.storage.remoteInvoke.registerClient(record);
-    if (req.ssh_device_route !== undefined) {
+    // Only sync SSH route when a non-null value is explicitly provided.
+    // Omitted or null ssh_device_route should NOT clear routes or revoke grants,
+    // because the client may have failed to read its local SSH key store (DB lock, IO error).
+    if (req.ssh_device_route != null) {
       const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
@@ -861,7 +864,10 @@ export class RemoteInvokeService {
     await this.storage.remoteInvoke.updateClientRecord(req.client_instance_id, {
       last_heartbeat_at: new Date().toISOString(),
     });
-    if (req.ssh_device_route !== undefined) {
+    // Only sync SSH route when a non-null value is explicitly provided.
+    // Omitted or null ssh_device_route should NOT clear routes or revoke grants,
+    // because the client may have failed to read its local SSH key store (DB lock, IO error).
+    if (req.ssh_device_route != null) {
       const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
