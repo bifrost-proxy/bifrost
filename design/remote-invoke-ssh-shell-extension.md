@@ -1103,6 +1103,7 @@ Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无�
 - Client 端新增 `remote_invoke_ssh_keys` 表（单密钥约束：至多一条 active 记录）
 - WebUI 密钥管理（创建、当前密钥视图、复制 Bifrost 密钥文件、撤销、重置）
 - Client 注册/心跳时同步 ssh\_device\_route 到 Relay（单对象，非数组）
+- `ssh_device_route` 同步必须保持三态语义：字段缺失表示 Client 本地 key store 读取失败，Relay 不应修改现有 route；字段值为 `null` 表示 Client 已无 active SSH key，Relay 必须删除旧 device\_code route 并 revoke 对应 SSH grant；对象值表示发布或更新 active route。
 - **bifrost-sync-server**：实现 `SshAuthService` + 路由存储
 - **bifrost-server-v4**：在 `RemoteInvokeService` 中扩展路由同步方法
 
@@ -1153,6 +1154,7 @@ Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无�
 - connect\_id 密码学随机性验证（≥16 字节、不可预测）
 - connect-result 写入（首次写入成功、重复写入被 NX 拒绝）
 - Relay 路由表 CRUD（写入、查找、删除、心跳更新、device\_code 派生校验失败拒绝）
+- Relay 路由同步三态语义（`ssh_device_route` 缺失不清理 route，`null` 清理旧 route，object 发布 route）
 - Client connect 处理（密钥查找、状态校验、grant 签发、密钥数量上限校验）
 - 密钥撤销联动 grant revoke + 路由删除
 - `openCall` 的 SSH key 状态校验

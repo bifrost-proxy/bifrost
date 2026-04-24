@@ -49,9 +49,15 @@ port = int(sys.argv[1])
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", port))
 sock.listen(1)
+sock.settimeout(0.2)
 
 try:
     while True:
+        try:
+            conn, _ = sock.accept()
+            conn.close()
+        except socket.timeout:
+            pass
         time.sleep(1)
 except KeyboardInterrupt:
     pass
@@ -59,6 +65,30 @@ finally:
     sock.close()
 PY
     DUMMY_PID=$!
+
+    local waited=0
+    while [[ "${waited}" -lt 20 ]]; do
+        if python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(0.2)
+try:
+    sock.connect(("127.0.0.1", port))
+finally:
+    sock.close()
+PY
+        then
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    _log_fail "dummy listener 应在启动 Bifrost 前占用测试端口" "port ${port} accepts TCP connection" "not listening after 2s"
+    return 1
 }
 
 main() {
@@ -108,6 +138,7 @@ main() {
     fi
 
     assert_body_contains "already in use" "${output}" "应报告端口占用" || true
+    assert_body_not_contains "System proxy: enabled" "${output}" "端口冲突检查应早于系统代理启动摘要" || true
     assert_body_not_contains "System proxy enabled:" "${output}" "端口冲突时不应启用系统代理" || true
 
     print_test_summary || exit 1

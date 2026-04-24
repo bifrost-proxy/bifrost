@@ -352,6 +352,17 @@ fn is_port_in_use(host: &str, port: u16) -> bool {
     } else {
         host
     };
+    match std::net::TcpListener::bind((check_host, port)) {
+        Ok(listener) => {
+            drop(listener);
+            return false;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            return true;
+        }
+        Err(_) => {}
+    }
+
     std::net::TcpStream::connect_timeout(
         &format!("{}:{}", check_host, port)
             .parse()
@@ -518,6 +529,8 @@ pub fn run_start(
     if !daemon && !skip_cert_check {
         check_and_install_certificate()?;
     }
+
+    check_and_resolve_port_conflict(&host, port, yes)?;
 
     super::completions::install_completions_silently();
 
@@ -736,8 +749,6 @@ pub fn run_start(
     } else {
         stored_config.tls.disconnect_on_change
     };
-
-    check_and_resolve_port_conflict(&host, port, yes)?;
 
     if daemon {
         #[cfg(unix)]
@@ -2375,4 +2386,29 @@ fn spawn_admin_push_watcher_task(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allocate_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn port_in_use_detects_bound_listener_without_accept_loop() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        assert!(is_port_in_use("127.0.0.1", port));
+    }
+
+    #[test]
+    fn port_in_use_returns_false_for_available_loopback_port() {
+        let port = allocate_loopback_port();
+
+        assert!(!is_port_in_use("127.0.0.1", port));
+    }
 }

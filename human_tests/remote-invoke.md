@@ -3450,6 +3450,29 @@ PY
 - client 侧 SSH grants 已被清空
 - relay 不再接受旧 `device_code`，返回 `device_code_not_found`
 
+### TC-RI-回归-126：SSH route 同步必须区分字段缺失与 null
+
+**背景**：修复前，Client 撤销 SSH key 后，本地 active key 已为空，但注册/心跳请求会把 `ssh_device_route` 省略；Relay 端又无法区分"字段缺失"和"明确为 null"，导致旧 `device_code` route 保留，旧 device_code 仍可发起 challenge。生产 relay `bifrost-server-v4` 的 heartbeat 路由也必须遵守同一三态语义。
+
+**前置条件**：
+- 本地 sync-server relay 已开启 Remote Invoke
+- 已注册一个 Remote Invoke client
+- 已准备一组可派生 `device_code` 的 SSH public key
+
+**操作步骤**：
+1. Client 注册请求携带 `ssh_device_route` 对象，内容包含 `device_code` 与 `public_key_pem`
+2. 对该 `device_code` 调用 `POST /v4/remote-invoke/ssh/challenge`
+3. Client 再次注册，但省略 `ssh_device_route` 字段，模拟本地 key store 读取失败
+4. 再次对同一个 `device_code` 调用 `POST /v4/remote-invoke/ssh/challenge`
+5. Client 第三次注册，显式发送 `"ssh_device_route": null`，模拟撤销 key 后无 active key
+6. 再次对旧 `device_code` 调用 `POST /v4/remote-invoke/ssh/challenge`
+
+**预期结果**：
+- 步骤 2 返回 200，证明 route 已发布
+- 步骤 4 仍返回 200，证明字段缺失不会误删 route
+- 步骤 6 返回 400，错误信息为 `device_code_not_found`，证明显式 `null` 会删除旧 route
+- `bifrost-server-v4` 的 heartbeat handler 使用字段存在性判断，显式 `null` 会调用 `syncSshDeviceRoute(..., null)`，字段缺失不会调用
+
 ### TC-RI-回归-111：线上 relay 的 reusable grant 查询应能命中 SSH grant
 
 **前置条件**：
@@ -3854,6 +3877,17 @@ PY
 | TC-RI-回归-108 | ✅ PASS | 使用 SSH grant 调用 relay `POST /v4/remote-invoke/calls/open` 执行 `search.get` 成功返回 `call_id` 与 `relay_token`；caller `events` SSE 收到搜索结果和 `exit_code=0`，输出中包含目标 marker，client 侧 `GET /api/remote-invoke/calls/<call_id>` 状态为 `Completed`。 |
 | TC-RI-回归-109 | ✅ PASS | 使用同一 SSH grant 调用 relay `POST /v4/remote-invoke/calls/open` 执行 `traffic.get` 成功返回 `call_id` 与 `relay_token`；caller `events` SSE 收到完整详情与 `response_body`，输出中同时包含目标 `traffic_id` 和响应体 marker，client 侧调用记录状态为 `Completed`。 |
 | TC-RI-回归-110 | ✅ PASS | `DELETE /api/remote-invoke/ssh-key` 后，client 侧 active key 立即为 `null`，SSH grants 被清空；5 秒后对旧 `device_code` 再发 relay challenge 返回 `device_code_not_found`，证明 revoke 已触发路由收敛删除。 |
+
+### TC-RI-回归-126 执行结果（2026-04-25，修复后）
+
+**执行环境**：
+- 本地 sync-server relay：`pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts`
+- 生产 relay 代码校验：`pnpm --dir bifrost-server-v4 build:local`
+- 真实 CLI/API 链路：`bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-126 | ✅ PASS | sync-server 回归验证 `ssh_device_route` 对象发布 route 后 challenge 返回 200，字段缺失时旧 route 继续有效，显式 `null` 后旧 `device_code` challenge 返回 `device_code_not_found`；`bifrost-server-v4` heartbeat handler 已改为按字段存在性区分缺失和 null，`build:local` 通过；真实 SSH E2E 中 `DELETE /api/remote-invoke/ssh-key` 后旧 `device_code` 不再接受 challenge。 |
 
 ### TC-RI-回归-111 ~ TC-RI-回归-112 执行结果（2026-04-21，修复后线上 relay）
 

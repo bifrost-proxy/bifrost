@@ -154,6 +154,30 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 
 ---
 
+### TC-PCR-06-回归：非交互端口冲突应先于系统代理摘要失败
+
+**背景**：
+CI 曾出现 `test_port_conflict_no_system_proxy_enable.sh` 中端口占用断言不稳定的问题。回归目标是验证普通进程占用端口时，`bifrost start --system-proxy` 在非交互环境会先报告端口占用并失败，不会进入或打印系统代理启用阶段。
+
+**操作步骤**：
+1. 构建当前源码的 release CLI：
+   ```bash
+   cargo build --release --bin bifrost
+   ```
+2. 执行自动化回归脚本：
+   ```bash
+   BIFROST_BIN=./target/release/bifrost bash e2e-tests/tests/test_port_conflict_no_system_proxy_enable.sh
+   ```
+
+**预期结果**：
+- 脚本输出 `应报告端口占用` 断言通过
+- 脚本输出 `端口冲突检查应早于系统代理启动摘要` 断言通过
+- 脚本输出 `端口冲突时不应启用系统代理` 断言通过
+- 汇总结果为 `Total: 3`、`Passed: 3`、`Failed: 0`
+- 测试不使用 9900 端口，且通过临时 `BIFROST_DATA_DIR` 隔离数据
+
+---
+
 ## 清理步骤
 
 1. 停止所有测试实例：

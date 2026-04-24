@@ -899,7 +899,7 @@ impl RemoteInvokeWorker {
             bifrost_version: env!("CARGO_PKG_VERSION").to_string(),
             signature,
             timestamp: now,
-            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
+            ssh_device_route: self.ssh_key_store.active_route().ok(),
         };
 
         let resp = self
@@ -1145,11 +1145,11 @@ impl RemoteInvokeWorker {
 
     async fn send_heartbeat(&self, stream_id: &str) -> Result<()> {
         let active_ids = self.active_call_ids();
-        // Only include ssh_device_route when we can successfully read the active key.
-        // On error (e.g. DB lock contention), omit the field entirely to avoid
-        // sending null which would cause the relay to delete the route and revoke grants.
+        // This is intentionally three-state: omitted means the local key store
+        // could not be read, null means no active SSH key and the relay should
+        // clear the route, and an object publishes the active key route.
         let ssh_device_route = match self.ssh_key_store.active_route() {
-            Ok(route) => route,
+            Ok(route) => Some(route),
             Err(e) => {
                 warn!(error = %e, "failed to read ssh active_route for heartbeat, omitting field");
                 None
