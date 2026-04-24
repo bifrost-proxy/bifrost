@@ -1,6 +1,7 @@
 pub mod access_control;
 pub mod bifrost_file;
 pub mod error;
+pub mod file_access;
 pub mod http_client;
 pub mod logging;
 pub mod matcher;
