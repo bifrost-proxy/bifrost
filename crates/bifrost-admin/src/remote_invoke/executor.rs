@@ -31,7 +31,7 @@ const MAX_CLIENT_APP_LEN: usize = 200;
 const MAX_TRAFFIC_LIST_LIMIT: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const SEARCH_STREAM_TIMEOUT_SECS: u64 = 600;
-const DEFAULT_SHELL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_SHELL_OUTPUT_MAX_BYTES: usize = 4 * 1024 * 1024; // PR#2: bumped 64 KiB -> 4 MiB; binary-safe stream path lands in PR#3
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 
 const ALLOWED_METHODS: &[&str] = &[
@@ -278,6 +278,7 @@ impl RemoteInvokeExecutor {
                     stdout_digest,
                     stderr_digest: None,
                     duration_ms,
+                    ..Default::default()
                 })
             }
             Err(e) => {
@@ -295,6 +296,7 @@ impl RemoteInvokeExecutor {
                     stdout_digest: None,
                     stderr_digest: Some(sha1_hex(&stderr)),
                     duration_ms,
+                    ..Default::default()
                 })
             }
         }
@@ -714,13 +716,22 @@ impl RemoteInvokeExecutor {
             BifrostError::Network("shell.exec stderr pipe unavailable".to_string())
         })?;
 
-        let mut stdout_buf = [0u8; 4096];
-        let mut stderr_buf = [0u8; 4096];
+        let mut stdout_buf = [0u8; 65536]; // PR#2: 4 KiB -> 64 KiB to reduce syscall / SSE-event overhead on large outputs
+        let mut stderr_buf = [0u8; 65536]; // PR#2: 4 KiB -> 64 KiB, see stdout_buf rationale
         let mut stdout_open = true;
         let mut stderr_open = true;
         let mut exit_status = None;
         let mut stdout_preview = Vec::new();
         let mut stderr_preview = Vec::new();
+        // // PR#2 source-of-truth hashing: track full byte totals + SHA-256 of
+        // the *complete* stdout/stderr streams, independent of the capped
+        // `stdout_preview` / `stderr_preview` inline buffers. This lets
+        // callers detect truncation and verify reassembled streams even
+        // when the inline preview was clipped by `max_output_bytes`.
+        let mut stdout_total_bytes: u64 = 0;
+        let mut stderr_total_bytes: u64 = 0;
+        let mut stdout_hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut stderr_hasher = ring::digest::Context::new(&ring::digest::SHA256);
         let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
         tokio::pin!(timeout);
 
@@ -752,6 +763,9 @@ impl RemoteInvokeExecutor {
                             break;
                         }
                     } else {
+                        // PR#2: hash + total BEFORE the cap so we retain truth even on overflow
+                        stdout_total_bytes += read as u64;
+                        stdout_hasher.update(&stdout_buf[..read]);
                         append_truncated_bytes(
                             &mut stdout_preview,
                             &stdout_buf[..read],
@@ -770,6 +784,9 @@ impl RemoteInvokeExecutor {
                             break;
                         }
                     } else {
+                        // PR#2: hash + total BEFORE the cap
+                        stderr_total_bytes += read as u64;
+                        stderr_hasher.update(&stderr_buf[..read]);
                         append_truncated_bytes(
                             &mut stderr_preview,
                             &stderr_buf[..read],
@@ -791,6 +808,33 @@ impl RemoteInvokeExecutor {
         let stdout = String::from_utf8_lossy(&stdout_preview).into_owned();
         let stderr = String::from_utf8_lossy(&stderr_preview).into_owned();
 
+        // PR#2: source-of-truth fields independent of the inline preview.
+        let stdout_sha256_full_hex = {
+            let digest = stdout_hasher.finish();
+            if stdout_total_bytes > 0 {
+                let mut out = String::with_capacity(64);
+                for b in digest.as_ref() {
+                    out.push_str(&format!("{b:02x}"));
+                }
+                Some(out)
+            } else {
+                None
+            }
+        };
+        let stderr_sha256_full_hex = {
+            let digest = stderr_hasher.finish();
+            if stderr_total_bytes > 0 {
+                let mut out = String::with_capacity(64);
+                for b in digest.as_ref() {
+                    out.push_str(&format!("{b:02x}"));
+                }
+                Some(out)
+            } else {
+                None
+            }
+        };
+        let stdout_truncated_flag = (stdout_total_bytes as usize) > stdout_preview.len();
+        let stderr_truncated_flag = (stderr_total_bytes as usize) > stderr_preview.len();
         Ok(RemoteInvokeResponse {
             exit_code: status.code().unwrap_or(-1),
             stdout: (!stdout.is_empty()).then_some(stdout.clone()),
@@ -798,6 +842,12 @@ impl RemoteInvokeExecutor {
             stdout_digest: (!stdout.is_empty()).then(|| sha1_hex(&stdout)),
             stderr_digest: (!stderr.is_empty()).then(|| sha1_hex(&stderr)),
             duration_ms: start.elapsed().as_millis() as u64,
+            stdout_total_bytes: (stdout_total_bytes > 0).then_some(stdout_total_bytes),
+            stderr_total_bytes: (stderr_total_bytes > 0).then_some(stderr_total_bytes),
+            stdout_sha256_full: stdout_sha256_full_hex,
+            stderr_sha256_full: stderr_sha256_full_hex,
+            stdout_truncated: Some(stdout_truncated_flag),
+            stderr_truncated: Some(stderr_truncated_flag),
         })
     }
 

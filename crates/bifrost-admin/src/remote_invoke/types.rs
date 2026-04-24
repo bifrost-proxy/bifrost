@@ -1122,18 +1122,46 @@ pub struct RemoteInvokeRequest {
     pub command_summary: CommandSummary,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteInvokeResponse {
+    #[serde(default)]
     pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// SHA-1 digest of the (possibly truncated) inline  field.
+    /// Kept for backward compatibility with legacy clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_digest: Option<String>,
+    #[serde(default)]
     pub duration_ms: u64,
+    // PR#2 large-output fields (all optional, additive, backward compatible):
+    /// Total byte count of the full stdout stream as seen by the executor.
+    /// When present and greater than , the
+    /// inline field was truncated by the executor's output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_total_bytes: Option<u64>,
+    /// Same for stderr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_total_bytes: Option<u64>,
+    /// Hex-encoded SHA-256 of the **full** stdout bytes (not the truncated
+    /// inline preview). Callers MUST use this for end-to-end verification
+    /// when reassembling stdout from streamed chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_sha256_full: Option<String>,
+    /// Same for stderr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_sha256_full: Option<String>,
+    /// True iff the executor truncated either stream when building the
+    /// inline preview. Callers may use this as a hint to fall back to
+    /// streamed chunks or a side-channel download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_truncated: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
