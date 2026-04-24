@@ -58,7 +58,10 @@ use crate::utils::tee::{
     store_request_body, store_response_body, BodyCaptureHandle,
 };
 use crate::utils::throttle::wrap_throttled_body;
-use crate::utils::url::apply_url_rules;
+use crate::utils::url::{
+    apply_url_rules, extract_target_path_from_host_rule, find_host_rule_source_path,
+    rewrite_path_with_prefix,
+};
 
 mod content_type;
 mod decode;
@@ -1349,10 +1352,33 @@ pub async fn handle_http_request(
             }
         };
 
-    let path = processed_uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+    let path = {
+        let original_path = processed_uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+
+        if let Some(ref host_rule) = resolved_rules.host {
+            if let Some(target_path) =
+                crate::utils::url::extract_target_path_from_host_rule(host_rule)
+            {
+                let source_path = crate::utils::url::find_host_rule_source_path(
+                    &resolved_rules.rules,
+                    resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                    host_rule,
+                );
+                crate::utils::url::rewrite_path_with_prefix(
+                    original_path,
+                    source_path.as_deref(),
+                    &target_path,
+                )
+            } else {
+                original_path.to_string()
+            }
+        } else {
+            original_path.to_string()
+        }
+    };
 
     let upstream_authority = if (use_tls && port == 443) || (!use_tls && port == 80) {
         host.clone()
@@ -2545,13 +2571,43 @@ async fn handle_http_websocket(
 
     let req_headers: Vec<(String, String)> = headers_to_pairs(req.headers());
 
-    let (target_host, target_port) = if let Some(ref host_rule) = resolved_rules.host {
-        let parts: Vec<&str> = host_rule.split(':').collect();
+    let (target_host, target_port, target_path) = if let Some(ref host_rule) = resolved_rules.host {
+        let host_without_path = host_rule.split('/').next().unwrap_or(host_rule);
+        let parts: Vec<&str> = host_without_path.split(':').collect();
         let h = parts[0].to_string();
         let p = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(port);
-        (h, p)
+        let path = if let Some(target_path) = extract_target_path_from_host_rule(host_rule) {
+            let source_path = find_host_rule_source_path(
+                &resolved_rules.rules,
+                resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                host_rule,
+            );
+            rewrite_path_with_prefix(
+                req.uri()
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/"),
+                source_path.as_deref(),
+                &target_path,
+            )
+        } else {
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+                .to_string()
+        };
+        (h, p, path)
     } else {
-        (host.to_string(), port)
+        (
+            host.to_string(),
+            port,
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+                .to_string(),
+        )
     };
 
     debug!(
@@ -2600,7 +2656,8 @@ async fn handle_http_websocket(
         Box::new(target_stream)
     };
 
-    let upgrade_request = build_http_websocket_handshake(&req, &target_host, target_port)?;
+    let upgrade_request =
+        build_http_websocket_handshake(&req, &target_host, target_port, &target_path)?;
     target_stream
         .write_all(upgrade_request.as_bytes())
         .await
@@ -2837,13 +2894,8 @@ fn build_http_websocket_handshake(
     req: &Request<Incoming>,
     target_host: &str,
     target_port: u16,
+    target_path: &str,
 ) -> Result<String> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
     let host_header = if target_port == 80 {
         target_host.to_string()
     } else {
@@ -2869,7 +2921,7 @@ fn build_http_websocket_handshake(
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: {}\r\n\
          Sec-WebSocket-Version: {}\r\n",
-        path, host_header, ws_key, ws_version
+        target_path, host_header, ws_key, ws_version
     );
 
     for (name, value) in req.headers().iter() {

@@ -3639,6 +3639,7 @@ PY
 - 已完成一次有效的 `remote connect`
 - caller 本地 `remote-connections.json` 中至少存在 1 条连接记录
 - 已知本次连接的 `grant_id` 与 `caller_fingerprint`
+- 如果前一条验证刚执行过“stale grant / grant crypto 丢失”类回归，必须先重新完成一次 fresh `remote connect`，不要复用已经失效或被清空的 caller 本地连接
 
 **操作步骤**：
 1. 先尝试直接调用 relay 删除 grant，制造 CLI 后续撤销命中 `404 grant_not_found` 的场景：
@@ -3802,6 +3803,29 @@ PY
 - 即使 relay 返回的 `command_summary.command_preview` 为空字符串，client 本地仍会用解密后的命令摘要补齐展示
 - `GET /api/remote-invoke/calls` 中对应记录的 `command_summary.command_preview` 非空，且与实际执行命令一致
 
+### TC-RI-回归-127：Shell Access 编辑器中的 Policy/Profile ID 必须只读，且仅名称可修改
+
+**前置条件**：
+- target client 的 Settings -> Remote Invoke 页面可正常打开
+- `Shell Access` 中至少有 1 个已有 profile 和 1 个已有 policy
+
+**操作步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=remote-invoke`。
+2. 在 `Shell Access` 卡片中点击 `Manage Access`。
+3. 观察已有 `Profile ID` 与 `Policy ID` 输入框是否仍可编辑。
+4. 尝试选中并复制 ID 文本，但不应能直接改写其值。
+5. 修改同一条 profile 的 `Profile name`。
+6. 修改同一条 policy 的 `Policy name`。
+7. 点击 `Save`。
+8. 保存成功后，重新打开 `Manage Access`，并通过 `GET /api/remote-invoke/shell-config` 核对对应 profile/policy。
+
+**预期结果**：
+- `Profile ID` 与 `Policy ID` 输入框为只读状态，用户可查看/复制，但不能直接修改
+- `Profile name` 与 `Policy name` 仍可正常编辑
+- 保存后弹出成功提示，且页面重新加载后名称更新生效
+- `GET /api/remote-invoke/shell-config` 中对应 profile/policy 的 `id` 保持原值不变，仅 `name` 发生变化
+- 现有 policy 与 profile 的关联关系未因本次保存被破坏
+
 ### TC-RI-回归-102 ~ TC-RI-回归-106 执行结果（2026-04-21）
 
 **执行环境**：
@@ -3871,6 +3895,17 @@ PY
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-121 | ✅ PASS | caller 使用 `--ssh-key` 成功完成 SSH connect，CLI 输出 `Connected with SSH key`；`remote-connections.json` 新增 `auth_method=ssh_publickey` 记录，包含 `client_instance_id`、`caller_fingerprint=<ssh_key_fingerprint>`、`device_code`；随后同一 `BIFROST_DATA_DIR` 下执行 `remote status` 成功复用该连接，不再要求重新 connect。 |
+
+### TC-RI-回归-127 执行结果（2026-04-24，Shell Access 只读 ID）
+
+**执行环境**：
+- Playwright UI：`pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Remote Invoke 的 Shell Access 仅允许修改名称，Policy/Profile ID 为只读"`
+- 管理端页面：`Settings -> Remote Invoke -> Manage Shell Access`
+- 校验方式：真实浏览器交互 + `GET/PUT /api/remote-invoke/shell-config`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-127 | ✅ PASS | 在 `Manage Shell Access` 中预置的 `readonly-profile` 与 `readonly-policy` 两个 ID 输入框均带有 `readonly` 属性，可查看但不可直接修改；对应 `Profile name` 与 `Policy name` 成功编辑并保存，随后 `GET /api/remote-invoke/shell-config` 返回的 `id` 保持 `readonly-profile` / `readonly-policy` 不变，仅 `name` 更新为新的值，证明 Web UI 已收敛为“只读 ID，仅名称可修改”。 |
 
 ### TC-RI-回归-122 执行结果（2026-04-21，server-v4 SSH caller 上下文）
 
@@ -3959,6 +3994,42 @@ PY
 |---------|------|---------|
 | TC-RI-回归-127 | ✅ PASS | `remote connect` 相关 mock relay 已补齐 `client_ephemeral_pub`，`overload retry` 与 `relay-url fallback` 两个 shell E2E 不再因旧批准 payload 报错；SSH 用例改为复用真实 CLI 执行 `remote status`、`remote search`、`remote traffic get`，不再命中旧版明文 `calls/open` 的 500，且 Recent Calls 中新增的 `search.get` / `traffic.get` 记录状态均为 `completed`。 |
 
+### TC-RI-回归-128：Recent Calls 必须展示参数预览并支持完整 Tooltip
+
+**背景**：Remote Invoke `openCall` 切换到密文 `command_encrypted` 后，relay 不再稳定下发明文 `command_summary.masked_args_json`。如果 client 本地没有用解密后的 `command.args_json` 做回退，Web UI 的 `Recent Calls` 就会只显示命令名，不显示参数详情。
+
+**前置条件**：
+- 已完成可复用授权
+- target client 已启动 Web Admin，且使用独立 `BIFROST_DATA_DIR`
+- 本机可以执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+2. 在脚本跑完 `remote search "$REMOTE_MARKER" --max-results 5 --max-scan 50` 后，调用 `GET /_bifrost/api/remote-invoke/calls`
+3. 定位最新一条 `search.get` 调用
+4. 检查该记录的 `command_summary.masked_args_json`
+5. 打开 target client Web UI 的 `Settings -> Remote Invoke -> Recent Calls`，查看同一条记录
+6. 确认标题行展示参数预览，并 hover 参数区域查看 Tooltip
+
+**预期结果**：
+- `command_summary.masked_args_json` 非空
+- `masked_args_json` 中包含 `query=<marker>`、`max_results=5`、`max_scan=50`
+- Recent Calls 标题行在 `search.get` 后展示参数预览
+- hover 参数预览时，Tooltip 展示完整 JSON
+- connect / status 等无参数命令仍不展示多余参数占位
+
+### TC-RI-回归-128 执行结果（2026-04-23，Recent Calls 参数预览恢复）
+
+**执行环境**：
+- Local relay：`npx tsx packages/bifrost-sync-server/src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Target client：`target/release/bifrost -H 0.0.0.0 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`target/release/bifrost remote connect/search --relay-url http://127.0.0.1:<relay_port>`
+- 前端单测：`pnpm --dir web test:unit -- src/api/remoteInvoke.test.ts`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-128 | ✅ PASS | 本轮执行 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 完成 `remote connect -> remote search` 最短闭环。脚本在 target client 上读取 `GET /_bifrost/api/remote-invoke/calls`，成功定位最新 `search.stream` 记录，并拿到非空 `command_summary.masked_args_json`，其 JSON 实际包含 `keyword=<marker>`、`max_results=5`、`max_scan=50`。同时执行 `pnpm --dir web test:unit -- src/api/remoteInvoke.test.ts`，验证 Recent Calls 前端优先使用 `command_summary.masked_args_json`，缺失时回退到 `command.args_json` / `command.query.args`，且标题预览与 Tooltip 共用同一来源。结合 API E2E 与前端单测，确认 Recent Calls 参数预览已恢复，不再出现只有命令名、没有参数详情的退化。 |
+
 ### 本轮实际执行回归（2026-04-21，远端 relay 收尾修正）
 
 **自动化回归**：
@@ -3982,7 +4053,265 @@ PY
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-120 | ✅ PASS | 本轮本地 relay 的 grant 删除接口表现为幂等 `200`，因此按用例中的兜底路径，将 caller 本地 `remote-connections.json` 里的 `grant_id` 替换为 `missing-grant-for-disconnect-test` 以稳定复现 `grant_not_found`；随后执行 `bifrost remote disconnect --all --relay-url http://127.0.0.1:<relay_port>`，CLI 输出 `relay grant already missing, local record removed`，`remote-connections.json` 中连接数从 `1` 变为 `0`，再次执行 `bifrost remote status` 时提示无可用连接，确认幽灵状态已消失。 |
+| TC-RI-回归-120 | ✅ PASS | 本轮本地 relay 的 grant 删除接口表现为幂等 `200`，因此按用例中的兜底路径，将 caller 本地 `remote-connections.json` 里的 `grant_id` 替换为 `missing-grant-for-disconnect-test` 以稳定复现 `grant_not_found`；随后执行 `bifrost remote disconnect --all --relay-url http://127.0.0.1:<relay_port>`，CLI 输出 `relay grant already missing, local record removed`，`remote-connections.json` 中连接数从 `1` 变为 `0`，再次执行 `bifrost remote status` 时提示无可用连接，确认幽灵状态已消失。2026-04-23 针对 shell E2E 复验时，又额外覆盖了“前一段 stale grant 回归之后先 fresh reconnect，再手动 DELETE relay grant，再执行 disconnect --all”的路径：本地 `grant_id` / `caller_fingerprint` 均非空，预删 relay grant 返回 `200`，CLI 输出包含成功标识，本地连接记录再次从 `1` 收敛到 `0`。 |
+
+---
+
+### TC-RI-回归-129：超时后的旧 pending pairing 不应继续占用 pair slot
+
+**背景**：如果第一次 `remote connect` 发起后无人审批直至超时，旧 pairing 必须从 relay 的“活跃待审批”集合里移除。否则用户重新获取新的 pair code 后，第二次 `remote connect` 会被误判为 `pair_slot_occupied`。
+
+**前置条件**：
+- 使用本地 relay，且将 `pair_code_ttl_secs` 调小到 2~5 秒，便于快速验证超时收敛
+- target client 已完成 sync 登录并处于 `Remote Invoke` 可用状态
+
+**操作步骤**：
+1. 在 target client 上进入 discovery mode，拿到第一组 `pair_code_1`
+2. 在 caller 侧执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect <pair_code_1> --relay-url http://127.0.0.1:<relay_port>
+   ```
+3. 在 target client 的 `Pending Pairing Requests` 中确认出现该请求，但**不要**审批
+4. 等待超过 `pair_code_ttl_secs`，确认该请求从 Pending 列表消失
+5. 在 target client 上刷新 discovery mode，拿到新的 `pair_code_2`
+6. 再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/release/bifrost remote connect <pair_code_2> --relay-url http://127.0.0.1:<relay_port>
+   ```
+7. 在 target client 上批准第二次请求
+
+**预期结果**：
+- 第 4 步：旧请求会自动从 Pending 列表消失
+- 第 6 步：第二次 `remote connect` 不会返回 `pair_slot_occupied`
+- 第 7 步：新的 pairing 可以正常审批并建立连接
+
+### TC-RI-回归-130：超时 pairing 在 Pending 列表里不会复活，点击审批也不再报 500
+
+**背景**：修复前，relay 的 pending 列表和审批接口对超时 pairing 的语义不一致，前端可能反复看到已经超时的请求，点击 Authorize / Reject 时还会报 500。
+
+**前置条件**：
+- 使用本地 relay，且将 `pair_code_ttl_secs` 调小到 2~5 秒
+- target client 已打开 `Settings > Remote Invoke`
+
+**操作步骤**：
+1. 创建一个新的 pairing 请求，并在 Pending Pairing Requests 中确认它已出现
+2. 等待该 pairing 超时
+3. 反复观察 Pending Pairing Requests 列表至少 10 秒，确认旧请求没有再次出现
+4. 如果列表仍短暂展示旧请求，在它消失前立刻点击 `Authorize` 或 `Reject`
+5. 重新请求 `GET /_bifrost/api/remote-invoke/pairings/pending`
+
+**预期结果**：
+- 第 3 步：超时 pairing 不会因 relay 轮询再次回到 Pending 列表
+- 第 4 步：前端最多显示 warning 提示 `Request may have expired and was removed`，不再出现 500
+- 第 5 步：接口返回中不再包含该 pairing；relay 存储中的该记录状态应已收敛为 `expired`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-129 | ✅ PASS | 2026-04-23 在本地隔离环境执行：relay `pair_code_ttl_secs=3`、target admin `8812`、relay `8688`。第一次 pairing `WHjmo7NTGwQTJaMl9B3Bm` 超时后，`GET /_bifrost/api/remote-invoke/pairings/pending` 返回 `0` 条，relay SQLite 中该记录状态为 `expired`。随后使用新 pair code 发起第二次连接，审批接口返回 `200`，caller `remote connect` 退出码为 `0`，日志中未出现 `pair_slot_occupied`。 |
+| TC-RI-回归-130 | ✅ PASS | 同一轮本地隔离环境中，第三次 pairing `dsnDosyo_FLdrCeF_XRF5` 超时后再次触发审批，target admin 返回 `404`，响应体为 `Failed to approve pairing: Network error: pairing dsnDosyo_FLdrCeF_XRF5 not found or expired`，不再出现 `500`。随后 `GET /_bifrost/api/remote-invoke/pairings/pending` 仍返回 `0` 条，relay SQLite 中该 pairing 状态为 `expired`。 |
+
+---
+
+### TC-RI-回归-131：client 本地 grant crypto 丢失后，重连必须主动清理幽灵授权
+
+**背景**：修复前，如果 target client 本地 `admin/remote_invoke_grant_crypto.json(.key)` 丢失，但 relay 上仍保留 active grant，client SSE 重连后会重新展示这条 grant，caller 再执行 `remote status` 时会把命令发到远端，最终在 target 侧报 `missing grant shared secret for encrypted remote command; reconnect is required`。这会把本应在“授权发现阶段”暴露的问题拖到真正执行命令时才失败。
+
+**前置条件**：
+- 使用本地 relay
+- target client 与 caller 已经通过 `remote connect` 建立一条可复用授权
+- caller 本地 `remote-connections.json` 仍保留这条连接，便于验证“旧连接再次执行命令”的表现
+
+**操作步骤**：
+1. 用真实 CLI 跑通一次完整闭环，至少覆盖：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote connect <pair_code> --relay-url http://127.0.0.1:<relay_port>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote traffic list --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote search <keyword> --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   ```
+2. 删除 target client 数据目录下的 grant crypto 持久化文件：
+   ```bash
+   rm -f <client_data_dir>/admin/remote_invoke_grant_crypto.json <client_data_dir>/admin/remote_invoke_grant_crypto.key
+   ```
+3. 重启 target client，等待 `/_bifrost/api/remote-invoke/status` 恢复 `Connected`
+4. 查询 target client 的 grants 列表：
+   ```bash
+   curl -sS http://127.0.0.1:<admin_port>/_bifrost/api/remote-invoke/grants
+   ```
+5. 不重新 `remote connect`，直接用原 caller 数据目录再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
+   ```
+
+**预期结果**：
+- 第 3 步重连后，target client 不会继续保留这条缺少本地加密材料的 grant
+- 第 4 步 grants 列表为空，不再展示幽灵授权
+- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect
+- 第 5 步不再出现 `missing grant shared secret for encrypted remote command`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-131 | ✅ PASS | 2026-04-23 使用本地隔离环境执行：relay `http://127.0.0.1:56618`，target admin `56617`，caller 独立 `BIFROST_DATA_DIR`。先后真实执行 `./target/debug/bifrost remote connect`、`remote status`、`remote traffic list`、`remote traffic get`、`remote search`、`remote traffic search`、caller 侧取消、reject pairing、disconnect，全链路自动化断言共 `64` 项全部通过。随后手动删除 target client 数据目录下的 `admin/remote_invoke_grant_crypto.json` 与 `.key`，重启 target client 后再次请求 `GET /_bifrost/api/remote-invoke/grants` 返回 `0` 条；继续复用旧 caller 连接执行 `remote status`，CLI 直接提示重新 connect，不再命中 `missing grant shared secret for encrypted remote command`。这说明缺少本地加密材料的旧 grant 已在 client 重连时被主动收敛删除。 |
+
+---
+
+### TC-RI-回归-132：shell E2E 在 `--skip-build` 且缺失 sync-server dist 时仍能启动本地 relay
+
+**背景**：CI 的 `scripts/ci/run-e2e-shell.sh` 固定带 `--skip-build`，只复用现成的 Rust `target/release/bifrost`。修复前，部分 remote invoke shell 用例仍硬编码 `node packages/bifrost-sync-server/dist/cli.js`。一旦 CI 镜像没有预编译该 dist，脚本会直接报 `Cannot find module '.../packages/bifrost-sync-server/dist/cli.js'` 并提前退出。
+
+**前置条件**：
+- 使用独立的临时数据目录运行 target admin / caller / relay
+- 不使用 `9900` 端口，Bifrost Admin 必须带 `--no-system-proxy`
+- 本地具备 `node`，并至少具备 `pnpm` 或 `npx` 之一
+
+**操作步骤**：
+1. 确认 `packages/bifrost-sync-server/dist/cli.js` 不存在；若存在，先临时移走：
+   ```bash
+   mv packages/bifrost-sync-server/dist packages/bifrost-sync-server/dist.bak
+   ```
+2. 执行定向 remote invoke shell E2E：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh
+   bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+3. 可选补充执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_search_traffic_cli_isomorphic_e2e.sh
+   bash e2e-tests/tests/test_group_sync_e2e.sh
+   ```
+4. 验证各脚本日志中的 relay 启动阶段没有出现 `Cannot find module '.../dist/cli.js'`
+5. 如第 1 步临时移走了 dist，恢复目录：
+   ```bash
+   mv packages/bifrost-sync-server/dist.bak packages/bifrost-sync-server/dist
+   ```
+
+**预期结果**：
+- 即使缺失 `dist/cli.js`，shell E2E 仍能自动回退到 `pnpm/npx tsx src/cli.ts` 启动本地 relay
+- remote invoke 相关脚本不再因 relay 入口不存在而提前失败
+- 整个闭环仍能完成 pair / approve / connect / status/search/traffic 等真实命令调用
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-132 | ✅ PASS | 2026-04-23 在本地隔离环境执行：先将 `packages/bifrost-sync-server/dist` 临时改名，确认工作区只保留源码入口。随后依次执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。三条脚本都成功通过，relay 启动日志未再出现 `Cannot find module '/Users/eden/work/github/bifrost/packages/bifrost-sync-server/dist/cli.js'`，说明 shell E2E 已能在 `--skip-build` 场景下自动回退到源码入口完成本地 relay 启动。 |
+
+---
+
+### TC-RI-回归-133：caller `open_call` 必须直接携带参数摘要，且 remote invoke shell E2E 仅在 release 过期时重建二进制
+
+**背景**：仅依赖 client 侧“解密后回填 `command_summary.masked_args_json`”并不稳妥。若 relay `open_call` 时没有直接收到参数摘要，Recent Calls 的参数预览会退化成空值；与此同时，shell E2E 若继续复用过期的 `target/release/bifrost`，会让“源码已修复但测试仍跑旧版本”的假回归反复出现。这里需要的是“过期时自动重建”，而不是“每次都重建”。
+
+**前置条件**：
+- 使用本地 relay + target client + caller 的隔离环境
+- shell E2E 未设置 `SKIP_BUILD=true`
+- target client 已完成一次可复用授权
+
+**操作步骤**：
+1. 记录 target client `GET /_bifrost/api/remote-invoke/calls` 当前最新一条 `traffic.list` / `traffic.get` / `search.stream` 的 `started_at`
+2. 直接执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh
+   ```
+3. 脚本执行完成后，再次读取 `GET /_bifrost/api/remote-invoke/calls`
+4. 定位本轮新增的 `traffic.list`、`traffic.get`、`search.stream` 调用，检查其 `command_summary.masked_args_json`
+5. 检查脚本日志；若源码比 `target/release/bifrost` 更新，则应出现 `Building release bifrost...`
+
+**预期结果**：
+- `traffic.list` 的 `command_summary.masked_args_json` 非空，且包含本轮 list/filter 参数
+- `traffic.get` 的 `command_summary.masked_args_json` 非空，且包含 `id/request_body/response_body`
+- `search.stream` 的 `command_summary.masked_args_json` 非空，且包含 `query|max_results|max_scan`
+- shell E2E 会在 release 缺失或过期时自动重建 `target/release/bifrost`，不再静默复用旧 release 二进制
+
+### TC-RI-回归-133 执行结果（2026-04-23，open_call 参数摘要与过期 release 自动重建）
+
+**执行环境**：
+- Local relay：`pnpm exec tsx packages/bifrost-sync-server/src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Target client：`cargo run --bin bifrost -- start -H 127.0.0.1 -p <随机端口> -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller / shell E2E：`bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-133 | ✅ PASS | 2026-04-23 在 `Cargo.toml` / `crates/bifrost-cli/src/commands/remote.rs` 更新时间晚于 `target/release/bifrost` 的条件下执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，脚本仅在检测到 release 过期时输出 `Building release bifrost...`，避免了每次强制全量重编。随后在 target client 查询 `GET /_bifrost/api/remote-invoke/calls`，本轮新增的 `traffic.list` / `traffic.get` / `search.stream` 记录都拿到了非空 `command_summary.masked_args_json`：`traffic.list` 含完整 filter 参数，`traffic.get` 含 `id + request_body + response_body`，`search.stream` 含 `query/max_results/max_scan`。同时 `remote traffic get` 返回的 JSON 详情可直接命中目标 `sequence + marker`，说明参数摘要与真实执行结果已经重新对齐。 |
+
+---
+
+### TC-RI-回归-134：pair-code connect 成功后，Client grants 列表应在短时间内稳定可见
+
+**背景**：CI 上出现过 `test_remote_invoke_e2e.sh` 在 caller `remote connect` 已成功完成、日志也已出现 `Connected! Authorization granted` 后，立刻读取 `GET /_bifrost/api/remote-invoke/grants` 仍短暂返回空列表的情况。这类现象更像授权可见性的瞬时时序窗口，而不是功能性回归。
+
+**前置条件**：
+- 使用本地 relay + target client + caller 的隔离环境
+- target 已连上 relay，且可进入 discovery mode
+
+**操作步骤**：
+1. 在 target 上进入 discovery mode，拿到新的 pair code
+2. 在 caller 侧执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh
+   ```
+3. 重点观察脚本中 `Verify grant is created on Client side` 这一段
+4. 如需手工复核，在 approve pairing 成功后 10 秒内多次执行：
+   ```bash
+   curl -s "http://127.0.0.1:<admin-port>/_bifrost/api/remote-invoke/grants" | jq '.grants | length'
+   ```
+
+**预期结果**：
+- caller `remote connect` 正常退出，日志包含 `Connected! Authorization granted`
+- Client grants 列表允许存在短暂同步延迟，但应在 10 秒内稳定出现至少 1 条 grant
+- 如果 10 秒后仍为 `0`，才视为真实失败
+
+### TC-RI-回归-134 执行结果（2026-04-24，grant 可见性时序窗口复验）
+
+**执行环境**：
+- Local relay：脚本自动启动 `packages/bifrost-sync-server`
+- Target client：`bash e2e-tests/tests/test_remote_invoke_e2e.sh` 自动使用隔离 `BIFROST_DATA_DIR` 启动
+- Caller CLI：同脚本内隔离目录
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-134 | ✅ PASS | 2026-04-24 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，整套 72 条断言全部通过。针对 `Verify grant is created on Client side` 已改为“最多等待 10 秒”的短轮询；本轮本地复验中 grants 列表在窗口内稳定出现，随后 `remote status`、`remote traffic list/get/search`、取消、reject pairing、stale grant 清理与 disconnect 回归也全部通过，说明该改动只吸收了瞬时时序抖动，没有放宽后续真实链路验证。 |
+
+---
+
+### TC-RI-回归-135：Recent Calls 参数预览回归脚本必须使用本地 mock 流量，不依赖公网 `httpbin.org`
+
+**背景**：`test_remote_invoke_recent_calls_args_preview_e2e.sh` 之前通过 `curl --proxy ... http://httpbin.org/anything/<marker>` 造流量。CI runner 一旦公网抖动，脚本会在 `set -e` 下直接退出，shell 汇总里只会残留“批准配对应返回 200”这样的上一条成功日志，难以判断到底是 connect 失败还是公网依赖失败。
+
+**前置条件**：
+- 使用隔离的 target admin / caller / relay 数据目录
+- 不使用 `9900` 端口，target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`，可启动 `e2e-tests/mock_servers/http_echo_server.py`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 观察脚本输出，确认其在启动 target admin 后还会启动本地 echo fixture：
+   ```text
+   [remote-invoke-args-preview-e2e] Starting local HTTP echo fixture on port <随机端口>
+   ```
+3. 脚本结束后，读取 target client 的 Recent Calls API：
+   ```bash
+   curl -s "http://127.0.0.1:<admin-port>/_bifrost/api/remote-invoke/calls" | jq '.calls[0].command_summary'
+   ```
+4. 定位本轮 `search.stream` 调用，检查 `command_summary.masked_args_json`
+
+**预期结果**：
+- 脚本不再访问公网 `httpbin.org`，即使 CI 外网受限也能完成 Recent Calls 回归
+- 本地 echo fixture 能成功生成带 `recent-calls-preview-<随机值>` 的流量记录
+- `search.stream` 的 `command_summary.masked_args_json` 非空，且包含 `keyword/max_results/max_scan`
+
+### TC-RI-回归-135 执行结果（2026-04-24，Recent Calls 参数预览 shell E2E 去公网依赖）
+
+**执行环境**：
+- Local relay：脚本自动启动 `packages/bifrost-sync-server`
+- Target admin：脚本自动启动隔离 `target/release/bifrost ... --no-system-proxy`
+- Local mock：脚本自动启动 `e2e-tests/mock_servers/http_echo_server.py --port <随机端口> --retries 5`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-135 | ✅ PASS | 2026-04-24 在当前 checkout 连续复验 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本输出明确显示已启动本地 `HTTP echo fixture`，不再依赖公网 `httpbin.org`。本轮 Recent Calls API 成功返回最新 `search.stream` 记录，`command_summary.masked_args_json` 非空，JSON 中实际包含 `keyword=recent-calls-preview-<随机值>`、`max_results=5`、`max_scan=50`，对应断言 `TC-RI-ARGS-01` 通过。此前“approve 后只剩上一条成功日志”的无诊断退出现象未再复现。 |
 
 ---
 

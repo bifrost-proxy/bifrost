@@ -318,6 +318,7 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
     "settings-remote-invoke-discovery-section",
   );
   const sshCard = page.getByTestId("settings-remote-invoke-ssh-card");
+  const shellCard = page.getByTestId("settings-remote-invoke-shell-card");
 
   await expect(statusCard).toBeVisible();
   await expect(connectionSection).toContainText("Connection Status");
@@ -326,6 +327,94 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
   await expect(discoverySection).toContainText("Enter Discovery Mode");
   await expect(sshCard).toBeVisible();
   await expect(sshCard).toContainText("SSH Key");
+  await expect(shellCard).toBeVisible();
+  await expect(shellCard).toContainText("Shell Access");
+  await expect(shellCard).toContainText("Configuration Mode");
+  await expect(shellCard).toContainText("Policy Set Version");
+});
+
+test("Settings Remote Invoke 的 Shell Access 仅允许修改名称，Policy/Profile ID 为只读", async ({
+  page,
+  request,
+}) => {
+  const shellConfigRes = await request.get(`${apiBase}/remote-invoke/shell-config`);
+  const originalShellConfig = await shellConfigRes.json();
+  const updatedProfileName = uniqueName("profile-name");
+  const updatedPolicyName = uniqueName("policy-name");
+
+  try {
+    await request.put(`${apiBase}/remote-invoke/shell-config`, {
+      data: {
+        schema_version: 1,
+        version: 1,
+        profiles: [
+          {
+            id: "readonly-profile",
+            name: "Readonly Profile",
+            description: "profile for readonly id regression",
+            enabled: true,
+            metadata: {},
+          },
+        ],
+        policies: [
+          {
+            id: "readonly-policy",
+            name: "Readonly Policy",
+            description: "policy for readonly id regression",
+            enabled: true,
+            profile_id: "readonly-profile",
+            metadata: {
+              exec_mode: "argv_exec",
+            },
+          },
+        ],
+      },
+    });
+
+    await openPage(page, "settings");
+    await page.getByRole("tab", { name: /Remote Invoke/ }).click({ force: true });
+    await page.getByRole("button", { name: "Manage Access" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Manage Shell Access" });
+    await expect(dialog.locator('input[value="readonly-profile"]')).toHaveAttribute(
+      "readonly",
+      "",
+    );
+    await expect(dialog.locator('input[value="readonly-policy"]')).toHaveAttribute(
+      "readonly",
+      "",
+    );
+
+    await dialog.locator('input[value="Readonly Profile"]').fill(updatedProfileName);
+    await dialog.locator('input[value="Readonly Policy"]').fill(updatedPolicyName);
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await waitForToast(page, "Shell access config saved");
+
+    await expect
+      .poll(async () => {
+        const response = await request.get(`${apiBase}/remote-invoke/shell-config`);
+        return response.json();
+      })
+      .toMatchObject({
+        profiles: [
+          {
+            id: "readonly-profile",
+            name: updatedProfileName,
+          },
+        ],
+        policies: [
+          {
+            id: "readonly-policy",
+            name: updatedPolicyName,
+            profile_id: "readonly-profile",
+          },
+        ],
+      });
+  } finally {
+    await request.put(`${apiBase}/remote-invoke/shell-config`, {
+      data: originalShellConfig,
+    });
+  }
 });
 
 test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async ({

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use base64::Engine;
+use bifrost_command::CanonicalQueryCommand;
 use bifrost_core::{BifrostError, Result};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::hkdf::{Salt, HKDF_SHA256};
@@ -282,6 +283,8 @@ pub struct RemoteCommand {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<CanonicalQueryCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<ShellExecMode>,
@@ -311,6 +314,10 @@ pub struct RemoteCommand {
 
 impl RemoteCommand {
     pub fn summary_label(&self) -> &str {
+        if let Some(query) = &self.query {
+            return query.command_id();
+        }
+
         if !self.command.is_empty() {
             return self.command.as_str();
         }
@@ -318,6 +325,25 @@ impl RemoteCommand {
         match self.kind {
             CommandKind::QueryReadonly => "query.readonly",
             CommandKind::ShellExec => "shell.exec",
+        }
+    }
+
+    pub fn summary_args_json(&self) -> Option<String> {
+        if let Some(args_json) = self
+            .args_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(args_json.to_string());
+        }
+
+        match &self.query {
+            Some(CanonicalQueryCommand::Search(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficList(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficGet(args)) => serde_json::to_string(args).ok(),
+            Some(CanonicalQueryCommand::TrafficClear(args)) => serde_json::to_string(args).ok(),
+            None => None,
         }
     }
 }
@@ -706,7 +732,7 @@ pub enum ClientSseEvent {
         pairing_id: String,
         caller_info: CallerInfo,
         command_summary: CommandSummary,
-        command: RemoteCommand,
+        command: Box<RemoteCommand>,
         caller_pubkey: String,
         client_ephemeral_pub: Option<String>,
         caller_ephemeral_pub: Option<String>,
@@ -776,6 +802,8 @@ pub struct PairingRequest {
     pub command_summary: CommandSummary,
     pub command: RemoteCommand,
     pub caller_pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -970,15 +998,14 @@ pub struct GrantDecisionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_scope: Option<GrantScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_binding: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_policy_set_version_snapshot: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interactive_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdin_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateGrantRequest {
+    pub client_instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_scope: Option<GrantScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1055,14 +1082,6 @@ pub struct SshConnectResultRequest {
     pub caller_ephemeral_pub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_binding: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_policy_set_version_snapshot: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interactive_allowed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdin_allowed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1119,13 +1138,7 @@ pub struct RemoteInvokeResponse {
 // Allowed commands
 // ---------------------------------------------------------------------------
 
-pub const ALLOWED_COMMANDS: &[&str] = &[
-    "status",
-    "traffic.list",
-    "traffic.get",
-    "traffic.search",
-    "search.get",
-];
+pub const ALLOWED_COMMANDS: &[&str] = &["status", "search.stream", "traffic.list", "traffic.get"];
 
 pub fn is_allowed_command(command: &str) -> bool {
     ALLOWED_COMMANDS.contains(&command)

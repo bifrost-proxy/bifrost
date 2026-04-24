@@ -14,6 +14,7 @@ use bifrost_core::{BifrostError, Protocol, Result};
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+use hyper::header::{HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Request, Response};
@@ -1710,7 +1711,16 @@ async fn handle_intercepted_request_with_protocol(
                 Some(Protocol::Host) | Some(Protocol::XHost) => p != 443 && p != 8443,
                 _ => false,
             };
-            let target_path = parsed_path.unwrap_or_else(|| path.to_string());
+            let target_path = if let Some(ref rule_path) = parsed_path {
+                let source_path = crate::utils::url::find_host_rule_source_path(
+                    &resolved_rules.rules,
+                    resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                    host_rule,
+                );
+                crate::utils::url::rewrite_path_with_prefix(path, source_path.as_deref(), rule_path)
+            } else {
+                path.to_string()
+            };
             debug!(
                 "[{}] Host rule applied: original={}:{} -> target={}:{}, host_protocol={:?}, use_http={}",
                 req_id, original_host, original_port, h, p, resolved_rules.host_protocol, use_http_override
@@ -2163,13 +2173,6 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    for (name, value) in &resolved_rules.req_headers {
-        if verbose_logging {
-            info!("[{}] [REQ_HEADER] {} = {}", req_id, name, value);
-        }
-        new_req = new_req.header(name.as_str(), value.as_str());
-    }
-
     let request_body_is_streaming = streaming_body.is_some();
     let outgoing_body = match streaming_body {
         Some(body) => body,
@@ -2186,6 +2189,18 @@ async fn handle_intercepted_request_with_protocol(
                 .unwrap());
         }
     };
+    if let Err(err) = apply_resolved_req_headers_to_outgoing_request(
+        req_id,
+        &mut outgoing_req,
+        &resolved_rules.req_headers,
+        verbose_logging,
+    ) {
+        error!("[{}] Failed to apply request headers: {}", req_id, err);
+        return Ok(Response::builder()
+            .status(502)
+            .body(full_body(b"Bad Gateway".to_vec()))
+            .unwrap());
+    }
     sanitize_upstream_headers(outgoing_req.headers_mut());
     outgoing_req.headers_mut().remove(hyper::header::HOST);
 
@@ -3243,29 +3258,41 @@ async fn handle_intercepted_websocket(
         || !resolved_rules.req_headers.is_empty()
         || !resolved_rules.res_headers.is_empty();
 
-    let (target_host, target_port, use_http) = if resolved_rules.ignored.host {
+    let (target_host, target_port, use_http, target_path) = if resolved_rules.ignored.host {
         debug!(
             "[{}] [WS] Passthrough rule applied: WebSocket will be forwarded to original target {}:{}",
             req_id, original_host, original_port
         );
-        (original_host.to_string(), original_port, false)
+        (
+            original_host.to_string(),
+            original_port,
+            false,
+            path.to_string(),
+        )
     } else if let Some(ref host_rule) = resolved_rules.host {
-        let host_rule_clean = host_rule.trim_end_matches('/');
-        let parts: Vec<&str> = host_rule_clean.split(':').collect();
-        let h = parts[0].to_string();
-        let p = if parts.len() > 1 {
-            parts[1].parse().unwrap_or(original_port)
-        } else {
-            match resolved_rules.host_protocol {
-                Some(Protocol::Http) | Some(Protocol::Ws) => 80,
-                Some(Protocol::Https) | Some(Protocol::Wss) => 443,
-                _ => original_port,
-            }
+        let (h, parsed_port, parsed_path) = match parse_host_rule(host_rule) {
+            Some((h, p, path_and_query)) => (h, p, path_and_query),
+            None => (host_rule.trim_end_matches('/').to_string(), None, None),
         };
+        let p = parsed_port.unwrap_or(match resolved_rules.host_protocol {
+            Some(Protocol::Http) | Some(Protocol::Ws) => 80,
+            Some(Protocol::Https) | Some(Protocol::Wss) => 443,
+            _ => original_port,
+        });
         let use_http_flag = match resolved_rules.host_protocol {
             Some(Protocol::Http) | Some(Protocol::Ws) => true,
             Some(Protocol::Host) | Some(Protocol::XHost) => p != 443 && p != 8443,
             _ => false,
+        };
+        let target_path = if let Some(ref rule_path) = parsed_path {
+            let source_path = crate::utils::url::find_host_rule_source_path(
+                &resolved_rules.rules,
+                resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                host_rule,
+            );
+            crate::utils::url::rewrite_path_with_prefix(path, source_path.as_deref(), rule_path)
+        } else {
+            path.to_string()
         };
         if verbose_logging {
             info!(
@@ -3278,9 +3305,14 @@ async fn handle_intercepted_websocket(
                 p
             );
         }
-        (h, p, use_http_flag)
+        (h, p, use_http_flag, target_path)
     } else {
-        (original_host.to_string(), original_port, false)
+        (
+            original_host.to_string(),
+            original_port,
+            false,
+            path.to_string(),
+        )
     };
 
     let connect_start = Instant::now();
@@ -3314,7 +3346,8 @@ async fn handle_intercepted_websocket(
 
     let upstream_handshake = if use_http {
         let stream: Box<dyn AsyncReadWrite + Send + Unpin> = Box::new(target_stream);
-        let handshake = build_websocket_handshake_request(&req, &target_host, target_port);
+        let handshake =
+            build_websocket_handshake_request(&req, &target_host, target_port, &target_path);
         let (mut stream_read, mut stream_write) = tokio::io::split(stream);
 
         if let Err(e) = stream_write.write_all(handshake.as_bytes()).await {
@@ -3397,7 +3430,8 @@ async fn handle_intercepted_websocket(
         };
 
         let stream: Box<dyn AsyncReadWrite + Send + Unpin> = Box::new(tls_stream);
-        let handshake = build_websocket_handshake_request(&req, &target_host, target_port);
+        let handshake =
+            build_websocket_handshake_request(&req, &target_host, target_port, &target_path);
         let (mut stream_read, mut stream_write) = tokio::io::split(stream);
 
         if let Err(e) = stream_write.write_all(handshake.as_bytes()).await {
@@ -3646,13 +3680,8 @@ fn build_websocket_handshake_request(
     req: &Request<Incoming>,
     target_host: &str,
     target_port: u16,
+    target_path: &str,
 ) -> String {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
     let ws_key = req
         .headers()
         .get("Sec-WebSocket-Key")
@@ -3684,7 +3713,7 @@ fn build_websocket_handshake_request(
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: {}\r\n\
          Sec-WebSocket-Version: {}\r\n",
-        path, host_header, ws_key, ws_version
+        target_path, host_header, ws_key, ws_version
     );
 
     for (name, value) in req.headers().iter() {
@@ -4124,6 +4153,25 @@ async fn serve_mock_file(
     }
 }
 
+fn apply_resolved_req_headers_to_outgoing_request<B>(
+    req_id: &str,
+    outgoing_req: &mut Request<B>,
+    req_headers: &[(String, String)],
+    verbose_logging: bool,
+) -> std::result::Result<(), String> {
+    for (name, value) in req_headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("invalid request header name: {name}"))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|_| format!("invalid request header value for header: {name}"))?;
+        if verbose_logging {
+            info!("[{}] [REQ_HEADER] {} = {}", req_id, name, value);
+        }
+        outgoing_req.headers_mut().insert(header_name, header_value);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4296,6 +4344,31 @@ mod tests {
         assert_eq!(socket_status.receive_bytes, 64);
 
         cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn apply_resolved_req_headers_replaces_existing_header_values() {
+        let mut req = Request::builder()
+            .uri("http://example.com")
+            .header("x-same-key", "client-original")
+            .body(())
+            .unwrap();
+
+        apply_resolved_req_headers_to_outgoing_request(
+            "test-req",
+            &mut req,
+            &[("x-same-key".to_string(), "rule-value".to_string())],
+            false,
+        )
+        .expect("request headers should be applied");
+
+        let values: Vec<_> = req
+            .headers()
+            .get_all("x-same-key")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["rule-value".to_string()]);
     }
 
     fn make_tls_config_with_ca() -> TlsConfig {

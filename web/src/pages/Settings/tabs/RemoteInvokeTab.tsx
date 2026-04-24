@@ -6,14 +6,18 @@ import {
   Card,
   Col,
   Descriptions,
+  Divider,
   Empty,
   Form,
   Input,
+  InputNumber,
   List,
   Modal,
   Popconfirm,
   Row,
+  Select,
   Space,
+  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -24,9 +28,11 @@ import {
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
+  EditOutlined,
   EyeOutlined,
   HistoryOutlined,
   KeyOutlined,
+  PlusOutlined,
   ReloadOutlined,
   SafetyOutlined,
   ScanOutlined,
@@ -40,12 +46,16 @@ import {
   getRemoteInvokeStatus,
   getRemoteInvokeSshKey,
   getRemoteInvokeSshPrivateKey,
+  getRemoteShellConfig,
   listCalls,
   listGrants,
   refreshPairCode,
   resetRemoteInvokeSshKey,
   revokeGrant,
   revokeRemoteInvokeSshKey,
+  updateGrant,
+  updateRemoteShellConfig,
+  getCallArgsPreviewSource,
   type CreateRemoteInvokeSshKeyInput,
   type Call,
   type ClientIdentity,
@@ -56,6 +66,7 @@ import {
   type RemoteInvokeSshKeyRecord,
   type RemoteInvokeSshKeySecretPayload,
   type RemoteInvokeStatus,
+  type RemoteShellSet,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -65,6 +76,7 @@ import type { PairingRequest } from "../../../api/remoteInvoke";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
+const { Option } = Select;
 
 const SSH_GRANT_MODE: { label: string; value: GrantMode } = {
   label: "Permanent",
@@ -87,6 +99,382 @@ function formatArgsPreview(argsJson?: string | null): string {
       .join(" ");
   } catch {
     return argsJson.length > 60 ? argsJson.slice(0, 60) + "…" : argsJson;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getStringArrayField(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string[] {
+  const value = metadata?.[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function getStringField(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function getNumberField(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+type ShellExecMode = "argv_exec" | "shell_text";
+type ShellAccessMode = "sandbox" | "full-access" | "custom";
+
+interface ShellPolicyEditorItem {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  profile_id?: string;
+  exec_mode: ShellExecMode;
+  allowed_executables: string[];
+  allowed_shell_patterns: string[];
+  cwd_allowlist: string[];
+  env_allowlist: string[];
+  default_cwd: string;
+  max_timeout_ms: number | null;
+  stdin_allowed: boolean;
+  interactive_allowed: boolean;
+  extra_metadata: Record<string, unknown>;
+}
+
+interface ShellProfileEditorItem {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  cwd_allowlist: string[];
+  env_allowlist: string[];
+  default_cwd: string;
+  max_timeout_ms: number | null;
+  stdin_allowed: boolean;
+  interactive_allowed: boolean;
+  extra_metadata: Record<string, unknown>;
+}
+
+interface ShellAccessPresetDefinition {
+  mode: Exclude<ShellAccessMode, "custom">;
+  label: string;
+  description: string;
+  policies: ShellPolicyEditorItem[];
+  profiles: ShellProfileEditorItem[];
+}
+
+const SHELL_POLICY_METADATA_KEYS = [
+  "exec_mode",
+  "allowed_executables",
+  "allowed_shell_patterns",
+  "cwd_allowlist",
+  "env_allowlist",
+  "default_cwd",
+  "max_timeout_ms",
+  "stdin_allowed",
+  "interactive_allowed",
+];
+
+const SHELL_PROFILE_METADATA_KEYS = [
+  "cwd_allowlist",
+  "env_allowlist",
+  "default_cwd",
+  "max_timeout_ms",
+  "stdin_allowed",
+  "interactive_allowed",
+];
+
+function omitKnownMetadata(
+  metadata: Record<string, unknown> | undefined,
+  knownKeys: string[],
+): Record<string, unknown> {
+  if (!metadata) return {};
+  return Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => !knownKeys.includes(key)),
+  );
+}
+
+function nextShellItemId(prefix: string, existingIds: string[]): string {
+  const seen = new Set(existingIds.map((item) => item.trim()).filter(Boolean));
+  let nextIndex = existingIds.length + 1;
+  let nextId = `${prefix}-${nextIndex}`;
+
+  while (seen.has(nextId)) {
+    nextIndex += 1;
+    nextId = `${prefix}-${nextIndex}`;
+  }
+
+  return nextId;
+}
+
+function toShellPolicyEditorItem(
+  policy: RemoteShellSet["policies"][number],
+): ShellPolicyEditorItem {
+  const metadata = isRecord(policy.metadata) ? policy.metadata : {};
+  return {
+    id: policy.id,
+    name: policy.name,
+    description: policy.description ?? "",
+    enabled: policy.enabled,
+    profile_id: policy.profile_id ?? undefined,
+    exec_mode:
+      getStringField(metadata, "exec_mode") === "shell_text"
+        ? "shell_text"
+        : "argv_exec",
+    allowed_executables: getStringArrayField(metadata, "allowed_executables"),
+    allowed_shell_patterns: getStringArrayField(metadata, "allowed_shell_patterns"),
+    cwd_allowlist: getStringArrayField(metadata, "cwd_allowlist"),
+    env_allowlist: getStringArrayField(metadata, "env_allowlist"),
+    default_cwd: getStringField(metadata, "default_cwd") ?? "",
+    max_timeout_ms: getNumberField(metadata, "max_timeout_ms") ?? null,
+    stdin_allowed: Boolean(metadata.stdin_allowed),
+    interactive_allowed: Boolean(metadata.interactive_allowed),
+    extra_metadata: omitKnownMetadata(metadata, SHELL_POLICY_METADATA_KEYS),
+  };
+}
+
+function toShellProfileEditorItem(
+  profile: RemoteShellSet["profiles"][number],
+): ShellProfileEditorItem {
+  const metadata = isRecord(profile.metadata) ? profile.metadata : {};
+  return {
+    id: profile.id,
+    name: profile.name,
+    description: profile.description ?? "",
+    enabled: profile.enabled,
+    cwd_allowlist: getStringArrayField(metadata, "cwd_allowlist"),
+    env_allowlist: getStringArrayField(metadata, "env_allowlist"),
+    default_cwd: getStringField(metadata, "default_cwd") ?? "",
+    max_timeout_ms: getNumberField(metadata, "max_timeout_ms") ?? null,
+    stdin_allowed: Boolean(metadata.stdin_allowed),
+    interactive_allowed: Boolean(metadata.interactive_allowed),
+    extra_metadata: omitKnownMetadata(metadata, SHELL_PROFILE_METADATA_KEYS),
+  };
+}
+
+function buildShellPolicyMetadata(
+  item: ShellPolicyEditorItem,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    ...item.extra_metadata,
+    exec_mode: item.exec_mode,
+  };
+
+  if (item.allowed_executables.length > 0) {
+    metadata.allowed_executables = item.allowed_executables;
+  }
+  if (item.allowed_shell_patterns.length > 0) {
+    metadata.allowed_shell_patterns = item.allowed_shell_patterns;
+  }
+  if (item.cwd_allowlist.length > 0) {
+    metadata.cwd_allowlist = item.cwd_allowlist;
+  }
+  if (item.env_allowlist.length > 0) {
+    metadata.env_allowlist = item.env_allowlist;
+  }
+  if (item.default_cwd.trim()) {
+    metadata.default_cwd = item.default_cwd.trim();
+  }
+  if (item.max_timeout_ms != null) {
+    metadata.max_timeout_ms = item.max_timeout_ms;
+  }
+  if (item.stdin_allowed) {
+    metadata.stdin_allowed = true;
+  }
+  if (item.interactive_allowed) {
+    metadata.interactive_allowed = true;
+  }
+
+  return metadata;
+}
+
+function buildShellProfileMetadata(
+  item: ShellProfileEditorItem,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    ...item.extra_metadata,
+  };
+
+  if (item.cwd_allowlist.length > 0) {
+    metadata.cwd_allowlist = item.cwd_allowlist;
+  }
+  if (item.env_allowlist.length > 0) {
+    metadata.env_allowlist = item.env_allowlist;
+  }
+  if (item.default_cwd.trim()) {
+    metadata.default_cwd = item.default_cwd.trim();
+  }
+  if (item.max_timeout_ms != null) {
+    metadata.max_timeout_ms = item.max_timeout_ms;
+  }
+  if (item.stdin_allowed) {
+    metadata.stdin_allowed = true;
+  }
+  if (item.interactive_allowed) {
+    metadata.interactive_allowed = true;
+  }
+
+  return metadata;
+}
+
+const DEFAULT_SANDBOX_ENV_KEYS = ["PATH", "LANG", "LC_ALL", "TERM"];
+const DEFAULT_SANDBOX_ENV = {
+  PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+  LANG: "C.UTF-8",
+  LC_ALL: "C.UTF-8",
+  TERM: "xterm-256color",
+};
+
+function createSandboxPreset(): ShellAccessPresetDefinition {
+  return {
+    mode: "sandbox",
+    label: "Default Sandbox",
+    description:
+      "Reserve a future sandboxed execution mode. Right now Bifrost will reject execution attempts until the sandbox runtime lands.",
+    profiles: [
+      {
+        id: "default-sandbox",
+        name: "Default Sandbox",
+        description: "Baseline sandboxed shell execution.",
+        enabled: true,
+        cwd_allowlist: [],
+        env_allowlist: [...DEFAULT_SANDBOX_ENV_KEYS],
+        default_cwd: "",
+        max_timeout_ms: 30000,
+        stdin_allowed: false,
+        interactive_allowed: false,
+        extra_metadata: {
+          inherit_env: false,
+          default_env: DEFAULT_SANDBOX_ENV,
+          reject_reason:
+            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+        },
+      },
+    ],
+    policies: [
+      {
+        id: "default-sandbox",
+        name: "Default Sandbox",
+        description: "Run shell text inside the default sandbox constraints.",
+        enabled: true,
+        profile_id: "default-sandbox",
+        exec_mode: "shell_text",
+        allowed_executables: [],
+        allowed_shell_patterns: ["^(?s:.*)$"],
+        cwd_allowlist: [],
+        env_allowlist: [],
+        default_cwd: "",
+        max_timeout_ms: null,
+        stdin_allowed: false,
+        interactive_allowed: false,
+        extra_metadata: {
+          shell: "/bin/bash",
+          reject_reason:
+            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+        },
+      },
+    ],
+  };
+}
+
+function createFullAccessPreset(): ShellAccessPresetDefinition {
+  return {
+    mode: "full-access",
+    label: "Full Access",
+    description:
+      "Allow unrestricted argv and shell text execution with inherited environment, stdin, and interactive access.",
+    profiles: [],
+    policies: [
+      {
+        id: "full-access",
+        name: "Full Access",
+        description: "Run any argv command or shell text with full caller access.",
+        enabled: true,
+        profile_id: undefined,
+        exec_mode: "shell_text",
+        allowed_executables: [],
+        allowed_shell_patterns: ["^(?s:.*)$"],
+        cwd_allowlist: [],
+        env_allowlist: [],
+        default_cwd: "",
+        max_timeout_ms: null,
+        stdin_allowed: true,
+        interactive_allowed: true,
+        extra_metadata: {
+          shell: "/bin/bash",
+          inherit_env: true,
+          allowed_exec_modes: ["argv_exec", "shell_text"],
+          allow_any_executable: true,
+        },
+      },
+    ],
+  };
+}
+
+const SHELL_ACCESS_PRESETS: ShellAccessPresetDefinition[] = [
+  createSandboxPreset(),
+  createFullAccessPreset(),
+];
+
+function shellPresetDefinition(
+  mode: Exclude<ShellAccessMode, "custom">,
+): ShellAccessPresetDefinition {
+  return mode === "sandbox"
+    ? createSandboxPreset()
+    : createFullAccessPreset();
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sameShellEditorItems<T>(left: T[], right: T[]): boolean {
+  return stableJson(left) === stableJson(right);
+}
+
+function inferShellAccessMode(
+  profiles: ShellProfileEditorItem[],
+  policies: ShellPolicyEditorItem[],
+): ShellAccessMode {
+  for (const preset of SHELL_ACCESS_PRESETS) {
+    if (
+      sameShellEditorItems(profiles, preset.profiles) &&
+      sameShellEditorItems(policies, preset.policies)
+    ) {
+      return preset.mode;
+    }
+  }
+  return "custom";
+}
+
+function shellAccessModeLabel(mode: ShellAccessMode): string {
+  switch (mode) {
+    case "sandbox":
+      return "Default Sandbox";
+    case "full-access":
+      return "Full Access";
+    default:
+      return "Custom Policies";
   }
 }
 
@@ -132,6 +520,25 @@ function formatCountdown(expiresAt: number): string {
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
+  if (grant.grant_scope === "remote_query") {
+    return "query";
+  }
+  const binding = isRecord(grant.policy_binding) ? grant.policy_binding : null;
+  if (binding?.mode === "selected") {
+    return "selected";
+  }
+  return "all";
+}
+
+function getGrantSelectedPolicies(grant: Grant): string[] {
+  const binding = isRecord(grant.policy_binding) ? grant.policy_binding : null;
+  if (!binding || binding.mode !== "selected" || !Array.isArray(binding.policy_ids)) {
+    return [];
+  }
+  return binding.policy_ids.filter((item): item is string => typeof item === "string");
 }
 
 function getCallStatusColor(call: Call): string {
@@ -190,12 +597,31 @@ export default function RemoteInvokeTab() {
   const [countdown, setCountdown] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
+  const [shellConfig, setShellConfig] = useState<RemoteShellSet | null>(null);
+  const [shellLoading, setShellLoading] = useState(false);
+  const [shellEditorOpen, setShellEditorOpen] = useState(false);
+  const [shellEditorMode, setShellEditorMode] = useState<ShellAccessMode>("custom");
+  const [shellEditorPolicies, setShellEditorPolicies] = useState<
+    ShellPolicyEditorItem[]
+  >([]);
+  const [shellEditorProfiles, setShellEditorProfiles] = useState<
+    ShellProfileEditorItem[]
+  >([]);
+  const [shellSaveLoading, setShellSaveLoading] = useState(false);
+  const [grantEditorOpen, setGrantEditorOpen] = useState(false);
+  const [editingGrant, setEditingGrant] = useState<Grant | null>(null);
+  const [grantEditorAccessMode, setGrantEditorAccessMode] = useState<"query" | "selected" | "all">("query");
+  const [grantEditorSelectedPolicies, setGrantEditorSelectedPolicies] = useState<string[]>([]);
+  const [grantEditorStdinAllowed, setGrantEditorStdinAllowed] = useState(false);
+  const [grantEditorInteractiveAllowed, setGrantEditorInteractiveAllowed] = useState(false);
+  const [grantSaveLoading, setGrantSaveLoading] = useState(false);
   const pollRef = useRef<number | null>(null);
   const [sshForm] = Form.useForm<CreateRemoteInvokeSshKeyInput>();
 
   const [reviewPairing, setReviewPairing] = useState<PairingRequest | null>(null);
   const pendingPairings = usePairingRequestStore((s) => s.pendingList);
   const storeFetchPairings = usePairingRequestStore((s) => s.fetchPendingList);
+  const enabledShellPolicies = shellConfig?.policies.filter((policy) => policy.enabled) ?? [];
 
   const refresh = useCallback(async () => {
     try {
@@ -231,6 +657,31 @@ export default function RemoteInvokeTab() {
       // ignore
     }
   }, []);
+
+  const refreshShellConfig = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setShellLoading(true);
+      }
+
+      try {
+        const config = await getRemoteShellConfig();
+        setShellConfig(config);
+      } catch (e) {
+        if (!silent && !isConnectionIssueError(e)) {
+          message.error(
+            e instanceof Error ? e.message : "Failed to load shell access config",
+          );
+        }
+      } finally {
+        if (!silent) {
+          setShellLoading(false);
+        }
+      }
+    },
+    [],
+  );
 
   const refreshSshKey = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -268,13 +719,15 @@ export default function RemoteInvokeTab() {
     void refreshGrants();
     void refreshCalls();
     void refreshSshKey();
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey]);
+    void refreshShellConfig();
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
       void refresh();
       void refreshGrants();
       void refreshCalls();
+      void refreshShellConfig({ silent: true });
       if (sshApiAvailable) {
         void refreshSshKey({ silent: true });
       }
@@ -282,7 +735,7 @@ export default function RemoteInvokeTab() {
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, sshApiAvailable]);
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, sshApiAvailable]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -364,6 +817,157 @@ export default function RemoteInvokeTab() {
       void refreshGrants();
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Failed to revoke grant");
+    }
+  };
+
+  const openGrantEditor = (grant: Grant) => {
+    const accessMode = getGrantAccessMode(grant);
+    setEditingGrant(grant);
+    setGrantEditorAccessMode(accessMode);
+    setGrantEditorSelectedPolicies(getGrantSelectedPolicies(grant));
+    setGrantEditorStdinAllowed(Boolean(grant.stdin_allowed));
+    setGrantEditorInteractiveAllowed(Boolean(grant.interactive_allowed));
+    setGrantEditorOpen(true);
+  };
+
+  const handleSaveGrant = async () => {
+    if (!editingGrant) {
+      return;
+    }
+    if (grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
+      message.error("Choose at least one shell policy");
+      return;
+    }
+
+    const payload =
+      grantEditorAccessMode === "query"
+        ? {
+            grant_scope: "remote_query",
+            policy_binding: null,
+            interactive_allowed: false,
+            stdin_allowed: false,
+          }
+        : {
+            grant_scope: grantEditorInteractiveAllowed
+              ? "remote_shell_interactive"
+              : "remote_shell_exec",
+            policy_binding:
+              grantEditorAccessMode === "all"
+                ? { mode: "all" }
+                : { mode: "selected", policy_ids: grantEditorSelectedPolicies },
+            interactive_allowed: grantEditorInteractiveAllowed,
+            stdin_allowed: grantEditorStdinAllowed,
+          };
+
+    setGrantSaveLoading(true);
+    try {
+      await updateGrant(editingGrant.grant_id, payload);
+      message.success("Grant access updated");
+      setGrantEditorOpen(false);
+      setEditingGrant(null);
+      void refreshGrants();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "Failed to update grant");
+    } finally {
+      setGrantSaveLoading(false);
+    }
+  };
+
+  const openShellEditor = () => {
+    const nextProfiles = shellConfig?.profiles.map(toShellProfileEditorItem) ?? [];
+    const nextPolicies = shellConfig?.policies.map(toShellPolicyEditorItem) ?? [];
+    setShellEditorProfiles(nextProfiles);
+    setShellEditorPolicies(nextPolicies);
+    setShellEditorMode(inferShellAccessMode(nextProfiles, nextPolicies));
+    setShellEditorOpen(true);
+  };
+
+  const applyShellAccessMode = (mode: ShellAccessMode) => {
+    setShellEditorMode(mode);
+    if (mode === "custom") {
+      return;
+    }
+
+    const preset = shellPresetDefinition(mode);
+    setShellEditorProfiles(preset.profiles);
+    setShellEditorPolicies(preset.policies);
+  };
+
+  const handleSaveShellConfig = async () => {
+    const policyIds = new Set<string>();
+    for (const policy of shellEditorPolicies) {
+      if (!policy.id.trim()) {
+        message.error("Every policy needs an ID");
+        return;
+      }
+      if (!policy.name.trim()) {
+        message.error("Every policy needs a name");
+        return;
+      }
+      if (policyIds.has(policy.id.trim())) {
+        message.error(`Duplicate policy ID: ${policy.id}`);
+        return;
+      }
+      policyIds.add(policy.id.trim());
+    }
+
+    const profileIds = new Set<string>();
+    for (const profile of shellEditorProfiles) {
+      if (!profile.id.trim()) {
+        message.error("Every profile needs an ID");
+        return;
+      }
+      if (!profile.name.trim()) {
+        message.error("Every profile needs a name");
+        return;
+      }
+      if (profileIds.has(profile.id.trim())) {
+        message.error(`Duplicate profile ID: ${profile.id}`);
+        return;
+      }
+      profileIds.add(profile.id.trim());
+    }
+
+    for (const policy of shellEditorPolicies) {
+      if (policy.profile_id && !profileIds.has(policy.profile_id)) {
+        message.error(`Policy ${policy.name} references a missing profile`);
+        return;
+      }
+    }
+
+    const parsed: RemoteShellSet = {
+      schema_version: shellConfig?.schema_version ?? 1,
+      version: shellConfig?.version ?? 0,
+      policies: shellEditorPolicies.map((policy) => ({
+        id: policy.id.trim(),
+        name: policy.name.trim(),
+        description: policy.description.trim() || null,
+        enabled: policy.enabled,
+        profile_id: policy.profile_id?.trim() || null,
+        metadata: buildShellPolicyMetadata(policy),
+      })),
+      profiles: shellEditorProfiles.map((profile) => ({
+        id: profile.id.trim(),
+        name: profile.name.trim(),
+        description: profile.description.trim() || null,
+        enabled: profile.enabled,
+        metadata: buildShellProfileMetadata(profile),
+      })),
+    };
+
+    setShellSaveLoading(true);
+    try {
+      const saved = await updateRemoteShellConfig(parsed);
+      setShellConfig(saved);
+      setShellEditorOpen(false);
+      message.success("Shell access config saved");
+      void refreshGrants();
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to save shell access config",
+      );
+    } finally {
+      setShellSaveLoading(false);
     }
   };
 
@@ -469,6 +1073,21 @@ export default function RemoteInvokeTab() {
   const discoverySession: DiscoverySession | null =
     status?.discovery_session ?? null;
   const pairingList = pendingPairings;
+  const enabledPolicyCount =
+    shellConfig?.policies.filter((policy) => policy.enabled).length ?? 0;
+  const enabledProfileCount =
+    shellConfig?.profiles.filter((profile) => profile.enabled).length ?? 0;
+  const shellAccessMode =
+    shellConfig && (shellConfig.policies.length > 0 || shellConfig.profiles.length > 0)
+      ? inferShellAccessMode(
+          shellConfig.profiles.map(toShellProfileEditorItem),
+          shellConfig.policies.map(toShellPolicyEditorItem),
+        )
+      : "custom";
+  const shellProfileOptions = shellEditorProfiles.map((profile) => ({
+    label: `${profile.name || profile.id} (${profile.id})`,
+    value: profile.id,
+  }));
 
   return (
     <div data-testid="settings-remote-invoke-tab" style={{ paddingBottom: 20 }}>
@@ -813,6 +1432,203 @@ export default function RemoteInvokeTab() {
 
         <Col xs={24}>
           <Card
+            data-testid="settings-remote-invoke-shell-card"
+            title={
+              <Space>
+                <SafetyOutlined />
+                <span>Shell Access</span>
+              </Space>
+            }
+            extra={
+              <Space>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void refreshShellConfig()}
+                  loading={shellLoading}
+                />
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={openShellEditor}
+                  disabled={shellLoading}
+                >
+                  Manage Access
+                </Button>
+              </Space>
+            }
+            size="small"
+          >
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="Shell execution is governed by local policies and profiles on this device"
+              description="Policies decide what the caller may execute, while profiles define sandbox boundaries such as cwd, env allowlist, timeout, stdin, and interactive mode."
+            />
+            <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="Configuration Mode">
+                <Tag color={shellAccessMode === "custom" ? "default" : "blue"}>
+                  {shellAccessModeLabel(shellAccessMode)}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Policy Set Version">
+                {shellConfig?.version ?? "-"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema Version">
+                {shellConfig?.schema_version ?? "-"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Policies">
+                {shellConfig?.policies.length ?? 0} total · {enabledPolicyCount} enabled
+              </Descriptions.Item>
+              <Descriptions.Item label="Profiles">
+                {shellConfig?.profiles.length ?? 0} total · {enabledProfileCount} enabled
+              </Descriptions.Item>
+            </Descriptions>
+
+            <Row gutter={[16, 16]}>
+              <Col xs={24} lg={12}>
+                <Card size="small" title="Policies">
+                  {!shellConfig || shellConfig.policies.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="No shell policies configured"
+                    />
+                  ) : (
+                    <List
+                      size="small"
+                      dataSource={shellConfig.policies}
+                      renderItem={(policy) => {
+                        const metadata = isRecord(policy.metadata)
+                          ? policy.metadata
+                          : undefined;
+                        const execMode = getStringField(metadata, "exec_mode");
+                        const allowedExecutables = getStringArrayField(
+                          metadata,
+                          "allowed_executables",
+                        );
+                        const allowedShellPatterns = getStringArrayField(
+                          metadata,
+                          "allowed_shell_patterns",
+                        );
+
+                        return (
+                          <List.Item>
+                            <List.Item.Meta
+                              title={
+                                <Space wrap>
+                                  <Text strong>{policy.name}</Text>
+                                  <Tag color={policy.enabled ? "green" : "default"}>
+                                    {policy.enabled ? "enabled" : "disabled"}
+                                  </Tag>
+                                  <Tag>{policy.id}</Tag>
+                                  {execMode && <Tag color="blue">{execMode}</Tag>}
+                                </Space>
+                              }
+                              description={
+                                <Space size={4} wrap>
+                                  {policy.profile_id && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      profile {policy.profile_id}
+                                    </Text>
+                                  )}
+                                  {allowedExecutables.length > 0 && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      · executables {allowedExecutables.length}
+                                    </Text>
+                                  )}
+                                  {allowedShellPatterns.length > 0 && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      · shell regex {allowedShellPatterns.length}
+                                    </Text>
+                                  )}
+                                </Space>
+                              }
+                            />
+                          </List.Item>
+                        );
+                      }}
+                    />
+                  )}
+                </Card>
+              </Col>
+
+              <Col xs={24} lg={12}>
+                <Card size="small" title="Profiles">
+                  {!shellConfig || shellConfig.profiles.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="No shell profiles configured"
+                    />
+                  ) : (
+                    <List
+                      size="small"
+                      dataSource={shellConfig.profiles}
+                      renderItem={(profile) => {
+                        const metadata = isRecord(profile.metadata)
+                          ? profile.metadata
+                          : undefined;
+                        const cwdAllowlist = getStringArrayField(
+                          metadata,
+                          "cwd_allowlist",
+                        );
+                        const envAllowlist = getStringArrayField(
+                          metadata,
+                          "env_allowlist",
+                        );
+                        const defaultCwd = getStringField(metadata, "default_cwd");
+                        const timeoutMs = getNumberField(metadata, "max_timeout_ms");
+
+                        return (
+                          <List.Item>
+                            <List.Item.Meta
+                              title={
+                                <Space wrap>
+                                  <Text strong>{profile.name}</Text>
+                                  <Tag color={profile.enabled ? "green" : "default"}>
+                                    {profile.enabled ? "enabled" : "disabled"}
+                                  </Tag>
+                                  <Tag>{profile.id}</Tag>
+                                </Space>
+                              }
+                              description={
+                                <Space size={4} wrap>
+                                  {cwdAllowlist.length > 0 && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      cwd {cwdAllowlist.length}
+                                    </Text>
+                                  )}
+                                  {envAllowlist.length > 0 && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      · env {envAllowlist.length}
+                                    </Text>
+                                  )}
+                                  {defaultCwd && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      · default cwd {defaultCwd}
+                                    </Text>
+                                  )}
+                                  {timeoutMs != null && (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      · timeout {timeoutMs}ms
+                                    </Text>
+                                  )}
+                                </Space>
+                              }
+                            />
+                          </List.Item>
+                        );
+                      }}
+                    />
+                  )}
+                </Card>
+              </Col>
+            </Row>
+          </Card>
+        </Col>
+
+        <Col xs={24}>
+          <Card
             title={
               <Space>
                 <span>Pending Pairing Requests</span>
@@ -921,6 +1737,14 @@ export default function RemoteInvokeTab() {
                 renderItem={(g) => (
                   <List.Item
                     actions={g.status === "removed" ? [] : [
+                      <Button
+                        key="edit"
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={() => openGrantEditor(g)}
+                      >
+                        Edit Access
+                      </Button>,
                       <Popconfirm
                         key="revoke"
                         title="Revoke this grant?"
@@ -947,6 +1771,14 @@ export default function RemoteInvokeTab() {
                             {g.status}
                           </Tag>
                           <Tag>{g.grant_mode}</Tag>
+                          <Tag color={g.grant_scope === "remote_query" ? "default" : "purple"}>
+                            {g.grant_scope}
+                          </Tag>
+                          {g.shell_policy_set_version_snapshot != null && (
+                            <Tag color="blue">
+                              shell set v{g.shell_policy_set_version_snapshot}
+                            </Tag>
+                          )}
                         </Space>
                       }
                       description={
@@ -969,6 +1801,16 @@ export default function RemoteInvokeTab() {
                               {formatFingerprint(g.caller_fingerprint)}
                             </Text>
                           </Tooltip>
+                          {g.stdin_allowed != null && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · stdin {g.stdin_allowed ? "on" : "off"}
+                            </Text>
+                          )}
+                          {g.interactive_allowed != null && (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              · interactive {g.interactive_allowed ? "on" : "off"}
+                            </Text>
+                          )}
                         </Space>
                       }
                     />
@@ -1008,7 +1850,8 @@ export default function RemoteInvokeTab() {
                 size="small"
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
                 renderItem={(c) => {
-                  const argsPreview = formatArgsPreview(c.command_summary?.masked_args_json);
+                  const argsPreviewSource = getCallArgsPreviewSource(c);
+                  const argsPreview = formatArgsPreview(argsPreviewSource);
                   const summaryPreview = c.command_summary?.command_preview?.trim();
                   const decryptedPreview = c.command?.command?.trim();
                   const routeOnlyPreview =
@@ -1029,7 +1872,7 @@ export default function RemoteInvokeTab() {
                             {commandPreview}
                           </Text>
                           {argsPreview && (
-                            <Tooltip title={c.command_summary?.masked_args_json}>
+                            <Tooltip title={argsPreviewSource}>
                               <Text type="secondary" style={{ fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}>
                                 {argsPreview}
                               </Text>
@@ -1047,6 +1890,12 @@ export default function RemoteInvokeTab() {
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               by {c.caller_display_name}
                             </Text>
+                          )}
+                          {c.policy_id && (
+                            <Tag color="purple">{c.policy_id}</Tag>
+                          )}
+                          {c.exec_mode && (
+                            <Tag color="blue">{c.exec_mode}</Tag>
                           )}
                         </Space>
                       }
@@ -1079,11 +1928,755 @@ export default function RemoteInvokeTab() {
       <PairingRequestModal
         visible={reviewPairing !== null}
         pairing={reviewPairing}
+        shellConfig={shellConfig}
         onClose={() => {
           setReviewPairing(null);
           void storeFetchPairings();
         }}
       />
+      <Modal
+        open={grantEditorOpen}
+        title="Edit Grant Access"
+        okText="Save"
+        cancelText="Cancel"
+        onCancel={() => {
+          setGrantEditorOpen(false);
+          setEditingGrant(null);
+        }}
+        onOk={() => void handleSaveGrant()}
+        confirmLoading={grantSaveLoading}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Descriptions
+            size="small"
+            column={1}
+            bordered
+            items={[
+              {
+                key: "grant",
+                label: "Grant",
+                children: <Text code>{editingGrant?.grant_id ?? "-"}</Text>,
+              },
+              {
+                key: "caller",
+                label: "Caller",
+                children:
+                  editingGrant?.caller_display_name ||
+                  formatFingerprint(editingGrant?.caller_fingerprint ?? ""),
+              },
+            ]}
+          />
+          <Select
+            value={grantEditorAccessMode}
+            onChange={(value) =>
+              setGrantEditorAccessMode(value as "query" | "selected" | "all")
+            }
+            options={[
+              { value: "query", label: "Read-only queries" },
+              {
+                value: "selected",
+                label: "Selected shell policies",
+                disabled: enabledShellPolicies.length === 0,
+              },
+              {
+                value: "all",
+                label: "All enabled shell policies",
+                disabled: enabledShellPolicies.length === 0,
+              },
+            ]}
+          />
+          <Select
+            mode="multiple"
+            placeholder="Choose shell policies for this grant"
+            disabled={grantEditorAccessMode !== "selected"}
+            value={grantEditorSelectedPolicies}
+            onChange={setGrantEditorSelectedPolicies}
+            options={enabledShellPolicies.map((policy) => ({
+              value: policy.id,
+              label: `${policy.name} (${policy.id})`,
+            }))}
+          />
+          <Space>
+            <Text type="secondary">Allow stdin</Text>
+            <Switch
+              checked={grantEditorStdinAllowed}
+              disabled={grantEditorAccessMode === "query"}
+              onChange={setGrantEditorStdinAllowed}
+            />
+            <Text type="secondary">Allow interactive shell</Text>
+            <Switch
+              checked={grantEditorInteractiveAllowed}
+              disabled={grantEditorAccessMode === "query"}
+              onChange={setGrantEditorInteractiveAllowed}
+            />
+          </Space>
+        </Space>
+      </Modal>
+      <Modal
+        open={shellEditorOpen}
+        title="Manage Shell Access"
+        okText="Save"
+        cancelText="Cancel"
+        onCancel={() => setShellEditorOpen(false)}
+        onOk={() => void handleSaveShellConfig()}
+        confirmLoading={shellSaveLoading}
+        width={960}
+        destroyOnClose
+      >
+        <Alert
+          showIcon
+          type="warning"
+          style={{ marginBottom: 16 }}
+          message="Changing shell access rules may require callers to re-authorize"
+          description="Policy set version is bound into shell grants. If you tighten or rename policies, existing shell authorizations may stop working until the caller reconnects."
+        />
+        <Space direction="vertical" size={20} style={{ width: "100%" }}>
+          <Card size="small" title="Access Mode">
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Text type="secondary">
+                Choose a simple preset for common cases, or switch to Custom Policies
+                when you need detailed allowlists and sandbox rules.
+              </Text>
+              <Select<ShellAccessMode>
+                value={shellEditorMode}
+                onChange={(value) => applyShellAccessMode(value)}
+                options={[
+                  {
+                    value: "sandbox",
+                    label: "Default Sandbox",
+                  },
+                  {
+                    value: "full-access",
+                    label: "Full Access",
+                  },
+                  {
+                    value: "custom",
+                    label: "Custom Policies",
+                  },
+                ]}
+              />
+              {shellEditorMode === "custom" ? (
+                <Alert
+                  showIcon
+                  type="info"
+                  message="Advanced editing enabled"
+                  description="Profiles and policies below map directly to remote_shell.json for fine-grained configuration."
+                />
+              ) : (
+                <Alert
+                  showIcon
+                  type={shellEditorMode === "full-access" ? "warning" : "success"}
+                  message={shellPresetDefinition(shellEditorMode).label}
+                  description={shellPresetDefinition(shellEditorMode).description}
+                />
+              )}
+            </Space>
+          </Card>
+
+          {shellEditorMode === "custom" ? (
+          <>
+          <div>
+            <Space
+              align="center"
+              style={{ width: "100%", justifyContent: "space-between" }}
+            >
+              <Title level={5} style={{ margin: 0 }}>
+                Profiles
+              </Title>
+              <Button
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  const nextId = nextShellItemId(
+                    "profile",
+                    shellEditorProfiles.map((profile) => profile.id),
+                  );
+                  const nextIndex = shellEditorProfiles.length + 1;
+                  setShellEditorProfiles((prev) => [
+                    ...prev,
+                    {
+                      id: nextId,
+                      name: `Profile ${nextIndex}`,
+                      description: "",
+                      enabled: true,
+                      cwd_allowlist: [],
+                      env_allowlist: [],
+                      default_cwd: "",
+                      max_timeout_ms: null,
+                      stdin_allowed: false,
+                      interactive_allowed: false,
+                      extra_metadata: {},
+                    },
+                  ]);
+                }}
+              >
+                Add Profile
+              </Button>
+            </Space>
+            <Text type="secondary">
+              Profiles define sandbox boundaries such as cwd, env allowlist,
+              timeout, stdin, and interactive mode.
+            </Text>
+            <Divider style={{ margin: "12px 0" }} />
+
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              {shellEditorProfiles.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="No profiles yet"
+                />
+              ) : (
+                shellEditorProfiles.map((profile, index) => (
+                  <Card
+                    key={`profile-editor-${profile.id}-${index}`}
+                    size="small"
+                    title={profile.name || profile.id || `Profile ${index + 1}`}
+                    extra={
+                      <Button
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() =>
+                          setShellEditorProfiles((prev) =>
+                            prev.filter((_, current) => current !== index),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    }
+                  >
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={10}>
+                        <Text type="secondary">Profile name</Text>
+                        <Input
+                          value={profile.name}
+                          onChange={(e) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, name: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={10}>
+                        <Text type="secondary">Profile ID</Text>
+                        <Input
+                          value={profile.id}
+                          readOnly
+                        />
+                      </Col>
+                      <Col xs={24} md={4}>
+                        <Text type="secondary">Enabled</Text>
+                        <div>
+                          <Switch
+                            checked={profile.enabled}
+                            onChange={(checked) =>
+                              setShellEditorProfiles((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, enabled: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                      <Col xs={24}>
+                        <Text type="secondary">Description</Text>
+                        <Input
+                          value={profile.description}
+                          onChange={(e) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, description: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed working directories</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={profile.cwd_allowlist}
+                          onChange={(value) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, cwd_allowlist: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Add allowed cwd prefixes"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed environment keys</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={profile.env_allowlist}
+                          onChange={(value) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, env_allowlist: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Add allowed env keys"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Default working directory</Text>
+                        <Input
+                          value={profile.default_cwd}
+                          onChange={(e) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, default_cwd: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Max timeout (ms)</Text>
+                        <InputNumber
+                          style={{ width: "100%" }}
+                          min={1}
+                          value={profile.max_timeout_ms ?? undefined}
+                          onChange={(value) =>
+                            setShellEditorProfiles((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? {
+                                      ...item,
+                                      max_timeout_ms:
+                                        typeof value === "number"
+                                          ? value
+                                          : null,
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }
+                          placeholder="Optional"
+                        />
+                      </Col>
+                      <Col xs={12} md={6}>
+                        <Text type="secondary">Allow stdin</Text>
+                        <div>
+                          <Switch
+                            checked={profile.stdin_allowed}
+                            onChange={(checked) =>
+                              setShellEditorProfiles((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, stdin_allowed: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                      <Col xs={12} md={6}>
+                        <Text type="secondary">Allow interactive</Text>
+                        <div>
+                          <Switch
+                            checked={profile.interactive_allowed}
+                            onChange={(checked) =>
+                              setShellEditorProfiles((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, interactive_allowed: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                    </Row>
+                  </Card>
+                ))
+              )}
+            </Space>
+          </div>
+          <div>
+            <Space
+              align="center"
+              style={{ width: "100%", justifyContent: "space-between" }}
+            >
+              <Title level={5} style={{ margin: 0 }}>
+                Policies
+              </Title>
+              <Button
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  const nextId = nextShellItemId(
+                    "policy",
+                    shellEditorPolicies.map((policy) => policy.id),
+                  );
+                  const nextIndex = shellEditorPolicies.length + 1;
+                  setShellEditorPolicies((prev) => [
+                    ...prev,
+                    {
+                      id: nextId,
+                      name: `Policy ${nextIndex}`,
+                      description: "",
+                      enabled: true,
+                      profile_id: shellEditorProfiles[0]?.id,
+                      exec_mode: "argv_exec",
+                      allowed_executables: [],
+                      allowed_shell_patterns: [],
+                      cwd_allowlist: [],
+                      env_allowlist: [],
+                      default_cwd: "",
+                      max_timeout_ms: null,
+                      stdin_allowed: false,
+                      interactive_allowed: false,
+                      extra_metadata: {},
+                    },
+                  ]);
+                }}
+              >
+                Add Policy
+              </Button>
+            </Space>
+            <Text type="secondary">
+              Policies define what callers may execute and which profile applies.
+            </Text>
+            <Divider style={{ margin: "12px 0" }} />
+
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              {shellEditorPolicies.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="No policies yet"
+                />
+              ) : (
+                shellEditorPolicies.map((policy, index) => (
+                  <Card
+                    key={`policy-editor-${policy.id}-${index}`}
+                    size="small"
+                    title={policy.name || policy.id || `Policy ${index + 1}`}
+                    extra={
+                      <Button
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() =>
+                          setShellEditorPolicies((prev) =>
+                            prev.filter((_, current) => current !== index),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    }
+                  >
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8}>
+                        <Text type="secondary">Policy name</Text>
+                        <Input
+                          value={policy.name}
+                          onChange={(e) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, name: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Text type="secondary">Policy ID</Text>
+                        <Input
+                          value={policy.id}
+                          readOnly
+                        />
+                      </Col>
+                      <Col xs={24} md={4}>
+                        <Text type="secondary">Enabled</Text>
+                        <div>
+                          <Switch
+                            checked={policy.enabled}
+                            onChange={(checked) =>
+                              setShellEditorPolicies((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, enabled: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                      <Col xs={24} md={4}>
+                        <Text type="secondary">Exec mode</Text>
+                        <Select
+                          style={{ width: "100%" }}
+                          value={policy.exec_mode}
+                          onChange={(value: ShellExecMode) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, exec_mode: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        >
+                          <Option value="argv_exec">argv_exec</Option>
+                          <Option value="shell_text">shell_text</Option>
+                        </Select>
+                      </Col>
+                      <Col xs={24}>
+                        <Text type="secondary">Description</Text>
+                        <Input
+                          value={policy.description}
+                          onChange={(e) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, description: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Sandbox profile</Text>
+                        <Select
+                          allowClear
+                          style={{ width: "100%" }}
+                          value={policy.profile_id}
+                          options={shellProfileOptions}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, profile_id: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          placeholder="Choose a profile"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed executables</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={policy.allowed_executables}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, allowed_executables: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Add executable paths"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed shell patterns</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={policy.allowed_shell_patterns}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, allowed_shell_patterns: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Add regex patterns"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed working directories</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={policy.cwd_allowlist}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, cwd_allowlist: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Optional extra cwd restrictions"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Allowed environment keys</Text>
+                        <Select
+                          mode="tags"
+                          style={{ width: "100%" }}
+                          value={policy.env_allowlist}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, env_allowlist: value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          tokenSeparators={[","]}
+                          placeholder="Optional env restrictions"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Default working directory</Text>
+                        <Input
+                          value={policy.default_cwd}
+                          onChange={(e) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? { ...item, default_cwd: e.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Text type="secondary">Max timeout (ms)</Text>
+                        <InputNumber
+                          style={{ width: "100%" }}
+                          min={1}
+                          value={policy.max_timeout_ms ?? undefined}
+                          onChange={(value) =>
+                            setShellEditorPolicies((prev) =>
+                              prev.map((item, current) =>
+                                current === index
+                                  ? {
+                                      ...item,
+                                      max_timeout_ms:
+                                        typeof value === "number"
+                                          ? value
+                                          : null,
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }
+                          placeholder="Optional"
+                        />
+                      </Col>
+                      <Col xs={12} md={6}>
+                        <Text type="secondary">Allow stdin</Text>
+                        <div>
+                          <Switch
+                            checked={policy.stdin_allowed}
+                            onChange={(checked) =>
+                              setShellEditorPolicies((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, stdin_allowed: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                      <Col xs={12} md={6}>
+                        <Text type="secondary">Allow interactive</Text>
+                        <div>
+                          <Switch
+                            checked={policy.interactive_allowed}
+                            onChange={(checked) =>
+                              setShellEditorPolicies((prev) =>
+                                prev.map((item, current) =>
+                                  current === index
+                                    ? { ...item, interactive_allowed: checked }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                      </Col>
+                    </Row>
+                  </Card>
+                ))
+              )}
+            </Space>
+          </div>
+          </>
+          ) : (
+            <Card size="small" title="Preset Preview">
+              <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                <Descriptions size="small" column={1} bordered>
+                  <Descriptions.Item label="Mode">
+                    {shellPresetDefinition(shellEditorMode).label}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Policies">
+                    {shellEditorPolicies.map((policy) => (
+                      <Tag key={policy.id} color="blue" style={{ marginBottom: 4 }}>
+                        {policy.name} ({policy.id})
+                      </Tag>
+                    ))}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Profiles">
+                    {shellEditorProfiles.length > 0 ? (
+                      shellEditorProfiles.map((profile) => (
+                        <Tag key={profile.id} color="green" style={{ marginBottom: 4 }}>
+                          {profile.name} ({profile.id})
+                        </Tag>
+                      ))
+                    ) : (
+                      <Text type="secondary">No extra profile. Policy metadata applies directly.</Text>
+                    )}
+                  </Descriptions.Item>
+                </Descriptions>
+                <Alert
+                  showIcon
+                  type="info"
+                  message="This preset still saves into the standard shell policy store"
+                  description="You can switch back to Custom Policies at any time if you want to fine-tune cwd, env, timeout, stdin, or interactive settings."
+                />
+              </Space>
+            </Card>
+          )}
+        </Space>
+      </Modal>
       <Modal
         open={editorOpen}
         title="Create SSH key"

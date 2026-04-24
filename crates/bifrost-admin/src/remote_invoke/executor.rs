@@ -1,11 +1,22 @@
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use bifrost_command::{
+    CanonicalQueryCommand, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
+};
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use futures_util::StreamExt;
+use regex::Regex;
 use sha1::{Digest, Sha1};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
+
+use crate::query_service::AdminQueryService;
+use crate::state::SharedAdminState;
 
 use super::types::{is_allowed_command, RemoteCommand, RemoteInvokeResponse, ShellExecMode};
 
@@ -20,6 +31,8 @@ const MAX_CLIENT_APP_LEN: usize = 200;
 const MAX_TRAFFIC_LIST_LIMIT: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const SEARCH_STREAM_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_SHELL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 
 const ALLOWED_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
@@ -31,6 +44,48 @@ pub struct RemoteInvokeExecutor {
     admin_host: String,
     admin_port: u16,
     http: reqwest::Client,
+    query_service: Option<AdminQueryService>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedShellPolicy {
+    policy_id: String,
+    allowed_exec_modes: Vec<ShellExecMode>,
+    reject_reason: Option<String>,
+    allow_any_executable: bool,
+    allowed_executables: Vec<String>,
+    allowed_shell_patterns: Vec<String>,
+    cwd_allowlist: Vec<String>,
+    env_allowlist: Vec<String>,
+    default_cwd: Option<String>,
+    shell: Option<String>,
+    max_timeout_ms: Option<u64>,
+    max_output_bytes: usize,
+    stdin_allowed: bool,
+    interactive_allowed: bool,
+    inherit_env: bool,
+    default_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[serde(default)]
+struct ShellPolicyMetadata {
+    exec_mode: Option<ShellExecMode>,
+    allowed_exec_modes: Vec<ShellExecMode>,
+    reject_reason: Option<String>,
+    allow_any_executable: Option<bool>,
+    allowed_executables: Vec<String>,
+    allowed_shell_patterns: Vec<String>,
+    cwd_allowlist: Vec<String>,
+    env_allowlist: Vec<String>,
+    default_cwd: Option<String>,
+    shell: Option<String>,
+    max_timeout_ms: Option<u64>,
+    max_output_bytes: Option<usize>,
+    stdin_allowed: Option<bool>,
+    interactive_allowed: Option<bool>,
+    inherit_env: Option<bool>,
+    default_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -45,10 +100,6 @@ struct CommandArgs {
     response_body: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
-    #[serde(default)]
-    max_scan: Option<usize>,
-    #[serde(default)]
-    max_results: Option<usize>,
     #[serde(default)]
     cursor: Option<u64>,
     #[serde(default)]
@@ -104,29 +155,38 @@ struct TrafficSummaryRow {
     proto: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchResultRow {
     record: TrafficSummaryRow,
     matches: Vec<SearchMatchRow>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchMatchRow {
     field: String,
     preview: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchProgressPayload {
     total_searched: usize,
     total_matched: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SearchDonePayload {
     total_searched: usize,
     total_matched: usize,
     has_more: bool,
+}
+
+enum SearchServiceEvent {
+    Result(Box<crate::search::SearchResultItem>),
+    Progress(crate::search::SearchProgress),
 }
 
 impl RemoteInvokeExecutor {
@@ -140,7 +200,14 @@ impl RemoteInvokeExecutor {
             admin_host: admin_host.to_string(),
             admin_port,
             http,
+            query_service: None,
         }
+    }
+
+    pub fn new_with_state(admin_host: &str, admin_port: u16, state: SharedAdminState) -> Self {
+        let mut executor = Self::new(admin_host, admin_port);
+        executor.query_service = Some(AdminQueryService::new(state));
+        executor
     }
 
     pub async fn execute(&self, command: &RemoteCommand) -> Result<RemoteInvokeResponse> {
@@ -157,34 +224,49 @@ impl RemoteInvokeExecutor {
         F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let args = self.parse_and_validate_args(command)?;
-
         let start = Instant::now();
-        let result = match command.kind {
-            super::types::CommandKind::QueryReadonly => {
-                if !is_allowed_command(&command.command) {
-                    let stderr = format!("command '{}' is not allowed", command.command);
-                    warn!(
-                        command = %command.command,
-                        "remote invoke rejected: command not in whitelist"
-                    );
-                    Err(BifrostError::Config(stderr))
-                } else {
-                    self.dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
-                        .await
+        let transport_validation = match command.query.as_ref() {
+            Some(query) => self.validate_query_transport_kind(command.kind, query),
+            None => Ok(()),
+        };
+        let query_result = match transport_validation {
+            Err(error) => Err(error),
+            Ok(()) => match command.kind {
+                super::types::CommandKind::QueryReadonly => {
+                    let command_label = command.summary_label().to_string();
+                    if !is_allowed_command(&command_label) {
+                        let stderr = format!("command '{}' is not allowed", command_label);
+                        warn!(
+                            command = %command_label,
+                            "remote invoke rejected: command not in whitelist"
+                        );
+                        Err(BifrostError::Config(stderr))
+                    } else if let Some(query) = &command.query {
+                        self.validate_query(query)?;
+                        self.dispatch_query_with_stdout_sink(query, &mut on_stdout)
+                            .await
+                    } else if command.command == "status" {
+                        let args = self.parse_and_validate_args(command)?;
+                        self.dispatch_with_stdout_sink(&command.command, &args, &mut on_stdout)
+                            .await
+                    } else {
+                        Err(BifrostError::Config(
+                            "legacy remote query commands are not supported".to_string(),
+                        ))
+                    }
                 }
-            }
-            super::types::CommandKind::ShellExec => {
-                self.execute_shell_exec(command, &mut on_stdout).await
-            }
+                super::types::CommandKind::ShellExec => {
+                    return self.execute_shell_exec(command, &mut on_stdout).await;
+                }
+            },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        match result {
+        match query_result {
             Ok(body) => {
                 let stdout_digest = (!body.is_empty()).then(|| sha1_hex(&body));
                 debug!(
-                    command = %command.command,
+                    command = %command.summary_label(),
                     duration_ms,
                     body_len = body.len(),
                     "remote invoke completed"
@@ -201,7 +283,7 @@ impl RemoteInvokeExecutor {
             Err(e) => {
                 let stderr = e.to_string();
                 warn!(
-                    command = %command.command,
+                    command = %command.summary_label(),
                     duration_ms,
                     error = %stderr,
                     "remote invoke failed"
@@ -209,9 +291,9 @@ impl RemoteInvokeExecutor {
                 Ok(RemoteInvokeResponse {
                     exit_code: -1,
                     stdout: None,
-                    stderr: Some(stderr),
+                    stderr: Some(stderr.clone()),
                     stdout_digest: None,
-                    stderr_digest: Some(sha1_hex(&e.to_string())),
+                    stderr_digest: Some(sha1_hex(&stderr)),
                     duration_ms,
                 })
             }
@@ -326,49 +408,412 @@ impl RemoteInvokeExecutor {
         Ok(args)
     }
 
-    async fn execute_shell_exec<F, Fut>(
+    fn validate_query(&self, query: &CanonicalQueryCommand) -> Result<()> {
+        match query {
+            CanonicalQueryCommand::Search(args) => self.validate_search_args(args),
+            CanonicalQueryCommand::TrafficList(args) => self.validate_traffic_list_args(args),
+            CanonicalQueryCommand::TrafficGet(args) => self.validate_traffic_get_args(args),
+            CanonicalQueryCommand::TrafficClear(_) => Err(BifrostError::Config(
+                "traffic.clear is not enabled for remote invoke".to_string(),
+            )),
+        }
+    }
+
+    fn validate_query_transport_kind(
         &self,
-        command: &RemoteCommand,
+        kind: super::types::CommandKind,
+        query: &CanonicalQueryCommand,
+    ) -> Result<()> {
+        if kind == super::types::CommandKind::QueryReadonly
+            && query.capability() == bifrost_command::CommandCapability::Mutating
+        {
+            return Err(BifrostError::Config(format!(
+                "mutating query '{}' cannot be sent as query.readonly",
+                query.command_id()
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_search_args(&self, args: &SearchArgs) -> Result<()> {
+        if args.keyword.len() > MAX_QUERY_LEN {
+            return Err(BifrostError::Config(format!(
+                "query param too long: {} > {}",
+                args.keyword.len(),
+                MAX_QUERY_LEN
+            )));
+        }
+        if args.keyword.chars().any(|c| c.is_ascii_control()) {
+            return Err(BifrostError::Config(
+                "query param must not contain ASCII control characters".to_string(),
+            ));
+        }
+        for domain in &args.filters.domains {
+            validate_string_param(&Some(domain.clone()), "domain", MAX_HOST_LEN, is_host_char)?;
+        }
+        for content_type in &args.filters.content_types {
+            validate_string_param(
+                &Some(content_type.clone()),
+                "content_type",
+                MAX_CONTENT_TYPE_LEN,
+                is_content_type_char,
+            )?;
+        }
+        for protocol in &args.filters.protocols {
+            let protocol = protocol.to_lowercase();
+            if !ALLOWED_PROTOCOLS.contains(&protocol.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported protocol filter '{}'",
+                    protocol
+                )));
+            }
+        }
+        for status_range in &args.filters.status_ranges {
+            if !matches!(
+                status_range.as_str(),
+                "2xx" | "3xx" | "4xx" | "5xx" | "error"
+            ) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported status filter '{}'",
+                    status_range
+                )));
+            }
+        }
+        for condition in &args.filters.conditions {
+            match condition.field.as_str() {
+                "method" if !ALLOWED_METHODS.contains(&condition.value.as_str()) => {
+                    return Err(BifrostError::Config(format!(
+                        "unsupported method filter '{}'",
+                        condition.value
+                    )));
+                }
+                "method" => {}
+                "host" => validate_string_param(
+                    &Some(condition.value.clone()),
+                    "host",
+                    MAX_HOST_LEN,
+                    is_host_char,
+                )?,
+                "path" => validate_string_param(
+                    &Some(condition.value.clone()),
+                    "path",
+                    MAX_PATH_LEN,
+                    is_path_char,
+                )?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_traffic_list_args(&self, args: &TrafficListArgs) -> Result<()> {
+        validate_string_param(&args.method, "method", 16, |c| c.is_ascii_uppercase())?;
+        validate_string_param(&args.protocol, "protocol", 8, |c| c.is_ascii_lowercase())?;
+        validate_string_param(&args.host, "host", MAX_HOST_LEN, is_host_char)?;
+        validate_string_param(&args.url, "url", MAX_URL_LEN, is_url_char)?;
+        validate_string_param(&args.path, "path", MAX_PATH_LEN, is_path_char)?;
+        validate_string_param(
+            &args.content_type,
+            "content_type",
+            MAX_CONTENT_TYPE_LEN,
+            is_content_type_char,
+        )?;
+        validate_string_param(
+            &args.client_ip,
+            "client_ip",
+            MAX_CLIENT_IP_LEN,
+            is_client_ip_char,
+        )?;
+        validate_string_param(
+            &args.client_app,
+            "client_app",
+            MAX_CLIENT_APP_LEN,
+            is_client_app_char,
+        )?;
+
+        if let Some(method) = &args.method {
+            if !ALLOWED_METHODS.contains(&method.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported method '{}'",
+                    method
+                )));
+            }
+        }
+        if let Some(protocol) = &args.protocol {
+            if !ALLOWED_PROTOCOLS.contains(&protocol.as_str()) {
+                return Err(BifrostError::Config(format!(
+                    "unsupported protocol '{}'",
+                    protocol
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_traffic_get_args(&self, args: &TrafficGetArgs) -> Result<()> {
+        if args.id.len() > MAX_ID_LEN {
+            return Err(BifrostError::Config(format!(
+                "id param too long: {} > {}",
+                args.id.len(),
+                MAX_ID_LEN
+            )));
+        }
+        if !args
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(BifrostError::Config(
+                "id param must contain only alphanumeric characters and hyphens".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn dispatch_query_with_stdout_sink<F, Fut>(
+        &self,
+        query: &CanonicalQueryCommand,
         on_stdout: &mut F,
     ) -> Result<String>
     where
         F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false) {
-            return Err(BifrostError::Config(
-                "shell.exec with PTY is not implemented on client yet".to_string(),
-            ));
-        }
-
-        let timeout_ms = command.timeout_ms.unwrap_or(REQUEST_TIMEOUT_SECS * 1000);
-        let mut process = self.build_shell_exec_process(command)?;
-        let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
-            .await
-            .map_err(|_| BifrostError::Network("shell.exec timed out".to_string()))?
-            .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !stdout.is_empty() {
-            on_stdout(stdout.clone()).await?;
-        }
-
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(BifrostError::Network(if stderr.is_empty() {
-                format!(
-                    "shell.exec exited with status {}",
-                    output.status.code().unwrap_or(-1)
-                )
-            } else {
-                stderr
-            }))
+        match query {
+            CanonicalQueryCommand::Search(args) => {
+                if self.query_service.is_some() {
+                    self.search_stream_via_service(args, on_stdout).await
+                } else {
+                    self.search_stream(
+                        &args.keyword,
+                        args.limit,
+                        args.max_results,
+                        args.max_scan,
+                        on_stdout,
+                    )
+                    .await
+                }
+            }
+            CanonicalQueryCommand::TrafficList(args) => {
+                if let Some(service) = &self.query_service {
+                    let body =
+                        serde_json::to_string(&service.list_traffic(args).await?).map_err(|e| {
+                            BifrostError::Config(format!("serialize traffic list: {e}"))
+                        })?;
+                    self.emit_stdout(on_stdout, body).await
+                } else {
+                    let legacy_args = self.command_args_from_traffic_list(args);
+                    let body = self.list_traffic(&legacy_args).await?;
+                    self.emit_stdout(on_stdout, body).await
+                }
+            }
+            CanonicalQueryCommand::TrafficGet(args) => {
+                if let Some(service) = &self.query_service {
+                    let body = serde_json::to_string(&service.get_traffic_json(args).await?)
+                        .map_err(|e| {
+                            BifrostError::Config(format!("serialize traffic detail: {e}"))
+                        })?;
+                    self.emit_stdout(on_stdout, body).await
+                } else {
+                    let legacy_args = self.command_args_from_traffic_get(args);
+                    let body = self.get_traffic(&args.id, &legacy_args).await?;
+                    self.emit_stdout(on_stdout, body).await
+                }
+            }
+            CanonicalQueryCommand::TrafficClear(_) => Err(BifrostError::Config(
+                "traffic.clear is not enabled for remote invoke".to_string(),
+            )),
         }
     }
 
-    fn build_shell_exec_process(&self, command: &RemoteCommand) -> Result<TokioCommand> {
+    fn command_args_from_traffic_list(&self, args: &TrafficListArgs) -> CommandArgs {
+        CommandArgs {
+            limit: args.limit,
+            cursor: args.cursor,
+            direction: Some(match args.direction {
+                TrafficListDirection::Backward => "backward".to_string(),
+                TrafficListDirection::Forward => "forward".to_string(),
+            }),
+            method: args.method.clone(),
+            status: args.status,
+            status_min: args.status_min,
+            status_max: args.status_max,
+            protocol: args.protocol.clone(),
+            host: args.host.clone(),
+            url: args.url.clone(),
+            path: args.path.clone(),
+            content_type: args.content_type.clone(),
+            client_ip: args.client_ip.clone(),
+            client_app: args.client_app.clone(),
+            has_rule_hit: args.has_rule_hit,
+            is_websocket: args.is_websocket,
+            is_sse: args.is_sse,
+            is_tunnel: args.is_tunnel,
+            ..CommandArgs::default()
+        }
+    }
+
+    fn command_args_from_traffic_get(&self, args: &TrafficGetArgs) -> CommandArgs {
+        CommandArgs {
+            id: Some(args.id.clone()),
+            request_body: Some(args.request_body),
+            response_body: Some(args.response_body),
+            ..CommandArgs::default()
+        }
+    }
+
+    async fn execute_shell_exec<F, Fut>(
+        &self,
+        command: &RemoteCommand,
+        on_stdout: &mut F,
+    ) -> Result<RemoteInvokeResponse>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let policy = self.resolve_shell_policy(command)?;
+
+        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false)
+            && !policy.interactive_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow PTY/interactive shell execution",
+                policy.policy_id
+            )));
+        }
+
+        if command
+            .stdin_mode
+            .is_some_and(|mode| mode != super::types::StdinMode::None)
+            && !policy.stdin_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow stdin for shell.exec",
+                policy.policy_id
+            )));
+        }
+
+        let start = Instant::now();
+        let timeout_ms = command
+            .timeout_ms
+            .unwrap_or(policy.max_timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS))
+            .min(policy.max_timeout_ms.unwrap_or(u64::MAX));
+        let mut process = self.build_shell_exec_process(command, &policy)?;
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        process.stdin(Stdio::null());
+        process.kill_on_drop(true);
+
+        let mut child = process
+            .spawn()
+            .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
+        let mut stdout_reader = child.stdout.take().ok_or_else(|| {
+            BifrostError::Network("shell.exec stdout pipe unavailable".to_string())
+        })?;
+        let mut stderr_reader = child.stderr.take().ok_or_else(|| {
+            BifrostError::Network("shell.exec stderr pipe unavailable".to_string())
+        })?;
+
+        let mut stdout_buf = [0u8; 4096];
+        let mut stderr_buf = [0u8; 4096];
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut exit_status = None;
+        let mut stdout_preview = Vec::new();
+        let mut stderr_preview = Vec::new();
+        let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec timed out after {} ms (policy '{}')",
+                        timeout_ms, policy.policy_id
+                    )));
+                }
+                wait_result = child.wait(), if exit_status.is_none() => {
+                    exit_status = Some(wait_result.map_err(|e| {
+                        BifrostError::Network(format!("wait shell.exec failed: {}", e))
+                    })?);
+                    if !stdout_open && !stderr_open {
+                        break;
+                    }
+                }
+                read = stdout_reader.read(&mut stdout_buf), if stdout_open => {
+                    let read = read.map_err(|e| {
+                        BifrostError::Network(format!("read shell.exec stdout failed: {}", e))
+                    })?;
+                    if read == 0 {
+                        stdout_open = false;
+                        if exit_status.is_some() && !stderr_open {
+                            break;
+                        }
+                    } else {
+                        append_truncated_bytes(
+                            &mut stdout_preview,
+                            &stdout_buf[..read],
+                            policy.max_output_bytes,
+                        );
+                        on_stdout(String::from_utf8_lossy(&stdout_buf[..read]).into_owned()).await?;
+                    }
+                }
+                read = stderr_reader.read(&mut stderr_buf), if stderr_open => {
+                    let read = read.map_err(|e| {
+                        BifrostError::Network(format!("read shell.exec stderr failed: {}", e))
+                    })?;
+                    if read == 0 {
+                        stderr_open = false;
+                        if exit_status.is_some() && !stdout_open {
+                            break;
+                        }
+                    } else {
+                        append_truncated_bytes(
+                            &mut stderr_preview,
+                            &stderr_buf[..read],
+                            policy.max_output_bytes,
+                        );
+                    }
+                }
+            }
+        }
+
+        let status = if let Some(status) = exit_status {
+            status
+        } else {
+            child
+                .wait()
+                .await
+                .map_err(|e| BifrostError::Network(format!("wait shell.exec failed: {}", e)))?
+        };
+        let stdout = String::from_utf8_lossy(&stdout_preview).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr_preview).into_owned();
+
+        Ok(RemoteInvokeResponse {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: (!stdout.is_empty()).then_some(stdout.clone()),
+            stderr: (!stderr.is_empty()).then_some(stderr.clone()),
+            stdout_digest: (!stdout.is_empty()).then(|| sha1_hex(&stdout)),
+            stderr_digest: (!stderr.is_empty()).then(|| sha1_hex(&stderr)),
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn build_shell_exec_process(
+        &self,
+        command: &RemoteCommand,
+        policy: &ResolvedShellPolicy,
+    ) -> Result<TokioCommand> {
+        Self::validate_shell_command_against_policy(policy, command)?;
+        if let Some(reason) = &policy.reject_reason {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' is not executable: {}",
+                policy.policy_id, reason
+            )));
+        }
+
         let exec_mode = command
             .exec_mode
             .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
@@ -389,13 +834,31 @@ impl RemoteInvokeExecutor {
                 let shell_text = command.command_text.as_deref().ok_or_else(|| {
                     BifrostError::Config("shell.exec requires command_text".to_string())
                 })?;
-                build_shell_text_process(command.shell.as_deref(), shell_text)
+                build_shell_text_process(
+                    command.shell.as_deref().or(policy.shell.as_deref()),
+                    shell_text,
+                )
             }
         };
 
-        if let Some(cwd) = &command.cwd {
+        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+        if let Some(cwd) = effective_cwd {
             process.current_dir(cwd);
         }
+        if !policy.inherit_env {
+            process.env_clear();
+            // On Windows, processes (especially .NET apps like PowerShell) need
+            // critical system env vars to start. Preserve them after env_clear().
+            #[cfg(windows)]
+            {
+                for key in &["SystemRoot", "SystemDrive"] {
+                    if let Ok(val) = std::env::var(key) {
+                        process.env(key, &val);
+                    }
+                }
+            }
+        }
+        process.envs(policy.default_env.clone());
         if let Some(env) = &command.env {
             process.envs(env);
         }
@@ -403,10 +866,356 @@ impl RemoteInvokeExecutor {
         Ok(process)
     }
 
+    pub fn select_policy_id_for_command(
+        &self,
+        command: &RemoteCommand,
+        binding: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let store = RemoteShellStore::new()?;
+        let set = store.load()?;
+        let candidate_ids = Self::candidate_policy_ids(&set, binding)?;
+        let mut matching_ids = Vec::new();
+        let mut candidate_errors: Vec<(String, BifrostError)> = Vec::new();
+
+        for policy_id in candidate_ids {
+            let policy = Self::resolve_shell_policy_from_set(&set, &policy_id)?;
+            match Self::validate_shell_command_against_policy(&policy, command) {
+                Ok(()) => matching_ids.push(policy.policy_id),
+                Err(error) => candidate_errors.push((policy_id, error)),
+            }
+        }
+
+        match matching_ids.len() {
+            1 => Ok(matching_ids.remove(0)),
+            0 => {
+                if candidate_errors.len() == 1 {
+                    return Err(candidate_errors.remove(0).1);
+                }
+                let candidate_list = candidate_errors
+                    .iter()
+                    .map(|(policy_id, _)| policy_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(BifrostError::Config(format!(
+                    "target Shell Access did not find a unique policy for this command among [{}]",
+                    candidate_list
+                )))
+            }
+            _ => Err(BifrostError::Config(format!(
+                "target Shell Access matched multiple policies for this command: {}",
+                matching_ids.join(", ")
+            ))),
+        }
+    }
+
+    fn resolve_shell_policy(&self, command: &RemoteCommand) -> Result<ResolvedShellPolicy> {
+        let policy_id = command
+            .policy_id
+            .as_deref()
+            .ok_or_else(|| BifrostError::Config("shell.exec requires policy_id".to_string()))?;
+        let store = RemoteShellStore::new()?;
+        let set = store.load()?;
+        Self::resolve_shell_policy_from_set(&set, policy_id)
+    }
+
+    fn candidate_policy_ids(
+        set: &RemoteShellSet,
+        binding: Option<&serde_json::Value>,
+    ) -> Result<Vec<String>> {
+        let enabled_policy_ids = set
+            .policies
+            .iter()
+            .filter(|policy| policy.enabled)
+            .map(|policy| policy.id.clone())
+            .collect::<Vec<_>>();
+        if enabled_policy_ids.is_empty() {
+            return Err(BifrostError::Config(
+                "no enabled shell policy exists on this device".to_string(),
+            ));
+        }
+
+        let Some(binding) = binding else {
+            return Ok(enabled_policy_ids);
+        };
+
+        let mode = binding
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("all");
+        if mode == "all" {
+            return Ok(enabled_policy_ids);
+        }
+
+        let Some(policy_ids) = binding.get("policy_ids").and_then(|value| value.as_array()) else {
+            return Err(BifrostError::Config(
+                "shell policy binding requires a non-empty policy_ids array".to_string(),
+            ));
+        };
+
+        let selected = policy_ids
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(BifrostError::Config(
+                "shell policy binding requires at least one policy id".to_string(),
+            ));
+        }
+
+        Ok(selected)
+    }
+
+    fn resolve_shell_policy_from_set(
+        set: &RemoteShellSet,
+        policy_id: &str,
+    ) -> Result<ResolvedShellPolicy> {
+        let policy = set.find_policy(policy_id).ok_or_else(|| {
+            BifrostError::Config(format!("remote shell policy '{}' not found", policy_id))
+        })?;
+        if !policy.enabled {
+            return Err(BifrostError::Config(format!(
+                "remote shell policy '{}' is disabled",
+                policy_id
+            )));
+        }
+
+        let policy_meta: ShellPolicyMetadata = serde_json::from_value(policy.metadata.clone())
+            .map_err(|error| {
+                BifrostError::Config(format!(
+                    "parse metadata for remote shell policy '{}': {}",
+                    policy_id, error
+                ))
+            })?;
+        let profile_meta = if let Some(profile_id) = policy.profile_id.as_deref() {
+            let profile = set.find_profile(profile_id).ok_or_else(|| {
+                BifrostError::Config(format!(
+                    "remote shell profile '{}' referenced by policy '{}' was not found",
+                    profile_id, policy_id
+                ))
+            })?;
+            if !profile.enabled {
+                return Err(BifrostError::Config(format!(
+                    "remote shell profile '{}' is disabled",
+                    profile_id
+                )));
+            }
+            serde_json::from_value::<ShellPolicyMetadata>(profile.metadata.clone()).map_err(
+                |error| {
+                    BifrostError::Config(format!(
+                        "parse metadata for remote shell profile '{}': {}",
+                        profile_id, error
+                    ))
+                },
+            )?
+        } else {
+            ShellPolicyMetadata::default()
+        };
+
+        let exec_mode = policy_meta
+            .exec_mode
+            .or(profile_meta.exec_mode)
+            .ok_or_else(|| {
+                BifrostError::Config(format!(
+                    "remote shell policy '{}' is missing metadata.exec_mode",
+                    policy_id
+                ))
+            })?;
+
+        let mut allowed_exec_modes = if policy_meta.allowed_exec_modes.is_empty() {
+            profile_meta.allowed_exec_modes
+        } else {
+            policy_meta.allowed_exec_modes
+        };
+        if allowed_exec_modes.is_empty() {
+            let can_argv = policy_meta
+                .allow_any_executable
+                .or(profile_meta.allow_any_executable)
+                .unwrap_or(false)
+                || !policy_meta.allowed_executables.is_empty()
+                || !profile_meta.allowed_executables.is_empty();
+            let can_shell = !policy_meta.allowed_shell_patterns.is_empty()
+                || !profile_meta.allowed_shell_patterns.is_empty();
+            if can_argv {
+                allowed_exec_modes.push(ShellExecMode::ArgvExec);
+            }
+            if can_shell {
+                allowed_exec_modes.push(ShellExecMode::ShellText);
+            }
+            if !allowed_exec_modes.contains(&exec_mode) {
+                allowed_exec_modes.push(exec_mode);
+            }
+        } else {
+            dedupe_shell_exec_modes(&mut allowed_exec_modes);
+        }
+
+        let resolved = ResolvedShellPolicy {
+            policy_id: policy_id.to_string(),
+            allowed_exec_modes,
+            reject_reason: policy_meta.reject_reason.or(profile_meta.reject_reason),
+            allow_any_executable: policy_meta
+                .allow_any_executable
+                .or(profile_meta.allow_any_executable)
+                .unwrap_or(false),
+            allowed_executables: if policy_meta.allowed_executables.is_empty() {
+                profile_meta.allowed_executables
+            } else {
+                policy_meta.allowed_executables
+            },
+            allowed_shell_patterns: if policy_meta.allowed_shell_patterns.is_empty() {
+                profile_meta.allowed_shell_patterns
+            } else {
+                policy_meta.allowed_shell_patterns
+            },
+            cwd_allowlist: if policy_meta.cwd_allowlist.is_empty() {
+                profile_meta.cwd_allowlist
+            } else {
+                policy_meta.cwd_allowlist
+            },
+            env_allowlist: if policy_meta.env_allowlist.is_empty() {
+                profile_meta.env_allowlist
+            } else {
+                policy_meta.env_allowlist
+            },
+            default_cwd: policy_meta.default_cwd.or(profile_meta.default_cwd),
+            shell: policy_meta.shell.or(profile_meta.shell),
+            max_timeout_ms: policy_meta.max_timeout_ms.or(profile_meta.max_timeout_ms),
+            max_output_bytes: policy_meta
+                .max_output_bytes
+                .or(profile_meta.max_output_bytes)
+                .unwrap_or(DEFAULT_SHELL_OUTPUT_MAX_BYTES),
+            stdin_allowed: policy_meta
+                .stdin_allowed
+                .unwrap_or(profile_meta.stdin_allowed.unwrap_or(false)),
+            interactive_allowed: policy_meta
+                .interactive_allowed
+                .unwrap_or(profile_meta.interactive_allowed.unwrap_or(false)),
+            inherit_env: policy_meta
+                .inherit_env
+                .unwrap_or(profile_meta.inherit_env.unwrap_or(false)),
+            default_env: if policy_meta.default_env.is_empty() {
+                profile_meta.default_env
+            } else {
+                policy_meta.default_env
+            },
+        };
+
+        Ok(resolved)
+    }
+
+    fn validate_shell_command_against_policy(
+        policy: &ResolvedShellPolicy,
+        command: &RemoteCommand,
+    ) -> Result<()> {
+        let exec_mode = command
+            .exec_mode
+            .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
+        if !policy.allowed_exec_modes.contains(&exec_mode) {
+            let allowed_modes = policy
+                .allowed_exec_modes
+                .iter()
+                .map(shell_exec_mode_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(BifrostError::Config(format!(
+                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote command exec -- <program> [args...]' for argv execution.",
+                policy.policy_id,
+                allowed_modes,
+                shell_exec_mode_label(&exec_mode)
+            )));
+        }
+        if command.pty.as_ref().map(|pty| pty.enabled).unwrap_or(false)
+            && !policy.interactive_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow PTY/interactive shell execution",
+                policy.policy_id
+            )));
+        }
+        if command
+            .stdin_mode
+            .is_some_and(|mode| mode != super::types::StdinMode::None)
+            && !policy.stdin_allowed
+        {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' does not allow stdin for shell.exec",
+                policy.policy_id
+            )));
+        }
+
+        match exec_mode {
+            ShellExecMode::ArgvExec => {
+                let argv = command.argv.as_ref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires argv".to_string())
+                })?;
+                let (program, _) = argv.split_first().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires non-empty argv".to_string())
+                })?;
+                if !policy.allow_any_executable
+                    && !policy
+                        .allowed_executables
+                        .iter()
+                        .any(|allowed| allowed == program)
+                {
+                    return Err(BifrostError::Config(format!(
+                        "program '{}' is not allowed by policy '{}'",
+                        program, policy.policy_id
+                    )));
+                }
+            }
+            ShellExecMode::ShellText | ShellExecMode::Template => {
+                let shell_text = command.command_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec requires command_text".to_string())
+                })?;
+                let allowed = policy
+                    .allowed_shell_patterns
+                    .iter()
+                    .any(|pattern| Regex::new(pattern).is_ok_and(|re| re.is_match(shell_text)));
+                if !allowed {
+                    return Err(BifrostError::Config(format!(
+                        "shell_text does not match any allowlist rule in policy '{}'",
+                        policy.policy_id
+                    )));
+                }
+            }
+        }
+
+        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+        if let Some(cwd) = effective_cwd {
+            if !policy.cwd_allowlist.is_empty()
+                && !policy
+                    .cwd_allowlist
+                    .iter()
+                    .any(|allowed| path_is_within(cwd, allowed))
+            {
+                return Err(BifrostError::Config(format!(
+                    "cwd '{}' is not allowed by policy '{}'",
+                    cwd, policy.policy_id
+                )));
+            }
+        }
+        if let Some(env) = &command.env {
+            for key in env.keys() {
+                if !policy.env_allowlist.is_empty()
+                    && !policy.env_allowlist.iter().any(|allowed| allowed == key)
+                {
+                    return Err(BifrostError::Config(format!(
+                        "environment key '{}' is not allowed by policy '{}'",
+                        key, policy.policy_id
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn dispatch_with_stdout_sink<F, Fut>(
         &self,
         command: &str,
-        args: &CommandArgs,
+        _args: &CommandArgs,
         on_stdout: &mut F,
     ) -> Result<String>
     where
@@ -417,30 +1226,6 @@ impl RemoteInvokeExecutor {
             "status" => {
                 let body = self.get_status().await?;
                 self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.list" => {
-                let body = self.list_traffic(args).await?;
-                self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.get" => {
-                let id = args.id.as_deref().ok_or_else(|| {
-                    BifrostError::Config("traffic.get requires 'id' arg".to_string())
-                })?;
-                let body = self.get_traffic(id, args).await?;
-                self.emit_stdout(on_stdout, body).await
-            }
-            "traffic.search" | "search.get" => {
-                let query = args.query.as_deref().ok_or_else(|| {
-                    BifrostError::Config(format!("{} requires 'query' arg", command))
-                })?;
-                self.search_stream(
-                    query,
-                    args.limit,
-                    args.max_results,
-                    args.max_scan,
-                    on_stdout,
-                )
-                .await
             }
             _ => Err(BifrostError::Config(format!(
                 "unhandled command: {}",
@@ -678,6 +1463,105 @@ impl RemoteInvokeExecutor {
             .map(|record| record.id))
     }
 
+    async fn search_stream_via_service<F, Fut>(
+        &self,
+        args: &SearchArgs,
+        on_stdout: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let service = self
+            .query_service
+            .as_ref()
+            .ok_or_else(|| BifrostError::Config("query service not available".to_string()))?
+            .clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SearchServiceEvent>(64);
+        let service_args = args.clone();
+        let tx_results = tx.clone();
+        let tx_progress = tx.clone();
+
+        let worker = tokio::spawn(async move {
+            service
+                .search_stream(
+                    &service_args,
+                    move |item| {
+                        let _ = tx_results
+                            .blocking_send(SearchServiceEvent::Result(Box::new(item.clone())));
+                    },
+                    move |progress| {
+                        let _ = tx_progress
+                            .blocking_send(SearchServiceEvent::Progress(progress.clone()));
+                    },
+                )
+                .await
+        });
+        drop(tx);
+
+        let mut full_output = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                SearchServiceEvent::Result(item) => {
+                    let payload = serde_json::to_string(&item).map_err(|e| {
+                        BifrostError::Config(format!("serialize search result event: {e}"))
+                    })?;
+                    emit_search_chunk(&mut full_output, on_stdout, sse_event("result", &payload))
+                        .await?;
+                }
+                SearchServiceEvent::Progress(progress) => {
+                    let payload = serde_json::json!({
+                        "total_searched": progress.total_searched,
+                        "total_matched": progress.total_matched,
+                        "next_cursor": progress.cursor,
+                        "has_more_hint": progress.has_more_hint,
+                        "iterations": progress.iterations,
+                    });
+                    emit_search_chunk(
+                        &mut full_output,
+                        on_stdout,
+                        sse_event("progress", &payload.to_string()),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        let response = worker
+            .await
+            .map_err(|e| BifrostError::Config(format!("search stream worker join failed: {e}")))?;
+
+        match response {
+            Ok(response) => {
+                let payload = serde_json::json!({
+                    "total_searched": response.total_searched,
+                    "total_matched": response.total_matched,
+                    "next_cursor": response.next_cursor,
+                    "has_more": response.has_more,
+                    "search_id": response.search_id,
+                });
+                emit_search_chunk(
+                    &mut full_output,
+                    on_stdout,
+                    sse_event("done", &payload.to_string()),
+                )
+                .await?;
+            }
+            Err(error) => {
+                let payload = serde_json::json!({ "message": error.to_string() });
+                emit_search_chunk(
+                    &mut full_output,
+                    on_stdout,
+                    sse_event("error", &payload.to_string()),
+                )
+                .await?;
+            }
+        }
+
+        Ok(full_output)
+    }
+
     async fn search_stream<F, Fut>(
         &self,
         query: &str,
@@ -732,159 +1616,14 @@ impl RemoteInvokeExecutor {
 
         let mut full_output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut partial_line = String::new();
-        let mut event_name = String::new();
-        let mut data_buf = String::new();
-        let mut printed_header = false;
-        let mut progress_visible = false;
-        let mut total_searched = 0usize;
-        let mut total_matched = 0usize;
-        let mut has_more = false;
-        let mut saw_done = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk
                 .map_err(|e| BifrostError::Network(format!("search stream read failed: {}", e)))?;
-            partial_line.push_str(&String::from_utf8_lossy(&bytes));
-
-            while let Some(pos) = partial_line.find('\n') {
-                let line = partial_line[..pos].trim_end_matches('\r').to_string();
-                partial_line = partial_line[pos + 1..].to_string();
-
-                if line.is_empty() {
-                    if event_name.is_empty() || data_buf.is_empty() {
-                        continue;
-                    }
-
-                    match event_name.as_str() {
-                        "result" => {
-                            let item: SearchResultRow =
-                                serde_json::from_str(&data_buf).map_err(|e| {
-                                    BifrostError::Parse(format!(
-                                        "failed to parse search result event: {}",
-                                        e
-                                    ))
-                                })?;
-                            if progress_visible {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    "\r\x1b[K".to_string(),
-                                )
-                                .await?;
-                                progress_visible = false;
-                            }
-                            if !printed_header {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    format!(
-                                        "\n{:>10}  {:>6}  {:>6}  {:7}  {:40}  {:46}  {:>10}  {:>8}\n{}\n",
-                                        "SEQ",
-                                        "STATUS",
-                                        "METHOD",
-                                        "PROTO",
-                                        "HOST",
-                                        "PATH",
-                                        "SIZE",
-                                        "TIME",
-                                        "─".repeat(150)
-                                    ),
-                                )
-                                .await?;
-                                printed_header = true;
-                            }
-
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                render_search_result(&item, query),
-                            )
-                            .await?;
-                        }
-                        "progress" => {
-                            let progress: SearchProgressPayload = serde_json::from_str(&data_buf)
-                                .map_err(|e| {
-                                BifrostError::Parse(format!(
-                                    "failed to parse search progress event: {}",
-                                    e
-                                ))
-                            })?;
-                            total_searched = progress.total_searched;
-                            total_matched = progress.total_matched;
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                format!(
-                                    "\r  Searching... {} records scanned, {} matched",
-                                    format_number(progress.total_searched),
-                                    progress.total_matched
-                                ),
-                            )
-                            .await?;
-                            progress_visible = true;
-                        }
-                        "done" => {
-                            let done: SearchDonePayload =
-                                serde_json::from_str(&data_buf).map_err(|e| {
-                                    BifrostError::Parse(format!(
-                                        "failed to parse search done event: {}",
-                                        e
-                                    ))
-                                })?;
-                            total_searched = done.total_searched;
-                            total_matched = done.total_matched;
-                            has_more = done.has_more;
-                            saw_done = true;
-
-                            if progress_visible {
-                                emit_search_chunk(
-                                    &mut full_output,
-                                    on_stdout,
-                                    "\r\x1b[K".to_string(),
-                                )
-                                .await?;
-                                progress_visible = false;
-                            }
-
-                            emit_search_chunk(
-                                &mut full_output,
-                                on_stdout,
-                                render_search_summary(
-                                    query,
-                                    search_limit,
-                                    total_searched,
-                                    total_matched,
-                                    has_more,
-                                ),
-                            )
-                            .await?;
-                        }
-                        _ => {}
-                    }
-
-                    event_name.clear();
-                    data_buf.clear();
-                } else if let Some(rest) = line.strip_prefix("event:") {
-                    event_name = rest.trim().to_string();
-                } else if let Some(rest) = line.strip_prefix("data:") {
-                    if !data_buf.is_empty() {
-                        data_buf.push('\n');
-                    }
-                    data_buf.push_str(rest.trim());
-                }
-            }
-        }
-
-        if progress_visible {
-            emit_search_chunk(&mut full_output, on_stdout, "\r\x1b[K".to_string()).await?;
-        }
-
-        if !saw_done {
             emit_search_chunk(
                 &mut full_output,
                 on_stdout,
-                render_search_summary(query, search_limit, total_searched, total_matched, has_more),
+                String::from_utf8_lossy(&bytes).into_owned(),
             )
             .await?;
         }
@@ -893,12 +1632,40 @@ impl RemoteInvokeExecutor {
     }
 }
 
+fn shell_exec_mode_label(mode: &ShellExecMode) -> &'static str {
+    match mode {
+        ShellExecMode::ArgvExec => "argv_exec",
+        ShellExecMode::ShellText => "shell_text",
+        ShellExecMode::Template => "template",
+    }
+}
+
+fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
+    let mut deduped = Vec::new();
+    for mode in modes.drain(..) {
+        if !deduped.contains(&mode) {
+            deduped.push(mode);
+        }
+    }
+    *modes = deduped;
+}
+
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
     #[cfg(windows)]
     {
         if let Some(shell) = shell {
             let mut command = TokioCommand::new(shell);
-            command.arg("/C").arg(shell_text);
+            if windows_shell_uses_command_flag(shell) {
+                command
+                    .arg("-NoLogo")
+                    .arg("-NoProfile")
+                    .arg("-Command")
+                    .arg(shell_text);
+            } else if windows_shell_uses_login_flag(shell) {
+                command.arg("-lc").arg(shell_text);
+            } else {
+                command.arg("/C").arg(shell_text);
+            }
             return command;
         }
 
@@ -914,6 +1681,34 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
         command.arg("-lc").arg(shell_text);
         command
     }
+}
+
+#[cfg(windows)]
+fn windows_shell_uses_command_flag(shell: &str) -> bool {
+    windows_shell_file_name(shell).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_shell_uses_login_flag(shell: &str) -> bool {
+    windows_shell_file_name(shell).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "bash" | "bash.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_shell_file_name(shell: &str) -> Option<String> {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
 }
 
 async fn emit_search_chunk<F, Fut>(
@@ -952,6 +1747,26 @@ fn validate_string_param(
         }
     }
     Ok(())
+}
+
+fn append_truncated_bytes(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) {
+    if target.len() >= max_bytes {
+        return;
+    }
+    let remaining = max_bytes.saturating_sub(target.len());
+    target.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+}
+
+fn path_is_within(path: &str, allowed_prefix: &str) -> bool {
+    path == allowed_prefix
+        || path
+            .strip_prefix(allowed_prefix)
+            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+}
+
+fn sse_event(event: &str, json_data: &str) -> String {
+    let data = json_data.replace('\n', "\\n");
+    format!("event: {event}\ndata: {data}\n\n")
 }
 
 fn is_host_char(c: char) -> bool {
@@ -1008,6 +1823,7 @@ pub(crate) fn sha1_hex(input: &str) -> String {
     })
 }
 
+#[allow(dead_code)]
 fn render_search_result(item: &SearchResultRow, query: &str) -> String {
     let record = &item.record;
     let mut out = format!(
@@ -1033,6 +1849,7 @@ fn render_search_result(item: &SearchResultRow, query: &str) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn render_search_summary(
     query: &str,
     limit: usize,
@@ -1093,6 +1910,7 @@ fn format_duration(duration_ms: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_number(value: usize) -> String {
     let s = value.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -1132,10 +1950,64 @@ fn highlight_keyword(text: &str, keyword: &str) -> String {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::*;
+    use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
+    use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    fn setup_remote_shell_store() -> (std::sync::MutexGuard<'static, ()>, TempDir) {
+        let guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let store = RemoteShellStore::new().expect("remote shell store");
+        store
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "test-shell".to_string(),
+                    name: "test-shell".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^printf hello$"],
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+        (guard, dir)
+    }
+
+    fn streaming_shell_command() -> (String, [&'static str; 2]) {
+        if cfg!(target_os = "windows") {
+            (
+                "[Console]::Write('first'); Start-Sleep -Milliseconds 350; [Console]::Write('second')".to_string(),
+                ["first", "second"],
+            )
+        } else {
+            (
+                "printf first; sleep 0.35; printf second".to_string(),
+                ["first", "second"],
+            )
+        }
+    }
+
+    fn streaming_shell_program() -> &'static str {
+        if cfg!(target_os = "windows") {
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
 
     #[test]
     fn test_sha1_hex_known_value() {
@@ -1254,22 +2126,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_args_search_accepts_max_scan_and_max_results() {
-        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
-        let cmd = RemoteCommand {
-            command: "traffic.search".to_string(),
-            args_json: Some(r#"{"query":"hello","max_results":7,"max_scan":23}"#.to_string()),
-            ..Default::default()
-        };
-        let args = executor
-            .parse_and_validate_args(&cmd)
-            .expect("args should parse");
-        assert_eq!(args.query.as_deref(), Some("hello"));
-        assert_eq!(args.max_results, Some(7));
-        assert_eq!(args.max_scan, Some(23));
-    }
-
-    #[test]
     fn test_validate_args_search_keeps_legacy_limit_compatibility() {
         let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
         let cmd = RemoteCommand {
@@ -1282,7 +2138,6 @@ mod tests {
             .expect("args should parse");
         assert_eq!(args.query.as_deref(), Some("hello"));
         assert_eq!(args.limit, Some(5));
-        assert_eq!(args.max_results, None);
     }
 
     #[test]
@@ -1311,18 +2166,264 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_shell_exec_shell_text() {
+    async fn test_execute_rejects_legacy_query_command_at_allowlist_boundary() {
         let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
         let cmd = RemoteCommand {
+            command: "traffic.search".to_string(),
+            args_json: Some(r#"{"query":"example.com"}"#.to_string()),
+            ..Default::default()
+        };
+
+        let resp = executor
+            .execute(&cmd)
+            .await
+            .expect("legacy command response");
+        assert_eq!(resp.exit_code, -1);
+        assert_eq!(
+            resp.stderr.as_deref(),
+            Some("Config error: command 'traffic.search' is not allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_mutating_query_declared_as_readonly() {
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            query: Some(CanonicalQueryCommand::TrafficClear(
+                bifrost_command::TrafficClearArgs {
+                    ids: Some(vec!["REQ-1".to_string()]),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let resp = executor
+            .execute(&cmd)
+            .await
+            .expect("traffic clear response");
+        assert_eq!(resp.exit_code, -1);
+        assert_eq!(
+            resp.stderr.as_deref(),
+            Some("Config error: mutating query 'traffic.clear' cannot be sent as query.readonly")
+        );
+    }
+
+    #[test]
+    fn test_execute_shell_exec_shell_text() {
+        let (_guard, _data_dir) = setup_remote_shell_store();
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("test-shell".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("printf hello".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute(&cmd))
+            .expect("shell exec response");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shell_detection_uses_powershell_command_flag_for_paths() {
+        assert!(windows_shell_uses_command_flag("powershell"));
+        assert!(windows_shell_uses_command_flag("pwsh.exe"));
+        assert!(windows_shell_uses_command_flag(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(!windows_shell_uses_command_flag("cmd.exe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shell_detection_uses_login_flag_for_posix_shells() {
+        assert!(windows_shell_uses_login_flag("bash"));
+        assert!(windows_shell_uses_login_flag(
+            r"C:\Program Files\Git\bin\bash.exe"
+        ));
+        assert!(!windows_shell_uses_login_flag("powershell.exe"));
+        assert!(!windows_shell_uses_login_flag("cmd.exe"));
+    }
+
+    #[test]
+    fn test_execute_shell_exec_streams_stdout_before_exit() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let (shell_text, expected_chunks) = streaming_shell_command();
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "stream-test".to_string(),
+                    name: "stream-test".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "shell": streaming_shell_program(),
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("stream-test".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some(shell_text.to_string()),
+            ..Default::default()
+        };
+
+        let received_at: Arc<Mutex<Vec<(String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received_at);
+        let started = Instant::now();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute_with_stdout_sink(&cmd, |chunk| {
+                let sink = Arc::clone(&sink);
+                let elapsed = started.elapsed();
+                async move {
+                    sink.lock().expect("sink lock").push((chunk, elapsed));
+                    Ok(())
+                }
+            }))
+            .expect("streaming shell exec response");
+
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("firstsecond"));
+        let received = received_at.lock().expect("received lock");
+        assert!(
+            received.len() >= 2,
+            "expected multiple streamed chunks, got {:?}",
+            *received
+        );
+        assert_eq!(received[0].0, expected_chunks[0]);
+        assert_eq!(received[1].0, expected_chunks[1]);
+        assert!(
+            received[0].1 < Duration::from_millis(250),
+            "first chunk should arrive before the command exits, got {:?}",
+            received[0].1
+        );
+        assert!(
+            received[1].1 >= Duration::from_millis(250),
+            "second chunk should arrive after the intentional delay, got {:?}",
+            received[1].1
+        );
+    }
+
+    #[test]
+    fn test_execute_shell_exec_rejects_unimplemented_sandbox_policy() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let store = RemoteShellStore::new().expect("remote shell store");
+        store
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "default-sandbox".to_string(),
+                    name: "Default Sandbox".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "reject_reason": "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies"
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("default-sandbox".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("printf hello".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(executor.execute(&cmd))
+            .expect_err("shell exec should reject");
+        assert_eq!(
+            error.to_string(),
+            "Config error: policy 'default-sandbox' is not executable: sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies"
+        );
+    }
+
+    #[test]
+    fn test_select_policy_id_for_command_rejects_ambiguous_target_match() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![
+                    RemoteShellPolicy {
+                        id: "full-a".to_string(),
+                        name: "full-a".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "shell_text",
+                            "allowed_shell_patterns": ["^(?s:.*)$"]
+                        }),
+                    },
+                    RemoteShellPolicy {
+                        id: "full-b".to_string(),
+                        name: "full-b".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "shell_text",
+                            "allowed_shell_patterns": ["^(?s:.*)$"]
+                        }),
+                    },
+                ],
+                profiles: vec![],
+            })
+            .expect("save remote shell store");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let command = RemoteCommand {
             kind: super::super::types::CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ShellText),
             command_text: Some("printf hello".to_string()),
             ..Default::default()
         };
 
-        let resp = executor.execute(&cmd).await.expect("shell exec response");
-        assert_eq!(resp.exit_code, 0);
-        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+        let error = executor
+            .select_policy_id_for_command(&command, Some(&serde_json::json!({ "mode": "all" })))
+            .expect_err("ambiguous match should fail");
+        assert!(error.to_string().contains("matched multiple policies"));
     }
 
     #[tokio::test]
@@ -1464,10 +2565,13 @@ mod tests {
             .unwrap();
 
         let joined_chunks = chunks.lock().unwrap().join("");
-        assert!(joined_chunks.contains("Searching... 12 records scanned, 0 matched"));
-        assert!(joined_chunks.contains("566961"));
+        assert!(joined_chunks.contains("event: progress"));
+        assert!(joined_chunks.contains("\"total_searched\":12"));
+        assert!(joined_chunks.contains("event: result"));
+        assert!(joined_chunks.contains("\"seq\":566961"));
         assert!(joined_chunks.contains("/nextoncall/profile"));
-        assert!(joined_chunks.contains("Found 1 matches"));
+        assert!(joined_chunks.contains("event: done"));
+        assert!(joined_chunks.contains("\"total_matched\":1"));
         assert_eq!(stdout, joined_chunks);
     }
 
@@ -1493,8 +2597,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(stdout.contains("Scanned 20 records"));
-        assert!(stdout.contains("limit: 2"));
+        assert!(stdout.contains("event: done"));
+        assert!(stdout.contains("\"total_searched\":20"));
+        assert!(stdout.contains("\"has_more\":true"));
     }
 
     struct MockResponse {
@@ -1552,5 +2657,171 @@ mod tests {
         });
 
         (handle, addr.ip().to_string(), addr.port())
+    }
+
+    #[test]
+    fn test_legacy_full_access_argv_exec_actually_runs() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "full-access".to_string(),
+                    name: "Full Access".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "allow_any_executable": true,
+                        "shell": "/bin/bash",
+                        "inherit_env": true
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("full-access".to_string()),
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute(&cmd))
+            .expect("old-format full-access should execute argv_exec /bin/pwd");
+        assert_eq!(resp.exit_code, 0, "exit_code should be 0");
+        assert!(
+            !resp.stdout.as_deref().unwrap_or("").trim().is_empty(),
+            "stdout should contain cwd path"
+        );
+    }
+
+    #[test]
+    fn test_legacy_full_access_without_allowed_exec_modes_permits_argv() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "full-access".to_string(),
+                    name: "Full Access".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "allow_any_executable": true,
+                        "shell": "/bin/bash",
+                        "inherit_env": true,
+                        "stdin_allowed": true,
+                        "interactive_allowed": true
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let argv_command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+        let result = executor
+            .select_policy_id_for_command(
+                &argv_command,
+                Some(&serde_json::json!({ "mode": "all" })),
+            )
+            .expect("legacy full-access should accept argv_exec");
+        assert_eq!(result, "full-access");
+
+        let shell_command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some("pwd".to_string()),
+            ..Default::default()
+        };
+        let result = executor
+            .select_policy_id_for_command(
+                &shell_command,
+                Some(&serde_json::json!({ "mode": "all" })),
+            )
+            .expect("legacy full-access should accept shell_text");
+        assert_eq!(result, "full-access");
+    }
+
+    #[test]
+    fn test_select_policy_single_rejection_has_no_double_error_prefix() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "shell-only".to_string(),
+                    name: "Shell Only".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_exec_modes": ["shell_text"],
+                        "allowed_shell_patterns": ["^(?s:.*)$"]
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let command = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+
+        let error = executor
+            .select_policy_id_for_command(&command, Some(&serde_json::json!({ "mode": "all" })))
+            .expect_err("should reject argv_exec for shell-only policy");
+        let msg = error.to_string();
+        assert!(
+            !msg.contains("Config error: Config error:"),
+            "error message must not double-wrap: {msg}"
+        );
+        assert!(
+            msg.starts_with("Config error: "),
+            "must have one prefix: {msg}"
+        );
+        assert!(
+            msg.contains("policy 'shell-only'"),
+            "must mention policy: {msg}"
+        );
     }
 }

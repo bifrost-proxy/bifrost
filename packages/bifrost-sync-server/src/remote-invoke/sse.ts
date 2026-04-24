@@ -6,6 +6,7 @@ const clientStreams = new Map<string, ClientStreamState>();
 const callerStreams = new Map<string, { res: ServerResponse; callId: string }>();
 const callerEventBuffers = new Map<string, Array<{ event: string; data: unknown; id?: string }>>();
 const pairingWatchers = new Map<string, { res: ServerResponse; pairingId: string }>();
+const pairingEventBuffers = new Map<string, Array<{ event: string; data: unknown }>>();
 const MAX_BUFFERED_CALLER_EVENTS = 256;
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -146,15 +147,33 @@ export function pushToCallerStream(callId: string, event: string, data: unknown,
 
 export function registerPairingWatcher(pairingId: string, res: ServerResponse): void {
   pairingWatchers.set(pairingId, { res, pairingId });
+  const buffered = pairingEventBuffers.get(pairingId);
+  if (buffered?.length) {
+    pairingEventBuffers.delete(pairingId);
+    for (const ev of buffered) {
+      try {
+        writeSseEvent(res, ev.event, ev.data);
+      } catch {
+        pairingWatchers.delete(pairingId);
+        break;
+      }
+    }
+  }
 }
 
 export function unregisterPairingWatcher(pairingId: string): void {
   pairingWatchers.delete(pairingId);
+  pairingEventBuffers.delete(pairingId);
 }
 
 export function pushToPairingWatcher(pairingId: string, event: string, data: unknown): boolean {
   const entry = pairingWatchers.get(pairingId);
-  if (!entry) return false;
+  if (!entry) {
+    const existing = pairingEventBuffers.get(pairingId) ?? [];
+    existing.push({ event, data });
+    pairingEventBuffers.set(pairingId, existing);
+    return true;
+  }
   try {
     writeSseEvent(entry.res, event, data);
     return true;

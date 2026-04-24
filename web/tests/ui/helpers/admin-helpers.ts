@@ -88,6 +88,79 @@ export async function resetAccessControl(request: APIRequestContext): Promise<vo
   await request.delete(`${apiBase}/whitelist/pending`);
 }
 
+export interface SeedNotificationRecord {
+  notificationType: string;
+  title: string;
+  message: string;
+  metadata?: string | null;
+  status: string;
+  actionTaken?: string | null;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export async function seedNotifications(records: SeedNotificationRecord[]): Promise<void> {
+  const dataDir = process.env.BIFROST_DATA_DIR;
+  if (!dataDir) {
+    throw new Error("BIFROST_DATA_DIR is required to seed notifications");
+  }
+
+  const payload = JSON.stringify(records);
+  const script = `
+import json
+import pathlib
+import sqlite3
+import sys
+import time
+
+data_dir = pathlib.Path(sys.argv[1])
+db_path = data_dir / "notifications.db"
+db_path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db_path)
+conn.executescript("""
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  notification_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  metadata TEXT,
+  status TEXT NOT NULL,
+  action_taken TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications(notification_type);
+CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications(status);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);
+DELETE FROM notifications;
+""")
+now = int(time.time())
+records = json.loads(sys.argv[2])
+for record in records:
+  conn.execute(
+    """
+    INSERT INTO notifications(
+      notification_type, title, message, metadata, status, action_taken, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+    (
+      record["notificationType"],
+      record["title"],
+      record["message"],
+      record.get("metadata"),
+      record["status"],
+      record.get("actionTaken"),
+      record.get("createdAt", now),
+      record.get("updatedAt", now),
+    ),
+  )
+conn.commit()
+conn.close()
+`;
+
+  await execFileAsync("python3", ["-c", script, dataDir, payload], { timeout: 15000 });
+}
+
 export async function sendProxyRequest(
   url: string,
   options: {

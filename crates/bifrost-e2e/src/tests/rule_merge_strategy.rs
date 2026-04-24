@@ -628,9 +628,9 @@ async fn test_merge_reqheaders_same_key_override_e2e() -> Result<(), String> {
 
     let req = mock.last_request().ok_or("No request received")?;
     let same_key_count = req
-        .headers
-        .keys()
-        .filter(|k| k.to_lowercase() == "x-same-key")
+        .header_pairs
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("x-same-key"))
         .count();
     if same_key_count != 1 {
         return Err(format!(

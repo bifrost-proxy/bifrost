@@ -3,6 +3,7 @@ use bifrost_storage::{data_dir, ConfigManager, DEFAULT_REMOTE_BASE_URL};
 use bifrost_tls::init_crypto_provider;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
+use std::io::IsTerminal;
 use std::path::Path;
 
 mod cli;
@@ -78,6 +79,17 @@ fn resolve_remote_relay_url(explicit: Option<String>, cli_port: u16) -> String {
     select_remote_relay_url(explicit, runtime, configured)
 }
 
+fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>) -> bool {
+    if !stdout_is_terminal && std::env::var_os("BIFROST_FORCE_UPDATE_CHECK").is_none() {
+        return false;
+    }
+
+    !matches!(
+        command,
+        Some(Commands::VersionCheck) | Some(Commands::Upgrade { .. })
+    )
+}
+
 fn main() {
     install_panic_hook();
     init_crypto_provider();
@@ -109,10 +121,12 @@ fn main() {
         }
     };
 
-    match &cli.command {
-        Some(Commands::Start { daemon: false, .. }) => spawn_update_check_notice(),
-        Some(Commands::Start { daemon: true, .. }) => {}
-        _ => check_and_print_update_notice(),
+    if should_run_update_notice(std::io::stdout().is_terminal(), cli.command.as_ref()) {
+        match &cli.command {
+            Some(Commands::Start { daemon: false, .. }) => spawn_update_check_notice(),
+            Some(Commands::Start { daemon: true, .. }) => {}
+            _ => check_and_print_update_notice(),
+        }
     }
 
     let result = match cli.command {
@@ -287,14 +301,22 @@ fn main() {
             action,
             relay_url,
             client_id,
-        }) => {
-            let relay_url = resolve_remote_relay_url(relay_url, cli.port);
-            remote::handle_remote_command(remote::RemoteOptions {
-                relay_url,
-                client_id,
-                action,
-            })
-        }
+        }) => match action {
+            cli::RemoteCommands::Shell { action } => commands::handle_remote_shell_command(*action),
+            cli::RemoteCommands::Grant { action } => commands::handle_remote_grant_command(
+                *action,
+                "127.0.0.1",
+                get_effective_port(cli.port),
+            ),
+            action => {
+                let relay_url = resolve_remote_relay_url(relay_url, cli.port);
+                remote::handle_remote_command(remote::RemoteOptions {
+                    relay_url,
+                    client_id,
+                    action,
+                })
+            }
+        },
         Some(Commands::Traffic { action }) => match action {
             TrafficCommands::List {
                 limit,
@@ -462,6 +484,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn should_run_update_notice_when_forced_even_without_tty() {
+        let previous = std::env::var_os("BIFROST_FORCE_UPDATE_CHECK");
+        unsafe {
+            std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", "1");
+        }
+
+        let should_run = should_run_update_notice(false, Some(&Commands::Status { tui: false }));
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", value);
+            },
+            None => unsafe {
+                std::env::remove_var("BIFROST_FORCE_UPDATE_CHECK");
+            },
+        }
+
+        assert!(should_run);
+    }
+
+    #[test]
     fn normalize_relay_url_trims_and_rejects_empty_values() {
         assert_eq!(normalize_relay_url(None), None);
         assert_eq!(normalize_relay_url(Some("".to_string())), None);
@@ -550,5 +593,32 @@ mod tests {
     fn read_configured_relay_url_returns_none_when_config_file_is_missing() {
         let temp_dir = TempDir::new().unwrap();
         assert_eq!(read_configured_relay_url(temp_dir.path()), None);
+    }
+
+    #[test]
+    fn should_run_update_notice_skips_non_tty_output() {
+        assert!(!should_run_update_notice(
+            false,
+            Some(&Commands::Status { tui: false })
+        ));
+    }
+
+    #[test]
+    fn should_run_update_notice_skips_explicit_version_related_commands() {
+        assert!(!should_run_update_notice(
+            true,
+            Some(&Commands::VersionCheck)
+        ));
+        assert!(!should_run_update_notice(
+            true,
+            Some(&Commands::Upgrade {
+                yes: false,
+                restart: false,
+            })
+        ));
+        assert!(should_run_update_notice(
+            true,
+            Some(&Commands::Status { tui: false })
+        ));
     }
 }

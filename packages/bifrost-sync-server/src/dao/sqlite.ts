@@ -414,7 +414,7 @@ export class SqliteGroupSettingDao implements IGroupSettingDao {
 }
 
 export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
-  constructor(private db: Database.Database) {}
+  constructor(private db: Database.Database) { }
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     this.db.prepare(
@@ -460,8 +460,28 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.caller_ephemeral_pub ?? '', g.client_ephemeral_pub ?? '', g.grant_mode, g.grant_scope, g.status, g.first_authorized_at, g.expires_at, g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time);
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      g.id,
+      g.user_id,
+      g.client_instance_id,
+      g.caller_fingerprint,
+      g.caller_display_name,
+      g.caller_ephemeral_pub ?? '',
+      g.client_ephemeral_pub ?? '',
+      g.grant_mode,
+      g.grant_scope,
+      g.ssh_key_id ?? '',
+      g.ssh_key_fingerprint ?? '',
+      g.status,
+      g.first_authorized_at,
+      g.expires_at,
+      g.last_used_at,
+      g.max_calls,
+      g.remaining_calls,
+      g.created_by,
+      g.update_time,
+    );
     return g;
   }
 
@@ -470,7 +490,10 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
   }
 
   async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
-    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+    if (userId) {
+      return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+    }
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
   }
 
   async listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeGrant[]; total: number }> {
@@ -503,6 +526,29 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     return this.db.prepare(
       'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ? ORDER BY first_authorized_at DESC'
     ).all(clientInstanceId, 'active') as RemoteInvokeGrant[];
+  }
+
+  async revokeActiveGrantsForCaller(
+    clientInstanceId: string,
+    callerFingerprint: string,
+    excludeGrantId?: string,
+  ): Promise<number> {
+    const now = new Date().toISOString();
+    if (excludeGrantId) {
+      const result = this.db.prepare(
+        `UPDATE bifrost_remote_invoke_grants
+         SET status = ?, update_time = ?
+         WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ? AND id != ?`,
+      ).run('removed', now, clientInstanceId, callerFingerprint, 'active', excludeGrantId);
+      return result.changes;
+    }
+
+    const result = this.db.prepare(
+      `UPDATE bifrost_remote_invoke_grants
+       SET status = ?, update_time = ?
+       WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ?`,
+    ).run('removed', now, clientInstanceId, callerFingerprint, 'active');
+    return result.changes;
   }
 
   async updateGrant(grantId: string, fields: Partial<RemoteInvokeGrant>): Promise<void> {
@@ -724,6 +770,22 @@ export class SqliteStorage implements IStorage {
         rules_enabled  INTEGER DEFAULT 1,
         visibility     TEXT DEFAULT 'private'
       );
+    `);
+    this.createRemoteInvokeTables();
+    this.migrateAddSortOrder();
+    this.resetRemoteInvokeSchemaIfNeeded();
+  }
+
+  private migrateAddSortOrder() {
+    const columns = this.db.pragma('table_info(bifrost_envs)') as Array<{ name: string }>;
+    const hasSortOrder = columns.some(col => col.name === 'sort_order');
+    if (!hasSortOrder) {
+      this.db.exec('ALTER TABLE bifrost_envs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+    }
+  }
+
+  private createRemoteInvokeTables() {
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_pairings (
         id                    TEXT PRIMARY KEY,
         user_id               TEXT NOT NULL,
@@ -756,6 +818,8 @@ export class SqliteStorage implements IStorage {
         client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         grant_mode            TEXT NOT NULL DEFAULT 'once',
         grant_scope           TEXT NOT NULL DEFAULT 'remote_query',
+        ssh_key_id            TEXT NOT NULL DEFAULT '',
+        ssh_key_fingerprint   TEXT NOT NULL DEFAULT '',
         status                TEXT NOT NULL DEFAULT 'active',
         first_authorized_at   TEXT NOT NULL DEFAULT '',
         expires_at            TEXT NOT NULL DEFAULT '',
@@ -816,15 +880,35 @@ export class SqliteStorage implements IStorage {
         update_time           TEXT NOT NULL
       );
     `);
-    this.migrateAddSortOrder();
   }
 
-  private migrateAddSortOrder() {
-    const columns = this.db.pragma('table_info(bifrost_envs)') as Array<{ name: string }>;
-    const hasSortOrder = columns.some(col => col.name === 'sort_order');
-    if (!hasSortOrder) {
-      this.db.exec('ALTER TABLE bifrost_envs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  private resetRemoteInvokeSchemaIfNeeded() {
+    const columns = this.db.pragma('table_info(bifrost_remote_invoke_grants)') as Array<{ name: string }>;
+    const required = [
+      'ssh_key_id',
+      'ssh_key_fingerprint',
+    ];
+    const forbidden = [
+      'policy_binding',
+      'shell_policy_set_version_snapshot',
+      'interactive_allowed',
+      'stdin_allowed',
+    ];
+    const schemaMismatch =
+      required.some(name => !columns.some(col => col.name === name)) ||
+      forbidden.some(name => columns.some(col => col.name === name));
+    if (!schemaMismatch) {
+      return;
     }
+
+    this.db.exec(`
+      DROP TABLE IF EXISTS bifrost_remote_invoke_events;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_calls;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_grants;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_pairings;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_clients;
+    `);
+    this.createRemoteInvokeTables();
   }
 
   async close(): Promise<void> {

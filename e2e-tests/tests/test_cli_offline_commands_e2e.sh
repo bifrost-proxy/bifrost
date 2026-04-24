@@ -875,6 +875,27 @@ test_config_help() {
     done
 }
 
+test_remote_command_exec_requires_double_dash_for_argv() {
+    header "测试 remote command exec 的 argv 必须显式使用 --"
+
+    local result
+    result=$(run_bifrost remote command exec pwd)
+    if echo "$result" | grep -q "unexpected argument 'pwd' found"; then
+        pass "裸 argv 会在 CLI 解析阶段直接拒绝"
+    else
+        fail "裸 argv 未被按预期拒绝: $result"
+    fi
+
+    result=$(run_bifrost remote command exec -- /bin/pwd)
+    if echo "$result" | grep -q "unexpected argument '/bin/pwd' found"; then
+        fail "显式 -- 后仍被当成解析错误: $result"
+    elif echo "$result" | grep -Eqi "no saved connection|using saved connection|authorization|not connected|remote connect"; then
+        pass "显式 -- 后通过了解析，继续进入连接/授权阶段"
+    else
+        fail "显式 -- 后未进入预期的后续阶段: $result"
+    fi
+}
+
 # ─── Summary ───
 
 print_summary() {
@@ -946,6 +967,7 @@ main() {
     test_search_help
     test_import_export_help
     test_config_help
+    test_remote_command_exec_requires_double_dash_for_argv
 
     test_help_all_commands
     test_help_new_subcommands

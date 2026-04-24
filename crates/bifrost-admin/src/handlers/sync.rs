@@ -275,7 +275,7 @@ async fn update_sync_config(req: Request<Incoming>, state: SharedAdminState) -> 
     {
         Ok(_) => {
             if let Some(new_url) = new_relay_url {
-                if let Some(ref worker) = state.remote_invoke_worker {
+                if let Some(worker) = state.remote_invoke_worker() {
                     worker.update_relay_url(&new_url);
                 }
             }

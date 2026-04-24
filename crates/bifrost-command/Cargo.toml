@@ -1,0 +1,14 @@
+[package]
+name = "bifrost-command"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared canonical command types for Bifrost CLI and admin"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

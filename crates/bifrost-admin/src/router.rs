@@ -189,7 +189,7 @@ impl AdminRouter {
             let path_suffix = path.strip_prefix("/api/bifrost-file").unwrap_or("");
             handle_bifrost_file(req, path_suffix, state.clone()).await
         } else if path.starts_with("/api/remote-invoke") {
-            handle_remote_invoke(req, state.remote_invoke_worker.clone(), path).await
+            handle_remote_invoke(req, state.remote_invoke_worker(), path).await
         } else {
             error_response(StatusCode::NOT_FOUND, "API endpoint not found")
         }

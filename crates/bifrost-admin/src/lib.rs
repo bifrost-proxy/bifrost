@@ -16,6 +16,7 @@ pub mod network;
 pub mod notification_db;
 mod port_rebind;
 pub mod push;
+mod query_service;
 pub mod remote_invoke;
 pub mod replay_db;
 pub mod replay_executor;
@@ -75,6 +76,9 @@ pub use port_rebind::{
     PortRebindManager, PortRebindRequest, PortRebindResponse, SharedPortRebindManager,
 };
 pub use push::{start_push_tasks, PushManager, SharedPushManager};
+pub use query_service::{
+    search_request_from_command, traffic_list_params_from_command, AdminQueryService,
+};
 pub use router::AdminRouter;
 pub use security::{is_cert_public_request, is_valid_admin_request, AdminSecurityConfig};
 pub use sse::{

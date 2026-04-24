@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Button,
   Descriptions,
   Modal,
+  Select,
   Space,
+  Switch,
   Tag,
   Typography,
   message,
@@ -18,6 +21,7 @@ import {
   rejectPairing,
   type GrantMode,
   type PairingRequest,
+  type RemoteShellSet,
 } from "../../api/remoteInvoke";
 
 const { Text } = Typography;
@@ -25,6 +29,7 @@ const { Text } = Typography;
 interface PairingRequestModalProps {
   visible: boolean;
   pairing: PairingRequest | null;
+  shellConfig?: RemoteShellSet | null;
   onClose: () => void;
 }
 
@@ -45,16 +50,55 @@ const GRANT_OPTIONS: { label: string; value: GrantMode; color: string }[] = [
 export default function PairingRequestModal({
   visible,
   pairing,
+  shellConfig,
   onClose,
 }: PairingRequestModalProps) {
   const [loading, setLoading] = useState(false);
+  const [accessMode, setAccessMode] = useState<"query" | "selected" | "all">("query");
+  const [selectedPolicies, setSelectedPolicies] = useState<string[]>([]);
+  const [stdinAllowed, setStdinAllowed] = useState(false);
+  const [interactiveAllowed, setInteractiveAllowed] = useState(false);
+
+  const enabledPolicies = useMemo(
+    () => (shellConfig?.policies ?? []).filter((policy) => policy.enabled),
+    [shellConfig],
+  );
+
+  useEffect(() => {
+    if (enabledPolicies.length > 0) {
+      setSelectedPolicies([enabledPolicies[0].id]);
+    } else {
+      setSelectedPolicies([]);
+    }
+    setAccessMode(enabledPolicies.length > 0 ? "selected" : "query");
+    setStdinAllowed(false);
+    setInteractiveAllowed(false);
+  }, [pairing?.pairing_id, enabledPolicies]);
 
   if (!pairing) return null;
 
   const handleApprove = async (mode: GrantMode) => {
     setLoading(true);
     try {
-      await approvePairing(pairing.pairing_id, mode);
+      const input =
+        accessMode === "query"
+          ? {
+              grant_mode: mode,
+              grant_scope: "remote_query" as const,
+            }
+          : {
+              grant_mode: mode,
+              grant_scope: interactiveAllowed
+                ? ("remote_shell_interactive" as const)
+                : ("remote_shell_exec" as const),
+              policy_binding:
+                accessMode === "all"
+                  ? { mode: "all" }
+                  : { mode: "selected", policy_ids: selectedPolicies },
+              interactive_allowed: interactiveAllowed,
+              stdin_allowed: stdinAllowed,
+            };
+      await approvePairing(pairing.pairing_id, input);
       message.success("Pairing approved");
       onClose();
     } catch (e) {
@@ -133,7 +177,66 @@ export default function PairingRequestModal({
 
         <div>
           <Text strong style={{ display: "block", marginBottom: 8 }}>
-            Choose authorization scope:
+            Access Decision
+          </Text>
+          {enabledPolicies.length === 0 ? (
+            <Alert
+              showIcon
+              type="warning"
+              style={{ marginBottom: 12 }}
+              message="No enabled shell policy found on this device"
+              description="Only read-only query access can be granted until you configure and enable at least one Shell Access policy."
+            />
+          ) : null}
+          <Space direction="vertical" size={12} style={{ width: "100%", marginBottom: 16 }}>
+            <Select
+              value={accessMode}
+              onChange={(value) => setAccessMode(value)}
+              options={[
+                {
+                  value: "query",
+                  label: "Read-only queries",
+                },
+                {
+                  value: "selected",
+                  label: "Selected shell policies",
+                  disabled: enabledPolicies.length === 0,
+                },
+                {
+                  value: "all",
+                  label: "All enabled shell policies",
+                  disabled: enabledPolicies.length === 0,
+                },
+              ]}
+            />
+            <Select
+              mode="multiple"
+              placeholder="Choose shell policies for this caller"
+              disabled={accessMode !== "selected"}
+              value={selectedPolicies}
+              onChange={setSelectedPolicies}
+              options={enabledPolicies.map((policy) => ({
+                value: policy.id,
+                label: `${policy.name} (${policy.id})`,
+              }))}
+            />
+            <Space>
+              <Text type="secondary">Allow stdin</Text>
+              <Switch
+                checked={stdinAllowed}
+                disabled={accessMode === "query"}
+                onChange={setStdinAllowed}
+              />
+              <Text type="secondary">Allow interactive shell</Text>
+              <Switch
+                checked={interactiveAllowed}
+                disabled={accessMode === "query"}
+                onChange={setInteractiveAllowed}
+              />
+            </Space>
+          </Space>
+          <Text strong style={{ display: "block", marginBottom: 8 }}>
+            Grant Duration
           </Text>
           <Space wrap>
             {GRANT_OPTIONS.map((opt) => (
@@ -142,6 +245,9 @@ export default function PairingRequestModal({
                 type={opt.value === "once" ? "primary" : "default"}
                 icon={<CheckOutlined />}
                 loading={loading}
+                disabled={
+                  accessMode === "selected" && selectedPolicies.length === 0
+                }
                 onClick={() => handleApprove(opt.value)}
                 data-testid={`pairing-approve-${opt.value}`}
               >

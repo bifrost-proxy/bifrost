@@ -7,6 +7,8 @@ mod group;
 mod install_skill;
 mod metrics;
 pub mod remote;
+mod remote_grant;
+mod remote_shell;
 mod rule;
 mod script;
 mod search;
@@ -40,7 +42,8 @@ pub use status_tui::*;
 pub use stop::*;
 pub use system_proxy::*;
 pub use traffic::{
-    run_traffic_clear, run_traffic_get, run_traffic_list, TrafficGetOptions, TrafficListOptions,
+    render_traffic_detail_body, render_traffic_list_body, run_traffic_clear, run_traffic_get,
+    run_traffic_list, TrafficGetOptions, TrafficListOptions,
 };
 pub use update_check::*;
 pub use upgrade::*;
@@ -49,6 +52,8 @@ pub use whitelist::*;
 
 pub use bifrost_file::{handle_export_command, handle_import_command};
 pub use metrics::handle_metrics_command;
+pub use remote_grant::handle_remote_grant_command;
+pub use remote_shell::handle_remote_shell_command;
 pub use sync_cmd::handle_sync_command;
 
 pub fn handle_version_check(host: &str, port: u16) -> bifrost_core::Result<()> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getCallArgsPreviewSource,
   normalizeRemoteInvokeSshCallerInfo,
   normalizeRemoteInvokeSshKeyRecord,
 } from "./remoteInvoke";
@@ -61,5 +62,57 @@ describe("remoteInvoke SSH key normalization", () => {
   it("returns null when the backend has not provisioned a key yet", () => {
     expect(normalizeRemoteInvokeSshKeyRecord(null)).toBeNull();
     expect(normalizeRemoteInvokeSshKeyRecord({})).toBeNull();
+  });
+});
+
+describe("getCallArgsPreviewSource", () => {
+  it("prefers masked args from command_summary", () => {
+    expect(
+      getCallArgsPreviewSource({
+        command_summary: {
+          command_preview: "search.get",
+          masked_args_json: '{"query":"***"}',
+        },
+        command: {
+          command: "search.get",
+          args_json: '{"query":"needle"}',
+        },
+      }),
+    ).toBe('{"query":"***"}');
+  });
+
+  it("falls back to decrypted command args when masked summary is missing", () => {
+    expect(
+      getCallArgsPreviewSource({
+        command_summary: {
+          command_preview: "search.get",
+        },
+        command: {
+          command: "search.get",
+          args_json: '{"query":"needle","max_results":5}',
+        },
+      }),
+    ).toBe('{"query":"needle","max_results":5}');
+  });
+
+  it("falls back to typed query args when args_json is absent", () => {
+    expect(
+      getCallArgsPreviewSource({
+        command_summary: {
+          command_preview: "search.stream",
+        },
+        command: {
+          command: "",
+          query: {
+            type: "search",
+            args: {
+              keyword: "needle",
+              limit: 5,
+              max_scan: 50,
+            },
+          },
+        },
+      }),
+    ).toBe('{"keyword":"needle","limit":5,"max_scan":50}');
   });
 });

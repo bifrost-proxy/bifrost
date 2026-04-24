@@ -24,6 +24,7 @@ pub struct RecordedRequest {
     pub path: String,
     pub query: Option<String>,
     pub headers: HashMap<String, String>,
+    pub header_pairs: Vec<(String, String)>,
     pub body: Option<String>,
 }
 
@@ -82,13 +83,9 @@ impl EnhancedMockServer {
                                 let path = req.uri().path().to_string();
                                 let query = req.uri().query().map(|s| s.to_string());
 
-                                let headers: HashMap<String, String> = req
-                                    .headers()
-                                    .iter()
-                                    .map(|(k, v)| {
-                                        (k.to_string(), v.to_str().unwrap_or("").to_string())
-                                    })
-                                    .collect();
+                                let header_pairs = collect_header_pairs(req.headers());
+                                let headers: HashMap<String, String> =
+                                    header_pairs.iter().cloned().collect();
 
                                 let body_bytes =
                                     match http_body_util::BodyExt::collect(req.into_body()).await {
@@ -107,6 +104,7 @@ impl EnhancedMockServer {
                                     path: path.clone(),
                                     query,
                                     headers: headers.clone(),
+                                    header_pairs,
                                     body,
                                 };
                                 requests.write().push(recorded);
@@ -376,13 +374,9 @@ impl HttpsMockServer {
                                 let path = req.uri().path().to_string();
                                 let query = req.uri().query().map(|s| s.to_string());
 
-                                let headers: HashMap<String, String> = req
-                                    .headers()
-                                    .iter()
-                                    .map(|(k, v)| {
-                                        (k.to_string(), v.to_str().unwrap_or("").to_string())
-                                    })
-                                    .collect();
+                                let header_pairs = collect_header_pairs(req.headers());
+                                let headers: HashMap<String, String> =
+                                    header_pairs.iter().cloned().collect();
 
                                 let body_bytes =
                                     match http_body_util::BodyExt::collect(req.into_body()).await {
@@ -401,6 +395,7 @@ impl HttpsMockServer {
                                     path: path.clone(),
                                     query,
                                     headers: headers.clone(),
+                                    header_pairs,
                                     body,
                                 });
 
@@ -735,6 +730,13 @@ fn build_httpbin_response(
 }
 
 fn collect_headers(headers: &hyper::HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))
+        .collect()
+}
+
+fn collect_header_pairs(headers: &hyper::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_str().unwrap_or("").to_string()))

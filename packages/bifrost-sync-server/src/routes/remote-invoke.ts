@@ -248,6 +248,12 @@ export async function handleRemoteInvoke(
       return await handleDeleteGrantByClient(ctx, service, auth.client_instance_id);
     }
 
+    if (pathname.match(/^\/v4\/remote-invoke\/client\/grants\/[^/]+$/) && method === 'PATCH') {
+      const auth = await requireClientAuth(ctx, service);
+      if (!auth) return true;
+      return await handleUpdateGrantByClient(ctx, service, auth.client_instance_id);
+    }
+
     if (pathname === '/v4/remote-invoke/client/calls' && method === 'GET') {
       const auth = await requireClientAuth(ctx, service);
       if (!auth) return true;
@@ -573,6 +579,8 @@ async function handleGrantDecision(
     const msg = e instanceof Error ? e.message : 'decision failed';
     if (msg === 'client_mismatch') {
       sendError(ctx.res, 403, msg);
+    } else if (msg === 'pairing_expired') {
+      sendError(ctx.res, 410, msg);
     } else if (msg === 'pairing_not_found') {
       sendError(ctx.res, 404, msg);
     } else {
@@ -690,6 +698,36 @@ async function handleDeleteGrantByClient(
   return true;
 }
 
+async function handleUpdateGrantByClient(
+  ctx: RequestContext,
+  service: RemoteInvokeService,
+  clientId: string,
+): Promise<boolean> {
+  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/grants\/([^/]+)$/);
+  const grantId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientQueryLimiter, `client:${clientId}:update_grant:${grantId || 'unknown'}`)) {
+    return true;
+  }
+
+  const body = parseJsonBody<any>(ctx.body);
+  try {
+    const grant = await service.updateGrantByClient(clientId, grantId, {
+      grant_scope: body?.grant_scope,
+    });
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: toGrantApi(grant) });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'update failed';
+    if (msg === 'client_instance_id_mismatch') {
+      sendError(ctx.res, 403, msg);
+    } else if (msg === 'grant_not_found') {
+      sendError(ctx.res, 404, msg);
+    } else {
+      sendError(ctx.res, 400, msg);
+    }
+  }
+  return true;
+}
+
 async function handleListActiveGrantsForClient(
   ctx: RequestContext,
   service: RemoteInvokeService,
@@ -778,6 +816,8 @@ function toGrantApi(g: RemoteInvokeGrant) {
     max_calls: g.max_calls,
     remaining_calls: g.remaining_calls,
     use_count: g.max_calls - g.remaining_calls,
+    ssh_key_id: g.ssh_key_id || null,
+    ssh_key_fingerprint: g.ssh_key_fingerprint || null,
   };
 }
 

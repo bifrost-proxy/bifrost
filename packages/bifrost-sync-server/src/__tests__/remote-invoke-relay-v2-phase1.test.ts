@@ -207,8 +207,8 @@ async function registerUser(userId: string, password: string): Promise<string> {
     user_id: userId,
     password,
   });
-  expect(response.status).toBe(200);
-  expect(response.data.code).toBe(0);
+  expect(response.status, JSON.stringify(response.data)).toBe(200);
+  expect(response.data.code, JSON.stringify(response.data)).toBe(0);
   return response.data.data.token as string;
 }
 
@@ -388,6 +388,137 @@ describe('remote invoke relay v2 phase 1', () => {
     expect(callDetail.data.data.command_kind).toBe('shell.exec');
     expect(callDetail.data.data.command_detail).toEqual({ kind: 'shell.exec' });
     expect(JSON.stringify(callDetail.data.data)).not.toContain('PHASE1-OPAQUE-CMD');
+  });
+
+  it('updates only the minimal relay grant scope through the client grant PATCH route', async () => {
+    const token = await registerUser('ri_phase1_update_owner', 'password123');
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientAuthToken = await registerClient(
+      'ri-phase1-update-client',
+      clientPubkey,
+      clientKeys.privateKey,
+      token,
+    );
+    const now = new Date().toISOString();
+
+    await server.storage.remoteInvoke.createGrant({
+      id: 'ri-phase1-update-grant',
+      user_id: 'ri_phase1_update_owner',
+      client_instance_id: 'ri-phase1-update-client',
+      caller_fingerprint: 'phase1-update-caller',
+      caller_display_name: 'phase1-update-caller',
+      grant_mode: 'permanent',
+      grant_scope: 'remote_query',
+      status: 'active',
+      first_authorized_at: now,
+      expires_at: '',
+      last_used_at: now,
+      max_calls: 999999,
+      remaining_calls: 999999,
+      created_by: 'test',
+      update_time: now,
+    });
+
+    const response = await req(
+      'PATCH',
+      '/v4/remote-invoke/client/grants/ri-phase1-update-grant',
+      {
+        client_instance_id: 'ri-phase1-update-client',
+        grant_scope: 'remote_shell_exec',
+      },
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.data.data.grant_scope).toBe('remote_shell_exec');
+
+    const storedGrant = await server.storage.remoteInvoke.getGrant('ri-phase1-update-grant');
+    expect(storedGrant?.grant_scope).toBe('remote_shell_exec');
+  });
+
+  it('replaces older active grants for the same caller when a new pairing approval succeeds', async () => {
+    const token = await registerUser(`ri_phase1_replace_owner_${Date.now()}`, 'password123');
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientInstanceId = `ri-phase1-replace-client-${Date.now()}`;
+    const clientAuthToken = await registerClient(
+      clientInstanceId,
+      clientPubkey,
+      clientKeys.privateKey,
+      token,
+    );
+    const now = new Date().toISOString();
+
+    await server.storage.remoteInvoke.createGrant({
+      id: 'ri-phase1-old-grant',
+      user_id: '',
+      client_instance_id: clientInstanceId,
+      caller_fingerprint: 'phase1-replace-caller',
+      caller_display_name: 'phase1-replace-caller',
+      caller_ephemeral_pub: 'old-caller-epk',
+      client_ephemeral_pub: 'old-client-epk',
+      grant_mode: 'permanent',
+      grant_scope: 'remote_query',
+      ssh_key_id: '',
+      ssh_key_fingerprint: '',
+      status: 'active',
+      first_authorized_at: new Date(Date.now() - 5_000).toISOString(),
+      expires_at: '',
+      last_used_at: now,
+      max_calls: 999999,
+      remaining_calls: 999999,
+      created_by: 'test',
+      update_time: now,
+    });
+
+    await server.storage.remoteInvoke.createPairing({
+      id: 'ri-phase1-replace-pairing',
+      user_id: '',
+      client_instance_id: clientInstanceId,
+      caller_fingerprint: 'phase1-replace-caller',
+      pair_code: '654321',
+      status: 'pending_approval',
+      caller_pubkey: '',
+      caller_ephemeral_pub: 'new-caller-epk',
+      client_ephemeral_pub: '',
+      caller_info_json: JSON.stringify({ fingerprint: 'phase1-replace-caller', display_name: 'replace-caller' }),
+      command_summary_json: '{}',
+      command_json: '{}',
+      relay_token: '',
+      call_id: '',
+      grant_id: '',
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      create_time: now,
+      update_time: now,
+    });
+
+    const response = await req(
+      'POST',
+      '/v4/remote-invoke/client/grants/ri-phase1-replace-pairing/decision',
+      {
+        decision: 'approve',
+        grant_mode: 'permanent',
+        grant_scope: 'remote_shell_exec',
+        client_instance_id: clientInstanceId,
+        client_ephemeral_pub: 'new-client-epk',
+      },
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+
+    expect(response.status, JSON.stringify(response.data)).toBe(200);
+
+    const reusable = await req(
+      'GET',
+      `/v4/remote-invoke/grants/reusable?client_instance_id=${encodeURIComponent(clientInstanceId)}&caller_fingerprint=${encodeURIComponent('phase1-replace-caller')}`,
+    );
+    expect(reusable.status).toBe(200);
+    expect(reusable.data.data.grant_id).not.toBe('ri-phase1-old-grant');
+    expect(reusable.data.data.caller_ephemeral_pub).toBe('new-caller-epk');
+    expect(reusable.data.data.client_ephemeral_pub).toBe('new-client-epk');
+
+    const oldGrant = await server.storage.remoteInvoke.getGrant('ri-phase1-old-grant');
+    expect(oldGrant?.status).toBe('removed');
   });
 
   it('forwards exit_encrypted to caller without persisting plaintext payload', async () => {
@@ -702,4 +833,5 @@ describe('remote invoke relay v2 phase 1', () => {
     expect(JSON.stringify(callAfterRestart)).not.toContain('PHASE1-RESTART-CMD');
     expect(JSON.stringify(callAfterRestart)).not.toContain('PHASE1-RESTART-EXIT');
   });
+
 });

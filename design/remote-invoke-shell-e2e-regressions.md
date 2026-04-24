@@ -8,6 +8,10 @@
 2. `test_remote_relay_url_fallback_e2e.sh`
 3. `test_remote_invoke_ssh_e2e.sh`
 
+以及 1 个 Recent Calls 参数预览回归脚本存在稳定性问题：
+
+4. `test_remote_invoke_recent_calls_args_preview_e2e.sh`
+
 排查后发现失败点并不一致，但根因都与 shell E2E 夹具落后于当前 relay v2 / 加密链路协议有关：
 
 - pair-code connect 成功后，caller 现在必须从 relay 获得 `client_ephemeral_pub` 才能完成本地加密上下文落盘；旧 mock relay 仍返回旧版最小 payload，导致 connect 在“批准成功”后反而报错。
@@ -51,6 +55,45 @@
 
 同时继续通过 Admin API 校验 Recent Calls 中的命令记录与参数透传，保持对 SSH grant 复用能力的覆盖。
 
+### 3. 收紧 pair-code connect 后的 grant 可见性断言
+
+`test_remote_invoke_e2e.sh` 在 caller `remote connect` 成功退出后，曾立即单次读取
+`/_bifrost/api/remote-invoke/grants` 并断言 `length > 0`。本地通常足够快，但 CI 上
+授权审批成功、caller 连接完成、target grants 列表可见之间可能存在短暂时序窗口，
+从而把瞬时延迟误判成产品回归。
+
+本轮将该断言改为带超时的短轮询：
+
+- approve pairing 成功后，最多等待 10 秒
+- 每秒重新读取一次 `/_bifrost/api/remote-invoke/grants`
+- 只有超时后仍为 `0` 才判定失败
+
+这样不会放宽真正的失败条件，只是避免把“授权刚创建但列表还没稳定可见”的 CI 抖动
+记成回归。
+
+### 4. Recent Calls 参数预览 E2E 改为本地 mock 流量并补齐可诊断失败日志
+
+`test_remote_invoke_recent_calls_args_preview_e2e.sh` 原本在 approve pairing 之后直接通过
+`curl --proxy http://127.0.0.1:<admin_port> http://httpbin.org/anything/<marker>` 造流量。
+
+这有两个 CI 脆弱点：
+
+- 该请求依赖公网可达与 `httpbin.org` 稳定性，一旦 runner 外网抖动，脚本会在 `set -e`
+  下直接退出。
+- 脚本对 caller `remote connect` 使用裸 `wait "$CALLER_CONNECT_PID"`，当 connect 子进程
+  非零退出时，会在自定义 `_log_fail` 之前被 `errexit` 截断，shell runner 最终只能把
+  “上一条成功日志”误报成失败原因，难以定位。
+
+本轮调整：
+
+- 启动 `e2e-tests/mock_servers/http_echo_server.py` 本地 echo fixture，使用
+  `http://127.0.0.1:<mock_port>/anything/<marker>` 代替公网 `httpbin.org`
+- 造流量请求改为显式重试 + 显式失败日志，确保失败时能看到 mock server 上下文
+- caller `remote connect` 改为可诊断的等待逻辑，避免 `wait` 被 `set -e` 提前中断
+
+这样 Recent Calls 参数预览回归就只验证“远程搜索调用是否把参数摘要写入调用历史”，
+不再额外耦合公网网络质量。
+
 ## 依赖项
 
 - `target/release/bifrost`
@@ -67,9 +110,11 @@
 
 ### E2E 测试
 
+- `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
 - `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
 - `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
 - `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
+- `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`
 
 ### 真实场景测试（human_tests）
 
@@ -78,6 +123,7 @@
 - pair-code connect 在当前加密协议下仍能完成 overload retry
 - 显式 `--relay-url` 仍优先于运行中实例 / 本地配置
 - `remote connect --ssh-key` 后，`remote search` 与 `remote traffic get` 能通过真实 CLI 成功执行
+- Recent Calls 参数预览回归脚本在离线/受限 CI 网络下仍能通过本地 mock 流量稳定生成调用记录
 
 同时同步更新 `human_tests/readme.md` 索引。
 

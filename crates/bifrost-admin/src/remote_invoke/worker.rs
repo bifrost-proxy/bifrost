@@ -1,22 +1,26 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::RemoteShellStore;
 use bifrost_sync::SyncManagerHandle;
+use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use ring::agreement::{agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
 use ring::rand::SystemRandom;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
 use super::executor::RemoteInvokeExecutor;
 use super::grant_crypto_store::{GrantCryptoStore, StoredGrantCryptoMaterial};
+use super::grant_info_store::GrantInfoStore;
+use super::grant_policy_store::{GrantPolicyStore, StoredGrantPolicy};
 use super::identity::Identity;
 use super::relay_client::RelayClient;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
@@ -29,8 +33,9 @@ use super::types::{
     EnvelopeAad, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode,
     GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
     RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
-    WorkerState,
+    UpdateGrantRequest, WorkerState,
 };
+use crate::state::SharedAdminState;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 25;
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
@@ -92,6 +97,15 @@ struct GrantCryptoMaterial {
     client_ephemeral_pub: String,
 }
 
+#[derive(Debug, Clone)]
+struct ShellGrantProvision {
+    grant_scope: GrantScope,
+    policy_binding: Option<Value>,
+    shell_policy_set_version_snapshot: Option<u64>,
+    interactive_allowed: Option<bool>,
+    stdin_allowed: Option<bool>,
+}
+
 pub struct RemoteInvokeWorker {
     config: RemoteInvokeConfig,
     identity: Identity,
@@ -105,6 +119,9 @@ pub struct RemoteInvokeWorker {
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
     grant_crypto_store: Arc<GrantCryptoStore>,
+    grant_policy_store: Arc<GrantPolicyStore>,
+    grant_info_store: Arc<GrantInfoStore>,
+    grant_policy: Arc<RwLock<HashMap<String, StoredGrantPolicy>>>,
     discovery_session: Arc<RwLock<Option<DiscoverySession>>>,
     ssh_key_store: Arc<SshKeyStore>,
     shutdown: Arc<AtomicBool>,
@@ -117,6 +134,7 @@ impl RemoteInvokeWorker {
         config: RemoteInvokeConfig,
         identity: Identity,
         sync_manager: Option<SyncManagerHandle>,
+        state: SharedAdminState,
         admin_host: &str,
         admin_port: u16,
     ) -> Arc<Self> {
@@ -126,10 +144,14 @@ impl RemoteInvokeWorker {
             &identity.device_name,
             &identity.platform,
         ));
-        let executor = Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port));
+        let executor = Arc::new(RemoteInvokeExecutor::new_with_state(
+            admin_host, admin_port, state,
+        ));
         let data_dir = bifrost_storage::data_dir();
         let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
+        let grant_policy_store = Arc::new(GrantPolicyStore::new(&data_dir));
+        let grant_info_store = Arc::new(GrantInfoStore::new(&data_dir));
         let restored_grant_crypto =
             match grant_crypto_store.load_for_relay(&relay_client.base_url()) {
                 Ok(restored) => restored
@@ -150,6 +172,48 @@ impl RemoteInvokeWorker {
                     HashMap::new()
                 }
             };
+        let restored_grant_policy =
+            match grant_policy_store.load_for_relay(&relay_client.base_url()) {
+                Ok(restored) => restored,
+                Err(error) => {
+                    warn!(error = %error, "load persisted grant policy failed");
+                    HashMap::new()
+                }
+            };
+        let restored_grant_info = match grant_info_store.load_for_relay(&relay_client.base_url()) {
+            Ok(mut restored) => {
+                // Remove grants whose crypto material is missing (e.g. crypto files were deleted).
+                // These orphaned grants cannot decrypt any incoming commands and will be revoked
+                // on the relay during the next SSE reconciliation.
+                let before = restored.len();
+                restored.retain(|grant_id, _| restored_grant_crypto.contains_key(grant_id));
+                let removed = before - restored.len();
+                if removed > 0 {
+                    warn!(
+                        removed = removed,
+                        remaining = restored.len(),
+                        "removed orphaned grants with missing crypto material on startup"
+                    );
+                    if let Err(error) = grant_info_store.retain_only(
+                        &relay_client.base_url(),
+                        &restored.keys().cloned().collect(),
+                    ) {
+                        warn!(error = %error, "failed to persist orphaned grant cleanup");
+                    }
+                }
+                if !restored.is_empty() {
+                    info!(
+                        count = restored.len(),
+                        "restored persisted grant info from disk"
+                    );
+                }
+                restored
+            }
+            Err(error) => {
+                warn!(error = %error, "load persisted grant info failed");
+                HashMap::new()
+            }
+        };
 
         Arc::new(Self {
             config,
@@ -161,9 +225,12 @@ impl RemoteInvokeWorker {
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             call_history: Arc::new(RwLock::new(VecDeque::new())),
-            local_grants: Arc::new(RwLock::new(HashMap::new())),
+            local_grants: Arc::new(RwLock::new(restored_grant_info)),
             grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
             grant_crypto_store,
+            grant_policy_store,
+            grant_info_store,
+            grant_policy: Arc::new(RwLock::new(restored_grant_policy)),
             discovery_session: Arc::new(RwLock::new(None)),
             ssh_key_store,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -198,6 +265,7 @@ impl RemoteInvokeWorker {
     }
 
     pub fn pending_pairings(&self) -> Vec<PairingRequest> {
+        self.cleanup_expired_pairings();
         self.pending_pairings
             .read()
             .values()
@@ -260,7 +328,41 @@ impl RemoteInvokeWorker {
                 HashMap::new()
             }
         };
-        *self.grant_crypto.write() = restored_grant_crypto;
+        *self.grant_crypto.write() = restored_grant_crypto.clone();
+        let restored_grant_policy = match self.grant_policy_store.load_for_relay(new_normalized) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, relay_url = %new_normalized, "reload persisted grant policy after relay switch failed");
+                HashMap::new()
+            }
+        };
+        *self.grant_policy.write() = restored_grant_policy;
+        let restored_grant_info = match self.grant_info_store.load_for_relay(new_normalized) {
+            Ok(mut restored) => {
+                let before = restored.len();
+                restored.retain(|grant_id, _| restored_grant_crypto.contains_key(grant_id));
+                let removed = before - restored.len();
+                if removed > 0 {
+                    warn!(
+                        removed = removed,
+                        remaining = restored.len(),
+                        "removed orphaned grants with missing crypto material on relay switch"
+                    );
+                    if let Err(error) = self
+                        .grant_info_store
+                        .retain_only(new_normalized, &restored.keys().cloned().collect())
+                    {
+                        warn!(error = %error, "failed to persist orphaned grant cleanup on relay switch");
+                    }
+                }
+                restored
+            }
+            Err(error) => {
+                warn!(error = %error, relay_url = %new_normalized, "reload persisted grant info after relay switch failed");
+                HashMap::new()
+            }
+        };
+        *self.local_grants.write() = restored_grant_info;
         self.reconnect_notify.notify_waiters();
     }
 
@@ -422,7 +524,15 @@ impl RemoteInvokeWorker {
         Ok(Some(session))
     }
 
-    pub async fn approve_pairing(&self, pairing_id: &str, grant_mode: GrantMode) -> Result<Value> {
+    pub async fn approve_pairing(
+        &self,
+        pairing_id: &str,
+        grant_mode: GrantMode,
+        requested_grant_scope: Option<GrantScope>,
+        requested_policy_binding: Option<Value>,
+        requested_interactive_allowed: Option<bool>,
+        requested_stdin_allowed: Option<bool>,
+    ) -> Result<Value> {
         let found = {
             let pairings = self.pending_pairings.read();
             pairings.contains_key(pairing_id)
@@ -448,24 +558,38 @@ impl RemoteInvokeWorker {
             )
         })?;
         let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
+        let shell_grant = shell_grant_provision(
+            requested_grant_scope,
+            requested_policy_binding,
+            requested_interactive_allowed,
+            requested_stdin_allowed,
+        )
+        .unwrap_or_else(|error| {
+            warn!(error = %error, "load remote shell grant defaults failed, fallback to remote_query");
+            default_query_grant_provision()
+        });
 
         let req = GrantDecisionRequest {
             pairing_id: pairing_id.to_string(),
             client_instance_id: self.identity.instance_id.clone(),
             decision: GrantDecision::Approve,
             grant_mode: Some(grant_mode),
-            grant_scope: Some(GrantScope::RemoteQuery),
-            policy_binding: None,
-            shell_policy_set_version_snapshot: None,
-            interactive_allowed: None,
-            stdin_allowed: None,
+            grant_scope: Some(shell_grant.grant_scope),
             client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
         };
 
-        let result = self
+        let result = match self
             .relay_client
             .submit_grant_decision(pairing_id, &req)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if is_relay_stale_pairing_error(&error) => {
+                self.pending_pairings.write().remove(pairing_id);
+                return Err(pairing_not_found_or_expired_error(pairing_id));
+            }
+            Err(error) => return Err(error),
+        };
 
         let (caller_fingerprint_from_pairing, caller_display_name_from_pairing) = self
             .pending_pairings
@@ -519,7 +643,7 @@ impl RemoteInvokeWorker {
                 caller_fingerprint,
                 caller_display_name,
                 grant_mode,
-                grant_scope: GrantScope::RemoteQuery,
+                grant_scope: shell_grant.grant_scope,
                 auth_method: AuthMethod::PairCode,
                 status: GrantStatus::Active,
                 first_authorized_at: now,
@@ -539,14 +663,25 @@ impl RemoteInvokeWorker {
                 ssh_key_fingerprint: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
-                policy_binding: None,
-                shell_policy_set_version_snapshot: None,
-                interactive_allowed: None,
-                stdin_allowed: None,
+                policy_binding: shell_grant.policy_binding.clone(),
+                shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
+                interactive_allowed: shell_grant.interactive_allowed,
+                stdin_allowed: shell_grant.stdin_allowed,
             };
             self.local_grants
                 .write()
                 .insert(grant_id.clone(), grant_info);
+            self.persist_grant_policy(
+                &grant_id,
+                &StoredGrantPolicy {
+                    grant_scope: shell_grant.grant_scope,
+                    policy_binding: shell_grant.policy_binding.clone(),
+                    shell_policy_set_version_snapshot: shell_grant
+                        .shell_policy_set_version_snapshot,
+                    interactive_allowed: shell_grant.interactive_allowed,
+                    stdin_allowed: shell_grant.stdin_allowed,
+                },
+            );
             debug!(grant_id = %grant_id, "inserted grant into local_grants from approve_pairing");
         }
 
@@ -579,17 +714,21 @@ impl RemoteInvokeWorker {
             decision: GrantDecision::Reject,
             grant_mode: None,
             grant_scope: None,
-            policy_binding: None,
-            shell_policy_set_version_snapshot: None,
-            interactive_allowed: None,
-            stdin_allowed: None,
             client_ephemeral_pub: None,
         };
 
-        let result = self
+        let result = match self
             .relay_client
             .submit_grant_decision(pairing_id, &req)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if is_relay_stale_pairing_error(&error) => {
+                self.pending_pairings.write().remove(pairing_id);
+                return Err(pairing_not_found_or_expired_error(pairing_id));
+            }
+            Err(error) => return Err(error),
+        };
         self.pending_pairings.write().remove(pairing_id);
         info!(pairing_id = %pairing_id, "rejected pairing");
         Ok(result)
@@ -724,9 +863,6 @@ impl RemoteInvokeWorker {
             )));
         }
 
-        *self.state.write() = WorkerState::Connected;
-        info!(stream_id = %stream_id, "SSE stream connected");
-
         if let Err(e) = self.relay_client.cancel_pending_pairings().await {
             debug!(error = %e, "cancel_pending_pairings on SSE connect (non-fatal)");
         } else {
@@ -738,26 +874,96 @@ impl RemoteInvokeWorker {
             Ok(grants_data) => {
                 let now = now_millis();
                 let mut count = 0u32;
+                let synced_transport = self.grant_crypto.read().clone();
+                let synced_policy = self.grant_policy.read().clone();
+                let mut stale_grant_ids = Vec::new();
+                let mut relay_active_ids = HashSet::new();
                 for item in &grants_data {
                     if let Some(gi) =
                         build_grant_info_from_grant_created(item, &self.identity.instance_id, now)
                     {
                         let gid = gi.grant_id.clone();
+                        relay_active_ids.insert(gid.clone());
+                        let gi = apply_stored_grant_policy(gi, synced_policy.get(&gid));
+                        if !has_usable_grant_crypto(&synced_transport, &gi) {
+                            warn!(
+                                grant_id = %gid,
+                                "active relay grant is missing usable encrypted transport context locally; deleting stale grant"
+                            );
+                            stale_grant_ids.push(gid);
+                            continue;
+                        }
+                        self.persist_grant_info(&gid, &gi);
                         self.local_grants.write().insert(gid, gi);
                         count += 1;
                     }
                 }
+
+                let local_orphans: Vec<String> = {
+                    let grants = self.local_grants.read();
+                    grants
+                        .keys()
+                        .filter(|id| !relay_active_ids.contains(id.as_str()))
+                        .cloned()
+                        .collect()
+                };
+                if !local_orphans.is_empty() {
+                    info!(
+                        count = local_orphans.len(),
+                        "purging local grants not present in relay active set (SSE reconciliation)"
+                    );
+                    for orphan_id in &local_orphans {
+                        self.local_grants.write().remove(orphan_id);
+                        self.remove_grant_crypto(orphan_id);
+                        self.remove_grant_policy(orphan_id);
+                        self.remove_grant_info(orphan_id);
+                    }
+                }
+
+                if let Err(error) = self
+                    .grant_info_store
+                    .retain_only(&self.relay_client.base_url(), &relay_active_ids)
+                {
+                    warn!(error = %error, "retain_only grant info store failed during SSE reconciliation");
+                }
+
                 if count > 0 {
                     info!(
                         count = count,
                         "synced active grants from relay on SSE connect"
                     );
                 }
+                for grant_id in stale_grant_ids {
+                    // Re-check after brief wait: approve_pairing may be storing crypto concurrently
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if self.grant_crypto.read().contains_key(&grant_id) {
+                        info!(grant_id = %grant_id, "grant crypto arrived during stale check; keeping grant");
+                        continue;
+                    }
+                    self.local_grants.write().remove(&grant_id);
+                    self.remove_grant_crypto(&grant_id);
+                    self.remove_grant_policy(&grant_id);
+                    self.remove_grant_info(&grant_id);
+                    match self.relay_client.delete_grant(&grant_id).await {
+                        Ok(_) => info!(
+                            grant_id = %grant_id,
+                            "deleted stale relay grant without local encrypted transport context"
+                        ),
+                        Err(error) => warn!(
+                            error = %error,
+                            grant_id = %grant_id,
+                            "failed to delete stale relay grant without local encrypted transport context"
+                        ),
+                    }
+                }
             }
             Err(e) => {
                 debug!(error = %e, "fetch_active_grants on SSE connect (non-fatal, relay may not support this endpoint)");
             }
         }
+
+        *self.state.write() = WorkerState::Connected;
+        info!(stream_id = %stream_id, "SSE stream connected");
 
         let heartbeat_interval = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
         let mut heartbeat_ticker = tokio::time::interval(heartbeat_interval);
@@ -883,9 +1089,14 @@ impl RemoteInvokeWorker {
         let mut pairings = self.pending_pairings.write();
         let before = pairings.len();
         pairings.retain(|id, tp| {
-            let alive = now.saturating_sub(tp.received_at) < ttl_ms;
+            let alive = pairing_request_is_alive(tp, now, ttl_ms);
             if !alive {
-                info!(pairing_id = %id, age_secs = (now - tp.received_at) / 1000, "removing expired pairing request");
+                info!(
+                    pairing_id = %id,
+                    age_secs = (now - tp.received_at) / 1000,
+                    expires_at = tp.request.expires_at,
+                    "removing expired pairing request"
+                );
             }
             alive
         });
@@ -979,6 +1190,7 @@ impl RemoteInvokeWorker {
                 command_summary: Default::default(),
                 command: Default::default(),
                 caller_pubkey,
+                expires_at: p.get("expires_at").and_then(parse_relay_timestamp_millis),
                 client_ephemeral_pub,
                 caller_ephemeral_pub,
             };
@@ -1067,6 +1279,8 @@ impl RemoteInvokeWorker {
             drop(grants);
             for id in &dead_ids {
                 self.remove_grant_crypto(id);
+                self.remove_grant_policy(id);
+                self.remove_grant_info(id);
             }
             debug!(
                 removed = count,
@@ -1090,6 +1304,7 @@ impl RemoteInvokeWorker {
         let relay_result = self.relay_client.delete_grant(grant_id).await;
         self.local_grants.write().remove(grant_id);
         self.remove_grant_crypto(grant_id);
+        self.remove_grant_policy(grant_id);
         match relay_result {
             Ok(_) => {
                 info!(grant_id = %grant_id, "grant deleted from local and relay");
@@ -1099,6 +1314,90 @@ impl RemoteInvokeWorker {
             }
         }
         Ok(())
+    }
+
+    pub async fn update_grant(
+        &self,
+        grant_id: &str,
+        requested_grant_scope: Option<GrantScope>,
+        requested_policy_binding: Option<Value>,
+        requested_interactive_allowed: Option<bool>,
+        requested_stdin_allowed: Option<bool>,
+    ) -> Result<Value> {
+        let existing = self
+            .local_grants
+            .read()
+            .get(grant_id)
+            .cloned()
+            .ok_or_else(|| BifrostError::NotFound(format!("grant '{}' not found", grant_id)))?;
+
+        let updated_shell_grant = updated_shell_grant_provision(
+            &existing,
+            requested_grant_scope,
+            requested_policy_binding,
+            requested_interactive_allowed,
+            requested_stdin_allowed,
+        )?;
+
+        let req = UpdateGrantRequest {
+            client_instance_id: self.identity.instance_id.clone(),
+            grant_scope: Some(updated_shell_grant.grant_scope),
+        };
+
+        let result = self.relay_client.update_grant(grant_id, &req).await?;
+        let mut updated_info = build_grant_info_from_grant_created(
+            &result,
+            &existing.client_instance_id,
+            existing.first_authorized_at,
+        )
+        .unwrap_or_else(|| GrantInfo {
+            grant_id: existing.grant_id.clone(),
+            client_instance_id: existing.client_instance_id.clone(),
+            caller_fingerprint: existing.caller_fingerprint.clone(),
+            caller_display_name: existing.caller_display_name.clone(),
+            grant_mode: existing.grant_mode,
+            grant_scope: updated_shell_grant.grant_scope,
+            auth_method: existing.auth_method,
+            status: existing.status,
+            first_authorized_at: existing.first_authorized_at,
+            expires_at: existing.expires_at,
+            last_used_at: existing.last_used_at,
+            max_calls: existing.max_calls,
+            remaining_calls: existing.remaining_calls,
+            ssh_key_id: existing.ssh_key_id.clone(),
+            ssh_key_fingerprint: existing.ssh_key_fingerprint.clone(),
+            caller_ephemeral_pub: existing.caller_ephemeral_pub.clone(),
+            client_ephemeral_pub: existing.client_ephemeral_pub.clone(),
+            policy_binding: updated_shell_grant.policy_binding.clone(),
+            shell_policy_set_version_snapshot: updated_shell_grant
+                .shell_policy_set_version_snapshot,
+            interactive_allowed: updated_shell_grant.interactive_allowed,
+            stdin_allowed: updated_shell_grant.stdin_allowed,
+        });
+        updated_info.policy_binding = updated_shell_grant.policy_binding.clone();
+        updated_info.shell_policy_set_version_snapshot =
+            updated_shell_grant.shell_policy_set_version_snapshot;
+        updated_info.interactive_allowed = updated_shell_grant.interactive_allowed;
+        updated_info.stdin_allowed = updated_shell_grant.stdin_allowed;
+
+        self.local_grants
+            .write()
+            .insert(grant_id.to_string(), updated_info.clone());
+        self.persist_grant_policy(
+            grant_id,
+            &StoredGrantPolicy {
+                grant_scope: updated_shell_grant.grant_scope,
+                policy_binding: updated_shell_grant.policy_binding.clone(),
+                shell_policy_set_version_snapshot: updated_shell_grant
+                    .shell_policy_set_version_snapshot,
+                interactive_allowed: updated_shell_grant.interactive_allowed,
+                stdin_allowed: updated_shell_grant.stdin_allowed,
+            },
+        );
+        info!(grant_id = %grant_id, "grant updated locally and on relay");
+        serde_json::to_value(updated_info).map_err(|error| {
+            BifrostError::Config(format!("serialize grant update result: {error}"))
+        })
     }
 
     fn persist_grant_crypto(&self, grant_id: &str, material: &GrantCryptoMaterial) {
@@ -1115,10 +1414,44 @@ impl RemoteInvokeWorker {
         }
     }
 
+    fn persist_grant_policy(&self, grant_id: &str, policy: &StoredGrantPolicy) {
+        self.grant_policy
+            .write()
+            .insert(grant_id.to_string(), policy.clone());
+        if let Err(error) =
+            self.grant_policy_store
+                .upsert(&self.relay_client.base_url(), grant_id, policy)
+        {
+            warn!(error = %error, grant_id = %grant_id, "persist grant policy failed");
+        }
+    }
+
     fn remove_grant_crypto(&self, grant_id: &str) {
         self.grant_crypto.write().remove(grant_id);
         if let Err(error) = self.grant_crypto_store.remove(grant_id) {
             warn!(error = %error, grant_id = %grant_id, "remove persisted grant crypto failed");
+        }
+    }
+
+    fn remove_grant_policy(&self, grant_id: &str) {
+        self.grant_policy.write().remove(grant_id);
+        if let Err(error) = self.grant_policy_store.remove(grant_id) {
+            warn!(error = %error, grant_id = %grant_id, "remove persisted grant policy failed");
+        }
+    }
+
+    fn persist_grant_info(&self, grant_id: &str, info: &GrantInfo) {
+        if let Err(error) =
+            self.grant_info_store
+                .upsert(&self.relay_client.base_url(), grant_id, info)
+        {
+            warn!(error = %error, grant_id = %grant_id, "persist grant info failed");
+        }
+    }
+
+    fn remove_grant_info(&self, grant_id: &str) {
+        if let Err(error) = self.grant_info_store.remove(grant_id) {
+            warn!(error = %error, grant_id = %grant_id, "remove persisted grant info failed");
         }
     }
 
@@ -1160,7 +1493,6 @@ impl RemoteInvokeWorker {
         match event_name {
             "client_hello_ack" => {
                 info!("received client_hello_ack from relay");
-                *self.state.write() = WorkerState::Connected;
             }
             "pairing_request" => match serde_json::from_str::<Value>(data) {
                 Ok(v) => self.handle_pairing_request(v).await,
@@ -1195,6 +1527,8 @@ impl RemoteInvokeWorker {
                         info!(grant_id = %grant_id, "grant revoked, sending ack");
                         self.local_grants.write().remove(grant_id);
                         self.remove_grant_crypto(grant_id);
+                        self.remove_grant_policy(grant_id);
+                        self.remove_grant_info(grant_id);
                         let rc = Arc::clone(&self.relay_client);
                         let gid = grant_id.to_string();
                         tokio::spawn(async move {
@@ -1246,6 +1580,8 @@ impl RemoteInvokeWorker {
         });
         for grant_id in revoked_grant_ids {
             self.remove_grant_crypto(&grant_id);
+            self.remove_grant_policy(&grant_id);
+            self.remove_grant_info(&grant_id);
         }
     }
 
@@ -1262,6 +1598,45 @@ impl RemoteInvokeWorker {
             }
         };
         let grant_id = grant_info.grant_id.clone();
+        let grant_info = {
+            let stored = self.grant_policy.read();
+            apply_stored_grant_policy(grant_info, stored.get(&grant_id))
+        };
+        if !has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
+            // Race condition: The relay sends the SSE grant_created event before the HTTP
+            // response to submit_grant_decision. If approve_pairing hasn't stored the crypto
+            // yet, we might mistakenly consider this grant stale. Wait briefly and retry.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
+                info!(grant_id = %grant_id, "grant crypto arrived after brief wait; accepting grant");
+                self.persist_grant_info(&grant_id, &grant_info);
+                self.local_grants
+                    .write()
+                    .insert(grant_id.clone(), grant_info);
+                return;
+            }
+            warn!(
+                grant_id = %grant_id,
+                "grant_created is missing usable encrypted transport context locally; deleting stale grant"
+            );
+            self.local_grants.write().remove(&grant_id);
+            self.remove_grant_crypto(&grant_id);
+            self.remove_grant_policy(&grant_id);
+            self.remove_grant_info(&grant_id);
+            match self.relay_client.delete_grant(&grant_id).await {
+                Ok(_) => info!(
+                    grant_id = %grant_id,
+                    "deleted stale grant from relay after grant_created without local encrypted transport context"
+                ),
+                Err(error) => warn!(
+                    error = %error,
+                    grant_id = %grant_id,
+                    "failed to delete stale grant from relay after grant_created without local encrypted transport context"
+                ),
+            }
+            return;
+        }
+        self.persist_grant_info(&grant_id, &grant_info);
         self.local_grants
             .write()
             .insert(grant_id.clone(), grant_info);
@@ -1292,10 +1667,6 @@ impl RemoteInvokeWorker {
                 grant_scope: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
-                policy_binding: None,
-                shell_policy_set_version_snapshot: None,
-                interactive_allowed: None,
-                stdin_allowed: None,
             };
         }
 
@@ -1313,10 +1684,6 @@ impl RemoteInvokeWorker {
                     grant_scope: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
-                    policy_binding: None,
-                    shell_policy_set_version_snapshot: None,
-                    interactive_allowed: None,
-                    stdin_allowed: None,
                 };
             }
             Err(error) => {
@@ -1332,10 +1699,6 @@ impl RemoteInvokeWorker {
                     grant_scope: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
-                    policy_binding: None,
-                    shell_policy_set_version_snapshot: None,
-                    interactive_allowed: None,
-                    stdin_allowed: None,
                 };
             }
         };
@@ -1352,10 +1715,6 @@ impl RemoteInvokeWorker {
                 grant_scope: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
-                policy_binding: None,
-                shell_policy_set_version_snapshot: None,
-                interactive_allowed: None,
-                stdin_allowed: None,
             };
         }
 
@@ -1371,10 +1730,6 @@ impl RemoteInvokeWorker {
                 grant_scope: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
-                policy_binding: None,
-                shell_policy_set_version_snapshot: None,
-                interactive_allowed: None,
-                stdin_allowed: None,
             };
         }
 
@@ -1395,10 +1750,6 @@ impl RemoteInvokeWorker {
                         grant_scope: None,
                         caller_ephemeral_pub: None,
                         client_ephemeral_pub: None,
-                        policy_binding: None,
-                        shell_policy_set_version_snapshot: None,
-                        interactive_allowed: None,
-                        stdin_allowed: None,
                     };
                 }
             },
@@ -1417,16 +1768,16 @@ impl RemoteInvokeWorker {
                     grant_scope: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
-                    policy_binding: None,
-                    shell_policy_set_version_snapshot: None,
-                    interactive_allowed: None,
-                    stdin_allowed: None,
                 };
             }
         };
         let grant_id = uuid::Uuid::new_v4().to_string();
         let grant_mode = GrantMode::Permanent;
         let expires_at = None;
+        let shell_grant = shell_grant_provision(None, None, None, None).unwrap_or_else(|error| {
+            warn!(error = %error, "load remote shell grant defaults failed for ssh connect, fallback to remote_query");
+            default_query_grant_provision()
+        });
 
         let grant_info = GrantInfo {
             grant_id: grant_id.clone(),
@@ -1437,7 +1788,7 @@ impl RemoteInvokeWorker {
                 .as_ref()
                 .and_then(|info| info.display_name.clone().or_else(|| info.hostname.clone())),
             grant_mode,
-            grant_scope: GrantScope::RemoteQuery,
+            grant_scope: shell_grant.grant_scope,
             auth_method: AuthMethod::SshPublickey,
             status: GrantStatus::Active,
             first_authorized_at: now,
@@ -1449,14 +1800,24 @@ impl RemoteInvokeWorker {
             ssh_key_fingerprint: Some(active_key.record.ssh_key_fingerprint.clone()),
             caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub.clone()),
             client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
-            policy_binding: None,
-            shell_policy_set_version_snapshot: None,
-            interactive_allowed: None,
-            stdin_allowed: None,
+            policy_binding: shell_grant.policy_binding.clone(),
+            shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
+            interactive_allowed: shell_grant.interactive_allowed,
+            stdin_allowed: shell_grant.stdin_allowed,
         };
         self.local_grants
             .write()
             .insert(grant_id.clone(), grant_info);
+        self.persist_grant_policy(
+            &grant_id,
+            &StoredGrantPolicy {
+                grant_scope: shell_grant.grant_scope,
+                policy_binding: shell_grant.policy_binding.clone(),
+                shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
+                interactive_allowed: shell_grant.interactive_allowed,
+                stdin_allowed: shell_grant.stdin_allowed,
+            },
+        );
         self.grant_crypto
             .write()
             .insert(grant_id.clone(), crypto_material.clone());
@@ -1477,13 +1838,9 @@ impl RemoteInvokeWorker {
             reason: None,
             caller_fingerprint: Some(active_key.record.ssh_key_fingerprint),
             grant_mode: Some(grant_mode),
-            grant_scope: Some(GrantScope::RemoteQuery),
+            grant_scope: Some(shell_grant.grant_scope),
             caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub),
             client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub),
-            policy_binding: None,
-            shell_policy_set_version_snapshot: None,
-            interactive_allowed: None,
-            stdin_allowed: None,
         }
     }
 
@@ -1557,6 +1914,9 @@ impl RemoteInvokeWorker {
             command_summary,
             command,
             caller_pubkey,
+            expires_at: data
+                .get("expires_at")
+                .and_then(parse_relay_timestamp_millis),
             client_ephemeral_pub,
             caller_ephemeral_pub,
         };
@@ -1647,6 +2007,7 @@ impl RemoteInvokeWorker {
                     interactive_allowed: None,
                     stdin_allowed: None,
                 };
+                self.persist_grant_info(&grant_id, &grant_info);
                 self.local_grants
                     .write()
                     .insert(grant_id.clone(), grant_info);
@@ -1764,7 +2125,7 @@ impl RemoteInvokeWorker {
             }
         };
 
-        let command = match self.decrypt_call_command(
+        let mut command = match self.decrypt_call_command(
             &grant_id,
             &call_id,
             command_kind,
@@ -1796,6 +2157,38 @@ impl RemoteInvokeWorker {
             return;
         }
 
+        if let Some(query) = &command.query {
+            if command_kind == CommandKind::QueryReadonly
+                && query.capability() == bifrost_command::CommandCapability::Mutating
+            {
+                let reason = format!(
+                    "query '{}' requires a mutating transport kind, but caller declared query.readonly",
+                    query.command_id()
+                );
+                warn!(call_id = %call_id, grant_id = %grant_id, %reason, "SECURITY: mutating query kind mismatch");
+                self.send_call_exit(&call_id, -2, Some(reason), None, None, 0)
+                    .await;
+                return;
+            }
+        }
+
+        if let Some(reason) = resolve_shell_command_policy_for_grant(
+            &mut command,
+            &self.local_grants,
+            &grant_id,
+            &self.executor,
+        ) {
+            warn!(
+                call_id = %call_id,
+                grant_id = %grant_id,
+                %reason,
+                "SECURITY: shell command rejected by grant policy binding"
+            );
+            self.send_call_exit(&call_id, -2, Some(reason), None, None, 0)
+                .await;
+            return;
+        }
+
         let command_summary_for_call =
             build_call_command_summary(data.get("command_summary"), &command, command_kind);
 
@@ -1812,6 +2205,7 @@ impl RemoteInvokeWorker {
             grant_id = %grant_id,
             command = %command.summary_label(),
             args_json = ?command.args_json,
+            query = ?command.query,
             "executing remote command via call_open"
         );
 
@@ -1841,6 +2235,7 @@ impl RemoteInvokeWorker {
                     kind: command.kind,
                     command: command.command.clone(),
                     args_json: command.args_json.clone(),
+                    query: command.query.clone(),
                     policy_id: command.policy_id.clone(),
                     exec_mode: command.exec_mode,
                     argv: command.argv.clone(),
@@ -1874,10 +2269,10 @@ impl RemoteInvokeWorker {
                     .read()
                     .get(&grant_id)
                     .and_then(|grant| grant.ssh_key_fingerprint.clone()),
-                policy_id: None,
-                exec_mode: None,
-                output_mode: None,
-                pty_enabled: None,
+                policy_id: command.policy_id.clone(),
+                exec_mode: command.exec_mode,
+                output_mode: command.output_mode,
+                pty_enabled: command.pty.as_ref().map(|pty| pty.enabled),
             };
             let max = self.config.max_records as usize;
             let mut history = self.call_history.write();
@@ -2284,6 +2679,22 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn pairing_request_is_alive(pairing: &TimestampedPairing, now: u64, ttl_ms: u64) -> bool {
+    match pairing.request.expires_at {
+        Some(expires_at) if expires_at > 0 => now < expires_at,
+        _ => now.saturating_sub(pairing.received_at) < ttl_ms,
+    }
+}
+
+fn parse_relay_timestamp_millis(value: &Value) -> Option<u64> {
+    if let Some(ms) = value.as_u64() {
+        return Some(ms);
+    }
+    let timestamp = value.as_str()?;
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    Some(parsed.with_timezone(&Utc).timestamp_millis().max(0) as u64)
+}
+
 struct CallResult {
     status: CallStatus,
     exit_code: i32,
@@ -2332,6 +2743,15 @@ fn build_call_command_summary(
         } else {
             fallback.to_string()
         };
+    }
+
+    let has_masked_args = summary
+        .masked_args_json
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !has_masked_args {
+        summary.masked_args_json = command.summary_args_json();
     }
 
     summary
@@ -2388,6 +2808,21 @@ fn is_relay_unauthorized(err: &BifrostError) -> bool {
     matches!(err, BifrostError::Network(msg) if msg.contains("unauthorized"))
 }
 
+fn is_relay_stale_pairing_error(err: &BifrostError) -> bool {
+    matches!(
+        err,
+        BifrostError::Network(msg)
+            if msg.contains("pairing_expired")
+                || msg.contains("pairing_not_found")
+                || msg.contains("pairing_not_pending")
+                || msg.contains("not found or expired")
+    )
+}
+
+fn pairing_not_found_or_expired_error(pairing_id: &str) -> BifrostError {
+    BifrostError::Network(format!("pairing {} not found or expired", pairing_id))
+}
+
 fn is_grant_info_dead(info: &GrantInfo, now_ms: u64) -> bool {
     if matches!(
         info.status,
@@ -2435,6 +2870,238 @@ fn validate_grant_for_call(
                 None
             }
         }
+    }
+}
+
+fn has_usable_grant_crypto(
+    grant_crypto: &HashMap<String, GrantCryptoMaterial>,
+    grant: &GrantInfo,
+) -> bool {
+    let Some(material) = grant_crypto.get(&grant.grant_id) else {
+        return false;
+    };
+
+    if let Some(caller_ephemeral_pub) = &grant.caller_ephemeral_pub {
+        if !caller_ephemeral_pub.is_empty()
+            && material.caller_ephemeral_pub != *caller_ephemeral_pub
+        {
+            return false;
+        }
+    }
+
+    if let Some(client_ephemeral_pub) = &grant.client_ephemeral_pub {
+        if !client_ephemeral_pub.is_empty()
+            && material.client_ephemeral_pub != *client_ephemeral_pub
+        {
+            return false;
+        }
+    }
+
+    !material.shared_secret.is_empty()
+}
+
+fn default_query_grant_provision() -> ShellGrantProvision {
+    ShellGrantProvision {
+        grant_scope: GrantScope::RemoteQuery,
+        policy_binding: None,
+        shell_policy_set_version_snapshot: None,
+        interactive_allowed: None,
+        stdin_allowed: None,
+    }
+}
+
+fn shell_grant_provision(
+    requested_grant_scope: Option<GrantScope>,
+    requested_policy_binding: Option<Value>,
+    requested_interactive_allowed: Option<bool>,
+    requested_stdin_allowed: Option<bool>,
+) -> Result<ShellGrantProvision> {
+    let store = RemoteShellStore::new()?;
+    let set = store.load()?;
+    let has_enabled_policy = set.policies.iter().any(|policy| policy.enabled);
+    if !has_enabled_policy {
+        return Ok(default_query_grant_provision());
+    }
+
+    let grant_scope = requested_grant_scope.unwrap_or(GrantScope::RemoteShellExec);
+    if grant_scope == GrantScope::RemoteQuery {
+        return Ok(default_query_grant_provision());
+    }
+
+    let policy_binding = normalize_shell_policy_binding(&set, requested_policy_binding)?;
+    let interactive_allowed = requested_interactive_allowed.unwrap_or(false);
+    if interactive_allowed && grant_scope != GrantScope::RemoteShellInteractive {
+        return Err(BifrostError::Config(
+            "interactive shell access requires grant_scope=remote_shell_interactive".to_string(),
+        ));
+    }
+
+    Ok(ShellGrantProvision {
+        grant_scope,
+        policy_binding: Some(policy_binding),
+        shell_policy_set_version_snapshot: Some(set.current_version()),
+        interactive_allowed: Some(interactive_allowed),
+        stdin_allowed: Some(requested_stdin_allowed.unwrap_or(false)),
+    })
+}
+
+fn updated_shell_grant_provision(
+    existing: &GrantInfo,
+    requested_grant_scope: Option<GrantScope>,
+    requested_policy_binding: Option<Value>,
+    requested_interactive_allowed: Option<bool>,
+    requested_stdin_allowed: Option<bool>,
+) -> Result<ShellGrantProvision> {
+    let desired_scope = requested_grant_scope.unwrap_or(existing.grant_scope);
+    if desired_scope == GrantScope::RemoteQuery {
+        return Ok(default_query_grant_provision());
+    }
+
+    let store = RemoteShellStore::new()?;
+    let set = store.load()?;
+    if !set.policies.iter().any(|policy| policy.enabled) {
+        return Err(BifrostError::Config(
+            "no enabled shell policy exists on this device".to_string(),
+        ));
+    }
+
+    let desired_policy_binding =
+        requested_policy_binding.or_else(|| existing.policy_binding.clone());
+    let policy_binding = normalize_shell_policy_binding(&set, desired_policy_binding)?;
+    let interactive_allowed = requested_interactive_allowed
+        .or(existing.interactive_allowed)
+        .unwrap_or(false);
+    if interactive_allowed && desired_scope != GrantScope::RemoteShellInteractive {
+        return Err(BifrostError::Config(
+            "interactive shell access requires grant_scope=remote_shell_interactive".to_string(),
+        ));
+    }
+
+    Ok(ShellGrantProvision {
+        grant_scope: desired_scope,
+        policy_binding: Some(policy_binding),
+        shell_policy_set_version_snapshot: Some(set.current_version()),
+        interactive_allowed: Some(interactive_allowed),
+        stdin_allowed: Some(
+            requested_stdin_allowed
+                .or(existing.stdin_allowed)
+                .unwrap_or(false),
+        ),
+    })
+}
+
+fn normalize_shell_policy_binding(
+    set: &bifrost_storage::RemoteShellSet,
+    binding: Option<Value>,
+) -> Result<Value> {
+    let enabled_policy_ids = set
+        .policies
+        .iter()
+        .filter(|policy| policy.enabled)
+        .map(|policy| policy.id.as_str())
+        .collect::<Vec<_>>();
+
+    if enabled_policy_ids.is_empty() {
+        return Err(BifrostError::Config(
+            "no enabled shell policy exists on this device".to_string(),
+        ));
+    }
+
+    let Some(binding) = binding else {
+        return Ok(json!({ "mode": "all" }));
+    };
+
+    let mode = binding
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("all");
+    if mode == "all" {
+        return Ok(json!({ "mode": "all" }));
+    }
+
+    let Some(policy_ids) = binding.get("policy_ids").and_then(|value| value.as_array()) else {
+        return Err(BifrostError::Config(
+            "shell policy binding requires a non-empty policy_ids array".to_string(),
+        ));
+    };
+
+    let normalized_policy_ids = policy_ids
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    if normalized_policy_ids.is_empty() {
+        return Err(BifrostError::Config(
+            "shell policy binding requires at least one policy id".to_string(),
+        ));
+    }
+
+    for policy_id in &normalized_policy_ids {
+        if !enabled_policy_ids
+            .iter()
+            .any(|enabled| enabled == policy_id)
+        {
+            return Err(BifrostError::Config(format!(
+                "shell policy '{}' is not enabled on this device",
+                policy_id
+            )));
+        }
+    }
+
+    Ok(json!({
+        "mode": "selected",
+        "policy_ids": normalized_policy_ids,
+    }))
+}
+
+fn resolve_shell_command_policy_for_grant(
+    command: &mut RemoteCommand,
+    grants: &Arc<RwLock<HashMap<String, GrantInfo>>>,
+    grant_id: &str,
+    executor: &Arc<RemoteInvokeExecutor>,
+) -> Option<String> {
+    if command.kind != CommandKind::ShellExec {
+        return None;
+    }
+
+    let grant = grants.read().get(grant_id).cloned()?;
+    if grant.grant_scope == GrantScope::RemoteQuery {
+        return Some("grant scope does not allow shell.exec".to_string());
+    }
+    if command
+        .policy_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Some(
+            "shell.exec caller must not specify policy_id; the target device selects policy"
+                .to_string(),
+        );
+    }
+
+    if let Some(snapshot) = grant.shell_policy_set_version_snapshot {
+        match RemoteShellStore::new().and_then(|store| store.current_version()) {
+            Ok(current_version) if current_version != snapshot => {
+                return Some(format!(
+                    "shell policy set version changed (grant={}, current={}), reconnect is required",
+                    snapshot, current_version
+                ));
+            }
+            Err(error) => {
+                return Some(format!("load shell policy set version failed: {}", error));
+            }
+            _ => {}
+        }
+    }
+
+    match executor.select_policy_id_for_command(command, grant.policy_binding.as_ref()) {
+        Ok(policy_id) => {
+            command.policy_id = Some(policy_id);
+            None
+        }
+        Err(error) => Some(error.to_string()),
     }
 }
 
@@ -2543,12 +3210,30 @@ fn build_grant_info_from_grant_created(
     })
 }
 
+fn apply_stored_grant_policy(
+    mut grant: GrantInfo,
+    stored: Option<&StoredGrantPolicy>,
+) -> GrantInfo {
+    if let Some(stored) = stored {
+        grant.grant_scope = stored.grant_scope;
+        grant.policy_binding = stored.policy_binding.clone();
+        grant.shell_policy_set_version_snapshot = stored.shell_policy_set_version_snapshot;
+        grant.interactive_allowed = stored.interactive_allowed;
+        grant.stdin_allowed = stored.stdin_allowed;
+    }
+    grant
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_invoke::types::ShellExecMode;
     use base64::Engine;
+    use bifrost_command::{CanonicalQueryCommand, SearchArgs};
+    use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
     use ring::agreement::EphemeralPrivateKey;
     use ring::rand::SystemRandom;
+    use tempfile::TempDir;
 
     fn make_active_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
         GrantInfo {
@@ -2582,6 +3267,33 @@ mod tests {
             interactive_allowed: None,
             stdin_allowed: None,
         }
+    }
+
+    fn setup_remote_shell_store(version: u64) -> (std::sync::MutexGuard<'static, ()>, TempDir) {
+        let guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        let store = RemoteShellStore::new().expect("remote shell store");
+        store
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version,
+                policies: vec![RemoteShellPolicy {
+                    id: "echo-argv".to_string(),
+                    name: "echo-argv".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "argv_exec"
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save store");
+        (guard, dir)
     }
 
     #[test]
@@ -2738,11 +3450,266 @@ mod tests {
     }
 
     #[test]
+    fn test_is_relay_stale_pairing_error_matches_expired_and_not_pending() {
+        let expired = BifrostError::Network(
+            "relay submit_grant_decision failed with status 410 Gone: pairing_expired".to_string(),
+        );
+        let not_pending = BifrostError::Network(
+            "relay submit_grant_decision failed with status 400 Bad Request: pairing_not_pending"
+                .to_string(),
+        );
+        let unrelated =
+            BifrostError::Network("relay submit_grant_decision unauthorized".to_string());
+
+        assert!(is_relay_stale_pairing_error(&expired));
+        assert!(is_relay_stale_pairing_error(&not_pending));
+        assert!(!is_relay_stale_pairing_error(&unrelated));
+    }
+
+    #[test]
+    fn test_pairing_request_is_alive_prefers_relay_expires_at() {
+        let pairing = TimestampedPairing {
+            request: PairingRequest {
+                pairing_id: "pairing-1".to_string(),
+                caller_info: CallerInfo::default(),
+                command_summary: CommandSummary::default(),
+                command: RemoteCommand::default(),
+                caller_pubkey: String::new(),
+                expires_at: Some(3_000),
+                client_ephemeral_pub: None,
+                caller_ephemeral_pub: None,
+            },
+            received_at: 1_000,
+        };
+
+        assert!(!pairing_request_is_alive(&pairing, 3_500, 120_000));
+        assert!(pairing_request_is_alive(&pairing, 2_500, 120_000));
+    }
+
+    #[test]
+    fn test_parse_relay_timestamp_millis_accepts_rfc3339() {
+        let millis =
+            parse_relay_timestamp_millis(&Value::String("2026-04-23T10:20:30.123Z".to_string()));
+
+        assert_eq!(millis, Some(1_776_939_630_123));
+    }
+
+    #[test]
+    fn test_shell_grant_provision_promotes_to_remote_shell_exec_when_policy_exists() {
+        let (_guard, _dir) = setup_remote_shell_store(7);
+
+        let provision =
+            shell_grant_provision(None, None, None, None).expect("shell grant provision");
+
+        assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        assert_eq!(provision.shell_policy_set_version_snapshot, Some(7));
+        assert_eq!(
+            provision
+                .policy_binding
+                .as_ref()
+                .and_then(|value| value.get("mode"))
+                .and_then(|value| value.as_str()),
+            Some("all")
+        );
+    }
+
+    #[test]
+    fn test_shell_grant_provision_accepts_selected_policy_binding() {
+        let (_guard, _dir) = setup_remote_shell_store(7);
+
+        let provision = shell_grant_provision(
+            Some(GrantScope::RemoteShellExec),
+            Some(serde_json::json!({
+                "mode": "selected",
+                "policy_ids": ["echo-argv"],
+            })),
+            Some(false),
+            Some(true),
+        )
+        .expect("shell grant provision");
+
+        assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        assert_eq!(provision.stdin_allowed, Some(true));
+        assert_eq!(
+            provision
+                .policy_binding
+                .as_ref()
+                .and_then(|value| value.get("policy_ids"))
+                .and_then(|value| value.as_array())
+                .map(|values| values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["echo-argv"])
+        );
+    }
+
+    #[test]
+    fn test_shell_grant_provision_rejects_unknown_selected_policy() {
+        let (_guard, _dir) = setup_remote_shell_store(7);
+
+        let error = shell_grant_provision(
+            Some(GrantScope::RemoteShellExec),
+            Some(serde_json::json!({
+                "mode": "selected",
+                "policy_ids": ["missing-policy"],
+            })),
+            None,
+            None,
+        )
+        .expect_err("missing policy should fail");
+
+        assert!(error.to_string().contains("missing-policy"));
+    }
+
+    #[test]
+    fn test_resolve_shell_command_policy_for_grant_rejects_version_mismatch() {
+        let (_guard, _dir) = setup_remote_shell_store(9);
+        let grants = Arc::new(RwLock::new(HashMap::new()));
+        let mut grant = make_active_grant("g1", GrantMode::Permanent);
+        grant.grant_scope = GrantScope::RemoteShellExec;
+        grant.policy_binding = Some(serde_json::json!({ "mode": "all" }));
+        grant.shell_policy_set_version_snapshot = Some(8);
+        grants.write().insert("g1".to_string(), grant);
+
+        let mut command = RemoteCommand {
+            kind: CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/echo".to_string(), "hello".to_string()]),
+            ..Default::default()
+        };
+        let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));
+
+        let reason = resolve_shell_command_policy_for_grant(&mut command, &grants, "g1", &executor)
+            .expect("reason");
+        assert!(reason.contains("version changed"));
+    }
+
+    #[test]
+    fn test_resolve_shell_command_policy_for_grant_rejects_caller_selected_policy() {
+        let (_guard, _dir) = setup_remote_shell_store(7);
+        let grants = Arc::new(RwLock::new(HashMap::new()));
+        let mut grant = make_active_grant("g1", GrantMode::Permanent);
+        grant.grant_scope = GrantScope::RemoteShellExec;
+        grant.policy_binding = Some(serde_json::json!({ "mode": "all" }));
+        grant.shell_policy_set_version_snapshot = Some(7);
+        grants.write().insert("g1".to_string(), grant);
+
+        let mut command = RemoteCommand {
+            kind: CommandKind::ShellExec,
+            policy_id: Some("echo-argv".to_string()),
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/echo".to_string(), "hello".to_string()]),
+            ..Default::default()
+        };
+        let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));
+
+        let reason = resolve_shell_command_policy_for_grant(&mut command, &grants, "g1", &executor)
+            .expect("caller policy should be rejected");
+        assert!(reason.contains("must not specify policy_id"));
+    }
+
+    #[test]
+    fn test_resolve_shell_command_policy_for_grant_selects_target_policy() {
+        let (_guard, dir) = setup_remote_shell_store(7);
+        let data_dir = dir.path().join("bifrost-data");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 7,
+                policies: vec![
+                    RemoteShellPolicy {
+                        id: "echo-argv".to_string(),
+                        name: "echo-argv".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "argv_exec",
+                            "allowed_executables": ["/bin/echo"]
+                        }),
+                    },
+                    RemoteShellPolicy {
+                        id: "pwd-argv".to_string(),
+                        name: "pwd-argv".to_string(),
+                        description: None,
+                        enabled: true,
+                        profile_id: None,
+                        metadata: serde_json::json!({
+                            "exec_mode": "argv_exec",
+                            "allowed_executables": ["/bin/pwd"]
+                        }),
+                    },
+                ],
+                profiles: vec![],
+            })
+            .expect("save store");
+
+        let grants = Arc::new(RwLock::new(HashMap::new()));
+        let mut grant = make_active_grant("g1", GrantMode::Permanent);
+        grant.grant_scope = GrantScope::RemoteShellExec;
+        grant.policy_binding = Some(serde_json::json!({
+            "mode": "selected",
+            "policy_ids": ["pwd-argv"]
+        }));
+        grant.shell_policy_set_version_snapshot = Some(7);
+        grants.write().insert("g1".to_string(), grant);
+
+        let mut command = RemoteCommand {
+            kind: CommandKind::ShellExec,
+            exec_mode: Some(ShellExecMode::ArgvExec),
+            argv: Some(vec!["/bin/pwd".to_string()]),
+            ..Default::default()
+        };
+        let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));
+
+        let reason = resolve_shell_command_policy_for_grant(&mut command, &grants, "g1", &executor);
+        assert!(reason.is_none());
+        assert_eq!(command.policy_id.as_deref(), Some("pwd-argv"));
+    }
+
+    #[test]
+    fn test_has_usable_grant_crypto_requires_matching_local_material() {
+        let grant = GrantInfo {
+            grant_id: "grant-1".to_string(),
+            caller_ephemeral_pub: Some("caller-epk".to_string()),
+            client_ephemeral_pub: Some("client-epk".to_string()),
+            ..make_active_grant("grant-1", GrantMode::Permanent)
+        };
+        let mut grant_crypto = HashMap::new();
+
+        assert!(!has_usable_grant_crypto(&grant_crypto, &grant));
+
+        grant_crypto.insert(
+            "grant-1".to_string(),
+            GrantCryptoMaterial {
+                shared_secret: vec![1, 2, 3],
+                caller_ephemeral_pub: "caller-epk".to_string(),
+                client_ephemeral_pub: "client-epk".to_string(),
+            },
+        );
+        assert!(has_usable_grant_crypto(&grant_crypto, &grant));
+
+        grant_crypto.insert(
+            "grant-1".to_string(),
+            GrantCryptoMaterial {
+                shared_secret: vec![1, 2, 3],
+                caller_ephemeral_pub: "other-caller".to_string(),
+                client_ephemeral_pub: "client-epk".to_string(),
+            },
+        );
+        assert!(!has_usable_grant_crypto(&grant_crypto, &grant));
+    }
+
+    #[test]
     fn test_build_call_command_summary_falls_back_to_decrypted_command_when_preview_blank() {
         let command = RemoteCommand {
             kind: CommandKind::QueryReadonly,
             command: "status".to_string(),
             args_json: None,
+            query: None,
             policy_id: None,
             exec_mode: None,
             argv: None,
@@ -2775,6 +3742,7 @@ mod tests {
             kind: CommandKind::QueryReadonly,
             command: "status".to_string(),
             args_json: None,
+            query: None,
             policy_id: None,
             exec_mode: None,
             argv: None,
@@ -2799,6 +3767,114 @@ mod tests {
         assert_eq!(summary.command_preview, "status");
     }
 
+    #[test]
+    fn test_build_call_command_summary_falls_back_to_decrypted_args_json_when_masked_args_missing()
+    {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "search.get".to_string(),
+            args_json: Some(r#"{"query":"needle","max_results":5,"max_scan":50}"#.to_string()),
+            query: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "search.get"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(
+            summary.masked_args_json.as_deref(),
+            Some(r#"{"query":"needle","max_results":5,"max_scan":50}"#)
+        );
+    }
+
+    #[test]
+    fn test_build_call_command_summary_preserves_existing_masked_args_json() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: "search.get".to_string(),
+            args_json: Some(r#"{"query":"needle","max_results":5}"#.to_string()),
+            query: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(
+            Some(&serde_json::json!({
+                "command_preview": "search.get",
+                "masked_args_json": "{\"query\":\"***\"}"
+            })),
+            &command,
+            CommandKind::QueryReadonly,
+        );
+
+        assert_eq!(
+            summary.masked_args_json.as_deref(),
+            Some("{\"query\":\"***\"}")
+        );
+    }
+
+    #[test]
+    fn test_build_call_command_summary_falls_back_to_query_args_when_args_json_missing() {
+        let command = RemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            command: String::new(),
+            args_json: None,
+            query: Some(CanonicalQueryCommand::Search(SearchArgs {
+                keyword: "needle".to_string(),
+                limit: Some(5),
+                max_scan: Some(50),
+                max_results: Some(5),
+                ..SearchArgs::default()
+            })),
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+        };
+
+        let summary = build_call_command_summary(None, &command, CommandKind::QueryReadonly);
+
+        let masked = summary
+            .masked_args_json
+            .as_deref()
+            .expect("query args should be serialized");
+        assert!(masked.contains("\"keyword\":\"needle\""));
+        assert!(masked.contains("\"limit\":5"));
+        assert!(masked.contains("\"max_scan\":50"));
+        assert!(masked.contains("\"max_results\":5"));
+    }
+
     fn make_call_info(call_id: &str) -> CallInfo {
         CallInfo {
             call_id: call_id.to_string(),
@@ -2817,6 +3893,7 @@ mod tests {
                 kind: CommandKind::QueryReadonly,
                 command: "status".to_string(),
                 args_json: None,
+                query: None,
                 policy_id: None,
                 exec_mode: None,
                 argv: None,

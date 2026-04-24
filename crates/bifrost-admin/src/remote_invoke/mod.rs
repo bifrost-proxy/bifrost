@@ -1,6 +1,8 @@
 pub mod config;
 pub mod executor;
 pub mod grant_crypto_store;
+pub mod grant_info_store;
+pub mod grant_policy_store;
 pub mod identity;
 pub mod relay_client;
 pub mod ssh_keys;
@@ -9,7 +11,16 @@ pub mod worker;
 
 pub use config::RemoteInvokeConfig;
 pub use executor::RemoteInvokeExecutor;
+pub use grant_info_store::GrantInfoStore;
 pub use identity::Identity;
 pub use relay_client::RelayClient;
 pub use types::{RemoteInvokeRequest, RemoteInvokeResponse};
 pub use worker::RemoteInvokeWorker;
+
+#[cfg(test)]
+pub(crate) fn remote_shell_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().expect("lock")
+}

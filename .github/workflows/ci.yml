@@ -91,44 +91,6 @@ jobs:
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
 
-  coverage:
-    name: Unit-Test Coverage
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: always()
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage (LCOV)
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
-      - name: Generate coverage summary
-        run: cargo llvm-cov --workspace --all-features --json --summary-only > coverage-summary.json
-      - name: Print coverage summary
-        run: |
-          echo "## Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
-          cargo llvm-cov --workspace --all-features 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-lcov
-          path: lcov.info
-          retention-days: 7
-
   build-e2e:
     name: Build E2E Binary
     runs-on: ubuntu-latest

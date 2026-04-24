@@ -1,20 +1,17 @@
 use std::time::Duration;
 
+use bifrost_command::SearchArgs;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use tokio_stream::StreamExt;
 
 use super::{error_response, json_response, method_not_allowed, BoxBody};
-use crate::search::{SearchEngine, SearchProgress, SearchRequest};
+use crate::query_service::AdminQueryService;
+use crate::search::{SearchProgress, SearchRequest};
 use crate::state::SharedAdminState;
-use crate::traffic_db::TrafficSummaryCompact;
 
 const SEARCH_HANDLER_TIMEOUT: Duration = Duration::from_secs(310);
-
-fn enrich_compact_frame_info(summary: &mut TrafficSummaryCompact, state: &SharedAdminState) {
-    state.reconcile_socket_summary(summary);
-}
 
 pub async fn handle_search(
     req: Request<Incoming>,
@@ -67,32 +64,12 @@ async fn execute_search(req: Request<Incoming>, state: SharedAdminState) -> Resp
         );
     }
 
-    let traffic_db = match &state.traffic_db_store {
-        Some(db) => db.clone(),
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Traffic database not available",
-            );
-        }
-    };
-
-    let body_store = state.body_store.clone();
-    let frame_store = state.frame_store.clone();
-    let connection_monitor = Some(state.connection_monitor.clone());
-
-    let search_future = tokio::task::spawn_blocking(move || {
-        let engine = SearchEngine::with_frame_support(
-            traffic_db,
-            body_store,
-            frame_store,
-            connection_monitor,
-        );
-        engine.search(&search_request)
-    });
+    let service = AdminQueryService::new(state.clone());
+    let search_args = command_search_args_from_request(&search_request);
+    let search_future = async move { service.search(&search_args).await };
 
     let search_result = match tokio::time::timeout(SEARCH_HANDLER_TIMEOUT, search_future).await {
-        Ok(join_result) => join_result,
+        Ok(result) => result,
         Err(_) => {
             return error_response(
                 StatusCode::GATEWAY_TIMEOUT,
@@ -102,14 +79,7 @@ async fn execute_search(req: Request<Incoming>, state: SharedAdminState) -> Resp
     };
 
     match search_result {
-        Ok(mut response) => {
-            for result in &mut response.results {
-                let mut record = result.record.clone();
-                enrich_compact_frame_info(&mut record, &state);
-                result.record = record;
-            }
-            json_response(&response)
-        }
+        Ok(response) => json_response(&response),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Search failed: {}", e),
@@ -133,6 +103,11 @@ struct SearchStreamDonePayload {
     next_cursor: Option<u64>,
     has_more: bool,
     search_id: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SearchStreamErrorPayload {
+    message: String,
 }
 
 async fn execute_search_stream(
@@ -166,79 +141,75 @@ async fn execute_search_stream(
         );
     }
 
-    let traffic_db = match &state.traffic_db_store {
-        Some(db) => db.clone(),
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Traffic database not available",
-            );
-        }
-    };
-
-    let body_store = state.body_store.clone();
-    let frame_store = state.frame_store.clone();
-    let connection_monitor = Some(state.connection_monitor.clone());
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    let service = AdminQueryService::new(state.clone());
+    let search_args = command_search_args_from_request(&search_request);
 
-    tokio::task::spawn_blocking(move || {
-        let engine = SearchEngine::with_frame_support(
-            traffic_db,
-            body_store,
-            frame_store,
-            connection_monitor,
-        );
-
+    tokio::spawn(async move {
         let mut last_progress: Option<SearchProgress> = None;
+        let tx_results = tx.clone();
+        let tx_progress = tx.clone();
+        let response = service
+            .search_stream(
+                &search_args,
+                move |item| {
+                    if let Ok(json) = serde_json::to_string(item) {
+                        let _ = tx_results.blocking_send(Bytes::from(sse_event("result", &json)));
+                    }
+                },
+                move |p| {
+                    let changed = last_progress
+                        .as_ref()
+                        .map(|prev| {
+                            prev.total_searched != p.total_searched
+                                || prev.total_matched != p.total_matched
+                                || prev.cursor != p.cursor
+                                || prev.iterations != p.iterations
+                                || prev.has_more_hint != p.has_more_hint
+                        })
+                        .unwrap_or(true);
+                    if !changed {
+                        return;
+                    }
+                    last_progress = Some(p.clone());
 
-        let response = engine.search_stream(
-            &search_request,
-            |item| {
-                if let Ok(json) = serde_json::to_string(item) {
-                    let _ = tx.blocking_send(Bytes::from(sse_event("result", &json)));
-                }
-            },
-            |p| {
-                // 避免过于频繁的进度推送：只在关键字段变化时发送
-                let changed = last_progress
-                    .as_ref()
-                    .map(|prev| {
-                        prev.total_searched != p.total_searched
-                            || prev.total_matched != p.total_matched
-                            || prev.cursor != p.cursor
-                            || prev.iterations != p.iterations
-                            || prev.has_more_hint != p.has_more_hint
-                    })
-                    .unwrap_or(true);
-                if !changed {
-                    return;
-                }
-                last_progress = Some(p.clone());
+                    let payload = SearchStreamProgressPayload {
+                        total_searched: p.total_searched,
+                        total_matched: p.total_matched,
+                        next_cursor: p.cursor,
+                        has_more_hint: p.has_more_hint,
+                        iterations: p.iterations,
+                    };
 
-                let payload = SearchStreamProgressPayload {
-                    total_searched: p.total_searched,
-                    total_matched: p.total_matched,
-                    next_cursor: p.cursor,
-                    has_more_hint: p.has_more_hint,
-                    iterations: p.iterations,
+                    if let Ok(json) = serde_json::to_string(&payload) {
+                        let _ =
+                            tx_progress.blocking_send(Bytes::from(sse_event("progress", &json)));
+                    }
+                },
+            )
+            .await;
+
+        match response {
+            Ok(response) => {
+                let done = SearchStreamDonePayload {
+                    total_searched: response.total_searched,
+                    total_matched: response.total_matched,
+                    next_cursor: response.next_cursor,
+                    has_more: response.has_more,
+                    search_id: response.search_id,
                 };
-
-                if let Ok(json) = serde_json::to_string(&payload) {
-                    let _ = tx.blocking_send(Bytes::from(sse_event("progress", &json)));
+                if let Ok(json) = serde_json::to_string(&done) {
+                    let _ = tx.blocking_send(Bytes::from(sse_event("done", &json)));
                 }
-            },
-        );
-
-        let done = SearchStreamDonePayload {
-            total_searched: response.total_searched,
-            total_matched: response.total_matched,
-            next_cursor: response.next_cursor,
-            has_more: response.has_more,
-            search_id: response.search_id,
-        };
-        if let Ok(json) = serde_json::to_string(&done) {
-            let _ = tx.blocking_send(Bytes::from(sse_event("done", &json)));
+            }
+            Err(error) => {
+                let payload = SearchStreamErrorPayload {
+                    message: error.to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&payload) {
+                    let _ = tx.blocking_send(Bytes::from(sse_event("error", &json)));
+                }
+            }
         }
     });
 
@@ -261,4 +232,43 @@ fn sse_event(event: &str, json_data: &str) -> String {
     // 这里保证 json_data 不包含换行，避免破坏 SSE 帧。
     let data = json_data.replace('\n', "\\n");
     format!("event: {}\ndata: {}\n\n", event, data)
+}
+
+fn command_search_args_from_request(request: &SearchRequest) -> SearchArgs {
+    SearchArgs {
+        keyword: request.keyword.clone(),
+        scope: bifrost_command::SearchScope {
+            request_body: request.scope.request_body,
+            response_body: request.scope.response_body,
+            request_headers: request.scope.request_headers,
+            response_headers: request.scope.response_headers,
+            url: request.scope.url,
+            websocket_messages: request.scope.websocket_messages,
+            sse_events: request.scope.sse_events,
+            all: request.scope.all,
+        },
+        filters: bifrost_command::SearchFilters {
+            protocols: request.filters.protocols.clone(),
+            status_ranges: request.filters.status_ranges.clone(),
+            content_types: request.filters.content_types.clone(),
+            has_rule_hit: request.filters.has_rule_hit,
+            conditions: request
+                .filters
+                .conditions
+                .iter()
+                .map(|condition| bifrost_command::FilterCondition {
+                    field: condition.field.clone(),
+                    operator: condition.operator.clone(),
+                    value: condition.value.clone(),
+                })
+                .collect(),
+            client_ips: request.filters.client_ips.clone(),
+            client_apps: request.filters.client_apps.clone(),
+            domains: request.filters.domains.clone(),
+        },
+        cursor: request.cursor,
+        limit: request.limit,
+        max_scan: request.max_scan,
+        max_results: request.max_results,
+    }
 }

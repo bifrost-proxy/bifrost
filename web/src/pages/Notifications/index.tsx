@@ -11,6 +11,7 @@ import {
   Typography,
   Tooltip,
   theme,
+  Segmented,
 } from 'antd';
 import {
   BellOutlined,
@@ -27,6 +28,8 @@ import { useTlsConfigStore } from '../../stores/useTlsConfigStore';
 import type { NotificationRecord, ClientTrustSummary } from '../../api/notifications';
 
 const { Text } = Typography;
+type NotificationFilterStatus = 'all' | 'read' | 'unread';
+type NotificationFilterMap = Record<'all' | 'tls_trust_change' | 'pending_authorization', NotificationFilterStatus>;
 
 function formatTimestamp(ts: number): string {
   if (!ts) return '-';
@@ -110,31 +113,47 @@ function CopyableCell({ text }: { text: string | null }) {
   );
 }
 
-function NotificationsTable() {
+function NotificationsTable({
+  tabKey,
+  statusFilter,
+  onStatusFilterChange,
+}: {
+  tabKey: 'all' | 'tls_trust_change' | 'pending_authorization';
+  statusFilter: NotificationFilterStatus;
+  onStatusFilterChange: (status: NotificationFilterStatus) => void;
+}) {
   const { notifications, total, loading, handleUpdateStatus, handleMarkAllRead, activeTab } =
     useNotificationStore();
   const addDomainToPassthrough = useTlsConfigStore((s) => s.addDomainToPassthrough);
   const fetchTlsConfig = useTlsConfigStore((s) => s.fetchConfig);
+  const fetchNotifications = useNotificationStore((s) => s.fetchNotifications);
 
   useEffect(() => {
     fetchTlsConfig();
   }, [fetchTlsConfig]);
 
+  useEffect(() => {
+    if (activeTab !== tabKey) {
+      return;
+    }
+    fetchNotifications(tabKey, statusFilter);
+  }, [activeTab, fetchNotifications, statusFilter, tabKey]);
+
   const handlePassthrough = useCallback(
     async (id: number, domain: string) => {
       const ok = await addDomainToPassthrough(domain);
       if (ok) {
-        await handleUpdateStatus(id, 'read', 'passthrough');
+        await handleUpdateStatus(id, 'read', 'passthrough', tabKey, statusFilter);
       }
     },
-    [addDomainToPassthrough, handleUpdateStatus],
+    [addDomainToPassthrough, handleUpdateStatus, statusFilter, tabKey],
   );
 
   const handleIgnore = useCallback(
     async (id: number) => {
-      await handleUpdateStatus(id, 'dismissed', 'ignored');
+      await handleUpdateStatus(id, 'dismissed', 'ignored', tabKey, statusFilter);
     },
-    [handleUpdateStatus],
+    [handleUpdateStatus, statusFilter, tabKey],
   );
 
   const pendingTlsItems = useMemo(() => {
@@ -160,15 +179,15 @@ function NotificationsTable() {
   const handleBatchPassthrough = useCallback(async () => {
     for (const item of pendingTlsItems) {
       await addDomainToPassthrough(item.domain);
-      await handleUpdateStatus(item.id, 'read', 'passthrough');
+      await handleUpdateStatus(item.id, 'read', 'passthrough', tabKey, statusFilter);
     }
-  }, [pendingTlsItems, addDomainToPassthrough, handleUpdateStatus]);
+  }, [pendingTlsItems, addDomainToPassthrough, handleUpdateStatus, statusFilter, tabKey]);
 
   const handleBatchIgnore = useCallback(async () => {
     for (const item of pendingTlsItems) {
-      await handleUpdateStatus(item.id, 'dismissed', 'ignored');
+      await handleUpdateStatus(item.id, 'dismissed', 'ignored', tabKey, statusFilter);
     }
-  }, [pendingTlsItems, handleUpdateStatus]);
+  }, [pendingTlsItems, handleUpdateStatus, statusFilter, tabKey]);
 
   const columns = [
     {
@@ -288,7 +307,19 @@ function NotificationsTable() {
   return (
     <div>
       <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between' }}>
-        <Text type="secondary">{total} notification(s)</Text>
+        <Space align="center" size="middle">
+          <Text type="secondary">{total} notification(s)</Text>
+          <Segmented<NotificationFilterStatus>
+            data-testid={`notifications-status-filter-${tabKey}`}
+            value={statusFilter}
+            onChange={(value) => onStatusFilterChange(value)}
+            options={[
+              { label: 'All', value: 'all' },
+              { label: 'Read', value: 'read' },
+              { label: 'Unread', value: 'unread' },
+            ]}
+          />
+        </Space>
         <Space size="small">
           {pendingTlsItems.length > 0 && (
             <>
@@ -303,7 +334,7 @@ function NotificationsTable() {
           <Button
             size="small"
             icon={<CheckCircleOutlined />}
-            onClick={() => handleMarkAllRead(activeTab === 'all' ? undefined : activeTab)}
+            onClick={() => handleMarkAllRead(tabKey === 'all' ? undefined : tabKey, statusFilter)}
           >
             Mark All Read
           </Button>
@@ -316,7 +347,7 @@ function NotificationsTable() {
         loading={loading}
         size="small"
         scroll={{ x: 1340 }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No notifications" /> }}
       />
     </div>
@@ -418,7 +449,7 @@ function ClientTrustTable() {
         rowKey={(r) => `${r.identifier_type}-${r.identifier}`}
         size="small"
         scroll={{ x: 900 }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No client trust data" /> }}
       />
     </div>
@@ -430,8 +461,12 @@ const VALID_TABS = ['all', 'tls_trust_change', 'pending_authorization', 'client_
 export default function Notifications() {
   const { token } = theme.useToken();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { unreadCount, activeTab, setActiveTab, fetchNotifications, fetchClientTrust } =
-    useNotificationStore();
+  const [statusFilters, setStatusFilters] = useState<NotificationFilterMap>({
+    all: 'unread',
+    tls_trust_change: 'unread',
+    pending_authorization: 'unread',
+  });
+  const { unreadCount, activeTab, setActiveTab, fetchClientTrust } = useNotificationStore();
 
   useEffect(() => {
     const urlTab = searchParams.get('tab');
@@ -441,9 +476,8 @@ export default function Notifications() {
   }, []);
 
   useEffect(() => {
-    fetchNotifications();
     fetchClientTrust();
-  }, [fetchNotifications, fetchClientTrust]);
+  }, [fetchClientTrust]);
 
   const handleTabChange = useCallback(
     (tab: string) => {
@@ -451,6 +485,13 @@ export default function Notifications() {
       setSearchParams({ tab }, { replace: true });
     },
     [setActiveTab, setSearchParams],
+  );
+
+  const handleStatusFilterChange = useCallback(
+    (tabKey: keyof NotificationFilterMap, status: NotificationFilterStatus) => {
+      setStatusFilters((prev) => ({ ...prev, [tabKey]: status }));
+    },
+    [],
   );
 
   const containerStyle: CSSProperties = {
@@ -511,7 +552,13 @@ export default function Notifications() {
                 {unreadCount > 0 && <Badge count={unreadCount} size="small" />}
               </Space>
             ),
-            children: <NotificationsTable />,
+            children: (
+              <NotificationsTable
+                tabKey="all"
+                statusFilter={statusFilters.all}
+                onStatusFilterChange={(status) => handleStatusFilterChange('all', status)}
+              />
+            ),
           },
           {
             key: 'tls_trust_change',
@@ -521,7 +568,15 @@ export default function Notifications() {
                 TLS Trust
               </Space>
             ),
-            children: <NotificationsTable />,
+            children: (
+              <NotificationsTable
+                tabKey="tls_trust_change"
+                statusFilter={statusFilters.tls_trust_change}
+                onStatusFilterChange={(status) =>
+                  handleStatusFilterChange('tls_trust_change', status)
+                }
+              />
+            ),
           },
           {
             key: 'pending_authorization',
@@ -531,7 +586,15 @@ export default function Notifications() {
                 Authorization
               </Space>
             ),
-            children: <NotificationsTable />,
+            children: (
+              <NotificationsTable
+                tabKey="pending_authorization"
+                statusFilter={statusFilters.pending_authorization}
+                onStatusFilterChange={(status) =>
+                  handleStatusFilterChange('pending_authorization', status)
+                }
+              />
+            ),
           },
           {
             key: 'client_trust',

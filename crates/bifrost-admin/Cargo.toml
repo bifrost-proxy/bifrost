@@ -5,6 +5,7 @@ edition = "2021"
 description = "Admin API and web interface for Bifrost proxy"
 
 [dependencies]
+bifrost-command = { path = "../bifrost-command" }
 bifrost-core = { path = "../bifrost-core" }
 bifrost-tls = { path = "../bifrost-tls" }
 bifrost-storage = { path = "../bifrost-storage" }

@@ -21,9 +21,9 @@ export default defineConfig({
     video: "retain-on-failure",
   },
   webServer: {
-    command: `BACKEND_PORT=${backendPort} WEB_PORT=${webPort} pnpm run dev -- --host 127.0.0.1 --port ${webPort}`,
+    command: `BACKEND_PORT=${backendPort} WEB_PORT=${webPort} pnpm exec vite --host 127.0.0.1 --port ${webPort}`,
     url: `http://127.0.0.1:${webPort}/_bifrost/`,
-    reuseExistingServer: false,
+    reuseExistingServer: true,
     cwd: webRoot,
     timeout: 120000,
   },

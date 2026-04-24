@@ -171,23 +171,7 @@ pub fn run_traffic_list(options: TrafficListOptions) -> Result<()> {
         .into_string()
         .map_err(|e| BifrostError::Network(format!("Failed to read response: {}", e)))?;
 
-    match options.format {
-        OutputFormat::Json => {
-            println!("{}", body.trim());
-            Ok(())
-        }
-        OutputFormat::JsonPretty => {
-            let v: Value =
-                serde_json::from_str(&body).map_err(|e| BifrostError::Parse(e.to_string()))?;
-            println!("{}", serde_json::to_string_pretty(&v).unwrap());
-            Ok(())
-        }
-        OutputFormat::Table | OutputFormat::Compact => {
-            let (rows, meta) = parse_traffic_list_rows(&body)?;
-            print_traffic_rows(&rows, meta, options.format, options.no_color);
-            Ok(())
-        }
-    }
+    render_traffic_list_body(&body, options.format, options.no_color)
 }
 
 pub fn run_traffic_clear(port: u16, ids: Option<String>, yes: bool) -> Result<()> {
@@ -281,15 +265,7 @@ pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
         }
     }
 
-    match options.format {
-        OutputFormat::Json => println!("{}", output),
-        OutputFormat::JsonPretty => {
-            println!("{}", serde_json::to_string_pretty(&output).unwrap())
-        }
-        OutputFormat::Table | OutputFormat::Compact => {
-            print_traffic_detail(&output, options.format);
-        }
-    };
+    render_traffic_detail_value(&output, options.format, false)?;
 
     if !other_matches.is_empty() {
         let use_color = std::io::stdout().is_terminal();
@@ -313,6 +289,32 @@ pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn render_traffic_list_body(body: &str, format: OutputFormat, no_color: bool) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", body.trim());
+            Ok(())
+        }
+        OutputFormat::JsonPretty => {
+            let v: Value =
+                serde_json::from_str(body).map_err(|e| BifrostError::Parse(e.to_string()))?;
+            println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            Ok(())
+        }
+        OutputFormat::Table | OutputFormat::Compact => {
+            let (rows, meta) = parse_traffic_list_rows(body)?;
+            print_traffic_rows(&rows, meta, format, no_color);
+            Ok(())
+        }
+    }
+}
+
+pub fn render_traffic_detail_body(body: &str, format: OutputFormat, no_color: bool) -> Result<()> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| BifrostError::Parse(e.to_string()))?;
+    render_traffic_detail_value(&value, format, no_color)
 }
 
 enum FetchTrafficError {
@@ -898,8 +900,33 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
-fn print_traffic_detail(record: &Value, _format: OutputFormat) {
-    let use_color = std::io::stdout().is_terminal();
+pub fn render_traffic_detail_value(
+    record: &Value,
+    format: OutputFormat,
+    no_color: bool,
+) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string(record)
+                    .map_err(|e| BifrostError::Parse(format!("serialize traffic json: {}", e)))?
+            );
+            return Ok(());
+        }
+        OutputFormat::JsonPretty => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(record).map_err(|e| {
+                    BifrostError::Parse(format!("serialize pretty traffic json: {}", e))
+                })?
+            );
+            return Ok(());
+        }
+        OutputFormat::Table | OutputFormat::Compact => {}
+    }
+
+    let use_color = !no_color && std::io::stdout().is_terminal();
 
     let dim = if use_color { "\x1b[90m" } else { "" };
     let bold = if use_color { "\x1b[1;37m" } else { "" };
@@ -1045,6 +1072,7 @@ fn print_traffic_detail(record: &Value, _format: OutputFormat) {
     }
 
     println!();
+    Ok(())
 }
 
 fn print_headers_section(

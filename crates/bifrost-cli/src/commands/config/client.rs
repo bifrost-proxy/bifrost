@@ -218,6 +218,28 @@ impl ConfigApiClient {
         self.get("/system/memory")
     }
 
+    pub fn list_remote_invoke_grants(&self) -> Result<serde_json::Value, String> {
+        self.get("/remote-invoke/grants")
+    }
+
+    pub fn update_remote_invoke_grant<R: Serialize>(
+        &self,
+        grant_id: &str,
+        body: &R,
+    ) -> Result<serde_json::Value, String> {
+        self.patch(
+            &format!("/remote-invoke/grants/{}", urlencoding::encode(grant_id)),
+            body,
+        )
+    }
+
+    pub fn revoke_remote_invoke_grant(&self, grant_id: &str) -> Result<serde_json::Value, String> {
+        self.delete(&format!(
+            "/remote-invoke/grants/{}",
+            urlencoding::encode(grant_id)
+        ))
+    }
+
     pub fn bifrost_file_detect(&self, content: &str) -> Result<serde_json::Value, String> {
         self.post_text("/bifrost-file/detect", content)
     }
@@ -302,6 +324,24 @@ impl ConfigApiClient {
         let url = format!("{}{}", self.base_url, path);
         let resp = bifrost_core::direct_ureq_agent()
             .post(&url)
+            .send_json(body)
+            .map_err(|e| {
+            format!(
+                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
+                url, e
+            )
+        })?;
+
+        let body = resp
+            .into_string()
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    fn patch<T: DeserializeOwned, R: Serialize>(&self, path: &str, body: &R) -> Result<T, String> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = bifrost_core::direct_ureq_agent()
+            .request("PATCH", &url)
             .send_json(body)
             .map_err(|e| {
             format!(
