@@ -103,7 +103,7 @@ pub async fn handle_file_read(
         .unwrap_or(decision.max_read_bytes)
         .min(decision.max_read_bytes);
 
-    let mut f = fs::File::open(path)
+    let f = fs::File::open(path)
         .await
         .map_err(|e| io_err(&format!("open {}", path.display()), e))?;
     let to_read = cap.min(total_size);

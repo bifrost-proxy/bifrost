@@ -3113,6 +3113,20 @@ fn updated_shell_grant_provision(
         return Ok(default_query_grant_provision());
     }
 
+    // File scopes don't need shell policies or policy bindings
+    if matches!(
+        desired_scope,
+        GrantScope::RemoteFileRead | GrantScope::RemoteFileWrite
+    ) {
+        return Ok(ShellGrantProvision {
+            grant_scope: desired_scope,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+        });
+    }
+
     let store = RemoteShellStore::new()?;
     let set = store.load()?;
     if !set.policies.iter().any(|policy| policy.enabled) {

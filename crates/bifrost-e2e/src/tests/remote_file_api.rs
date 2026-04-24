@@ -1,4 +1,4 @@
-//! Integration coverage for the Phase 1 Remote File API policy primitives.
+//! Integration coverage for the Remote File API policy primitives.
 //!
 //! These tests exercise `bifrost_core::file_access` — the single choke
 //! point every `file.*` remote invoke call flows through. The matching
@@ -27,6 +27,9 @@ fn unique_tmp(prefix: &str) -> PathBuf {
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
+        // ---------------------------------------------------------------
+        //  Phase 1 — read-only policy tests
+        // ---------------------------------------------------------------
         TestCase::standalone(
             "remote_file_policy_allows_file_inside_root",
             "FileAccessPolicy::check succeeds for a regular file within the configured root",
@@ -160,7 +163,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "remote_file_op_as_str_round_trip",
-            "FileOp::as_str returns stable lowercase tokens for all Phase 1 ops",
+            "FileOp::as_str returns stable lowercase tokens for all ops (Phase 1+2+3)",
             "remote_file_api",
             || async {
                 let cases = [
@@ -170,6 +173,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     (FileOp::Glob, "glob"),
                     (FileOp::Search, "search"),
                     (FileOp::Hash, "hash"),
+                    (FileOp::Write, "write"),
+                    (FileOp::Edit, "edit"),
+                    (FileOp::Mkdir, "mkdir"),
+                    (FileOp::Move, "move"),
+                    (FileOp::Delete, "delete"),
+                    (FileOp::ApplyPatch, "apply_patch"),
                 ];
                 for (op, want) in cases {
                     let got = op.as_str();
@@ -178,6 +187,142 @@ pub fn get_all_tests() -> Vec<TestCase> {
                             "FileOp::{:?}.as_str() = {}, want {}",
                             op, got, want
                         ));
+                    }
+                }
+                Ok(())
+            },
+        ),
+        // ---------------------------------------------------------------
+        //  Phase 2 — write policy tests
+        // ---------------------------------------------------------------
+        TestCase::standalone(
+            "remote_file_readonly_policy_rejects_write_op",
+            "readonly policy denies Write operations",
+            "remote_file_api",
+            || async {
+                let root = unique_tmp("ro-write");
+                fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+                fs::write(root.join("test.txt"), b"data").map_err(|e| e.to_string())?;
+
+                let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+                let err = policy
+                    .check(std::path::Path::new("test.txt"), &root, FileOp::Write)
+                    .err()
+                    .ok_or_else(|| "expected error for write on readonly policy".to_string())?;
+
+                let _ = fs::remove_dir_all(&root);
+                if err.code() != "file.permission_denied" {
+                    return Err(format!(
+                        "expected file.permission_denied, got {}",
+                        err.code()
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "remote_file_write_policy_allows_write_op",
+            "write policy accepts Write operations inside roots",
+            "remote_file_api",
+            || async {
+                let root = unique_tmp("rw-write");
+                fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+                fs::write(root.join("test.txt"), b"data").map_err(|e| e.to_string())?;
+
+                let policy = FileAccessPolicy::new_read_write("t", vec![root.clone()]);
+                let decision = policy
+                    .check(std::path::Path::new("test.txt"), &root, FileOp::Write)
+                    .map_err(|e| format!("expected ok, got {e}"))?;
+
+                let _ = fs::remove_dir_all(&root);
+                if decision.op != FileOp::Write {
+                    return Err(format!("decision.op = {:?}, want Write", decision.op));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "remote_file_write_policy_allows_all_write_ops",
+            "write policy accepts Edit/Mkdir/Move/Delete/ApplyPatch ops",
+            "remote_file_api",
+            || async {
+                let root = unique_tmp("rw-allops");
+                fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+                fs::write(root.join("test.txt"), b"data").map_err(|e| e.to_string())?;
+
+                let policy = FileAccessPolicy::new_read_write("t", vec![root.clone()]);
+                for op in [
+                    FileOp::Edit,
+                    FileOp::Mkdir,
+                    FileOp::Move,
+                    FileOp::Delete,
+                    FileOp::ApplyPatch,
+                ] {
+                    let result = policy.check(std::path::Path::new("test.txt"), &root, op);
+                    if let Err(e) = result {
+                        let _ = fs::remove_dir_all(&root);
+                        return Err(format!("expected ok for {:?}, got {e}", op));
+                    }
+                }
+
+                let _ = fs::remove_dir_all(&root);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "remote_file_write_policy_still_denies_secrets",
+            "write policy still denies *.pem / *.key / .git/** for write ops",
+            "remote_file_api",
+            || async {
+                let root = unique_tmp("rw-deny");
+                fs::create_dir_all(root.join(".git")).map_err(|e| e.to_string())?;
+                fs::write(root.join(".git/config"), b"[core]").map_err(|e| e.to_string())?;
+
+                let policy = FileAccessPolicy::new_read_write("t", vec![root.clone()]);
+                let err = policy
+                    .check(std::path::Path::new(".git/config"), &root, FileOp::Write)
+                    .err()
+                    .ok_or_else(|| "expected deny for .git/config write".to_string())?;
+
+                let _ = fs::remove_dir_all(&root);
+                if err.code() != "file.permission_denied" {
+                    return Err(format!(
+                        "expected file.permission_denied, got {}",
+                        err.code()
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "remote_file_is_write_classification",
+            "FileOp::is_write correctly classifies read vs write ops",
+            "remote_file_api",
+            || async {
+                let read_ops = [
+                    FileOp::Read,
+                    FileOp::List,
+                    FileOp::Stat,
+                    FileOp::Glob,
+                    FileOp::Search,
+                    FileOp::Hash,
+                ];
+                let write_ops = [
+                    FileOp::Write,
+                    FileOp::Edit,
+                    FileOp::Mkdir,
+                    FileOp::Move,
+                    FileOp::Delete,
+                    FileOp::ApplyPatch,
+                ];
+                for op in read_ops {
+                    if op.is_write() {
+                        return Err(format!("{:?} should not be write", op));
+                    }
+                }
+                for op in write_ops {
+                    if !op.is_write() {
+                        return Err(format!("{:?} should be write", op));
                     }
                 }
                 Ok(())

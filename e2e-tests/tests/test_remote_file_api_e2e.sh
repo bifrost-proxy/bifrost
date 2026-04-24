@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# Remote File API (Phase 1) CLI contract test.
+# Remote File API — full CLI contract test.
 #
-# This test verifies that the `bifrost remote file` command surface was
-# wired correctly — six read-only subcommands are present and their
+# This test verifies that ALL `bifrost remote file` subcommands
+# (Phase 1 read-only + Phase 2 write + Phase 3 apply-patch) are
+# wired correctly — twelve subcommands are present and their
 # --help text mentions the documented flags. It is intentionally
 # hermetic (no relay, no daemon, no network): it only invokes the local
 # binary's help output.
@@ -58,21 +59,25 @@ ensure_binary() {
     info "binary: $BIFROST_BIN"
 }
 
+# ---------------------------------------------------------------------------
+#  Phase 1 — read-only subcommands
+# ---------------------------------------------------------------------------
+
 test_remote_file_root_help() {
-    header "bifrost remote file --help lists six subcommands"
+    header "bifrost remote file --help lists all twelve subcommands"
     local out
     out=$(run_bifrost remote file --help)
     local missing=""
-    for sub in read list stat glob search hash; do
+    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
         if ! echo "$out" | grep -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
     done
     if [[ -z "$missing" ]]; then
-        pass "all six subcommands (read/list/stat/glob/search/hash) present"
+        pass "all twelve subcommands present"
     else
         fail "missing subcommands:$missing"
-        echo "$out" | head -40
+        echo "$out" | head -50
     fi
 }
 
@@ -150,10 +155,98 @@ test_hash_help() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+#  Phase 2 — write subcommands
+# ---------------------------------------------------------------------------
+
+test_write_help() {
+    header "remote file write --help has --content-b64 / --base-sha256 / --allow-overwrite"
+    local out
+    out=$(run_bifrost remote file write --help)
+    if echo "$out" | grep -q -- "--content-b64" \
+       && echo "$out" | grep -qi "base-sha256\|sha256" \
+       && echo "$out" | grep -qi "allow-overwrite\|overwrite"; then
+        pass "write --help surface ok"
+    else
+        fail "write --help missing required flag"
+        echo "$out" | head -30
+    fi
+}
+
+test_edit_help() {
+    header "remote file edit --help has --edits / --base-sha256"
+    local out
+    out=$(run_bifrost remote file edit --help)
+    if echo "$out" | grep -q -- "--edits" \
+       && echo "$out" | grep -qi "base-sha256\|sha256"; then
+        pass "edit --help surface ok"
+    else
+        fail "edit --help missing required flag"
+        echo "$out" | head -30
+    fi
+}
+
+test_mkdir_help() {
+    header "remote file mkdir --help has --parents"
+    local out
+    out=$(run_bifrost remote file mkdir --help)
+    if echo "$out" | grep -q -- "--parents"; then
+        pass "mkdir --help has --parents"
+    else
+        fail "mkdir --help missing --parents"
+        echo "$out" | head -20
+    fi
+}
+
+test_move_help() {
+    header "remote file move --help accepts <PATH> <TO>"
+    local out
+    out=$(run_bifrost remote file move --help)
+    if echo "$out" | grep -qi "source\|path" \
+       && echo "$out" | grep -qi "destination\|to"; then
+        pass "move --help surface ok"
+    else
+        fail "move --help missing source/destination"
+        echo "$out" | head -20
+    fi
+}
+
+test_delete_help() {
+    header "remote file delete --help has --recursive"
+    local out
+    out=$(run_bifrost remote file delete --help)
+    if echo "$out" | grep -q -- "--recursive"; then
+        pass "delete --help has --recursive"
+    else
+        fail "delete --help missing --recursive"
+        echo "$out" | head -20
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Phase 3 — apply-patch
+# ---------------------------------------------------------------------------
+
+test_apply_patch_help() {
+    header "remote file apply-patch --help has --patch-text"
+    local out
+    out=$(run_bifrost remote file apply-patch --help)
+    if echo "$out" | grep -q -- "--patch-text"; then
+        pass "apply-patch --help has --patch-text"
+    else
+        fail "apply-patch --help missing --patch-text"
+        echo "$out" | head -20
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Cross-cutting checks
+# ---------------------------------------------------------------------------
+
 test_output_json_supported() {
-    header "all subcommands accept --output (human | json)"
+    header "all twelve subcommands accept --output (human | json)"
     local any_fail=0
-    for sub in read list stat glob search hash; do
+    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! echo "$out" | grep -qi -- "--output\|human\|json"; then
@@ -162,7 +255,23 @@ test_output_json_supported() {
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "six subcommands --help all mention --output"
+        pass "twelve subcommands --help all mention --output"
+    fi
+}
+
+test_all_subcommands_have_cwd() {
+    header "all twelve subcommands accept --cwd"
+    local any_fail=0
+    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
+        local out
+        out=$(run_bifrost remote file "$sub" --help)
+        if ! echo "$out" | grep -qi -- "--cwd"; then
+            fail "subcommand $sub --help missing --cwd"
+            any_fail=1
+        fi
+    done
+    if [[ $any_fail -eq 0 ]]; then
+        pass "twelve subcommands --help all mention --cwd"
     fi
 }
 
@@ -178,8 +287,62 @@ test_missing_required_path_fails() {
     fi
 }
 
+test_missing_required_write_content_fails() {
+    header "missing required --content-b64: write should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file write test.txt 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "write without --content-b64 correctly rejected (exit=$rc)"
+    else
+        fail "write without --content-b64 not rejected: $out"
+    fi
+}
+
+test_missing_required_edit_edits_fails() {
+    header "missing required --edits: edit should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file edit test.txt 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "edit without --edits correctly rejected (exit=$rc)"
+    else
+        fail "edit without --edits not rejected: $out"
+    fi
+}
+
+test_missing_required_move_to_fails() {
+    header "missing required <TO>: move should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file move src.txt 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "move without <TO> correctly rejected (exit=$rc)"
+    else
+        fail "move without <TO> not rejected: $out"
+    fi
+}
+
+test_missing_required_apply_patch_text_fails() {
+    header "missing required --patch-text: apply-patch should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file apply-patch 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "apply-patch without --patch-text correctly rejected (exit=$rc)"
+    else
+        fail "apply-patch without --patch-text not rejected: $out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------------
+
 main() {
     ensure_binary
+
+    # Phase 1 read-only
     test_remote_file_root_help
     test_read_help
     test_list_help
@@ -187,8 +350,25 @@ main() {
     test_glob_help
     test_search_help
     test_hash_help
+
+    # Phase 2 write
+    test_write_help
+    test_edit_help
+    test_mkdir_help
+    test_move_help
+    test_delete_help
+
+    # Phase 3 apply-patch
+    test_apply_patch_help
+
+    # Cross-cutting
     test_output_json_supported
+    test_all_subcommands_have_cwd
     test_missing_required_path_fails
+    test_missing_required_write_content_fails
+    test_missing_required_edit_edits_fails
+    test_missing_required_move_to_fails
+    test_missing_required_apply_patch_text_fails
 
     echo ""
     echo -e "${BLUE}===============================================================${NC}"
