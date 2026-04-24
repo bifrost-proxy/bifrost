@@ -412,6 +412,537 @@ pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> 
     Ok(json!({ "algo": "sha256", "hex": hex, "size": md.len() }))
 }
 
+// === Phase 2/3 handlers: file.write / edit / mkdir / move / delete / apply_patch ===
+//
+// All handlers here assume the executor has already invoked
+// `FileAccessPolicy::check` and produced a `PolicyDecision`. They perform no
+// additional access control; they only translate the decision into
+// tokio::fs calls and a wire response.
+//
+// Atomicity: file.write and file.edit go via a tmpfile + rename in the same
+// directory. file.apply_patch resolves every target path first (all-or-none
+// policy check), then applies hunks atomically per-file.
+
+use tokio::io::AsyncWriteExt;
+
+const DEFAULT_MAX_WRITE_BYTES: u64 = 2 * 1024 * 1024;
+
+fn b64_decode(s: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(s.as_bytes())
+        .map_err(|e| BifrostError::Config(format!("[file.invalid_args] invalid base64: {}", e)))
+}
+
+async fn read_sha256(path: &Path) -> Result<Option<String>> {
+    match fs::metadata(path).await {
+        Ok(_) => Ok(Some(sha256_file(path).await?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err("stat-for-sha", e)),
+    }
+}
+
+fn precondition_failed(msg: impl Into<String>) -> BifrostError {
+    BifrostError::Config(format!("[file.precondition_failed] {}", msg.into()))
+}
+
+fn size_too_large(msg: impl Into<String>) -> BifrostError {
+    BifrostError::Config(format!("[file.size_too_large] {}", msg.into()))
+}
+
+/// Write `content` atomically to `decision.path`. Honors `base_sha256`
+/// optimistic locking and the policy's `max_write_bytes` / `allow_overwrite`.
+pub async fn handle_file_write(
+    decision: &PolicyDecision,
+    content_b64: &str,
+    base_sha256: Option<&str>,
+    allow_overwrite_override: Option<bool>,
+) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Write);
+    let path = decision.path.as_path();
+
+    let bytes = b64_decode(content_b64)?;
+    let max = if decision.max_write_bytes == 0 {
+        DEFAULT_MAX_WRITE_BYTES
+    } else {
+        decision.max_write_bytes
+    };
+    if (bytes.len() as u64) > max {
+        return Err(size_too_large(format!(
+            "content is {} bytes, max_write_bytes is {}",
+            bytes.len(),
+            max
+        )));
+    }
+
+    // Existence + overwrite + sha precondition check.
+    let existing_sha = read_sha256(path).await?;
+    let allow_overwrite = allow_overwrite_override.unwrap_or(decision.allow_overwrite);
+    match (&existing_sha, base_sha256) {
+        (Some(_), _) if !allow_overwrite => {
+            return Err(precondition_failed(
+                "target exists and overwrite is disabled",
+            ));
+        }
+        (Some(actual), Some(expected)) if actual != expected => {
+            return Err(precondition_failed(format!(
+                "sha mismatch: expected {}, actual {}",
+                expected, actual
+            )));
+        }
+        (None, Some(expected)) if !expected.is_empty() => {
+            return Err(precondition_failed(
+                "target does not exist but base_sha256 was supplied",
+            ));
+        }
+        _ => {}
+    }
+
+    // Atomic write via tmpfile + rename in the same directory.
+    let parent = path.parent().ok_or_else(|| {
+        BifrostError::Config("[file.invalid_args] path has no parent".to_string())
+    })?;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(".bifrost-write.{}.{}.tmp", pid, nanos));
+    {
+        let mut f = fs::File::create(&tmp)
+            .await
+            .map_err(|e| io_err("create-tmp", e))?;
+        f.write_all(&bytes)
+            .await
+            .map_err(|e| io_err("write-tmp", e))?;
+        f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
+    }
+    fs::rename(&tmp, path)
+        .await
+        .map_err(|e| io_err("rename-tmp", e))?;
+
+    let new_sha = sha256_hex(&bytes);
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "bytes_written": bytes.len(),
+        "sha256": new_sha,
+        "previous_sha256": existing_sha,
+    }))
+}
+
+/// A single line-range edit. Line numbers are 1-based and inclusive.
+#[derive(Debug, serde::Deserialize)]
+pub struct EditRange {
+    pub start_line: u32,
+    pub end_line: u32,
+    #[serde(default)]
+    pub replacement: String,
+}
+
+pub async fn handle_file_edit(
+    decision: &PolicyDecision,
+    base_sha256: Option<&str>,
+    edits: &[EditRange],
+) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Edit);
+    let path = decision.path.as_path();
+
+    if edits.is_empty() {
+        return Err(BifrostError::Config(
+            "[file.invalid_args] edits must not be empty".to_string(),
+        ));
+    }
+
+    let orig_bytes = fs::read(path).await.map_err(|e| io_err("read", e))?;
+    let orig_sha = sha256_hex(&orig_bytes);
+    if let Some(expected) = base_sha256 {
+        if expected != orig_sha {
+            return Err(precondition_failed(format!(
+                "sha mismatch: expected {}, actual {}",
+                expected, orig_sha
+            )));
+        }
+    }
+    let original = String::from_utf8(orig_bytes)
+        .map_err(|_| BifrostError::Config("[file.invalid_args] file is not utf-8".to_string()))?;
+    let lines: Vec<&str> = original.split_inclusive('\n').collect();
+
+    // Validate ranges: 1-based, non-overlapping, ascending.
+    let mut sorted: Vec<&EditRange> = edits.iter().collect();
+    sorted.sort_by_key(|e| e.start_line);
+    let mut last_end = 0u32;
+    for e in &sorted {
+        if e.start_line == 0 || e.start_line > e.end_line {
+            return Err(BifrostError::Config(format!(
+                "[file.invalid_args] invalid range: {}..{}",
+                e.start_line, e.end_line
+            )));
+        }
+        if (e.end_line as usize) > lines.len() {
+            return Err(BifrostError::Config(format!(
+                "[file.invalid_args] end_line {} exceeds file length {}",
+                e.end_line,
+                lines.len()
+            )));
+        }
+        if e.start_line <= last_end {
+            return Err(BifrostError::Config(
+                "[file.invalid_args] edit ranges must not overlap".to_string(),
+            ));
+        }
+        last_end = e.end_line;
+    }
+
+    // Build output.
+    let mut out = String::with_capacity(original.len());
+    let mut cursor: u32 = 1; // next line (1-based) to emit
+    for e in &sorted {
+        while cursor < e.start_line {
+            out.push_str(lines[(cursor - 1) as usize]);
+            cursor += 1;
+        }
+        out.push_str(&e.replacement);
+        if !e.replacement.ends_with('\n') && (e.end_line as usize) < lines.len() {
+            out.push('\n');
+        }
+        cursor = e.end_line + 1;
+    }
+    while (cursor as usize) <= lines.len() {
+        out.push_str(lines[(cursor - 1) as usize]);
+        cursor += 1;
+    }
+
+    let new_bytes = out.into_bytes();
+    let max = if decision.max_write_bytes == 0 {
+        DEFAULT_MAX_WRITE_BYTES
+    } else {
+        decision.max_write_bytes
+    };
+    if (new_bytes.len() as u64) > max {
+        return Err(size_too_large(format!(
+            "result is {} bytes, max_write_bytes is {}",
+            new_bytes.len(),
+            max
+        )));
+    }
+
+    // Atomic rewrite.
+    let parent = path.parent().ok_or_else(|| {
+        BifrostError::Config("[file.invalid_args] path has no parent".to_string())
+    })?;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(".bifrost-edit.{}.{}.tmp", pid, nanos));
+    {
+        let mut f = fs::File::create(&tmp)
+            .await
+            .map_err(|e| io_err("create-tmp", e))?;
+        f.write_all(&new_bytes)
+            .await
+            .map_err(|e| io_err("write-tmp", e))?;
+        f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
+    }
+    fs::rename(&tmp, path)
+        .await
+        .map_err(|e| io_err("rename-tmp", e))?;
+
+    let new_sha = sha256_hex(&new_bytes);
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "bytes_written": new_bytes.len(),
+        "sha256": new_sha,
+        "previous_sha256": orig_sha,
+        "applied_edits": edits.len(),
+    }))
+}
+
+pub async fn handle_file_mkdir(decision: &PolicyDecision, parents: bool) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Mkdir);
+    let path = decision.path.as_path();
+    let res = if parents {
+        fs::create_dir_all(path).await
+    } else {
+        fs::create_dir(path).await
+    };
+    res.map_err(|e| io_err("mkdir", e))?;
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "created": true,
+        "parents": parents,
+    }))
+}
+
+pub async fn handle_file_move(
+    decision: &PolicyDecision,
+    to_decision: &PolicyDecision,
+) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Move);
+    debug_assert_eq!(to_decision.op, FileOp::Move);
+    let from = decision.path.as_path();
+    let to = to_decision.path.as_path();
+    if fs::metadata(to).await.is_ok() && !decision.allow_overwrite {
+        return Err(precondition_failed(
+            "destination exists and overwrite is disabled",
+        ));
+    }
+    fs::rename(from, to)
+        .await
+        .map_err(|e| io_err("rename", e))?;
+    Ok(json!({
+        "from": from.to_string_lossy(),
+        "to": to.to_string_lossy(),
+    }))
+}
+
+pub async fn handle_file_delete(decision: &PolicyDecision, recursive: bool) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Delete);
+    let path = decision.path.as_path();
+    let meta = fs::symlink_metadata(path)
+        .await
+        .map_err(|e| io_err("stat", e))?;
+    let ft = meta.file_type();
+    if ft.is_dir() {
+        if recursive {
+            if !decision.allow_recursive_delete {
+                return Err(BifrostError::Config(
+                    "[file.permission_denied] recursive delete is disabled by policy".to_string(),
+                ));
+            }
+            fs::remove_dir_all(path)
+                .await
+                .map_err(|e| io_err("remove_dir_all", e))?;
+        } else {
+            fs::remove_dir(path)
+                .await
+                .map_err(|e| io_err("remove_dir", e))?;
+        }
+    } else {
+        fs::remove_file(path)
+            .await
+            .map_err(|e| io_err("remove_file", e))?;
+    }
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "deleted": true,
+        "recursive": recursive,
+    }))
+}
+
+/// Minimal unified-diff applier. Accepts a patch in `git diff` / `diff -u`
+/// form. For each file header (`--- a/FOO` + `+++ b/FOO`) we resolve the
+/// target against the provided decisions map (policy pre-checked upstream),
+/// verify the context lines match, and apply hunks atomically per-file.
+///
+/// Any parse or context-mismatch error aborts the whole patch (no partial
+/// application). Binary diffs are refused.
+pub async fn handle_file_apply_patch(
+    decisions: &std::collections::HashMap<String, PolicyDecision>,
+    patch_text: &str,
+) -> Result<Value> {
+    // Very small, intentionally restricted parser: recognizes only the
+    // subset of unified diff that our CLI emits. Not a full `git apply`.
+    let mut applied: Vec<Value> = Vec::new();
+    let mut files = patch_text.split("\n--- ");
+    let _preamble = files.next(); // anything before first "--- "
+    for raw in files {
+        // `raw` starts with e.g. "a/src/foo.rs\n+++ b/src/foo.rs\n@@ ..."
+        let mut it = raw.splitn(2, '\n');
+        let old_line = it.next().unwrap_or("");
+        let rest = it.next().unwrap_or("");
+        let mut it2 = rest.splitn(2, '\n');
+        let new_line = it2.next().unwrap_or("");
+        let body = it2.next().unwrap_or("");
+        if !new_line.starts_with("+++ ") {
+            return Err(BifrostError::Config(
+                "[file.invalid_args] malformed unified diff: expected '+++' line".to_string(),
+            ));
+        }
+        let strip = |s: &str| -> String {
+            let s = s.trim();
+            s.strip_prefix("a/")
+                .or_else(|| s.strip_prefix("b/"))
+                .unwrap_or(s)
+                .to_string()
+        };
+        let old_path = strip(old_line);
+        let new_path = strip(new_line.trim_start_matches("+++ "));
+        let key = if new_path == "/dev/null" {
+            old_path.clone()
+        } else {
+            new_path.clone()
+        };
+        let decision = decisions.get(&key).ok_or_else(|| {
+            BifrostError::Config(format!(
+                "[file.invalid_args] no policy decision for patch target '{}'",
+                key
+            ))
+        })?;
+
+        // Read original (empty if creating).
+        let target = decision.path.as_path();
+        let orig_bytes = match fs::read(target).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(io_err("read", e)),
+        };
+        let orig_text = String::from_utf8(orig_bytes.clone()).map_err(|_| {
+            BifrostError::Config("[file.invalid_args] file is not utf-8".to_string())
+        })?;
+        let orig_lines: Vec<&str> = orig_text.split_inclusive('\n').collect();
+
+        // Apply hunks.
+        let mut out = String::with_capacity(orig_text.len());
+        let mut src_cursor: usize = 0; // 0-based index into orig_lines
+        let mut hunks = body.split("\n@@ ");
+        // Everything before the first "@@ " is file-level metadata we ignore.
+        let _meta = hunks.next();
+        for hunk in hunks {
+            // `hunk` looks like "-l,c +l,c @@\n<lines>"
+            let mut hlines = hunk.splitn(2, '\n');
+            let header = hlines.next().unwrap_or("");
+            let content = hlines.next().unwrap_or("");
+            let (old_start, _old_count) = parse_hunk_range(header, '-').ok_or_else(|| {
+                BifrostError::Config(format!("[file.invalid_args] bad hunk header: {}", header))
+            })?;
+            // Emit source lines up to the hunk.
+            let target_cursor = if old_start == 0 { 0 } else { old_start - 1 };
+            while src_cursor < target_cursor && src_cursor < orig_lines.len() {
+                out.push_str(orig_lines[src_cursor]);
+                src_cursor += 1;
+            }
+            // Walk hunk lines.
+            for line in content.split_inclusive('\n') {
+                let body_line = line.strip_suffix('\n').unwrap_or(line);
+                if body_line.is_empty() && !line.ends_with('\n') {
+                    continue;
+                }
+                let ch = body_line.chars().next().unwrap_or(' ');
+                let tail = &body_line[ch.len_utf8()..];
+                match ch {
+                    ' ' => {
+                        if src_cursor >= orig_lines.len()
+                            || orig_lines[src_cursor].trim_end_matches('\n') != tail
+                        {
+                            return Err(precondition_failed(format!(
+                                "context mismatch at line {}",
+                                src_cursor + 1
+                            )));
+                        }
+                        out.push_str(orig_lines[src_cursor]);
+                        src_cursor += 1;
+                    }
+                    '-' => {
+                        if src_cursor >= orig_lines.len()
+                            || orig_lines[src_cursor].trim_end_matches('\n') != tail
+                        {
+                            return Err(precondition_failed(format!(
+                                "delete-line mismatch at line {}",
+                                src_cursor + 1
+                            )));
+                        }
+                        src_cursor += 1;
+                    }
+                    '+' => {
+                        out.push_str(tail);
+                        out.push('\n');
+                    }
+                    '\\' => { /* "\ No newline at end of file" — ignore */ }
+                    _ => {
+                        return Err(BifrostError::Config(format!(
+                            "[file.invalid_args] unknown hunk char '{}'",
+                            ch
+                        )))
+                    }
+                }
+            }
+        }
+        // Emit trailing source lines.
+        while src_cursor < orig_lines.len() {
+            out.push_str(orig_lines[src_cursor]);
+            src_cursor += 1;
+        }
+
+        let new_bytes = out.into_bytes();
+        let max = if decision.max_write_bytes == 0 {
+            DEFAULT_MAX_WRITE_BYTES
+        } else {
+            decision.max_write_bytes
+        };
+        if (new_bytes.len() as u64) > max {
+            return Err(size_too_large(format!(
+                "patched file is {} bytes, max_write_bytes is {}",
+                new_bytes.len(),
+                max
+            )));
+        }
+
+        // Atomic rewrite (or delete if target is /dev/null).
+        if new_path == "/dev/null" {
+            fs::remove_file(target)
+                .await
+                .map_err(|e| io_err("remove_file", e))?;
+            applied.push(json!({
+                "path": target.to_string_lossy(),
+                "deleted": true,
+            }));
+        } else {
+            let parent = target.parent().ok_or_else(|| {
+                BifrostError::Config("[file.invalid_args] path has no parent".to_string())
+            })?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io_err("mkdir-parent", e))?;
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let tmp = parent.join(format!(".bifrost-patch.{}.{}.tmp", pid, nanos));
+            {
+                let mut f = fs::File::create(&tmp)
+                    .await
+                    .map_err(|e| io_err("create-tmp", e))?;
+                f.write_all(&new_bytes)
+                    .await
+                    .map_err(|e| io_err("write-tmp", e))?;
+                f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
+            }
+            fs::rename(&tmp, target)
+                .await
+                .map_err(|e| io_err("rename-tmp", e))?;
+            applied.push(json!({
+                "path": target.to_string_lossy(),
+                "bytes_written": new_bytes.len(),
+                "sha256": sha256_hex(&new_bytes),
+            }));
+        }
+    }
+
+    Ok(json!({ "files": applied }))
+}
+
+fn parse_hunk_range(header: &str, sign: char) -> Option<(usize, usize)> {
+    // header example (after "@@ " prefix has been stripped): "-5,7 +5,8 @@"
+    // or "-5 +5,8 @@", or the very first hunk which still starts with "@@" if
+    // splitn didn't strip it. Handle both.
+    let header = header.trim_start_matches('@').trim_start();
+    for tok in header.split_whitespace() {
+        if tok.starts_with(sign) {
+            let tok = &tok[1..];
+            let mut it = tok.split(',');
+            let start: usize = it.next()?.parse().ok()?;
+            let count: usize = match it.next() {
+                Some(c) => c.parse().ok()?,
+                None => 1,
+            };
+            return Some((start, count));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -263,7 +263,13 @@ impl RemoteInvokeExecutor {
                 | super::types::CommandKind::FileStat
                 | super::types::CommandKind::FileGlob
                 | super::types::CommandKind::FileSearch
-                | super::types::CommandKind::FileHash => self.execute_file_op(command).await,
+                | super::types::CommandKind::FileHash
+                | super::types::CommandKind::FileWrite
+                | super::types::CommandKind::FileEdit
+                | super::types::CommandKind::FileMkdir
+                | super::types::CommandKind::FileMove
+                | super::types::CommandKind::FileDelete
+                | super::types::CommandKind::FileApplyPatch => self.execute_file_op(command).await,
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -318,6 +324,12 @@ impl RemoteInvokeExecutor {
             super::types::CommandKind::FileGlob => FileOp::Glob,
             super::types::CommandKind::FileSearch => FileOp::Search,
             super::types::CommandKind::FileHash => FileOp::Hash,
+            super::types::CommandKind::FileWrite => FileOp::Write,
+            super::types::CommandKind::FileEdit => FileOp::Edit,
+            super::types::CommandKind::FileMkdir => FileOp::Mkdir,
+            super::types::CommandKind::FileMove => FileOp::Move,
+            super::types::CommandKind::FileDelete => FileOp::Delete,
+            super::types::CommandKind::FileApplyPatch => FileOp::ApplyPatch,
             _ => {
                 return Err(BifrostError::Config(
                     "execute_file_op called with non-file kind".to_string(),
@@ -338,6 +350,15 @@ impl RemoteInvokeExecutor {
             algo: Option<String>,
             grant_id: Option<String>,
             cwd: Option<String>,
+            // --- Phase 2/3 additions ---
+            content_b64: Option<String>,
+            base_sha256: Option<String>,
+            allow_overwrite: Option<bool>,
+            edits: Option<Vec<super::file_ops::EditRange>>,
+            to_path: Option<String>,
+            recursive: Option<bool>,
+            parents: Option<bool>,
+            patch_text: Option<String>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -416,6 +437,80 @@ impl RemoteInvokeExecutor {
             super::types::CommandKind::FileHash => {
                 super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
             }
+            super::types::CommandKind::FileWrite => {
+                let content = params.content_b64.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'content_b64' is required for file.write".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_write(
+                    &decision,
+                    content,
+                    params.base_sha256.as_deref(),
+                    params.allow_overwrite,
+                )
+                .await?
+            }
+            super::types::CommandKind::FileEdit => {
+                let edits = params.edits.as_ref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'edits' is required for file.edit".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_edit(&decision, params.base_sha256.as_deref(), edits)
+                    .await?
+            }
+            super::types::CommandKind::FileMkdir => {
+                super::file_ops::handle_file_mkdir(&decision, params.parents.unwrap_or(false))
+                    .await?
+            }
+            super::types::CommandKind::FileMove => {
+                let to = params.to_path.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'to_path' is required for file.move".to_string(),
+                    )
+                })?;
+                let to_decision = policy
+                    .check(Path::new(to), cwd, FileOp::Move)
+                    .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+                super::file_ops::handle_file_move(&decision, &to_decision).await?
+            }
+            super::types::CommandKind::FileDelete => {
+                super::file_ops::handle_file_delete(&decision, params.recursive.unwrap_or(false))
+                    .await?
+            }
+            super::types::CommandKind::FileApplyPatch => {
+                let patch_text = params.patch_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'patch_text' is required for file.apply_patch"
+                            .to_string(),
+                    )
+                })?;
+                // Pre-resolve every target path in the patch so policy checks
+                // happen BEFORE any filesystem mutation.
+                let mut decisions = std::collections::HashMap::new();
+                for raw in patch_text.split("\n--- ").skip(1) {
+                    let mut it = raw.splitn(2, '\n');
+                    let _old = it.next().unwrap_or("");
+                    let rest = it.next().unwrap_or("");
+                    let new_line = rest.splitn(2, '\n').next().unwrap_or("");
+                    if let Some(p) = new_line.strip_prefix("+++ ") {
+                        let p = p.trim();
+                        let key = p
+                            .strip_prefix("a/")
+                            .or_else(|| p.strip_prefix("b/"))
+                            .unwrap_or(p);
+                        if key == "/dev/null" {
+                            continue;
+                        }
+                        let d = policy
+                            .check(Path::new(key), cwd, FileOp::ApplyPatch)
+                            .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+                        decisions.insert(key.to_string(), d);
+                    }
+                }
+                super::file_ops::handle_file_apply_patch(&decisions, patch_text).await?
+            }
             _ => unreachable!(),
         };
 
@@ -433,6 +528,12 @@ impl RemoteInvokeExecutor {
                 | super::types::CommandKind::FileGlob
                 | super::types::CommandKind::FileSearch
                 | super::types::CommandKind::FileHash
+                | super::types::CommandKind::FileWrite
+                | super::types::CommandKind::FileEdit
+                | super::types::CommandKind::FileMkdir
+                | super::types::CommandKind::FileMove
+                | super::types::CommandKind::FileDelete
+                | super::types::CommandKind::FileApplyPatch
         ) {
             return Ok(CommandArgs::default());
         }
