@@ -30,7 +30,10 @@ use crate::cli::{
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
-const CALL_EVENT_TIMEOUT_SECS: u64 = 120;
+// PR #5a: interpreted as an IDLE deadline (resets on every chunk/event),
+// not an overall wall-clock deadline. 300s matches executor-side
+// DEFAULT_IDLE_TIMEOUT_MS so client and server agree on liveness.
+const CALL_EVENT_TIMEOUT_SECS: u64 = 300;
 const CANCEL_SETTLE_TIMEOUT_SECS: u64 = 10;
 const CANCEL_SETTLE_TOTAL_TIMEOUT_SECS: u64 = 15;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
@@ -3282,7 +3285,9 @@ impl CallerRelayClient {
         }
 
         let mut stream = response.bytes_stream();
-        let mut timeout = Box::pin(tokio::time::sleep(Duration::from_secs(timeout_secs)));
+        // PR #5a: idle deadline resets on each frame; see pulse() below.
+        let idle = Duration::from_secs(timeout_secs);
+        let mut timeout = Box::pin(tokio::time::sleep(idle));
 
         let mut event_name = String::new();
         let mut data_buf = String::new();
@@ -3318,6 +3323,8 @@ impl CallerRelayClient {
                         Some(Ok(bytes)) => {
                             let text = String::from_utf8_lossy(&bytes);
                             partial_line.push_str(&text);
+                            // PR #5a: reset idle deadline on each received chunk.
+                            timeout.as_mut().reset(tokio::time::Instant::now() + idle);
 
                             while let Some(pos) = partial_line.find('\n') {
                                 let line = partial_line[..pos].trim_end_matches('\r').to_string();
