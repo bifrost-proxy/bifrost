@@ -26,6 +26,7 @@ use super::grant_info_store::GrantInfoStore;
 use super::grant_policy_store::{GrantPolicyStore, StoredGrantPolicy};
 use super::identity::Identity;
 use super::relay_client::RelayClient;
+use super::session_ring;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use super::types::{
     build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
@@ -2413,6 +2414,9 @@ impl RemoteInvokeWorker {
 
             let start = std::time::Instant::now();
             let mut next_seq = 1u64;
+            // PR #4c-2: register a session in the global ring so tee/resume can work.
+            let _session_registered = session_ring::register_session_str(&cid);
+
             let result = executor
                 .execute_with_stdout_sink(&command, |chunk| {
                     let relay_client = Arc::clone(&relay_client);
@@ -2423,6 +2427,9 @@ impl RemoteInvokeWorker {
                     next_seq += 1;
 
                     async move {
+                        // PR #4c-2: mirror stdout bytes into the session ring
+                        // for resume. Silent no-op if cid is not a UUID.
+                        session_ring::tee_stdout_str(&cid, chunk.as_bytes());
                         let envelope = Self::encrypt_call_frame(
                             &grant_crypto,
                             &cid,
@@ -2447,6 +2454,13 @@ impl RemoteInvokeWorker {
 
             match result {
                 Ok(response) => {
+                    // PR #4c-2: finalize the session ring for successful exit.
+                    session_ring::finalize_session_str(
+                        &cid,
+                        super::session_ring::SessionStatus::Done {
+                            exit_code: response.exit_code,
+                        },
+                    );
                     if active_call_for_task.is_cancelled() {
                         info!(call_id = %cid, "skip completion update because call was cancelled");
                         active_calls.write().remove(&cid);
@@ -2463,6 +2477,13 @@ impl RemoteInvokeWorker {
                     ) {
                         Ok(payload) => Some(payload),
                         Err(error) => {
+                            // PR #4c-2: finalize the session ring for failure.
+                            session_ring::finalize_session_str(
+                                &cid,
+                                super::session_ring::SessionStatus::Failed {
+                                    code: error.to_string(),
+                                },
+                            );
                             error!(
                                 error = %error,
                                 call_id = %cid,
