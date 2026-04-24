@@ -333,10 +333,10 @@ test_file_read() {
     if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
         local decoded
         decoded=$(echo "$out" | jq -r '.content_b64' | base64 -d)
-        if [[ "$decoded" == "hello world"$'\n' ]]; then
+        if [[ "$decoded" == "hello world" ]]; then
             _log_pass "TC-FILE-01: file.read returns correct content"
         else
-            _log_fail "TC-FILE-01: file.read returns correct content" "hello world\\n" "$decoded"
+            _log_fail "TC-FILE-01: file.read returns correct content" "hello world" "$decoded"
         fi
         # Also verify metadata fields exist
         local size total_size
@@ -480,11 +480,13 @@ test_file_write() {
 
     log "TC-FILE-05: file.write — write new-file.txt"
     local content="written by e2e"
-    local b64
-    b64=$(printf '%s\n' "$content" | base64)
+    local content_file
+    content_file="$(mktemp)"
+    printf '%s\n' "$content" > "$content_file"
 
     local out
-    out=$(run_remote_file_cmd write new-file.txt --content-b64 "$b64" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd write new-file.txt --content-file "$content_file" --cwd "$SANDBOX_DIR") || true
+    rm -f "$content_file"
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-05: caller connection error, skipping: $out"
@@ -556,7 +558,7 @@ test_file_move() {
 
     log "TC-FILE-07: file.move — move moveme.txt to moved.txt"
     local out
-    out=$(run_remote_file_cmd move moveme.txt moved.txt --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd mv moveme.txt moved.txt --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-07: caller connection error, skipping: $out"
@@ -594,7 +596,7 @@ test_file_delete() {
 
     log "TC-FILE-08: file.delete — delete deleteme.txt"
     local out
-    out=$(run_remote_file_cmd delete deleteme.txt --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd rm deleteme.txt --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-08: caller connection error, skipping: $out"
@@ -653,10 +655,12 @@ test_readonly_rejection() {
     fi
 
     # Attempt a write operation — should be rejected
-    local b64
-    b64=$(printf 'should fail' | base64)
+    local content_file
+    content_file="$(mktemp)"
+    printf 'should fail' > "$content_file"
     local out
-    out=$(run_remote_file_cmd write rejected-file.txt --content-b64 "$b64" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd write rejected-file.txt --content-file "$content_file" --cwd "$SANDBOX_DIR") || true
+    rm -f "$content_file"
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-09: caller connection error during write attempt: $out"
@@ -705,6 +709,24 @@ setup_sandbox() {
     echo "hello world" > "$SANDBOX_DIR/hello.txt"
     echo "to move" > "$SANDBOX_DIR/moveme.txt"
     echo "to delete" > "$SANDBOX_DIR/deleteme.txt"
+}
+
+write_file_access_policy() {
+    log "Writing file-access policy for grant $GRANT_ID"
+    cat >"$TARGET_DATA_DIR/file-access.toml" <<EOF
+[[grant]]
+grant_id = "$GRANT_ID"
+name = "remote-file-relay-e2e"
+roots = ["$SANDBOX_DIR"]
+denies = ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"]
+write_denies = []
+ops = ["read", "list", "stat", "glob", "search", "hash", "write", "edit", "mkdir", "move", "delete", "apply_patch"]
+max_read_bytes = 2097152
+max_write_bytes = 2097152
+respect_gitignore = false
+allow_overwrite = true
+allow_recursive_delete = false
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -762,6 +784,7 @@ EOF
     pair_and_upgrade_grant
 
     setup_sandbox
+    write_file_access_policy
 
     # Run all file operation tests
     test_file_read

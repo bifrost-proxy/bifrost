@@ -1,7 +1,7 @@
 //! Per-grant file access policy store for the remote-invoke executor.
 //!
 //! The store holds an in-memory `HashMap<GrantId, FileAccessPolicy>` hydrated
-//! from `~/.bifrost/file-access.toml` at startup (best-effort). If no explicit
+//! from `<data-dir>/file-access.toml` at startup (best-effort). If no explicit
 //! policy is configured for a grant, [`FileAccessPolicyStore::resolve`] returns
 //! a default read-only policy rooted at the caller's `cwd`.
 //!
@@ -42,11 +42,19 @@ struct RawGrantPolicy {
     #[serde(default)]
     denies: Vec<String>,
     #[serde(default)]
+    write_denies: Vec<String>,
+    #[serde(default)]
     ops: Vec<FileOp>,
     #[serde(default)]
     max_read_bytes: Option<u64>,
     #[serde(default)]
+    max_write_bytes: Option<u64>,
+    #[serde(default)]
     respect_gitignore: Option<bool>,
+    #[serde(default)]
+    allow_overwrite: Option<bool>,
+    #[serde(default)]
+    allow_recursive_delete: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -61,13 +69,15 @@ impl FileAccessPolicyStore {
         Self::default()
     }
 
-    /// Load from `~/.bifrost/file-access.toml` if it exists. Missing file or
+    /// Load from `<data-dir>/file-access.toml` if it exists. Missing file or
     /// parse errors produce an empty store plus a warning — the relay can
     /// still serve requests using the default read-only policy.
     pub fn load_default() -> Self {
-        match default_config_path() {
-            Some(path) if path.exists() => Self::load_from(&path),
-            _ => Self::empty(),
+        let path = default_config_path();
+        if path.exists() {
+            Self::load_from(&path)
+        } else {
+            Self::empty()
         }
     }
 
@@ -107,12 +117,24 @@ impl FileAccessPolicyStore {
             if !g.denies.is_empty() {
                 policy.denies = g.denies;
             }
+            if !g.write_denies.is_empty() {
+                policy.write_denies = g.write_denies;
+            }
             policy.ops = ops;
             if let Some(max) = g.max_read_bytes {
                 policy.max_read_bytes = max;
             }
+            if let Some(max) = g.max_write_bytes {
+                policy.max_write_bytes = max;
+            }
             if let Some(rg) = g.respect_gitignore {
                 policy.respect_gitignore = rg;
+            }
+            if let Some(allow) = g.allow_overwrite {
+                policy.allow_overwrite = allow;
+            }
+            if let Some(allow) = g.allow_recursive_delete {
+                policy.allow_recursive_delete = allow;
             }
             by_grant.insert(g.grant_id, policy);
         }
@@ -130,9 +152,8 @@ impl FileAccessPolicyStore {
     }
 }
 
-fn default_config_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".bifrost").join(CONFIG_FILE_NAME))
+fn default_config_path() -> PathBuf {
+    bifrost_storage::data_dir().join(CONFIG_FILE_NAME)
 }
 
 #[cfg(test)]
@@ -160,8 +181,12 @@ grant_id = "g-1"
 name = "proj"
 roots = ["{}"]
 denies = ["**/.git/**"]
-ops = ["read", "stat"]
+write_denies = ["**/*.lock"]
+ops = ["read", "stat", "write"]
 max_read_bytes = 1024
+max_write_bytes = 2048
+allow_overwrite = false
+allow_recursive_delete = true
 "#,
                 tmp.path().to_string_lossy().replace('\\', "/")
             ),
@@ -170,8 +195,12 @@ max_read_bytes = 1024
         let store = FileAccessPolicyStore::load_from(&cfg);
         let p = store.resolve("g-1", tmp.path());
         assert_eq!(p.name, "proj");
-        assert_eq!(p.ops, vec![FileOp::Read, FileOp::Stat]);
+        assert_eq!(p.ops, vec![FileOp::Read, FileOp::Stat, FileOp::Write]);
+        assert_eq!(p.write_denies, vec!["**/*.lock"]);
         assert_eq!(p.max_read_bytes, 1024);
+        assert_eq!(p.max_write_bytes, 2048);
+        assert!(!p.allow_overwrite);
+        assert!(p.allow_recursive_delete);
     }
 
     #[test]

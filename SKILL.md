@@ -706,15 +706,21 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - 遇到不确定的参数或用法，**先执行** **`bifrost <command> -h`** **获取完整手册**，不要猜测
 
 
-## 9. 远程文件 API（Phase 1, 只读）
+## 9. 远程文件 API（Phase 1/2/3）
 
-受 FileAccessPolicy 约束的远程文件访问能力。默认策略 roots=[cwd]，denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]。
+受 FileAccessPolicy 约束的远程文件访问能力。默认策略 roots=[cwd]，denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]。文件能力使用独立 grant scope：只读使用 `remote_file_read`，读写/patch 使用 `remote_file_write`；shell scope 不自动授予 file API。
 
-bifrost remote file read   --path <path> [--max-bytes <N>] [--allow-binary]
-bifrost remote file list   --path <path> [--depth <N>]
-bifrost remote file stat   --path <path>
-bifrost remote file glob   --pattern '<glob>' [--max-matches <N>]
-bifrost remote file search --pattern '<regex>' --path <path>
-bifrost remote file hash   --path <path> --algo sha256
+bifrost remote file read   <path> [--max-bytes <N>] [--allow-binary]
+bifrost remote file list   [path] [--depth <N>]
+bifrost remote file stat   <path>
+bifrost remote file glob   '<glob>' [--max-matches <N>]
+bifrost remote file search '<regex>' [--path <path>]
+bifrost remote file hash   <path> --algo sha256
+bifrost remote file write  <path> [--content-file <local-path|->] [--base-sha256 <sha>]
+bifrost remote file edit   <path> --edits '[{"start_line":1,"end_line":1,"replacement":"..."}]'
+bifrost remote file mkdir  <path> [--parents]
+bifrost remote file mv     <from> <to>
+bifrost remote file rm     <path> [--recursive]
+bifrost remote file apply-patch --patch-file <local-patch|->
 
 所有子命令支持 `--output json` 做机器可读输出，错误码遵循 file.out_of_scope / file.permission_denied / file.binary_not_allowed 等契约。

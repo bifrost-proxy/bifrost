@@ -16,9 +16,9 @@ use crate::file_access::{
 };
 
 /// The full set of file operations — Phase 1 read ops plus Phase 2 write ops
-/// plus Phase 3 apply_patch. Serialized as lowercase strings on the wire.
+/// plus Phase 3 apply_patch. Serialized as snake_case strings on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum FileOp {
     // --- Phase 1 (read) ---
     Read,
@@ -179,17 +179,25 @@ impl FileAccessPolicy {
                 } else {
                     cwd.join(&path)
                 };
-                let parent = abs
-                    .parent()
-                    .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?;
-                let file_name = abs
-                    .file_name()
-                    .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?
-                    .to_owned();
-                let parent_canonical = canonicalize_within_roots(parent, cwd, &self.roots)?;
-                let root_index = parent_canonical.root_index;
-                let parent_abs = parent_canonical.into_path_buf();
-                let new_abs = parent_abs.join(&file_name);
+                let mut ancestor = abs.as_path();
+                let mut missing_components = Vec::new();
+                while !ancestor.exists() {
+                    let component = ancestor
+                        .file_name()
+                        .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?
+                        .to_owned();
+                    missing_components.push(component);
+                    ancestor = ancestor
+                        .parent()
+                        .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?;
+                }
+
+                let ancestor_canonical = canonicalize_within_roots(ancestor, cwd, &self.roots)?;
+                let root_index = ancestor_canonical.root_index;
+                let mut new_abs = ancestor_canonical.into_path_buf();
+                for component in missing_components.iter().rev() {
+                    new_abs.push(component);
+                }
                 let canonical_root = std::fs::canonicalize(&self.roots[root_index])
                     .unwrap_or_else(|_| self.roots[root_index].clone());
                 let rel = new_abs
@@ -366,6 +374,22 @@ mod tests {
             .unwrap();
         assert_eq!(decision.op, FileOp::Write);
         assert!(decision.path.as_path().ends_with("new_file.txt"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mkdir_parents_can_target_nested_missing_path() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_mkdir_parents_test");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let policy = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+        let decision = policy
+            .check(Path::new("sub/nested"), &root, FileOp::Mkdir)
+            .unwrap();
+        assert_eq!(decision.op, FileOp::Mkdir);
+        assert!(decision.path.as_path().ends_with("sub/nested"));
 
         std::fs::remove_dir_all(&root).ok();
     }

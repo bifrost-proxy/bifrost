@@ -269,7 +269,10 @@ impl RemoteInvokeExecutor {
                 | super::types::CommandKind::FileMkdir
                 | super::types::CommandKind::FileMove
                 | super::types::CommandKind::FileDelete
-                | super::types::CommandKind::FileApplyPatch => self.execute_file_op(command).await,
+                | super::types::CommandKind::FileApplyPatch => {
+                    let body = self.execute_file_op(command).await?;
+                    self.emit_stdout(&mut on_stdout, body).await
+                }
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -379,7 +382,11 @@ impl RemoteInvokeExecutor {
             });
         let cwd = Path::new(&cwd_str);
 
-        let grant_id = params.grant_id.clone().unwrap_or_default();
+        let grant_id = command
+            .grant_id
+            .clone()
+            .or(params.grant_id.clone())
+            .unwrap_or_default();
         let store = super::file_policy_store::FileAccessPolicyStore::load_default();
         let policy = store.resolve(&grant_id, cwd);
 
@@ -493,7 +500,7 @@ impl RemoteInvokeExecutor {
                     let mut it = raw.splitn(2, '\n');
                     let _old = it.next().unwrap_or("");
                     let rest = it.next().unwrap_or("");
-                    let new_line = rest.splitn(2, '\n').next().unwrap_or("");
+                    let new_line = rest.split('\n').next().unwrap_or("");
                     if let Some(p) = new_line.strip_prefix("+++ ") {
                         let p = p.trim();
                         let key = p

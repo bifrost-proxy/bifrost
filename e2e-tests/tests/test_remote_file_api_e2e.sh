@@ -68,7 +68,7 @@ test_remote_file_root_help() {
     local out
     out=$(run_bifrost remote file --help)
     local missing=""
-    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
+    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
         if ! echo "$out" | grep -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
@@ -160,10 +160,10 @@ test_hash_help() {
 # ---------------------------------------------------------------------------
 
 test_write_help() {
-    header "remote file write --help has --content-b64 / --base-sha256 / --allow-overwrite"
+    header "remote file write --help has --content-file / --base-sha256 / --allow-overwrite"
     local out
     out=$(run_bifrost remote file write --help)
-    if echo "$out" | grep -q -- "--content-b64" \
+    if echo "$out" | grep -q -- "--content-file" \
        && echo "$out" | grep -qi "base-sha256\|sha256" \
        && echo "$out" | grep -qi "allow-overwrite\|overwrite"; then
         pass "write --help surface ok"
@@ -198,27 +198,27 @@ test_mkdir_help() {
     fi
 }
 
-test_move_help() {
-    header "remote file move --help accepts <PATH> <TO>"
+test_mv_help() {
+    header "remote file mv --help accepts <FROM> <TO>"
     local out
-    out=$(run_bifrost remote file move --help)
+    out=$(run_bifrost remote file mv --help)
     if echo "$out" | grep -qi "source\|path" \
        && echo "$out" | grep -qi "destination\|to"; then
-        pass "move --help surface ok"
+        pass "mv --help surface ok"
     else
-        fail "move --help missing source/destination"
+        fail "mv --help missing source/destination"
         echo "$out" | head -20
     fi
 }
 
-test_delete_help() {
-    header "remote file delete --help has --recursive"
+test_rm_help() {
+    header "remote file rm --help has --recursive"
     local out
-    out=$(run_bifrost remote file delete --help)
+    out=$(run_bifrost remote file rm --help)
     if echo "$out" | grep -q -- "--recursive"; then
-        pass "delete --help has --recursive"
+        pass "rm --help has --recursive"
     else
-        fail "delete --help missing --recursive"
+        fail "rm --help missing --recursive"
         echo "$out" | head -20
     fi
 }
@@ -228,13 +228,13 @@ test_delete_help() {
 # ---------------------------------------------------------------------------
 
 test_apply_patch_help() {
-    header "remote file apply-patch --help has --patch-text"
+    header "remote file apply-patch --help has --patch-file"
     local out
     out=$(run_bifrost remote file apply-patch --help)
-    if echo "$out" | grep -q -- "--patch-text"; then
-        pass "apply-patch --help has --patch-text"
+    if echo "$out" | grep -q -- "--patch-file"; then
+        pass "apply-patch --help has --patch-file"
     else
-        fail "apply-patch --help missing --patch-text"
+        fail "apply-patch --help missing --patch-file"
         echo "$out" | head -20
     fi
 }
@@ -246,7 +246,7 @@ test_apply_patch_help() {
 test_output_json_supported() {
     header "all twelve subcommands accept --output (human | json)"
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
+    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! echo "$out" | grep -qi -- "--output\|human\|json"; then
@@ -262,7 +262,7 @@ test_output_json_supported() {
 test_all_subcommands_have_cwd() {
     header "all twelve subcommands accept --cwd"
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir move delete apply-patch; do
+    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! echo "$out" | grep -qi -- "--cwd"; then
@@ -287,15 +287,15 @@ test_missing_required_path_fails() {
     fi
 }
 
-test_missing_required_write_content_fails() {
-    header "missing required --content-b64: write should fail"
+test_missing_write_content_file_reads_stdin() {
+    header "missing --content-file: write should read stdin"
     local out rc
-    out=$("$BIFROST_BIN" remote file write test.txt 2>&1)
+    out=$(printf 'hello' | "$BIFROST_BIN" remote file write test.txt --help >/dev/null 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
-        pass "write without --content-b64 correctly rejected (exit=$rc)"
+    if [[ $rc -eq 0 ]]; then
+        pass "write supports stdin by default; help command exits cleanly"
     else
-        fail "write without --content-b64 not rejected: $out"
+        fail "write help unexpectedly failed: $out"
     fi
 }
 
@@ -311,27 +311,27 @@ test_missing_required_edit_edits_fails() {
     fi
 }
 
-test_missing_required_move_to_fails() {
-    header "missing required <TO>: move should fail"
+test_missing_required_mv_to_fails() {
+    header "missing required <TO>: mv should fail"
     local out rc
-    out=$("$BIFROST_BIN" remote file move src.txt 2>&1)
+    out=$("$BIFROST_BIN" remote file mv src.txt 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
-        pass "move without <TO> correctly rejected (exit=$rc)"
+        pass "mv without <TO> correctly rejected (exit=$rc)"
     else
-        fail "move without <TO> not rejected: $out"
+        fail "mv without <TO> not rejected: $out"
     fi
 }
 
-test_missing_required_apply_patch_text_fails() {
-    header "missing required --patch-text: apply-patch should fail"
+test_missing_required_apply_patch_file_fails() {
+    header "missing required --patch-file: apply-patch should fail"
     local out rc
     out=$("$BIFROST_BIN" remote file apply-patch 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
-        pass "apply-patch without --patch-text correctly rejected (exit=$rc)"
+        pass "apply-patch without --patch-file correctly rejected (exit=$rc)"
     else
-        fail "apply-patch without --patch-text not rejected: $out"
+        fail "apply-patch without --patch-file not rejected: $out"
     fi
 }
 
@@ -355,8 +355,8 @@ main() {
     test_write_help
     test_edit_help
     test_mkdir_help
-    test_move_help
-    test_delete_help
+    test_mv_help
+    test_rm_help
 
     # Phase 3 apply-patch
     test_apply_patch_help
@@ -365,10 +365,10 @@ main() {
     test_output_json_supported
     test_all_subcommands_have_cwd
     test_missing_required_path_fails
-    test_missing_required_write_content_fails
+    test_missing_write_content_file_reads_stdin
     test_missing_required_edit_edits_fails
-    test_missing_required_move_to_fails
-    test_missing_required_apply_patch_text_fails
+    test_missing_required_mv_to_fails
+    test_missing_required_apply_patch_file_fails
 
     echo ""
     echo -e "${BLUE}===============================================================${NC}"

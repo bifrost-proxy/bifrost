@@ -967,7 +967,7 @@ mod tests {
             .unwrap();
         let v = handle_file_read(&dec, None, false).await.unwrap();
         assert_eq!(v["size"].as_u64().unwrap(), 6);
-        assert_eq!(v["truncated"].as_bool().unwrap(), false);
+        assert!(!v["truncated"].as_bool().unwrap());
     }
 
     #[tokio::test]

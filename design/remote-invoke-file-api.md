@@ -17,7 +17,7 @@
 
 因此在 `query.readonly` 与 `shell.exec` 之间，新增 **File API** 作为第三类 remote 能力，提供 coding agent 所需的语义化文件操作原语，复用现有 relay + encrypted remote invoke 通道，沿用现有授权模型。
 
-## 能力矩阵（首版 Phase 1：只读最小集）
+## 能力矩阵（当前实现：Phase 1/2/3）
 
 | method           | 语义                                           | 必需 scope              |
 | ---------------- | ---------------------------------------------- | ----------------------- |
@@ -28,9 +28,9 @@
 | `file.search`    | 内容检索（ripgrep 语义）                       | `remote_file_read`      |
 | `file.hash`      | 计算文件哈希（sha256）                         | `remote_file_read`      |
 
-Phase 2（写入与原子编辑）与 Phase 3（unified diff & 进阶能力）在独立 PR 中单独实现，本设计文档记录完整能力矩阵以指导后续演进，但代码实现严格按 Phase 1 范围落地。
+Phase 1 的只读能力、Phase 2 的写入/编辑能力与 Phase 3 的 unified diff apply 已在当前分支串通。`file.watch` 仍是后续能力，不属于本轮实现。
 
-### Phase 2 预览（仅设计，不在本 PR 实现）
+### Phase 2 写能力
 
 | method             | 语义                                            | 必需 scope           |
 | ------------------ | ----------------------------------------------- | -------------------- |
@@ -40,7 +40,7 @@ Phase 2（写入与原子编辑）与 Phase 3（unified diff & 进阶能力）�
 | `file.move`        | 重命名/移动                                      | `remote_file_write`  |
 | `file.delete`      | 删除文件或目录                                   | `remote_file_write`  |
 
-### Phase 3 预览
+### Phase 3 patch 能力
 
 | method             | 语义                                            | 必需 scope           |
 | ------------------ | ----------------------------------------------- | -------------------- |
@@ -371,15 +371,21 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 
 ## CLI 映射（caller 侧）
 
-Phase 1 子命令骨架：
+当前子命令骨架：
 
 ```
-bifrost remote file read    <path> [--offset N --length M --format json|text|base64]
-bifrost remote file list    <path> [--recursive --glob '**/*.rs' --limit N]
-bifrost remote file stat    <path> [--with-sha256]
-bifrost remote file glob    '<pattern>' [--cwd <cwd> --limit N]
-bifrost remote file search  <query> [--path P --regex --glob '**/*.rs' --context 2 --max-results N]
-bifrost remote file hash    <path> [--algo sha256]
+bifrost remote file read        <path> [--max-bytes N] [--allow-binary]
+bifrost remote file list        [path] [--depth N]
+bifrost remote file stat        <path>
+bifrost remote file glob        <pattern> [--max-matches N]
+bifrost remote file search      <regex> [--path P] [--max-matches N] [--max-scan N]
+bifrost remote file hash        <path> [--algo sha256]
+bifrost remote file write       <path> [--content-file <local-path|->] [--base-sha256 SHA]
+bifrost remote file edit        <path> --edits JSON [--base-sha256 SHA]
+bifrost remote file mkdir       <path> [--parents]
+bifrost remote file mv          <from> <to>
+bifrost remote file rm          <path> [--recursive]
+bifrost remote file apply-patch --patch-file <local-patch|->
 ```
 
 ## 实现拆分
@@ -477,7 +483,7 @@ Phase 2 将引入**写能力**，但遵循与 Phase 1 相同的铁律：任何�
 | `file.watch` | 长连接订阅目录变更事件（FSEvents / inotify），Phase 3.1 |
 | `file.chmod` / `file.chown` | 权限/所有者管理，默认禁用，需显式 `allow_metadata_ops` |
 | `file.symlink` | 创建符号链接，默认禁用；启用后目标必须在 roots 内 |
-| CLI `bifrost remote file apply-patch <patch.diff>` | 一键投递 unified diff |
+| CLI `bifrost remote file apply-patch --patch-file <patch.diff>` | 一键投递 unified diff |
 
 ### 10.3 与 Phase 2 的叠加约束
 

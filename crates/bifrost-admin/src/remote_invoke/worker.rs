@@ -2239,6 +2239,7 @@ impl RemoteInvokeWorker {
                 .await;
             return;
         }
+        command.grant_id = Some(grant_id.clone());
 
         if let Some(query) = &command.query {
             if command_kind == CommandKind::QueryReadonly
@@ -2330,6 +2331,7 @@ impl RemoteInvokeWorker {
                     timeout_ms: command.timeout_ms,
                     pty: command.pty.clone(),
                     output_mode: command.output_mode,
+                    grant_id: None,
                 },
                 source_ip: None,
                 caller_display_name,
@@ -3891,6 +3893,7 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
         };
 
         let summary = build_call_command_summary(
@@ -3924,6 +3927,7 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
         };
 
         let summary = build_call_command_summary(
@@ -3956,6 +3960,7 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
         };
 
         let summary = build_call_command_summary(
@@ -3990,6 +3995,7 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
         };
 
         let summary = build_call_command_summary(
@@ -4031,6 +4037,7 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
         };
 
         let summary = build_call_command_summary(None, &command, CommandKind::QueryReadonly);
@@ -4075,6 +4082,7 @@ mod tests {
                 timeout_ms: None,
                 pty: None,
                 output_mode: None,
+                grant_id: None,
             },
             source_ip: None,
             caller_display_name: Some("TestCaller".to_string()),

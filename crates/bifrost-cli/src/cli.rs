@@ -1611,8 +1611,14 @@ pub enum RemoteGrantCommands {
     Update {
         #[arg(help = "Grant ID to update")]
         grant_id: String,
-        #[arg(long, value_parser = ["query", "selected", "all"], help = "Grant access mode")]
-        access: String,
+        #[arg(long, value_parser = ["query", "selected", "all"], help = "Shell/query access mode")]
+        access: Option<String>,
+        #[arg(
+            long,
+            value_parser = ["remote_query", "remote_shell_exec", "remote_shell_interactive", "remote_file_read", "remote_file_write"],
+            help = "Explicit grant scope; use remote_file_read/write for Remote File API grants"
+        )]
+        scope: Option<String>,
         #[arg(long = "policy", action = ArgAction::Append, help = "Bind to this shell policy id (repeatable for selected access)")]
         policy: Vec<String>,
         #[arg(long, help = "Allow stdin: true or false")]

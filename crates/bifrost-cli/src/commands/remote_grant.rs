@@ -28,11 +28,18 @@ pub fn handle_remote_grant_command(
         RemoteGrantCommands::Update {
             grant_id,
             access,
+            scope,
             policy,
             stdin,
             interactive,
         } => {
-            let body = build_update_payload(&access, &policy, stdin, interactive)?;
+            let body = build_update_payload(
+                access.as_deref(),
+                scope.as_deref(),
+                &policy,
+                stdin,
+                interactive,
+            )?;
             let payload = client
                 .update_remote_invoke_grant(&grant_id, &body)
                 .map_err(BifrostError::Config)?;
@@ -58,11 +65,52 @@ pub fn handle_remote_grant_command(
 }
 
 fn build_update_payload(
-    access: &str,
+    access: Option<&str>,
+    scope: Option<&str>,
     policy_ids: &[String],
     stdin: Option<bool>,
     interactive: Option<bool>,
 ) -> Result<Value> {
+    if access.is_some() && scope.is_some() {
+        return Err(BifrostError::Config(
+            "use either --access or --scope, not both".to_string(),
+        ));
+    }
+
+    if let Some(scope) = scope {
+        return match scope {
+            "remote_query" => Ok(json!({
+                "grant_scope": "remote_query",
+                "policy_binding": Value::Null,
+                "interactive_allowed": Value::Null,
+                "stdin_allowed": Value::Null,
+            })),
+            "remote_file_read" | "remote_file_write" => Ok(json!({
+                "grant_scope": scope,
+                "policy_binding": Value::Null,
+                "interactive_allowed": Value::Null,
+                "stdin_allowed": Value::Null,
+            })),
+            "remote_shell_exec" | "remote_shell_interactive" => {
+                let interactive_allowed = scope == "remote_shell_interactive";
+                Ok(json!({
+                    "grant_scope": scope,
+                    "policy_binding": json!({ "mode": "all" }),
+                    "interactive_allowed": Value::Bool(interactive_allowed),
+                    "stdin_allowed": stdin.map(Value::Bool).unwrap_or(Value::Bool(false)),
+                }))
+            }
+            _ => Err(BifrostError::Config(format!(
+                "unsupported grant scope '{}'",
+                scope
+            ))),
+        };
+    }
+
+    let access = access.ok_or_else(|| {
+        BifrostError::Config("either --access or --scope is required".to_string())
+    })?;
+
     let (grant_scope, policy_binding) = match access {
         "query" => ("remote_query", Value::Null),
         "all" => ("remote_shell_exec", json!({ "mode": "all" })),
@@ -152,5 +200,29 @@ fn print_grant_summary(payload: &Value) {
         println!("    scope: {} | mode: {}", scope, mode);
         println!("    binding: {}", binding);
         println!("    stdin: {} | interactive: {}", stdin, interactive);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_update_payload_supports_remote_file_write_scope() {
+        let payload = build_update_payload(None, Some("remote_file_write"), &[], None, None)
+            .expect("payload");
+
+        assert_eq!(payload["grant_scope"], "remote_file_write");
+        assert!(payload["policy_binding"].is_null());
+        assert!(payload["interactive_allowed"].is_null());
+        assert!(payload["stdin_allowed"].is_null());
+    }
+
+    #[test]
+    fn build_update_payload_rejects_access_and_scope_together() {
+        let err = build_update_payload(Some("all"), Some("remote_file_read"), &[], None, None)
+            .expect_err("conflicting flags should fail");
+
+        assert!(err.to_string().contains("either --access or --scope"));
     }
 }

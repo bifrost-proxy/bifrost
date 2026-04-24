@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { IStorage } from './dao/types';
 import type { User } from './types';
 
-export const MAX_BODY_SIZE = 1024 * 1024;
+export const MAX_BODY_SIZE = 2 * 1024 * 1024;
 
 export interface RequestContext {
   req: IncomingMessage;

@@ -91,6 +91,7 @@ struct ShellExecPayload {
 #[derive(Debug, Clone)]
 enum RemoteRenderMode {
     Raw,
+    File,
     Search {
         format: OutputFormat,
         no_color: bool,
@@ -1123,7 +1124,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     ensure_remote_command_confirmed(&opts.action)?;
-    let command = build_remote_command(&opts.action);
+    let command = build_remote_command_checked(&opts.action)?;
 
     let grant = caller
         .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
@@ -1845,11 +1846,18 @@ async fn revoke_all_matching_grants(
     Ok(revoked)
 }
 
+#[cfg(test)]
 fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
+    build_remote_command_checked(action).expect("remote command should build")
+}
+
+fn build_remote_command_checked(
+    action: &RemoteCommands,
+) -> bifrost_core::Result<BuiltRemoteCommand> {
     match action {
         RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
         RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
-        RemoteCommands::Status => BuiltRemoteCommand {
+        RemoteCommands::Status => Ok(BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
             label: "status".to_string(),
             command: Some("status".to_string()),
@@ -1857,9 +1865,11 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
-        },
+        }),
         RemoteCommands::Command { action } => match action {
-            RemoteCommandCommands::Exec(exec_args) => build_remote_shell_exec_command(exec_args),
+            RemoteCommandCommands::Exec(exec_args) => {
+                Ok(build_remote_shell_exec_command(exec_args))
+            }
         },
         RemoteCommands::Shell { .. } => unreachable!("shell handled separately"),
         RemoteCommands::Grant { .. } => unreachable!("grant handled separately"),
@@ -1867,7 +1877,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
         RemoteCommands::Search(search_args) => {
             let query = CanonicalQueryCommand::Search(command_search_args(search_args));
             let command_id = query.command_id().to_string();
-            BuiltRemoteCommand {
+            Ok(BuiltRemoteCommand {
                 kind: CommandKind::QueryReadonly,
                 label: "search.stream".to_string(),
                 command: Some(command_id),
@@ -1881,7 +1891,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     max_scan: search_args.max_scan,
                     max_results: search_args.max_results,
                 },
-            }
+            })
         }
         RemoteCommands::Traffic { action } => match action {
             RemoteTrafficCommands::List(list_args) => {
@@ -1911,7 +1921,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     is_tunnel: list_args.is_tunnel,
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.list".to_string(),
                     command: Some(command_id),
@@ -1922,7 +1932,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: list_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: list_args.no_color,
                     },
-                }
+                })
             }
             RemoteTrafficCommands::Get {
                 id,
@@ -1937,7 +1947,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     response_body: *response_body,
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.get".to_string(),
                     command: Some(command_id),
@@ -1948,12 +1958,12 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: format.parse().unwrap_or(OutputFormat::JsonPretty),
                         no_color: *no_color,
                     },
-                }
+                })
             }
             RemoteTrafficCommands::Search(search_args) => {
                 let query = CanonicalQueryCommand::Search(command_search_args(search_args));
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "search.stream".to_string(),
                     command: Some(command_id),
@@ -1967,7 +1977,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         max_scan: search_args.max_scan,
                         max_results: search_args.max_results,
                     },
-                }
+                })
             }
             RemoteTrafficCommands::Clear { ids, yes: _ } => {
                 let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
@@ -1979,7 +1989,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     }),
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.clear".to_string(),
                     command: Some(command_id),
@@ -1987,7 +1997,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     query: Some(query),
                     shell_exec: None,
                     render: RemoteRenderMode::Raw,
-                }
+                })
             }
         },
     }
@@ -2038,7 +2048,9 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
     }
 }
 
-fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand {
+fn build_remote_file_command(
+    action: &RemoteFileCommands,
+) -> bifrost_core::Result<BuiltRemoteCommand> {
     use serde_json::json;
     let (kind, label, args_value, preview, _output) = match action {
         RemoteFileCommands::Read {
@@ -2138,14 +2150,20 @@ fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand 
                 Some("-") | None => {
                     use std::io::Read;
                     let mut buf = Vec::new();
-                    std::io::stdin()
-                        .read_to_end(&mut buf)
-                        .map(|_| base64::engine::general_purpose::STANDARD.encode(&buf))
-                        .unwrap_or_default()
+                    std::io::stdin().read_to_end(&mut buf).map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read stdin for file.write: {e}"
+                        )))
+                    })?;
+                    base64::engine::general_purpose::STANDARD.encode(&buf)
                 }
                 Some(path) => std::fs::read(path)
                     .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
-                    .unwrap_or_default(),
+                    .map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read content file {path}: {e}"
+                        )))
+                    })?,
             };
             (
                 CommandKind::FileWrite,
@@ -2227,10 +2245,18 @@ fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand 
             let patch_text = if patch_file == "-" {
                 use std::io::Read;
                 let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf).ok();
+                std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                    BifrostError::Io(std::io::Error::other(format!(
+                        "read stdin for file.apply-patch: {e}"
+                    )))
+                })?;
                 buf
             } else {
-                std::fs::read_to_string(patch_file).unwrap_or_default()
+                std::fs::read_to_string(patch_file).map_err(|e| {
+                    BifrostError::Io(std::io::Error::other(format!(
+                        "read patch file {patch_file}: {e}"
+                    )))
+                })?
             };
             (
                 CommandKind::FileApplyPatch,
@@ -2242,15 +2268,15 @@ fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand 
         }
     };
 
-    BuiltRemoteCommand {
+    Ok(BuiltRemoteCommand {
         kind,
         label: label.to_string(),
         command: Some(preview),
         args_json: Some(args_value.to_string()),
         query: None,
         shell_exec: None,
-        render: RemoteRenderMode::Raw,
-    }
+        render: RemoteRenderMode::File,
+    })
 }
 
 fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<String, String>> {
@@ -2902,7 +2928,7 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
     if let Some(ref stdout) = result.stdout {
         if !stdout.is_empty() {
             match &command.render {
-                RemoteRenderMode::Raw => {
+                RemoteRenderMode::Raw | RemoteRenderMode::File => {
                     print!("{stdout}");
                     if !stdout.ends_with('\n') {
                         println!();

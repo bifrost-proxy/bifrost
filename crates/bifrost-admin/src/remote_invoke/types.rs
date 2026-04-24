@@ -66,20 +66,8 @@ impl GrantScope {
             (Self::RemoteQuery, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
-                | (Self::RemoteShellExec, CommandKind::FileRead)
-                | (Self::RemoteShellExec, CommandKind::FileList)
-                | (Self::RemoteShellExec, CommandKind::FileStat)
-                | (Self::RemoteShellExec, CommandKind::FileGlob)
-                | (Self::RemoteShellExec, CommandKind::FileSearch)
-                | (Self::RemoteShellExec, CommandKind::FileHash)
                 | (Self::RemoteShellInteractive, CommandKind::QueryReadonly)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
-                | (Self::RemoteShellInteractive, CommandKind::FileRead)
-                | (Self::RemoteShellInteractive, CommandKind::FileList)
-                | (Self::RemoteShellInteractive, CommandKind::FileStat)
-                | (Self::RemoteShellInteractive, CommandKind::FileGlob)
-                | (Self::RemoteShellInteractive, CommandKind::FileSearch)
-                | (Self::RemoteShellInteractive, CommandKind::FileHash)
                 | (Self::RemoteFileRead, CommandKind::FileRead)
                 | (Self::RemoteFileRead, CommandKind::FileList)
                 | (Self::RemoteFileRead, CommandKind::FileStat)
@@ -380,6 +368,8 @@ pub struct RemoteCommand {
     pub pty: Option<RemotePtyRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_mode: Option<OutputMode>,
+    #[serde(skip)]
+    pub grant_id: Option<String>,
 }
 
 impl RemoteCommand {
@@ -1253,6 +1243,18 @@ mod tests {
             "remote_invoke".to_string(),
         ));
         assert!(scope.is_err());
+    }
+
+    #[test]
+    fn test_file_scopes_are_separate_from_shell_scopes() {
+        assert!(!GrantScope::RemoteShellExec.allows_command(CommandKind::FileRead));
+        assert!(!GrantScope::RemoteShellInteractive.allows_command(CommandKind::FileRead));
+        assert!(GrantScope::RemoteFileRead.allows_command(CommandKind::FileRead));
+        assert!(GrantScope::RemoteFileRead.allows_command(CommandKind::FileSearch));
+        assert!(!GrantScope::RemoteFileRead.allows_command(CommandKind::FileWrite));
+        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileRead));
+        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileWrite));
+        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileApplyPatch));
     }
 
     #[test]

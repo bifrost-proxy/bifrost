@@ -103,8 +103,13 @@ fn glob_to_regex(pat: &str) -> String {
         match bytes[i] {
             b'*' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-                    out.push_str(".*");
-                    i += 2;
+                    if i + 2 < bytes.len() && bytes[i + 2] == b'/' {
+                        out.push_str("(?:.*/)?");
+                        i += 3;
+                    } else {
+                        out.push_str(".*");
+                        i += 2;
+                    }
                 } else {
                     out.push_str("[^/]*");
                     i += 1;
