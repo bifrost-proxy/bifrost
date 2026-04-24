@@ -1408,7 +1408,7 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
     },
-    #[command(about = "Remote file read-only operations (Phase 1)")]
+    #[command(about = "Remote file read + write operations (Phase 1/2/3)")]
     File {
         #[command(subcommand)]
         action: Box<RemoteFileCommands>,
@@ -1495,6 +1495,80 @@ pub enum RemoteFileCommands {
         path: String,
         #[arg(long, default_value = "sha256", help = "Digest algorithm")]
         algo: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(
+        about = "Write a file atomically (Phase 2). Content is read from --content-file or stdin."
+    )]
+    Write {
+        #[arg(help = "Target path (absolute, or relative to --cwd)")]
+        path: String,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Read content from a local file (or '-' for stdin)")]
+        content_file: Option<String>,
+        #[arg(long, help = "Expected current sha256 for optimistic locking")]
+        base_sha256: Option<String>,
+        #[arg(long, help = "Allow overwrite even if policy default forbids")]
+        allow_overwrite: Option<bool>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(
+        about = "Apply line-range edits atomically (Phase 2). --edits is a JSON array of {start_line,end_line,replacement}."
+    )]
+    Edit {
+        #[arg(help = "Target path")]
+        path: String,
+        #[arg(long, help = "JSON array of edit ranges")]
+        edits: String,
+        #[arg(long, help = "Expected current sha256 for optimistic locking")]
+        base_sha256: Option<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Create a directory (Phase 2)")]
+    Mkdir {
+        #[arg(help = "Directory to create")]
+        path: String,
+        #[arg(long, help = "Create intermediate parent directories as needed")]
+        parents: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Move / rename a path (Phase 2)")]
+    Mv {
+        #[arg(help = "Source path")]
+        from: String,
+        #[arg(help = "Destination path")]
+        to: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Delete a file or directory (Phase 2)")]
+    Rm {
+        #[arg(help = "Path to delete")]
+        path: String,
+        #[arg(long, help = "Recursively delete a non-empty directory")]
+        recursive: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Apply a unified diff across multiple files atomically (Phase 3)")]
+    ApplyPatch {
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
+        patch_file: String,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]

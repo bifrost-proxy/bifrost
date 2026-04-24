@@ -426,6 +426,30 @@ enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
+    #[serde(rename = "file.read")]
+    FileRead,
+    #[serde(rename = "file.list")]
+    FileList,
+    #[serde(rename = "file.stat")]
+    FileStat,
+    #[serde(rename = "file.glob")]
+    FileGlob,
+    #[serde(rename = "file.search")]
+    FileSearch,
+    #[serde(rename = "file.hash")]
+    FileHash,
+    #[serde(rename = "file.write")]
+    FileWrite,
+    #[serde(rename = "file.edit")]
+    FileEdit,
+    #[serde(rename = "file.mkdir")]
+    FileMkdir,
+    #[serde(rename = "file.move")]
+    FileMove,
+    #[serde(rename = "file.delete")]
+    FileDelete,
+    #[serde(rename = "file.apply_patch")]
+    FileApplyPatch,
 }
 
 impl CommandKind {
@@ -433,6 +457,18 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
+            Self::FileRead => "file.read",
+            Self::FileList => "file.list",
+            Self::FileStat => "file.stat",
+            Self::FileGlob => "file.glob",
+            Self::FileSearch => "file.search",
+            Self::FileHash => "file.hash",
+            Self::FileWrite => "file.write",
+            Self::FileEdit => "file.edit",
+            Self::FileMkdir => "file.mkdir",
+            Self::FileMove => "file.move",
+            Self::FileDelete => "file.delete",
+            Self::FileApplyPatch => "file.apply_patch",
         }
     }
 }
@@ -2090,6 +2126,120 @@ fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand 
             format!("file.hash {}", path),
             output.clone(),
         ),
+        RemoteFileCommands::Write {
+            path,
+            content_file,
+            base_sha256,
+            allow_overwrite,
+            cwd,
+            output,
+        } => {
+            let content_b64 = match content_file.as_deref() {
+                Some("-") | None => {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    std::io::stdin()
+                        .read_to_end(&mut buf)
+                        .map(|_| base64::engine::general_purpose::STANDARD.encode(&buf))
+                        .unwrap_or_default()
+                }
+                Some(path) => std::fs::read(path)
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
+                    .unwrap_or_default(),
+            };
+            (
+                CommandKind::FileWrite,
+                "file.write",
+                json!({
+                    "path": path,
+                    "content_b64": content_b64,
+                    "base_sha256": base_sha256,
+                    "allow_overwrite": allow_overwrite,
+                    "cwd": cwd,
+                }),
+                format!("file.write {}", path),
+                output.clone(),
+            )
+        }
+        RemoteFileCommands::Edit {
+            path,
+            edits,
+            base_sha256,
+            cwd,
+            output,
+        } => {
+            let edits_val: serde_json::Value =
+                serde_json::from_str(edits).unwrap_or(serde_json::Value::Null);
+            (
+                CommandKind::FileEdit,
+                "file.edit",
+                json!({
+                    "path": path,
+                    "edits": edits_val,
+                    "base_sha256": base_sha256,
+                    "cwd": cwd,
+                }),
+                format!("file.edit {}", path),
+                output.clone(),
+            )
+        }
+        RemoteFileCommands::Mkdir {
+            path,
+            parents,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileMkdir,
+            "file.mkdir",
+            json!({ "path": path, "parents": parents, "cwd": cwd }),
+            format!("file.mkdir {}", path),
+            output.clone(),
+        ),
+        RemoteFileCommands::Mv {
+            from,
+            to,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileMove,
+            "file.move",
+            json!({ "path": from, "to_path": to, "cwd": cwd }),
+            format!("file.move {} -> {}", from, to),
+            output.clone(),
+        ),
+        RemoteFileCommands::Rm {
+            path,
+            recursive,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileDelete,
+            "file.delete",
+            json!({ "path": path, "recursive": recursive, "cwd": cwd }),
+            format!("file.delete {}", path),
+            output.clone(),
+        ),
+        RemoteFileCommands::ApplyPatch {
+            patch_file,
+            cwd,
+            output,
+        } => {
+            let patch_text = if patch_file == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).ok();
+                buf
+            } else {
+                std::fs::read_to_string(patch_file).unwrap_or_default()
+            };
+            (
+                CommandKind::FileApplyPatch,
+                "file.apply_patch",
+                json!({ "patch_text": patch_text, "cwd": cwd }),
+                format!("file.apply_patch ({} bytes)", patch_text.len()),
+                output.clone(),
+            )
+        }
     };
 
     BuiltRemoteCommand {
