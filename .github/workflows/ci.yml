@@ -180,14 +180,20 @@ jobs:
           if-no-files-found: ignore
 
   e2e-shell:
-    name: E2E Shell (Linux)
+    name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
     needs: [build-e2e]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "8"
+      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
+      BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -236,7 +242,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-linux
+          name: e2e-shell-logs-linux-shard-${{ matrix.shard }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
@@ -538,14 +544,20 @@ jobs:
           if-no-files-found: ignore
 
   e2e-macos-shell:
-    name: E2E Shell (aarch64-apple-darwin)
+    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
     needs: [build-desktop-macos]
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "8"
+      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
+      BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -596,7 +608,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-aarch64-apple-darwin
+          name: e2e-shell-logs-aarch64-apple-darwin-shard-${{ matrix.shard }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/

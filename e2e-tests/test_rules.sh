@@ -385,6 +385,12 @@ preprocess_rules_file() {
         -e "s|__ECHO_WSS_PORT__|${ECHO_WSS_PORT}|g" \
         -e "s|__ECHO_SSE_PORT__|${ECHO_SSE_PORT}|g" \
         -e "s|__ECHO_PROXY_PORT__|${ECHO_PROXY_PORT}|g" \
+        -e "s|__MOCK_HTTP_PORT__|${ECHO_HTTP_PORT}|g" \
+        -e "s|__MOCK_HTTPS_PORT__|${ECHO_HTTPS_PORT}|g" \
+        -e "s|__MOCK_WS_PORT__|${ECHO_WS_PORT}|g" \
+        -e "s|__MOCK_WSS_PORT__|${ECHO_WSS_PORT}|g" \
+        -e "s|__MOCK_SSE_PORT__|${ECHO_SSE_PORT}|g" \
+        -e "s|__MOCK_PROXY_PORT__|${ECHO_PROXY_PORT}|g" \
         -e "s|127.0.0.1:3000|127.0.0.1:${ECHO_HTTP_PORT}|g" \
         -e "s|localhost:3000|localhost:${ECHO_HTTP_PORT}|g" \
         -e "s|127.0.0.1:3443|127.0.0.1:${ECHO_HTTPS_PORT}|g" \

@@ -4151,7 +4151,7 @@ PY
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-131 | ✅ PASS | 2026-04-23 使用本地隔离环境执行：relay `http://127.0.0.1:56618`，target admin `56617`，caller 独立 `BIFROST_DATA_DIR`。先后真实执行 `./target/debug/bifrost remote connect`、`remote status`、`remote traffic list`、`remote traffic get`、`remote search`、`remote traffic search`、caller 侧取消、reject pairing、disconnect，全链路自动化断言共 `64` 项全部通过。随后手动删除 target client 数据目录下的 `admin/remote_invoke_grant_crypto.json` 与 `.key`，重启 target client 后再次请求 `GET /_bifrost/api/remote-invoke/grants` 返回 `0` 条；继续复用旧 caller 连接执行 `remote status`，CLI 直接提示重新 connect，不再命中 `missing grant shared secret for encrypted remote command`。这说明缺少本地加密材料的旧 grant 已在 client 重连时被主动收敛删除。 |
+| TC-RI-回归-131 | ✅ PASS | 2026-04-24 代码修复后执行：worker.rs `new()` 与 `update_relay_url()` 启动时检测 grant_info 中有条目但 grant_crypto 为空的孤儿 grant，立即从 local_grants 与 grant_info_store 中移除；caller 侧 remote.rs 新增 `is_stale_grant_crypto_error()` 检测，在 call_exit 携带 `missing grant shared secret` 时按"授权失效"路径清理本地连接。`SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh` 全套 72 条断言全部通过，其中 TC-RI-07A 三条（grants 列表为 0、caller 提示重新 connect 而非 missing shared secret、caller 本地连接已清空）均 ✅。 |
 
 ---
 

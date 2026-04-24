@@ -16,6 +16,7 @@ SKIP_STATIC=0
 E2E_ONLY=""
 RUN_COVERAGE=0
 COVERAGE_FORMAT="text"
+SHARD_SPEC=""
 
 usage() {
   cat <<'EOF'
@@ -28,6 +29,7 @@ Options:
   --skip-e2e          Skip all E2E tests (only run fmt/clippy/test)
   --skip-static       Skip fmt/clippy/test (only run E2E)
   --e2e-only TYPE     Run only a specific E2E suite: rules, shell, runner, platform
+  --shard N/M         Run only shard N of M for shell E2E (e.g. --shard 1/3)
   --coverage          Run unit-test coverage report after tests
   --coverage-html     Run unit-test coverage and open HTML report
   -h, --help          Show this help
@@ -46,6 +48,11 @@ while [[ $# -gt 0 ]]; do
     --skip-e2e)     SKIP_E2E=1; shift ;;
     --skip-static)  SKIP_STATIC=1; shift ;;
     --e2e-only)     E2E_ONLY="$2"; shift 2 ;;
+    --shard)
+      if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
+        echo "Error: --shard requires N/M format (e.g. --shard 1/3)" >&2; exit 1
+      fi
+      SHARD_SPEC="$2"; shift 2 ;;
     --coverage)     RUN_COVERAGE=1; COVERAGE_FORMAT="text"; shift ;;
     --coverage-html) RUN_COVERAGE=1; COVERAGE_FORMAT="html"; shift ;;
     -h|--help)      usage; exit 0 ;;
@@ -142,7 +149,13 @@ if [[ "$SKIP_E2E" -eq 0 ]]; then
   fi
 
   if [[ -z "$E2E_ONLY" || "$E2E_ONLY" == "shell" ]]; then
-    run_step "E2E shell" bash scripts/ci/run-e2e-shell.sh || HAD_FAILURE=1
+    if [[ -n "$SHARD_SPEC" ]]; then
+      run_step "E2E shell (shard ${SHARD_SPEC})" \
+        env "BIFROST_E2E_SHARD_INDEX=${SHARD_SPEC%%/*}" "BIFROST_E2E_SHARD_TOTAL=${SHARD_SPEC##*/}" \
+        bash scripts/ci/run-e2e-shell.sh || HAD_FAILURE=1
+    else
+      run_step "E2E shell" bash scripts/ci/run-e2e-shell.sh || HAD_FAILURE=1
+    fi
   else
     register_result "E2E shell" "SKIP"
   fi
