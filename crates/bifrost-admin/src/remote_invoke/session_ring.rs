@@ -228,6 +228,97 @@ impl SessionRegistry {
     }
 }
 
+// PR #4b: process-global singleton registry + tee helpers.
+//
+// The worker / executor pipeline today is synchronous wrt frame emission
+// (it calls `relay_client.post_call_frame(...).await` per chunk). To add
+// resume support without touching worker.rs (which is under parallel
+// modification for call_history_store), we expose a lock-free-ish global
+// registry. Future PR #4c will add a *single* `tee_stdout(call_id, bytes)`
+// call into the worker's existing `on_stdout` closure; because tee is a
+// no-op when no session has been registered for that call_id, this stays
+// 100% backwards compatible.
+
+use std::sync::OnceLock;
+
+static GLOBAL_REGISTRY: OnceLock<SessionRegistry> = OnceLock::new();
+
+/// Access the process-wide session registry (lazy init).
+pub fn global_registry() -> &'static SessionRegistry {
+    GLOBAL_REGISTRY.get_or_init(SessionRegistry::new)
+}
+
+/// Register a new session in the global registry and return its call_id.
+/// Convenience wrapper so callers don't need to touch the registry type
+/// directly.
+pub fn register_session(capacity: usize) -> Uuid {
+    let (id, _state) = global_registry().create(capacity);
+    id
+}
+
+/// Mirror a stdout chunk into the session's ring. Silent no-op if no
+/// session is registered for this call_id (keeps legacy callers unchanged).
+pub fn tee_stdout(call_id: &Uuid, bytes: &[u8]) {
+    if let Some(state_arc) = global_registry().get(call_id) {
+        let mut state = state_arc.lock().expect("session state poisoned");
+        state.stdout.append(bytes);
+    }
+}
+
+/// Mirror a stderr chunk into the session's ring. Silent no-op if absent.
+pub fn tee_stderr(call_id: &Uuid, bytes: &[u8]) {
+    if let Some(state_arc) = global_registry().get(call_id) {
+        let mut state = state_arc.lock().expect("session state poisoned");
+        state.stderr.append(bytes);
+    }
+}
+
+/// Finalize a session by setting its terminal status. Subsequent reads
+/// still succeed for any retained bytes so the CLI can drain after Done.
+pub fn finalize_session(call_id: &Uuid, status: SessionStatus) {
+    if let Some(state_arc) = global_registry().get(call_id) {
+        let mut state = state_arc.lock().expect("session state poisoned");
+        state.status = status;
+    }
+}
+
+/// Drain bytes from a session's stdout ring starting at `from_offset`.
+/// Returns `(bytes, head_offset, status)`. If the call is unknown or the
+/// offset was evicted, returns the corresponding ResumeError.
+pub fn resume_stdout(
+    call_id: &Uuid,
+    from_offset: u64,
+) -> Result<(Vec<u8>, u64, SessionStatus), ResumeError> {
+    let state_arc = global_registry()
+        .get(call_id)
+        .ok_or(ResumeError::UnknownCallId)?;
+    let state = state_arc.lock().expect("session state poisoned");
+    let head = state.stdout.head();
+    // Pre-size buffer to exactly the available range; read_from fills it.
+    let available = head.saturating_sub(from_offset) as usize;
+    let mut out = vec![0u8; available];
+    let n = state.stdout.read_from(from_offset, &mut out)?;
+    out.truncate(n);
+    Ok((out, head, state.status.clone()))
+}
+
+/// Drain bytes from a session's stderr ring starting at `from_offset`.
+pub fn resume_stderr(
+    call_id: &Uuid,
+    from_offset: u64,
+) -> Result<(Vec<u8>, u64, SessionStatus), ResumeError> {
+    let state_arc = global_registry()
+        .get(call_id)
+        .ok_or(ResumeError::UnknownCallId)?;
+    let state = state_arc.lock().expect("session state poisoned");
+    let head = state.stderr.head();
+    let available = head.saturating_sub(from_offset) as usize;
+    let mut out = vec![0u8; available];
+    let n = state.stderr.read_from(from_offset, &mut out)?;
+    out.truncate(n);
+    Ok((out, head, state.status.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +428,83 @@ mod tests {
         sb.lock().unwrap().stdout.append(b"bbbb");
         assert_eq!(reg.get(&a).unwrap().lock().unwrap().stdout.head(), 2);
         assert_eq!(reg.get(&b).unwrap().lock().unwrap().stdout.head(), 4);
+    }
+
+    // ---- PR #4b: global singleton + tee/resume helpers ----
+
+    #[test]
+    fn global_tee_and_resume_stdout_roundtrip() {
+        let call_id = register_session(1024);
+        tee_stdout(&call_id, b"hello ");
+        tee_stdout(&call_id, b"world");
+        let (bytes, head, status) = resume_stdout(&call_id, 0).unwrap();
+        assert_eq!(bytes, b"hello world");
+        assert_eq!(head, 11);
+        assert_eq!(status, SessionStatus::Running);
+
+        // Partial resume from offset 6
+        let (bytes2, head2, _) = resume_stdout(&call_id, 6).unwrap();
+        assert_eq!(bytes2, b"world");
+        assert_eq!(head2, 11);
+
+        // Cleanup so the global registry doesn't leak between tests.
+        global_registry().remove(&call_id);
+    }
+
+    #[test]
+    fn global_tee_stderr_is_isolated_from_stdout() {
+        let call_id = register_session(1024);
+        tee_stdout(&call_id, b"OUT");
+        tee_stderr(&call_id, b"ERR!!");
+        let (so, _, _) = resume_stdout(&call_id, 0).unwrap();
+        let (se, _, _) = resume_stderr(&call_id, 0).unwrap();
+        assert_eq!(so, b"OUT");
+        assert_eq!(se, b"ERR!!");
+        global_registry().remove(&call_id);
+    }
+
+    #[test]
+    fn finalize_session_transitions_status() {
+        let call_id = register_session(128);
+        tee_stdout(&call_id, b"done");
+        finalize_session(&call_id, SessionStatus::Done { exit_code: 0 });
+        let (bytes, _, status) = resume_stdout(&call_id, 0).unwrap();
+        assert_eq!(bytes, b"done");
+        assert_eq!(status, SessionStatus::Done { exit_code: 0 });
+        global_registry().remove(&call_id);
+    }
+
+    #[test]
+    fn tee_on_unknown_call_id_is_silent_noop() {
+        // A random uuid not registered; must not panic.
+        let ghost = Uuid::new_v4();
+        tee_stdout(&ghost, b"ignored");
+        tee_stderr(&ghost, b"ignored");
+        assert!(matches!(
+            resume_stdout(&ghost, 0).unwrap_err(),
+            ResumeError::UnknownCallId
+        ));
+    }
+
+    #[test]
+    fn resume_after_eviction_reports_data_evicted() {
+        let call_id = register_session(8);
+        tee_stdout(&call_id, b"0123456789ABCDEF"); // 16 bytes into 8-cap ring
+        let err = resume_stdout(&call_id, 0).unwrap_err();
+        match err {
+            ResumeError::DataEvicted {
+                requested_offset,
+                earliest_available_offset,
+            } => {
+                assert_eq!(requested_offset, 0);
+                assert_eq!(earliest_available_offset, 8);
+            }
+            other => panic!("unexpected err: {:?}", other),
+        }
+        // Fresh read from the retained tail works.
+        let (bytes, head, _) = resume_stdout(&call_id, 8).unwrap();
+        assert_eq!(bytes, b"89ABCDEF");
+        assert_eq!(head, 16);
+        global_registry().remove(&call_id);
     }
 }
