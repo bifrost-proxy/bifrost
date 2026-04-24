@@ -1408,7 +1408,7 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
     },
-    #[command(about = "Remote file read + write operations (Phase 1/2/3)")]
+    #[command(about = "Remote file operations (read/write/edit/mkdir/move/delete/apply-patch)")]
     File {
         #[command(subcommand)]
         action: Box<RemoteFileCommands>,
@@ -1489,7 +1489,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Hash a file (Phase 1: sha256 only)")]
+    #[command(about = "Hash a file (sha256 only)")]
     Hash {
         #[arg(help = "Path to hash")]
         path: String,
@@ -1500,9 +1500,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(
-        about = "Write a file atomically (Phase 2). Content is read from --content-file or stdin."
-    )]
+    #[command(about = "Write a file atomically. Content is read from --content-file or stdin.")]
     Write {
         #[arg(help = "Target path (absolute, or relative to --cwd)")]
         path: String,
@@ -1518,7 +1516,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(
-        about = "Apply line-range edits atomically (Phase 2). --edits is a JSON array of {start_line,end_line,replacement}."
+        about = "Apply line-range edits atomically. --edits is a JSON array of {start_line,end_line,replacement}."
     )]
     Edit {
         #[arg(help = "Target path")]
@@ -1532,7 +1530,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Create a directory (Phase 2)")]
+    #[command(about = "Create a directory on the remote host")]
     Mkdir {
         #[arg(help = "Directory to create")]
         path: String,
@@ -1543,7 +1541,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Move / rename a path (Phase 2)")]
+    #[command(about = "Move / rename a path on the remote host")]
     Mv {
         #[arg(help = "Source path")]
         from: String,
@@ -1554,7 +1552,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Delete a file or directory (Phase 2)")]
+    #[command(about = "Delete a file or directory on the remote host")]
     Rm {
         #[arg(help = "Path to delete")]
         path: String,
@@ -1565,7 +1563,7 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Apply a unified diff across multiple files atomically (Phase 3)")]
+    #[command(about = "Apply a unified diff across multiple files atomically")]
     ApplyPatch {
         #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
         patch_file: String,
