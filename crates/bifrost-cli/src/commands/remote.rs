@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::commands::caller_stream_frame::{
-    parse_stream_frame_from_sse_data, CallerStreamState, StreamDecision, StreamIngestError,
+    parse_stream_frame_from_sse_data, CallerStreamState, StreamDecision,
 };
 use base64::Engine;
 use bifrost_command::{
