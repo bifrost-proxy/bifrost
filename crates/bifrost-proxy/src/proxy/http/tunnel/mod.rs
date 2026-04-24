@@ -1592,8 +1592,18 @@ async fn handle_intercepted_request_with_protocol(
     client_pid: Option<u32>,
     client_path: Option<String>,
     push_manager: Option<SharedPushManager>,
-    inject_bifrost_badge: bool,
+    inject_bifrost_badge_default: bool,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
+    // Re-read inject_bifrost_badge from persisted config on every request,
+    // so that toggling the setting in Web UI takes effect immediately
+    // even for long-lived CONNECT tunnels.
+    let inject_bifrost_badge = admin_state
+        .as_ref()
+        .and_then(|s| s.config_manager.as_ref())
+        .and_then(|cm| cm.try_config())
+        .map(|config| config.traffic.inject_bifrost_badge)
+        .unwrap_or(inject_bifrost_badge_default);
+
     if original_host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
         if let Some(state) = admin_state.clone() {
             let req = rewrite_intercepted_virtual_host_request(req);
