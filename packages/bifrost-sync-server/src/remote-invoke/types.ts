@@ -166,6 +166,17 @@ export interface ClientCallFrameRequest {
   envelope_json: string;
 }
 
+export interface ClientCallStreamFrameRequest {
+  call_id: string;
+  client_instance_id: string;
+  /**
+   * PR#6a: full StreamFrame JSON as emitted by the worker
+   * (see `crates/bifrost-admin/src/remote_invoke/stream_emit.rs`).
+   * Relay forwards verbatim to the caller SSE as `stream_frame` event.
+   */
+  frame_json: string;
+}
+
 export interface ClientCallExitRequest {
   call_id: string;
   client_instance_id: string;
