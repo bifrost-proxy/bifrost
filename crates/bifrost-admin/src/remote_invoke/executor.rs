@@ -1653,24 +1653,38 @@ fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
     #[cfg(windows)]
     {
-        if let Some(shell) = shell {
+        // Resolve the effective shell: skip Unix-style paths that don't exist on Windows
+        // (e.g. "/bin/bash" from a cross-platform default) and fall back to cmd.
+        let effective_shell = shell.filter(|s| !is_unix_only_shell_path(s));
+
+        if let Some(shell) = effective_shell {
             let mut command = TokioCommand::new(shell);
             if windows_shell_uses_command_flag(shell) {
+                // Force UTF-8 output encoding for PowerShell to avoid garbled
+                // non-ASCII text (e.g. Chinese chars from ipconfig).
+                let utf8_shell_text = format!(
+                    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; {}",
+                    shell_text
+                );
                 command
                     .arg("-NoLogo")
                     .arg("-NoProfile")
                     .arg("-Command")
-                    .arg(shell_text);
+                    .arg(&utf8_shell_text);
             } else if windows_shell_uses_login_flag(shell) {
                 command.arg("-lc").arg(shell_text);
             } else {
-                command.arg("/C").arg(shell_text);
+                // cmd.exe: prepend chcp 65001 to switch console to UTF-8
+                let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
+                command.arg("/C").arg(&utf8_shell_text);
             }
             return command;
         }
 
+        // Default: cmd with UTF-8 code page
+        let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
         let mut command = TokioCommand::new("cmd");
-        command.arg("/C").arg(shell_text);
+        command.arg("/C").arg(&utf8_shell_text);
         command
     }
 
@@ -1681,6 +1695,13 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
         command.arg("-lc").arg(shell_text);
         command
     }
+}
+
+/// Returns true if the shell path looks like a Unix-only absolute path
+/// (e.g. "/bin/bash", "/usr/bin/zsh") that would never exist on Windows.
+#[cfg(windows)]
+fn is_unix_only_shell_path(shell: &str) -> bool {
+    shell.starts_with('/')
 }
 
 #[cfg(windows)]
