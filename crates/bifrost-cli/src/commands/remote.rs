@@ -25,8 +25,8 @@ use tracing::{debug, error, warn};
 use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
-    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteSearchArgs,
-    RemoteTrafficCommands,
+    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteFileCommands,
+    RemoteSearchArgs, RemoteTrafficCommands,
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
@@ -1827,6 +1827,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
         },
         RemoteCommands::Shell { .. } => unreachable!("shell handled separately"),
         RemoteCommands::Grant { .. } => unreachable!("grant handled separately"),
+        RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
         RemoteCommands::Search(search_args) => {
             let query = CanonicalQueryCommand::Search(command_search_args(search_args));
             let command_id = query.command_id().to_string();
@@ -1997,6 +1998,107 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         args_json: None,
         query: None,
         shell_exec: Some(shell_exec),
+        render: RemoteRenderMode::Raw,
+    }
+}
+
+fn build_remote_file_command(action: &RemoteFileCommands) -> BuiltRemoteCommand {
+    use serde_json::json;
+    let (kind, label, args_value, preview, _output) = match action {
+        RemoteFileCommands::Read {
+            path,
+            max_bytes,
+            allow_binary,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileRead,
+            "file.read",
+            json!({
+                "path": path,
+                "max_bytes": max_bytes,
+                "allow_binary": allow_binary,
+                "cwd": cwd,
+            }),
+            format!("file.read {}", path),
+            output.clone(),
+        ),
+        RemoteFileCommands::List {
+            path,
+            depth,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileList,
+            "file.list",
+            json!({ "path": path, "depth": depth, "cwd": cwd }),
+            format!("file.list {}", path.clone().unwrap_or_else(|| ".".into())),
+            output.clone(),
+        ),
+        RemoteFileCommands::Stat { path, cwd, output } => (
+            CommandKind::FileStat,
+            "file.stat",
+            json!({ "path": path, "cwd": cwd }),
+            format!("file.stat {}", path),
+            output.clone(),
+        ),
+        RemoteFileCommands::Glob {
+            pattern,
+            max_matches,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileGlob,
+            "file.glob",
+            json!({
+                "pattern": pattern,
+                "max_matches": max_matches,
+                "cwd": cwd,
+            }),
+            format!("file.glob {}", pattern),
+            output.clone(),
+        ),
+        RemoteFileCommands::Search {
+            pattern,
+            path,
+            max_matches,
+            max_scan,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileSearch,
+            "file.search",
+            json!({
+                "pattern": pattern,
+                "path": path,
+                "max_matches": max_matches,
+                "max_scan_bytes": max_scan,
+                "cwd": cwd,
+            }),
+            format!("file.search {}", pattern),
+            output.clone(),
+        ),
+        RemoteFileCommands::Hash {
+            path,
+            algo,
+            cwd,
+            output,
+        } => (
+            CommandKind::FileHash,
+            "file.hash",
+            json!({ "path": path, "algo": algo, "cwd": cwd }),
+            format!("file.hash {}", path),
+            output.clone(),
+        ),
+    };
+
+    BuiltRemoteCommand {
+        kind,
+        label: label.to_string(),
+        command: Some(preview),
+        args_json: Some(args_value.to_string()),
+        query: None,
+        shell_exec: None,
         render: RemoteRenderMode::Raw,
     }
 }

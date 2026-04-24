@@ -258,6 +258,12 @@ impl RemoteInvokeExecutor {
                 super::types::CommandKind::ShellExec => {
                     return self.execute_shell_exec(command, &mut on_stdout).await;
                 }
+                super::types::CommandKind::FileRead
+                | super::types::CommandKind::FileList
+                | super::types::CommandKind::FileStat
+                | super::types::CommandKind::FileGlob
+                | super::types::CommandKind::FileSearch
+                | super::types::CommandKind::FileHash => self.execute_file_op(command).await,
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -300,8 +306,134 @@ impl RemoteInvokeExecutor {
         }
     }
 
+    async fn execute_file_op(&self, command: &RemoteCommand) -> Result<String> {
+        use bifrost_core::file_access::FileOp;
+        use std::path::Path;
+
+        let kind = command.kind;
+        let op = match kind {
+            super::types::CommandKind::FileRead => FileOp::Read,
+            super::types::CommandKind::FileList => FileOp::List,
+            super::types::CommandKind::FileStat => FileOp::Stat,
+            super::types::CommandKind::FileGlob => FileOp::Glob,
+            super::types::CommandKind::FileSearch => FileOp::Search,
+            super::types::CommandKind::FileHash => FileOp::Hash,
+            _ => {
+                return Err(BifrostError::Config(
+                    "execute_file_op called with non-file kind".to_string(),
+                ))
+            }
+        };
+
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct FileParams {
+            path: Option<String>,
+            max_bytes: Option<u64>,
+            allow_binary: Option<bool>,
+            depth: Option<u32>,
+            pattern: Option<String>,
+            max_matches: Option<usize>,
+            max_scan_bytes: Option<u64>,
+            algo: Option<String>,
+            grant_id: Option<String>,
+            cwd: Option<String>,
+        }
+
+        let params: FileParams = match command.args_json.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => serde_json::from_str(raw).map_err(|e| {
+                BifrostError::Config(format!("[file.invalid_args] bad args_json: {}", e))
+            })?,
+            _ => FileParams::default(),
+        };
+
+        let cwd_str = params
+            .cwd
+            .clone()
+            .or_else(|| command.cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "/".to_string())
+            });
+        let cwd = Path::new(&cwd_str);
+
+        let grant_id = params.grant_id.clone().unwrap_or_default();
+        let store = super::file_policy_store::FileAccessPolicyStore::load_default();
+        let policy = store.resolve(&grant_id, cwd);
+
+        let default_path = ".".to_string();
+        let requested_path = match kind {
+            super::types::CommandKind::FileGlob
+            | super::types::CommandKind::FileSearch
+            | super::types::CommandKind::FileList => params.path.clone().unwrap_or(default_path),
+            _ => params.path.clone().ok_or_else(|| {
+                BifrostError::Config("[file.invalid_args] 'path' is required".to_string())
+            })?,
+        };
+
+        let decision = policy
+            .check(Path::new(&requested_path), cwd, op)
+            .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+
+        let value = match kind {
+            super::types::CommandKind::FileRead => {
+                super::file_ops::handle_file_read(
+                    &decision,
+                    params.max_bytes,
+                    params.allow_binary.unwrap_or(false),
+                )
+                .await?
+            }
+            super::types::CommandKind::FileList => {
+                super::file_ops::handle_file_list(&decision, params.depth).await?
+            }
+            super::types::CommandKind::FileStat => {
+                super::file_ops::handle_file_stat(&decision).await?
+            }
+            super::types::CommandKind::FileGlob => {
+                let pattern = params.pattern.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'pattern' is required for file.glob".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_glob(&decision, &pattern, params.max_matches).await?
+            }
+            super::types::CommandKind::FileSearch => {
+                let pattern = params.pattern.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'pattern' is required for file.search".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_search(
+                    &decision,
+                    &pattern,
+                    params.max_matches,
+                    params.max_scan_bytes,
+                )
+                .await?
+            }
+            super::types::CommandKind::FileHash => {
+                super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
+            }
+            _ => unreachable!(),
+        };
+
+        serde_json::to_string(&value)
+            .map_err(|e| BifrostError::Config(format!("serialize file op result: {}", e)))
+    }
+
     fn parse_and_validate_args(&self, command: &RemoteCommand) -> Result<CommandArgs> {
-        if command.kind == super::types::CommandKind::ShellExec {
+        if matches!(
+            command.kind,
+            super::types::CommandKind::ShellExec
+                | super::types::CommandKind::FileRead
+                | super::types::CommandKind::FileList
+                | super::types::CommandKind::FileStat
+                | super::types::CommandKind::FileGlob
+                | super::types::CommandKind::FileSearch
+                | super::types::CommandKind::FileHash
+        ) {
             return Ok(CommandArgs::default());
         }
 

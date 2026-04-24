@@ -1408,6 +1408,11 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
     },
+    #[command(about = "Remote file read-only operations (Phase 1)")]
+    File {
+        #[command(subcommand)]
+        action: Box<RemoteFileCommands>,
+    },
     #[command(about = "Search remote traffic records")]
     Search(Box<RemoteSearchArgs>),
     #[command(about = "Inspect remote traffic records")]
@@ -1421,6 +1426,80 @@ pub enum RemoteCommands {
 pub enum RemoteCommandCommands {
     #[command(about = "Execute a remote command via the encrypted shell.exec channel")]
     Exec(Box<RemoteCommandExecArgs>),
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteFileCommands {
+    #[command(about = "Read a file from the remote host (read-only)")]
+    Read {
+        #[arg(help = "Path (absolute, or relative to --cwd)")]
+        path: String,
+        #[arg(long, help = "Maximum bytes to return (capped by policy)")]
+        max_bytes: Option<u64>,
+        #[arg(long, help = "Allow binary content in the response")]
+        allow_binary: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human", help = "Output format: human | json")]
+        output: String,
+    },
+    #[command(about = "List files under a directory")]
+    List {
+        #[arg(help = "Directory (default '.' = policy root / cwd)")]
+        path: Option<String>,
+        #[arg(long, default_value_t = 1, help = "Max recursion depth")]
+        depth: u32,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Show metadata (size, mtime, mode, sha256) for a path")]
+    Stat {
+        #[arg(help = "Path to stat")]
+        path: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Match files by glob pattern")]
+    Glob {
+        #[arg(help = "Glob pattern (e.g. 'src/**/*.rs')")]
+        pattern: String,
+        #[arg(long, help = "Max matches to return")]
+        max_matches: Option<usize>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Regex-search file contents under the policy root")]
+    Search {
+        #[arg(help = "Regex pattern")]
+        pattern: String,
+        #[arg(long, help = "Subpath to restrict the search (default: policy root)")]
+        path: Option<String>,
+        #[arg(long, help = "Max matches to return")]
+        max_matches: Option<usize>,
+        #[arg(long, help = "Per-file scan byte cap")]
+        max_scan: Option<u64>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Hash a file (Phase 1: sha256 only)")]
+    Hash {
+        #[arg(help = "Path to hash")]
+        path: String,
+        #[arg(long, default_value = "sha256", help = "Digest algorithm")]
+        algo: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]

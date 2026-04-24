@@ -53,6 +53,10 @@ pub enum GrantScope {
     RemoteShellExec,
     #[serde(rename = "remote_shell_interactive")]
     RemoteShellInteractive,
+    #[serde(rename = "remote_file_read")]
+    RemoteFileRead,
+    #[serde(rename = "remote_file_write")]
+    RemoteFileWrite,
 }
 
 impl GrantScope {
@@ -62,8 +66,26 @@ impl GrantScope {
             (Self::RemoteQuery, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
+                | (Self::RemoteShellExec, CommandKind::FileRead)
+                | (Self::RemoteShellExec, CommandKind::FileList)
+                | (Self::RemoteShellExec, CommandKind::FileStat)
+                | (Self::RemoteShellExec, CommandKind::FileGlob)
+                | (Self::RemoteShellExec, CommandKind::FileSearch)
+                | (Self::RemoteShellExec, CommandKind::FileHash)
                 | (Self::RemoteShellInteractive, CommandKind::QueryReadonly)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
+                | (Self::RemoteShellInteractive, CommandKind::FileRead)
+                | (Self::RemoteShellInteractive, CommandKind::FileList)
+                | (Self::RemoteShellInteractive, CommandKind::FileStat)
+                | (Self::RemoteShellInteractive, CommandKind::FileGlob)
+                | (Self::RemoteShellInteractive, CommandKind::FileSearch)
+                | (Self::RemoteShellInteractive, CommandKind::FileHash)
+                | (Self::RemoteFileRead, CommandKind::FileRead)
+                | (Self::RemoteFileRead, CommandKind::FileList)
+                | (Self::RemoteFileRead, CommandKind::FileStat)
+                | (Self::RemoteFileRead, CommandKind::FileGlob)
+                | (Self::RemoteFileRead, CommandKind::FileSearch)
+                | (Self::RemoteFileRead, CommandKind::FileHash)
         )
     }
 }
@@ -75,6 +97,18 @@ pub enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
+    #[serde(rename = "file.read")]
+    FileRead,
+    #[serde(rename = "file.list")]
+    FileList,
+    #[serde(rename = "file.stat")]
+    FileStat,
+    #[serde(rename = "file.glob")]
+    FileGlob,
+    #[serde(rename = "file.search")]
+    FileSearch,
+    #[serde(rename = "file.hash")]
+    FileHash,
 }
 
 impl CommandKind {
@@ -82,6 +116,12 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
+            Self::FileRead => "file.read",
+            Self::FileList => "file.list",
+            Self::FileStat => "file.stat",
+            Self::FileGlob => "file.glob",
+            Self::FileSearch => "file.search",
+            Self::FileHash => "file.hash",
         }
     }
 }
@@ -325,6 +365,12 @@ impl RemoteCommand {
         match self.kind {
             CommandKind::QueryReadonly => "query.readonly",
             CommandKind::ShellExec => "shell.exec",
+            CommandKind::FileRead => "file.read",
+            CommandKind::FileList => "file.list",
+            CommandKind::FileStat => "file.stat",
+            CommandKind::FileGlob => "file.glob",
+            CommandKind::FileSearch => "file.search",
+            CommandKind::FileHash => "file.hash",
         }
     }
 
