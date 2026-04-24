@@ -461,14 +461,22 @@ async fn handle_calls_list(
     req: Request<Incoming>,
     worker: &RemoteInvokeWorker,
 ) -> Response<BoxBody> {
-    if req.method() != Method::GET {
-        return method_not_allowed();
+    match *req.method() {
+        Method::GET => {
+            let calls = worker.list_calls();
+            json_response(&serde_json::json!({
+                "calls": calls,
+            }))
+        }
+        Method::DELETE => {
+            let removed = worker.clear_calls();
+            json_response(&serde_json::json!({
+                "success": true,
+                "removed": removed,
+            }))
+        }
+        _ => method_not_allowed(),
     }
-
-    let calls = worker.list_calls();
-    json_response(&serde_json::json!({
-        "calls": calls,
-    }))
 }
 
 async fn handle_call_get(

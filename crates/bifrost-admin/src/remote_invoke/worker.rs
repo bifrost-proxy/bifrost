@@ -1,9 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use bifrost_command::CanonicalQueryCommand;
 use bifrost_core::{BifrostError, Result};
 use bifrost_storage::RemoteShellStore;
 use bifrost_sync::SyncManagerHandle;
@@ -13,6 +15,7 @@ use rand::Rng;
 use ring::agreement::{agree_ephemeral, EphemeralPrivateKey, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
 use ring::rand::SystemRandom;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -106,6 +109,382 @@ struct ShellGrantProvision {
     stdin_allowed: Option<bool>,
 }
 
+const CALL_HISTORY_STORE_FILE: &str = "remote_invoke_call_history.json";
+const CALL_HISTORY_STORE_VERSION: u32 = 1;
+const CALL_HISTORY_COMMAND_TEXT_LIMIT: usize = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallHistoryStoreFile {
+    version: u32,
+    entries: Vec<PersistedCallHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedCallHistoryEntry {
+    call_id: String,
+    relay_url: String,
+    client_instance_id: String,
+    call: CallInfo,
+    updated_at: u64,
+}
+
+struct CallHistoryStore {
+    file_path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl CallHistoryStore {
+    fn new(data_dir: &std::path::Path) -> Self {
+        Self {
+            file_path: data_dir.join("admin").join(CALL_HISTORY_STORE_FILE),
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn load_for_client(
+        &self,
+        relay_url: &str,
+        client_instance_id: &str,
+        max_records: usize,
+        retention_days: u32,
+    ) -> Result<VecDeque<CallInfo>> {
+        let _guard = self.lock.lock();
+        let mut file = self.read_store_file()?;
+        let before = file.entries.len();
+        prune_call_history_entries(
+            &mut file.entries,
+            relay_url,
+            client_instance_id,
+            max_records,
+            retention_days,
+        );
+        let mut sanitized = false;
+        for entry in &mut file.entries {
+            if entry.relay_url == relay_url
+                && entry.client_instance_id == client_instance_id
+                && sanitize_call_for_history(&mut entry.call)
+            {
+                sanitized = true;
+            }
+        }
+        if before != file.entries.len() || sanitized {
+            self.write_store_file(&file)?;
+        }
+        let mut calls = file
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                entry.relay_url == relay_url && entry.client_instance_id == client_instance_id
+            })
+            .map(|entry| entry.call)
+            .collect::<Vec<_>>();
+        calls.sort_by_key(|call| call.started_at);
+        Ok(calls.into())
+    }
+
+    fn upsert(
+        &self,
+        relay_url: &str,
+        client_instance_id: &str,
+        call: &CallInfo,
+        max_records: usize,
+        retention_days: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock();
+        let mut file = self.read_store_file()?;
+        file.entries.retain(|entry| {
+            !(entry.relay_url == relay_url
+                && entry.client_instance_id == client_instance_id
+                && entry.call_id == call.call_id)
+        });
+        let mut call = call.clone();
+        sanitize_call_for_history(&mut call);
+        file.entries.push(PersistedCallHistoryEntry {
+            call_id: call.call_id.clone(),
+            relay_url: relay_url.to_string(),
+            client_instance_id: client_instance_id.to_string(),
+            call,
+            updated_at: now_millis(),
+        });
+        prune_call_history_entries(
+            &mut file.entries,
+            relay_url,
+            client_instance_id,
+            max_records,
+            retention_days,
+        );
+        self.write_store_file(&file)
+    }
+
+    fn clear_for_client(&self, relay_url: &str, client_instance_id: &str) -> Result<usize> {
+        let _guard = self.lock.lock();
+        let mut file = self.read_store_file()?;
+        let before = file.entries.len();
+        file.entries.retain(|entry| {
+            !(entry.relay_url == relay_url && entry.client_instance_id == client_instance_id)
+        });
+        let removed = before - file.entries.len();
+        if removed > 0 {
+            self.write_store_file(&file)?;
+        }
+        Ok(removed)
+    }
+
+    fn read_store_file(&self) -> Result<CallHistoryStoreFile> {
+        if !self.file_path.exists() {
+            return Ok(CallHistoryStoreFile {
+                version: CALL_HISTORY_STORE_VERSION,
+                entries: Vec::new(),
+            });
+        }
+        let content = std::fs::read_to_string(&self.file_path).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "read {}: {e}",
+                self.file_path.display()
+            )))
+        })?;
+        match serde_json::from_str::<CallHistoryStoreFile>(&content) {
+            Ok(file) if file.version == CALL_HISTORY_STORE_VERSION => Ok(file),
+            Ok(file) => {
+                self.reset_store_file()?;
+                Err(BifrostError::Config(format!(
+                    "reset incompatible call history store version {}",
+                    file.version
+                )))
+            }
+            Err(e) => {
+                self.reset_store_file()?;
+                Err(BifrostError::Config(format!(
+                    "reset unreadable call history store {}: {e}",
+                    self.file_path.display()
+                )))
+            }
+        }
+    }
+
+    fn write_store_file(&self, file: &CallHistoryStoreFile) -> Result<()> {
+        if let Some(parent) = self.file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                BifrostError::Io(std::io::Error::other(format!(
+                    "mkdir {}: {e}",
+                    parent.display()
+                )))
+            })?;
+        }
+        let content = serde_json::to_string_pretty(file)
+            .map_err(|e| BifrostError::Config(format!("serialize call history store: {e}")))?;
+        std::fs::write(&self.file_path, content).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "write {}: {e}",
+                self.file_path.display()
+            )))
+        })?;
+        Ok(())
+    }
+
+    fn reset_store_file(&self) -> Result<()> {
+        if self.file_path.exists() {
+            std::fs::remove_file(&self.file_path).map_err(|e| {
+                BifrostError::Io(std::io::Error::other(format!(
+                    "remove {}: {e}",
+                    self.file_path.display()
+                )))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn prune_call_history_entries(
+    entries: &mut Vec<PersistedCallHistoryEntry>,
+    relay_url: &str,
+    client_instance_id: &str,
+    max_records: usize,
+    retention_days: u32,
+) {
+    let cutoff = now_millis().saturating_sub(retention_days as u64 * 24 * 60 * 60 * 1000);
+    entries.retain(|entry| {
+        entry.relay_url != relay_url
+            || entry.client_instance_id != client_instance_id
+            || entry.call.started_at >= cutoff
+    });
+    let mut indexes = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.relay_url == relay_url && entry.client_instance_id == client_instance_id
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if indexes.len() <= max_records {
+        return;
+    }
+    indexes.sort_by_key(|index| entries[*index].call.started_at);
+    let remove_count = indexes.len() - max_records;
+    let mut remove_indexes = indexes.into_iter().take(remove_count).collect::<Vec<_>>();
+    remove_indexes.sort_unstable_by(|a, b| b.cmp(a));
+    for index in remove_indexes {
+        entries.remove(index);
+    }
+}
+
+fn truncate_history_string(value: &mut String) -> bool {
+    if value.chars().count() <= CALL_HISTORY_COMMAND_TEXT_LIMIT {
+        return false;
+    }
+    *value = value
+        .chars()
+        .take(CALL_HISTORY_COMMAND_TEXT_LIMIT)
+        .collect();
+    true
+}
+
+fn truncate_history_option(value: &mut Option<String>) -> bool {
+    value.as_mut().map(truncate_history_string).unwrap_or(false)
+}
+
+fn sanitize_history_json_string(value: &mut String) -> bool {
+    let Ok(mut json_value) = serde_json::from_str::<Value>(value) else {
+        return truncate_history_string(value);
+    };
+    if !sanitize_history_json_value(&mut json_value) {
+        return false;
+    }
+    match serde_json::to_string(&json_value) {
+        Ok(sanitized) => {
+            *value = sanitized;
+            true
+        }
+        Err(_) => truncate_history_string(value),
+    }
+}
+
+fn sanitize_history_json_option(value: &mut Option<String>) -> bool {
+    value
+        .as_mut()
+        .map(sanitize_history_json_string)
+        .unwrap_or(false)
+}
+
+fn sanitize_history_json_value(value: &mut Value) -> bool {
+    match value {
+        Value::String(text) => truncate_history_string(text),
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= sanitize_history_json_value(item);
+            }
+            changed
+        }
+        Value::Object(map) => {
+            let mut changed = false;
+            for item in map.values_mut() {
+                changed |= sanitize_history_json_value(item);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+fn truncate_history_vec(value: &mut Option<Vec<String>>) -> bool {
+    let mut changed = false;
+    if let Some(items) = value {
+        for item in items {
+            changed |= truncate_history_string(item);
+        }
+    }
+    changed
+}
+
+fn truncate_history_env(value: &mut Option<BTreeMap<String, String>>) -> bool {
+    let Some(env) = value else {
+        return false;
+    };
+    let mut changed = false;
+    let mut truncated = BTreeMap::new();
+    for (mut key, mut item_value) in std::mem::take(env) {
+        changed |= truncate_history_string(&mut key);
+        changed |= truncate_history_string(&mut item_value);
+        truncated.insert(key, item_value);
+    }
+    *env = truncated;
+    changed
+}
+
+fn sanitize_query_for_history(query: &mut Option<CanonicalQueryCommand>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let mut changed = false;
+    match query {
+        CanonicalQueryCommand::Search(args) => {
+            changed |= truncate_history_string(&mut args.keyword);
+            for value in &mut args.filters.protocols {
+                changed |= truncate_history_string(value);
+            }
+            for value in &mut args.filters.status_ranges {
+                changed |= truncate_history_string(value);
+            }
+            for value in &mut args.filters.content_types {
+                changed |= truncate_history_string(value);
+            }
+            for value in &mut args.filters.client_ips {
+                changed |= truncate_history_string(value);
+            }
+            for value in &mut args.filters.client_apps {
+                changed |= truncate_history_string(value);
+            }
+            for value in &mut args.filters.domains {
+                changed |= truncate_history_string(value);
+            }
+            for condition in &mut args.filters.conditions {
+                changed |= truncate_history_string(&mut condition.field);
+                changed |= truncate_history_string(&mut condition.operator);
+                changed |= truncate_history_string(&mut condition.value);
+            }
+        }
+        CanonicalQueryCommand::TrafficList(args) => {
+            changed |= truncate_history_option(&mut args.method);
+            changed |= truncate_history_option(&mut args.protocol);
+            changed |= truncate_history_option(&mut args.host);
+            changed |= truncate_history_option(&mut args.url);
+            changed |= truncate_history_option(&mut args.path);
+            changed |= truncate_history_option(&mut args.content_type);
+            changed |= truncate_history_option(&mut args.client_ip);
+            changed |= truncate_history_option(&mut args.client_app);
+        }
+        CanonicalQueryCommand::TrafficGet(args) => {
+            changed |= truncate_history_string(&mut args.id);
+        }
+        CanonicalQueryCommand::TrafficClear(args) => {
+            if let Some(ids) = &mut args.ids {
+                for id in ids {
+                    changed |= truncate_history_string(id);
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn sanitize_call_for_history(call: &mut CallInfo) -> bool {
+    let mut changed = false;
+    changed |= truncate_history_string(&mut call.command_summary.command_preview);
+    changed |= sanitize_history_json_option(&mut call.command_summary.masked_args_json);
+    changed |= truncate_history_string(&mut call.command.command);
+    changed |= sanitize_history_json_option(&mut call.command.args_json);
+    changed |= sanitize_query_for_history(&mut call.command.query);
+    changed |= truncate_history_option(&mut call.command.policy_id);
+    changed |= truncate_history_vec(&mut call.command.argv);
+    changed |= truncate_history_option(&mut call.command.shell);
+    changed |= truncate_history_option(&mut call.command.command_text);
+    changed |= truncate_history_option(&mut call.command.cwd);
+    changed |= truncate_history_env(&mut call.command.env);
+    changed |= truncate_history_option(&mut call.policy_id);
+    changed
+}
+
 pub struct RemoteInvokeWorker {
     config: RemoteInvokeConfig,
     identity: Identity,
@@ -116,6 +495,7 @@ pub struct RemoteInvokeWorker {
     pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
     active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
     call_history: Arc<RwLock<VecDeque<CallInfo>>>,
+    call_history_store: Arc<CallHistoryStore>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
     grant_crypto_store: Arc<GrantCryptoStore>,
@@ -152,6 +532,7 @@ impl RemoteInvokeWorker {
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
         let grant_policy_store = Arc::new(GrantPolicyStore::new(&data_dir));
         let grant_info_store = Arc::new(GrantInfoStore::new(&data_dir));
+        let call_history_store = Arc::new(CallHistoryStore::new(&data_dir));
         let restored_grant_crypto =
             match grant_crypto_store.load_for_relay(&relay_client.base_url()) {
                 Ok(restored) => restored
@@ -214,6 +595,31 @@ impl RemoteInvokeWorker {
                 HashMap::new()
             }
         };
+        let mut restored_call_history = match call_history_store.load_for_client(
+            &relay_client.base_url(),
+            &identity.instance_id,
+            config.max_records as usize,
+            config.retention_days,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, "load persisted call history failed");
+                VecDeque::new()
+            }
+        };
+        if finalize_non_terminal_restored_calls(&mut restored_call_history, now_millis()) > 0 {
+            for call in &restored_call_history {
+                if let Err(error) = call_history_store.upsert(
+                    &relay_client.base_url(),
+                    &identity.instance_id,
+                    call,
+                    config.max_records as usize,
+                    config.retention_days,
+                ) {
+                    warn!(error = %error, call_id = %call.call_id, "persist finalized restored call failed");
+                }
+            }
+        }
 
         Arc::new(Self {
             config,
@@ -224,7 +630,8 @@ impl RemoteInvokeWorker {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
-            call_history: Arc::new(RwLock::new(VecDeque::new())),
+            call_history: Arc::new(RwLock::new(restored_call_history)),
+            call_history_store,
             local_grants: Arc::new(RwLock::new(restored_grant_info)),
             grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
             grant_crypto_store,
@@ -287,6 +694,22 @@ impl RemoteInvokeWorker {
             .iter()
             .find(|c| c.call_id == call_id)
             .cloned()
+    }
+
+    pub fn clear_calls(&self) -> usize {
+        let removed = {
+            let mut history = self.call_history.write();
+            let removed = history.len();
+            history.clear();
+            removed
+        };
+        if let Err(error) = self
+            .call_history_store
+            .clear_for_client(&self.relay_client.base_url(), &self.identity.instance_id)
+        {
+            warn!(error = %error, "clear persisted remote invoke call history failed");
+        }
+        removed
     }
 
     pub fn relay_client(&self) -> &Arc<RelayClient> {
@@ -363,6 +786,32 @@ impl RemoteInvokeWorker {
             }
         };
         *self.local_grants.write() = restored_grant_info;
+        let mut restored_call_history = match self.call_history_store.load_for_client(
+            new_normalized,
+            &self.identity.instance_id,
+            self.config.max_records as usize,
+            self.config.retention_days,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, relay_url = %new_normalized, "reload persisted call history after relay switch failed");
+                VecDeque::new()
+            }
+        };
+        if finalize_non_terminal_restored_calls(&mut restored_call_history, now_millis()) > 0 {
+            for call in &restored_call_history {
+                if let Err(error) = self.call_history_store.upsert(
+                    new_normalized,
+                    &self.identity.instance_id,
+                    call,
+                    self.config.max_records as usize,
+                    self.config.retention_days,
+                ) {
+                    warn!(error = %error, call_id = %call.call_id, "persist finalized restored call after relay switch failed");
+                }
+            }
+        }
+        *self.call_history.write() = restored_call_history;
         self.reconnect_notify.notify_waiters();
     }
 
@@ -2216,7 +2665,7 @@ impl RemoteInvokeWorker {
             .insert(call_id.clone(), Arc::clone(&active_call));
 
         {
-            let call_info = CallInfo {
+            let mut call_info = CallInfo {
                 call_id: call_id.clone(),
                 grant_id: grant_id.clone(),
                 pairing_id: None,
@@ -2274,7 +2723,9 @@ impl RemoteInvokeWorker {
                 output_mode: command.output_mode,
                 pty_enabled: command.pty.as_ref().map(|pty| pty.enabled),
             };
+            sanitize_call_for_history(&mut call_info);
             let max = self.config.max_records as usize;
+            self.persist_call_history_entry(&call_info);
             let mut history = self.call_history.write();
             history.push_back(call_info);
             while history.len() > max {
@@ -2308,6 +2759,11 @@ impl RemoteInvokeWorker {
         let active_calls = Arc::clone(&self.active_calls);
         let active_call_for_task = Arc::clone(&active_call);
         let call_history = Arc::clone(&self.call_history);
+        let call_history_store = Arc::clone(&self.call_history_store);
+        let call_history_relay_url = self.relay_client.base_url();
+        let call_history_client_instance_id = self.identity.instance_id.clone();
+        let call_history_max_records = self.config.max_records as usize;
+        let call_history_retention_days = self.config.retention_days;
         let cid = call_id.clone();
         let command_kind_for_stream = command.kind;
         let grant_scope_for_stream = grant_scope;
@@ -2404,7 +2860,7 @@ impl RemoteInvokeWorker {
                         duration_ms = duration_ms,
                         "remote command execution completed"
                     );
-                    let _ = update_call_in_history(
+                    if update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -2419,7 +2875,17 @@ impl RemoteInvokeWorker {
                             stdout_digest: response.stdout_digest.clone(),
                             stderr_digest: response.stderr_digest.clone(),
                         },
-                    );
+                    ) {
+                        persist_call_history_entry_from_lock(
+                            &call_history_store,
+                            &call_history_relay_url,
+                            &call_history_client_instance_id,
+                            &call_history,
+                            &cid,
+                            call_history_max_records,
+                            call_history_retention_days,
+                        );
+                    }
                 }
                 Err(e) => {
                     if active_call_for_task.is_cancelled() {
@@ -2465,7 +2931,7 @@ impl RemoteInvokeWorker {
                     if let Err(e2) = relay_client.post_call_exit(&cid, &exit_req).await {
                         error!(error = %e2, call_id = %cid, "failed to post error call exit");
                     }
-                    let _ = update_call_in_history(
+                    if update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -2476,7 +2942,17 @@ impl RemoteInvokeWorker {
                             stdout_digest: None,
                             stderr_digest: None,
                         },
-                    );
+                    ) {
+                        persist_call_history_entry_from_lock(
+                            &call_history_store,
+                            &call_history_relay_url,
+                            &call_history_client_instance_id,
+                            &call_history,
+                            &cid,
+                            call_history_max_records,
+                            call_history_retention_days,
+                        );
+                    }
                 }
             }
 
@@ -2639,6 +3115,24 @@ impl RemoteInvokeWorker {
         }
     }
 
+    fn persist_call_history_entry(&self, call: &CallInfo) {
+        if let Err(error) = self.call_history_store.upsert(
+            &self.relay_client.base_url(),
+            &self.identity.instance_id,
+            call,
+            self.config.max_records as usize,
+            self.config.retention_days,
+        ) {
+            warn!(error = %error, call_id = %call.call_id, "persist remote invoke call history failed");
+        }
+    }
+
+    fn persist_call_history_by_id(&self, call_id: &str) {
+        if let Some(call) = find_call_in_history(&self.call_history, call_id) {
+            self.persist_call_history_entry(&call);
+        }
+    }
+
     fn apply_cancelled_call(&self, call_id: &str) {
         let active_call = self.active_calls.write().remove(call_id);
         let started_at = active_call
@@ -2657,7 +3151,9 @@ impl RemoteInvokeWorker {
         if let Some(started_at) = started_at {
             let duration_ms = now_millis().saturating_sub(started_at);
             let updated = force_cancel_call_in_history(&self.call_history, call_id, duration_ms);
-            if !updated {
+            if updated {
+                self.persist_call_history_by_id(call_id);
+            } else {
                 debug!(call_id = %call_id, "cancel reconcile did not change local history");
             }
         } else {
@@ -2724,6 +3220,65 @@ fn update_call_in_history(
         return true;
     }
     false
+}
+
+fn find_call_in_history(history: &RwLock<VecDeque<CallInfo>>, call_id: &str) -> Option<CallInfo> {
+    history
+        .read()
+        .iter()
+        .rev()
+        .find(|c| c.call_id == call_id)
+        .cloned()
+}
+
+fn persist_call_history_entry_from_lock(
+    store: &CallHistoryStore,
+    relay_url: &str,
+    client_instance_id: &str,
+    history: &RwLock<VecDeque<CallInfo>>,
+    call_id: &str,
+    max_records: usize,
+    retention_days: u32,
+) {
+    let Some(call) = find_call_in_history(history, call_id) else {
+        debug!(call_id = %call_id, "skip persisting missing call history entry");
+        return;
+    };
+    if let Err(error) = store.upsert(
+        relay_url,
+        client_instance_id,
+        &call,
+        max_records,
+        retention_days,
+    ) {
+        warn!(error = %error, call_id = %call_id, "persist remote invoke call history failed");
+    }
+}
+
+fn finalize_non_terminal_restored_calls(
+    history: &mut VecDeque<CallInfo>,
+    now_millis: u64,
+) -> usize {
+    let mut finalized = 0;
+    for call in history {
+        if is_terminal_call_status(call.status) {
+            continue;
+        }
+        call.status = CallStatus::Failed;
+        call.exit_code.get_or_insert(-1);
+        call.ended_at.get_or_insert(now_millis);
+        call.duration_ms
+            .get_or_insert(now_millis.saturating_sub(call.started_at));
+        finalized += 1;
+    }
+    finalized
+}
+
+fn is_terminal_call_status(status: CallStatus) -> bool {
+    matches!(
+        status,
+        CallStatus::Completed | CallStatus::Failed | CallStatus::Cancelled | CallStatus::Timeout
+    )
 }
 
 fn build_call_command_summary(
@@ -4131,6 +4686,163 @@ mod tests {
 
         assert_eq!(find_call_started_at(&history, "c1"), Some(333));
         assert_eq!(find_call_started_at(&history, "missing"), None);
+    }
+
+    #[test]
+    fn test_finalize_non_terminal_restored_calls_marks_streaming_failed() {
+        let mut history = VecDeque::new();
+        let mut streaming = make_call_info("streaming");
+        streaming.started_at = 1000;
+        streaming.status = CallStatus::Streaming;
+        history.push_back(streaming);
+        history.push_back({
+            let mut completed = make_call_info("completed");
+            completed.status = CallStatus::Completed;
+            completed.exit_code = Some(0);
+            completed
+        });
+
+        let finalized = finalize_non_terminal_restored_calls(&mut history, 1500);
+
+        assert_eq!(finalized, 1);
+        assert_eq!(history[0].status, CallStatus::Failed);
+        assert_eq!(history[0].exit_code, Some(-1));
+        assert_eq!(history[0].ended_at, Some(1500));
+        assert_eq!(history[0].duration_ms, Some(500));
+        assert_eq!(history[1].status, CallStatus::Completed);
+    }
+
+    #[test]
+    fn test_call_history_store_prunes_by_retention_and_max_records() {
+        let temp = TempDir::new().unwrap();
+        let store = CallHistoryStore::new(temp.path());
+        let now = now_millis();
+        let old = now - 8 * 24 * 60 * 60 * 1000;
+        let mut old_call = make_call_info("old");
+        old_call.started_at = old;
+        let mut mid_call = make_call_info("mid");
+        mid_call.started_at = now;
+        let mut new_call = make_call_info("new");
+        new_call.started_at = now + 1;
+
+        store
+            .upsert("https://relay", "client", &old_call, 100, 30)
+            .unwrap();
+        store
+            .upsert("https://relay", "client", &mid_call, 2, 7)
+            .unwrap();
+        store
+            .upsert("https://relay", "client", &new_call, 2, 7)
+            .unwrap();
+
+        let calls = store
+            .load_for_client("https://relay", "client", 1, 7)
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, "new");
+    }
+
+    #[test]
+    fn test_call_history_store_clear_for_client_removes_only_current_client() {
+        let temp = TempDir::new().unwrap();
+        let store = CallHistoryStore::new(temp.path());
+        let now = now_millis();
+        let mut call_a = make_call_info("a");
+        call_a.started_at = now;
+        let mut call_b = make_call_info("b");
+        call_b.started_at = now;
+
+        store
+            .upsert("https://relay", "client-a", &call_a, 100, 7)
+            .unwrap();
+        store
+            .upsert("https://relay", "client-b", &call_b, 100, 7)
+            .unwrap();
+
+        assert_eq!(
+            store.clear_for_client("https://relay", "client-a").unwrap(),
+            1
+        );
+        assert!(store
+            .load_for_client("https://relay", "client-a", 100, 7)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .load_for_client("https://relay", "client-b", 100, 7)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_call_history_store_truncates_command_fields_before_persisting() {
+        let temp = TempDir::new().unwrap();
+        let store = CallHistoryStore::new(temp.path());
+        let long_value = "x".repeat(CALL_HISTORY_COMMAND_TEXT_LIMIT + 50);
+        let forbidden_fragment = "x".repeat(CALL_HISTORY_COMMAND_TEXT_LIMIT + 1);
+        let mut call = make_call_info("long");
+        call.started_at = now_millis();
+        call.command_summary.command_preview = long_value.clone();
+        call.command_summary.masked_args_json =
+            Some(serde_json::json!({ "keyword": long_value.clone() }).to_string());
+        call.command.command = long_value.clone();
+        call.command.args_json =
+            Some(serde_json::json!({ "keyword": long_value.clone() }).to_string());
+        call.command.argv = Some(vec![long_value.clone()]);
+        call.command.shell = Some(long_value.clone());
+        call.command.command_text = Some(long_value.clone());
+        call.command.cwd = Some(long_value.clone());
+        call.command.env = Some(BTreeMap::from([(long_value.clone(), long_value.clone())]));
+        call.command.query = Some(CanonicalQueryCommand::Search(SearchArgs {
+            keyword: long_value.clone(),
+            ..SearchArgs::default()
+        }));
+
+        store
+            .upsert("https://relay", "client", &call, 100, 7)
+            .unwrap();
+
+        let calls = store
+            .load_for_client("https://relay", "client", 100, 7)
+            .unwrap();
+        let persisted = &calls[0];
+        assert_eq!(
+            persisted.command.command.chars().count(),
+            CALL_HISTORY_COMMAND_TEXT_LIMIT
+        );
+        let masked_args_json: Value =
+            serde_json::from_str(persisted.command_summary.masked_args_json.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(
+            masked_args_json["keyword"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            CALL_HISTORY_COMMAND_TEXT_LIMIT
+        );
+        let args_json: Value =
+            serde_json::from_str(persisted.command.args_json.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            args_json["keyword"].as_str().unwrap().chars().count(),
+            CALL_HISTORY_COMMAND_TEXT_LIMIT
+        );
+        match persisted.command.query.as_ref().unwrap() {
+            CanonicalQueryCommand::Search(args) => {
+                assert_eq!(
+                    args.keyword.chars().count(),
+                    CALL_HISTORY_COMMAND_TEXT_LIMIT
+                );
+            }
+            other => panic!("unexpected query command: {other:?}"),
+        }
+
+        let raw_store =
+            std::fs::read_to_string(temp.path().join("admin").join(CALL_HISTORY_STORE_FILE))
+                .unwrap();
+        assert!(!raw_store.contains(&forbidden_fragment));
     }
 
     #[test]
