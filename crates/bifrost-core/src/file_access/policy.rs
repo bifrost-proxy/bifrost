@@ -15,17 +15,26 @@ use crate::file_access::{
     path::{canonicalize_within_roots, CanonicalPath},
 };
 
-/// The set of Phase 1 file operations. This enum is serialized as lowercase
-/// kebab strings in the config and on the wire.
+/// The full set of file operations — Phase 1 read ops plus Phase 2 write ops
+/// plus Phase 3 apply_patch. Serialized as lowercase strings on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileOp {
+    // --- Phase 1 (read) ---
     Read,
     List,
     Stat,
     Glob,
     Search,
     Hash,
+    // --- Phase 2 (write) ---
+    Write,
+    Edit,
+    Mkdir,
+    Move,
+    Delete,
+    // --- Phase 3 (unified-diff apply) ---
+    ApplyPatch,
 }
 
 impl FileOp {
@@ -37,7 +46,26 @@ impl FileOp {
             FileOp::Glob => "glob",
             FileOp::Search => "search",
             FileOp::Hash => "hash",
+            FileOp::Write => "write",
+            FileOp::Edit => "edit",
+            FileOp::Mkdir => "mkdir",
+            FileOp::Move => "move",
+            FileOp::Delete => "delete",
+            FileOp::ApplyPatch => "apply_patch",
         }
+    }
+
+    /// True for any op that may mutate the filesystem.
+    pub fn is_write(self) -> bool {
+        matches!(
+            self,
+            FileOp::Write
+                | FileOp::Edit
+                | FileOp::Mkdir
+                | FileOp::Move
+                | FileOp::Delete
+                | FileOp::ApplyPatch
+        )
     }
 }
 
@@ -48,10 +76,18 @@ impl FileOp {
 pub struct PolicyDecision {
     pub path: CanonicalPath,
     pub op: FileOp,
-    /// Effective byte cap for the current operation. For ops that don't
-    /// read content (e.g. `stat`, `hash`) this is informational.
+    /// Effective byte cap for the current read operation. For ops that don't
+    /// read content this is informational.
     pub max_read_bytes: u64,
+    /// Effective byte cap for the current write operation. Applies to
+    /// `file.write`, `file.edit`, and per-file hunks of `file.apply_patch`.
+    pub max_write_bytes: u64,
     pub respect_gitignore: bool,
+    /// Whether write ops may overwrite an existing target. When false,
+    /// `file.write` to an existing file is refused.
+    pub allow_overwrite: bool,
+    /// Whether `file.delete` may remove non-empty directories.
+    pub allow_recursive_delete: bool,
 }
 
 /// Declarative file access policy. One policy corresponds to one grant +
@@ -70,6 +106,12 @@ pub struct FileAccessPolicy {
     #[serde(default)]
     pub denies: Vec<String>,
 
+    /// Additional deny patterns applied only to write ops. These layer on
+    /// top of `denies` so read operations can continue to see files that
+    /// Phase 2/3 must never mutate (example: `**/Cargo.lock`).
+    #[serde(default)]
+    pub write_denies: Vec<String>,
+
     /// The set of ops allowed by this policy. An empty set is invalid.
     pub ops: Vec<FileOp>,
 
@@ -78,13 +120,29 @@ pub struct FileAccessPolicy {
     #[serde(default = "default_max_read_bytes")]
     pub max_read_bytes: u64,
 
+    /// Maximum bytes accepted by a single write op. Defaults to 2 MiB to
+    /// match `max_read_bytes` — large writes must be split.
+    #[serde(default = "default_max_write_bytes")]
+    pub max_write_bytes: u64,
+
     /// When true, paths ignored by `.gitignore` inside the matched root are
     /// treated as denied.
     #[serde(default = "default_true")]
     pub respect_gitignore: bool,
+
+    /// Whether write ops may overwrite an existing file. Default: true.
+    #[serde(default = "default_true")]
+    pub allow_overwrite: bool,
+
+    /// Whether `file.delete` may remove non-empty directories. Default: false.
+    #[serde(default)]
+    pub allow_recursive_delete: bool,
 }
 
 fn default_max_read_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+fn default_max_write_bytes() -> u64 {
     2 * 1024 * 1024
 }
 fn default_true() -> bool {
@@ -96,6 +154,11 @@ impl FileAccessPolicy {
     ///
     /// This function performs *all* security checks required before any
     /// filesystem read. Callers MUST NOT short-circuit or skip it.
+    ///
+    /// For write ops against a not-yet-existing target, we canonicalize the
+    /// parent directory and rebuild the `CanonicalPath` via
+    /// [`CanonicalPath::from_parent`] so containment checks still run
+    /// against real, symlink-resolved paths.
     pub fn check(
         &self,
         input: &Path,
@@ -107,8 +170,39 @@ impl FileAccessPolicy {
             return Err(FileAccessError::OpNotPermitted { op: op.as_str() });
         }
 
-        // 2. canonicalize + root containment + symlink escape detection
-        let canonical = canonicalize_within_roots(input, cwd, &self.roots)?;
+        // 2. canonicalize + root containment + symlink escape detection.
+        let canonical = match canonicalize_within_roots(input, cwd, &self.roots) {
+            Ok(c) => c,
+            Err(FileAccessError::NotFound { path }) if op.is_write() && op != FileOp::Delete => {
+                let abs = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    cwd.join(&path)
+                };
+                let parent = abs
+                    .parent()
+                    .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?;
+                let file_name = abs
+                    .file_name()
+                    .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?
+                    .to_owned();
+                let parent_canonical = canonicalize_within_roots(parent, cwd, &self.roots)?;
+                let root_index = parent_canonical.root_index;
+                let parent_abs = parent_canonical.into_path_buf();
+                let new_abs = parent_abs.join(&file_name);
+                let canonical_root = std::fs::canonicalize(&self.roots[root_index])
+                    .unwrap_or_else(|_| self.roots[root_index].clone());
+                let rel = new_abs
+                    .strip_prefix(&canonical_root)
+                    .map_err(|_| FileAccessError::OutOfScope {
+                        path: new_abs.clone(),
+                    })?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                CanonicalPath::from_parent(new_abs, root_index, rel)
+            }
+            Err(e) => return Err(e),
+        };
 
         // 3. deny-pattern check against the canonical, root-relative path
         let deny = DenyMatcher::new(&self.denies)?;
@@ -119,18 +213,28 @@ impl FileAccessPolicy {
             });
         }
 
+        // 3b. write-specific deny layer
+        if op.is_write() && !self.write_denies.is_empty() {
+            let write_deny = DenyMatcher::new(&self.write_denies)?;
+            if let Some(pat) = write_deny.match_raw(&canonical.rel_posix) {
+                return Err(FileAccessError::DenyPattern {
+                    path: canonical.into_path_buf(),
+                    pattern: pat.to_string(),
+                });
+            }
+        }
+
         // 4. gitignore (best-effort; implemented in Phase 1.1 when the
         //    `ignore` crate is wired in. For now we pass through.)
-        //
-        // TODO(phase-1.1): consult `ignore::gitignore::Gitignore` rooted at
-        // `self.roots[canonical.root_index]` and fail with
-        // `FileAccessError::IgnoredByGitignore` on a match.
 
         Ok(PolicyDecision {
             path: canonical,
             op,
             max_read_bytes: self.max_read_bytes,
+            max_write_bytes: self.max_write_bytes,
             respect_gitignore: self.respect_gitignore,
+            allow_overwrite: self.allow_overwrite,
+            allow_recursive_delete: self.allow_recursive_delete,
         })
     }
 
@@ -139,12 +243,8 @@ impl FileAccessPolicy {
         Self {
             name: name.into(),
             roots,
-            denies: vec![
-                "**/.git/**".into(),
-                "**/target/**".into(),
-                "**/*.key".into(),
-                "**/*.pem".into(),
-            ],
+            denies: default_denies(),
+            write_denies: Vec::new(),
             ops: vec![
                 FileOp::Read,
                 FileOp::List,
@@ -154,9 +254,50 @@ impl FileAccessPolicy {
                 FileOp::Hash,
             ],
             max_read_bytes: default_max_read_bytes(),
+            max_write_bytes: default_max_write_bytes(),
             respect_gitignore: true,
+            allow_overwrite: true,
+            allow_recursive_delete: false,
         }
     }
+
+    /// Phase 2/3 convenience constructor: read + write + apply_patch.
+    pub fn new_read_write(name: impl Into<String>, roots: Vec<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            roots,
+            denies: default_denies(),
+            write_denies: vec!["**/Cargo.lock".into(), "**/*.lock".into()],
+            ops: vec![
+                FileOp::Read,
+                FileOp::List,
+                FileOp::Stat,
+                FileOp::Glob,
+                FileOp::Search,
+                FileOp::Hash,
+                FileOp::Write,
+                FileOp::Edit,
+                FileOp::Mkdir,
+                FileOp::Move,
+                FileOp::Delete,
+                FileOp::ApplyPatch,
+            ],
+            max_read_bytes: default_max_read_bytes(),
+            max_write_bytes: default_max_write_bytes(),
+            respect_gitignore: true,
+            allow_overwrite: true,
+            allow_recursive_delete: false,
+        }
+    }
+}
+
+fn default_denies() -> Vec<String> {
+    vec![
+        "**/.git/**".into(),
+        "**/target/**".into(),
+        "**/*.key".into(),
+        "**/*.pem".into(),
+    ]
 }
 
 #[cfg(test)]
@@ -186,6 +327,45 @@ mod tests {
             .check(Path::new(".git/config"), &root, FileOp::Read)
             .unwrap_err();
         assert_eq!(err.code(), "file.permission_denied");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_denies_layer_on_top_of_read_denies() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_wdeny_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.lock"), b"locked").unwrap();
+
+        let policy = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+        // Read must succeed …
+        policy
+            .check(Path::new("Cargo.lock"), &root, FileOp::Read)
+            .unwrap();
+        // … Write must fail via write_denies.
+        let err = policy
+            .check(Path::new("Cargo.lock"), &root, FileOp::Write)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.permission_denied");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_on_missing_file_canonicalizes_parent() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_missing_test");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let policy = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+        // The target file does NOT exist — the check must still succeed by
+        // canonicalizing the parent.
+        let decision = policy
+            .check(Path::new("new_file.txt"), &root, FileOp::Write)
+            .unwrap();
+        assert_eq!(decision.op, FileOp::Write);
+        assert!(decision.path.as_path().ends_with("new_file.txt"));
 
         std::fs::remove_dir_all(&root).ok();
     }

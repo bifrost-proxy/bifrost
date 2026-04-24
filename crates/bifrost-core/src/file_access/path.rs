@@ -32,6 +32,22 @@ impl CanonicalPath {
     pub fn into_path_buf(self) -> PathBuf {
         self.abs
     }
+
+    /// Construct a `CanonicalPath` for a not-yet-existing target whose
+    /// parent directory has already been canonicalized via
+    /// [`canonicalize_within_roots`]. The caller is responsible for ensuring
+    /// `abs` is absolute and lies inside `roots[root_index]`; this
+    /// constructor intentionally does no IO.
+    ///
+    /// Used by `FileAccessPolicy::check` to handle Phase 2 write ops that
+    /// target files which do not exist yet.
+    pub fn from_parent(abs: PathBuf, root_index: usize, rel_posix: String) -> Self {
+        Self {
+            abs,
+            root_index,
+            rel_posix,
+        }
+    }
 }
 
 /// Canonicalize `input` (which may be relative or absolute) and ensure the
