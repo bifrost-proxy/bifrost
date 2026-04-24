@@ -161,12 +161,12 @@ bifrost remote file read crates/link-passwd
 ### TC-2.5 只读 policy 拒绝写操作（回归）
 **步骤**：
 ```bash
-cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op
+CARGO_TARGET_DIR=./.codex-target/remote-file-readonly-policy cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op
 ```
 **期望**：
 - 用例 `remote_file_readonly_policy_rejects_write_op` 通过；
-- 只读 `FileAccessPolicy` 对 `FileOp::Write` 返回 `error.code = file.op_not_permitted`；
-- 该错误码仅表示操作不在当前 policy 的 `ops` allowlist 中，和 deny pattern 命中的 `file.permission_denied` 区分。
+- 只读 `FileAccessPolicy` 对 `FileOp::Write` 返回 `error.code = file.permission_denied`；
+- 该错误码表示只读 policy 明确拒绝写操作，和一般非只读策略的 op allowlist 缺失错误 `file.op_not_permitted` 区分。
 
 ### TC-2.6 二进制文件默认保护
 ```bash
@@ -267,4 +267,4 @@ bifrost remote file read --help
 
 | 日期 | 用例 | 执行命令 | 结果 |
 |------|------|----------|------|
-| 2026-04-25 | TC-2.5 只读 policy 拒绝写操作（回归） | `cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op` | 待执行 |
+| 2026-04-25 | TC-2.5 只读 policy 拒绝写操作（回归） | `CARGO_TARGET_DIR=./.codex-target/remote-file-readonly-policy cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op` | PASS：1/1 passed，确认只读 policy 写操作返回 `file.permission_denied` |
