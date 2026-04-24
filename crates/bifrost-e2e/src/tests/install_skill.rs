@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use bifrost_cli::commands::handle_install_skill;
 
@@ -200,18 +201,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
                 let tmp = tempdir("install_skill_cwd")?;
-                let original_dir =
-                    std::env::current_dir().map_err(|e| format!("Failed to get cwd: {e}"))?;
-
-                std::env::set_current_dir(&tmp).map_err(|e| format!("Failed to set cwd: {e}"))?;
-
-                let result =
-                    handle_install_skill(Some("claude-code".to_string()), None, true, true);
-
-                std::env::set_current_dir(&original_dir)
-                    .map_err(|e| format!("Failed to restore cwd: {e}"))?;
-
-                result.map_err(|e| format!("handle_install_skill --cwd failed: {e}"))?;
+                with_temp_cwd(&tmp, || {
+                    handle_install_skill(Some("claude-code".to_string()), None, true, true)
+                        .map_err(|e| format!("handle_install_skill --cwd failed: {e}"))
+                })?;
 
                 let target = tmp
                     .join(".claude")
@@ -243,17 +236,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
                 let tmp = tempdir("install_skill_cwd_codex")?;
-                let original_dir =
-                    std::env::current_dir().map_err(|e| format!("Failed to get cwd: {e}"))?;
-
-                std::env::set_current_dir(&tmp).map_err(|e| format!("Failed to set cwd: {e}"))?;
-
-                let result = handle_install_skill(Some("codex".to_string()), None, true, true);
-
-                std::env::set_current_dir(&original_dir)
-                    .map_err(|e| format!("Failed to restore cwd: {e}"))?;
-
-                result.map_err(|e| format!("handle_install_skill codex --cwd failed: {e}"))?;
+                with_temp_cwd(&tmp, || {
+                    handle_install_skill(Some("codex".to_string()), None, true, true)
+                        .map_err(|e| format!("handle_install_skill codex --cwd failed: {e}"))
+                })?;
 
                 let targets = [
                     tmp.join(".codex")
@@ -292,19 +278,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
                 let tmp = tempdir("install_skill_cwd_copilot")?;
-                let original_dir =
-                    std::env::current_dir().map_err(|e| format!("Failed to get cwd: {e}"))?;
-
-                std::env::set_current_dir(&tmp).map_err(|e| format!("Failed to set cwd: {e}"))?;
-
-                let result =
-                    handle_install_skill(Some("github-copilot".to_string()), None, true, true);
-
-                std::env::set_current_dir(&original_dir)
-                    .map_err(|e| format!("Failed to restore cwd: {e}"))?;
-
-                result.map_err(|e| {
-                    format!("handle_install_skill github-copilot --cwd failed: {e}")
+                with_temp_cwd(&tmp, || {
+                    handle_install_skill(Some("github-copilot".to_string()), None, true, true)
+                        .map_err(|e| {
+                            format!("handle_install_skill github-copilot --cwd failed: {e}")
+                        })
                 })?;
 
                 let target = tmp
@@ -377,6 +355,26 @@ fn tempdir(prefix: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create temp dir {}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+fn cwd_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_temp_cwd<F>(tmp: &PathBuf, op: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let _guard = cwd_test_lock()
+        .lock()
+        .map_err(|_| "Failed to acquire cwd test lock".to_string())?;
+    let original_dir = std::env::current_dir().map_err(|e| format!("Failed to get cwd: {e}"))?;
+
+    std::env::set_current_dir(tmp).map_err(|e| format!("Failed to set cwd: {e}"))?;
+    let result = op();
+    std::env::set_current_dir(&original_dir).map_err(|e| format!("Failed to restore cwd: {e}"))?;
+    result
 }
 
 fn cleanup_dir(dir: &PathBuf) {

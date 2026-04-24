@@ -54,17 +54,27 @@ fn platform_expected_stdout() -> &'static str {
 
 fn streaming_shell_program() -> &'static str {
     if cfg!(target_os = "windows") {
-        "cmd"
+        // Use plain cmd.exe — the streaming test policy sets inherit_env=true
+        // so PATH is preserved and we don't need absolute paths.
+        "cmd.exe"
     } else {
         "/bin/sh"
     }
 }
 
-fn streaming_shell_command() -> &'static str {
+fn streaming_shell_command() -> String {
     if cfg!(target_os = "windows") {
-        "<nul set /p =stream-one & powershell -NoLogo -NoProfile -Command \"Start-Sleep -Milliseconds 350\" & <nul set /p =stream-two"
+        // <nul set /p = prints without trailing newline;
+        // ping -n 2 gives ~1s delay (1s interval between pings).
+        // Works reliably because the test policy sets inherit_env=true,
+        // keeping PATH intact so cmd.exe and ping are always found.
+        // Trailing `&exit /b 0` forces cmd /C to return exit code 0.
+        // Without it, `set /p` reading from nul returns exit code 1,
+        // and cmd /C propagates the last sub-command's exit code.
+        r"<nul set /p =stream-one&ping -n 2 127.0.0.1 >nul&<nul set /p =stream-two&exit /b 0"
+            .to_string()
     } else {
-        "printf stream-one; sleep 0.35; printf stream-two"
+        "printf stream-one; sleep 0.35; printf stream-two".to_string()
     }
 }
 
@@ -197,6 +207,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                                 "exec_mode": "shell_text",
                                 "allowed_shell_patterns": ["^(?s:.*)$"],
                                 "shell": streaming_shell_program(),
+                                "inherit_env": true,
                                 "max_timeout_ms": 5000
                             }),
                         }],
@@ -209,7 +220,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     kind: CommandKind::ShellExec,
                     policy_id: Some("stream-shell".to_string()),
                     exec_mode: Some(ShellExecMode::ShellText),
-                    command_text: Some(streaming_shell_command().to_string()),
+                    command_text: Some(streaming_shell_command()),
                     ..Default::default()
                 };
 

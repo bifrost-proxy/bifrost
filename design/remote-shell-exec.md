@@ -196,12 +196,18 @@ bifrost remote command exec --shell-text "printf hello && /bin/pwd"
 - 单元测试：
   - `test_execute_shell_exec_streams_stdout_before_exit`
     验证第一段 stdout 在命令结束前就通过 sink 发出，并且延迟后的第二段 stdout 分批到达
+  - Windows 回归：`test_execute_shell_exec_streams_stdout_before_exit`
+    在 `shell_text + env_clear()` 下仍可通过 PowerShell 绝对路径完成延迟输出，避免因 `PATH` 被清空导致裸 `powershell` 查找失败
 - E2E 测试：
   - `remote_shell_exec_streams_stdout`
-    通过 `crates/bifrost-e2e` 验证 shell.exec 在真实执行器路径上会分多段推送 stdout
+    通过 `crates/bifrost-e2e` 验证 shell.exec 在真实执行器路径上会分多段推送 stdout；Windows 夹具使用 `inherit_env=true` 保留完整 PATH，从而直接通过 `cmd.exe` + 裸 `ping` 完成延迟，末尾追加 `&exit /b 0` 保证 `cmd /C` 退出码为 0（`<nul set /p` 从 nul 读取时 `set /p` 返回 exit code 1），彻底避免 `env_clear()` 后绝对路径展开、`timeout.exe` stdin 限制、PowerShell .NET 运行时等 CI 兼容性问题
+  - `e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`
+    通过真实 relay / target / caller shell 链路，回归 `shell_text` 与 `argv_exec` 两条关键 stdout 流式路径，并断言 Recent Calls 会继续写入 `policy_id` / `exec_mode` / `exit_code` / `stdout_digest`
 - 真实场景测试：
   - 更新 `human_tests/remote-shell-exec.md`
   - 新增流式输出回归用例，真实跑通 `python3 -u ...` 和 `top -l 2 -s 1` 类命令在 caller 侧的增量显示
+  - 新增 Windows 环境变量清空回归用例，验证 `bifrost-admin` 单元测试通过 PowerShell 绝对路径覆盖 `env_clear()` 场景；`bifrost-e2e` E2E 测试使用 `inherit_env=true` 保留 PATH，专注验证流式输出语义，彻底解除对 Windows CI runner 环境限制的依赖
+  - 增加脚本化回归用例，要求 `test_remote_shell_exec_streaming_e2e.sh` 在本地真实执行通过
 
 ## 说明
 

@@ -99,6 +99,41 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 - 执行 `top -l 2 -s 1` 时，caller 会连续收到输出，不再卡到最后一次性打印
 - Recent Calls 最终仍正常写入 exit_code / duration / stdout_digest
 
+### TC-RSE-15：关键流式回归场景已经沉淀为可重复执行的 shell E2E 脚本
+
+步骤：
+1. 在仓库根目录执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+2. 观察脚本输出的断言结果
+3. 如脚本失败，检查脚本打印的 target / relay / caller 日志，再修复后重新执行
+
+预期：
+- 脚本会自动隔离启动 relay / target / caller，不污染默认数据目录，也不会使用 `9900`
+- `shell_text` 场景会验证第一段 stdout 在进程退出前已经到达 caller
+- `argv_exec` 场景会验证第一段 stdout 在进程退出前已经到达 caller
+- 两个场景都会验证 Recent Calls 继续记录 `policy_id` / `exec_mode` / `exit_code` / `stdout_digest`
+- 脚本最终 summary 为全部通过，可作为后续改动的稳定回归入口
+
+### TC-RSE-16：Windows 流式 shell 输出 E2E 回归
+
+步骤：
+1. 在 Windows 环境执行：
+   ```bash
+   cargo test -p bifrost-admin test_execute_shell_exec_streams_stdout_before_exit -- --exact --nocapture
+   cargo test -p bifrost-e2e remote_shell_exec_streams_stdout -- --exact --nocapture
+   ```
+2. 确认 `bifrost-admin` 单元测试继续使用 PowerShell 绝对路径 + `env_clear()`（`inherit_env` 未设置），覆盖环境清空场景
+3. 确认 `bifrost-e2e` E2E 测试策略显式设置 `"inherit_env": true`，使用裸 `cmd.exe` + 裸 `ping`，不依赖绝对路径，专注验证流式输出语义
+4. 确认 Windows 命令末尾包含 `&exit /b 0`，强制 `cmd /C` 返回 exit code 0（因 `<nul set /p` 从 nul 读取 stdin 时 `set /p` 本身返回 exit code 1）
+
+预期：
+- `bifrost-admin` 单元测试验证 `env_clear()` 下 PowerShell 绝对路径仍可完成流式输出
+- `bifrost-e2e` E2E 测试因 `inherit_env=true` 保留完整 PATH，裸 `cmd.exe` 和 `ping` 均可直接找到
+- `stdout` 仍按 `stream-one` / `stream-two` 分段到达，而不是等进程退出后一次性返回
+- 最终 exit code 为 `0`（由 `exit /b 0` 保证），stderr 为空或不含命令未找到错误
+
 ### TC-RSE-02：read-only grant 不能执行 shell.exec
 
 步骤：
@@ -279,3 +314,5 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-12 | ✅ PASS | 2026-04-23 本地验证。**根因**：旧版 `full-access` 策略 metadata 中无 `allowed_exec_modes` 字段，回退逻辑仅添加 `exec_mode=shell_text`，导致 `argv_exec` 被拒绝（`Config error: policy 'full-access' allows exec_mode [shell_text], got argv_exec`），且错误信息存在双重 `Config error:` 前缀。**修复**：`resolve_shell_policy_from_set` 中当 `allowed_exec_modes` 为空时，从 `allow_any_executable`/`allowed_executables` 推断 `argv_exec`，从 `allowed_shell_patterns` 推断 `shell_text`，保证向后兼容。同时修复 `select_policy_id_for_command` 中单候选错误被双重包装的问题（保留原始 `BifrostError` 而非 `.to_string()` 后重新包装）。**验证方式**：(1) 写入旧版 `full-access` 配置到 `TARGET_DATA_DIR=/tmp/bifrost-rse12-target-oC8W5Llv/remote_shell.json`，仅含 `exec_mode=shell_text`、`allowed_shell_patterns=["^(?s:.*)$"]`、`allow_any_executable=true`、`shell=/bin/bash`、`inherit_env=true`，无 `allowed_exec_modes`。通过 CLI `remote shell list` 确认 target 加载了 `full-access (mode: shell_text)` 单策略。(2) 单元测试 `test_legacy_full_access_without_allowed_exec_modes_permits_argv`：模拟旧格式策略，`select_policy_id_for_command` 对 `argv_exec` 和 `shell_text` 均返回 `Ok("full-access")`。(3) 真实执行测试 `test_legacy_full_access_argv_exec_actually_runs`：同旧格式策略，通过 `executor.execute()` 以 `argv_exec` 模式执行 `/bin/pwd`，exit_code=0，stdout 输出非空目录路径。(4) 单元测试 `test_select_policy_single_rejection_has_no_double_error_prefix`：验证单候选拒绝时错误信息为 `Config error: policy '...'` 而非 `Config error: Config error: policy '...'`。全部 27 个 executor 测试通过。 |
 | TC-RSE-13 | ✅ PASS | 2026-04-23 本地验证。执行 `cargo run --bin bifrost -- remote command exec pwd` 时，CLI 直接报 `unexpected argument 'pwd' found`，并提示查看 `--help`，不会再把裸参数静默解析成 `argv_exec` 然后打到远端策略层。随后执行 `cargo run --bin bifrost -- remote command exec -- /bin/pwd`，仍按 `argv_exec` 正常解析。 |
 | TC-RSE-14 | ✅ PASS | 2026-04-23 本地真实链路验证。隔离启动 target / relay / caller 后，将 target Shell Access 切到 `Full Access`。第一轮执行 `python3 -u -c 'print(\"stream-one\", end=\"\", flush=True); time.sleep(1.2); print(\"stream-two\", end=\"\", flush=True)'`：命令启动约 0.4 秒时检查 caller 输出文件，已提前看到 `stream-one`，且进程仍在运行；命令结束后完整输出为 `stream-onestream-two`。第二轮单独执行 `/usr/bin/top -l 2 -s 1`：在命令启动约 1.4 秒时，caller 输出文件已写入 211457 字节，首屏包含 `Processes:` / 时间 / `Load Avg`，且进程仍在运行；命令结束后总输出增长到 434068 字节，`Processes:` 采样头共出现 2 次。证明 caller 在进程退出前已经收到 stdout frame，而不是等到 `top` 整体结束后一次性打印。Recent Calls 最终仍正常记录 exit_code / stdout_digest。 |
+| TC-RSE-15 | ✅ PASS | 2026-04-24 再次本地执行 `bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`。脚本自动隔离启动 relay / target / caller，`shell_text` 场景继续稳定在命令退出前输出 `shell-one`，随后完整收敛为 `shell-oneshell-two`；`argv_exec` 场景同样先观察到 `argv-one`，最终完整输出 `argv-oneargv-two`。两条链路都继续校验 target `/_bifrost/api/remote-invoke/calls` 中最新 `shell.exec` 记录，确认 `policy_id=stream-shell/stream-argv`、`exec_mode=shell_text/argv_exec`、`exit_code=0`、`stdout_digest` 为有效 SHA1，脚本 summary 33/33 全部通过。 |
+| TC-RSE-16 | ⚠️ PARTIAL | 2026-04-24 经 10+ 轮 Windows CI 迭代，完成全部根因修复：1) `inherit_env=true` 保留 PATH 解决命令查找问题；2) 使用裸 `cmd.exe` + 裸 `ping` 避免绝对路径与引号解析问题；3) 末尾追加 `&exit /b 0` 解决 `set /p` 从 nul 读取返回 exit code 1 的问题。macOS 本地验证 E2E 与单元测试全部通过，Windows 真机状态待 CI 补验。 |

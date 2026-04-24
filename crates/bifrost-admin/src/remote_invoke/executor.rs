@@ -847,6 +847,16 @@ impl RemoteInvokeExecutor {
         }
         if !policy.inherit_env {
             process.env_clear();
+            // On Windows, processes (especially .NET apps like PowerShell) need
+            // critical system env vars to start. Preserve them after env_clear().
+            #[cfg(windows)]
+            {
+                for key in &["SystemRoot", "SystemDrive"] {
+                    if let Ok(val) = std::env::var(key) {
+                        process.env(key, &val);
+                    }
+                }
+            }
         }
         process.envs(policy.default_env.clone());
         if let Some(env) = &command.env {
@@ -1645,7 +1655,17 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
     {
         if let Some(shell) = shell {
             let mut command = TokioCommand::new(shell);
-            command.arg("/C").arg(shell_text);
+            if windows_shell_uses_command_flag(shell) {
+                command
+                    .arg("-NoLogo")
+                    .arg("-NoProfile")
+                    .arg("-Command")
+                    .arg(shell_text);
+            } else if windows_shell_uses_login_flag(shell) {
+                command.arg("-lc").arg(shell_text);
+            } else {
+                command.arg("/C").arg(shell_text);
+            }
             return command;
         }
 
@@ -1661,6 +1681,34 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
         command.arg("-lc").arg(shell_text);
         command
     }
+}
+
+#[cfg(windows)]
+fn windows_shell_uses_command_flag(shell: &str) -> bool {
+    windows_shell_file_name(shell).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_shell_uses_login_flag(shell: &str) -> bool {
+    windows_shell_file_name(shell).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "bash" | "bash.exe" | "sh" | "sh.exe" | "zsh" | "zsh.exe"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_shell_file_name(shell: &str) -> Option<String> {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
 }
 
 async fn emit_search_chunk<F, Fut>(
@@ -1939,23 +1987,23 @@ mod tests {
         (guard, dir)
     }
 
-    fn streaming_shell_command() -> (&'static str, &'static [&'static str]) {
+    fn streaming_shell_command() -> (String, [&'static str; 2]) {
         if cfg!(target_os = "windows") {
             (
-                "<nul set /p =first & powershell -NoLogo -NoProfile -Command \"Start-Sleep -Milliseconds 350\" & <nul set /p =second",
-                &["first", "second"],
+                "[Console]::Write('first'); Start-Sleep -Milliseconds 350; [Console]::Write('second')".to_string(),
+                ["first", "second"],
             )
         } else {
             (
-                "printf first; sleep 0.35; printf second",
-                &["first", "second"],
+                "printf first; sleep 0.35; printf second".to_string(),
+                ["first", "second"],
             )
         }
     }
 
     fn streaming_shell_program() -> &'static str {
         if cfg!(target_os = "windows") {
-            "cmd"
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         } else {
             "/bin/sh"
         }
@@ -2178,6 +2226,28 @@ mod tests {
             .expect("shell exec response");
         assert_eq!(resp.exit_code, 0);
         assert_eq!(resp.stdout.as_deref(), Some("hello"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shell_detection_uses_powershell_command_flag_for_paths() {
+        assert!(windows_shell_uses_command_flag("powershell"));
+        assert!(windows_shell_uses_command_flag("pwsh.exe"));
+        assert!(windows_shell_uses_command_flag(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(!windows_shell_uses_command_flag("cmd.exe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_shell_detection_uses_login_flag_for_posix_shells() {
+        assert!(windows_shell_uses_login_flag("bash"));
+        assert!(windows_shell_uses_login_flag(
+            r"C:\Program Files\Git\bin\bash.exe"
+        ));
+        assert!(!windows_shell_uses_login_flag("powershell.exe"));
+        assert!(!windows_shell_uses_login_flag("cmd.exe"));
     }
 
     #[test]

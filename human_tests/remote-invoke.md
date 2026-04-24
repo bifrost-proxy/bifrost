@@ -3803,6 +3803,29 @@ PY
 - 即使 relay 返回的 `command_summary.command_preview` 为空字符串，client 本地仍会用解密后的命令摘要补齐展示
 - `GET /api/remote-invoke/calls` 中对应记录的 `command_summary.command_preview` 非空，且与实际执行命令一致
 
+### TC-RI-回归-127：Shell Access 编辑器中的 Policy/Profile ID 必须只读，且仅名称可修改
+
+**前置条件**：
+- target client 的 Settings -> Remote Invoke 页面可正常打开
+- `Shell Access` 中至少有 1 个已有 profile 和 1 个已有 policy
+
+**操作步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=remote-invoke`。
+2. 在 `Shell Access` 卡片中点击 `Manage Access`。
+3. 观察已有 `Profile ID` 与 `Policy ID` 输入框是否仍可编辑。
+4. 尝试选中并复制 ID 文本，但不应能直接改写其值。
+5. 修改同一条 profile 的 `Profile name`。
+6. 修改同一条 policy 的 `Policy name`。
+7. 点击 `Save`。
+8. 保存成功后，重新打开 `Manage Access`，并通过 `GET /api/remote-invoke/shell-config` 核对对应 profile/policy。
+
+**预期结果**：
+- `Profile ID` 与 `Policy ID` 输入框为只读状态，用户可查看/复制，但不能直接修改
+- `Profile name` 与 `Policy name` 仍可正常编辑
+- 保存后弹出成功提示，且页面重新加载后名称更新生效
+- `GET /api/remote-invoke/shell-config` 中对应 profile/policy 的 `id` 保持原值不变，仅 `name` 发生变化
+- 现有 policy 与 profile 的关联关系未因本次保存被破坏
+
 ### TC-RI-回归-102 ~ TC-RI-回归-106 执行结果（2026-04-21）
 
 **执行环境**：
@@ -3872,6 +3895,17 @@ PY
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-121 | ✅ PASS | caller 使用 `--ssh-key` 成功完成 SSH connect，CLI 输出 `Connected with SSH key`；`remote-connections.json` 新增 `auth_method=ssh_publickey` 记录，包含 `client_instance_id`、`caller_fingerprint=<ssh_key_fingerprint>`、`device_code`；随后同一 `BIFROST_DATA_DIR` 下执行 `remote status` 成功复用该连接，不再要求重新 connect。 |
+
+### TC-RI-回归-127 执行结果（2026-04-24，Shell Access 只读 ID）
+
+**执行环境**：
+- Playwright UI：`pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Remote Invoke 的 Shell Access 仅允许修改名称，Policy/Profile ID 为只读"`
+- 管理端页面：`Settings -> Remote Invoke -> Manage Shell Access`
+- 校验方式：真实浏览器交互 + `GET/PUT /api/remote-invoke/shell-config`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-127 | ✅ PASS | 在 `Manage Shell Access` 中预置的 `readonly-profile` 与 `readonly-policy` 两个 ID 输入框均带有 `readonly` 属性，可查看但不可直接修改；对应 `Profile name` 与 `Policy name` 成功编辑并保存，随后 `GET /api/remote-invoke/shell-config` 返回的 `id` 保持 `readonly-profile` / `readonly-policy` 不变，仅 `name` 更新为新的值，证明 Web UI 已收敛为“只读 ID，仅名称可修改”。 |
 
 ### TC-RI-回归-122 执行结果（2026-04-21，server-v4 SSH caller 上下文）
 
@@ -4198,6 +4232,86 @@ PY
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-133 | ✅ PASS | 2026-04-23 在 `Cargo.toml` / `crates/bifrost-cli/src/commands/remote.rs` 更新时间晚于 `target/release/bifrost` 的条件下执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，脚本仅在检测到 release 过期时输出 `Building release bifrost...`，避免了每次强制全量重编。随后在 target client 查询 `GET /_bifrost/api/remote-invoke/calls`，本轮新增的 `traffic.list` / `traffic.get` / `search.stream` 记录都拿到了非空 `command_summary.masked_args_json`：`traffic.list` 含完整 filter 参数，`traffic.get` 含 `id + request_body + response_body`，`search.stream` 含 `query/max_results/max_scan`。同时 `remote traffic get` 返回的 JSON 详情可直接命中目标 `sequence + marker`，说明参数摘要与真实执行结果已经重新对齐。 |
+
+---
+
+### TC-RI-回归-134：pair-code connect 成功后，Client grants 列表应在短时间内稳定可见
+
+**背景**：CI 上出现过 `test_remote_invoke_e2e.sh` 在 caller `remote connect` 已成功完成、日志也已出现 `Connected! Authorization granted` 后，立刻读取 `GET /_bifrost/api/remote-invoke/grants` 仍短暂返回空列表的情况。这类现象更像授权可见性的瞬时时序窗口，而不是功能性回归。
+
+**前置条件**：
+- 使用本地 relay + target client + caller 的隔离环境
+- target 已连上 relay，且可进入 discovery mode
+
+**操作步骤**：
+1. 在 target 上进入 discovery mode，拿到新的 pair code
+2. 在 caller 侧执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh
+   ```
+3. 重点观察脚本中 `Verify grant is created on Client side` 这一段
+4. 如需手工复核，在 approve pairing 成功后 10 秒内多次执行：
+   ```bash
+   curl -s "http://127.0.0.1:<admin-port>/_bifrost/api/remote-invoke/grants" | jq '.grants | length'
+   ```
+
+**预期结果**：
+- caller `remote connect` 正常退出，日志包含 `Connected! Authorization granted`
+- Client grants 列表允许存在短暂同步延迟，但应在 10 秒内稳定出现至少 1 条 grant
+- 如果 10 秒后仍为 `0`，才视为真实失败
+
+### TC-RI-回归-134 执行结果（2026-04-24，grant 可见性时序窗口复验）
+
+**执行环境**：
+- Local relay：脚本自动启动 `packages/bifrost-sync-server`
+- Target client：`bash e2e-tests/tests/test_remote_invoke_e2e.sh` 自动使用隔离 `BIFROST_DATA_DIR` 启动
+- Caller CLI：同脚本内隔离目录
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-134 | ✅ PASS | 2026-04-24 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，整套 72 条断言全部通过。针对 `Verify grant is created on Client side` 已改为“最多等待 10 秒”的短轮询；本轮本地复验中 grants 列表在窗口内稳定出现，随后 `remote status`、`remote traffic list/get/search`、取消、reject pairing、stale grant 清理与 disconnect 回归也全部通过，说明该改动只吸收了瞬时时序抖动，没有放宽后续真实链路验证。 |
+
+---
+
+### TC-RI-回归-135：Recent Calls 参数预览回归脚本必须使用本地 mock 流量，不依赖公网 `httpbin.org`
+
+**背景**：`test_remote_invoke_recent_calls_args_preview_e2e.sh` 之前通过 `curl --proxy ... http://httpbin.org/anything/<marker>` 造流量。CI runner 一旦公网抖动，脚本会在 `set -e` 下直接退出，shell 汇总里只会残留“批准配对应返回 200”这样的上一条成功日志，难以判断到底是 connect 失败还是公网依赖失败。
+
+**前置条件**：
+- 使用隔离的 target admin / caller / relay 数据目录
+- 不使用 `9900` 端口，target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`，可启动 `e2e-tests/mock_servers/http_echo_server.py`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 观察脚本输出，确认其在启动 target admin 后还会启动本地 echo fixture：
+   ```text
+   [remote-invoke-args-preview-e2e] Starting local HTTP echo fixture on port <随机端口>
+   ```
+3. 脚本结束后，读取 target client 的 Recent Calls API：
+   ```bash
+   curl -s "http://127.0.0.1:<admin-port>/_bifrost/api/remote-invoke/calls" | jq '.calls[0].command_summary'
+   ```
+4. 定位本轮 `search.stream` 调用，检查 `command_summary.masked_args_json`
+
+**预期结果**：
+- 脚本不再访问公网 `httpbin.org`，即使 CI 外网受限也能完成 Recent Calls 回归
+- 本地 echo fixture 能成功生成带 `recent-calls-preview-<随机值>` 的流量记录
+- `search.stream` 的 `command_summary.masked_args_json` 非空，且包含 `keyword/max_results/max_scan`
+
+### TC-RI-回归-135 执行结果（2026-04-24，Recent Calls 参数预览 shell E2E 去公网依赖）
+
+**执行环境**：
+- Local relay：脚本自动启动 `packages/bifrost-sync-server`
+- Target admin：脚本自动启动隔离 `target/release/bifrost ... --no-system-proxy`
+- Local mock：脚本自动启动 `e2e-tests/mock_servers/http_echo_server.py --port <随机端口> --retries 5`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-135 | ✅ PASS | 2026-04-24 在当前 checkout 连续复验 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本输出明确显示已启动本地 `HTTP echo fixture`，不再依赖公网 `httpbin.org`。本轮 Recent Calls API 成功返回最新 `search.stream` 记录，`command_summary.masked_args_json` 非空，JSON 中实际包含 `keyword=recent-calls-preview-<随机值>`、`max_results=5`、`max_scan=50`，对应断言 `TC-RI-ARGS-01` 通过。此前“approve 后只剩上一条成功日志”的无诊断退出现象未再复现。 |
 
 ---
 

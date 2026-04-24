@@ -414,7 +414,7 @@ export class SqliteGroupSettingDao implements IGroupSettingDao {
 }
 
 export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
-  constructor(private db: Database.Database) {}
+  constructor(private db: Database.Database) { }
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     this.db.prepare(
@@ -490,7 +490,10 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
   }
 
   async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
-    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+    if (userId) {
+      return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+    }
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
   }
 
   async listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeGrant[]; total: number }> {

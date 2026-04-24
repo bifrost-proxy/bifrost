@@ -407,7 +407,36 @@
 
 ---
 
-### TC-CIE-24：导入不存在的文件报错
+### TC-CIE-24：项目级安装到 Codex 时同时写入 `.codex` 和 `.agents`
+
+**操作步骤**：
+1. 执行命令：
+   ```bash
+   TOOLCHAIN_BIN="$(dirname "$(rustup which cargo)")"
+   TEST_ROOT="$(mktemp -d)"
+   (
+     cd "$TEST_ROOT" && PATH="$TOOLCHAIN_BIN:$PATH" \
+     BIFROST_INSTALL_SKILL_SOURCE=embedded \
+     BIFROST_DATA_DIR=./.bifrost-test \
+     cargo run --manifest-path /Users/eden/work/github/bifrost/Cargo.toml --bin bifrost -- install-skill -t codex --cwd -y
+   )
+   ```
+2. 检查以下文件都存在且非空：
+   ```bash
+   test -s "$TEST_ROOT/.codex/skills/bifrost/SKILL.md"
+   test -s "$TEST_ROOT/.agents/skills/bifrost/SKILL.md"
+   ```
+
+**预期结果**：
+- `Target tools:` 显示 `Codex`
+- `Install mode:` 显示 `project-local (current directory)`
+- 输出的目标路径同时包含 `.codex/skills/bifrost/SKILL.md` 和 `.agents/skills/bifrost/SKILL.md`
+- 上述两个 `SKILL.md` 文件都被创建，且内容非空
+- 命令退出码为 0
+
+---
+
+### TC-CIE-25：导入不存在的文件报错
 
 **操作步骤**：
 1. 执行命令：
@@ -421,7 +450,7 @@
 
 ---
 
-### TC-CIE-25：version-check redirect 优先验证（upgrade 命令）
+### TC-CIE-26：version-check redirect 优先验证（upgrade 命令）
 
 **操作步骤**：
 1. 清除 version check 缓存以强制重新请求：
@@ -442,7 +471,7 @@
 
 ---
 
-### TC-CIE-26：highlights 获取失败不阻塞版本检测
+### TC-CIE-27：highlights 获取失败不阻塞版本检测
 
 **操作步骤**：
 1. 执行 upgrade 验证整体流程在 API 限流时仍然正常工作：

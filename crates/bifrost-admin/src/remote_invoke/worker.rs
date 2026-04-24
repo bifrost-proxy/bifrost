@@ -897,6 +897,12 @@ impl RemoteInvokeWorker {
                     );
                 }
                 for grant_id in stale_grant_ids {
+                    // Re-check after brief wait: approve_pairing may be storing crypto concurrently
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if self.grant_crypto.read().contains_key(&grant_id) {
+                        info!(grant_id = %grant_id, "grant crypto arrived during stale check; keeping grant");
+                        continue;
+                    }
                     self.local_grants.write().remove(&grant_id);
                     self.remove_grant_crypto(&grant_id);
                     self.remove_grant_policy(&grant_id);
@@ -1560,6 +1566,18 @@ impl RemoteInvokeWorker {
             apply_stored_grant_policy(grant_info, stored.get(&grant_id))
         };
         if !has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
+            // Race condition: The relay sends the SSE grant_created event before the HTTP
+            // response to submit_grant_decision. If approve_pairing hasn't stored the crypto
+            // yet, we might mistakenly consider this grant stale. Wait briefly and retry.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
+                info!(grant_id = %grant_id, "grant crypto arrived after brief wait; accepting grant");
+                self.persist_grant_info(&grant_id, &grant_info);
+                self.local_grants
+                    .write()
+                    .insert(grant_id.clone(), grant_info);
+                return;
+            }
             warn!(
                 grant_id = %grant_id,
                 "grant_created is missing usable encrypted transport context locally; deleting stale grant"

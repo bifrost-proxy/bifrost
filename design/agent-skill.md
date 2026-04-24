@@ -126,6 +126,11 @@ bifrost install-skill [OPTIONS]
 8. GitHub Copilot 验证：`-t github-copilot` 时安装到 Copilot 专用目录
 9. Universal 验证：`-t universal` 时仅安装到 `.agents/skills/bifrost/SKILL.md`
 
+测试约束补充：
+
+- `--cwd` 相关 E2E 会临时切换进程级 `current_dir`，这属于共享全局状态；在并发 runner 中必须加串行保护，避免不同用例互相污染工作目录
+- Windows CI 上如果缺少这层保护，会出现首跑误判“目标文件不存在”、单条重试立刻通过的竞态现象，因此该类用例必须以“首跑稳定通过”为目标
+
 ## 校验要求
 
 - `cargo build -p bifrost-cli` 编译通过

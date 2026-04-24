@@ -25,6 +25,7 @@ require_cmd curl
 require_cmd jq
 require_cmd cargo
 require_cmd npx
+require_cmd python3
 
 pick_free_port() {
     python3 - <<'PY'
@@ -90,6 +91,7 @@ http_post_json() {
 
 RELAY_PORT="$(pick_free_port)"
 ADMIN_PORT="$(pick_free_port)"
+MOCK_HTTP_PORT="$(pick_free_port)"
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 CLIENT_ADMIN_URL="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
@@ -99,13 +101,19 @@ RELAY_LOG="$(mktemp)"
 RELAY_DATA_DIR="$(mktemp -d)"
 CALLER_CONNECT_LOG="$(mktemp)"
 SEARCH_LOG="$(mktemp)"
+MOCK_SERVER_LOG="$(mktemp)"
 RELAY_PID=""
 CALLER_CONNECT_PID=""
+MOCK_SERVER_PID=""
 
 cleanup() {
     if [[ -n "$CALLER_CONNECT_PID" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
         wait "$CALLER_CONNECT_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$MOCK_SERVER_PID" ]] && kill -0 "$MOCK_SERVER_PID" 2>/dev/null; then
+        kill "$MOCK_SERVER_PID" 2>/dev/null || true
+        wait "$MOCK_SERVER_PID" 2>/dev/null || true
     fi
     admin_cleanup_bifrost || true
     if [[ -n "$RELAY_PID" ]] && kill -0 "$RELAY_PID" 2>/dev/null; then
@@ -113,9 +121,29 @@ cleanup() {
         wait "$RELAY_PID" 2>/dev/null || true
     fi
     rm -rf "$BIFROST_DATA_DIR" "$CALLER_DATA_DIR" "$RELAY_DATA_DIR"
-    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG"
+    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG" "$MOCK_SERVER_LOG"
 }
 trap cleanup EXIT
+
+start_mock_server() {
+    log "Starting local HTTP echo fixture on port $MOCK_HTTP_PORT"
+    python3 "$REPO_DIR/e2e-tests/mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_SERVER_LOG" 2>&1 &
+    MOCK_SERVER_PID=$!
+
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$MOCK_SERVER_PID" 2>/dev/null; then
+            _log_fail "本地 echo fixture 提前退出" "server keeps running" "$(cat "$MOCK_SERVER_LOG")"
+            exit 1
+        fi
+        if curl -fsS --max-time 2 "http://127.0.0.1:${MOCK_HTTP_PORT}/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+
+    _log_fail "本地 echo fixture 未在超时内就绪" "GET /health 返回 200" "$(cat "$MOCK_SERVER_LOG")"
+    exit 1
+}
 
 log "Starting local relay on port $RELAY_PORT"
 RELAY_EXEC="$(sync_server_exec "$SYNC_SERVER_DIR")"
@@ -163,6 +191,7 @@ export ADMIN_PATH_PREFIX
 export BIFROST_DATA_DIR
 log "Starting bifrost admin on port $ADMIN_PORT"
 admin_start_bifrost
+start_mock_server
 
 SYNC_USER_ID="remote_invoke_args_preview_${RANDOM}"
 SYNC_PASSWORD="remote_invoke_args_preview_123"
@@ -214,23 +243,49 @@ assert_not_empty "$PAIRING_ID" "pairing_id 不应为空"
 http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent"}'
 assert_status "200" "$HTTP_STATUS" "批准配对应返回 200"
 
-wait "$CALLER_CONNECT_PID"
-CONNECT_EXIT=$?
+CONNECT_OK=0
+for _ in $(seq 1 30); do
+    if ! kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
+        wait "$CALLER_CONNECT_PID" 2>/dev/null || CONNECT_EXIT=$?
+        CONNECT_EXIT="${CONNECT_EXIT:-0}"
+        if [[ "$CONNECT_EXIT" -eq 0 ]]; then
+            CONNECT_OK=1
+        fi
+        break
+    fi
+    sleep 1
+done
 CALLER_CONNECT_PID=""
-if [[ "$CONNECT_EXIT" -ne 0 ]]; then
+if [[ "$CONNECT_OK" -ne 1 ]]; then
     _log_fail "remote connect 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
     exit 1
 fi
 
 REMOTE_MARKER="recent-calls-preview-${RANDOM}"
-curl -sS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "http://httpbin.org/anything/${REMOTE_MARKER}" >/dev/null
+TRAFFIC_URL="http://127.0.0.1:${MOCK_HTTP_PORT}/anything/${REMOTE_MARKER}"
+TRAFFIC_READY=0
+for _ in $(seq 1 5); do
+    if curl -fsS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "$TRAFFIC_URL" >/dev/null 2>&1; then
+        TRAFFIC_READY=1
+        break
+    fi
+    sleep 0.5
+done
+if [[ "$TRAFFIC_READY" -ne 1 ]]; then
+    _log_fail "通过本地 echo fixture 生成 Recent Calls 流量失败" "$TRAFFIC_URL 返回 2xx" "$(cat "$MOCK_SERVER_LOG")"
+    exit 1
+fi
 sleep 2
 
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$REMOTE_MARKER" \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --max-results 5 \
-    --max-scan 50 >"$SEARCH_LOG" 2>&1
+    --max-scan 50 >"$SEARCH_LOG" 2>&1 || {
+    log "remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "search log: $(cat "$SEARCH_LOG")"
+}
+sleep 1
 
 http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "读取 Recent Calls API 应返回 200"

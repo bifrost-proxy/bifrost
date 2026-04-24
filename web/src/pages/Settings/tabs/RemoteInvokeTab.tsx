@@ -205,13 +205,17 @@ function omitKnownMetadata(
   );
 }
 
-function slugifyShellId(value: string, fallback: string): string {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized || fallback;
+function nextShellItemId(prefix: string, existingIds: string[]): string {
+  const seen = new Set(existingIds.map((item) => item.trim()).filter(Boolean));
+  let nextIndex = existingIds.length + 1;
+  let nextId = `${prefix}-${nextIndex}`;
+
+  while (seen.has(nextId)) {
+    nextIndex += 1;
+    nextId = `${prefix}-${nextIndex}`;
+  }
+
+  return nextId;
 }
 
 function toShellPolicyEditorItem(
@@ -2083,11 +2087,15 @@ export default function RemoteInvokeTab() {
               <Button
                 icon={<PlusOutlined />}
                 onClick={() => {
+                  const nextId = nextShellItemId(
+                    "profile",
+                    shellEditorProfiles.map((profile) => profile.id),
+                  );
                   const nextIndex = shellEditorProfiles.length + 1;
                   setShellEditorProfiles((prev) => [
                     ...prev,
                     {
-                      id: `profile-${nextIndex}`,
+                      id: nextId,
                       name: `Profile ${nextIndex}`,
                       description: "",
                       enabled: true,
@@ -2158,21 +2166,7 @@ export default function RemoteInvokeTab() {
                         <Text type="secondary">Profile ID</Text>
                         <Input
                           value={profile.id}
-                          onChange={(e) =>
-                            setShellEditorProfiles((prev) =>
-                              prev.map((item, current) =>
-                                current === index
-                                  ? {
-                                      ...item,
-                                      id: slugifyShellId(
-                                        e.target.value,
-                                        item.id,
-                                      ),
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
+                          readOnly
                         />
                       </Col>
                       <Col xs={24} md={4}>
@@ -2335,11 +2329,15 @@ export default function RemoteInvokeTab() {
               <Button
                 icon={<PlusOutlined />}
                 onClick={() => {
+                  const nextId = nextShellItemId(
+                    "policy",
+                    shellEditorPolicies.map((policy) => policy.id),
+                  );
                   const nextIndex = shellEditorPolicies.length + 1;
                   setShellEditorPolicies((prev) => [
                     ...prev,
                     {
-                      id: `policy-${nextIndex}`,
+                      id: nextId,
                       name: `Policy ${nextIndex}`,
                       description: "",
                       enabled: true,
@@ -2413,21 +2411,7 @@ export default function RemoteInvokeTab() {
                         <Text type="secondary">Policy ID</Text>
                         <Input
                           value={policy.id}
-                          onChange={(e) =>
-                            setShellEditorPolicies((prev) =>
-                              prev.map((item, current) =>
-                                current === index
-                                  ? {
-                                      ...item,
-                                      id: slugifyShellId(
-                                        e.target.value,
-                                        item.id,
-                                      ),
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
+                          readOnly
                         />
                       </Col>
                       <Col xs={24} md={4}>
