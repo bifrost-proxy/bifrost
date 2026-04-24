@@ -1475,14 +1475,36 @@ pub struct ObjectRef {
 pub enum StreamFrame {
     Stdout {
         seq: u64,
+        /// PR#3b: absolute byte offset of the first byte in `data_b64` within
+        /// the total stdout stream. Enables receivers to detect gaps, dedup
+        /// on resume, and reassemble in order even across reconnects.
+        #[serde(default)]
+        offset: u64,
         data_b64: String,
     },
     Stderr {
         seq: u64,
+        #[serde(default)]
+        offset: u64,
         data_b64: String,
     },
     Heartbeat {
         ts: u64,
+        /// PR#3b: last stdout/stderr offsets the executor has emitted so a
+        /// disconnected receiver can tell whether it is behind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdout_offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stderr_offset: Option<u64>,
+    },
+    /// PR#3b: advisory signal from executor to receiver: "the current relay
+    /// connection is approaching its wall-clock limit; please reconnect soon
+    /// with Resume(call_id, from_offset)". Receivers that ignore this will
+    /// still get correct data, but may hit a hard relay-side disconnect.
+    Reconnect {
+        reason: String,
+        stdout_offset: u64,
+        stderr_offset: u64,
     },
     Ack {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1574,14 +1596,23 @@ mod pr1_large_output_protocol_tests {
         let frames = vec![
             StreamFrame::Stdout {
                 seq: 0,
+                offset: 0,
                 data_b64: "YQ==".into(),
             },
             StreamFrame::Stderr {
                 seq: 7,
+                offset: 0,
                 data_b64: "Yg==".into(),
             },
             StreamFrame::Heartbeat {
                 ts: 1_700_000_000_000,
+                stdout_offset: Some(65536),
+                stderr_offset: Some(0),
+            },
+            StreamFrame::Reconnect {
+                reason: "relay-wall-clock".into(),
+                stdout_offset: 65536,
+                stderr_offset: 0,
             },
             StreamFrame::Ack {
                 stdout_seq: Some(5),
