@@ -3,6 +3,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::commands::caller_stream_frame::{
+    parse_stream_frame_from_sse_data, CallerStreamState, StreamDecision, StreamIngestError,
+};
 use base64::Engine;
 use bifrost_command::{
     CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope,
@@ -2862,6 +2865,32 @@ struct OpenCallResponse {
     relay_token: String,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum StreamingSubscriptionOutcome {
+    /// The call finished with a terminal Done frame.
+    Completed {
+        exit_code: i32,
+        duration_ms: Option<u64>,
+        digest_ok: bool,
+    },
+    /// The executor emitted a Reconnect advisory or we observed a mid-stream
+    /// disconnect that can be resumed; caller should reopen a new SSE
+    /// subscription with these offsets.
+    ReconnectNeeded {
+        stdout_offset: u64,
+        stderr_offset: u64,
+        reason: String,
+    },
+    /// The SSE stream closed or errored without a terminal frame; caller
+    /// should decide whether to resume or surface as a hard failure.
+    Disconnected { reason: String },
+    /// The executor emitted an Error frame; treat as a non-resumable failure.
+    ErrorFrame { code: String, message: String },
+    /// The status channel reported the call was cancelled.
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CallResult {
     exit_code: i32,
@@ -3458,6 +3487,145 @@ impl CallerRelayClient {
                                 result.stdout = Some(stdout_parts.join(""));
                             }
                             return Ok(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// PR #5d-2: streaming variant of subscribe_call_events that routes
+    /// recognised StreamFrame-shaped payloads through CallerStreamState
+    /// and surfaces a structured outcome so the dispatcher can implement an
+    /// outer reconnect-with-offset loop.
+    ///
+    /// Legacy envelope payloads (envelope_json / ciphertext) are NOT handled
+    /// here; callers should fall back to `subscribe_call_events` when the
+    /// remote does not yet emit StreamFrames. Detection is strict via
+    /// `parse_stream_frame_from_sse_data`.
+    ///
+    /// The `resume_from` parameter, when Some, pre-positions the state
+    /// machine heads so duplicate bytes across a reconnect are deduped.
+    #[allow(dead_code)]
+    async fn subscribe_call_events_streaming<W: std::io::Write, E: std::io::Write>(
+        &self,
+        call_id: &str,
+        relay_token: &str,
+        state: &mut CallerStreamState<W, E>,
+        resume_from: Option<(u64, u64)>,
+        timeout_secs: u64,
+    ) -> bifrost_core::Result<StreamingSubscriptionOutcome> {
+        if let Some((so, se)) = resume_from {
+            state.set_heads(so, se);
+        }
+
+        let url = format!(
+            "{}/v4/remote-invoke/calls/{}/events",
+            self.base_url, call_id
+        );
+        let sse_http = direct_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
+        let response = sse_http
+            .get(&url)
+            .header("Authorization", format!("Bearer {relay_token}"))
+            .send()
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!("subscribe streaming events failed: {e}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "streaming events returned {status}: {body}"
+            )));
+        }
+
+        let mut stream = response.bytes_stream();
+        let idle = Duration::from_secs(timeout_secs);
+        let mut timeout = Box::pin(tokio::time::sleep(idle));
+
+        let mut event_name = String::new();
+        let mut data_buf = String::new();
+        let mut partial_line = String::new();
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    warn!("streaming events idle timeout");
+                    return Ok(StreamingSubscriptionOutcome::Disconnected {
+                        reason: "idle_timeout".to_string(),
+                    });
+                }
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            partial_line.push_str(&text);
+                            timeout.as_mut().reset(tokio::time::Instant::now() + idle);
+
+                            while let Some(pos) = partial_line.find('\n') {
+                                let line = partial_line[..pos].trim_end_matches('\r').to_string();
+                                partial_line = partial_line[pos + 1..].to_string();
+
+                                if line.is_empty() {
+                                    if !event_name.is_empty() && !data_buf.is_empty() {
+                                        if event_name == "frame" {
+                                            if let Some(frame) = parse_stream_frame_from_sse_data(&data_buf) {
+                                                match state.feed(&frame).map_err(|e| BifrostError::Config(format!("stream ingest error: {e:?}")))? {
+                                                    StreamDecision::Continue => {}
+                                                    StreamDecision::ReconnectAt { stdout_offset, stderr_offset, reason } => {
+                                                        return Ok(StreamingSubscriptionOutcome::ReconnectNeeded {
+                                                            stdout_offset,
+                                                            stderr_offset,
+                                                            reason,
+                                                        });
+                                                    }
+                                                    StreamDecision::Done { exit_code, duration_ms, digest_ok, .. } => {
+                                                        return Ok(StreamingSubscriptionOutcome::Completed {
+                                                            exit_code,
+                                                            duration_ms: Some(duration_ms),
+                                                            digest_ok,
+                                                        });
+                                                    }
+                                                    StreamDecision::Error { code, message } => {
+                                                        return Ok(StreamingSubscriptionOutcome::ErrorFrame { code, message });
+                                                    }
+                                                }
+                                            } else {
+                                                debug!("streaming path saw non-StreamFrame frame payload; ignoring");
+                                            }
+                                        } else if event_name == "status" {
+                                            if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                if let Some(status) = parse_call_terminal_status(&v) {
+                                                    if status == "cancelled" {
+                                                        return Ok(StreamingSubscriptionOutcome::Cancelled);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    event_name.clear();
+                                    data_buf.clear();
+                                } else if let Some(ev) = line.strip_prefix("event:") {
+                                    event_name = ev.trim().to_string();
+                                } else if let Some(d) = line.strip_prefix("data:") {
+                                    if !data_buf.is_empty() { data_buf.push('\n'); }
+                                    data_buf.push_str(d.trim());
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            return Ok(StreamingSubscriptionOutcome::Disconnected {
+                                reason: format!("sse error: {e}"),
+                            });
+                        }
+                        None => {
+                            return Ok(StreamingSubscriptionOutcome::Disconnected {
+                                reason: "sse stream closed".to_string(),
+                            });
                         }
                     }
                 }

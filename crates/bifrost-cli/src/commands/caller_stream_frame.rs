@@ -153,6 +153,18 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
         s
     }
 
+    /// PR #5d-2: reposition stdout/stderr heads on an existing state so the
+    /// same instance can be reused across a reconnect with resume offsets.
+    /// Note: this does NOT reset the streaming SHA-256 digests, because
+    /// a correct resume should replay bytes from the last committed offset
+    /// and the digests must continue accumulating in order. Callers that
+    /// want a fresh digest should construct a new instance instead.
+    #[allow(dead_code)]
+    pub fn set_heads(&mut self, stdout_from: u64, stderr_from: u64) {
+        self.stdout_head = stdout_from;
+        self.stderr_head = stderr_from;
+    }
+
     /// Current stdout write head (total bytes accepted so far).
     pub fn stdout_head(&self) -> u64 {
         self.stdout_head
