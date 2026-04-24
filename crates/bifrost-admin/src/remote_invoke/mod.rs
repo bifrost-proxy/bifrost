@@ -6,6 +6,7 @@ pub mod grant_info_store;
 pub mod grant_policy_store;
 pub mod identity;
 pub mod relay_client;
+pub mod session_ring;
 pub mod ssh_keys;
 pub mod types;
 pub mod worker;
