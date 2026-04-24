@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use bifrost_command::CanonicalQueryCommand;
 use bifrost_core::{BifrostError, Result};
 use bifrost_storage::RemoteShellStore;
 use bifrost_sync::SyncManagerHandle;
@@ -1146,11 +1145,21 @@ impl RemoteInvokeWorker {
 
     async fn send_heartbeat(&self, stream_id: &str) -> Result<()> {
         let active_ids = self.active_call_ids();
+        // Only include ssh_device_route when we can successfully read the active key.
+        // On error (e.g. DB lock contention), omit the field entirely to avoid
+        // sending null which would cause the relay to delete the route and revoke grants.
+        let ssh_device_route = match self.ssh_key_store.active_route() {
+            Ok(route) => route,
+            Err(e) => {
+                warn!(error = %e, "failed to read ssh active_route for heartbeat, omitting field");
+                None
+            }
+        };
         let req = ClientHeartbeatRequest {
             client_instance_id: self.identity.instance_id.clone(),
             stream_id: stream_id.to_string(),
             active_call_ids: active_ids,
-            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
+            ssh_device_route,
         };
         self.relay_client.heartbeat(&req).await?;
         debug!("heartbeat sent");

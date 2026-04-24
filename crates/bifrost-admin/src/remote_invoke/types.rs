@@ -923,6 +923,7 @@ pub struct ClientRegistrationRequest {
     pub bifrost_version: String,
     pub signature: String,
     pub timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_device_route: Option<SshDeviceRoute>,
 }
 
@@ -985,6 +986,7 @@ pub struct ClientHeartbeatRequest {
     pub stream_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_call_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_device_route: Option<SshDeviceRoute>,
 }
 
