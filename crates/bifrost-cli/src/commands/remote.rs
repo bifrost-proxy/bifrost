@@ -106,8 +106,8 @@ struct ShellExecPayload {
 struct StreamingPrefs {
     pub stream: bool,
     pub output_file: Option<std::path::PathBuf>,
-    #[allow(dead_code)]
     pub resume_call_id: Option<String>,
+    pub resume_relay_token: Option<String>,
     pub no_verify_digest: bool,
 }
 
@@ -116,6 +116,24 @@ impl StreamingPrefs {
     /// or --resume-call-id.
     pub fn is_streaming(&self) -> bool {
         self.stream || self.output_file.is_some() || self.resume_call_id.is_some()
+    }
+}
+
+/// PR #5e-3: cross-field validation for resume flags.
+/// `--resume-call-id` and `--resume-relay-token` must be provided together; if
+/// either appears without the other, return a helpful error string.
+fn validate_streaming_prefs(prefs: &StreamingPrefs) -> Result<(), String> {
+    match (
+        prefs.resume_call_id.as_ref(),
+        prefs.resume_relay_token.as_ref(),
+    ) {
+        (Some(_), None) => Err(
+            "--resume-call-id requires --resume-relay-token to rejoin an existing call".to_string(),
+        ),
+        (None, Some(_)) => Err(
+            "--resume-relay-token requires --resume-call-id to rejoin an existing call".to_string(),
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -1180,6 +1198,51 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         );
     }
 
+    // PR #5e-3: if the caller passed `--resume-call-id` together with
+    // `--resume-relay-token`, skip open_call entirely and dive straight into
+    // the streaming subscriber, seeded with offsets (0, 0). Validation of the
+    // pair is performed via `validate_streaming_prefs`.
+    if let Some(prefs) = command.streaming_prefs.as_ref() {
+        if let Err(msg) = validate_streaming_prefs(prefs) {
+            return Err(BifrostError::Config(msg));
+        }
+        if let (Some(resume_id), Some(resume_token)) = (
+            prefs.resume_call_id.as_ref(),
+            prefs.resume_relay_token.as_ref(),
+        ) {
+            debug!(call_id = %resume_id, "resume-call-id bypass: skipping open_call and rejoining existing call");
+            if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
+                println!(
+                    "{}",
+                    format!(
+                        "→ Rejoining existing remote call (call_id: {})...",
+                        &resume_id[..resume_id.len().min(8)]
+                    )
+                    .dimmed()
+                );
+            }
+            let stream_result = tokio::select! {
+                result = run_streaming_dispatch(
+                    &caller,
+                    resume_id,
+                    resume_token,
+                    prefs,
+                ) => result?,
+                _ = wait_for_remote_call_cancel_signal() => {
+                    eprintln!("{}", "→ Cancellation requested, notifying remote device...".bright_yellow());
+                    let _ = caller
+                        .cancel_call(resume_id, resume_token)
+                        .await;
+                    synthesized_cancelled_result()
+                }
+            };
+            if stream_result.exit_code != 0 {
+                std::process::exit(stream_result.exit_code);
+            }
+            return Ok(());
+        }
+    }
+
     let mut transport = merge_transport_context(&conn, &grant)?;
     let mut active_grant_id = grant.grant_id.clone();
     let command_summary = build_open_call_command_summary(&command);
@@ -2063,6 +2126,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         stream: exec_args.stream,
         output_file: exec_args.output_file.as_ref().map(std::path::PathBuf::from),
         resume_call_id: exec_args.resume_call_id.clone(),
+        resume_relay_token: exec_args.resume_relay_token.clone(),
         no_verify_digest: exec_args.no_verify_digest,
     };
 
@@ -4598,6 +4662,7 @@ mod tests {
                 stream: false,
                 output_file: None,
                 resume_call_id: None,
+                resume_relay_token: None,
                 no_verify_digest: false,
             })),
         });
@@ -4634,6 +4699,7 @@ mod tests {
                 stream: false,
                 output_file: None,
                 resume_call_id: None,
+                resume_relay_token: None,
                 no_verify_digest: false,
             })),
         });
@@ -4665,6 +4731,7 @@ mod tests {
                 stream: true,
                 output_file: Some("/tmp/out.bin".to_string()),
                 resume_call_id: Some("ab12cd34".to_string()),
+                resume_relay_token: Some("tok-xyz".to_string()),
                 no_verify_digest: true,
             })),
         });
@@ -4678,6 +4745,7 @@ mod tests {
             Some(std::path::PathBuf::from("/tmp/out.bin"))
         );
         assert_eq!(prefs.resume_call_id.as_deref(), Some("ab12cd34"));
+        assert_eq!(prefs.resume_relay_token.as_deref(), Some("tok-xyz"));
         assert!(prefs.no_verify_digest);
         assert!(prefs.is_streaming());
     }
@@ -4694,6 +4762,77 @@ mod tests {
         let mut p3 = StreamingPrefs::default();
         p3.stream = true;
         assert!(p3.is_streaming());
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_requires_token() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: None,
+            no_verify_digest: false,
+        };
+        let err = validate_streaming_prefs(&prefs).expect_err("should reject missing token");
+        assert!(err.contains("--resume-call-id"), "got: {err}");
+        assert!(err.contains("--resume-relay-token"), "got: {err}");
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_token_without_call_id_rejected() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_streaming_prefs(&prefs).expect_err("should reject lone token");
+        assert!(err.contains("--resume-relay-token"), "got: {err}");
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_with_token_ok() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_both_none_ok() {
+        let prefs = StreamingPrefs::default();
+        assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_build_remote_command_populates_resume_fields() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: None,
+                env: vec![],
+                timeout_ms: None,
+                shell_text: Some("tail -f /var/log/x".to_string()),
+                argv: Vec::new(),
+                stream: false,
+                output_file: None,
+                resume_call_id: Some("resume-xyz".to_string()),
+                resume_relay_token: Some("relay-tok-42".to_string()),
+                no_verify_digest: false,
+            })),
+        });
+
+        let prefs = built
+            .streaming_prefs
+            .expect("streaming_prefs should be populated");
+        assert_eq!(prefs.resume_call_id.as_deref(), Some("resume-xyz"));
+        assert_eq!(prefs.resume_relay_token.as_deref(), Some("relay-tok-42"));
+        assert!(prefs.is_streaming());
+        assert!(validate_streaming_prefs(&prefs).is_ok());
     }
 
     #[test]

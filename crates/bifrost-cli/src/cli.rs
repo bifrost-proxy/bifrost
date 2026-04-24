@@ -1664,6 +1664,13 @@ pub struct RemoteCommandExecArgs {
     )]
     pub resume_call_id: Option<String>,
     #[arg(
+        long = "resume-relay-token",
+        value_name = "TOKEN",
+        requires = "resume_call_id",
+        help = "Relay token for the existing call (required with --resume-call-id)"
+    )]
+    pub resume_relay_token: Option<String>,
+    #[arg(
         long = "no-verify-digest",
         help = "Skip the client-side streaming SHA-256 verification against the Done frame digest"
     )]
