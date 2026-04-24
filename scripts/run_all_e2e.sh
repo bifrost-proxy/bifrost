@@ -12,6 +12,7 @@ RUN_SHELL=1
 RUN_RUNNER=1
 RUN_UI=1
 SKIP_RELEASE_BUILD=0
+LIST_SHELL_TESTS=0
 PLATFORM="$(uname -s)"
 REPORT_DIR=""
 SHARD_INDEX="${BIFROST_E2E_SHARD_INDEX:-0}"
@@ -96,6 +97,7 @@ Options:
   --skip-ui           Skip Playwright UI E2E
   --skip-build        Skip release binary compilation (use pre-built binary)
   --shard N/M         Run only shard N of M (1-indexed). E.g. --shard 1/3
+  --list-shell-tests  Print the shell tests selected by the current mode/shard and exit
   -h, --help          Show this help
 
 Environment variables:
@@ -133,6 +135,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-build)
       SKIP_RELEASE_BUILD=1
+      shift
+      ;;
+    --list-shell-tests)
+      LIST_SHELL_TESTS=1
       shift
       ;;
     --shard)
@@ -477,6 +483,9 @@ run_and_capture() {
 
 SKIP_IN_CI_TESTS=(
   "test_memory_pressure_e2e.sh"
+  # System proxy tests mutate host network settings and are too flaky in
+  # ephemeral CI runners. Keep them as local-only full-shell coverage.
+  "test_system_proxy_e2e.sh"
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"
@@ -518,6 +527,11 @@ collect_shell_tests() {
     printf '%s\n' "${all_tests[@]}"
   fi
 }
+
+if [[ "$LIST_SHELL_TESTS" -eq 1 ]]; then
+  collect_shell_tests
+  exit 0
+fi
 
 skip_suite() {
   local name="$1"

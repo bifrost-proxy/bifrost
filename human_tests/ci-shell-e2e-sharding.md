@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-对 CI 中 shell E2E 测试进行性能优化，通过测试分片（sharding）将 ~70 个测试分配到 3 个并行 CI runner 上执行，将总耗时从 ~30 分钟降至 ~3-5 分钟。
+对 CI 中 shell E2E 测试进行性能优化，通过测试分片（sharding）将 shell 测试分配到 3 个并行 CI runner 上执行，将总耗时从 ~30 分钟降至 ~3-5 分钟。CI 模式不执行会修改宿主系统代理设置的 `test_system_proxy_e2e.sh`，该用例仅在本地 full-shell 场景验证。
 
 ## 前置条件
 
@@ -18,7 +18,7 @@
 
 **预期结果**：
 - 输出包含 `Shard        : 1/3`
-- 测试数量约 23-24（总 70 的 1/3）
+- 测试数量约 22-23（取决于 CI skip 列表）
 
 ### TC-CS-02: 环境变量分片透传
 
@@ -35,7 +35,7 @@
 1. 分别运行 shard 1/3、2/3、3/3，统计各分片测试数量之和
 
 **预期结果**：
-- 三个分片测试数量之和等于总测试数（约 69-70，取决于 CI skip 列表）
+- 三个分片测试数量之和等于总测试数（约 68-69，取决于 CI skip 列表）
 - 每个测试只出现在一个分片中，无重复
 
 ### TC-CS-04: 无分片时行为不变
@@ -45,7 +45,7 @@
 
 **预期结果**：
 - 输出不包含 `Shard` 行
-- 测试数量为全量（约 69-70）
+- 测试数量为全量（约 68-69）
 
 ### TC-CS-05: local-ci.sh --shard 参数
 
@@ -82,6 +82,17 @@
 **预期结果**：
 - 输出错误信息包含 "Error: --shard requires N/M format"
 - 退出码非 0
+
+### TC-CS-09: CI 模式不收集系统代理用例，本地 full-shell 保留
+
+**操作步骤**：
+1. 运行 `bash scripts/run_all_e2e.sh --ci --full-shell --list-shell-tests --shard 3/3 | grep test_system_proxy_e2e.sh; test $? -eq 1`
+2. 运行 `bash scripts/run_all_e2e.sh --full-shell --list-shell-tests | grep -q '^test_system_proxy_e2e.sh$'`
+
+**预期结果**：
+- 第 1 步退出码为 0，表示 CI 模式 shard 3/3 未收集 `test_system_proxy_e2e.sh`
+- 第 2 步退出码为 0，表示系统代理用例仍可在本地 full-shell 全量场景收集
+- 两个命令只列出测试脚本，不启动 Bifrost 服务、不修改系统代理配置
 
 ## 清理步骤
 
