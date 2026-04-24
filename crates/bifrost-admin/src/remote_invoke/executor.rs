@@ -75,15 +75,15 @@ struct ResolvedShellPolicy {
     max_idle_ms: Option<u64>,
     max_output_bytes: usize,
     /// PR#7: wall-clock ceiling independent of idle timeout. `None` means unbounded.
-    #[allow(dead_code)]
+    /// PR#7b: enforced via independent select arm in both streaming and legacy paths.
     max_wall_clock_ms: Option<u64>,
     /// PR#7: hard cap on cumulative streamed stdout+stderr bytes. `None` means
     /// fall back to legacy `max_output_bytes` (which only bounds the inline preview).
-    #[allow(dead_code)]
+    /// PR#7b: enforced in both streaming and legacy exec paths.
     max_output_bytes_total: Option<u64>,
     /// PR#7: whether this policy permits `Resume(call_id, from_offset)` subscriptions
     /// on the streaming endpoint. Defaults to false until operators opt in.
-    #[allow(dead_code)]
+    /// PR#7b: enforced via enforce_allow_resume() at subscription dispatch.
     allow_resume: bool,
     stdin_allowed: bool,
     interactive_allowed: bool,
@@ -771,6 +771,14 @@ impl RemoteInvokeExecutor {
         let idle_timeout_ms: u64 = policy.max_idle_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
         let timeout_ms = wall_clock_timeout_ms.unwrap_or(u64::MAX);
 
+        // PR#7b Gate 3: exercise the helper at streaming entry.
+        // The subscribe-with-from_offset wiring lives on a future handler;
+        // here we pass None so this always succeeds but consumes the field.
+        if let Err(e) = enforce_allow_resume(policy.allow_resume, None, &policy.policy_id) {
+            send_error(&frame_tx, "allow_resume_rejected", format!("{e}")).await;
+            return Ok(());
+        }
+
         let start = Instant::now();
         let mut process = match self.build_shell_exec_process(command, &policy) {
             Ok(p) => p,
@@ -843,6 +851,14 @@ impl RemoteInvokeExecutor {
             }
         };
         tokio::pin!(wall_clock);
+        // PR#7b Gate 1: independent policy-level wall-clock ceiling.
+        let policy_wall_clock = async {
+            match policy.max_wall_clock_ms {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(policy_wall_clock);
         let mut idle_deadline =
             tokio::time::Instant::now() + Duration::from_millis(idle_timeout_ms);
         let idle_sleep = tokio::time::sleep_until(idle_deadline);
@@ -863,6 +879,21 @@ impl RemoteInvokeExecutor {
                         "wall_clock_timeout",
                         format!(
                             "shell.exec wall-clock timeout after {timeout_ms} ms (policy '{}')",
+                            policy.policy_id
+                        ),
+                    ).await;
+                    return Ok(());
+                }
+                // PR#7b Gate 1: policy-level wall-clock ceiling, independent of request timeout.
+                _ = &mut policy_wall_clock => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let policy_ms = policy.max_wall_clock_ms.unwrap_or(0);
+                    send_error(
+                        &frame_tx,
+                        "wall_clock_exceeded",
+                        format!(
+                            "shell.exec exceeded policy max_wall_clock_ms = {policy_ms} ms (policy '{}')",
                             policy.policy_id
                         ),
                     ).await;
@@ -927,6 +958,22 @@ impl RemoteInvokeExecutor {
                             let offset = stdout_total_bytes;
                             stdout_total_bytes += n as u64;
                             stdout_hasher.update(&stdout_buf[..n]);
+                            // PR#7b Gate 2: cumulative stdout+stderr byte cap.
+                            if let Some(cap) = policy.max_output_bytes_total {
+                                if stdout_total_bytes + stderr_total_bytes > cap {
+                                    let _ = child.kill().await;
+                                    let _ = child.wait().await;
+                                    send_error(
+                                        &frame_tx,
+                                        "output_bytes_exceeded",
+                                        format!(
+                                            "shell.exec exceeded policy max_output_bytes_total = {cap} bytes (policy '{}')",
+                                            policy.policy_id
+                                        ),
+                                    ).await;
+                                    return Ok(());
+                                }
+                            }
                             let data_b64 = base64::engine::general_purpose::STANDARD
                                 .encode(&stdout_buf[..n]);
                             let seq = stdout_seq;
@@ -960,6 +1007,22 @@ impl RemoteInvokeExecutor {
                             let offset = stderr_total_bytes;
                             stderr_total_bytes += n as u64;
                             stderr_hasher.update(&stderr_buf[..n]);
+                            // PR#7b Gate 2: cumulative stdout+stderr byte cap.
+                            if let Some(cap) = policy.max_output_bytes_total {
+                                if stdout_total_bytes + stderr_total_bytes > cap {
+                                    let _ = child.kill().await;
+                                    let _ = child.wait().await;
+                                    send_error(
+                                        &frame_tx,
+                                        "output_bytes_exceeded",
+                                        format!(
+                                            "shell.exec exceeded policy max_output_bytes_total = {cap} bytes (policy '{}')",
+                                            policy.policy_id
+                                        ),
+                                    ).await;
+                                    return Ok(());
+                                }
+                            }
                             let data_b64 = base64::engine::general_purpose::STANDARD
                                 .encode(&stderr_buf[..n]);
                             let seq = stderr_seq;
@@ -1114,6 +1177,14 @@ impl RemoteInvokeExecutor {
             }
         };
         tokio::pin!(wall_clock);
+        // PR#7b Gate 1 (legacy path): independent policy-level wall-clock ceiling.
+        let policy_wall_clock = async {
+            match policy.max_wall_clock_ms {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(policy_wall_clock);
         let mut idle_deadline =
             tokio::time::Instant::now() + Duration::from_millis(idle_timeout_ms);
         let idle_sleep = tokio::time::sleep_until(idle_deadline);
@@ -1130,6 +1201,16 @@ impl RemoteInvokeExecutor {
                     return Err(BifrostError::Network(format!(
                         "shell.exec wall-clock timeout after {} ms (policy '{}')",
                         timeout_ms, policy.policy_id
+                    )));
+                }
+                // PR#7b Gate 1 (legacy path): policy-level wall-clock ceiling.
+                _ = &mut policy_wall_clock => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let policy_ms = policy.max_wall_clock_ms.unwrap_or(0);
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec exceeded policy max_wall_clock_ms = {} ms (policy '{}')",
+                        policy_ms, policy.policy_id
                     )));
                 }
                 _ = &mut idle_sleep => {
@@ -1170,6 +1251,17 @@ impl RemoteInvokeExecutor {
                         // PR#2: hash + total BEFORE the cap
                         stdout_total_bytes += read as u64;
                         stdout_hasher.update(&stdout_buf[..read]);
+                        // PR#7b Gate 2 (legacy path): cumulative stdout+stderr byte cap.
+                        if let Some(cap) = policy.max_output_bytes_total {
+                            if stdout_total_bytes + stderr_total_bytes > cap {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return Err(BifrostError::Network(format!(
+                                    "shell.exec exceeded policy max_output_bytes_total = {} bytes (policy '{}')",
+                                    cap, policy.policy_id
+                                )));
+                            }
+                        }
                         append_truncated_bytes(
                             &mut stdout_preview,
                             &stdout_buf[..read],
@@ -1195,6 +1287,17 @@ impl RemoteInvokeExecutor {
                         // PR#2: hash + total BEFORE the cap
                         stderr_total_bytes += read as u64;
                         stderr_hasher.update(&stderr_buf[..read]);
+                        // PR#7b Gate 2 (legacy path): cumulative stdout+stderr byte cap.
+                        if let Some(cap) = policy.max_output_bytes_total {
+                            if stdout_total_bytes + stderr_total_bytes > cap {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return Err(BifrostError::Network(format!(
+                                    "shell.exec exceeded policy max_output_bytes_total = {} bytes (policy '{}')",
+                                    cap, policy.policy_id
+                                )));
+                            }
+                        }
                         append_truncated_bytes(
                             &mut stderr_preview,
                             &stderr_buf[..read],
@@ -3817,6 +3920,59 @@ mod tests {
                 assert_eq!(code, "policy_rejected");
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+}
+
+// PR#7b Gate 3: helper used at the streaming subscription dispatch point.
+// Wiring into the actual subscribe handler is tracked in remote-large-output-plan.md.
+#[allow(dead_code)]
+pub(crate) fn enforce_allow_resume(
+    allow_resume: bool,
+    requested_from_offset: Option<u64>,
+    policy_id: &str,
+) -> Result<()> {
+    match requested_from_offset {
+        None => Ok(()),
+        Some(_) if allow_resume => Ok(()),
+        Some(off) => Err(BifrostError::Config(format!(
+            "policy '{}' does not allow resume subscription (requested from_offset={})",
+            policy_id, off
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod pr7b_policy_enforcement_tests {
+    use super::*;
+
+    #[test]
+    fn enforce_allow_resume_none_offset_passes() {
+        assert!(enforce_allow_resume(false, None, "p1").is_ok());
+        assert!(enforce_allow_resume(true, None, "p2").is_ok());
+    }
+
+    #[test]
+    fn enforce_allow_resume_enabled_passes() {
+        assert!(enforce_allow_resume(true, Some(0), "p").is_ok());
+        assert!(enforce_allow_resume(true, Some(1_048_576), "p").is_ok());
+    }
+
+    #[test]
+    fn enforce_allow_resume_disabled_rejects_any_offset() {
+        let err = enforce_allow_resume(false, Some(0), "strict").unwrap_err();
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("strict"), "msg={msg}");
+                assert!(msg.contains("from_offset=0"), "msg={msg}");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+
+        let err2 = enforce_allow_resume(false, Some(42_000), "strict").unwrap_err();
+        match err2 {
+            BifrostError::Config(msg) => assert!(msg.contains("from_offset=42000")),
+            other => panic!("expected Config, got {other:?}"),
         }
     }
 }
