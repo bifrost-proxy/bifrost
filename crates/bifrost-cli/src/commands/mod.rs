@@ -1,6 +1,7 @@
 mod admin;
 mod bifrost_file;
 mod ca;
+mod caller_stream_frame;
 mod completions;
 pub(crate) mod config;
 mod group;
