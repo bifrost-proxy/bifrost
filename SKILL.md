@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询，以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''远程执行命令''管理远程授权' 等。"
+description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询，以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash）。"
 ---
 
 # Bifrost
@@ -704,3 +704,17 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - 如果用户只想验证规则，不必启用 TLS 拦截
 - 当用户提供一个少于 6 位的纯数字（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作
 - 遇到不确定的参数或用法，**先执行** **`bifrost <command> -h`** **获取完整手册**，不要猜测
+
+
+## 9. 远程文件 API（Phase 1, 只读）
+
+受 FileAccessPolicy 约束的远程文件访问能力。默认策略 roots=[cwd]，denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]。
+
+bifrost remote file read   --path <path> [--max-bytes <N>] [--allow-binary]
+bifrost remote file list   --path <path> [--depth <N>]
+bifrost remote file stat   --path <path>
+bifrost remote file glob   --pattern '<glob>' [--max-matches <N>]
+bifrost remote file search --pattern '<regex>' --path <path>
+bifrost remote file hash   --path <path> --algo sha256
+
+所有子命令支持 `--output json` 做机器可读输出，错误码遵循 file.out_of_scope / file.permission_denied / file.binary_not_allowed 等契约。

@@ -410,3 +410,76 @@ bifrost remote file hash    <path> [--algo sha256]
 - GitHub Contents API — `If-Match-SHA` 乐观锁
 - Claude Code / Codex / Cursor 的 file_read / file_edit / grep / glob / apply_patch 工具
 - 现有 `crates/bifrost-admin/src/remote_invoke/` 的 executor/worker/types 分层
+
+---
+
+## 9. Phase 2 — 写入与原子编辑（≈ 2 周）
+
+Phase 2 将引入**写能力**，但遵循与 Phase 1 相同的铁律：任何写入都必须经 `FileAccessPolicy::check(op=Write)` 校验、经审计、并通过 sha 乐观锁防止覆盖他人改动。
+
+### 9.1 新增方法
+
+| 方法 | 说明 | 关键约束 |
+|------|------|----------|
+| `file.write` | 写/覆盖整个文件，可选创建父目录 | 必须携带 `base_sha256`（`new` 文件传空串）做乐观锁；超过 `max_write_bytes` 拒绝 |
+| `file.edit` | 结构化编辑：`[{ range: {start_line, end_line}, replacement }]`；一次 request 一个文件多段 edits | 客户端传 `base_sha256`；服务端校验冲突后原子写入；失败返回 `file.precondition_failed` |
+| `file.mkdir` | 创建目录（支持 `--parents`） | 命中 deny 或非 roots 均拒绝 |
+| `file.move` | 重命名/移动 | 源和目标都必须在 roots 内；跨 root 拒绝 |
+| `file.delete` | 删除文件或空目录（递归删除默认禁用） | `recursive=true` 时必须在 policy 中显式 `allow_recursive_delete=true` |
+
+### 9.2 Grant scope 与 policy
+
+- 新增 `GrantScope::RemoteFileWrite`（Phase 1 已预留枚举变体）。
+- `FileAccessPolicy` 扩展：
+  - `allow_write_roots: Vec<PathBuf>`（可以是 `roots` 子集，进一步收紧）
+  - `max_write_bytes: u64`
+  - `allow_overwrite: bool`（默认 true，只影响 `file.write`）
+  - `allow_recursive_delete: bool`（默认 false）
+  - `write_denies: Vec<String>`（与 read 的 `denies` 合并叠加）
+- `GrantScope::allows_command` 将所有 write 类 CommandKind 收敛到 `RemoteFileWrite`（shell scope 不再默认放行写）。
+
+### 9.3 协议要点
+
+- 所有写请求 body 中必须包含 `base_sha256`（空串表示 "文件不存在，期望创建"）。
+- 响应返回 `{ new_sha256, size, mtime_unix }`，便于调用端继续基于新状态做后续操作。
+- 错误码新增：`file.precondition_failed`、`file.exists`、`file.not_empty`、`file.write_quota_exceeded`。
+
+### 9.4 审计
+
+每次写操作写一条审计记录：`{ grant_id, op, path, base_sha, new_sha, bytes, result }`。失败也写（`result=rejected/failed`），并记录拒绝原因。
+
+### 9.5 human_tests 必须覆盖
+
+- **并发写**：两个 caller 基于同一 `base_sha` 同时写，后到者必须 `file.precondition_failed`。
+- **路径逃逸**：`../../etc/hosts` / 绝对路径 / 跨 root 全部拒绝；
+- **Symlink**：通过符号链接写入 roots 外目标，`file.symlink_escape`；
+- **大文件拒绝**：超过 `max_write_bytes` 必须拒绝，且不在磁盘留下临时残片（原子写：`tmpfile + rename`）；
+- **mkdir/rename/delete 的 deny 拦截**。
+
+---
+
+## 10. Phase 3 — Unified diff & 进阶能力
+
+### 10.1 `file.apply_patch`（多文件 diff）
+
+- 接收标准 unified diff（`git apply` 兼容格式），支持一次 patch 多文件。
+- 服务端流程：
+  1. 解析 diff，提取每个 hunk 的 `before_sha256`。
+  2. 对每个目标文件串行走 `FileAccessPolicy::check(op=Write)`。
+  3. 逐 hunk 比对 `before_sha256`；任一失败则整个 patch 回滚（要么全提交，要么全不提交）。
+  4. 通过后以 `write` 原子落盘，逐文件登记 audit。
+- 错误码：`patch.parse_failed`、`patch.hunk_conflict`、`patch.no_such_file`、`patch.partial_aborted`（部分成功即 abort 的强保护）。
+
+### 10.2 其余进阶能力
+
+| 能力 | 描述 |
+|------|------|
+| `file.watch` | 长连接订阅目录变更事件（FSEvents / inotify），Phase 3.1 |
+| `file.chmod` / `file.chown` | 权限/所有者管理，默认禁用，需显式 `allow_metadata_ops` |
+| `file.symlink` | 创建符号链接，默认禁用；启用后目标必须在 roots 内 |
+| CLI `bifrost remote file apply-patch <patch.diff>` | 一键投递 unified diff |
+
+### 10.3 与 Phase 2 的叠加约束
+
+- Phase 3 不引入新的 GrantScope；`file.apply_patch` 复用 `RemoteFileWrite`。
+- Phase 3 强制要求 Phase 2 的审计链已上线，任何 patch 失败都可以从 audit 单文件级别定位回滚点。

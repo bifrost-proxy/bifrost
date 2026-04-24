@@ -170,3 +170,15 @@ bifrost remote file read --help
 - [ ] 以上全部 TC 在 macOS + Linux 被控端至少各执行一轮并记录结果。
 - [ ] 每条失败 TC 单独开 issue；全部通过前不得合入 main。
 - [ ] 审计日志样本随 PR 附带（脱敏）。
+
+
+---
+
+## 自动化覆盖
+
+| 来源 | 覆盖点 |
+|------|--------|
+| `e2e-tests/tests/test_remote_file_api_e2e.sh` | CLI 子命令 help + 表面契约（或按脚本实际覆盖更新） |
+| `crates/bifrost-e2e/src/tests/remote_file_api.rs` | FileAccessPolicy / DenyMatcher / PolicyDecision 正负向 6 例 |
+
+以上自动化用例在 CI 必过，手动用例覆盖真机网络/双端/审计等自动化不便验证的场景。
