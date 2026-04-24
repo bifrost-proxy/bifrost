@@ -171,13 +171,55 @@
 
 **预期结果**：
 - 服务正常启动
-- 步骤 2 显示系统代理已启用，代理地址指向 `127.0.0.1:8800`
-- 步骤 3 macOS 网络设置中 Web 代理已启用，指向 `127.0.0.1:8800`
+- 步骤 2 在启动后的异步收敛窗口内显示系统代理已启用，代理地址指向 `127.0.0.1:8800`
+- 步骤 3 macOS 网络设置中 Web 代理在异步收敛窗口内启用，指向 `127.0.0.1:8800`
 - 停止服务后系统代理自动恢复原始状态
 
 **清理**：
 ```bash
 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
+```
+
+---
+
+### TC-CSA-06a：--system-proxy 启动后系统代理异步收敛轮询回归
+
+**操作步骤**：
+1. 执行以下命令启动服务（启用系统代理，使用非 9900 端口和临时数据目录）：
+   ```bash
+   export BIFROST_DATA_DIR="$(mktemp -d)"
+   cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --system-proxy > /tmp/bifrost-system-proxy.log 2>&1 &
+   PROXY_PID=$!
+   until curl -sS http://127.0.0.1:8800/_bifrost/api/system >/dev/null; do sleep 1; done
+   ```
+2. 服务 ready 后，在 45 秒内每秒检查一次系统代理状态：
+   ```bash
+   for i in $(seq 1 45); do
+     networksetup -getwebproxy Wi-Fi | grep -q "Enabled: Yes" \
+       && networksetup -getwebproxy Wi-Fi | grep -q "Server: 127.0.0.1" \
+       && networksetup -getwebproxy Wi-Fi | grep -q "Port: 8800" \
+       && break
+     sleep 1
+   done
+   ```
+3. 停止服务后继续轮询，确认系统代理恢复关闭：
+   ```bash
+   cargo run --bin bifrost -- stop || kill "$PROXY_PID"
+   for i in $(seq 1 45); do
+     networksetup -getwebproxy Wi-Fi | grep -q "Enabled: No" && break
+     sleep 1
+   done
+   ```
+
+**预期结果**：
+- 服务启动不等待系统代理同步设置完成，核心代理可先 ready
+- 45 秒内系统代理最终收敛到 `127.0.0.1:8800`
+- 停止服务后 45 秒内系统代理恢复关闭
+- 不应因为固定 2 秒检查窗口导致误报失败
+
+**清理**：
+```bash
+cargo run --bin bifrost -- stop || true
 ```
 
 ---

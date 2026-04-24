@@ -11,7 +11,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 25 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证，以及 status 活跃规则摘要 |
-| [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 32 | 顶层 help 的 start 参考区块同步、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
+| [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 的 start 参考区块同步、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 45 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器和 lineProps |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
 | [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 36 | traffic list/get/search/clear 命令，含多维度过滤器、搜索范围控制、交互式搜索 |
