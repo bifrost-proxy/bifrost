@@ -74,6 +74,17 @@ struct ResolvedShellPolicy {
     /// PR#3a: idle timeout (None => DEFAULT_IDLE_TIMEOUT_MS)
     max_idle_ms: Option<u64>,
     max_output_bytes: usize,
+    /// PR#7: wall-clock ceiling independent of idle timeout. `None` means unbounded.
+    #[allow(dead_code)]
+    max_wall_clock_ms: Option<u64>,
+    /// PR#7: hard cap on cumulative streamed stdout+stderr bytes. `None` means
+    /// fall back to legacy `max_output_bytes` (which only bounds the inline preview).
+    #[allow(dead_code)]
+    max_output_bytes_total: Option<u64>,
+    /// PR#7: whether this policy permits `Resume(call_id, from_offset)` subscriptions
+    /// on the streaming endpoint. Defaults to false until operators opt in.
+    #[allow(dead_code)]
+    allow_resume: bool,
     stdin_allowed: bool,
     interactive_allowed: bool,
     inherit_env: bool,
@@ -96,6 +107,9 @@ struct ShellPolicyMetadata {
     max_timeout_ms: Option<u64>,
     max_idle_ms: Option<u64>,
     max_output_bytes: Option<usize>,
+    max_wall_clock_ms: Option<u64>,
+    max_output_bytes_total: Option<u64>,
+    allow_resume: Option<bool>,
     stdin_allowed: Option<bool>,
     interactive_allowed: Option<bool>,
     inherit_env: Option<bool>,
@@ -1531,6 +1545,16 @@ impl RemoteInvokeExecutor {
                 .max_output_bytes
                 .or(profile_meta.max_output_bytes)
                 .unwrap_or(DEFAULT_SHELL_OUTPUT_MAX_BYTES),
+            max_wall_clock_ms: policy_meta
+                .max_wall_clock_ms
+                .or(profile_meta.max_wall_clock_ms),
+            max_output_bytes_total: policy_meta
+                .max_output_bytes_total
+                .or(profile_meta.max_output_bytes_total),
+            allow_resume: policy_meta
+                .allow_resume
+                .or(profile_meta.allow_resume)
+                .unwrap_or(false),
             stdin_allowed: policy_meta
                 .stdin_allowed
                 .unwrap_or(profile_meta.stdin_allowed.unwrap_or(false)),
@@ -2423,6 +2447,29 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn shell_policy_metadata_parses_pr7_fields() {
+        let json = serde_json::json!({
+            "max_wall_clock_ms": 7_200_000u64,
+            "max_output_bytes_total": 1_073_741_824u64,
+            "allow_resume": true
+        });
+        let meta: ShellPolicyMetadata =
+            serde_json::from_value(json).expect("parse PR#7 policy metadata");
+        assert_eq!(meta.max_wall_clock_ms, Some(7_200_000));
+        assert_eq!(meta.max_output_bytes_total, Some(1_073_741_824));
+        assert_eq!(meta.allow_resume, Some(true));
+    }
+
+    #[test]
+    fn shell_policy_metadata_defaults_pr7_fields_to_none() {
+        let json = serde_json::json!({});
+        let meta: ShellPolicyMetadata = serde_json::from_value(json).expect("parse empty metadata");
+        assert!(meta.max_wall_clock_ms.is_none());
+        assert!(meta.max_output_bytes_total.is_none());
+        assert!(meta.allow_resume.is_none());
+    }
 
     fn setup_remote_shell_store() -> (std::sync::MutexGuard<'static, ()>, TempDir) {
         let guard = crate::remote_invoke::remote_shell_test_guard();
