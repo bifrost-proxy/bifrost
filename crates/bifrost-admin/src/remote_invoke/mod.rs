@@ -1,3 +1,4 @@
+pub mod call_history_store;
 pub mod config;
 pub mod executor;
 pub mod grant_crypto_store;

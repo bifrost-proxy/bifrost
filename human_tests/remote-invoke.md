@@ -4315,6 +4315,95 @@ PY
 
 ---
 
+### TC-RI-回归-136：Recent Calls 在 Bifrost 重启后必须从本地落盘恢复
+
+**背景**：`Recent Calls` 之前只保存在目标客户端 `RemoteInvokeWorker.call_history` 内存队列中。Bifrost 进程重启后 worker 重新创建，Settings -> Remote Invoke 页面会显示 `No recent calls`，即使重启前刚刚执行过远程命令。
+
+**前置条件**：
+- 使用隔离的 target admin / caller / relay 数据目录
+- target admin 使用动态端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- target admin 的 `BIFROST_DATA_DIR` 在重启前后保持相同
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 脚本建立本地 relay、target admin、caller，并完成 pair-code 授权。
+3. 脚本执行 `bifrost remote status --relay-url <relay> --client-id <client-prefix>`。
+4. 脚本读取 `/_bifrost/api/remote-invoke/calls`，记录最新 `status` 调用的 `call_id`。
+5. 脚本检查 `<BIFROST_DATA_DIR>/admin/remote_invoke_call_history.json`。
+6. 脚本停止 target admin，但保留同一个 `BIFROST_DATA_DIR`，随后重新启动 target admin。
+7. 脚本再次读取 Recent Calls API，查找步骤 4 的同一个 `call_id`。
+8. 脚本调用 `DELETE /_bifrost/api/remote-invoke/calls`，再次读取 Recent Calls API。
+
+**预期结果**：
+- 重启前 Recent Calls API 包含本轮 `status` 调用
+- `remote_invoke_call_history.json` 存在且包含同一个 `call_id`
+- 重启后 Recent Calls API 仍包含同一个 `call_id`
+- 恢复后的 `command_summary.command_preview` 仍为 `search.stream`
+- 调用清理接口后 Recent Calls API 返回空列表
+- 全流程不使用正式 `9900` 端口，不修改系统代理
+
+### TC-RI-回归-136 执行结果（2026-04-24，Recent Calls 本地落盘恢复）
+
+**执行环境**：
+- Local relay：脚本自动启动 `packages/bifrost-sync-server`
+- Target admin：脚本自动启动隔离 `target/release/bifrost ... --no-system-proxy`
+- Caller CLI：脚本使用独立 `CALLER_DATA_DIR`
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-136 | ✅ PASS | 2026-04-24 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本使用随机 relay/admin 端口和隔离数据目录，生成 `search.stream` Recent Calls 后确认 `command_summary.masked_args_json` 含 `keyword/max_results/max_scan`；`<BIFROST_DATA_DIR>/admin/remote_invoke_call_history.json` 存在且包含同一个 `call_id`；随后脚本停止 target admin 但保留同一数据目录，再次启动后 Recent Calls API 仍返回同一个 `call_id`，`command_summary.command_preview=search.stream`；最后调用 `DELETE /_bifrost/api/remote-invoke/calls` 后 Recent Calls API 返回空列表，证明重启不丢失且支持清理全部记录。 |
+
+---
+
+### TC-RI-回归-137：Recent Calls 超长命令必须按 200 字符截断并可点击查看详情
+
+**背景**：Recent Calls 列表曾把超长 `shell.exec` 命令、caller、policy、exec mode 放在同一个横向容器中。超长命令会撑高列表行，并把右侧 caller / policy / exec mode 挤成竖排，导致页面布局错乱；如果完整超长命令继续写入本地历史文件，也会放大 `remote_invoke_call_history.json` 的存储风险。本次要求命令相关字段超过 200 字符时直接截断，只展示和落盘前 200 字符。
+
+**前置条件**：
+- 当前机器正式 Bifrost 可运行在 `9900`，但本用例验证服务必须使用隔离数据目录和非 `9900` 端口
+- 验证服务启动时必须携带 `--no-system-proxy`
+- 浏览器访问目标为隔离端口的 `/_bifrost/settings?tab=remote-invoke`
+- Recent Calls 中至少存在一条包含长 `shell.exec` 文本、长 caller display name、`policy_id`、`exec_mode` 的记录
+
+**操作步骤**：
+1. 启动隔离 Bifrost：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-ri-long-call-ui cargo run --bin bifrost -- start -H 127.0.0.1 -p <admin_port> --unsafe-ssl --no-system-proxy
+   ```
+2. 通过真实 Recent Calls API 或测试夹具生成一条超长 `shell.exec` 调用记录，命令内容长度不少于 300 字符，且包含 `policy_id=full-access`、`exec_mode=shell_text`。
+3. 在 Chrome 中打开：
+   ```text
+   http://127.0.0.1:<admin_port>/_bifrost/settings?tab=remote-invoke
+   ```
+4. 观察 `Recent Calls` 列表中该记录的首行布局。
+5. 点击该记录，或点击记录右侧详情按钮。
+6. 在弹出的详情窗口中检查命令、参数 JSON、调用 ID、状态、caller、policy、exec mode、耗时与流量信息。
+7. 读取 `/_bifrost/api/remote-invoke/calls` 与 `<BIFROST_DATA_DIR>/admin/remote_invoke_call_history.json`。
+8. 关闭详情窗口并刷新 Recent Calls。
+
+**预期结果**：
+- 超长命令和参数预览在列表中只占一行，超过可用宽度自动省略，不撑高行高
+- caller、policy、exec mode 标签仍保持横向显示，不被挤压成逐字竖排
+- 列表右侧存在可点击的详情操作
+- 点击记录或详情按钮后弹出 `Call Detail` 窗口
+- API 和详情窗口中的命令相关长文本最多 200 字符，直接保留前缀，不额外添加省略号
+- `masked_args_json` / `args_json` 仍保持合法 JSON，其中 JSON 字符串值最多 200 字符
+- `remote_invoke_call_history.json` 不包含完整 300+ 字符命令原文或完整超长参数
+- 刷新列表后布局仍保持稳定
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-137 执行结果（2026-04-24，Recent Calls 长内容截断与详情弹窗）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-137 | ✅ PASS | 2026-04-24 在当前 checkout 执行 `HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本使用随机 relay/admin/mock 端口，target admin 使用隔离数据目录和 `--no-system-proxy`；普通 `search.stream` 的 `masked_args_json` 仍是合法 JSON 并包含 `keyword/max_results/max_scan`；长 keyword 场景验证 `masked_args_json.keyword` 被截断到 200 字符以内且保留前缀；`remote_invoke_call_history.json` 不包含完整长参数；随后同一数据目录重启后 Recent Calls 仍恢复同一 `call_id`，最后 `DELETE /_bifrost/api/remote-invoke/calls` 后列表为空。同日补充执行真实浏览器布局验证：使用隔离数据目录 `/tmp/bifrost-ri-long-call-ui` 与非正式端口 `8813` 启动 `BIFROST_DATA_DIR=/tmp/bifrost-ri-long-call-ui cargo run --bin bifrost -- start -H 127.0.0.1 -p 8813 --unsafe-ssl --no-system-proxy`，通过真实 API 构造 `call-long-layout-actual-001` 后打开 `http://127.0.0.1:8813/_bifrost/settings?tab=remote-invoke`；Playwright 测得列表行高度约 `60.7px`，长命令与参数单行省略，caller/policy/exec mode 保持横向标签，policy 标签宽度限制为 `120px`；点击记录后弹出 `Call Detail`，详情中可见完整 `call_id`、状态、caller、policy、exec mode、命令与参数区，截图为 `/tmp/bifrost-recent-calls-row-real.png` 和 `/tmp/bifrost-recent-calls-detail-real.png`。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

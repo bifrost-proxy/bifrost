@@ -101,10 +101,28 @@ RELAY_LOG="$(mktemp)"
 RELAY_DATA_DIR="$(mktemp -d)"
 CALLER_CONNECT_LOG="$(mktemp)"
 SEARCH_LOG="$(mktemp)"
+LONG_SEARCH_LOG="$(mktemp)"
 MOCK_SERVER_LOG="$(mktemp)"
 RELAY_PID=""
 CALLER_CONNECT_PID=""
 MOCK_SERVER_PID=""
+
+stop_bifrost_preserve_data() {
+    if [[ -n "${ADMIN_CLIENT_BIFROST_PID:-}" ]] && kill -0 "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null; then
+        safe_cleanup_proxy "$ADMIN_CLIENT_BIFROST_PID"
+        wait "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        rm -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true
+    fi
+    ADMIN_CLIENT_BIFROST_PID=""
+    ADMIN_CLIENT_BIFROST_LOG_FILE=""
+    ADMIN_CLIENT_BIFROST_DATA_DIR=""
+    ADMIN_CLIENT_HOME_DIR=""
+    ADMIN_CLIENT_XDG_CONFIG_HOME=""
+    ADMIN_CLIENT_XDG_DATA_HOME=""
+    ADMIN_CLIENT_STARTED_BIFROST=0
+}
 
 cleanup() {
     if [[ -n "$CALLER_CONNECT_PID" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
@@ -121,7 +139,7 @@ cleanup() {
         wait "$RELAY_PID" 2>/dev/null || true
     fi
     rm -rf "$BIFROST_DATA_DIR" "$CALLER_DATA_DIR" "$RELAY_DATA_DIR"
-    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG" "$MOCK_SERVER_LOG"
+    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG" "$LONG_SEARCH_LOG" "$MOCK_SERVER_LOG"
 }
 trap cleanup EXIT
 
@@ -305,6 +323,20 @@ LATEST_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r --arg marker "$REMOT
 
 assert_not_empty "$LATEST_SEARCH_MASKED_ARGS_JSON" "search.stream 的 masked_args_json 不应为空"
 
+LATEST_SEARCH_CALL_ID="$(echo "$HTTP_BODY" | jq -r --arg marker "$REMOTE_MARKER" '
+    (.calls // [])
+    | map(select(
+        (.command_summary.command_preview // "") == "search.stream"
+        and (
+            (.command_summary.masked_args_json // "") | contains($marker)
+        )
+    ))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].call_id // ""
+')"
+assert_not_empty "$LATEST_SEARCH_CALL_ID" "search.stream 的 call_id 不应为空"
+
 if echo "$LATEST_SEARCH_MASKED_ARGS_JSON" | jq -e --arg marker "$REMOTE_MARKER" '
     .keyword == $marker
     and .max_results == 5
@@ -318,4 +350,91 @@ else
     exit 1
 fi
 
-log "Recent Calls args preview E2E passed"
+LONG_REMOTE_MARKER="recent-calls-long-$(python3 - <<'PY'
+print("x" * 240)
+PY
+)"
+LONG_REMOTE_MARKER_PREFIX="${LONG_REMOTE_MARKER:0:120}"
+LONG_TRAFFIC_URL="http://127.0.0.1:${MOCK_HTTP_PORT}/anything/${LONG_REMOTE_MARKER}"
+if ! curl -fsS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "$LONG_TRAFFIC_URL" >/dev/null 2>&1; then
+    _log_fail "通过本地 echo fixture 生成长参数 Recent Calls 流量失败" "$LONG_TRAFFIC_URL 返回 2xx" "$(cat "$MOCK_SERVER_LOG")"
+    exit 1
+fi
+
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$LONG_REMOTE_MARKER" \
+    --relay-url "$RELAY_URL" \
+    --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    --max-results 5 \
+    --max-scan 50 >"$LONG_SEARCH_LOG" 2>&1 || {
+    log "long remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "long search log: $(cat "$LONG_SEARCH_LOG")"
+}
+sleep 1
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "读取长参数 Recent Calls API 应返回 200"
+LATEST_LONG_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r '
+    (.calls // [])
+    | map(select((.command_summary.command_preview // "") == "search.stream"))
+    | sort_by(.started_at // 0)
+    | reverse
+    | .[0].command_summary.masked_args_json // ""
+')"
+assert_not_empty "$LATEST_LONG_SEARCH_MASKED_ARGS_JSON" "长参数 search.stream 的 masked_args_json 不应为空"
+LONG_MASKED_KEYWORD="$(echo "$LATEST_LONG_SEARCH_MASKED_ARGS_JSON" | jq -r '.keyword // ""')"
+if [[ "${#LONG_MASKED_KEYWORD}" -le 200 ]] \
+    && [[ "$LONG_MASKED_KEYWORD" == *"$LONG_REMOTE_MARKER_PREFIX"* ]]; then
+    _log_pass "TC-RI-ARGS-02: Recent Calls 命令参数超过 200 字符会直接截断"
+else
+    _log_fail "TC-RI-ARGS-02: Recent Calls 长命令参数未按 200 字符截断" \
+        "keyword length<=200 and contains prefix" \
+        "keyword_length=${#LONG_MASKED_KEYWORD}; value=$LATEST_LONG_SEARCH_MASKED_ARGS_JSON"
+    exit 1
+fi
+
+STORE_FILE="$BIFROST_DATA_DIR/admin/remote_invoke_call_history.json"
+if [[ ! -s "$STORE_FILE" ]]; then
+    _log_fail "Recent Calls 落盘文件不存在或为空" "$STORE_FILE exists" "missing"
+    exit 1
+fi
+if ! jq -e --arg call_id "$LATEST_SEARCH_CALL_ID" '.entries[] | select(.call_id == $call_id)' "$STORE_FILE" >/dev/null; then
+    _log_fail "Recent Calls 落盘文件缺少目标 call_id" "$LATEST_SEARCH_CALL_ID" "$(cat "$STORE_FILE")"
+    exit 1
+fi
+if grep -Fq "$LONG_REMOTE_MARKER" "$STORE_FILE"; then
+    _log_fail "Recent Calls 落盘文件不应保存超过 200 字符的完整参数" "full long marker absent" "$(cat "$STORE_FILE")"
+    exit 1
+fi
+_log_pass "TC-RI-ARGS-03: Recent Calls 已写入本地落盘文件且未保存完整长参数"
+
+log "Restarting bifrost admin with the same data dir"
+stop_bifrost_preserve_data
+admin_start_bifrost
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "重启后读取 Recent Calls API 应返回 200"
+RESTORED_PREVIEW="$(echo "$HTTP_BODY" | jq -r --arg call_id "$LATEST_SEARCH_CALL_ID" '
+    (.calls // [])
+    | map(select(.call_id == $call_id))
+    | .[0].command_summary.command_preview // ""
+')"
+if [[ "$RESTORED_PREVIEW" == "search.stream" ]]; then
+    _log_pass "TC-RI-ARGS-04: 重启 Bifrost 后 Recent Calls 仍保留 search.stream 调用"
+else
+    _log_fail "TC-RI-ARGS-04: 重启后 Recent Calls 丢失或摘要错误" "search.stream" "${RESTORED_PREVIEW:-<empty>}"
+    exit 1
+fi
+
+http_request "${CLIENT_ADMIN_URL}/api/remote-invoke/calls" "DELETE"
+assert_status "200" "$HTTP_STATUS" "清理 Recent Calls API 应返回 200"
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+assert_status "200" "$HTTP_STATUS" "清理后读取 Recent Calls API 应返回 200"
+REMAINING_CALLS="$(echo "$HTTP_BODY" | jq '.calls | length')"
+if [[ "$REMAINING_CALLS" -eq 0 ]]; then
+    _log_pass "TC-RI-ARGS-05: Recent Calls 支持清理全部记录"
+else
+    _log_fail "TC-RI-ARGS-05: 清理后仍存在 Recent Calls" "0" "$REMAINING_CALLS"
+    exit 1
+fi
+
+log "Recent Calls args preview and persistence E2E passed"
