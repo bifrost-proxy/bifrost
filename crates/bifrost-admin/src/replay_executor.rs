@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bifrost_core::{
-    parse_rules, Protocol, RequestContext, ResolvedRules, Rule, RulesResolver, ValueStore,
+    Protocol, RequestContext, ResolvedRules, Rule, RuleParser, RulesResolver, ValueStore,
 };
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -556,23 +556,30 @@ impl ReplayExecutor {
         url: &str,
         method: &str,
     ) -> (ResolvedRules, Vec<MatchedRule>) {
-        let rules = match parse_rules(custom_rules) {
-            Ok(r) => r
-                .into_iter()
-                .enumerate()
-                .map(|(i, r)| r.with_source("custom".to_string(), i + 1))
-                .collect::<Vec<_>>(),
+        let mut values = self.load_values();
+        let parser = RuleParser::with_values(values.clone());
+        let parsed_rules = match parser.parse_rules_with_inline_values(custom_rules) {
+            Ok((r, inline_values)) => {
+                for (key, value) in inline_values {
+                    values.entry(key).or_insert(value);
+                }
+                r
+            }
             Err(e) => {
                 warn!(error = %e, "[REPLAY] Failed to parse custom rules");
                 return (ResolvedRules::default(), vec![]);
             }
         };
+        let rules = parsed_rules
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| r.with_source("custom".to_string(), i + 1))
+            .collect::<Vec<_>>();
 
         if rules.is_empty() {
             return (ResolvedRules::default(), vec![]);
         }
 
-        let values = self.load_values();
         let resolver = RulesResolver::new(rules).with_values(values);
         let ctx = RequestContext::from_url(url).with_method(method);
         let resolved = resolver.resolve(&ctx);
@@ -601,6 +608,7 @@ impl ReplayExecutor {
         selected_rules: Option<&Vec<String>>,
     ) -> (ResolvedRules, Vec<MatchedRule>) {
         let mut all_rules: Vec<Rule> = vec![];
+        let mut values = self.load_values();
 
         let rule_files = match rules_storage.load_all() {
             Ok(files) => files,
@@ -634,8 +642,12 @@ impl ReplayExecutor {
                 }
             }
 
-            match parse_rules(&rule_file.content) {
-                Ok(parsed) => {
+            let parser = RuleParser::with_values(values.clone());
+            match parser.parse_rules_with_inline_values(&rule_file.content) {
+                Ok((parsed, inline_values)) => {
+                    for (key, value) in inline_values {
+                        values.entry(key).or_insert(value);
+                    }
                     info!(
                         rule_name = %rule_file.name,
                         parsed_count = parsed.len(),
@@ -664,7 +676,6 @@ impl ReplayExecutor {
             return (ResolvedRules::default(), vec![]);
         }
 
-        let values = self.load_values();
         let resolver = RulesResolver::new(all_rules.clone()).with_values(values);
 
         let ctx = RequestContext::from_url(url).with_method(method);

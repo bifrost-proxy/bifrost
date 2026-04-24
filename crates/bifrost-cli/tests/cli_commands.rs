@@ -1,3 +1,4 @@
+use std::fs;
 use std::process::Command;
 
 use bifrost_cli::cli::{Cli, Commands, RemoteCommandCommands, RemoteCommands};
@@ -1022,6 +1023,61 @@ fn install_skill_options_parse() {
     assert!(
         help.contains("universal"),
         "install-skill help should include universal target"
+    );
+}
+
+#[test]
+fn install_skill_installs_remote_skill_from_embedded_bundle() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let target_dir = temp.path().join("skills").join("bifrost");
+
+    let output = bifrost_cmd()
+        .env("BIFROST_INSTALL_SKILL_SOURCE", "embedded")
+        .arg("install-skill")
+        .arg("--tool")
+        .arg("codex")
+        .arg("--dir")
+        .arg(&target_dir)
+        .arg("-y")
+        .output()
+        .expect("failed to run install-skill");
+
+    assert!(
+        output.status.success(),
+        "install-skill should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let primary_skill = target_dir.join("SKILL.md");
+    let remote_skill = target_dir
+        .parent()
+        .expect("target dir parent")
+        .join("bifrost-remote")
+        .join("SKILL.md");
+
+    assert!(
+        primary_skill.exists(),
+        "main bifrost skill should be installed"
+    );
+    assert!(
+        remote_skill.exists(),
+        "bifrost-remote skill should be installed as sibling"
+    );
+
+    let remote_content = fs::read_to_string(remote_skill).expect("remote skill content");
+    assert!(remote_content.contains("name: \"bifrost-remote\""));
+    assert!(remote_content.contains("remote shell ..."));
+    assert!(remote_content.contains("不代表 Agent 不能操作目标设备"));
+    assert!(remote_content.contains("两类操作的前置准备工作"));
+    assert!(remote_content.contains("`query` 访问模式"));
+    assert!(remote_content.contains("bifrost remote shell profile add"));
+    assert!(remote_content.contains("bifrost remote shell policy add"));
+    assert!(remote_content.contains("selected"));
+    assert!(remote_content.contains("all"));
+    assert!(
+        !remote_content.contains("bifrost remote traffic clear"),
+        "remote skill should not provide executable traffic clear examples"
     );
 }
 

@@ -9,6 +9,8 @@ use url::Url;
 #[derive(Debug, Clone, Default)]
 pub struct AppliedRules {
     pub forward_url: Option<String>,
+    pub forward_source_path: Option<String>,
+    pub forwarding_passthrough: bool,
     pub host: Option<String>,
     pub method: Option<String>,
     pub ua: Option<String>,
@@ -39,7 +41,7 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
     for rule in &core_rules.rules {
         match rule.rule.protocol {
             Protocol::Http | Protocol::Https | Protocol::Ws | Protocol::Wss
-                if applied.forward_url.is_none() =>
+                if !applied.forwarding_passthrough && applied.forward_url.is_none() =>
             {
                 let scheme = match rule.rule.protocol {
                     Protocol::Http => "http",
@@ -54,10 +56,19 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 } else {
                     format!("{}://{}", scheme, value)
                 };
+                applied.forward_source_path = extract_path_from_pattern(&rule.rule.pattern);
                 applied.forward_url = Some(forward_url);
             }
-            Protocol::Host | Protocol::XHost if applied.host.is_none() => {
+            Protocol::Host | Protocol::XHost
+                if !applied.forwarding_passthrough && applied.host.is_none() =>
+            {
                 applied.host = Some(rule.resolved_value.clone());
+            }
+            Protocol::Passthrough => {
+                applied.forwarding_passthrough = true;
+                applied.forward_url = None;
+                applied.forward_source_path = None;
+                applied.host = None;
             }
             Protocol::Method if applied.method.is_none() => {
                 applied.method = Some(rule.resolved_value.clone());
@@ -72,9 +83,9 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 applied.auth = Some(rule.resolved_value.clone());
             }
             Protocol::ReqHeaders => {
-                if let Some((key, value)) = parse_header_value(&rule.resolved_value) {
-                    applied.req_headers.push((key, value));
-                }
+                applied
+                    .req_headers
+                    .extend(parse_header_values(&rule.resolved_value));
             }
             Protocol::ReqCookies => {
                 if let Some((key, value)) = parse_cookie_value(&rule.resolved_value) {
@@ -209,17 +220,25 @@ pub fn apply_all_request_rules(
             Url::parse(forward_url).map_err(|e| format!("Invalid forward URL: {}", e))?;
 
         let mut new_url = forward_parsed.clone();
-        let original_path = original_parsed.path();
-        let forward_path = forward_parsed.path().trim_end_matches('/');
-        let combined_path = if forward_path.is_empty() {
-            original_path.to_string()
-        } else if original_path == "/" {
-            forward_path.to_string()
+        let original_path = original_parsed.path().to_string()
+            + original_parsed
+                .query()
+                .map(|query| format!("?{}", query))
+                .unwrap_or_default()
+                .as_str();
+        if let Some(target_path) = extract_target_path_from_forward_url(forward_url) {
+            let rewritten_path = rewrite_path_with_prefix(
+                &original_path,
+                applied_rules.forward_source_path.as_deref(),
+                &target_path,
+            );
+            let (path, query) = split_path_and_query(&rewritten_path);
+            new_url.set_path(path);
+            new_url.set_query(query);
         } else {
-            format!("{}{}", forward_path, original_path)
-        };
-        new_url.set_path(&combined_path);
-        new_url.set_query(original_parsed.query());
+            new_url.set_path(original_parsed.path());
+            new_url.set_query(original_parsed.query());
+        }
 
         if verbose_logging {
             info!(
@@ -273,6 +292,71 @@ pub fn apply_all_request_rules(
         headers: final_headers,
         body: final_body,
     })
+}
+
+fn extract_path_from_pattern(pattern: &str) -> Option<String> {
+    let s = pattern
+        .strip_prefix("http://")
+        .or_else(|| pattern.strip_prefix("https://"))
+        .or_else(|| pattern.strip_prefix("ws://"))
+        .or_else(|| pattern.strip_prefix("wss://"))
+        .unwrap_or(pattern);
+
+    s.find('/')
+        .map(|pos| s[pos..].to_string())
+        .filter(|p| p != "/")
+}
+
+fn extract_target_path_from_forward_url(forward_url: &str) -> Option<String> {
+    Url::parse(forward_url)
+        .ok()
+        .map(|url| {
+            let mut path = url.path().to_string();
+            if let Some(query) = url.query() {
+                path.push('?');
+                path.push_str(query);
+            }
+            path
+        })
+        .filter(|path| path != "/")
+}
+
+fn split_path_and_query(path_and_query: &str) -> (&str, Option<&str>) {
+    match path_and_query.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path_and_query, None),
+    }
+}
+
+fn rewrite_path_with_prefix(
+    request_path: &str,
+    source_path: Option<&str>,
+    target_path: &str,
+) -> String {
+    if let Some(source) = source_path {
+        let source_trimmed = source.trim_end_matches('/');
+        if let Some(remaining) = request_path.strip_prefix(source_trimmed) {
+            let target = target_path.trim_end_matches('/');
+            if remaining.is_empty() {
+                format!("{}/", target)
+            } else if remaining.starts_with('/') || remaining.starts_with('?') {
+                format!("{}{}", target, remaining)
+            } else {
+                format!("{}/{}", target, remaining)
+            }
+        } else {
+            request_path.to_string()
+        }
+    } else {
+        let target = target_path.trim_end_matches('/');
+        if request_path == "/" {
+            format!("{}/", target)
+        } else if request_path.starts_with('/') {
+            format!("{}{}", target, request_path)
+        } else {
+            format!("{}/{}", target, request_path)
+        }
+    }
 }
 
 fn apply_header_rules(
@@ -455,6 +539,13 @@ fn apply_body_rules(
     }
 }
 
+fn parse_header_values(value: &str) -> Vec<(String, String)> {
+    value
+        .lines()
+        .filter_map(parse_header_value)
+        .collect::<Vec<_>>()
+}
+
 fn parse_header_value(value: &str) -> Option<(String, String)> {
     let trimmed = value.trim();
 
@@ -547,6 +638,7 @@ fn extract_inline_content(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bifrost_core::{parse_rules, RequestContext, RuleParser, RulesResolver};
 
     #[test]
     fn test_apply_host_rule_basic() {
@@ -593,6 +685,154 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_forward_rule_uses_suffix_after_matched_source_path() {
+        let rules = AppliedRules {
+            forward_url: Some("http://localhost:9000/labor_cost/static".to_string()),
+            forward_source_path: Some("/labor_cost/static/".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_all_request_rules(
+            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg",
+            "GET",
+            &[],
+            None,
+            &rules,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.url,
+            "http://localhost:9000/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg"
+        );
+    }
+
+    #[test]
+    fn test_apply_forward_rule_preserves_query_after_prefix_rewrite() {
+        let rules = AppliedRules {
+            forward_url: Some("http://localhost:9000/labor_cost/static".to_string()),
+            forward_source_path: Some("/labor_cost/static/".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_all_request_rules(
+            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/app.js?v=1",
+            "GET",
+            &[],
+            None,
+            &rules,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.url,
+            "http://localhost:9000/labor_cost/static/app.js?v=1"
+        );
+    }
+
+    #[test]
+    fn test_apply_forward_rule_without_target_path_preserves_original_path() {
+        let rules = AppliedRules {
+            forward_url: Some("http://127.0.0.1:13000".to_string()),
+            forward_source_path: None,
+            ..Default::default()
+        };
+
+        let result = apply_all_request_rules(
+            "http://fake-host.local/test-host",
+            "GET",
+            &[],
+            None,
+            &rules,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.url, "http://127.0.0.1:13000/test-host");
+    }
+
+    #[test]
+    fn test_apply_forward_rule_from_resolved_custom_rule_uses_source_path_suffix() {
+        let rules = parse_rules(
+            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:13000/labor_cost/static/",
+        )
+        .unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx = RequestContext::from_url(
+            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
+        )
+        .with_method("GET");
+        let resolved_rules = resolver.resolve(&ctx);
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        let result =
+            apply_all_request_rules(&ctx.url, "GET", &[], None, &applied_rules, false).unwrap();
+
+        assert_eq!(
+            result.url,
+            "http://127.0.0.1:13000/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1"
+        );
+    }
+
+    #[test]
+    fn test_passthrough_blocks_later_forward_rule_from_resolved_rules() {
+        let rules_text = r#"
+https://nextoncall-bd.byteintl.net/ reqHeaders://{ppe_i18n}
+```ppe_i18n
+x-tt-env: ppe_next_agent_new
+x-use-ppe: 1
+```
+
+https://bifrost.local/ reqHeaders://{ppe2}
+```ppe2
+x-tt-env: ppe_next_agent_new
+x-use-ppe: 1
+```
+https://bifrost.local/app/ passthrough://
+
+https://bifrost.local/api/v1 passthrough://
+https://bifrost.local/api/nextagent/ passthrough://
+bifrost.local http://localhost:5173/
+a.com status://200 resBody://{data}
+
+```data
+abc
+```
+
+b.com status://200 resBody://(value)
+"#;
+        let parser = RuleParser::default();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = RulesResolver::new(rules).with_values(values);
+        let ctx = RequestContext::from_url("https://bifrost.local/api/nextagent/v1/sessions")
+            .with_method("POST");
+        let resolved_rules = resolver.resolve(&ctx);
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        assert!(applied_rules.forwarding_passthrough);
+        assert_eq!(applied_rules.forward_url, None);
+        assert_eq!(applied_rules.host, None);
+        assert_eq!(
+            applied_rules.req_headers,
+            vec![
+                ("x-tt-env".to_string(), "ppe_next_agent_new".to_string()),
+                ("x-use-ppe".to_string(), "1".to_string())
+            ]
+        );
+
+        let result =
+            apply_all_request_rules(&ctx.url, "POST", &[], Some(b"{}"), &applied_rules, false)
+                .unwrap();
+
+        assert_eq!(
+            result.url,
+            "https://bifrost.local/api/nextagent/v1/sessions"
+        );
+    }
+
+    #[test]
     fn test_parse_header_value_colon() {
         let result = parse_header_value("Content-Type: application/json");
         assert_eq!(
@@ -605,6 +845,18 @@ mod tests {
     fn test_parse_header_value_equals() {
         let result = parse_header_value("X-Custom=value");
         assert_eq!(result, Some(("X-Custom".to_string(), "value".to_string())));
+    }
+
+    #[test]
+    fn test_parse_header_values_multiline() {
+        let result = parse_header_values("x-tt-env: ppe_next_agent_new\nx-use-ppe: 1");
+        assert_eq!(
+            result,
+            vec![
+                ("x-tt-env".to_string(), "ppe_next_agent_new".to_string()),
+                ("x-use-ppe".to_string(), "1".to_string())
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx' 等。"
+description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询，以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''远程执行命令''管理远程授权' 等。"
 ---
 
 # Bifrost
@@ -109,7 +109,7 @@ bifrost status --tui
 bifrost stop
 ```
 
-- **启动前必须先执行 `bifrost status` 检查**，如果已有服务在运行，直接复用，不要尝试启动新的
+- **启动前必须先执行** **`bifrost status`** **检查**，如果已有服务在运行，直接复用，不要尝试启动新的
 - 前台调试优先用普通 `start`
 - 需要后台运行时才用 `--daemon`
 - 若未指定端口，默认 `9900`
@@ -163,7 +163,7 @@ bifrost ca info
 bifrost ca export -o ./bifrost-ca.pem
 ```
 
-**⚠️ TLS 拦截默认关闭，不建议全局开启 `--intercept`。推荐使用域名/应用白名单按需解包：**
+**⚠️ TLS 拦截默认关闭，不建议全局开启** **`--intercept`。推荐使用域名/应用白名单按需解包：**
 
 ```bash
 # ✅ 推荐：仅对指定域名启用 TLS 解包（无需全局 --intercept）
@@ -236,7 +236,9 @@ bifrost group rule disable <group_id> <name>
 - `group list` 支持 `-k/--keyword` 模糊搜索、`-l/--limit` 限制最大结果数（默认 50）和 `-o/--offset` 分页偏移
 
 ### 6. 脚本管理
+
 > 支持 QuickJS 引擎执行 JS 脚本
+
 ```bash
 bifrost script list
 bifrost script list -t request             # 按类型过滤：request, response, decode
@@ -542,122 +544,28 @@ bifrost install-skill -t all -y                # 自动安装到所有支持的�
 
 ### 22. 远程调用 (Remote)
 
-通过云端 Relay 中转，远程查询目标 Bifrost 客户端实例的状态和流量信息。适用于目标 Bifrost 实例不在本机的场景。
+`bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户明确要连接另一台机器、使用 SSH key / pair code、远程查询流量或通过 `shell.exec` 操作目标设备时，应优先使用 `bifrost-remote` skill 中的完整流程。
 
-#### 前置条件
-
-- bifrost remote 依赖 Relay 中转服务，Bifrost 客户端需已连接到 Relay 并处于在线状态
-- 首次调用需走配对授权流程：
-  1. 目标 Bifrost 客户端在 WebUI Settings -> Remote Invoke 中开启"发现模式"
-  2. 获取 6 位一次性授权码
-  3. 调用方使用授权码完成配对
-  4. 目标客户端用户在 WebUI 中人工批准
-- 已授权的调用方可在授权有效期内直接复用，无需重新配对
-
-#### 命令
+本节只保留快速索引：
 
 ```bash
-bifrost remote connect <code>                  # 使用授权码建立配对
+bifrost remote connect --ssh-key <path>        # 使用导出的 SSH key 建立长期授权
+bifrost remote connect <code>                  # 使用一次性配对码建立授权
 bifrost remote status                          # 查看远端状态
-bifrost remote search <query>                  # 远程搜索流量（支持中文等 Unicode，禁止 ASCII 控制字符，最大 500 字符）
-bifrost remote traffic search <query>          # 等价于 bifrost remote search
+bifrost remote search <query>                  # 远程搜索流量
+bifrost remote traffic search <query>          # 远程搜索流量详情
 bifrost remote traffic list [OPTIONS]          # 远程流量列表
 bifrost remote traffic get <id> [OPTIONS]      # 远程获取流量详情
+bifrost remote command exec --shell-text "pwd" # 受 Shell Access policy 限制的 shell.exec
 ```
 
-`remote traffic list` 支持的过滤参数：
+边界说明：
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `--limit` | number | 每页记录数，默认 50，上限 100 |
-| `--cursor` | number | 分页游标 |
-| `--direction` | string | 翻页方向：backward/forward |
-| `--method` | string | HTTP 方法过滤 |
-| `--status` | number | 精确状态码 |
-| `--status-min` | number | 状态码下限 |
-| `--status-max` | number | 状态码上限 |
-| `--protocol` | string | 协议：http/https/ws/wss/h3 |
-| `--host` | string | 域名包含匹配 |
-| `--url` | string | URL 包含匹配 |
-| `--path` | string | 路径包含匹配 |
-| `--content-type` | string | Content-Type 过滤 |
-| `--client-ip` | string | 客户端 IP |
-| `--client-app` | string | 客户端应用 |
-| `--has-rule-hit` | bool | 是否命中规则 |
-| `--is-websocket` | bool | 仅 WebSocket |
-| `--is-sse` | bool | 仅 SSE |
-| `--is-tunnel` | bool | 仅隧道 |
-
-`remote traffic get` 参数：
-- `<id>`: 流量记录 ID 或 sequence 编号（纯数字）
-- `--request-body`: 包含请求体
-- `--response-body`: 包含响应体
-
-> 当用户提及一个少于 6 位的数字 ID 并希望远程查看详情时，直接执行 `bifrost remote traffic get <ID> --request-body --response-body`。
-
-#### 命令协议说明
-
-`bifrost remote` 采用"受控查询命令白名单"模型，不支持任意 shell 透传。
-
-支持的命令白名单：
-- `status` — 查询客户端运行状态
-- `search.get` / `traffic.search` — 关键词搜索流量
-- `traffic.list` — 分页查询流量列表
-- `traffic.get` — 获取单条流量详情
-
-不支持的操作（会返回 `unsupported_command` 错误）：
-- 任何配置修改操作、规则新增/编辑/删除
-- `traffic.clear`（写操作）
-- values/config/cert/系统代理管理
-- 任意文件访问或脚本执行
-
-#### 授权模式
-
-| 模式 | 说明 |
-|------|------|
-| 仅本次 | 单次调用后授权自动失效 |
-| 30 分钟 | 30 分钟内可复用 |
-| 1 小时 | 1 小时内可复用 |
-| 1 天 | 24 小时内可复用 |
-| 永久 | 永久有效，需要二次确认 |
-
-#### 安全说明
-
-- 所有命令内容通过端到端加密传输（X25519 + ChaCha20-Poly1305），Relay 无法查看明文
-- 每次调用使用独立的临时密钥对，调用结束后立即销毁
-- Relay 仅存储命令摘要和审计信息，不存储原始命令或结果明文
-- 授权绑定调用方设备指纹（`caller_fingerprint`），token 被窃取也无法冒充
-
-#### 远程调用常见工作流
-
-```bash
-# 首次授权或授权失效时，使用一次性授权码建立连接
-bifrost remote connect <code>
-
-# connect 成功后，不要再次使用同一个 code；优先检查远端状态
-bifrost remote status
-
-# 远程排查某个域名的请求
-bifrost remote traffic list --host example.com --limit 20
-bifrost remote traffic get <id> --request-body --response-body
-
-# 远程搜索关键词
-bifrost remote search "error"
-bifrost remote search "api/v1/users"
-
-```
-
-#### 远程调用 Agent 行为建议
-
-- 优先检查是否有可复用授权，避免每次都走配对流程
-- `bifrost remote connect <code>` 只用于首次配对或授权失效后的重新配对；如果此前 connect 已成功，下一步应优先执行 `bifrost remote status`
-- 配对码（pair code / `<code>`）是一次性的，成功消费后不能再次复用；不要在 connect 成功后再次尝试用同一个 code 连接
-- 当用户说“已经连过了 / 刚刚 connect 成功 / 已经授权过”，默认先执行 `bifrost remote status` 或其他只读查询，而不是再次 `remote connect`
-- 远程命令仅支持只读查询，不要尝试远程修改配置或规则
-- 当用户需要修改远端 Bifrost 配置时，提示用户直接在目标机器上操作
-- 如果远程命令返回 `unsupported_command`，说明该操作不在白名单内
-- 如果返回授权相关错误（例如授权过期、被撤销、无本地连接记录），再引导用户重新 `remote connect <code>` 并在目标 Bifrost WebUI 中进行授权
-- 遇到网络超时或 Relay 不可达，提示检查 Relay 服务状态和网络连接
+- 只读查询类操作需要目标设备先启动 Bifrost、在 Remote Invoke 页面启用 SSH key 或配对码授权，并由 caller 用 `bifrost remote status` 验证连接。
+- 远程设备控制类操作还需要目标设备启用 Shell Access profile/policy，并在授权请求中选择 `selected` 或 `all` 访问模式。
+- `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令；caller 要管理目标设备时，应通过 `remote command exec` 执行目标机命令。
+- `shell.exec` 受目标终端 Shell Access policy 约束；当前不能承诺 OS 级 sandbox 隔离。
+- rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote command exec`。
 
 ## 推荐工作流
 
@@ -706,21 +614,21 @@ bifrost traffic get <id> --request-body --response-body  # <id> 为少于 6 位�
 
 #### 第一步：阅读必要文档
 
-| 优先级 | 文档 | 内容 |
-| --- | --- | --- |
-| **必读** | [docs/rule.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rule.md) | 规则整体语法（pattern + operation + filter + lineProps） |
-| **必读** | [docs/pattern.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/pattern.md) | 匹配模式：Domain / IP / Wildcard / PathWildcard / Regex、否定匹配 |
-| **必读** | [docs/operation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/operation.md) | 操作指令语法、Value 类型、模板变量、协议列表 |
-| 按需 | [docs/rules/routing.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/routing.md) | host / xhost / proxy / pac 等路由转发 |
-| 按需 | [docs/rules/request-modification.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/request-modification.md) | reqHeaders / reqBody / reqCookies / method / ua 等 |
-| 按需 | [docs/rules/response-modification.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/response-modification.md) | resHeaders / resBody / resCookies / statusCode / cache 等 |
-| 按需 | [docs/rules/body-manipulation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/body-manipulation.md) | reqReplace / resReplace / resMerge 等 Body 操作 |
-| 按需 | [docs/rules/url-manipulation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/url-manipulation.md) | urlParams / pathReplace 等 URL 操作 |
-| 按需 | [docs/rules/status-redirect.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/status-redirect.md) | statusCode / redirect |
-| 按需 | [docs/rules/filters.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/filters.md) | includeFilter / excludeFilter |
-| 按需 | [docs/rules/scripts.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/scripts.md) | reqScript / resScript / decode |
-| 按需 | [docs/values.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/values.md) | Values 变量管理 |
-| 按需 | [docs/scripts.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/scripts.md) | 脚本开发完整指南 |
+| 优先级    | 文档                                                                                                                            | 内容                                                       |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| **必读** | [docs/rule.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rule.md)                                               | 规则整体语法（pattern + operation + filter + lineProps）         |
+| **必读** | [docs/pattern.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/pattern.md)                                         | 匹配模式：Domain / IP / Wildcard / PathWildcard / Regex、否定匹配  |
+| **必读** | [docs/operation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/operation.md)                                     | 操作指令语法、Value 类型、模板变量、协议列表                                |
+| 按需     | [docs/rules/routing.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/routing.md)                             | host / xhost / proxy / pac 等路由转发                         |
+| 按需     | [docs/rules/request-modification.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/request-modification.md)   | reqHeaders / reqBody / reqCookies / method / ua 等        |
+| 按需     | [docs/rules/response-modification.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/response-modification.md) | resHeaders / resBody / resCookies / statusCode / cache 等 |
+| 按需     | [docs/rules/body-manipulation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/body-manipulation.md)         | reqReplace / resReplace / resMerge 等 Body 操作             |
+| 按需     | [docs/rules/url-manipulation.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/url-manipulation.md)           | urlParams / pathReplace 等 URL 操作                         |
+| 按需     | [docs/rules/status-redirect.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/status-redirect.md)             | statusCode / redirect                                    |
+| 按需     | [docs/rules/filters.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/filters.md)                             | includeFilter / excludeFilter                            |
+| 按需     | [docs/rules/scripts.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/rules/scripts.md)                             | reqScript / resScript / decode                           |
+| 按需     | [docs/values.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/values.md)                                           | Values 变量管理                                              |
+| 按需     | [docs/scripts.md](https://github.com/bifrost-proxy/bifrost/blob/main/docs/scripts.md)                                         | 脚本开发完整指南                                                 |
 
 #### 第二步：添加规则
 

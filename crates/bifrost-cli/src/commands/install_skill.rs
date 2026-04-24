@@ -11,9 +11,44 @@ use std::thread;
 use std::time::Duration;
 
 const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/SKILL.md";
+const REMOTE_SKILL_RAW_URL: &str =
+    "https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/skill_remote.md";
 
 const EMBEDDED_SKILL_MD: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../SKILL.md"));
+const EMBEDDED_REMOTE_SKILL_MD: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../skill_remote.md"
+));
+
+#[derive(Debug, Clone, Copy)]
+struct SkillSource {
+    dir_name: &'static str,
+    display_name: &'static str,
+    raw_url: &'static str,
+    embedded_content: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct SkillAsset {
+    source: SkillSource,
+    content: String,
+}
+
+const SKILL_SOURCES: &[SkillSource] = &[
+    SkillSource {
+        dir_name: "bifrost",
+        display_name: "SKILL.md",
+        raw_url: SKILL_RAW_URL,
+        embedded_content: EMBEDDED_SKILL_MD,
+    },
+    SkillSource {
+        dir_name: "bifrost-remote",
+        display_name: "skill_remote.md",
+        raw_url: REMOTE_SKILL_RAW_URL,
+        embedded_content: EMBEDDED_REMOTE_SKILL_MD,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiTool {
@@ -233,7 +268,7 @@ fn format_io_error(err: &io::Error, path: &Path, operation: &str) -> BifrostErro
     }
 }
 
-fn download_skill() -> Result<String, BifrostError> {
+fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
     if std::env::var("BIFROST_INSTALL_SKILL_SOURCE")
         .ok()
         .map(|v| v.to_lowercase())
@@ -242,16 +277,16 @@ fn download_skill() -> Result<String, BifrostError> {
     {
         println!(
             "{} {}",
-            "📦 Using embedded SKILL.md:".bright_cyan(),
+            format!("📦 Using embedded {}:", source.display_name).bright_cyan(),
             "(compiled in)".dimmed()
         );
-        return Ok(EMBEDDED_SKILL_MD.to_string());
+        return Ok(source.embedded_content.to_string());
     }
 
     println!(
         "{} {}",
-        "⬇ Downloading latest SKILL.md from:".bright_cyan(),
-        SKILL_RAW_URL.dimmed()
+        format!("⬇ Downloading latest {} from:", source.display_name).bright_cyan(),
+        source.raw_url.dimmed()
     );
 
     // NOTE: Even with per-socket timeouts, some environments can still hang during TLS/DNS.
@@ -267,7 +302,7 @@ fn download_skill() -> Result<String, BifrostError> {
                 .build();
 
             let response = agent
-                .get(SKILL_RAW_URL)
+                .get(source.raw_url)
                 .call()
                 .map_err(|e| format_network_error(&e))?;
 
@@ -288,7 +323,7 @@ fn download_skill() -> Result<String, BifrostError> {
                     .bright_yellow()
             );
             println!("    {}", err_msg.dimmed());
-            return Ok(EMBEDDED_SKILL_MD.to_string());
+            return Ok(source.embedded_content.to_string());
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             println!(
@@ -300,7 +335,7 @@ fn download_skill() -> Result<String, BifrostError> {
                 )
                 .bright_yellow()
             );
-            return Ok(EMBEDDED_SKILL_MD.to_string());
+            return Ok(source.embedded_content.to_string());
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             println!(
@@ -308,7 +343,7 @@ fn download_skill() -> Result<String, BifrostError> {
                 "⚠".bright_yellow(),
                 "Download worker disconnected; falling back to embedded copy.".bright_yellow()
             );
-            return Ok(EMBEDDED_SKILL_MD.to_string());
+            return Ok(source.embedded_content.to_string());
         }
     };
 
@@ -345,6 +380,14 @@ fn download_skill() -> Result<String, BifrostError> {
     Ok(body)
 }
 
+fn download_skill_bundle() -> Result<Vec<SkillAsset>, BifrostError> {
+    SKILL_SOURCES
+        .iter()
+        .copied()
+        .map(|source| download_skill_source(source).map(|content| SkillAsset { source, content }))
+        .collect()
+}
+
 fn prompt_confirm(message: &str) -> bool {
     print!("{} [y/N]: ", message);
     io::stdout().flush().ok();
@@ -366,13 +409,31 @@ fn resolve_target_dirs(tool: &AiTool, custom_dir: &Option<PathBuf>, cwd: bool) -
     tool.default_global_dirs()
 }
 
-fn install_to_dir(tool: &AiTool, content: &str, target_dir: &Path) -> Result<(), BifrostError> {
+fn skill_target_dir(primary_target_dir: &Path, source: SkillSource) -> PathBuf {
+    if source.dir_name == "bifrost" {
+        return primary_target_dir.to_path_buf();
+    }
+
+    primary_target_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(source.dir_name)
+}
+
+fn install_to_dir(
+    tool: &AiTool,
+    asset: &SkillAsset,
+    primary_target_dir: &Path,
+) -> Result<(), BifrostError> {
+    let target_dir = skill_target_dir(primary_target_dir, asset.source);
     let target_file = target_dir.join(tool.target_filename());
 
     println!();
     println!(
         "{} {}",
-        format!("📦 Installing to {}:", tool).bright_cyan().bold(),
+        format!("📦 Installing {} to {}:", asset.source.dir_name, tool)
+            .bright_cyan()
+            .bold(),
         target_file.display()
     );
 
@@ -384,10 +445,10 @@ fn install_to_dir(tool: &AiTool, content: &str, target_dir: &Path) -> Result<(),
         );
     }
 
-    fs::create_dir_all(target_dir)
-        .map_err(|e| format_io_error(&e, target_dir, "create directory"))?;
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format_io_error(&e, &target_dir, "create directory"))?;
 
-    let final_content = tool.wrap_content(content);
+    let final_content = tool.wrap_content(&asset.content);
 
     fs::write(&target_file, &final_content)
         .map_err(|e| format_io_error(&e, &target_file, "write file"))?;
@@ -404,13 +465,15 @@ fn install_to_dir(tool: &AiTool, content: &str, target_dir: &Path) -> Result<(),
 
 fn install_to_tool(
     tool: &AiTool,
-    content: &str,
+    assets: &[SkillAsset],
     custom_dir: &Option<PathBuf>,
     cwd: bool,
 ) -> Result<(), BifrostError> {
     let dirs = resolve_target_dirs(tool, custom_dir, cwd);
     for d in &dirs {
-        install_to_dir(tool, content, d)?;
+        for asset in assets {
+            install_to_dir(tool, asset, d)?;
+        }
     }
     Ok(())
 }
@@ -482,19 +545,22 @@ pub fn handle_install_skill(
     for t in &tools {
         let target_dirs = resolve_target_dirs(t, &dir, cwd);
         for target_dir in &target_dirs {
-            let target_file = target_dir.join(t.target_filename());
-            let exists = if target_file.exists() {
-                " (exists → overwrite)".bright_yellow().to_string()
-            } else {
-                " (new)".bright_green().to_string()
-            };
-            println!(
-                "    {} {} → {}{}",
-                "•".bright_cyan(),
-                t,
-                target_file.display(),
-                exists
-            );
+            for source in SKILL_SOURCES {
+                let target_file = skill_target_dir(target_dir, *source).join(t.target_filename());
+                let exists = if target_file.exists() {
+                    " (exists → overwrite)".bright_yellow().to_string()
+                } else {
+                    " (new)".bright_green().to_string()
+                };
+                println!(
+                    "    {} {} / {} → {}{}",
+                    "•".bright_cyan(),
+                    t,
+                    source.dir_name,
+                    target_file.display(),
+                    exists
+                );
+            }
         }
     }
 
@@ -505,13 +571,13 @@ pub fn handle_install_skill(
         return Ok(());
     }
 
-    let content = download_skill()?;
+    let assets = download_skill_bundle()?;
 
     let mut success_count = 0;
     let mut errors: Vec<(AiTool, String)> = Vec::new();
 
     for t in &tools {
-        match install_to_tool(t, &content, &dir, cwd) {
+        match install_to_tool(t, &assets, &dir, cwd) {
             Ok(()) => success_count += 1,
             Err(e) => {
                 println!(
