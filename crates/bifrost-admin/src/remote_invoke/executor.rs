@@ -479,8 +479,14 @@ impl RemoteInvokeExecutor {
                             .to_string(),
                     )
                 })?;
+                // Normalize: ensure split("\n--- ") works even if patch starts with "--- "
+                let normalized = if patch_text.starts_with("--- ") {
+                    format!("\n{}", patch_text)
+                } else {
+                    patch_text.to_string()
+                };
                 let mut decisions = std::collections::HashMap::new();
-                for raw in patch_text.split("\n--- ").skip(1) {
+                for raw in normalized.split("\n--- ").skip(1) {
                     let mut it = raw.splitn(2, '\n');
                     let _old = it.next().unwrap_or("");
                     let rest = it.next().unwrap_or("");

@@ -744,7 +744,13 @@ pub async fn handle_file_apply_patch(
     // Very small, intentionally restricted parser: recognizes only the
     // subset of unified diff that our CLI emits. Not a full `git apply`.
     let mut applied: Vec<Value> = Vec::new();
-    let mut files = patch_text.split("\n--- ");
+    // Normalize: ensure split("\n--- ") works even if patch starts with "--- "
+    let normalized = if patch_text.starts_with("--- ") {
+        format!("\n{}", patch_text)
+    } else {
+        patch_text.to_string()
+    };
+    let mut files = normalized.split("\n--- ");
     let _preamble = files.next(); // anything before first "--- "
     for raw in files {
         // `raw` starts with e.g. "a/src/foo.rs\n+++ b/src/foo.rs\n@@ ..."
@@ -795,7 +801,13 @@ pub async fn handle_file_apply_patch(
         // Apply hunks.
         let mut out = String::with_capacity(orig_text.len());
         let mut src_cursor: usize = 0; // 0-based index into orig_lines
-        let mut hunks = body.split("\n@@ ");
+                                       // Normalize: ensure split("\n@@ ") works even if body starts with "@@ "
+        let norm_body = if body.starts_with("@@ ") {
+            format!("\n{}", body)
+        } else {
+            body.to_string()
+        };
+        let mut hunks = norm_body.split("\n@@ ");
         // Everything before the first "@@ " is file-level metadata we ignore.
         let _meta = hunks.next();
         for hunk in hunks {
