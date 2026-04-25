@@ -88,6 +88,12 @@ pub struct PolicyDecision {
     pub allow_overwrite: bool,
     /// Whether `file.delete` may remove non-empty directories.
     pub allow_recursive_delete: bool,
+    /// The absolute path as originally supplied by the caller, BEFORE
+    /// canonicalization (i.e. without following symlinks). Handlers that
+    /// need to detect/report symlinks (e.g. `file.stat`) should use this
+    /// for `lstat`/`read_link`. Security decisions still use `path`
+    /// (canonical, root-confined).
+    pub input_abs: std::path::PathBuf,
 }
 
 /// Declarative file access policy. One policy corresponds to one grant +
@@ -165,6 +171,13 @@ impl FileAccessPolicy {
         cwd: &Path,
         op: FileOp,
     ) -> Result<PolicyDecision, FileAccessError> {
+        // 0. remember the pre-canonicalization absolute input for handlers
+        //    that need lstat semantics (e.g. `file.stat` symlink_target).
+        let input_abs: std::path::PathBuf = if input.is_absolute() {
+            input.to_path_buf()
+        } else {
+            cwd.join(input)
+        };
         // 1. op allowlist
         if !self.ops.contains(&op) {
             if op.is_write() && self.ops.iter().all(|allowed| !allowed.is_write()) {
@@ -248,6 +261,7 @@ impl FileAccessPolicy {
             respect_gitignore: self.respect_gitignore,
             allow_overwrite: self.allow_overwrite,
             allow_recursive_delete: self.allow_recursive_delete,
+            input_abs,
         })
     }
 
