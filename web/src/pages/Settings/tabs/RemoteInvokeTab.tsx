@@ -644,6 +644,23 @@ function formatCountdown(expiresAt: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/**
+ * Humanize a grant_scope value for display in UI tags.
+ * Keeps the raw scope accessible via tooltip for power users.
+ */
+function describeGrantScope(scope: string): { label: string; color: string } {
+  switch (scope) {
+    case "remote_query":
+      return { label: "Read-only", color: "default" };
+    case "remote_shell_exec":
+      return { label: "Can run commands", color: "purple" };
+    case "remote_shell_interactive":
+      return { label: "Can run commands + interactive", color: "magenta" };
+    default:
+      return { label: scope, color: "default" };
+  }
+}
+
 function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
   if (grant.grant_scope === "remote_query") {
     return "query";
@@ -2166,9 +2183,11 @@ export default function RemoteInvokeTab() {
                             {g.status}
                           </Tag>
                           <Tag>{g.grant_mode}</Tag>
-                          <Tag color={g.grant_scope === "remote_query" ? "default" : "purple"}>
-                            {g.grant_scope}
-                          </Tag>
+                          <Tooltip title={`grant_scope: ${g.grant_scope}`}>
+                            <Tag color={describeGrantScope(g.grant_scope).color}>
+                              {describeGrantScope(g.grant_scope).label}
+                            </Tag>
+                          </Tooltip>
                           {g.file_access && g.file_access !== "none" && (
                             <Tag color="blue">
                               {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
