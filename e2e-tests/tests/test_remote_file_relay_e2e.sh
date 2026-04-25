@@ -1319,7 +1319,7 @@ test_gap_read_truncated_file_sha256() {
         dd if=/dev/zero of="$target" bs=1024 count=3072 >/dev/null 2>&1
 
     local file_sha
-    file_sha=$(shasum -a 256 "$target" 2>/dev/null | awk "{print \$1}")
+    file_sha=$( { shasum -a 256 "$target" 2>/dev/null || sha256sum "$target" 2>/dev/null; } | awk "{print \$1}")
 
     local out
     out=$(run_remote_file_cmd read big.txt --cwd "$SANDBOX_DIR" --max-bytes 65536) || true

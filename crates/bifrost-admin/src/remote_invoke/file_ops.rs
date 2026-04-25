@@ -193,6 +193,30 @@ fn normalize_to_eol(text: &str, eol: Eol) -> String {
     out
 }
 
+/// Normalize a symlink-target path for the wire. On Unix this is a passthrough.
+/// On Windows, `fs::read_link` can return the NT verbatim form
+/// (`\\?\C:\...` or `\\?\UNC\server\share\...`) which leaks an
+/// implementation detail. Strip those prefixes so callers receive a clean
+/// user-friendly path.
+#[allow(unused_mut)]
+fn normalize_symlink_target(p: std::path::PathBuf) -> String {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy().to_string();
+        if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+            return format!("\\\\{}", rest);
+        }
+        if let Some(rest) = s.strip_prefix("\\\\?\\") {
+            return rest.to_string();
+        }
+        return s;
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_string_lossy().to_string()
+    }
+}
+
 /// Build an ignore::gitignore::Gitignore matcher by walking up from `root` to
 /// the filesystem root, loading every `.gitignore` encountered. This matches
 /// what ripgrep / git do when searching below a subdirectory of a repo.
@@ -416,7 +440,7 @@ pub async fn handle_file_list(
             });
             if lmd.file_type().is_symlink() {
                 if let Ok(tgt) = fs::read_link(&path).await {
-                    entry_val["symlink_target"] = Value::String(tgt.to_string_lossy().to_string());
+                    entry_val["symlink_target"] = Value::String(normalize_symlink_target(tgt));
                 }
             }
             entries.push(entry_val);
@@ -450,7 +474,7 @@ pub async fn handle_file_stat(decision: &PolicyDecision) -> Result<Value> {
     let mut symlink_target: Option<String> = None;
     if lmd.file_type().is_symlink() {
         if let Ok(tgt) = fs::read_link(lstat_path).await {
-            symlink_target = Some(tgt.to_string_lossy().to_string());
+            symlink_target = Some(normalize_symlink_target(tgt));
         }
     }
 
