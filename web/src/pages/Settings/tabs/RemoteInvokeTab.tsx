@@ -661,6 +661,27 @@ function describeGrantScope(scope: string): { label: string; color: string } {
   }
 }
 
+/**
+ * Humanize a grant_mode value for display in UI tags.
+ * Keeps the raw mode accessible via tooltip.
+ */
+function describeGrantMode(mode: string): string {
+  switch (mode) {
+    case "once":
+      return "One-shot";
+    case "30m":
+      return "Valid 30 min";
+    case "1h":
+      return "Valid 1 hour";
+    case "1d":
+      return "Valid 1 day";
+    case "permanent":
+      return "Permanent";
+    default:
+      return mode;
+  }
+}
+
 function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
   if (grant.grant_scope === "remote_query") {
     return "query";
@@ -2182,7 +2203,9 @@ export default function RemoteInvokeTab() {
                           <Tag color={g.status === "active" ? "green" : "default"}>
                             {g.status}
                           </Tag>
-                          <Tag>{g.grant_mode}</Tag>
+                          <Tooltip title={`grant_mode: ${g.grant_mode}`}>
+                            <Tag>{describeGrantMode(g.grant_mode)}</Tag>
+                          </Tooltip>
                           <Tooltip title={`grant_scope: ${g.grant_scope}`}>
                             <Tag color={describeGrantScope(g.grant_scope).color}>
                               {describeGrantScope(g.grant_scope).label}
