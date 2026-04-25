@@ -63,6 +63,7 @@ import {
   revokeRemoteInvokeSshKey,
   updateGrant,
   updateRemoteShellConfig,
+  matchRemoteShellCommand,
   getCallArgsPreviewSource,
   getCall,
   type CreateRemoteInvokeSshKeyInput,
@@ -779,6 +780,41 @@ export default function RemoteInvokeTab() {
   // When disabled (default), the UI presents a unified "Command group" view
   // hiding the Profile/Policy distinction from end users.
   const [shellEditorExpertMode, setShellEditorExpertMode] = useState<boolean>(false);
+  const [shellEditorTestInput, setShellEditorTestInput] = useState<Record<string, string>>({});
+  const [shellEditorTestMode, setShellEditorTestMode] = useState<Record<string, "argv_exec" | "shell_text">>({});
+  const [shellEditorTestResult, setShellEditorTestResult] = useState<
+    Record<string, { matched: boolean; matched_policy_id: string | null; reason: string } | null>
+  >({});
+  const [shellEditorTestLoading, setShellEditorTestLoading] = useState<Record<string, boolean>>({});
+
+  const runShellPolicyTest = async (policyId: string) => {
+    const command = (shellEditorTestInput[policyId] ?? "").trim();
+    const execMode = shellEditorTestMode[policyId] ?? "shell_text";
+    if (!command) {
+      message.warning("Enter a command to test");
+      return;
+    }
+    setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: true }));
+    try {
+      const result = await matchRemoteShellCommand({
+        command,
+        exec_mode: execMode,
+      });
+      setShellEditorTestResult((prev) => ({ ...prev, [policyId]: result }));
+    } catch (error) {
+      setShellEditorTestResult((prev) => ({
+        ...prev,
+        [policyId]: {
+          matched: false,
+          matched_policy_id: null,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      }));
+    } finally {
+      setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: false }));
+    }
+  };
+
   const [shellEditorPolicies, setShellEditorPolicies] = useState<
     ShellPolicyEditorItem[]
   >([]);
@@ -3513,6 +3549,76 @@ export default function RemoteInvokeTab() {
                         </div>
                       </Col>
                     </Row>
+
+                    <Divider style={{ margin: "12px 0" }} />
+                    <div>
+                      <Text strong>🧪 Test this group</Text>
+                      <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                        Check whether a sample command would be allowed by the currently-saved policy set.
+                      </Text>
+                      <Row gutter={[8, 8]} style={{ marginTop: 8 }} align="middle">
+                        <Col xs={24} md={6}>
+                          <Select
+                            style={{ width: "100%" }}
+                            value={shellEditorTestMode[policy.id] ?? "shell_text"}
+                            onChange={(value: "argv_exec" | "shell_text") =>
+                              setShellEditorTestMode((prev) => ({ ...prev, [policy.id]: value }))
+                            }
+                            options={[
+                              { value: "shell_text", label: "Shell text" },
+                              { value: "argv_exec", label: "Argv exec" },
+                            ]}
+                          />
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <Input
+                            placeholder="e.g. ls -la /tmp"
+                            value={shellEditorTestInput[policy.id] ?? ""}
+                            onChange={(e) =>
+                              setShellEditorTestInput((prev) => ({
+                                ...prev,
+                                [policy.id]: e.target.value,
+                              }))
+                            }
+                            onPressEnter={() => runShellPolicyTest(policy.id)}
+                          />
+                        </Col>
+                        <Col xs={24} md={6}>
+                          <Button
+                            type="primary"
+                            block
+                            loading={shellEditorTestLoading[policy.id] ?? false}
+                            onClick={() => runShellPolicyTest(policy.id)}
+                          >
+                            Test
+                          </Button>
+                        </Col>
+                      </Row>
+                      {shellEditorTestResult[policy.id] && (
+                        <Alert
+                          style={{ marginTop: 8 }}
+                          showIcon
+                          type={
+                            shellEditorTestResult[policy.id]!.matched
+                              ? shellEditorTestResult[policy.id]!.matched_policy_id === policy.id
+                                ? "success"
+                                : "warning"
+                              : "error"
+                          }
+                          message={
+                            shellEditorTestResult[policy.id]!.matched
+                              ? shellEditorTestResult[policy.id]!.matched_policy_id === policy.id
+                                ? `✓ Matched this group (policy '${shellEditorTestResult[policy.id]!.matched_policy_id}')`
+                                : `⚠ Matched a different group: '${shellEditorTestResult[policy.id]!.matched_policy_id}'`
+                              : "✗ Not allowed by any enabled policy"
+                          }
+                          description={shellEditorTestResult[policy.id]!.reason}
+                        />
+                      )}
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 6 }}>
+                        Tests run against the saved config on this device. Save your edits first to include them.
+                      </Text>
+                    </div>
                   </Card>
                 ))
               )}

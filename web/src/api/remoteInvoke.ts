@@ -290,6 +290,27 @@ export async function updateRemoteShellConfig(
   return put<RemoteShellSet>("/remote-invoke/shell-config", input);
 }
 
+export interface ShellConfigMatchRequest {
+  command: string;
+  exec_mode: "argv_exec" | "shell_text";
+  argv?: string[];
+}
+
+export interface ShellConfigMatchResponse {
+  matched: boolean;
+  matched_policy_id: string | null;
+  reason: string;
+}
+
+export async function matchRemoteShellCommand(
+  input: ShellConfigMatchRequest,
+): Promise<ShellConfigMatchResponse> {
+  return post<ShellConfigMatchResponse>(
+    "/remote-invoke/shell-config/match",
+    input,
+  );
+}
+
 // --- File Access Config ---
 
 export type FileOp =
