@@ -1,4 +1,4 @@
-//! Phase 1 read-only filesystem operations for the Remote Invoke File API.
+//! Remote file operations for the Remote Invoke subsystem.
 //!
 //! Every handler here is invoked *after* [`bifrost_core::file_access::FileAccessPolicy::check`]
 //! has produced a [`PolicyDecision`]. The handlers themselves perform no

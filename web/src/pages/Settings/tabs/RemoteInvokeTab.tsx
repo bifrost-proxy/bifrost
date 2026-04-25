@@ -3080,33 +3080,7 @@ export default function RemoteInvokeTab() {
           </div>
         </Space>
       </Modal>
-      <Card
-        size="small"
-        title="Remote File API (Phase 1)"
-        style={{ marginTop: 16 }}
-      >
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-          只读远程文件访问能力（Phase 1）。访问受{" "}
-          <code>FileAccessPolicy</code>（<code>~/.bifrost/file-access.toml</code>）约束，默认拒绝{" "}
-          <code>.git/</code>、<code>target/</code>、<code>*.key</code>、<code>*.pem</code>。
-        </Typography.Paragraph>
-        <Descriptions column={1} size="small" bordered>
-          <Descriptions.Item label="file.read">读取文件内容（支持 max_bytes 截断、二进制保护）</Descriptions.Item>
-          <Descriptions.Item label="file.list">列目录（支持 depth，跳过 deny）</Descriptions.Item>
-          <Descriptions.Item label="file.stat">获取文件元信息（size/mtime/sha256/kind）</Descriptions.Item>
-          <Descriptions.Item label="file.glob">按 glob 匹配 root-relative 路径</Descriptions.Item>
-          <Descriptions.Item label="file.search">内容正则检索（跳过二进制）</Descriptions.Item>
-          <Descriptions.Item label="file.hash">sha256 哈希</Descriptions.Item>
-        </Descriptions>
-        <pre style={{ background: "#f5f5f5", padding: 8, marginTop: 12, fontSize: 12, borderRadius: 4 }}>
-{`bifrost remote file read   --path README.md
-bifrost remote file list   --path . --depth 1
-bifrost remote file stat   --path Cargo.toml
-bifrost remote file glob   --pattern '**/*.rs'
-bifrost remote file search --pattern 'TODO' --path src
-bifrost remote file hash   --path Cargo.lock --algo sha256`}
-        </pre>
-      </Card>
+
     </div>
   );
 }
