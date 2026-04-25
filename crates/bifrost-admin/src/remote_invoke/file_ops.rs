@@ -106,7 +106,9 @@ async fn capture_mode(path: &Path) -> Option<u32> {
     {
         use std::os::unix::fs::PermissionsExt;
         match fs::metadata(path).await {
-            Ok(md) => Some(md.permissions().mode()),
+            // Mask to permission bits; st_mode also carries file-type
+            // bits (S_IFREG etc.) that must not round-trip via chmod.
+            Ok(md) => Some(md.permissions().mode() & 0o7777),
             Err(_) => None,
         }
     }
@@ -127,6 +129,21 @@ async fn apply_mode(path: &Path, mode: Option<u32>) {
         if let Some(m) = mode {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(path, std::fs::Permissions::from_mode(m)).await;
+        }
+    }
+}
+
+/// Synchronously set the unix mode on a path. Used on the tmp file
+/// prior to `rename` so the final inode already carries the desired
+/// permission bits, even if a later async `apply_mode` were to fail.
+/// No-op on non-unix platforms.
+#[allow(unused_variables)]
+fn apply_mode_sync(path: &Path, mode: Option<u32>) {
+    #[cfg(unix)]
+    {
+        if let Some(m) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(m));
         }
     }
 }
@@ -896,6 +913,10 @@ pub async fn handle_file_write(
             .map_err(|e| io_err("write-tmp", e))?;
         f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
     }
+    // Pre-apply prior mode on tmp so the rename-target inode already
+    // carries the correct perms; the async apply_mode after rename
+    // remains as a defensive fallback.
+    apply_mode_sync(&tmp, prior_mode);
     fs::rename(&tmp, path)
         .await
         .map_err(|e| io_err("rename-tmp", e))?;
@@ -1035,6 +1056,10 @@ pub async fn handle_file_edit(
             .map_err(|e| io_err("write-tmp", e))?;
         f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
     }
+    // Pre-apply prior mode on tmp so the rename-target inode already
+    // carries the correct perms; the async apply_mode after rename
+    // remains as a defensive fallback.
+    apply_mode_sync(&tmp, prior_mode);
     fs::rename(&tmp, path)
         .await
         .map_err(|e| io_err("rename-tmp", e))?;
