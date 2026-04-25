@@ -8,7 +8,9 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use bifrost_core::BifrostError;
 
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
-use crate::remote_invoke::types::{FileAccessScope, GrantMode, GrantScope};
+use crate::remote_invoke::types::{
+    CommandKind, FileAccessScope, GrantMode, GrantScope, RemoteCommand, ShellExecMode,
+};
 use crate::remote_invoke::worker::RemoteInvokeWorker;
 
 pub type SharedRemoteInvokeWorker = Arc<RemoteInvokeWorker>;
@@ -61,6 +63,9 @@ pub async fn handle_remote_invoke(
     }
     if sub == "/shell-config" || sub == "/shell-config/" {
         return handle_shell_config(req).await;
+    }
+    if sub == "/shell-config/match" || sub == "/shell-config/match/" {
+        return handle_shell_config_match(req, &worker).await;
     }
     if sub == "/file-access-config" || sub == "/file-access-config/" {
         return handle_file_access_config(req).await;
@@ -389,6 +394,88 @@ async fn handle_shell_config(req: Request<Incoming>) -> Response<BoxBody> {
         }
         _ => method_not_allowed(),
     }
+}
+
+async fn handle_shell_config_match(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+
+    let body = match req.collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read request body: {error}"),
+            );
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct MatchRequest {
+        #[serde(default)]
+        command: String,
+        exec_mode: ShellExecMode,
+        #[serde(default)]
+        argv: Option<Vec<String>>,
+    }
+
+    let input: MatchRequest = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {error}"),
+            );
+        }
+    };
+
+    let mut cmd = RemoteCommand {
+        kind: CommandKind::ShellExec,
+        command: "shell.exec".to_string(),
+        exec_mode: Some(input.exec_mode),
+        ..Default::default()
+    };
+    match input.exec_mode {
+        ShellExecMode::ArgvExec => {
+            let argv = input.argv.filter(|v| !v.is_empty()).or_else(|| {
+                let trimmed = input.command.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        trimmed
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            });
+            cmd.argv = argv;
+        }
+        ShellExecMode::ShellText | ShellExecMode::Template => {
+            cmd.command_text = Some(input.command.clone());
+        }
+    }
+
+    let (matched, matched_policy_id, reason) =
+        match worker.executor().select_policy_id_for_command(&cmd, None) {
+            Ok(policy_id) => {
+                let reason = format!("matched policy '{}'", policy_id);
+                (true, Some(policy_id), reason)
+            }
+            Err(error) => (false, None, error.to_string()),
+        };
+
+    let response = serde_json::json!({
+        "matched": matched,
+        "matched_policy_id": matched_policy_id,
+        "reason": reason,
+    });
+    json_response(&response)
 }
 
 async fn handle_file_access_config(req: Request<Incoming>) -> Response<BoxBody> {

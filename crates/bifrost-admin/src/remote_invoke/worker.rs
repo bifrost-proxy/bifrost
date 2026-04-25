@@ -341,6 +341,10 @@ impl RemoteInvokeWorker {
         &self.relay_client
     }
 
+    pub fn executor(&self) -> &Arc<RemoteInvokeExecutor> {
+        &self.executor
+    }
+
     pub fn update_relay_url(&self, new_url: &str) {
         let old_url = self.relay_client.base_url();
         let new_normalized = new_url.trim_end_matches('/');

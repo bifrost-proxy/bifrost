@@ -58,6 +58,7 @@
 | [remote-shell-exec.md](./remote-shell-exec.md) | Remote Shell Exec | 26 | `bifrost remote command exec` 主链路回归：caller 不再传 `policy_id`、target 基于 grant binding 与本地 Shell Access 自动选择唯一策略、query/shell scope 隔离、策略未命中与歧义匹配拒绝、policy version 失效、`Full Access` / `Default Sandbox` 真实语义、grant 的 WebUI / CLI 编辑、target 本地 grant policy overlay 持久化、relay 仅保留最小 `grant_scope` 不存储具体策略绑定，reconnect 覆盖旧 grant / disconnect 清理残留 reusable grants 的验证；Windows shell_text Unix 路径 fallback（`/bin/bash` → `cmd`）与 UTF-8 编码处理（`chcp 65001` / PowerShell OutputEncoding）、`policy update` 命令原地更新策略元数据不破坏 grant 有效性、CLI 对裸 argv 输入的显式拒绝回归、长时间命令 stdout 流式输出回归、Windows 流式 shell 输出 E2E 回归，以及对应 shell E2E 自动化脚本回归 |
 | [remote-invoke-file.md](./remote-invoke-file.md) | Remote Invoke File API | 33 | file.read/list/stat/glob/search/hash/write/edit/mkdir/mv/rm/apply-patch 的正向用例、FileAccessPolicy 的 roots/denies/symlink-escape/scope/二进制/target/只读 policy 拒绝写操作错误码回归用例、shell scope 不自动授予 file API、配对批准时 file scope 不依赖 Shell Access policy 的 CI 回归、并发与 grant 过期稳定性、审计日志留痕、CLI --help / --output json UX 验收、以及 coding agent 增强能力（offset/limit 行范围读取、search context 上下文行、glob/search/list 默认排除 .git/node_modules/target） |
 | [grant-file-access.md](./grant-file-access.md) | Grant File Access 正交权限模型 | 18 | file_access 独立于 grant_scope 的正交权限模型：WebUI 预设策略模式、API approve/update file_access、CLI --file-access 参数、权限检查、SSE grant_created 包含 file_access 回归、approve_pairing 持久化 grant_info 回归、Full Access 端到端文件操作验证、三策略动态切换验证（read_write/read/none）、executor 写权限检查回归 |
+| [grant-permission-hierarchy.md](./grant-permission-hierarchy.md) | Grant 权限层级模型 | 14 | Shell > File > Query 层级验证：Shell 默认包含 File(read_write) + Query、降级到 Query 后 shell/file 被拒、升级到 File 后 file 可用 shell 仍拒、权限切换后 grant 保持有效、无 shell policy 降级为 query、shell_grant_provision 层级默认值单元测试 |
 
 ### Admin API 测试
 
@@ -125,7 +126,7 @@
 
 ---
 
-**总计：64 个测试文件，1259 个测试用例**
+**总计：65 个测试文件，1273 个测试用例**
 
 ## 工作流程
 
