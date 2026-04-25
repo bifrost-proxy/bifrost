@@ -12,6 +12,7 @@ export type GrantScope =
   | "remote_query"
   | "remote_shell_exec"
   | "remote_shell_interactive";
+export type FileAccessScope = "none" | "read" | "read_write";
 export type RemoteInvokeAuthMethod = "pair_code" | "ssh_publickey";
 
 export interface DiscoverySession {
@@ -116,6 +117,7 @@ export interface PairingApprovalInput {
   policy_binding?: Record<string, unknown> | null;
   interactive_allowed?: boolean;
   stdin_allowed?: boolean;
+  file_access?: FileAccessScope;
 }
 
 export async function approvePairing(
@@ -155,6 +157,7 @@ export interface Grant {
   shell_policy_set_version_snapshot?: number | null;
   interactive_allowed?: boolean | null;
   stdin_allowed?: boolean | null;
+  file_access?: FileAccessScope;
 }
 
 export interface GrantsListResponse {

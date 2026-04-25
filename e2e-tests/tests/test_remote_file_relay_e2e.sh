@@ -4,8 +4,8 @@
 #
 # This test verifies that ALL `bifrost remote file` subcommands work
 # end-to-end through the relay server. It starts a relay (bifrost-sync-server),
-# a target bifrost daemon, does the pairing flow, upgrades the grant to
-# remote_file_write scope, and exercises file operations through the relay.
+# a target bifrost daemon, does the pairing flow, sets file_access=read_write
+# on the grant, and exercises file operations through the relay.
 #
 
 set -euo pipefail
@@ -234,7 +234,8 @@ pair_and_upgrade_grant() {
     done
     assert_equals "1" "$pairing_found" "pending pairing should arrive on target" || return 1
 
-    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${pairing_id}/approve" '{"grant_mode":"permanent"}'
+    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${pairing_id}/approve" \
+        '{"grant_mode":"permanent","grant_scope":"remote_query","file_access":"read_write"}'
     assert_status "200" "$HTTP_STATUS" "approve pairing should return 200" || return 1
 
     local connect_ok=0
@@ -277,14 +278,28 @@ pair_and_upgrade_grant() {
     done
     assert_not_empty "$GRANT_ID" "grant_id 不应为空" || return 1
 
-    # Upgrade grant to remote_file_write scope
+    # Confirm the target-side grant is materialized with file_access=read_write before
+    # running file commands. If the direct approval did not carry the scope for
+    # some reason, the PATCH path is allowed to repair it, but missing grants are
+    # setup failures rather than something the test can safely ignore.
     local grant_update_ok=0
-    local update_body='{"grant_scope":"remote_file_write"}'
+    local update_body='{"file_access":"read_write"}'
     for _ in $(seq 1 20); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+        if [[ "$HTTP_STATUS" == "200" ]] && echo "$HTTP_BODY" | jq -e --arg grant_id "$GRANT_ID" '
+            .grants[]? | select(.grant_id == $grant_id and .file_access == "read_write")
+        ' >/dev/null 2>&1; then
+            grant_update_ok=1
+            break
+        fi
+
         http_patch_json "${CLIENT_ADMIN_URL}/api/remote-invoke/grants/${GRANT_ID}" "$update_body"
-        if [[ "$HTTP_STATUS" == "200" ]]; then
-            if echo "$HTTP_BODY" | jq -e '
-                ((.data.grant_scope // .grant_scope // "") == "remote_file_write")
+        if [[ "$HTTP_STATUS" == "200" ]] && echo "$HTTP_BODY" | jq -e '
+            ((.data.file_access // .file_access // "") == "read_write")
+        ' >/dev/null 2>&1; then
+            http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+            if [[ "$HTTP_STATUS" == "200" ]] && echo "$HTTP_BODY" | jq -e --arg grant_id "$GRANT_ID" '
+                .grants[]? | select(.grant_id == $grant_id and .file_access == "read_write")
             ' >/dev/null 2>&1; then
                 grant_update_ok=1
                 break
@@ -293,12 +308,10 @@ pair_and_upgrade_grant() {
         sleep 0.5
     done
     if [[ "$grant_update_ok" -eq 1 ]]; then
-        _log_pass "grant upgraded to remote_file_write"
-    elif [[ "$HTTP_STATUS" == "400" && "$HTTP_BODY" == *"grant '${GRANT_ID}' not found"* ]]; then
-        _log_warning "target local grant was not materialized yet; fallback to the pair-created default grant"
+        _log_pass "grant available with file_access=read_write"
     else
-        _log_fail "grant upgraded to remote_file_write" \
-            'HTTP 200 with grant_scope=remote_file_write' \
+        _log_fail "grant available with file_access=read_write" \
+            'target grant list contains grant_id with file_access=read_write' \
             "status=${HTTP_STATUS} body=${HTTP_BODY}"
         return 1
     fi
@@ -1115,16 +1128,16 @@ test_readonly_rejection() {
         return 0
     fi
 
-    log "TC-FILE-09: readonly rejection — downgrade to remote_file_read, attempt write"
+    log "TC-FILE-09: readonly rejection — downgrade to file_access=read, attempt write"
 
-    # Downgrade grant to remote_file_read
+    # Downgrade grant to read-only file access
     local downgrade_ok=0
-    local downgrade_body='{"grant_scope":"remote_file_read"}'
+    local downgrade_body='{"file_access":"read"}'
     for _ in $(seq 1 10); do
         http_patch_json "${CLIENT_ADMIN_URL}/api/remote-invoke/grants/${GRANT_ID}" "$downgrade_body"
         if [[ "$HTTP_STATUS" == "200" ]]; then
             if echo "$HTTP_BODY" | jq -e '
-                ((.data.grant_scope // .grant_scope // "") == "remote_file_read")
+                ((.data.file_access // .file_access // "") == "read")
             ' >/dev/null 2>&1; then
                 downgrade_ok=1
                 break
@@ -1134,10 +1147,10 @@ test_readonly_rejection() {
     done
 
     if [[ "$downgrade_ok" -eq 1 ]]; then
-        _log_pass "TC-FILE-09: grant downgraded to remote_file_read"
+        _log_pass "TC-FILE-09: grant downgraded to file_access=read"
     else
-        _log_fail "TC-FILE-09: grant downgraded to remote_file_read" \
-            "HTTP 200 with grant_scope=remote_file_read" \
+        _log_fail "TC-FILE-09: grant downgraded to file_access=read" \
+            "HTTP 200 with file_access=read" \
             "status=${HTTP_STATUS} body=${HTTP_BODY}"
         return 0
     fi
@@ -1177,8 +1190,8 @@ test_readonly_rejection() {
         fi
     fi
 
-    # Restore grant to remote_file_write for any subsequent tests
-    local restore_body='{"grant_scope":"remote_file_write"}'
+    # Restore grant to file_access=read_write for any subsequent tests
+    local restore_body='{"file_access":"read_write"}'
     for _ in $(seq 1 10); do
         http_patch_json "${CLIENT_ADMIN_URL}/api/remote-invoke/grants/${GRANT_ID}" "$restore_body"
         if [[ "$HTTP_STATUS" == "200" ]]; then

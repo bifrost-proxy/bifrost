@@ -32,6 +32,7 @@ pub fn handle_remote_grant_command(
             policy,
             stdin,
             interactive,
+            file_access,
         } => {
             let body = build_update_payload(
                 access.as_deref(),
@@ -39,6 +40,7 @@ pub fn handle_remote_grant_command(
                 &policy,
                 stdin,
                 interactive,
+                file_access.as_deref(),
             )?;
             let payload = client
                 .update_remote_invoke_grant(&grant_id, &body)
@@ -70,6 +72,7 @@ fn build_update_payload(
     policy_ids: &[String],
     stdin: Option<bool>,
     interactive: Option<bool>,
+    file_access: Option<&str>,
 ) -> Result<Value> {
     if access.is_some() && scope.is_some() {
         return Err(BifrostError::Config(
@@ -77,16 +80,15 @@ fn build_update_payload(
         ));
     }
 
+    let file_access_value = file_access
+        .map(|fa| Value::String(fa.to_string()))
+        .unwrap_or(Value::Null);
+
     if let Some(scope) = scope {
         return match scope {
             "remote_query" => Ok(json!({
                 "grant_scope": "remote_query",
-                "policy_binding": Value::Null,
-                "interactive_allowed": Value::Null,
-                "stdin_allowed": Value::Null,
-            })),
-            "remote_file_read" | "remote_file_write" => Ok(json!({
-                "grant_scope": scope,
+                "file_access": file_access_value,
                 "policy_binding": Value::Null,
                 "interactive_allowed": Value::Null,
                 "stdin_allowed": Value::Null,
@@ -95,6 +97,7 @@ fn build_update_payload(
                 let interactive_allowed = scope == "remote_shell_interactive";
                 Ok(json!({
                     "grant_scope": scope,
+                    "file_access": file_access_value,
                     "policy_binding": json!({ "mode": "all" }),
                     "interactive_allowed": Value::Bool(interactive_allowed),
                     "stdin_allowed": stdin.map(Value::Bool).unwrap_or(Value::Bool(false)),
@@ -107,8 +110,15 @@ fn build_update_payload(
         };
     }
 
+    // If only --file-access is given without --access or --scope, just update file_access
+    if access.is_none() && file_access.is_some() {
+        return Ok(json!({
+            "file_access": file_access_value,
+        }));
+    }
+
     let access = access.ok_or_else(|| {
-        BifrostError::Config("either --access or --scope is required".to_string())
+        BifrostError::Config("either --access, --scope, or --file-access is required".to_string())
     })?;
 
     let (grant_scope, policy_binding) = match access {
@@ -145,6 +155,7 @@ fn build_update_payload(
 
     Ok(json!({
         "grant_scope": effective_scope,
+        "file_access": file_access_value,
         "policy_binding": if effective_scope == "remote_query" { Value::Null } else { policy_binding },
         "interactive_allowed": if effective_scope == "remote_query" { Value::Null } else { Value::Bool(interactive_allowed) },
         "stdin_allowed": if effective_scope == "remote_query" { Value::Null } else { stdin.map(Value::Bool).unwrap_or(Value::Bool(false)) },
@@ -208,21 +219,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_update_payload_supports_remote_file_write_scope() {
-        let payload = build_update_payload(None, Some("remote_file_write"), &[], None, None)
+    fn build_update_payload_with_file_access() {
+        let payload = build_update_payload(Some("all"), None, &[], None, None, Some("read_write"))
             .expect("payload");
 
-        assert_eq!(payload["grant_scope"], "remote_file_write");
-        assert!(payload["policy_binding"].is_null());
-        assert!(payload["interactive_allowed"].is_null());
-        assert!(payload["stdin_allowed"].is_null());
+        assert_eq!(payload["grant_scope"], "remote_shell_exec");
+        assert_eq!(payload["file_access"], "read_write");
+    }
+
+    #[test]
+    fn build_update_payload_file_access_only() {
+        let payload =
+            build_update_payload(None, None, &[], None, None, Some("read")).expect("payload");
+
+        assert_eq!(payload["file_access"], "read");
+        assert!(payload.get("grant_scope").is_none());
+    }
+
+    #[test]
+    fn build_update_payload_scope_with_file_access() {
+        let payload = build_update_payload(
+            None,
+            Some("remote_shell_interactive"),
+            &[],
+            None,
+            None,
+            Some("read_write"),
+        )
+        .expect("payload");
+
+        assert_eq!(payload["grant_scope"], "remote_shell_interactive");
+        assert_eq!(payload["file_access"], "read_write");
+        assert_eq!(payload["interactive_allowed"], true);
     }
 
     #[test]
     fn build_update_payload_rejects_access_and_scope_together() {
-        let err = build_update_payload(Some("all"), Some("remote_file_read"), &[], None, None)
+        let err = build_update_payload(Some("all"), Some("remote_query"), &[], None, None, None)
             .expect_err("conflicting flags should fail");
 
         assert!(err.to_string().contains("either --access or --scope"));
+    }
+
+    #[test]
+    fn build_update_payload_requires_some_flag() {
+        let err = build_update_payload(None, None, &[], None, None, None)
+            .expect_err("no flags should fail");
+
+        assert!(err.to_string().contains("--file-access"));
     }
 }

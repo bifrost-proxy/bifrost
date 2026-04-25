@@ -9,6 +9,7 @@ import type {
   CallerInfo,
   CommandSummary,
   RemoteCommand,
+  FileAccessScope,
 } from '../types';
 
 export type {
@@ -21,6 +22,7 @@ export type {
   CallerInfo,
   CommandSummary,
   RemoteCommand,
+  FileAccessScope,
 };
 
 export interface CommandEncryptedPayload {
@@ -306,8 +308,6 @@ export function normalizeGrantScope(scope?: string | null): RemoteInvokeGrantSco
   switch (scope) {
     case 'remote_shell_exec':
     case 'remote_shell_interactive':
-    case 'remote_file_read':
-    case 'remote_file_write':
       return scope;
     case 'remote_query':
     case undefined:
@@ -316,6 +316,21 @@ export function normalizeGrantScope(scope?: string | null): RemoteInvokeGrantSco
       return 'remote_query';
     default:
       throw new Error('invalid_grant_scope');
+  }
+}
+
+export function normalizeFileAccess(fileAccess?: string | null): FileAccessScope {
+  switch (fileAccess) {
+    case 'read':
+    case 'read_write':
+      return fileAccess;
+    case 'none':
+    case undefined:
+    case null:
+    case '':
+      return 'none';
+    default:
+      throw Object.assign(new Error('invalid_file_access'), { status: 400, details: `"${fileAccess}" is not a valid file_access value` });
   }
 }
 
@@ -332,15 +347,17 @@ export function resolveCommandKind(
   throw new Error('command_kind_required');
 }
 
-export function grantScopeAllowsCommand(scope: string | undefined, commandKind: RemoteCommandKind): boolean {
+export function grantScopeAllowsCommand(scope: string | undefined, commandKind: RemoteCommandKind, fileAccess?: string | null): boolean {
+  if (commandKind === 'file') {
+    const normalized = normalizeFileAccess(fileAccess);
+    return normalized === 'read' || normalized === 'read_write';
+  }
   const normalizedScope = normalizeGrantScope(scope);
   if (commandKind === 'shell.exec') {
     return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
   }
-  if (commandKind === 'file') {
-    return normalizedScope === 'remote_file_read' || normalizedScope === 'remote_file_write';
-  }
-  return normalizedScope === 'remote_query' || normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
+  // query.readonly is always allowed
+  return true;
 }
 
 export function grantModeTtlMs(mode: GrantMode): number | null {

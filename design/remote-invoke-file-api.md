@@ -464,6 +464,16 @@ Phase 2 将引入**写能力**，但遵循与 Phase 1 相同的铁律：任何�
 - **mkdir/rename/delete 的 deny 拦截**。
 - **只读 policy 写操作拒绝**：`FileAccessPolicy::new_readonly` 对 `write/edit/mkdir/move/delete/apply_patch` 等写操作必须返回 `file.permission_denied`，与一般非只读策略的 op allowlist 缺失错误 `file.op_not_permitted` 区分。
 
+### 9.6 Grant scope 回归防护
+
+`remote_file_read` / `remote_file_write` 是 File API 的独立授权域，不依赖 Remote Shell policy 是否存在或启用。配对批准阶段如果显式请求 file scope，target 必须直接创建对应 file grant；不能先降级为 `remote_query` 再依赖后续 PATCH 修正，否则 relay E2E 在 grant 尚未同步完成时会用 `RemoteQuery` 拒绝 `CommandKind::File`。
+
+验证要求：
+
+- 单元测试：`shell_grant_provision` 在无 shell policy 时仍接受 `RemoteFileRead` / `RemoteFileWrite`，且不写入 shell policy binding。
+- E2E 测试：`test_remote_file_relay_e2e.sh` 批准配对时直接请求 `remote_file_write`，并在执行 file 命令前确认 target grant list 中对应 `grant_id` 已是 `remote_file_write`。
+- 真实场景测试：`human_tests/remote-invoke-file.md` 记录 `TC-4.1`，覆盖 CI 回归路径：配对批准后 file.read/list/edit 必须返回 JSON，不能出现 `grant scope RemoteQuery does not allow command kind File`。
+
 ---
 
 ## 10. Phase 3 — Unified diff & 进阶能力

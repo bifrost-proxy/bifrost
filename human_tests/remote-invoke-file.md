@@ -27,7 +27,7 @@
    allow_overwrite = true
    allow_recursive_delete = false
    ```
-3. **Grant**：host-A 本地通过 `bifrost remote grant update <grant_id> --scope remote_file_write` 为目标 grant 设置文件读写作用域；只读拒绝用例中再降级到 `remote_file_read`。
+3. **Grant**：host-A 本地通过 `bifrost remote grant update <grant_id> --file-access read_write` 为目标 grant 设置文件读写权限；只读拒绝用例中再降级到 `--file-access read`。注意：`file_access` 是独立于 `grant_scope` 的正交字段。
 
 ---
 
@@ -241,6 +241,23 @@ bifrost remote file read --help
 
 - 确保原有 `bifrost remote command exec`、`bifrost remote shell` 行为不受影响。
 - `bifrost remote grant list` 能正确展示 `remote_file_read` / `remote_file_write` 作用域。
+
+### TC-6.1 回归：配对批准时 remote_file_write 不依赖 Shell Access policy
+
+**触发 Bug**：CI `scripts/ci/run-e2e-shell.sh` 运行 `test_remote_file_relay_e2e.sh` 时，前置授权未稳定升级为 file scope，后续 `file.read/list/edit` 被 target 端拒绝为 `grant scope RemoteQuery does not allow command kind File`。
+
+**步骤**：
+```bash
+SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh
+```
+
+**期望**：
+- 配对批准阶段输出 `grant available as remote_file_write`；
+- `TC-FILE-01` `file.read` 返回包含 `content_b64` 的 JSON，不再出现 `RemoteQuery does not allow command kind File`；
+- `TC-FILE-19` `file.list --exclude` 返回 `entries` JSON；
+- `TC-FILE-20` `file.edit` 空 replacement 删除行返回成功 JSON；
+- `TC-FILE-09` 降级到 `remote_file_read` 后写入被拒绝，证明 read/write scope 边界仍生效；
+- 总结为 `Total: 56`、`Failed: 0`。
 
 ---
 
@@ -475,5 +492,6 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users
 | 2026-04-25 | patch 创建新文件 | `cargo test -p bifrost-admin -- apply_patch_creates_new_file` | PASS："hello\nworld\n" |
 | 2026-04-25 | glob 自定义 exclude | `cargo test -p bifrost-admin -- glob_custom_exclude` | PASS：build/ 被排除 |
 | 2026-04-25 | 空文件 offset | `cargo test -p bifrost-admin -- read_empty_file_with_offset_returns_empty` | PASS：total_lines=0 |
+| 2026-04-25 | TC-6.1 配对批准时 remote_file_write 不依赖 Shell Access policy | `SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh` | PASS：输出 `grant available as remote_file_write`，TC-FILE-01/19/20/09 通过，Summary 56/56 passed |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
 | 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |

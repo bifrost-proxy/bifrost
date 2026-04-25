@@ -14,6 +14,7 @@ import {
   List,
   Modal,
   Popconfirm,
+  Radio,
   Row,
   Select,
   Space,
@@ -26,18 +27,23 @@ import {
 } from "antd";
 import {
   ApiOutlined,
+  CodeOutlined,
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
   EyeOutlined,
+  FileOutlined,
   HistoryOutlined,
   KeyOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyOutlined,
   ScanOutlined,
+  SearchOutlined,
+  SettingOutlined,
   StopOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
   clearCalls,
@@ -70,6 +76,7 @@ import {
   type RemoteInvokeSshKeySecretPayload,
   type RemoteInvokeStatus,
   type RemoteShellSet,
+  type FileAccessScope,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -699,10 +706,12 @@ export default function RemoteInvokeTab() {
   const [shellSaveLoading, setShellSaveLoading] = useState(false);
   const [grantEditorOpen, setGrantEditorOpen] = useState(false);
   const [editingGrant, setEditingGrant] = useState<Grant | null>(null);
+  const [grantEditorPreset, setGrantEditorPreset] = useState<"query" | "full" | "shell_only" | "file_only" | "custom">("full");
   const [grantEditorAccessMode, setGrantEditorAccessMode] = useState<"query" | "selected" | "all">("query");
   const [grantEditorSelectedPolicies, setGrantEditorSelectedPolicies] = useState<string[]>([]);
   const [grantEditorStdinAllowed, setGrantEditorStdinAllowed] = useState(false);
   const [grantEditorInteractiveAllowed, setGrantEditorInteractiveAllowed] = useState(false);
+  const [grantEditorFileAccess, setGrantEditorFileAccess] = useState<FileAccessScope>("none");
   const [grantSaveLoading, setGrantSaveLoading] = useState(false);
   const [callDetailOpen, setCallDetailOpen] = useState(false);
   const [callDetailLoading, setCallDetailLoading] = useState(false);
@@ -943,11 +952,31 @@ export default function RemoteInvokeTab() {
 
   const openGrantEditor = (grant: Grant) => {
     const accessMode = getGrantAccessMode(grant);
+    const fa = grant.file_access || "none";
+    const isShell = accessMode === "selected" || accessMode === "all";
+    const hasFile = fa === "read" || fa === "read_write";
+
+    // Derive preset from current grant state
+    let preset: "query" | "full" | "shell_only" | "file_only" | "custom";
+    if (isShell && hasFile && grant.interactive_allowed) {
+      preset = "full";
+    } else if (isShell && !hasFile) {
+      preset = "shell_only";
+    } else if (!isShell && hasFile) {
+      preset = "file_only";
+    } else if (!isShell && !hasFile) {
+      preset = "query";
+    } else {
+      preset = "custom";
+    }
+
     setEditingGrant(grant);
+    setGrantEditorPreset(preset);
     setGrantEditorAccessMode(accessMode);
     setGrantEditorSelectedPolicies(getGrantSelectedPolicies(grant));
     setGrantEditorStdinAllowed(Boolean(grant.stdin_allowed));
     setGrantEditorInteractiveAllowed(Boolean(grant.interactive_allowed));
+    setGrantEditorFileAccess(fa as FileAccessScope);
     setGrantEditorOpen(true);
   };
 
@@ -955,23 +984,61 @@ export default function RemoteInvokeTab() {
     if (!editingGrant) {
       return;
     }
-    if (grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
+    if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
       message.error("Choose at least one shell policy");
       return;
     }
 
-    const payload =
-      grantEditorAccessMode === "query"
-        ? {
+    // Resolve preset to actual grant parameters
+    const resolvePayload = () => {
+      switch (grantEditorPreset) {
+        case "query":
+          return {
             grant_scope: "remote_query",
+            file_access: "none" as const,
             policy_binding: null,
             interactive_allowed: false,
             stdin_allowed: false,
+          };
+        case "full":
+          return {
+            grant_scope: "remote_shell_interactive",
+            file_access: "read_write" as const,
+            policy_binding: { mode: "all" },
+            interactive_allowed: true,
+            stdin_allowed: true,
+          };
+        case "shell_only":
+          return {
+            grant_scope: "remote_shell_interactive",
+            file_access: "none" as const,
+            policy_binding: { mode: "all" },
+            interactive_allowed: true,
+            stdin_allowed: true,
+          };
+        case "file_only":
+          return {
+            grant_scope: "remote_query",
+            file_access: "read_write" as const,
+            policy_binding: null,
+            interactive_allowed: false,
+            stdin_allowed: false,
+          };
+        case "custom":
+          if (grantEditorAccessMode === "query") {
+            return {
+              grant_scope: "remote_query",
+              file_access: grantEditorFileAccess,
+              policy_binding: null,
+              interactive_allowed: false,
+              stdin_allowed: false,
+            };
           }
-        : {
+          return {
             grant_scope: grantEditorInteractiveAllowed
               ? "remote_shell_interactive"
               : "remote_shell_exec",
+            file_access: grantEditorFileAccess,
             policy_binding:
               grantEditorAccessMode === "all"
                 ? { mode: "all" }
@@ -979,7 +1046,10 @@ export default function RemoteInvokeTab() {
             interactive_allowed: grantEditorInteractiveAllowed,
             stdin_allowed: grantEditorStdinAllowed,
           };
+      }
+    };
 
+    const payload = resolvePayload();
     setGrantSaveLoading(true);
     try {
       await updateGrant(editingGrant.grant_id, payload);
@@ -1895,6 +1965,11 @@ export default function RemoteInvokeTab() {
                           <Tag color={g.grant_scope === "remote_query" ? "default" : "purple"}>
                             {g.grant_scope}
                           </Tag>
+                          {g.file_access && g.file_access !== "none" && (
+                            <Tag color="blue">
+                              {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
+                            </Tag>
+                          )}
                           {g.shell_policy_set_version_snapshot != null && (
                             <Tag color="blue">
                               shell set v{g.shell_policy_set_version_snapshot}
@@ -2273,50 +2348,132 @@ export default function RemoteInvokeTab() {
               },
             ]}
           />
-          <Select
-            value={grantEditorAccessMode}
-            onChange={(value) =>
-              setGrantEditorAccessMode(value as "query" | "selected" | "all")
-            }
-            options={[
-              { value: "query", label: "Read-only queries" },
-              {
-                value: "selected",
-                label: "Selected shell policies",
-                disabled: enabledShellPolicies.length === 0,
-              },
-              {
-                value: "all",
-                label: "All enabled shell policies",
-                disabled: enabledShellPolicies.length === 0,
-              },
-            ]}
-          />
-          <Select
-            mode="multiple"
-            placeholder="Choose shell policies for this grant"
-            disabled={grantEditorAccessMode !== "selected"}
-            value={grantEditorSelectedPolicies}
-            onChange={setGrantEditorSelectedPolicies}
-            options={enabledShellPolicies.map((policy) => ({
-              value: policy.id,
-              label: `${policy.name} (${policy.id})`,
-            }))}
-          />
-          <Space>
-            <Text type="secondary">Allow stdin</Text>
-            <Switch
-              checked={grantEditorStdinAllowed}
-              disabled={grantEditorAccessMode === "query"}
-              onChange={setGrantEditorStdinAllowed}
-            />
-            <Text type="secondary">Allow interactive shell</Text>
-            <Switch
-              checked={grantEditorInteractiveAllowed}
-              disabled={grantEditorAccessMode === "query"}
-              onChange={setGrantEditorInteractiveAllowed}
-            />
-          </Space>
+          <Radio.Group
+            value={grantEditorPreset}
+            onChange={(e) => setGrantEditorPreset(e.target.value)}
+            style={{ width: "100%" }}
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size={4}>
+              <Radio value="full" disabled={enabledShellPolicies.length === 0}>
+                <Space>
+                  <ThunderboltOutlined />
+                  <span>Full Access</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Shell + File + Interactive
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="shell_only" disabled={enabledShellPolicies.length === 0}>
+                <Space>
+                  <CodeOutlined />
+                  <span>Shell Only</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Execute commands, no file access
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="file_only">
+                <Space>
+                  <FileOutlined />
+                  <span>File Only</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Read & write files, no shell
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="query">
+                <Space>
+                  <SearchOutlined />
+                  <span>Query Only</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Read-only queries
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="custom">
+                <Space>
+                  <SettingOutlined />
+                  <span>Custom</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Configure individually
+                  </Text>
+                </Space>
+              </Radio>
+            </Space>
+          </Radio.Group>
+          {grantEditorPreset === "custom" && (
+            <div
+              style={{
+                padding: 12,
+                background: "var(--ant-color-bg-container-disabled, #fafafa)",
+                borderRadius: 8,
+              }}
+            >
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Shell Access</Text>
+                  <Select
+                    value={grantEditorAccessMode}
+                    onChange={setGrantEditorAccessMode}
+                    style={{ width: "100%", marginTop: 4 }}
+                    options={[
+                      { value: "query", label: "No shell access" },
+                      {
+                        value: "selected",
+                        label: "Selected shell policies",
+                        disabled: enabledShellPolicies.length === 0,
+                      },
+                      {
+                        value: "all",
+                        label: "All enabled shell policies",
+                        disabled: enabledShellPolicies.length === 0,
+                      },
+                    ]}
+                  />
+                </div>
+                {grantEditorAccessMode === "selected" && (
+                  <Select
+                    mode="multiple"
+                    placeholder="Choose shell policies"
+                    value={grantEditorSelectedPolicies}
+                    onChange={setGrantEditorSelectedPolicies}
+                    style={{ width: "100%" }}
+                    options={enabledShellPolicies.map((policy) => ({
+                      value: policy.id,
+                      label: `${policy.name} (${policy.id})`,
+                    }))}
+                  />
+                )}
+                {grantEditorAccessMode !== "query" && (
+                  <Space>
+                    <Text type="secondary">Allow stdin</Text>
+                    <Switch
+                      checked={grantEditorStdinAllowed}
+                      onChange={setGrantEditorStdinAllowed}
+                    />
+                    <Text type="secondary">Interactive</Text>
+                    <Switch
+                      checked={grantEditorInteractiveAllowed}
+                      onChange={setGrantEditorInteractiveAllowed}
+                    />
+                  </Space>
+                )}
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>File Access</Text>
+                  <Select
+                    value={grantEditorFileAccess}
+                    onChange={setGrantEditorFileAccess}
+                    style={{ width: "100%", marginTop: 4 }}
+                    options={[
+                      { value: "none", label: "No file access" },
+                      { value: "read", label: "Read only" },
+                      { value: "read_write", label: "Read & Write" },
+                    ]}
+                  />
+                </div>
+              </Space>
+            </div>
+          )}
         </Space>
       </Modal>
       <Modal

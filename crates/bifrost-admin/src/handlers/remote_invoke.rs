@@ -8,7 +8,7 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use bifrost_core::BifrostError;
 
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
-use crate::remote_invoke::types::{GrantMode, GrantScope};
+use crate::remote_invoke::types::{FileAccessScope, GrantMode, GrantScope};
 use crate::remote_invoke::worker::RemoteInvokeWorker;
 
 pub type SharedRemoteInvokeWorker = Arc<RemoteInvokeWorker>;
@@ -220,6 +220,8 @@ async fn handle_pairing_approve(
         #[serde(default)]
         grant_scope: Option<GrantScope>,
         #[serde(default)]
+        file_access: Option<FileAccessScope>,
+        #[serde(default)]
         policy_binding: Option<serde_json::Value>,
         #[serde(default)]
         interactive_allowed: Option<bool>,
@@ -242,6 +244,7 @@ async fn handle_pairing_approve(
             pairing_id,
             parsed.grant_mode,
             parsed.grant_scope,
+            parsed.file_access,
             parsed.policy_binding,
             parsed.interactive_allowed,
             parsed.stdin_allowed,
@@ -407,6 +410,8 @@ async fn handle_grant_action(
                 #[serde(default)]
                 grant_scope: Option<GrantScope>,
                 #[serde(default)]
+                file_access: Option<FileAccessScope>,
+                #[serde(default)]
                 policy_binding: Option<serde_json::Value>,
                 #[serde(default)]
                 interactive_allowed: Option<bool>,
@@ -428,6 +433,7 @@ async fn handle_grant_action(
                 .update_grant(
                     grant_id,
                     parsed.grant_scope,
+                    parsed.file_access,
                     parsed.policy_binding,
                     parsed.interactive_allowed,
                     parsed.stdin_allowed,

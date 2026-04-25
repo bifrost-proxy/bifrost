@@ -611,7 +611,7 @@ export class RemoteInvokeService {
     }
 
     const commandKind = resolveCommandKind(req.command_kind);
-    if (!grantScopeAllowsCommand(grant.grant_scope, commandKind)) {
+    if (!grantScopeAllowsCommand(grant.grant_scope, commandKind, grant.file_access)) {
       throw new Error('grant_scope_mismatch');
     }
 

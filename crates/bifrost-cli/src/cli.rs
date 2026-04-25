@@ -1641,8 +1641,8 @@ pub enum RemoteGrantCommands {
         access: Option<String>,
         #[arg(
             long,
-            value_parser = ["remote_query", "remote_shell_exec", "remote_shell_interactive", "remote_file_read", "remote_file_write"],
-            help = "Explicit grant scope; use remote_file_read/write for Remote File API grants"
+            value_parser = ["remote_query", "remote_shell_exec", "remote_shell_interactive"],
+            help = "Explicit grant scope for shell/query access"
         )]
         scope: Option<String>,
         #[arg(long = "policy", action = ArgAction::Append, help = "Bind to this shell policy id (repeatable for selected access)")]
@@ -1651,6 +1651,8 @@ pub enum RemoteGrantCommands {
         stdin: Option<bool>,
         #[arg(long, help = "Allow interactive shell: true or false")]
         interactive: Option<bool>,
+        #[arg(long, value_parser = ["none", "read", "read_write"], help = "File access level: none, read, or read_write")]
+        file_access: Option<String>,
     },
     #[command(about = "Revoke a grant")]
     Revoke {
