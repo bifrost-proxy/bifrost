@@ -697,6 +697,35 @@ function describeExecMode(mode: string): string {
   }
 }
 
+function escapeRegExpForPrefix(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Build a "starts with" regex that allows the prefix followed by end-of-string,
+// whitespace, or a non-word/non-slash separator. Stored in allowed_shell_patterns.
+function buildPrefixPattern(prefix: string): string {
+  const escaped = escapeRegExpForPrefix(prefix);
+  return "^" + escaped + "(\\s|$)";
+}
+
+// If the stored pattern was produced by buildPrefixPattern, decode it back so
+// the UI can show it as a plain prefix. Otherwise return null to signal "custom regex".
+function tryDecodePrefix(pattern: string): string | null {
+  const m = /^\^(.*)\(\\s\|\$\)$/.exec(pattern);
+  if (!m) return null;
+  const body = m[1];
+  // Reject bodies that still contain unescaped regex metacharacters — means
+  // the user hand-wrote a regex that happens to end with the same suffix.
+  try {
+    const unescaped = body.replace(/\\(.)/g, "$1");
+    if (buildPrefixPattern(unescaped) !== pattern) return null;
+    return unescaped;
+  } catch {
+    return null;
+  }
+}
+
+
 function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
   if (grant.grant_scope === "remote_query") {
     return "query";
@@ -3486,23 +3515,110 @@ export default function RemoteInvokeTab() {
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed shell patterns</Text>
-                        <Select
-                          mode="tags"
-                          style={{ width: "100%" }}
-                          value={policy.allowed_shell_patterns}
-                          onChange={(value) =>
-                            setShellEditorPolicies((prev) =>
-                              prev.map((item, current) =>
-                                current === index
-                                  ? { ...item, allowed_shell_patterns: value }
-                                  : item,
-                              ),
-                            )
-                          }
-                          tokenSeparators={[","]}
-                          placeholder="Add regex patterns"
-                        />
+                        <Tooltip title="Each row allows one shell command. Use 'Starts with' for a literal command prefix (recommended), or switch to 'Regex' for full control.">
+                          <Text type="secondary">Allowed shell patterns</Text>
+                        </Tooltip>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          {policy.allowed_shell_patterns.length === 0 && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              No patterns yet. Click Add to allow a command.
+                            </Text>
+                          )}
+                          {policy.allowed_shell_patterns.map((pat, patIdx) => {
+                            const decoded = tryDecodePrefix(pat);
+                            const isPrefix = decoded !== null;
+                            return (
+                              <Space.Compact
+                                key={`${policy.id}-pat-${patIdx}`}
+                                style={{ width: "100%" }}
+                              >
+                                <Select
+                                  style={{ width: 130 }}
+                                  value={isPrefix ? "prefix" : "regex"}
+                                  onChange={(nextMode: "prefix" | "regex") => {
+                                    setShellEditorPolicies((prev) =>
+                                      prev.map((item, current) => {
+                                        if (current !== index) return item;
+                                        const next = [...item.allowed_shell_patterns];
+                                        if (nextMode === "prefix") {
+                                          // Convert current entry to a prefix pattern.
+                                          const body = isPrefix
+                                            ? (decoded as string)
+                                            : pat.replace(/^\^/, "");
+                                          next[patIdx] = buildPrefixPattern(body);
+                                        } else {
+                                          // Switch to raw regex mode, show the stored regex as-is.
+                                          next[patIdx] = isPrefix
+                                            ? buildPrefixPattern(decoded as string)
+                                            : pat;
+                                        }
+                                        return { ...item, allowed_shell_patterns: next };
+                                      }),
+                                    );
+                                  }}
+                                  options={[
+                                    { value: "prefix", label: "Starts with" },
+                                    { value: "regex", label: "Regex" },
+                                  ]}
+                                />
+                                <Input
+                                  style={{ flex: 1 }}
+                                  value={isPrefix ? (decoded as string) : pat}
+                                  placeholder={isPrefix ? "e.g. git status" : "e.g. ^ls(\\s|$)"}
+                                  onChange={(e) => {
+                                    const raw = e.target.value;
+                                    setShellEditorPolicies((prev) =>
+                                      prev.map((item, current) => {
+                                        if (current !== index) return item;
+                                        const next = [...item.allowed_shell_patterns];
+                                        next[patIdx] = isPrefix ? buildPrefixPattern(raw) : raw;
+                                        return { ...item, allowed_shell_patterns: next };
+                                      }),
+                                    );
+                                  }}
+                                />
+                                <Button
+                                  danger
+                                  icon={<DeleteOutlined />}
+                                  onClick={() =>
+                                    setShellEditorPolicies((prev) =>
+                                      prev.map((item, current) => {
+                                        if (current !== index) return item;
+                                        const next = item.allowed_shell_patterns.filter(
+                                          (_, i) => i !== patIdx,
+                                        );
+                                        return { ...item, allowed_shell_patterns: next };
+                                      }),
+                                    )
+                                  }
+                                />
+                              </Space.Compact>
+                            );
+                          })}
+                          <Space>
+                            <Button
+                              size="small"
+                              icon={<PlusOutlined />}
+                              onClick={() =>
+                                setShellEditorPolicies((prev) =>
+                                  prev.map((item, current) =>
+                                    current === index
+                                      ? {
+                                          ...item,
+                                          allowed_shell_patterns: [
+                                            ...item.allowed_shell_patterns,
+                                            buildPrefixPattern(""),
+                                          ],
+                                        }
+                                      : item,
+                                  ),
+                                )
+                              }
+                            >
+                              Add command
+                            </Button>
+                          </Space>
+                        </Space>
                       </Col>
                       <Col xs={24} md={12}>
                         <Text type="secondary">Allowed working directories</Text>
