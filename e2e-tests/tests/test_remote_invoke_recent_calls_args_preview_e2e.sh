@@ -373,11 +373,20 @@ sleep 1
 
 http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "读取长参数 Recent Calls API 应返回 200"
-LATEST_LONG_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r '
+LATEST_LONG_SEARCH_CALL_ID="$(echo "$HTTP_BODY" | jq -r --arg prefix "$LONG_REMOTE_MARKER_PREFIX" '
     (.calls // [])
-    | map(select((.command_summary.command_preview // "") == "search.stream"))
+    | map(select(
+        (.command_summary.command_preview // "") == "search.stream"
+        and ((.command_summary.masked_args_json // "") | contains($prefix))
+    ))
     | sort_by(.started_at // 0)
     | reverse
+    | .[0].call_id // ""
+')"
+assert_not_empty "$LATEST_LONG_SEARCH_CALL_ID" "长参数 search.stream 的 call_id 不应为空"
+LATEST_LONG_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r --arg call_id "$LATEST_LONG_SEARCH_CALL_ID" '
+    (.calls // [])
+    | map(select(.call_id == $call_id))
     | .[0].command_summary.masked_args_json // ""
 ')"
 assert_not_empty "$LATEST_LONG_SEARCH_MASKED_ARGS_JSON" "长参数 search.stream 的 masked_args_json 不应为空"
@@ -422,6 +431,22 @@ if [[ "$RESTORED_PREVIEW" == "search.stream" ]]; then
     _log_pass "TC-RI-ARGS-04: 重启 Bifrost 后 Recent Calls 仍保留 search.stream 调用"
 else
     _log_fail "TC-RI-ARGS-04: 重启后 Recent Calls 丢失或摘要错误" "search.stream" "${RESTORED_PREVIEW:-<empty>}"
+    exit 1
+fi
+RESTORED_LONG_SEARCH_MASKED_ARGS_JSON="$(echo "$HTTP_BODY" | jq -r --arg call_id "$LATEST_LONG_SEARCH_CALL_ID" '
+    (.calls // [])
+    | map(select(.call_id == $call_id))
+    | .[0].command_summary.masked_args_json // ""
+')"
+assert_not_empty "$RESTORED_LONG_SEARCH_MASKED_ARGS_JSON" "重启后长参数 search.stream 的 masked_args_json 不应为空"
+RESTORED_LONG_MASKED_KEYWORD="$(echo "$RESTORED_LONG_SEARCH_MASKED_ARGS_JSON" | jq -r '.keyword // ""')"
+if [[ "${#RESTORED_LONG_MASKED_KEYWORD}" -le 120 ]] \
+    && [[ "$RESTORED_LONG_MASKED_KEYWORD" == *"$LONG_REMOTE_MARKER_PREFIX"* ]]; then
+    _log_pass "TC-RI-ARGS-04B: 重启后长参数 Recent Calls 仍保留且继续按 120 字符截断"
+else
+    _log_fail "TC-RI-ARGS-04B: 重启后长参数 Recent Calls 未保持截断" \
+        "keyword length<=120 and contains prefix" \
+        "keyword_length=${#RESTORED_LONG_MASKED_KEYWORD}; value=$RESTORED_LONG_SEARCH_MASKED_ARGS_JSON"
     exit 1
 fi
 

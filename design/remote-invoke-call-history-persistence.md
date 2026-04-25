@@ -26,10 +26,9 @@ Remote Invoke 的 `Recent Calls` 是目标客户端本地 Settings 页面展示�
 
 ### 单元测试
 
-- `call_history_store_roundtrip_filters_by_relay_and_client`：验证落盘后只恢复当前 relay 与 client 的记录
-- `call_history_store_upsert_replaces_existing_call`：验证终态更新覆盖同一 `call_id`
-- `call_history_store_trims_oldest_records_per_client`：验证 `max_records` 裁剪最旧记录
-- `call_history_store_resets_unreadable_file`：验证损坏 JSON 会被清理并返回错误
+- `test_call_history_store_prunes_by_retention_and_max_records`：验证 `max_records` 与保留时间裁剪最旧记录
+- `test_call_history_store_clear_for_client_removes_only_current_client`：验证清理只删除当前 relay/client 的记录
+- `test_call_history_store_truncates_command_fields_before_persisting`：验证命令相关长文本和 JSON 字符串值落盘前最多保留 120 字符，且原始完整长文本不会写入存储文件
 - `test_finalize_non_terminal_restored_calls_marks_streaming_failed`：验证重启恢复时 streaming 记录收敛为 failed
 
 ### E2E 测试
@@ -40,6 +39,10 @@ Remote Invoke 的 `Recent Calls` 是目标客户端本地 Settings 页面展示�
 - 读取 `/_bifrost/api/remote-invoke/calls` 确认 call 存在
 - 停止并用同一个数据目录重启 Bifrost
 - 再次读取 Recent Calls，断言同一个 `call_id` 和 `command_summary.command_preview=status` 仍存在
+- 扩展 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`
+- 生成长参数 `remote search` 调用后，断言 `masked_args_json.keyword` 最多 120 字符且保留前缀
+- 检查 `remote_invoke_call_history.json` 不包含完整长参数
+- 用同一个数据目录重启 Bifrost 后，按长参数调用的同一个 `call_id` 再次读取 Recent Calls，并断言长字段仍最多 120 字符
 
 ### 真实场景测试
 
