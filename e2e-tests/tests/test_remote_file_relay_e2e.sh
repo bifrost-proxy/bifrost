@@ -1454,6 +1454,393 @@ test_gap_error_code_sha_mismatch() {
 }
 
 
+# ---------------------------------------------------------------------------
+#  TC-GAP-11 (P0-1): file.search column is 1-based CHAR column (not byte offset)
+# ---------------------------------------------------------------------------
+test_gap_search_char_column() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-11: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-11 (P0-1): file.search column is char-based, not byte-based"
+
+    # 三个中文字符(每个 3 字节 UTF-8)后跟 NEEDLE。字节列=10,字符列=4。
+    local target="$SANDBOX_DIR/multibyte.txt"
+    printf '你好啊NEEDLE tail\n' > "$target"
+
+    local out
+    out=$(run_remote_file_cmd search "NEEDLE" --cwd "$SANDBOX_DIR" --glob "multibyte.txt") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-11: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    # 提取首条命中的 column / byte_column
+    local col byte_col
+    col=$(echo "$out" | python3 -c 'import sys,json,re
+blob=sys.stdin.read()
+# 宽松解析:取出第一个含 column 的 JSON 片段
+m=re.search(r"\"column\"\s*:\s*(\d+)",blob); print(m.group(1) if m else "")')
+    byte_col=$(echo "$out" | python3 -c 'import sys,re
+blob=sys.stdin.read()
+m=re.search(r"\"byte_column\"\s*:\s*(\d+)",blob); print(m.group(1) if m else "")')
+
+    if [[ "$col" == "4" ]]; then
+        _log_pass "TC-GAP-11: column is char-based (=4 after 3 CJK chars)"
+    else
+        _log_fail "TC-GAP-11: column is char-based" "4" "$col"
+    fi
+    if [[ "$byte_col" == "10" ]]; then
+        _log_pass "TC-GAP-11: byte_column preserved (=10)"
+    else
+        _log_fail "TC-GAP-11: byte_column preserved" "10" "$byte_col"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-12 (P0-2): file.edit normalizes CRLF replacement into LF source
+# ---------------------------------------------------------------------------
+test_gap_edit_normalizes_lf_file() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-12: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-12 (P0-2): file.edit strips CRLF from replacement into LF file"
+
+    # 纯 LF 源文件
+    local target="$SANDBOX_DIR/lf.txt"
+    printf 'alpha\nbeta\ngamma\n' > "$target"
+
+    # 替换串带 CRLF —— 期望被归一化回 LF,不出现混合行尾
+    local edits_json
+    edits_json='[{"start_line":2,"end_line":2,"replacement":"BETA1\r\nBETA2"}]'
+    local out
+    out=$(run_remote_file_cmd edit lf.txt --cwd "$SANDBOX_DIR" --edits "$edits_json") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-12: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local crlf_count
+    # Count CR bytes via tr|wc — grep -c prints "0" AND exits 1 on no-match,
+    # which together with `|| echo 0` produces "0\n0" and breaks the check.
+    crlf_count=$(tr -cd '\r' < "$target" | wc -c | tr -d ' ')
+    if [[ "$crlf_count" == "0" ]]; then
+        _log_pass "TC-GAP-12: LF file stays pure LF after edit with CRLF replacement"
+    else
+        _log_fail "TC-GAP-12: LF file stays pure LF" "0 CR bytes" "$crlf_count CR bytes"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-13 (P0-3): file.read offset/limit does not inject a trailing \n
+# ---------------------------------------------------------------------------
+test_gap_read_no_trailing_nl_injection() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-13: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-13 (P0-3): offset/limit reading EOF line preserves no-trailing-newline"
+
+    # 3 行且末行无 \n
+    local target="$SANDBOX_DIR/no-nl.txt"
+    printf 'one\ntwo\nthree' > "$target"
+
+    # 读第 3 行(即最后一行)—— 它没有换行,响应的 content_b64 也不应含换行
+    local out
+    out=$(run_remote_file_cmd read no-nl.txt --cwd "$SANDBOX_DIR" --offset 3 --limit 1) || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-13: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local decoded last_byte
+    decoded=$(echo "$out" | python3 -c 'import sys,json,re,base64
+blob=sys.stdin.read()
+m=re.search(r"\"content_b64\"\s*:\s*\"([^\"]+)\"",blob)
+if not m: sys.exit(0)
+sys.stdout.buffer.write(base64.b64decode(m.group(1)))')
+    last_byte=$(printf '%s' "$decoded" | tail -c 1 | od -An -tx1 | tr -d ' \n')
+    # 期望 decoded = "three" (5 字节, 最后一字节 0x65 'e')
+    if [[ "$decoded" == "three" ]]; then
+        _log_pass "TC-GAP-13: last-line slice has no injected trailing newline"
+    else
+        _log_fail "TC-GAP-13: last-line slice is pristine" "three" "$decoded (last=$last_byte)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-14 (P0-4): file.apply_patch rollback restores unix mode
+# ---------------------------------------------------------------------------
+test_gap_apply_patch_rollback_preserves_mode() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-14: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-14 (P0-4): apply_patch rollback keeps 0755 on restored files"
+
+    # 两个文件,a 可执行,b 故意让第二个 hunk 失配触发 rollback。
+    local a="$SANDBOX_DIR/roll_a.sh"
+    local b="$SANDBOX_DIR/roll_b.sh"
+    printf '#!/bin/sh\necho a_v1\n' > "$a"
+    printf '#!/bin/sh\necho b_v1\n' > "$b"
+    chmod 0755 "$a" "$b"
+
+    # patch: 第一个文件可正常应用;第二个文件的上下文写错触发失败。
+    local patch_file="$SANDBOX_DIR/bad.patch"
+    cat > "$patch_file" <<'PATCH'
+--- a/roll_a.sh
++++ b/roll_a.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo a_v1
++echo a_v2
+--- a/roll_b.sh
++++ b/roll_b.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo WRONG_CONTEXT
++echo b_v2
+PATCH
+
+    local out
+    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-14: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    # 期望原子回滚:两个文件都回到 v1;可执行位仍是 755
+    local a_mode b_mode a_content b_content
+    a_mode=$(stat -f '%Lp' "$a" 2>/dev/null || stat -c '%a' "$a" 2>/dev/null || echo "?")
+    b_mode=$(stat -f '%Lp' "$b" 2>/dev/null || stat -c '%a' "$b" 2>/dev/null || echo "?")
+    a_content=$(cat "$a")
+    b_content=$(cat "$b")
+
+    if [[ "$a_content" == *"a_v1"* && "$b_content" == *"b_v1"* ]]; then
+        _log_pass "TC-GAP-14: rollback restored both files' contents"
+    else
+        _log_fail "TC-GAP-14: rollback restored contents" "a_v1 & b_v1" "a=$a_content | b=$b_content"
+    fi
+    if [[ "$a_mode" == "755" && "$b_mode" == "755" ]]; then
+        _log_pass "TC-GAP-14: rollback preserved 0755 on both files"
+    else
+        _log_fail "TC-GAP-14: rollback preserved mode" "755/755" "$a_mode/$b_mode"
+    fi
+}
+
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-15 (P0-2'): normalize_to_eol is UTF-8 safe; multi-byte CJK preserved
+# ---------------------------------------------------------------------------
+test_gap_edit_multibyte_eol_safe() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-15: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-15 (P0-2'): CJK characters survive EOL normalization intact"
+
+    local target="$SANDBOX_DIR/mb-lf.txt"
+    printf 'alpha\nbeta\ngamma\n' > "$target"
+
+    # 替换串含 CJK 与 CRLF,期望输出为纯 LF 且 CJK 字节完整(UTF-8:中=E4B8AD 文=E69687)
+    local edits_json
+    edits_json='[{"start_line":2,"end_line":2,"replacement":"中\r\n文"}]'
+    local out
+    out=$(run_remote_file_cmd edit mb-lf.txt --cwd "$SANDBOX_DIR" --edits "$edits_json") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-15: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local cr_count has_zhong has_wen
+    cr_count=$(tr -cd '\r' < "$target" | wc -c | tr -d ' ')
+    has_zhong=$(grep -c '中' "$target" || true); has_zhong=${has_zhong%% *}
+    has_wen=$(grep -c '文' "$target" || true);   has_wen=${has_wen%% *}
+    # 更严:确认 UTF-8 字节完整
+    local bytes_ok="no"
+    if python3 -c '
+import sys
+d=open(sys.argv[1],"rb").read()
+sys.exit(0 if (b"\xe4\xb8\xad" in d and b"\xe6\x96\x87" in d and b"\r" not in d) else 1)
+' "$target"; then
+        bytes_ok="yes"
+    fi
+
+    if [[ "$cr_count" == "0" ]]; then
+        _log_pass "TC-GAP-15: no CR bytes after EOL normalization"
+    else
+        _log_fail "TC-GAP-15: no CR bytes" "0" "$cr_count"
+    fi
+    if [[ "$bytes_ok" == "yes" ]]; then
+        _log_pass "TC-GAP-15: UTF-8 multi-byte CJK bytes intact (中 and 文)"
+    else
+        _log_fail "TC-GAP-15: UTF-8 bytes intact" "中(E4B8AD) & 文(E69687) present, no CR" "corrupted"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-16 (P0-3): offset reading last line WITH trailing \n keeps the \n
+# ---------------------------------------------------------------------------
+test_gap_read_last_line_with_nl() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-16: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-16 (P0-3): offset=3 on 'a\\nb\\nc\\n' returns exactly 'c\\n'"
+
+    local target="$SANDBOX_DIR/with-nl.txt"
+    printf 'a\nb\nc\n' > "$target"
+
+    local out
+    out=$(run_remote_file_cmd read with-nl.txt --cwd "$SANDBOX_DIR" --offset 3 --limit 1) || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-16: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local hex
+    hex=$(echo "$out" | python3 -c 'import sys,re,base64
+blob=sys.stdin.read()
+m=re.search(r"\"content_b64\"\s*:\s*\"([^\"]+)\"",blob)
+if not m: sys.exit(0)
+sys.stdout.write(base64.b64decode(m.group(1)).hex())')
+    # 期望 "c\n" = 0x63 0x0a
+    if [[ "$hex" == "630a" ]]; then
+        _log_pass "TC-GAP-16: last-line slice keeps source trailing newline"
+    else
+        _log_fail "TC-GAP-16: last-line slice hex" "630a" "$hex"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-17 (P0-4'): apply_patch rollback on CREATE removes orphan files
+# ---------------------------------------------------------------------------
+test_gap_apply_patch_rollback_on_create() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-17: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-17 (P0-4'): rollback of partial multi-file CREATE leaves no orphans"
+
+    # 预清理,确保初始状态是"两个文件都不存在"
+    rm -f "$SANDBOX_DIR/new_a.txt" "$SANDBOX_DIR/new_b.txt"
+
+    local patch_file="$SANDBOX_DIR/create.patch"
+    # 第一个 hunk 合法创建 new_a.txt;第二个 hunk 故意写成无效(空 hunk header),让 apply 失败。
+    # 通过把第二个文件的上下文行写成不存在于 /dev/null 的伪行来触发失败。
+    cat > "$patch_file" <<'PATCH'
+--- /dev/null
++++ b/new_a.txt
+@@ -0,0 +1,1 @@
++hello_a
+--- /dev/null
++++ b/new_b.txt
+@@ -0,0 +1,1 @@
+ SHOULD_NOT_EXIST_CONTEXT
++hello_b
+PATCH
+
+    local out
+    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-17: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    # 原子回滚期望:两个文件都不应存在(或至少 new_a.txt 不应残留成功创建的内容)
+    local a_exists="no" b_exists="no"
+    [[ -e "$SANDBOX_DIR/new_a.txt" ]] && a_exists="yes"
+    [[ -e "$SANDBOX_DIR/new_b.txt" ]] && b_exists="yes"
+
+    if [[ "$a_exists" == "no" && "$b_exists" == "no" ]]; then
+        _log_pass "TC-GAP-17: both create-targets removed after rollback"
+    else
+        _log_fail "TC-GAP-17: no orphan create-targets" "a=no b=no" "a=$a_exists b=$b_exists"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-18 (P0-1 regression): ASCII column is same as byte_column
+# ---------------------------------------------------------------------------
+test_gap_search_ascii_column_regression() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-18: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-18 (P0-1 regression): ASCII column == byte_column"
+
+    local target="$SANDBOX_DIR/ascii.txt"
+    printf 'hello NEEDLE world\n' > "$target"
+
+    local out
+    out=$(run_remote_file_cmd search "NEEDLE" --cwd "$SANDBOX_DIR" --glob "ascii.txt") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-18: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local col byte_col
+    col=$(echo "$out" | python3 -c 'import sys,re
+b=sys.stdin.read(); m=re.search(r"\"column\"\s*:\s*(\d+)",b); print(m.group(1) if m else "")')
+    byte_col=$(echo "$out" | python3 -c 'import sys,re
+b=sys.stdin.read(); m=re.search(r"\"byte_column\"\s*:\s*(\d+)",b); print(m.group(1) if m else "")')
+
+    if [[ "$col" == "7" && "$byte_col" == "7" ]]; then
+        _log_pass "TC-GAP-18: ASCII column=byte_column=7"
+    else
+        _log_fail "TC-GAP-18: ASCII column parity" "column=7 byte_column=7" "column=$col byte_column=$byte_col"
+    fi
+}
+
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-19 (P0-4'): mid-commit CREATE rollback unlinks, not writes empty stub
+# ---------------------------------------------------------------------------
+test_gap_apply_patch_mid_commit_create_rollback() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-19: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-19 (P0-4'): mid-commit failure unlinks freshly-created files"
+
+    rm -rf "$SANDBOX_DIR/fresh_a.txt" "$SANDBOX_DIR/blocker_b"
+    # 预置一个同名目录,让第二个文件的 rename 失败(EISDIR)
+    mkdir -p "$SANDBOX_DIR/blocker_b"
+
+    local patch_file="$SANDBOX_DIR/mid-create.patch"
+    cat > "$patch_file" <<'PATCH'
+--- /dev/null
++++ b/fresh_a.txt
+@@ -0,0 +1,1 @@
++freshly_created_A
+--- /dev/null
++++ b/blocker_b
+@@ -0,0 +1,1 @@
++should_fail_B
+PATCH
+
+    local out
+    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-19: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    # 期望 fresh_a.txt 被 unlink(不残留空文件或成功内容)
+    # blocker_b 仍是目录
+    local a_state="missing" b_is_dir="no"
+    if [[ -e "$SANDBOX_DIR/fresh_a.txt" ]]; then
+        if [[ -s "$SANDBOX_DIR/fresh_a.txt" ]]; then a_state="has_content"
+        else a_state="empty_stub"; fi
+    fi
+    [[ -d "$SANDBOX_DIR/blocker_b" ]] && b_is_dir="yes"
+
+    if [[ "$a_state" == "missing" ]]; then
+        _log_pass "TC-GAP-19: freshly-created file unlinked on mid-commit rollback"
+    else
+        _log_fail "TC-GAP-19: fresh file unlinked" "missing" "$a_state"
+    fi
+    if [[ "$b_is_dir" == "yes" ]]; then
+        _log_pass "TC-GAP-19: blocker directory untouched"
+    else
+        _log_fail "TC-GAP-19: blocker directory untouched" "yes" "$b_is_dir"
+    fi
+    rmdir "$SANDBOX_DIR/blocker_b" 2>/dev/null || true
+}
+
+
 test_readonly_rejection() {
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
         _log_warning "TC-FILE-09: skipped due to prior connection error"
@@ -1672,6 +2059,16 @@ EOF
     test_gap_search_case_insensitive_and_glob
     test_gap_symlink_target_field
     test_gap_error_code_sha_mismatch
+
+    test_gap_search_char_column
+    test_gap_edit_normalizes_lf_file
+    test_gap_read_no_trailing_nl_injection
+    test_gap_apply_patch_rollback_preserves_mode
+    test_gap_edit_multibyte_eol_safe
+    test_gap_read_last_line_with_nl
+    test_gap_apply_patch_rollback_on_create
+    test_gap_search_ascii_column_regression
+    test_gap_apply_patch_mid_commit_create_rollback
 
     test_readonly_rejection
 
