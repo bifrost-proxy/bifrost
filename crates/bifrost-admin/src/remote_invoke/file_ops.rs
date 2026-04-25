@@ -186,26 +186,35 @@ impl Eol {
 /// `+` line is in LF form but the source file is CRLF — we normalize to the
 /// source style before emitting.
 fn normalize_to_eol(text: &str, eol: Eol) -> String {
-    if eol == Eol::Lf {
-        return text.to_string();
-    }
-    // CRLF target: walk byte-by-byte, inserting \r before any lone \n.
-    let mut out = String::with_capacity(text.len() + 16);
+    // First collapse any CRLF in the input to LF so we have a single
+    // canonical form; then re-emit in the target style. This is UTF-8 safe
+    // because we only match / insert ASCII bytes (`\r`, `\n`).
+    let mut lf_only = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\n' {
-            let prev_cr = i > 0 && bytes[i - 1] == b'\r';
-            if !prev_cr {
-                out.push('\r');
-            }
-            out.push('\n');
-        } else {
-            // Safe: we only split on ASCII boundaries.
-            out.push(b as char);
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            lf_only.push('\n');
+            i += 2;
+            continue;
         }
-        i += 1;
+        // Push the next UTF-8 scalar as-is (safe: we started at a char
+        // boundary and only skipped ASCII `\r\n`).
+        let tail = &text[i..];
+        let ch = tail.chars().next().expect("non-empty tail");
+        lf_only.push(ch);
+        i += ch.len_utf8();
+    }
+    if eol == Eol::Lf {
+        return lf_only;
+    }
+    // CRLF target: every `\n` becomes `\r\n`.
+    let mut out = String::with_capacity(lf_only.len() + 16);
+    for ch in lf_only.chars() {
+        if ch == '\n' {
+            out.push('\r');
+        }
+        out.push(ch);
     }
     out
 }
@@ -325,8 +334,19 @@ pub async fn handle_file_read(
         let start_idx = ((start - 1) as usize).min(all_lines.len());
         let end_idx = (start_idx + count as usize).min(all_lines.len());
         let selected: String = all_lines[start_idx..end_idx].join("\n");
+        // P0-3: only append a trailing newline when (a) we are not at
+        // the last line of the file, or (b) the source file itself
+        // ends with '\n'. Otherwise we would inject a byte that
+        // never existed on disk and break sha256 round-trip.
+        let source_ends_with_nl = buf.last().copied() == Some(b'\n');
+        let reached_eof = (end_idx as u32) == total_lines;
+        let need_trailing_nl = start_idx < end_idx && (!reached_eof || source_ends_with_nl);
         let selected_bytes = if start_idx < end_idx {
-            format!("{}\n", selected).into_bytes()
+            if need_trailing_nl {
+                format!("{}\n", selected).into_bytes()
+            } else {
+                selected.into_bytes()
+            }
         } else {
             Vec::new()
         };
@@ -735,10 +755,18 @@ pub async fn handle_file_search(
             };
             for (line_idx, line) in lines_iter {
                 if let Some(m) = re.find(line) {
+                    // P0-1: `column` is a CHAR column (1-based), not a
+                    // byte offset — editors and language servers expect
+                    // grapheme-ish indices. Keep the byte offset as
+                    // `byte_column` so callers that diff raw bytes can
+                    // still recover the original value.
+                    let byte_start = m.start();
+                    let char_col = line[..byte_start].chars().count() as u64 + 1;
                     let mut hit = json!({
                         "path": rel,
                         "line": (line_idx as u64) + 1,
-                        "column": (m.start() as u64) + 1,
+                        "column": char_col,
+                        "byte_column": (byte_start as u64) + 1,
                         "preview": line.chars().take(240).collect::<String>(),
                     });
                     if need_context {
@@ -1003,14 +1031,12 @@ pub async fn handle_file_edit(
             out.push_str(lines[(cursor - 1) as usize]);
             cursor += 1;
         }
-        // P0-3: normalize replacement to the source file's EOL style.
-        let rep_norm;
-        let rep_ref: &str = if eol == Eol::Crlf {
-            rep_norm = normalize_to_eol(&e.replacement, eol);
-            rep_norm.as_str()
-        } else {
-            e.replacement.as_str()
-        };
+        // P0-2: always normalize replacement to the source file's EOL
+        // (both LF and CRLF) — previously we only normalized when the
+        // file was CRLF, which silently allowed CRLF bytes to leak
+        // into LF files and produce mixed endings.
+        let rep_norm = normalize_to_eol(&e.replacement, eol);
+        let rep_ref: &str = rep_norm.as_str();
         out.push_str(rep_ref);
         if !rep_ref.is_empty() && !rep_ref.ends_with('\n') && (e.end_line as usize) < lines.len() {
             out.push_str(eol.newline());
@@ -1442,15 +1468,26 @@ pub async fn handle_file_apply_patch(
 
     // Phase 2 — commit. Track what we've already renamed so a late failure
     // can best-effort restore the originals.
-    let mut committed: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    // P0-4: snapshot tuple carries prior_mode so rollback preserves
+    // unix permissions instead of resetting to umask defaults.
+    // The `existed_before` flag lets rollback unlink files that were
+    // freshly created by the patch rather than leaving empty stubs.
+    let mut committed: Vec<(PathBuf, Vec<u8>, Option<u32>, bool)> = Vec::new();
     let mut applied_out: Vec<Value> = Vec::new();
     for s in &staged {
         if s.new_path_is_dev_null {
             if let Err(e) = fs::remove_file(&s.target).await {
                 // rollback: rewrite every already-committed target from the
-                // snapshot we took before renaming.
-                for (path, bytes) in committed.iter().rev() {
-                    let _ = fs::write(path, bytes).await;
+                // snapshot we took before renaming, and restore its prior mode.
+                for (path, bytes, prior, existed) in committed.iter().rev() {
+                    if *existed {
+                        let _ = fs::write(path, bytes).await;
+                        apply_mode_sync(path, *prior);
+                    } else {
+                        // File was freshly created by this patch —
+                        // unlink instead of leaving an empty stub.
+                        let _ = fs::remove_file(path).await;
+                    }
                 }
                 // also drop any remaining tmp files that haven't been renamed yet
                 for rest in staged.iter().skip(committed.len()) {
@@ -1464,11 +1501,20 @@ pub async fn handle_file_apply_patch(
             continue;
         }
         // Snapshot current bytes for rollback (best-effort). `Vec::new()` if
-        // the file didn't exist before.
+        // the file didn't exist before. Also capture the prior mode so a
+        // later rollback can restore executable bits etc.
+        // `existed_before` lets rollback distinguish overwrite vs create.
+        let existed_before = fs::metadata(&s.target).await.is_ok();
         let snapshot = fs::read(&s.target).await.unwrap_or_default();
+        let snapshot_mode = capture_mode(&s.target).await;
         if let Err(e) = fs::rename(&s.tmp, &s.target).await {
-            for (path, bytes) in committed.iter().rev() {
-                let _ = fs::write(path, bytes).await;
+            for (path, bytes, prior, existed) in committed.iter().rev() {
+                if *existed {
+                    let _ = fs::write(path, bytes).await;
+                    apply_mode_sync(path, *prior);
+                } else {
+                    let _ = fs::remove_file(path).await;
+                }
             }
             for rest in staged.iter().skip(committed.len()) {
                 if !rest.tmp.as_os_str().is_empty() {
@@ -1478,7 +1524,7 @@ pub async fn handle_file_apply_patch(
             return Err(io_err("rename-tmp", e));
         }
         apply_mode(&s.target, s.prior_mode).await;
-        committed.push((s.target.clone(), snapshot));
+        committed.push((s.target.clone(), snapshot, snapshot_mode, existed_before));
         applied_out.push(s.applied_entry.clone());
     }
 
