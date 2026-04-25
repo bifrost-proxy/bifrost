@@ -1157,14 +1157,32 @@ test_gap_write_preserves_mode() {
         _log_pass "TC-GAP-01: executable bit preserved after file.write"
     else
         _log_fail "TC-GAP-01: executable bit preserved after file.write" "755" "$mode"
-        if [[ -n "${BIFROST_FILE_OPS_DEBUG_LOG:-}" && -f "$BIFROST_FILE_OPS_DEBUG_LOG" ]]; then
-            echo "--- BIFROST_FILE_OPS_DEBUG_LOG ($BIFROST_FILE_OPS_DEBUG_LOG) ---"
-            tail -80 "$BIFROST_FILE_OPS_DEBUG_LOG" || true
-            echo "--- end sidecar ---"
+        # Write rich post-mortem INTO the sidecar (survives suite-log tail truncation in CI).
+        if [[ -n "${BIFROST_FILE_OPS_DEBUG_LOG:-}" ]]; then
+            {
+                echo "=== TC-GAP-01 POST-FAIL DIAGNOSTIC ==="
+                echo "stat-reported-mode: $mode"
+                echo "target: $target"
+                echo "sandbox: $SANDBOX_DIR"
+                echo "tmpdir-mount:"
+                mount | grep -E "on /tmp|on $(dirname "$SANDBOX_DIR")" 2>&1 || true
+                echo "ls -la target:"
+                ls -la "$target" 2>&1 || true
+                echo "stat -c raw:"
+                stat -c "mode=%a perms=%A type=%F uid=%u owner=%U gid=%g group=%G inode=%i fs=%T size=%s" "$target" 2>&1 || true
+                echo "stat (default):"
+                stat "$target" 2>&1 || true
+                echo "umask: $(umask)"
+                echo "whoami: $(id 2>&1)"
+                echo "file ACL (getfacl if any):"
+                getfacl -p "$target" 2>&1 || true
+                echo "ls -la sandbox:"
+                ls -la "$SANDBOX_DIR" 2>&1 | head -40 || true
+                echo "=== END TC-GAP-01 POST-FAIL ==="
+            } >> "$BIFROST_FILE_OPS_DEBUG_LOG" 2>&1
         fi
-        echo "[TC-GAP-01] target path: $target"
-        ls -la "$target" 2>&1 || true
-        stat "$target" 2>&1 || true
+        # Also still echo a short note to stdout for easy spotting.
+        echo "[TC-GAP-01] stat-mode=$mode (expected 755); full post-mortem in $BIFROST_FILE_OPS_DEBUG_LOG"
     fi
 }
 
