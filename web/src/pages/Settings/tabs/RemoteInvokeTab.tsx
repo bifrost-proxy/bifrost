@@ -96,7 +96,7 @@ const recentCallItemStyle: CSSProperties = {
 
 const recentCallRowStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto auto",
+  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 500px) auto",
   alignItems: "center",
   gap: 8,
   width: "100%",
