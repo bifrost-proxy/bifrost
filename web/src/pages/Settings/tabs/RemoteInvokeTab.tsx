@@ -775,6 +775,10 @@ export default function RemoteInvokeTab() {
   const [shellLoading, setShellLoading] = useState(false);
   const [shellEditorOpen, setShellEditorOpen] = useState(false);
   const [shellEditorMode, setShellEditorMode] = useState<ShellAccessMode>("custom");
+  // Expert mode: when enabled, show raw Profiles & Policies dual-column view.
+  // When disabled (default), the UI presents a unified "Command group" view
+  // hiding the Profile/Policy distinction from end users.
+  const [shellEditorExpertMode, setShellEditorExpertMode] = useState<boolean>(false);
   const [shellEditorPolicies, setShellEditorPolicies] = useState<
     ShellPolicyEditorItem[]
   >([]);
@@ -2904,6 +2908,19 @@ export default function RemoteInvokeTab() {
 
           {shellEditorMode === "custom" ? (
           <>
+          <div style={{ marginBottom: 8 }}>
+            <Space>
+              <Switch
+                checked={shellEditorExpertMode}
+                onChange={setShellEditorExpertMode}
+                size="small"
+              />
+              <Text>Expert mode</Text>
+              <Tooltip title="Show the raw Profiles (execution environments) and Policies (command whitelists) as separate sections. Leave this off for the simpler unified Command groups view.">
+                <Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>(what is this?)</Text>
+              </Tooltip>
+            </Space>
+          </div>
           <div>
             <Space
               align="center"
