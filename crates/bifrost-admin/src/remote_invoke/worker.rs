@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::Engine;
 use bifrost_core::{BifrostError, Result};
@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
+use super::call_history_store::{
+    finalize_non_terminal_restored_calls, now_millis, sanitize_call_for_history, CallHistoryStore,
+};
 use super::executor::RemoteInvokeExecutor;
 use super::grant_crypto_store::{GrantCryptoStore, StoredGrantCryptoMaterial};
 use super::grant_info_store::GrantInfoStore;
@@ -116,6 +119,7 @@ pub struct RemoteInvokeWorker {
     pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
     active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
     call_history: Arc<RwLock<VecDeque<CallInfo>>>,
+    call_history_store: Arc<CallHistoryStore>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
     grant_crypto_store: Arc<GrantCryptoStore>,
@@ -152,6 +156,7 @@ impl RemoteInvokeWorker {
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
         let grant_policy_store = Arc::new(GrantPolicyStore::new(&data_dir));
         let grant_info_store = Arc::new(GrantInfoStore::new(&data_dir));
+        let call_history_store = Arc::new(CallHistoryStore::new(&data_dir));
         let restored_grant_crypto =
             match grant_crypto_store.load_for_relay(&relay_client.base_url()) {
                 Ok(restored) => restored
@@ -214,6 +219,31 @@ impl RemoteInvokeWorker {
                 HashMap::new()
             }
         };
+        let mut restored_call_history = match call_history_store.load_for_client(
+            &relay_client.base_url(),
+            &identity.instance_id,
+            config.max_records as usize,
+            config.retention_days,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, "load persisted call history failed");
+                VecDeque::new()
+            }
+        };
+        if finalize_non_terminal_restored_calls(&mut restored_call_history, now_millis()) > 0 {
+            for call in &restored_call_history {
+                if let Err(error) = call_history_store.upsert(
+                    &relay_client.base_url(),
+                    &identity.instance_id,
+                    call,
+                    config.max_records as usize,
+                    config.retention_days,
+                ) {
+                    warn!(error = %error, call_id = %call.call_id, "persist finalized restored call failed");
+                }
+            }
+        }
 
         Arc::new(Self {
             config,
@@ -224,7 +254,8 @@ impl RemoteInvokeWorker {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
-            call_history: Arc::new(RwLock::new(VecDeque::new())),
+            call_history: Arc::new(RwLock::new(restored_call_history)),
+            call_history_store,
             local_grants: Arc::new(RwLock::new(restored_grant_info)),
             grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
             grant_crypto_store,
@@ -287,6 +318,22 @@ impl RemoteInvokeWorker {
             .iter()
             .find(|c| c.call_id == call_id)
             .cloned()
+    }
+
+    pub fn clear_calls(&self) -> usize {
+        let removed = {
+            let mut history = self.call_history.write();
+            let removed = history.len();
+            history.clear();
+            removed
+        };
+        if let Err(error) = self
+            .call_history_store
+            .clear_for_client(&self.relay_client.base_url(), &self.identity.instance_id)
+        {
+            warn!(error = %error, "clear persisted remote invoke call history failed");
+        }
+        removed
     }
 
     pub fn relay_client(&self) -> &Arc<RelayClient> {
@@ -363,6 +410,32 @@ impl RemoteInvokeWorker {
             }
         };
         *self.local_grants.write() = restored_grant_info;
+        let mut restored_call_history = match self.call_history_store.load_for_client(
+            new_normalized,
+            &self.identity.instance_id,
+            self.config.max_records as usize,
+            self.config.retention_days,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, relay_url = %new_normalized, "reload persisted call history after relay switch failed");
+                VecDeque::new()
+            }
+        };
+        if finalize_non_terminal_restored_calls(&mut restored_call_history, now_millis()) > 0 {
+            for call in &restored_call_history {
+                if let Err(error) = self.call_history_store.upsert(
+                    new_normalized,
+                    &self.identity.instance_id,
+                    call,
+                    self.config.max_records as usize,
+                    self.config.retention_days,
+                ) {
+                    warn!(error = %error, call_id = %call.call_id, "persist finalized restored call after relay switch failed");
+                }
+            }
+        }
+        *self.call_history.write() = restored_call_history;
         self.reconnect_notify.notify_waiters();
     }
 
@@ -826,7 +899,7 @@ impl RemoteInvokeWorker {
             bifrost_version: env!("CARGO_PKG_VERSION").to_string(),
             signature,
             timestamp: now,
-            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
+            ssh_device_route: self.ssh_key_store.active_route().ok(),
         };
 
         let resp = self
@@ -1072,11 +1145,21 @@ impl RemoteInvokeWorker {
 
     async fn send_heartbeat(&self, stream_id: &str) -> Result<()> {
         let active_ids = self.active_call_ids();
+        // This is intentionally three-state: omitted means the local key store
+        // could not be read, null means no active SSH key and the relay should
+        // clear the route, and an object publishes the active key route.
+        let ssh_device_route = match self.ssh_key_store.active_route() {
+            Ok(route) => Some(route),
+            Err(e) => {
+                warn!(error = %e, "failed to read ssh active_route for heartbeat, omitting field");
+                None
+            }
+        };
         let req = ClientHeartbeatRequest {
             client_instance_id: self.identity.instance_id.clone(),
             stream_id: stream_id.to_string(),
             active_call_ids: active_ids,
-            ssh_device_route: self.ssh_key_store.active_route().unwrap_or(None),
+            ssh_device_route,
         };
         self.relay_client.heartbeat(&req).await?;
         debug!("heartbeat sent");
@@ -2216,7 +2299,7 @@ impl RemoteInvokeWorker {
             .insert(call_id.clone(), Arc::clone(&active_call));
 
         {
-            let call_info = CallInfo {
+            let mut call_info = CallInfo {
                 call_id: call_id.clone(),
                 grant_id: grant_id.clone(),
                 pairing_id: None,
@@ -2274,7 +2357,9 @@ impl RemoteInvokeWorker {
                 output_mode: command.output_mode,
                 pty_enabled: command.pty.as_ref().map(|pty| pty.enabled),
             };
+            sanitize_call_for_history(&mut call_info);
             let max = self.config.max_records as usize;
+            self.persist_call_history_entry(&call_info);
             let mut history = self.call_history.write();
             history.push_back(call_info);
             while history.len() > max {
@@ -2308,6 +2393,11 @@ impl RemoteInvokeWorker {
         let active_calls = Arc::clone(&self.active_calls);
         let active_call_for_task = Arc::clone(&active_call);
         let call_history = Arc::clone(&self.call_history);
+        let call_history_store = Arc::clone(&self.call_history_store);
+        let call_history_relay_url = self.relay_client.base_url();
+        let call_history_client_instance_id = self.identity.instance_id.clone();
+        let call_history_max_records = self.config.max_records as usize;
+        let call_history_retention_days = self.config.retention_days;
         let cid = call_id.clone();
         let command_kind_for_stream = command.kind;
         let grant_scope_for_stream = grant_scope;
@@ -2404,7 +2494,7 @@ impl RemoteInvokeWorker {
                         duration_ms = duration_ms,
                         "remote command execution completed"
                     );
-                    let _ = update_call_in_history(
+                    if update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -2419,7 +2509,17 @@ impl RemoteInvokeWorker {
                             stdout_digest: response.stdout_digest.clone(),
                             stderr_digest: response.stderr_digest.clone(),
                         },
-                    );
+                    ) {
+                        persist_call_history_entry_from_lock(
+                            &call_history_store,
+                            &call_history_relay_url,
+                            &call_history_client_instance_id,
+                            &call_history,
+                            &cid,
+                            call_history_max_records,
+                            call_history_retention_days,
+                        );
+                    }
                 }
                 Err(e) => {
                     if active_call_for_task.is_cancelled() {
@@ -2465,7 +2565,7 @@ impl RemoteInvokeWorker {
                     if let Err(e2) = relay_client.post_call_exit(&cid, &exit_req).await {
                         error!(error = %e2, call_id = %cid, "failed to post error call exit");
                     }
-                    let _ = update_call_in_history(
+                    if update_call_in_history(
                         &call_history,
                         &cid,
                         CallResult {
@@ -2476,7 +2576,17 @@ impl RemoteInvokeWorker {
                             stdout_digest: None,
                             stderr_digest: None,
                         },
-                    );
+                    ) {
+                        persist_call_history_entry_from_lock(
+                            &call_history_store,
+                            &call_history_relay_url,
+                            &call_history_client_instance_id,
+                            &call_history,
+                            &cid,
+                            call_history_max_records,
+                            call_history_retention_days,
+                        );
+                    }
                 }
             }
 
@@ -2639,6 +2749,24 @@ impl RemoteInvokeWorker {
         }
     }
 
+    fn persist_call_history_entry(&self, call: &CallInfo) {
+        if let Err(error) = self.call_history_store.upsert(
+            &self.relay_client.base_url(),
+            &self.identity.instance_id,
+            call,
+            self.config.max_records as usize,
+            self.config.retention_days,
+        ) {
+            warn!(error = %error, call_id = %call.call_id, "persist remote invoke call history failed");
+        }
+    }
+
+    fn persist_call_history_by_id(&self, call_id: &str) {
+        if let Some(call) = find_call_in_history(&self.call_history, call_id) {
+            self.persist_call_history_entry(&call);
+        }
+    }
+
     fn apply_cancelled_call(&self, call_id: &str) {
         let active_call = self.active_calls.write().remove(call_id);
         let started_at = active_call
@@ -2657,7 +2785,9 @@ impl RemoteInvokeWorker {
         if let Some(started_at) = started_at {
             let duration_ms = now_millis().saturating_sub(started_at);
             let updated = force_cancel_call_in_history(&self.call_history, call_id, duration_ms);
-            if !updated {
+            if updated {
+                self.persist_call_history_by_id(call_id);
+            } else {
                 debug!(call_id = %call_id, "cancel reconcile did not change local history");
             }
         } else {
@@ -2670,13 +2800,6 @@ fn generate_pair_code() -> String {
     let mut rng = rand::thread_rng();
     let code: u32 = rng.gen_range(0..10u32.pow(PAIR_CODE_DIGITS));
     format!("{:0>width$}", code, width = PAIR_CODE_DIGITS as usize)
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn pairing_request_is_alive(pairing: &TimestampedPairing, now: u64, ttl_ms: u64) -> bool {
@@ -2724,6 +2847,39 @@ fn update_call_in_history(
         return true;
     }
     false
+}
+
+fn find_call_in_history(history: &RwLock<VecDeque<CallInfo>>, call_id: &str) -> Option<CallInfo> {
+    history
+        .read()
+        .iter()
+        .rev()
+        .find(|c| c.call_id == call_id)
+        .cloned()
+}
+
+fn persist_call_history_entry_from_lock(
+    store: &CallHistoryStore,
+    relay_url: &str,
+    client_instance_id: &str,
+    history: &RwLock<VecDeque<CallInfo>>,
+    call_id: &str,
+    max_records: usize,
+    retention_days: u32,
+) {
+    let Some(call) = find_call_in_history(history, call_id) else {
+        debug!(call_id = %call_id, "skip persisting missing call history entry");
+        return;
+    };
+    if let Err(error) = store.upsert(
+        relay_url,
+        client_instance_id,
+        &call,
+        max_records,
+        retention_days,
+    ) {
+        warn!(error = %error, call_id = %call_id, "persist remote invoke call history failed");
+    }
 }
 
 fn build_call_command_summary(

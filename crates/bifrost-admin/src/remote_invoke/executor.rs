@@ -1653,24 +1653,38 @@ fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
     #[cfg(windows)]
     {
-        if let Some(shell) = shell {
+        // Resolve the effective shell: skip Unix-style paths that don't exist on Windows
+        // (e.g. "/bin/bash" from a cross-platform default) and fall back to cmd.
+        let effective_shell = shell.filter(|s| !is_unix_only_shell_path(s));
+
+        if let Some(shell) = effective_shell {
             let mut command = TokioCommand::new(shell);
             if windows_shell_uses_command_flag(shell) {
+                // Force UTF-8 output encoding for PowerShell to avoid garbled
+                // non-ASCII text (e.g. Chinese chars from ipconfig).
+                let utf8_shell_text = format!(
+                    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; {}",
+                    shell_text
+                );
                 command
                     .arg("-NoLogo")
                     .arg("-NoProfile")
                     .arg("-Command")
-                    .arg(shell_text);
+                    .arg(&utf8_shell_text);
             } else if windows_shell_uses_login_flag(shell) {
                 command.arg("-lc").arg(shell_text);
             } else {
-                command.arg("/C").arg(shell_text);
+                // cmd.exe: prepend chcp 65001 to switch console to UTF-8
+                let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
+                command.arg("/C").arg(&utf8_shell_text);
             }
             return command;
         }
 
+        // Default: cmd with UTF-8 code page
+        let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
         let mut command = TokioCommand::new("cmd");
-        command.arg("/C").arg(shell_text);
+        command.arg("/C").arg(&utf8_shell_text);
         command
     }
 
@@ -1681,6 +1695,13 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
         command.arg("-lc").arg(shell_text);
         command
     }
+}
+
+/// Returns true if the shell path looks like a Unix-only absolute path
+/// (e.g. "/bin/bash", "/usr/bin/zsh") that would never exist on Windows.
+#[cfg(windows)]
+fn is_unix_only_shell_path(shell: &str) -> bool {
+    shell.starts_with('/')
 }
 
 #[cfg(windows)]
@@ -2769,6 +2790,89 @@ mod tests {
             )
             .expect("legacy full-access should accept shell_text");
         assert_eq!(result, "full-access");
+    }
+
+    #[test]
+    fn test_build_shell_text_process_default_shell() {
+        // When shell is None, should default to /bin/sh on non-windows
+        let cmd = build_shell_text_process(None, "echo hi");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        #[cfg(not(windows))]
+        assert_eq!(prog, "/bin/sh", "default shell should be /bin/sh");
+        #[cfg(windows)]
+        assert_eq!(prog, "cmd", "default shell on windows should be cmd");
+    }
+
+    #[test]
+    fn test_build_shell_text_process_explicit_shell() {
+        // When an explicit shell is given, it should be used directly
+        #[cfg(not(windows))]
+        {
+            let cmd = build_shell_text_process(Some("/bin/bash"), "echo test");
+            let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+            assert_eq!(prog, "/bin/bash");
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert_eq!(args, vec!["-lc", "echo test"]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_shell_text_process_unix_path_fallback_on_windows() {
+        // Unix-style paths like /bin/bash should be ignored on Windows, falling back to cmd
+        let cmd = build_shell_text_process(Some("/bin/bash"), "echo hi");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(
+            prog, "cmd",
+            "unix shell path should fallback to cmd on windows"
+        );
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "/C");
+        assert!(args[1].contains("chcp 65001"), "should prepend chcp 65001");
+        assert!(
+            args[1].contains("echo hi"),
+            "should contain original command"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_shell_text_process_powershell_utf8_prefix() {
+        let cmd = build_shell_text_process(Some("powershell.exe"), "ipconfig");
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(prog, "powershell.exe");
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"-Command".to_string()));
+        let cmd_arg = args.last().expect("should have command arg");
+        assert!(
+            cmd_arg.contains("[Console]::OutputEncoding"),
+            "should set UTF-8 encoding"
+        );
+        assert!(cmd_arg.contains("ipconfig"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_unix_only_shell_path() {
+        assert!(is_unix_only_shell_path("/bin/bash"));
+        assert!(is_unix_only_shell_path("/usr/bin/zsh"));
+        assert!(is_unix_only_shell_path("/bin/sh"));
+        assert!(!is_unix_only_shell_path("cmd.exe"));
+        assert!(!is_unix_only_shell_path("powershell.exe"));
+        assert!(!is_unix_only_shell_path(r"C:\Windows\System32\cmd.exe"));
+        assert!(!is_unix_only_shell_path("bash"));
     }
 
     #[test]

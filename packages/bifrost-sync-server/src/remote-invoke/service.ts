@@ -204,8 +204,12 @@ export class RemoteInvokeService {
     };
 
     await this.storage.remoteInvoke.registerClient(record);
-    if (req.ssh_device_route !== undefined) {
-      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
+    // Keep SSH route sync three-state:
+    // omitted = client could not read local key store, do not touch relay route;
+    // null = client has no active SSH key, clear relay route;
+    // object = publish/update active route.
+    if (Object.prototype.hasOwnProperty.call(req, 'ssh_device_route')) {
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route ?? null);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
       }
@@ -861,8 +865,10 @@ export class RemoteInvokeService {
     await this.storage.remoteInvoke.updateClientRecord(req.client_instance_id, {
       last_heartbeat_at: new Date().toISOString(),
     });
-    if (req.ssh_device_route !== undefined) {
-      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route);
+    // Keep SSH route sync three-state. See registerClient for the protocol
+    // meaning of omitted vs null vs object.
+    if (Object.prototype.hasOwnProperty.call(req, 'ssh_device_route')) {
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route ?? null);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
       }

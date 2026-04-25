@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     RemoteShellCommands, RemoteShellPolicyAddArgs, RemoteShellPolicyCommands,
-    RemoteShellProfileCommands,
+    RemoteShellPolicyUpdateArgs, RemoteShellProfileCommands,
 };
 
 pub fn handle_remote_shell_command(action: RemoteShellCommands) -> Result<()> {
@@ -170,6 +170,83 @@ fn handle_policy_command(
             });
             save_bumped(store, set)?;
             println!("Added shell policy '{id}'.");
+        }
+        RemoteShellPolicyCommands::Update(args) => {
+            let RemoteShellPolicyUpdateArgs {
+                id,
+                name,
+                description,
+                mode,
+                profile,
+                program,
+                pattern,
+                cwd,
+                env,
+                default_cwd,
+                timeout_ms,
+                shell,
+                stdin,
+                interactive,
+                inherit_env,
+            } = *args;
+            let policy_idx = set
+                .policies
+                .iter()
+                .position(|p| p.id == id)
+                .ok_or_else(|| {
+                    BifrostError::NotFound(format!("shell policy '{}' not found", id))
+                })?;
+            if let Some(profile_id) = profile.as_deref() {
+                ensure_profile_exists(&set, profile_id)?;
+            }
+            let policy = &mut set.policies[policy_idx];
+            if let Some(name) = name {
+                policy.name = name;
+            }
+            if let Some(desc) = description {
+                policy.description = Some(desc);
+            }
+            if let Some(profile_id) = profile {
+                policy.profile_id = Some(profile_id);
+            }
+            let meta = policy.metadata.as_object_mut().ok_or_else(|| {
+                BifrostError::Config("policy metadata is not a JSON object".to_string())
+            })?;
+            if let Some(mode) = mode {
+                meta.insert("exec_mode".to_string(), json!(mode));
+            }
+            if !program.is_empty() {
+                meta.insert("allowed_executables".to_string(), json!(program));
+            }
+            if !pattern.is_empty() {
+                meta.insert("allowed_shell_patterns".to_string(), json!(pattern));
+            }
+            if !cwd.is_empty() {
+                meta.insert("cwd_allowlist".to_string(), json!(cwd));
+            }
+            if !env.is_empty() {
+                meta.insert("env_allowlist".to_string(), json!(env));
+            }
+            if let Some(v) = default_cwd {
+                meta.insert("default_cwd".to_string(), json!(v));
+            }
+            if let Some(v) = timeout_ms {
+                meta.insert("max_timeout_ms".to_string(), json!(v));
+            }
+            if let Some(v) = shell {
+                meta.insert("shell".to_string(), json!(v));
+            }
+            if let Some(v) = stdin {
+                meta.insert("stdin_allowed".to_string(), json!(v));
+            }
+            if let Some(v) = interactive {
+                meta.insert("interactive_allowed".to_string(), json!(v));
+            }
+            if let Some(v) = inherit_env {
+                meta.insert("inherit_env".to_string(), json!(v));
+            }
+            save_bumped(store, set)?;
+            println!("Updated shell policy '{id}'.");
         }
         RemoteShellPolicyCommands::Delete { id } => {
             let before = set.policies.len();

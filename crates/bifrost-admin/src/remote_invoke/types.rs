@@ -923,7 +923,8 @@ pub struct ClientRegistrationRequest {
     pub bifrost_version: String,
     pub signature: String,
     pub timestamp: u64,
-    pub ssh_device_route: Option<SshDeviceRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_device_route: Option<Option<SshDeviceRoute>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -985,7 +986,8 @@ pub struct ClientHeartbeatRequest {
     pub stream_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_call_ids: Vec<String>,
-    pub ssh_device_route: Option<SshDeviceRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_device_route: Option<Option<SshDeviceRoute>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1358,5 +1360,44 @@ mod tests {
         assert_eq!(decrypted.kind, CommandKind::QueryReadonly);
         assert_eq!(decrypted.command, "status");
         assert_eq!(decrypted.args_json.as_deref(), Some(r#"{"limit":5}"#));
+    }
+
+    #[test]
+    fn test_client_registration_ssh_route_serializes_three_states() {
+        let base = ClientRegistrationRequest {
+            challenge_id: "challenge".to_string(),
+            client_instance_id: "client".to_string(),
+            client_long_term_pubkey: "pubkey".to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            bifrost_version: "0.0.0-test".to_string(),
+            signature: "signature".to_string(),
+            timestamp: 1_700_000_000,
+            ssh_device_route: None,
+        };
+
+        let omitted = serde_json::to_value(&base).expect("serialize omitted route");
+        assert!(omitted.get("ssh_device_route").is_none());
+
+        let mut clear = base.clone();
+        clear.ssh_device_route = Some(None);
+        let clear = serde_json::to_value(&clear).expect("serialize clear route");
+        assert!(clear
+            .get("ssh_device_route")
+            .is_some_and(|value| value.is_null()));
+
+        let mut publish = base;
+        publish.ssh_device_route = Some(Some(SshDeviceRoute {
+            device_code: "BF-0123456789ABCDEF".to_string(),
+            public_key_pem: "public-key".to_string(),
+        }));
+        let publish = serde_json::to_value(&publish).expect("serialize publish route");
+        assert_eq!(
+            publish
+                .get("ssh_device_route")
+                .and_then(|value| value.get("device_code"))
+                .and_then(|value| value.as_str()),
+            Some("BF-0123456789ABCDEF")
+        );
     }
 }

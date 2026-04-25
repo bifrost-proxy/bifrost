@@ -1,7 +1,8 @@
----
+***
+
 name: "bifrost-remote"
 description: "通过 Bifrost Remote Invoke 实现远程设备控制能力：连接另一台电脑上的 Bifrost，指导目标终端安装/启动并开启系统代理，使用 SSH key 或配对码授权，查询远端状态/流量，并通过受 Shell Access policy 控制的 remote command exec 操作目标设备。"
----
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Bifrost Remote
 
@@ -24,6 +25,7 @@ description: "通过 Bifrost Remote Invoke 实现远程设备控制能力：连�
 - 需要操作目标设备文件、配置、规则、脚本、证书或系统代理时，优先通过已授权的 `bifrost remote command exec ...` 在目标终端执行对应命令。
 - 目标终端未配置匹配的 Shell Access policy 时，引导用户在目标终端本机或 Web UI 中放行对应 policy。
 - 不要绕过目标终端 Web UI 或 SSH key 授权。
+- 如果出现 BEGIN BIFROST KEY 消息表示需要连接远端 bifrost
 
 ## 一、目标终端如何安装 Bifrost
 
@@ -129,7 +131,7 @@ bifrost remote status
 目标终端上的准备流程：
 
 1. 用户在目标终端本机或 Web UI 中配置 Shell Access profile，定义允许的 cwd、env、timeout、stdin/interactive 等执行环境。
-2. 用户在目标终端本机或 Web UI 中配置 Shell Access policy，定义允许的 argv 程序或 shell_text 正则。
+2. 用户在目标终端本机或 Web UI 中配置 Shell Access policy，定义允许的 argv 程序或 shell\_text 正则。
 3. 用户在目标终端 `Remote Invoke` 授权请求中选择：
    - `selected`：只绑定指定 Shell Access policy。
    - `all`：允许当前已启用 Shell Access policy 覆盖的命令。
@@ -234,11 +236,11 @@ bifrost remote status --client-id <client-prefix>
 
 ### 授权模型
 
-| UI 访问模式 | 底层 grant scope | 允许的操作 |
-| --- | --- | --- |
-| `query` | `remote_query` | 只读查询：status、search、traffic list/get/search |
-| `selected` | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 绑定指定 Shell Access policy 的 `shell.exec` |
-| `all` | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 所有已启用 Shell Access policy 覆盖的 `shell.exec` |
+| UI 访问模式    | 底层 grant scope                                   | 允许的操作                                           |
+| ---------- | ------------------------------------------------ | ----------------------------------------------- |
+| `query`    | `remote_query`                                   | 只读查询：status、search、traffic list/get/search      |
+| `selected` | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 绑定指定 Shell Access policy 的 `shell.exec`    |
+| `all`      | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 所有已启用 Shell Access policy 覆盖的 `shell.exec` |
 
 `remote_shell_interactive` 表示 grant 允许 stdin/interactive 相关能力；当前是否能形成完整交互体验取决于 CLI/PTY 能力和目标端 policy。
 
@@ -398,3 +400,4 @@ Agent 使用本技能时，遵循以下原则：
 7. 若用户只需要本机本地操作，优先使用普通 `bifrost` CLI，不必绕到 `remote`。
 8. caller 侧需要管理目标设备时，优先使用 `remote command exec` 执行目标机命令，而不是误把本地 `remote shell` / `remote grant` 当成 relay-backed API。
 9. 不要承诺 OS 级 sandbox；描述为当前 Shell Access policy 的授权和限制能力。
+

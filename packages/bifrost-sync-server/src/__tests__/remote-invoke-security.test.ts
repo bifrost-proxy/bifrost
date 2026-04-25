@@ -6,6 +6,7 @@ import path from 'path';
 
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
+import { deriveSshDeviceCode } from '../remote-invoke/ssh-auth';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-remote-invoke-security');
 
@@ -232,6 +233,7 @@ async function registerClient(
     timestamp: number;
     challenge_id: string;
     challenge: string;
+    ssh_device_route: null | { device_code: string; public_key_pem: string };
   }> = {},
 ) {
   const challenge = await requestRegistrationChallenge(clientInstanceId, token);
@@ -255,19 +257,24 @@ async function registerClient(
     privateKey,
   ).toString('base64');
 
+  const body: Record<string, unknown> = {
+    challenge_id: challenge.challenge_id,
+    client_instance_id: clientInstanceId,
+    client_long_term_pubkey: publicKeyDerBase64,
+    device_name: deviceName,
+    platform,
+    bifrost_version: bifrostVersion,
+    signature,
+    timestamp,
+  };
+  if (Object.prototype.hasOwnProperty.call(overrides, 'ssh_device_route')) {
+    body.ssh_device_route = overrides.ssh_device_route;
+  }
+
   return req(
     'POST',
     '/v4/remote-invoke/client/register',
-    {
-      challenge_id: challenge.challenge_id,
-      client_instance_id: clientInstanceId,
-      client_long_term_pubkey: publicKeyDerBase64,
-      device_name: deviceName,
-      platform,
-      bifrost_version: bifrostVersion,
-      signature,
-      timestamp,
-    },
+    body,
     { 'x-bifrost-token': token },
   );
 }
@@ -378,6 +385,60 @@ describe('Remote Invoke security', () => {
       );
       expect(response.status).toBe(200);
     }
+  });
+
+  it('clears SSH device route only when client registration explicitly sends null', async () => {
+    const token = await registerUser('ri_ssh_route_null_user', 'password123');
+    const { publicKey, privateKey } = generateClientKeypair();
+    const publicKeyDerBase64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const sshPublicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const deviceCode = deriveSshDeviceCode(sshPublicKeyPem);
+    const route = {
+      device_code: deviceCode,
+      public_key_pem: sshPublicKeyPem,
+    };
+
+    const registerWithRoute = await registerClient(
+      'ri-ssh-route-null-client',
+      publicKeyDerBase64,
+      privateKey,
+      token,
+      { ssh_device_route: route },
+    );
+    expect(registerWithRoute.status, JSON.stringify(registerWithRoute.data)).toBe(200);
+
+    const challengeWithRoute = await req('POST', '/v4/remote-invoke/ssh/challenge', {
+      device_code: deviceCode,
+    });
+    expect(challengeWithRoute.status, JSON.stringify(challengeWithRoute.data)).toBe(200);
+
+    const registerOmittingRoute = await registerClient(
+      'ri-ssh-route-null-client',
+      publicKeyDerBase64,
+      privateKey,
+      token,
+    );
+    expect(registerOmittingRoute.status, JSON.stringify(registerOmittingRoute.data)).toBe(200);
+
+    const challengeAfterOmit = await req('POST', '/v4/remote-invoke/ssh/challenge', {
+      device_code: deviceCode,
+    });
+    expect(challengeAfterOmit.status, JSON.stringify(challengeAfterOmit.data)).toBe(200);
+
+    const registerClearingRoute = await registerClient(
+      'ri-ssh-route-null-client',
+      publicKeyDerBase64,
+      privateKey,
+      token,
+      { ssh_device_route: null },
+    );
+    expect(registerClearingRoute.status, JSON.stringify(registerClearingRoute.data)).toBe(200);
+
+    const challengeAfterNull = await req('POST', '/v4/remote-invoke/ssh/challenge', {
+      device_code: deviceCode,
+    });
+    expect(challengeAfterNull.status).toBe(400);
+    expect(challengeAfterNull.data.message).toBe('device_code_not_found');
   });
 
   it('allows authenticated client SSE streams from different users behind the same forwarded IP', async () => {

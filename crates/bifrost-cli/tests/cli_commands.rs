@@ -332,6 +332,72 @@ fn remote_shell_policy_add_parses_semantic_flags() {
 }
 
 #[test]
+fn remote_shell_policy_update_parses_all_flags() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "shell",
+        "policy",
+        "update",
+        "my-policy",
+        "--name",
+        "New Name",
+        "--mode",
+        "shell_text",
+        "--shell",
+        "cmd.exe",
+        "--program",
+        "/bin/echo",
+        "--pattern",
+        "^echo.*",
+        "--timeout-ms",
+        "10000",
+        "--stdin",
+        "true",
+        "--interactive",
+        "false",
+        "--inherit-env",
+        "true",
+    ])
+    .expect("remote shell policy update should parse");
+
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Shell { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("my-policy"), "should contain policy id");
+                assert!(rendered.contains("New Name"), "should contain new name");
+                assert!(rendered.contains("shell_text"), "should contain mode");
+                assert!(rendered.contains("cmd.exe"), "should contain shell");
+                assert!(rendered.contains("10000"), "should contain timeout");
+            }
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_shell_policy_update_minimal_args() {
+    // Only the positional ID is required; all other flags are optional
+    let cli = Cli::try_parse_from(["bifrost", "remote", "shell", "policy", "update", "some-id"])
+        .expect("policy update with only id should parse");
+
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Shell { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("some-id"));
+            }
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
 fn import_command_parse() {
     let help = run_help(&["import"]);
     assert!(help.contains("file"), "import should require file arg");

@@ -21,11 +21,13 @@
 - 若进程存活，则调用 `prompt_restart_if_running(pid)` 读取 stdin。
 - 若用户确认重启，则复用 `stop` 的收尾逻辑：直接调用 `commands::stop::run_stop()`（包含：发送 SIGTERM/TerminateProcess、等待退出、必要时强杀、恢复/关闭 system proxy、清理 CLI proxy、删除 pid/runtime 文件）。
 - stop 成功后继续执行原本的启动流程。
+- PID 检查完成后立即执行目标监听端口冲突检查，再进入配置初始化、启动摘要打印和系统代理收敛规划。端口占用判断优先尝试绑定目标地址，避免仅靠 TCP connect 时被 backlog、未 accept 的测试监听器或防火墙行为影响；这样非交互 CI 或脚本环境中，普通端口占用会稳定返回 `Port <host>:<port> is already in use...`，且不会在实际启动失败前打印 `System proxy: enabled` 这类易误导的摘要。
 
 ## 依赖与影响面
 
 - 复用现有 `stop` 子命令逻辑；不新增 CLI 参数，不改变非冲突场景的启动行为。
 - 为保证 Windows 下 `stop`/进程检测语义正确，补齐 `is_process_running` 的 Windows 实现。
+- 端口冲突提前检查不依赖配置文件或数据目录初始化，因此不会改变已运行 Bifrost PID 冲突的重启语义，也不会提前触发系统代理修改。
 
 ## 测试方案
 
@@ -41,6 +43,10 @@
 
 - 场景 1：检测冲突 -> stdin 输入 `y` -> 旧进程退出 -> 新进程启动成功
 - 场景 2：检测冲突 -> stdin 输入 `n` -> 不终止旧进程 -> 本次 start 退出
+- 回归脚本：`e2e-tests/tests/test_port_conflict_no_system_proxy_enable.sh`
+  - 用 dummy listener 占用测试端口，启动 Bifrost 后必须非 0 退出。
+  - 输出必须包含 `already in use`。
+  - 输出不得包含 `System proxy: enabled` 或 `System proxy enabled:`，证明端口冲突时不会进入系统代理启用阶段或打印启用摘要。
 
 ### 真实场景测试（手动）
 
@@ -51,6 +57,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 18890 --ski
 # 另一个终端再次执行 start，观察交互提示并选择 y/n
 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 18890 --skip-cert-check --unsafe-ssl
 ```
+
+补充回归：在端口被普通进程占用且 stdin 非交互时，执行 `bifrost start --system-proxy` 应直接失败并报告端口占用，不应打印系统代理启用摘要。
 
 ## 校验要求
 

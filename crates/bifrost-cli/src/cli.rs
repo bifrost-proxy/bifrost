@@ -1515,6 +1515,10 @@ pub enum RemoteShellProfileCommands {
 pub enum RemoteShellPolicyCommands {
     #[command(about = "Add a shell policy")]
     Add(Box<RemoteShellPolicyAddArgs>),
+    #[command(
+        about = "Update an existing shell policy's metadata in-place (preserves grant validity)"
+    )]
+    Update(Box<RemoteShellPolicyUpdateArgs>),
     #[command(about = "Delete a shell policy")]
     Delete { id: String },
     #[command(about = "Enable a shell policy")]
@@ -1569,6 +1573,40 @@ pub struct RemoteShellPolicyAddArgs {
     pub inherit_env: bool,
     #[arg(long, help = "Create the policy disabled")]
     pub disabled: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RemoteShellPolicyUpdateArgs {
+    #[arg(help = "Policy ID to update")]
+    pub id: String,
+    #[arg(long, help = "New display name")]
+    pub name: Option<String>,
+    #[arg(long, help = "New description")]
+    pub description: Option<String>,
+    #[arg(long, help = "New exec mode: argv_exec or shell_text")]
+    pub mode: Option<String>,
+    #[arg(long, help = "Bind to an existing shell profile")]
+    pub profile: Option<String>,
+    #[arg(long = "program", action = ArgAction::Append, help = "Replace allowed executables")]
+    pub program: Vec<String>,
+    #[arg(long = "pattern", action = ArgAction::Append, help = "Replace allowed shell patterns")]
+    pub pattern: Vec<String>,
+    #[arg(long = "cwd", action = ArgAction::Append, help = "Replace allowed cwd paths")]
+    pub cwd: Vec<String>,
+    #[arg(long = "env", action = ArgAction::Append, help = "Replace allowed env keys")]
+    pub env: Vec<String>,
+    #[arg(long, help = "New default working directory")]
+    pub default_cwd: Option<String>,
+    #[arg(long = "timeout-ms", help = "New timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[arg(long, help = "Shell binary for shell_text mode")]
+    pub shell: Option<String>,
+    #[arg(long, help = "Allow stdin")]
+    pub stdin: Option<bool>,
+    #[arg(long, help = "Allow interactive shell")]
+    pub interactive: Option<bool>,
+    #[arg(long, help = "Inherit environment from parent")]
+    pub inherit_env: Option<bool>,
 }
 
 #[derive(Args, Clone, Debug)]
