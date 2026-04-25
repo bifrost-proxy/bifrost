@@ -786,6 +786,8 @@ export default function RemoteInvokeTab() {
     Record<string, { matched: boolean; matched_policy_id: string | null; reason: string } | null>
   >({});
   const [shellEditorTestLoading, setShellEditorTestLoading] = useState<Record<string, boolean>>({});
+  const [cliPreviewOpen, setCliPreviewOpen] = useState<boolean>(false);
+  const [cliPreviewText, setCliPreviewText] = useState<string>("");
 
   const runShellPolicyTest = async (policyId: string) => {
     const command = (shellEditorTestInput[policyId] ?? "").trim();
@@ -813,6 +815,68 @@ export default function RemoteInvokeTab() {
     } finally {
       setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: false }));
     }
+  };
+
+  const generateShellCliCommands = (
+    profiles: ShellProfileEditorItem[],
+    policies: ShellPolicyEditorItem[],
+  ): string => {
+    const sh = (v: string): string => {
+      if (v === "") return "''" + "''";
+      if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(v)) return v;
+      return "'" + v.replace(/'/g, "'\\''") + "'";
+    };
+    const lines: string[] = [];
+    lines.push("# Generated from the current Shell Access editor state.");
+    lines.push("# Run these on the TARGET device (the one receiving remote commands).");
+    lines.push("");
+    for (const pr of profiles) {
+      const parts: string[] = [
+        "bifrost remote shell profile add",
+        "--id " + sh(pr.id),
+        "--name " + sh(pr.name || pr.id),
+      ];
+      if (pr.description) parts.push("--description " + sh(pr.description));
+      for (const c of pr.cwd_allowlist) if (c) parts.push("--cwd " + sh(c));
+      for (const e of pr.env_allowlist) if (e) parts.push("--env " + sh(e));
+      if (pr.default_cwd) parts.push("--default-cwd " + sh(pr.default_cwd));
+      if (typeof pr.max_timeout_ms === "number")
+        parts.push("--timeout-ms " + String(pr.max_timeout_ms));
+      if (pr.stdin_allowed) parts.push("--stdin");
+      if (pr.interactive_allowed) parts.push("--interactive");
+      if (!pr.enabled) parts.push("--disabled");
+      lines.push(parts.join(" \\\n  "));
+      lines.push("");
+    }
+    for (const pl of policies) {
+      const parts: string[] = [
+        "bifrost remote shell policy add",
+        "--id " + sh(pl.id),
+        "--name " + sh(pl.name || pl.id),
+        "--mode " + pl.exec_mode,
+      ];
+      if (pl.description) parts.push("--description " + sh(pl.description));
+      if (pl.profile_id) parts.push("--profile " + sh(pl.profile_id));
+      for (const ex of pl.allowed_executables) if (ex) parts.push("--program " + sh(ex));
+      for (const pt of pl.allowed_shell_patterns) if (pt) parts.push("--pattern " + sh(pt));
+      for (const c of pl.cwd_allowlist) if (c) parts.push("--cwd " + sh(c));
+      for (const e of pl.env_allowlist) if (e) parts.push("--env " + sh(e));
+      if (pl.default_cwd) parts.push("--default-cwd " + sh(pl.default_cwd));
+      if (typeof pl.max_timeout_ms === "number")
+        parts.push("--timeout-ms " + String(pl.max_timeout_ms));
+      if (pl.stdin_allowed) parts.push("--stdin");
+      if (pl.interactive_allowed) parts.push("--interactive");
+      if (!pl.enabled) parts.push("--disabled");
+      lines.push(parts.join(" \\\n  "));
+      lines.push("");
+    }
+    return lines.join("\n");
+  };
+
+  const openCliPreview = () => {
+    const text = generateShellCliCommands(shellEditorProfiles, shellEditorPolicies);
+    setCliPreviewText(text);
+    setCliPreviewOpen(true);
   };
 
   const [shellEditorPolicies, setShellEditorPolicies] = useState<
@@ -2955,6 +3019,9 @@ export default function RemoteInvokeTab() {
               <Tooltip title="Show the raw Profiles (execution environments) and Policies (command whitelists) as separate sections. Leave this off for the simpler unified Command groups view.">
                 <Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>(what is this?)</Text>
               </Tooltip>
+              <Button size="small" onClick={openCliPreview}>
+                Generate CLI command
+              </Button>
             </Space>
           </div>
           {shellEditorExpertMode && (
@@ -3661,6 +3728,52 @@ export default function RemoteInvokeTab() {
             </Card>
           )}
         </Space>
+      </Modal>
+      <Modal
+        open={cliPreviewOpen}
+        title="Equivalent CLI commands"
+        onCancel={() => setCliPreviewOpen(false)}
+        width={820}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            onClick={async () => {
+              const ok = await copyToClipboard(cliPreviewText);
+              if (ok) {
+                message.success("Copied");
+              } else {
+                message.error("Copy failed");
+              }
+            }}
+          >
+            Copy
+          </Button>,
+          <Button key="close" onClick={() => setCliPreviewOpen(false)}>
+            Close
+          </Button>,
+        ]}
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 12 }}
+          message="Run on the target device"
+          description="These commands reproduce the current editor state via the local Bifrost CLI. They are NOT executed automatically — copy and run them on the device you want to control."
+        />
+        <pre
+          style={{
+            background: "var(--ant-color-fill-tertiary, #f5f5f5)",
+            padding: 12,
+            borderRadius: 6,
+            maxHeight: 420,
+            overflow: "auto",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {cliPreviewText || "(empty)"}
+        </pre>
       </Modal>
       <Modal
         open={fileAccessEditorOpen}
