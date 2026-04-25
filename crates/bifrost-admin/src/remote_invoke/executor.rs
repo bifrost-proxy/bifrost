@@ -258,18 +258,7 @@ impl RemoteInvokeExecutor {
                 super::types::CommandKind::ShellExec => {
                     return self.execute_shell_exec(command, &mut on_stdout).await;
                 }
-                super::types::CommandKind::FileRead
-                | super::types::CommandKind::FileList
-                | super::types::CommandKind::FileStat
-                | super::types::CommandKind::FileGlob
-                | super::types::CommandKind::FileSearch
-                | super::types::CommandKind::FileHash
-                | super::types::CommandKind::FileWrite
-                | super::types::CommandKind::FileEdit
-                | super::types::CommandKind::FileMkdir
-                | super::types::CommandKind::FileMove
-                | super::types::CommandKind::FileDelete
-                | super::types::CommandKind::FileApplyPatch => {
+                super::types::CommandKind::File => {
                     let body = self.execute_file_op(command).await?;
                     self.emit_stdout(&mut on_stdout, body).await
                 }
@@ -319,24 +308,26 @@ impl RemoteInvokeExecutor {
         use bifrost_core::file_access::FileOp;
         use std::path::Path;
 
-        let kind = command.kind;
-        let op = match kind {
-            super::types::CommandKind::FileRead => FileOp::Read,
-            super::types::CommandKind::FileList => FileOp::List,
-            super::types::CommandKind::FileStat => FileOp::Stat,
-            super::types::CommandKind::FileGlob => FileOp::Glob,
-            super::types::CommandKind::FileSearch => FileOp::Search,
-            super::types::CommandKind::FileHash => FileOp::Hash,
-            super::types::CommandKind::FileWrite => FileOp::Write,
-            super::types::CommandKind::FileEdit => FileOp::Edit,
-            super::types::CommandKind::FileMkdir => FileOp::Mkdir,
-            super::types::CommandKind::FileMove => FileOp::Move,
-            super::types::CommandKind::FileDelete => FileOp::Delete,
-            super::types::CommandKind::FileApplyPatch => FileOp::ApplyPatch,
+        // The specific file operation is carried in command.command (e.g. "file.read")
+        let file_op_name = command.command.as_str();
+        let op = match file_op_name {
+            "file.read" => FileOp::Read,
+            "file.list" => FileOp::List,
+            "file.stat" => FileOp::Stat,
+            "file.glob" => FileOp::Glob,
+            "file.search" => FileOp::Search,
+            "file.hash" => FileOp::Hash,
+            "file.write" => FileOp::Write,
+            "file.edit" => FileOp::Edit,
+            "file.mkdir" => FileOp::Mkdir,
+            "file.move" => FileOp::Move,
+            "file.delete" => FileOp::Delete,
+            "file.apply_patch" => FileOp::ApplyPatch,
             _ => {
-                return Err(BifrostError::Config(
-                    "execute_file_op called with non-file kind".to_string(),
-                ))
+                return Err(BifrostError::Config(format!(
+                    "unknown file operation: '{}'",
+                    file_op_name
+                )))
             }
         };
 
@@ -353,7 +344,6 @@ impl RemoteInvokeExecutor {
             algo: Option<String>,
             grant_id: Option<String>,
             cwd: Option<String>,
-            // --- Phase 2/3 additions ---
             content_b64: Option<String>,
             base_sha256: Option<String>,
             allow_overwrite: Option<bool>,
@@ -391,10 +381,10 @@ impl RemoteInvokeExecutor {
         let policy = store.resolve(&grant_id, cwd);
 
         let default_path = ".".to_string();
-        let requested_path = match kind {
-            super::types::CommandKind::FileGlob
-            | super::types::CommandKind::FileSearch
-            | super::types::CommandKind::FileList => params.path.clone().unwrap_or(default_path),
+        let requested_path = match file_op_name {
+            "file.glob" | "file.search" | "file.list" => {
+                params.path.clone().unwrap_or(default_path)
+            }
             _ => params.path.clone().ok_or_else(|| {
                 BifrostError::Config("[file.invalid_args] 'path' is required".to_string())
             })?,
@@ -404,8 +394,8 @@ impl RemoteInvokeExecutor {
             .check(Path::new(&requested_path), cwd, op)
             .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
 
-        let value = match kind {
-            super::types::CommandKind::FileRead => {
+        let value = match file_op_name {
+            "file.read" => {
                 super::file_ops::handle_file_read(
                     &decision,
                     params.max_bytes,
@@ -413,13 +403,9 @@ impl RemoteInvokeExecutor {
                 )
                 .await?
             }
-            super::types::CommandKind::FileList => {
-                super::file_ops::handle_file_list(&decision, params.depth).await?
-            }
-            super::types::CommandKind::FileStat => {
-                super::file_ops::handle_file_stat(&decision).await?
-            }
-            super::types::CommandKind::FileGlob => {
+            "file.list" => super::file_ops::handle_file_list(&decision, params.depth).await?,
+            "file.stat" => super::file_ops::handle_file_stat(&decision).await?,
+            "file.glob" => {
                 let pattern = params.pattern.clone().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'pattern' is required for file.glob".to_string(),
@@ -427,7 +413,7 @@ impl RemoteInvokeExecutor {
                 })?;
                 super::file_ops::handle_file_glob(&decision, &pattern, params.max_matches).await?
             }
-            super::types::CommandKind::FileSearch => {
+            "file.search" => {
                 let pattern = params.pattern.clone().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'pattern' is required for file.search".to_string(),
@@ -441,10 +427,10 @@ impl RemoteInvokeExecutor {
                 )
                 .await?
             }
-            super::types::CommandKind::FileHash => {
+            "file.hash" => {
                 super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
             }
-            super::types::CommandKind::FileWrite => {
+            "file.write" => {
                 let content = params.content_b64.as_deref().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'content_b64' is required for file.write".to_string(),
@@ -458,7 +444,7 @@ impl RemoteInvokeExecutor {
                 )
                 .await?
             }
-            super::types::CommandKind::FileEdit => {
+            "file.edit" => {
                 let edits = params.edits.as_ref().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'edits' is required for file.edit".to_string(),
@@ -467,11 +453,11 @@ impl RemoteInvokeExecutor {
                 super::file_ops::handle_file_edit(&decision, params.base_sha256.as_deref(), edits)
                     .await?
             }
-            super::types::CommandKind::FileMkdir => {
+            "file.mkdir" => {
                 super::file_ops::handle_file_mkdir(&decision, params.parents.unwrap_or(false))
                     .await?
             }
-            super::types::CommandKind::FileMove => {
+            "file.move" => {
                 let to = params.to_path.as_deref().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'to_path' is required for file.move".to_string(),
@@ -482,19 +468,17 @@ impl RemoteInvokeExecutor {
                     .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
                 super::file_ops::handle_file_move(&decision, &to_decision).await?
             }
-            super::types::CommandKind::FileDelete => {
+            "file.delete" => {
                 super::file_ops::handle_file_delete(&decision, params.recursive.unwrap_or(false))
                     .await?
             }
-            super::types::CommandKind::FileApplyPatch => {
+            "file.apply_patch" => {
                 let patch_text = params.patch_text.as_deref().ok_or_else(|| {
                     BifrostError::Config(
                         "[file.invalid_args] 'patch_text' is required for file.apply_patch"
                             .to_string(),
                     )
                 })?;
-                // Pre-resolve every target path in the patch so policy checks
-                // happen BEFORE any filesystem mutation.
                 let mut decisions = std::collections::HashMap::new();
                 for raw in patch_text.split("\n--- ").skip(1) {
                     let mut it = raw.splitn(2, '\n');
@@ -528,19 +512,7 @@ impl RemoteInvokeExecutor {
     fn parse_and_validate_args(&self, command: &RemoteCommand) -> Result<CommandArgs> {
         if matches!(
             command.kind,
-            super::types::CommandKind::ShellExec
-                | super::types::CommandKind::FileRead
-                | super::types::CommandKind::FileList
-                | super::types::CommandKind::FileStat
-                | super::types::CommandKind::FileGlob
-                | super::types::CommandKind::FileSearch
-                | super::types::CommandKind::FileHash
-                | super::types::CommandKind::FileWrite
-                | super::types::CommandKind::FileEdit
-                | super::types::CommandKind::FileMkdir
-                | super::types::CommandKind::FileMove
-                | super::types::CommandKind::FileDelete
-                | super::types::CommandKind::FileApplyPatch
+            super::types::CommandKind::ShellExec | super::types::CommandKind::File
         ) {
             return Ok(CommandArgs::default());
         }

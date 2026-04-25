@@ -160,7 +160,7 @@ export type GrantStatus = 'active' | 'expired' | 'revoked' | 'consumed' | 'remov
 export type CallStatus = 'pending' | 'authorized' | 'key_exchanged' | 'streaming' | 'completed' | 'failed' | 'cancelled' | 'timeout';
 export type PairingStatus = 'created' | 'code_verified' | 'pending_approval' | 'approved' | 'rejected' | 'expired' | 'cancelled';
 export type RemoteInvokeGrantScope = 'remote_query' | 'remote_shell_exec' | 'remote_shell_interactive' | 'remote_file_read' | 'remote_file_write';
-export type RemoteCommandKind = 'query.readonly' | 'shell.exec' | 'file.read' | 'file.list' | 'file.stat' | 'file.glob' | 'file.search' | 'file.hash' | 'file.write' | 'file.edit' | 'file.mkdir' | 'file.move' | 'file.delete' | 'file.apply_patch';
+export type RemoteCommandKind = 'query.readonly' | 'shell.exec' | 'file';
 
 export interface RemoteInvokeConfig {
   enabled: boolean;

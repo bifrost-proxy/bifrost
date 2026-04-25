@@ -68,24 +68,8 @@ impl GrantScope {
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
                 | (Self::RemoteShellInteractive, CommandKind::QueryReadonly)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
-                | (Self::RemoteFileRead, CommandKind::FileRead)
-                | (Self::RemoteFileRead, CommandKind::FileList)
-                | (Self::RemoteFileRead, CommandKind::FileStat)
-                | (Self::RemoteFileRead, CommandKind::FileGlob)
-                | (Self::RemoteFileRead, CommandKind::FileSearch)
-                | (Self::RemoteFileRead, CommandKind::FileHash)
-                | (Self::RemoteFileWrite, CommandKind::FileRead)
-                | (Self::RemoteFileWrite, CommandKind::FileList)
-                | (Self::RemoteFileWrite, CommandKind::FileStat)
-                | (Self::RemoteFileWrite, CommandKind::FileGlob)
-                | (Self::RemoteFileWrite, CommandKind::FileSearch)
-                | (Self::RemoteFileWrite, CommandKind::FileHash)
-                | (Self::RemoteFileWrite, CommandKind::FileWrite)
-                | (Self::RemoteFileWrite, CommandKind::FileEdit)
-                | (Self::RemoteFileWrite, CommandKind::FileMkdir)
-                | (Self::RemoteFileWrite, CommandKind::FileMove)
-                | (Self::RemoteFileWrite, CommandKind::FileDelete)
-                | (Self::RemoteFileWrite, CommandKind::FileApplyPatch)
+                | (Self::RemoteFileRead, CommandKind::File)
+                | (Self::RemoteFileWrite, CommandKind::File)
         )
     }
 }
@@ -97,30 +81,8 @@ pub enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
-    #[serde(rename = "file.read")]
-    FileRead,
-    #[serde(rename = "file.list")]
-    FileList,
-    #[serde(rename = "file.stat")]
-    FileStat,
-    #[serde(rename = "file.glob")]
-    FileGlob,
-    #[serde(rename = "file.search")]
-    FileSearch,
-    #[serde(rename = "file.hash")]
-    FileHash,
-    #[serde(rename = "file.write")]
-    FileWrite,
-    #[serde(rename = "file.edit")]
-    FileEdit,
-    #[serde(rename = "file.mkdir")]
-    FileMkdir,
-    #[serde(rename = "file.move")]
-    FileMove,
-    #[serde(rename = "file.delete")]
-    FileDelete,
-    #[serde(rename = "file.apply_patch")]
-    FileApplyPatch,
+    #[serde(rename = "file")]
+    File,
 }
 
 impl CommandKind {
@@ -128,18 +90,7 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
-            Self::FileRead => "file.read",
-            Self::FileList => "file.list",
-            Self::FileStat => "file.stat",
-            Self::FileGlob => "file.glob",
-            Self::FileSearch => "file.search",
-            Self::FileHash => "file.hash",
-            Self::FileWrite => "file.write",
-            Self::FileEdit => "file.edit",
-            Self::FileMkdir => "file.mkdir",
-            Self::FileMove => "file.move",
-            Self::FileDelete => "file.delete",
-            Self::FileApplyPatch => "file.apply_patch",
+            Self::File => "file",
         }
     }
 }
@@ -385,18 +336,7 @@ impl RemoteCommand {
         match self.kind {
             CommandKind::QueryReadonly => "query.readonly",
             CommandKind::ShellExec => "shell.exec",
-            CommandKind::FileRead => "file.read",
-            CommandKind::FileList => "file.list",
-            CommandKind::FileStat => "file.stat",
-            CommandKind::FileGlob => "file.glob",
-            CommandKind::FileSearch => "file.search",
-            CommandKind::FileHash => "file.hash",
-            CommandKind::FileWrite => "file.write",
-            CommandKind::FileEdit => "file.edit",
-            CommandKind::FileMkdir => "file.mkdir",
-            CommandKind::FileMove => "file.move",
-            CommandKind::FileDelete => "file.delete",
-            CommandKind::FileApplyPatch => "file.apply_patch",
+            CommandKind::File => "file",
         }
     }
 
@@ -1247,14 +1187,15 @@ mod tests {
 
     #[test]
     fn test_file_scopes_are_separate_from_shell_scopes() {
-        assert!(!GrantScope::RemoteShellExec.allows_command(CommandKind::FileRead));
-        assert!(!GrantScope::RemoteShellInteractive.allows_command(CommandKind::FileRead));
-        assert!(GrantScope::RemoteFileRead.allows_command(CommandKind::FileRead));
-        assert!(GrantScope::RemoteFileRead.allows_command(CommandKind::FileSearch));
-        assert!(!GrantScope::RemoteFileRead.allows_command(CommandKind::FileWrite));
-        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileRead));
-        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileWrite));
-        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::FileApplyPatch));
+        // With unified CommandKind::File, shell scopes should NOT allow file commands
+        assert!(!GrantScope::RemoteShellExec.allows_command(CommandKind::File));
+        assert!(!GrantScope::RemoteShellInteractive.allows_command(CommandKind::File));
+        // Both file read and file write scopes allow the unified File kind
+        assert!(GrantScope::RemoteFileRead.allows_command(CommandKind::File));
+        assert!(GrantScope::RemoteFileWrite.allows_command(CommandKind::File));
+        // File scopes should NOT allow shell/query commands
+        assert!(!GrantScope::RemoteFileRead.allows_command(CommandKind::ShellExec));
+        assert!(!GrantScope::RemoteFileWrite.allows_command(CommandKind::ShellExec));
     }
 
     #[test]

@@ -427,30 +427,8 @@ enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
-    #[serde(rename = "file.read")]
-    FileRead,
-    #[serde(rename = "file.list")]
-    FileList,
-    #[serde(rename = "file.stat")]
-    FileStat,
-    #[serde(rename = "file.glob")]
-    FileGlob,
-    #[serde(rename = "file.search")]
-    FileSearch,
-    #[serde(rename = "file.hash")]
-    FileHash,
-    #[serde(rename = "file.write")]
-    FileWrite,
-    #[serde(rename = "file.edit")]
-    FileEdit,
-    #[serde(rename = "file.mkdir")]
-    FileMkdir,
-    #[serde(rename = "file.move")]
-    FileMove,
-    #[serde(rename = "file.delete")]
-    FileDelete,
-    #[serde(rename = "file.apply_patch")]
-    FileApplyPatch,
+    #[serde(rename = "file")]
+    File,
 }
 
 impl CommandKind {
@@ -458,18 +436,7 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
-            Self::FileRead => "file.read",
-            Self::FileList => "file.list",
-            Self::FileStat => "file.stat",
-            Self::FileGlob => "file.glob",
-            Self::FileSearch => "file.search",
-            Self::FileHash => "file.hash",
-            Self::FileWrite => "file.write",
-            Self::FileEdit => "file.edit",
-            Self::FileMkdir => "file.mkdir",
-            Self::FileMove => "file.move",
-            Self::FileDelete => "file.delete",
-            Self::FileApplyPatch => "file.apply_patch",
+            Self::File => "file",
         }
     }
 }
@@ -2052,7 +2019,7 @@ fn build_remote_file_command(
     action: &RemoteFileCommands,
 ) -> bifrost_core::Result<BuiltRemoteCommand> {
     use serde_json::json;
-    let (kind, label, args_value, preview, _output) = match action {
+    let (file_op, label, args_value, _output) = match action {
         RemoteFileCommands::Read {
             path,
             max_bytes,
@@ -2060,15 +2027,14 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileRead,
             "file.read",
+            format!("file.read {}", path),
             json!({
                 "path": path,
                 "max_bytes": max_bytes,
                 "allow_binary": allow_binary,
                 "cwd": cwd,
             }),
-            format!("file.read {}", path),
             output.clone(),
         ),
         RemoteFileCommands::List {
@@ -2077,17 +2043,15 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileList,
             "file.list",
-            json!({ "path": path, "depth": depth, "cwd": cwd }),
             format!("file.list {}", path.clone().unwrap_or_else(|| ".".into())),
+            json!({ "path": path, "depth": depth, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::Stat { path, cwd, output } => (
-            CommandKind::FileStat,
             "file.stat",
-            json!({ "path": path, "cwd": cwd }),
             format!("file.stat {}", path),
+            json!({ "path": path, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::Glob {
@@ -2096,14 +2060,13 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileGlob,
             "file.glob",
+            format!("file.glob {}", pattern),
             json!({
                 "pattern": pattern,
                 "max_matches": max_matches,
                 "cwd": cwd,
             }),
-            format!("file.glob {}", pattern),
             output.clone(),
         ),
         RemoteFileCommands::Search {
@@ -2114,8 +2077,8 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileSearch,
             "file.search",
+            format!("file.search {}", pattern),
             json!({
                 "pattern": pattern,
                 "path": path,
@@ -2123,7 +2086,6 @@ fn build_remote_file_command(
                 "max_scan_bytes": max_scan,
                 "cwd": cwd,
             }),
-            format!("file.search {}", pattern),
             output.clone(),
         ),
         RemoteFileCommands::Hash {
@@ -2132,10 +2094,9 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileHash,
             "file.hash",
-            json!({ "path": path, "algo": algo, "cwd": cwd }),
             format!("file.hash {}", path),
+            json!({ "path": path, "algo": algo, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::Write {
@@ -2166,8 +2127,8 @@ fn build_remote_file_command(
                     })?,
             };
             (
-                CommandKind::FileWrite,
                 "file.write",
+                format!("file.write {}", path),
                 json!({
                     "path": path,
                     "content_b64": content_b64,
@@ -2175,7 +2136,6 @@ fn build_remote_file_command(
                     "allow_overwrite": allow_overwrite,
                     "cwd": cwd,
                 }),
-                format!("file.write {}", path),
                 output.clone(),
             )
         }
@@ -2189,15 +2149,14 @@ fn build_remote_file_command(
             let edits_val: serde_json::Value =
                 serde_json::from_str(edits).unwrap_or(serde_json::Value::Null);
             (
-                CommandKind::FileEdit,
                 "file.edit",
+                format!("file.edit {}", path),
                 json!({
                     "path": path,
                     "edits": edits_val,
                     "base_sha256": base_sha256,
                     "cwd": cwd,
                 }),
-                format!("file.edit {}", path),
                 output.clone(),
             )
         }
@@ -2207,10 +2166,9 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileMkdir,
             "file.mkdir",
-            json!({ "path": path, "parents": parents, "cwd": cwd }),
             format!("file.mkdir {}", path),
+            json!({ "path": path, "parents": parents, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::Mv {
@@ -2219,10 +2177,9 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileMove,
             "file.move",
-            json!({ "path": from, "to_path": to, "cwd": cwd }),
             format!("file.move {} -> {}", from, to),
+            json!({ "path": from, "to_path": to, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::Rm {
@@ -2231,10 +2188,9 @@ fn build_remote_file_command(
             cwd,
             output,
         } => (
-            CommandKind::FileDelete,
             "file.delete",
-            json!({ "path": path, "recursive": recursive, "cwd": cwd }),
             format!("file.delete {}", path),
+            json!({ "path": path, "recursive": recursive, "cwd": cwd }),
             output.clone(),
         ),
         RemoteFileCommands::ApplyPatch {
@@ -2259,19 +2215,18 @@ fn build_remote_file_command(
                 })?
             };
             (
-                CommandKind::FileApplyPatch,
                 "file.apply_patch",
-                json!({ "patch_text": patch_text, "cwd": cwd }),
                 format!("file.apply_patch ({} bytes)", patch_text.len()),
+                json!({ "patch_text": patch_text, "cwd": cwd }),
                 output.clone(),
             )
         }
     };
 
     Ok(BuiltRemoteCommand {
-        kind,
-        label: label.to_string(),
-        command: Some(preview),
+        kind: CommandKind::File,
+        label,
+        command: Some(file_op.to_string()),
         args_json: Some(args_value.to_string()),
         query: None,
         shell_exec: None,

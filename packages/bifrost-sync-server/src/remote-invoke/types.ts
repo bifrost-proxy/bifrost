@@ -323,28 +323,11 @@ export function isShellCommandKind(kind?: string | null): kind is 'shell.exec' {
   return kind === 'shell.exec';
 }
 
-const FILE_COMMAND_KINDS = new Set([
-  'file.read', 'file.list', 'file.stat', 'file.glob', 'file.search', 'file.hash',
-  'file.write', 'file.edit', 'file.mkdir', 'file.move', 'file.delete', 'file.apply_patch',
-]);
-
-export function isFileCommandKind(kind?: string | null): boolean {
-  return typeof kind === 'string' && FILE_COMMAND_KINDS.has(kind);
-}
-
-export function isFileWriteCommandKind(kind?: string | null): boolean {
-  return kind === 'file.write' || kind === 'file.edit' || kind === 'file.mkdir'
-    || kind === 'file.move' || kind === 'file.delete' || kind === 'file.apply_patch';
-}
-
 export function resolveCommandKind(
   explicitKind?: string | null,
 ): RemoteCommandKind {
-  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly') {
+  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly' || explicitKind === 'file') {
     return explicitKind;
-  }
-  if (typeof explicitKind === 'string' && FILE_COMMAND_KINDS.has(explicitKind)) {
-    return explicitKind as RemoteCommandKind;
   }
   throw new Error('command_kind_required');
 }
@@ -354,10 +337,8 @@ export function grantScopeAllowsCommand(scope: string | undefined, commandKind: 
   if (commandKind === 'shell.exec') {
     return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
   }
-  if (isFileCommandKind(commandKind)) {
-    if (normalizedScope === 'remote_file_write') return true;
-    if (normalizedScope === 'remote_file_read') return !isFileWriteCommandKind(commandKind);
-    return false;
+  if (commandKind === 'file') {
+    return normalizedScope === 'remote_file_read' || normalizedScope === 'remote_file_write';
   }
   return normalizedScope === 'remote_query' || normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
 }
