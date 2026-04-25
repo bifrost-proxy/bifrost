@@ -796,6 +796,317 @@ PATCH
 }
 
 # ---------------------------------------------------------------------------
+#  TC-FILE-14: file.read with --offset/--limit (line-range reading)
+# ---------------------------------------------------------------------------
+test_file_read_offset_limit() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-14: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-14: file.read --offset 2 --limit 2 on multiline.txt"
+    local out
+    out=$(run_remote_file_cmd read multiline.txt --offset 2 --limit 2 --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-14: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
+        local decoded
+        decoded=$(echo "$out" | jq -r '.content_b64' | base64 -d)
+        # offset=2 (line 2), limit=2 → should return lines 2-3: "L2 banana\nL3 cherry\n"
+        local expected
+        expected=$(printf 'L2 banana\nL3 cherry\n')
+        if [[ "$decoded" == "$expected" ]]; then
+            _log_pass "TC-FILE-14: read offset=2 limit=2 returns correct 2 lines"
+        else
+            _log_fail "TC-FILE-14: read offset=2 limit=2 returns correct 2 lines" "$expected" "$decoded"
+        fi
+
+        # total_lines should be 5 (full file has 5 lines)
+        local total_lines
+        total_lines=$(echo "$out" | jq -r '.total_lines // ""')
+        if [[ "$total_lines" == "5" ]]; then
+            _log_pass "TC-FILE-14: read offset response includes total_lines=5"
+        else
+            _log_fail "TC-FILE-14: read offset response includes total_lines=5" "5" "$total_lines"
+        fi
+    else
+        _log_fail "TC-FILE-14: file.read offset/limit returns valid JSON" "JSON with content_b64" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-15: file.read returns total_lines without offset
+# ---------------------------------------------------------------------------
+test_file_read_total_lines() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-15: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-15: file.read multiline.txt (no offset) returns total_lines"
+    local out
+    out=$(run_remote_file_cmd read multiline.txt --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-15: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
+        local total_lines
+        total_lines=$(echo "$out" | jq -r '.total_lines // ""')
+        if [[ "$total_lines" == "5" ]]; then
+            _log_pass "TC-FILE-15: read without offset includes total_lines=5"
+        else
+            _log_fail "TC-FILE-15: read without offset includes total_lines=5" "5" "$total_lines"
+        fi
+    else
+        _log_fail "TC-FILE-15: file.read returns valid JSON" "JSON with content_b64" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-16: file.search with -B (context_before) and -A (context_after)
+# ---------------------------------------------------------------------------
+test_file_search_context() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-16: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-16: file.search NEEDLE -B 1 -A 1 in sandbox"
+    local out
+    out=$(run_remote_file_cmd search "NEEDLE" -B 1 -A 1 --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-16: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.matches' >/dev/null 2>&1; then
+        local count
+        count=$(echo "$out" | jq '.matches | length')
+        if [[ "$count" -ge 1 ]]; then
+            _log_pass "TC-FILE-16: search NEEDLE with context returns matches (count=$count)"
+        else
+            _log_fail "TC-FILE-16: search NEEDLE with context returns matches" ">=1" "$count"
+        fi
+
+        # Verify context lines are present: returned as a single "context" array
+        local first_match ctx_len
+        first_match=$(echo "$out" | jq '.matches[0]')
+        ctx_len=$(echo "$first_match" | jq '.context | length // 0')
+        if [[ "$ctx_len" -ge 2 ]]; then
+            _log_pass "TC-FILE-16: search match contains context array (length=$ctx_len)"
+
+            # Verify context content: should include "ctx-line-2" (before) and "ctx-line-4" (after)
+            local ctx_text
+            ctx_text=$(echo "$first_match" | jq -r '.context[].content' 2>/dev/null || echo "")
+            local has_before=0 has_after=0
+            if echo "$ctx_text" | grep -q "ctx-line-2"; then has_before=1; fi
+            if echo "$ctx_text" | grep -q "ctx-line-4"; then has_after=1; fi
+            if [[ "$has_before" -eq 1 && "$has_after" -eq 1 ]]; then
+                _log_pass "TC-FILE-16: context contains expected before (ctx-line-2) and after (ctx-line-4)"
+            else
+                _log_fail "TC-FILE-16: context should contain before/after lines" "ctx-line-2 + ctx-line-4" "$ctx_text"
+            fi
+        else
+            _log_fail "TC-FILE-16: search match should contain context array" ">=2 items" "$first_match"
+        fi
+    else
+        _log_fail "TC-FILE-16: file.search with context returns valid JSON" "JSON with matches array" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-17: file.search with --exclude node_modules
+# ---------------------------------------------------------------------------
+test_file_search_exclude() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-17: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-17: file.search 'excluded' --exclude node_modules"
+    # "should be excluded" text is in node_modules/pkg.json
+    # With --exclude node_modules, it should NOT be found
+    local out_excluded
+    out_excluded=$(run_remote_file_cmd search "excluded" --exclude node_modules --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out_excluded"; then
+        _log_warning "TC-FILE-17: caller connection error, skipping: $out_excluded"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out_excluded" | jq -e '.matches' >/dev/null 2>&1; then
+        local excluded_count
+        excluded_count=$(echo "$out_excluded" | jq '.matches | length')
+        # node_modules is already in DEFAULT_EXCLUDE_DIRS, so matches should be 0
+        if [[ "$excluded_count" -eq 0 ]]; then
+            _log_pass "TC-FILE-17: search with exclude=node_modules returns 0 matches"
+        else
+            # Check if any match is from node_modules
+            local nm_hits
+            nm_hits=$(echo "$out_excluded" | jq '[.matches[] | select(.path | test("node_modules"))] | length')
+            if [[ "$nm_hits" -eq 0 ]]; then
+                _log_pass "TC-FILE-17: search results exclude node_modules entries"
+            else
+                _log_fail "TC-FILE-17: search results should exclude node_modules" "0 node_modules hits" "$nm_hits"
+            fi
+        fi
+    else
+        _log_fail "TC-FILE-17: file.search with exclude returns valid JSON" "JSON with matches" "$out_excluded"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-18: file.glob with --exclude
+# ---------------------------------------------------------------------------
+test_file_glob_exclude() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-18: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-18: file.glob '**/*' --exclude node_modules — should not include node_modules paths"
+    local out
+    out=$(run_remote_file_cmd glob "**/*" --exclude node_modules --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-18: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.matches' >/dev/null 2>&1; then
+        local total nm_count
+        total=$(echo "$out" | jq '.matches | length')
+        nm_count=$(echo "$out" | jq '[.matches[] | select(test("node_modules"))] | length')
+
+        if [[ "$total" -ge 1 ]]; then
+            _log_pass "TC-FILE-18: glob returns matches (count=$total)"
+        else
+            _log_fail "TC-FILE-18: glob returns matches" ">=1" "$total"
+        fi
+
+        if [[ "$nm_count" -eq 0 ]]; then
+            _log_pass "TC-FILE-18: glob excludes node_modules paths"
+        else
+            _log_fail "TC-FILE-18: glob should exclude node_modules" "0" "$nm_count"
+        fi
+
+        # Verify src/main.rs IS present (non-excluded subdir)
+        if echo "$out" | jq -r '.matches[]' | grep -q "src/main.rs\|src\\\\main.rs"; then
+            _log_pass "TC-FILE-18: glob includes src/main.rs (not excluded)"
+        else
+            _log_warning "TC-FILE-18: src/main.rs not found in glob results (may depend on pattern semantics)"
+        fi
+    else
+        _log_fail "TC-FILE-18: file.glob with exclude returns valid JSON" "JSON with matches" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-19: file.list with --exclude
+# ---------------------------------------------------------------------------
+test_file_list_exclude() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-19: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-19: file.list --depth 2 --exclude node_modules — should not recurse into node_modules"
+    local out
+    out=$(run_remote_file_cmd list --exclude node_modules --depth 2 --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-19: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.entries' >/dev/null 2>&1; then
+        # At depth 2, node_modules dir entry itself may appear, but its contents (pkg.json) must not
+        local nm_content
+        nm_content=$(echo "$out" | jq '[.entries[] | select(.path | test("node_modules/"))] | length')
+        if [[ "$nm_content" -eq 0 ]]; then
+            _log_pass "TC-FILE-19: list --depth 2 --exclude excludes node_modules contents"
+        else
+            _log_fail "TC-FILE-19: list should exclude node_modules contents" "0" "$nm_content"
+        fi
+
+        # src/ contents should be visible at depth 2
+        local src_content
+        src_content=$(echo "$out" | jq '[.entries[] | select(.path | test("src/"))] | length')
+        if [[ "$src_content" -ge 1 ]]; then
+            _log_pass "TC-FILE-19: list --depth 2 shows src/ contents (not excluded)"
+        else
+            _log_warning "TC-FILE-19: src/ contents not found at depth 2"
+        fi
+    else
+        _log_fail "TC-FILE-19: file.list with exclude returns valid JSON" "JSON with entries" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-20: file.edit empty replacement deletes line without blank
+# ---------------------------------------------------------------------------
+test_file_edit_empty_replacement() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-20: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-20: file.edit — delete line 2 with empty replacement"
+    # edit-delete.txt = "keep-first\ndelete-me\nkeep-last\n"
+    # Delete line 2 by replacing with empty string
+    local edits_json='[{"start_line":2,"end_line":2,"replacement":""}]'
+    local out
+    out=$(run_remote_file_cmd edit edit-delete.txt --edits "$edits_json" --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-20: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.bytes_written // .applied_edits' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-20: file.edit empty replacement returns success JSON"
+
+        # Verify file content on disk: should be "keep-first\nkeep-last\n" (NO blank line)
+        if [[ -f "$SANDBOX_DIR/edit-delete.txt" ]]; then
+            local actual expected
+            actual=$(cat "$SANDBOX_DIR/edit-delete.txt")
+            expected=$(printf 'keep-first\nkeep-last')
+            if [[ "$actual" == "$expected" ]]; then
+                _log_pass "TC-FILE-20: deleted line leaves no blank line (keep-first\\nkeep-last)"
+            else
+                # Also accept trailing newline
+                local expected_nl
+                expected_nl=$(printf 'keep-first\nkeep-last\n')
+                if [[ "$actual" == "$expected_nl" ]]; then
+                    _log_pass "TC-FILE-20: deleted line leaves no blank line (with trailing newline)"
+                else
+                    _log_fail "TC-FILE-20: deleted line should leave no blank" "keep-first\\nkeep-last" "$actual"
+                fi
+            fi
+        else
+            _log_fail "TC-FILE-20: edit-delete.txt exists after edit" "file present" "file missing"
+        fi
+    else
+        _log_fail "TC-FILE-20: file.edit empty replacement returns valid JSON" "JSON with bytes_written" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 #  TC-FILE-09: readonly scope rejection
 # ---------------------------------------------------------------------------
 test_readonly_rejection() {
@@ -888,6 +1199,23 @@ setup_sandbox() {
     echo "to delete" > "$SANDBOX_DIR/deleteme.txt"
     printf 'line one\nline two\nline three\n' > "$SANDBOX_DIR/editable.txt"
     printf 'alpha\nbeta\ngamma\n' > "$SANDBOX_DIR/patchable.txt"
+
+    # multiline file for offset/limit tests (5 lines)
+    printf 'L1 apple\nL2 banana\nL3 cherry\nL4 date\nL5 elderberry\n' > "$SANDBOX_DIR/multiline.txt"
+
+    # file for edit-empty-replacement (delete line) test
+    printf 'keep-first\ndelete-me\nkeep-last\n' > "$SANDBOX_DIR/edit-delete.txt"
+
+    # searchable file with enough context for context-before/after tests
+    printf 'ctx-line-1\nctx-line-2\nNEEDLE-match\nctx-line-4\nctx-line-5\n' > "$SANDBOX_DIR/searchctx.txt"
+
+    # excluded directory (node_modules) with a file inside
+    mkdir -p "$SANDBOX_DIR/node_modules"
+    echo "should be excluded" > "$SANDBOX_DIR/node_modules/pkg.json"
+
+    # a normal subdirectory for comparison
+    mkdir -p "$SANDBOX_DIR/src"
+    echo "source file" > "$SANDBOX_DIR/src/main.rs"
 }
 
 write_file_access_policy() {
@@ -978,6 +1306,16 @@ EOF
     test_file_search
     test_file_edit
     test_file_apply_patch
+
+    # Coding-agent enhancement accuracy tests
+    test_file_read_offset_limit
+    test_file_read_total_lines
+    test_file_search_context
+    test_file_search_exclude
+    test_file_glob_exclude
+    test_file_list_exclude
+    test_file_edit_empty_replacement
+
     test_readonly_rejection
 
     print_test_summary
