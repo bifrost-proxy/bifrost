@@ -205,7 +205,22 @@ start_proxy() {
     kill_process_on_port "$PROXY_PORT"
     rm -f "$BIFROST_DATA_DIR/bifrost.pid" "$BIFROST_DATA_DIR/runtime.json" 2>/dev/null || true
 
-    local cmd="$BIFROST_BIN --port $PROXY_PORT --log-level debug start --skip-cert-check --unsafe-ssl --no-system-proxy"
+    # Wait for the port to be actually released before starting a new proxy.
+    # Without this, consecutive tests on the same PROXY_PORT may race on CI
+    # where kill returns fast but the TCP listener lingers briefly.
+    for _ in {1..40}; do
+        local port_in_use=false
+        if command -v lsof >/dev/null 2>&1; then
+            lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 && port_in_use=true
+        elif command -v ss >/dev/null 2>&1; then
+            ss -tlnp "sport = :$PROXY_PORT" 2>/dev/null | grep -q LISTEN && port_in_use=true
+        fi
+        $port_in_use || break
+        sleep 0.25
+    done
+
+    # --yes: auto-resolve port conflicts in non-interactive CI. Must come after the `start` subcommand.
+    local cmd="$BIFROST_BIN --port $PROXY_PORT --log-level debug start --yes --skip-cert-check --unsafe-ssl --no-system-proxy"
     
     if [[ -n "$rules" ]]; then
         cmd="$cmd --rules \"$rules\""
