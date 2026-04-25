@@ -3185,6 +3185,32 @@ export default function RemoteInvokeTab() {
                     shellEditorPolicies.map((policy) => policy.id),
                   );
                   const nextIndex = shellEditorPolicies.length + 1;
+                  // In Simple mode, auto-create a matching profile so the new
+                  // group has an execution environment attached.
+                  let profileIdForNewGroup = shellEditorProfiles[0]?.id;
+                  if (!shellEditorExpertMode) {
+                    const profileId = nextShellItemId(
+                      "profile",
+                      shellEditorProfiles.map((profile) => profile.id),
+                    );
+                    profileIdForNewGroup = profileId;
+                    setShellEditorProfiles((prev) => [
+                      ...prev,
+                      {
+                        id: profileId,
+                        name: `Profile ${nextIndex}`,
+                        description: "Auto-created for command group",
+                        enabled: true,
+                        cwd_allowlist: [],
+                        env_allowlist: [...DEFAULT_SANDBOX_ENV_KEYS],
+                        default_cwd: "",
+                        max_timeout_ms: 30000,
+                        stdin_allowed: false,
+                        interactive_allowed: false,
+                        extra_metadata: {},
+                      },
+                    ]);
+                  }
                   setShellEditorPolicies((prev) => [
                     ...prev,
                     {
@@ -3192,7 +3218,7 @@ export default function RemoteInvokeTab() {
                       name: `Policy ${nextIndex}`,
                       description: "",
                       enabled: true,
-                      profile_id: shellEditorProfiles[0]?.id,
+                      profile_id: profileIdForNewGroup,
                       exec_mode: "argv_exec",
                       allowed_executables: [],
                       allowed_shell_patterns: [],
