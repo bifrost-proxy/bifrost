@@ -1122,6 +1122,338 @@ test_file_edit_empty_replacement() {
 # ---------------------------------------------------------------------------
 #  TC-FILE-09: readonly scope rejection
 # ---------------------------------------------------------------------------
+
+# ===========================================================================
+#  Gap-targeting cases — added from design/remote-file-api-gap-analysis.md
+#  These cases are expected to RED-LIGHT until the P0/P1 fixes land. They
+#  intentionally exercise edge cases that real coding agents hit in the wild.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-01 (P0-4): file.write must preserve executable bit
+# ---------------------------------------------------------------------------
+test_gap_write_preserves_mode() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-01: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-01 (P0-4): file.write preserves 0755 executable mode"
+
+    local target="$SANDBOX_DIR/bin.sh"
+    printf '#!/bin/sh\necho v1\n' > "$target"
+    chmod 0755 "$target"
+
+    local new_b64
+    new_b64=$(printf '#!/bin/sh\necho v2\n' | base64 | tr -d '\n')
+    local out
+    out=$(run_remote_file_cmd write bin.sh --cwd "$SANDBOX_DIR" --content-b64 "$new_b64") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-01: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local mode
+    mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || echo "?")
+    if [[ "$mode" == "755" ]]; then
+        _log_pass "TC-GAP-01: executable bit preserved after file.write"
+    else
+        _log_fail "TC-GAP-01: executable bit preserved after file.write" "755" "$mode"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-02 (P0-3): file.edit must preserve CRLF line endings
+# ---------------------------------------------------------------------------
+test_gap_edit_preserves_crlf() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-02: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-02 (P0-3): file.edit preserves CRLF line endings"
+
+    local target="$SANDBOX_DIR/crlf.txt"
+    printf 'alpha\r\nbeta\r\ngamma\r\n' > "$target"
+
+    local edits_json
+    edits_json='[{"start_line":2,"end_line":2,"replacement":"BETA"}]'
+    local out
+    out=$(run_remote_file_cmd edit crlf.txt --cwd "$SANDBOX_DIR" --edits "$edits_json") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-02: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local crlf_count lf_only_count
+    crlf_count=$(grep -c $'\r$' "$target" 2>/dev/null || echo 0)
+    lf_only_count=$(awk 'BEGIN{n=0} /\r$/{next} /./{n++} END{print n}' "$target" 2>/dev/null || echo 0)
+    if [[ "$crlf_count" -eq 3 && "$lf_only_count" -eq 0 ]]; then
+        _log_pass "TC-GAP-02: CRLF line endings preserved across edit"
+    else
+        _log_fail "TC-GAP-02: CRLF line endings preserved" "crlf=3 lf_only=0" "crlf=${crlf_count} lf_only=${lf_only_count}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-03 (P0-1): file.apply_patch is all-or-nothing across files
+# ---------------------------------------------------------------------------
+test_gap_apply_patch_atomic_multifile() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-03: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-03 (P0-1): apply_patch multi-file atomicity"
+
+    # two files: first patches cleanly, second has deliberate context mismatch
+    printf 'one\ntwo\nthree\n' > "$SANDBOX_DIR/a.txt"
+    printf 'apple\nbanana\ncherry\n' > "$SANDBOX_DIR/b.txt"
+
+    local patch
+    patch=$(cat <<'PATCH'
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+-one
++ONE
+ two
+ three
+--- a/b.txt
++++ b/b.txt
+@@ -1,3 +1,3 @@
+-WRONG_CONTEXT_LINE
++APPLE
+ banana
+ cherry
+PATCH
+)
+    local patch_b64
+    patch_b64=$(printf '%s\n' "$patch" | base64 | tr -d '\n')
+    local out
+    out=$(run_remote_file_cmd apply-patch --cwd "$SANDBOX_DIR" --patch-b64 "$patch_b64") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-03: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local a_changed
+    a_changed_raw=$(grep -c '^ONE$' "$SANDBOX_DIR/a.txt" 2>/dev/null; true)
+    a_changed=$(printf '%s' "$a_changed_raw" | head -n1)
+    : "${a_changed:=0}"
+    if [[ "$a_changed" -eq 0 ]]; then
+        _log_pass "TC-GAP-03: failed patch rolled back first file (atomic)"
+    else
+        _log_fail "TC-GAP-03: failed patch rolled back first file (atomic)" \
+            "a.txt unchanged (atomic rollback)" \
+            "a.txt was modified despite b.txt failure — half-applied state"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-04 (P0-5): .gitignore is respected by file.search / file.glob
+# ---------------------------------------------------------------------------
+test_gap_gitignore_respected() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-04: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-04 (P0-5): .gitignore is respected by file.search"
+
+    local dir="$SANDBOX_DIR/gi"
+    mkdir -p "$dir/dist" "$dir/src"
+    printf '.gitignore\n' > "$dir/.gitignore"
+    printf 'dist/\n' >> "$dir/.gitignore"
+    printf 'MARKER_HIT\n' > "$dir/dist/ignored.txt"
+    printf 'MARKER_HIT\n' > "$dir/src/kept.txt"
+
+    local out
+    out=$(run_remote_file_cmd search 'MARKER_HIT' --cwd "$dir") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-04: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local hits_in_dist
+    hits_in_dist=$(echo "$out" | jq '[.matches[]? | select(.path | test("dist/"))] | length' 2>/dev/null || echo 0)
+    if [[ "$hits_in_dist" -eq 0 ]]; then
+        _log_pass "TC-GAP-04: search skips files ignored by .gitignore"
+    else
+        _log_fail "TC-GAP-04: search skips files ignored by .gitignore" \
+            "0 hits under dist/" \
+            "${hits_in_dist} hits under dist/ — .gitignore not wired"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-05 (P0-6): file.write supports create_parents
+# ---------------------------------------------------------------------------
+test_gap_write_create_parents() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-05: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-05 (P0-6): file.write --create-parents creates missing dirs"
+
+    local nested="deep/very/nested/new.txt"
+    local b64
+    b64=$(printf 'ok\n' | base64 | tr -d '\n')
+    local out
+    out=$(run_remote_file_cmd write "$nested" --cwd "$SANDBOX_DIR" --content-b64 "$b64" --create-parents) || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-05: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+    if [[ -f "$SANDBOX_DIR/$nested" ]]; then
+        _log_pass "TC-GAP-05: create_parents created missing directories"
+    else
+        _log_fail "TC-GAP-05: create_parents created missing directories" \
+            "file exists at $nested" "file missing — create_parents flag not implemented"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-06 (P1-8): file.read truncated must expose FILE-wide sha256
+# ---------------------------------------------------------------------------
+test_gap_read_truncated_file_sha256() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-06: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-06 (P1-8): truncated read returns file_sha256 over whole file"
+
+    local target="$SANDBOX_DIR/big.txt"
+    python3 -c "open(r'${target}','wb').write(b'x'*(3*1024*1024))" 2>/dev/null || \
+        dd if=/dev/zero of="$target" bs=1024 count=3072 >/dev/null 2>&1
+
+    local file_sha
+    file_sha=$(shasum -a 256 "$target" 2>/dev/null | awk "{print \$1}")
+
+    local out
+    out=$(run_remote_file_cmd read big.txt --cwd "$SANDBOX_DIR" --max-bytes 65536) || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-06: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local reported
+    reported=$(echo "$out" | jq -r '.file_sha256 // ""')
+    if [[ -n "$reported" && "$reported" == "$file_sha" ]]; then
+        _log_pass "TC-GAP-06: file_sha256 matches whole-file digest when truncated"
+    else
+        _log_fail "TC-GAP-06: file_sha256 matches whole-file digest when truncated" \
+            "$file_sha" "${reported:-<missing file_sha256 field>}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-07 (P1-4): file.list truncation must surface truncated=true
+# ---------------------------------------------------------------------------
+test_gap_list_truncated_flag() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-07: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-07 (P1-4): file.list surfaces truncated flag"
+
+    # This dir is too expensive to actually create (>10k files); we instead
+    # assert the JSON schema exposes the field so clients can branch on it.
+    local out
+    out=$(run_remote_file_cmd list --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-07: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+    if echo "$out" | jq -e 'has("truncated")' >/dev/null 2>&1; then
+        _log_pass "TC-GAP-07: file.list response carries 'truncated' key"
+    else
+        _log_fail "TC-GAP-07: file.list response carries 'truncated' key" \
+            '"truncated": bool' \
+            'field missing — silent truncation at MAX_ENTRIES_PER_DIR=10000'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-08 (P1-1): file.search supports case-insensitive + file glob
+# ---------------------------------------------------------------------------
+test_gap_search_case_insensitive_and_glob() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-08: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-08 (P1-1): file.search --case-insensitive --glob"
+
+    local dir="$SANDBOX_DIR/ci"
+    mkdir -p "$dir"
+    printf 'Hello World\n' > "$dir/a.rs"
+    printf 'HELLO WORLD\n' > "$dir/b.md"
+
+    local out
+    out=$(run_remote_file_cmd search 'hello world' --cwd "$dir" --case-insensitive --glob '**/*.rs') || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-08: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local hits_rs hits_md
+    hits_rs=$(echo "$out" | jq '[.matches[]? | select(.path | endswith(".rs"))] | length' 2>/dev/null || echo 0)
+    hits_md=$(echo "$out" | jq '[.matches[]? | select(.path | endswith(".md"))] | length' 2>/dev/null || echo 0)
+    if [[ "$hits_rs" -ge 1 && "$hits_md" -eq 0 ]]; then
+        _log_pass "TC-GAP-08: search honors --case-insensitive + --glob file filter"
+    else
+        _log_fail "TC-GAP-08: search honors --case-insensitive + --glob" \
+            "rs>=1 md=0" "rs=${hits_rs} md=${hits_md} (flags likely unimplemented)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-09 (P2): file.stat / file.list expose symlink_target
+# ---------------------------------------------------------------------------
+test_gap_symlink_target_field() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-09: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-09 (P2): file.stat returns symlink_target"
+
+    rm -f "$SANDBOX_DIR/link.txt"
+    ln -s hello.txt "$SANDBOX_DIR/link.txt"
+
+    local out
+    out=$(run_remote_file_cmd stat link.txt --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-09: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    local tgt
+    tgt=$(echo "$out" | jq -r '.symlink_target // ""')
+    if [[ -n "$tgt" ]]; then
+        _log_pass "TC-GAP-09: file.stat exposes symlink_target=${tgt}"
+    else
+        _log_fail "TC-GAP-09: file.stat exposes symlink_target" \
+            "non-empty symlink_target" "field missing"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-GAP-10 (design drift): error codes match design doc (file.sha_mismatch)
+# ---------------------------------------------------------------------------
+test_gap_error_code_sha_mismatch() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-GAP-10: skipped due to prior connection error"
+        return 0
+    fi
+    log "TC-GAP-10 (design drift): write with wrong base_sha256 returns file.sha_mismatch"
+
+    local target="$SANDBOX_DIR/sha.txt"
+    printf 'v1\n' > "$target"
+    local b64
+    b64=$(printf 'v2\n' | base64 | tr -d '\n')
+    local out
+    out=$(run_remote_file_cmd write sha.txt --cwd "$SANDBOX_DIR" \
+        --content-b64 "$b64" --base-sha256 0000000000000000000000000000000000000000000000000000000000000000) || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-GAP-10: caller conn error: $out"; CALLER_CONN_OK=0; return 0
+    fi
+
+    if echo "$out" | grep -q 'file.sha_mismatch'; then
+        _log_pass "TC-GAP-10: error code is file.sha_mismatch (matches design doc)"
+    else
+        _log_fail "TC-GAP-10: error code is file.sha_mismatch" \
+            "file.sha_mismatch" "$(echo "$out" | tr -d '\n' | head -c 200)"
+    fi
+}
+
+
 test_readonly_rejection() {
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
         _log_warning "TC-FILE-09: skipped due to prior connection error"
@@ -1328,6 +1660,18 @@ EOF
     test_file_glob_exclude
     test_file_list_exclude
     test_file_edit_empty_replacement
+
+    # ---- gap-targeting cases (expected RED-LIGHT until P0/P1 fixes land) ----
+    test_gap_write_preserves_mode
+    test_gap_edit_preserves_crlf
+    test_gap_apply_patch_atomic_multifile
+    test_gap_gitignore_respected
+    test_gap_write_create_parents
+    test_gap_read_truncated_file_sha256
+    test_gap_list_truncated_flag
+    test_gap_search_case_insensitive_and_glob
+    test_gap_symlink_target_field
+    test_gap_error_code_sha_mismatch
 
     test_readonly_rejection
 
