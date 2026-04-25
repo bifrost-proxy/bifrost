@@ -138,13 +138,71 @@ async fn apply_mode(path: &Path, mode: Option<u32>) {
 /// permission bits, even if a later async `apply_mode` were to fail.
 /// No-op on non-unix platforms.
 #[allow(unused_variables)]
-fn apply_mode_sync(path: &Path, mode: Option<u32>) {
+fn apply_mode_sync(path: &Path, mode: Option<u32>) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         if let Some(m) = mode {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(m));
+            let res = std::fs::set_permissions(path, std::fs::Permissions::from_mode(m));
+            diag_mode(
+                "apply_mode_sync",
+                path,
+                Some(m),
+                res.as_ref().err().map(|e| e.to_string()),
+            );
+            return res;
         }
+    }
+    Ok(())
+}
+
+/// Read back the current unix mode for a path (masked to perm bits).
+/// Returns `None` when not unix, the path is missing, or stat fails.
+#[allow(unused_variables)]
+fn read_mode_sync(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(md) => Some(md.permissions().mode() & 0o7777),
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Diagnostic sidecar log. Enabled when `BIFROST_FILE_OPS_DEBUG=1`.
+/// Writes a single line to `BIFROST_FILE_OPS_DEBUG_LOG` (default
+/// `/tmp/bifrost-fileops.log`). Used for post-mortem in CI where we
+/// cannot attach a debugger.
+fn diag_mode(tag: &str, path: &Path, mode: Option<u32>, err: Option<String>) {
+    if std::env::var("BIFROST_FILE_OPS_DEBUG").ok().as_deref() != Some("1") {
+        return;
+    }
+    let log_path = std::env::var("BIFROST_FILE_OPS_DEBUG_LOG")
+        .unwrap_or_else(|_| "/tmp/bifrost-fileops.log".to_string());
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(
+            f,
+            "{} tag={} path={} mode={:?} err={:?}",
+            now,
+            tag,
+            path.display(),
+            mode.map(|m| format!("0o{:o}", m)),
+            err,
+        );
     }
 }
 
@@ -942,13 +1000,35 @@ pub async fn handle_file_write(
         f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
     }
     // Pre-apply prior mode on tmp so the rename-target inode already
-    // carries the correct perms; the async apply_mode after rename
-    // remains as a defensive fallback.
-    apply_mode_sync(&tmp, prior_mode);
+    // carries the correct perms. Pre-rename chmod is best-effort:
+    // if it fails (e.g. EPERM on some filesystems), we still try post-rename.
+    let pre_rename_err = apply_mode_sync(&tmp, prior_mode).err();
+    diag_mode(
+        "pre-rename",
+        &tmp,
+        prior_mode,
+        pre_rename_err.as_ref().map(|e| e.to_string()),
+    );
+    diag_mode("pre-rename-readback", &tmp, read_mode_sync(&tmp), None);
     fs::rename(&tmp, path)
         .await
         .map_err(|e| io_err("rename-tmp", e))?;
-    apply_mode(path, prior_mode).await;
+    diag_mode("post-rename-readback", path, read_mode_sync(path), None);
+    // Post-rename chmod: authoritative guarantee that the final inode
+    // carries `prior_mode`. Uses sync std::fs to avoid tokio scheduling
+    // races on Linux runners where the tmp-side chmod has been observed
+    // to be lost through rename on some filesystems.
+    if let Err(e) = apply_mode_sync(path, prior_mode) {
+        diag_mode(
+            "post-rename-chmod-fail",
+            path,
+            prior_mode,
+            Some(e.to_string()),
+        );
+        // Don't fail the whole write on chmod error — the bytes landed
+        // atomically. Caller can re-stat if perms matter.
+    }
+    diag_mode("final-readback", path, read_mode_sync(path), None);
 
     let new_sha = sha256_hex(&bytes);
     Ok(json!({
@@ -1085,7 +1165,7 @@ pub async fn handle_file_edit(
     // Pre-apply prior mode on tmp so the rename-target inode already
     // carries the correct perms; the async apply_mode after rename
     // remains as a defensive fallback.
-    apply_mode_sync(&tmp, prior_mode);
+    let _ = apply_mode_sync(&tmp, prior_mode);
     fs::rename(&tmp, path)
         .await
         .map_err(|e| io_err("rename-tmp", e))?;
@@ -1482,7 +1562,7 @@ pub async fn handle_file_apply_patch(
                 for (path, bytes, prior, existed) in committed.iter().rev() {
                     if *existed {
                         let _ = fs::write(path, bytes).await;
-                        apply_mode_sync(path, *prior);
+                        let _ = apply_mode_sync(path, *prior);
                     } else {
                         // File was freshly created by this patch —
                         // unlink instead of leaving an empty stub.
@@ -1511,7 +1591,7 @@ pub async fn handle_file_apply_patch(
             for (path, bytes, prior, existed) in committed.iter().rev() {
                 if *existed {
                     let _ = fs::write(path, bytes).await;
-                    apply_mode_sync(path, *prior);
+                    let _ = apply_mode_sync(path, *prior);
                 } else {
                     let _ = fs::remove_file(path).await;
                 }

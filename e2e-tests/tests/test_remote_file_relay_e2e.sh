@@ -1157,6 +1157,14 @@ test_gap_write_preserves_mode() {
         _log_pass "TC-GAP-01: executable bit preserved after file.write"
     else
         _log_fail "TC-GAP-01: executable bit preserved after file.write" "755" "$mode"
+        if [[ -n "${BIFROST_FILE_OPS_DEBUG_LOG:-}" && -f "$BIFROST_FILE_OPS_DEBUG_LOG" ]]; then
+            echo "--- BIFROST_FILE_OPS_DEBUG_LOG ($BIFROST_FILE_OPS_DEBUG_LOG) ---"
+            tail -80 "$BIFROST_FILE_OPS_DEBUG_LOG" || true
+            echo "--- end sidecar ---"
+        fi
+        echo "[TC-GAP-01] target path: $target"
+        ls -la "$target" 2>&1 || true
+        stat "$target" 2>&1 || true
     fi
 }
 
@@ -2016,6 +2024,11 @@ main() {
 remote_base_url = "$RELAY_URL"
 EOF
 
+    # P0-4 diagnostic: capture mode-preservation internals into sidecar log.
+    # Safe no-op when the env is unset. Log file surfaces into CI artifacts via BIFROST_E2E_REPORT_DIR.
+    export BIFROST_FILE_OPS_DEBUG=1
+    export BIFROST_FILE_OPS_DEBUG_LOG="${BIFROST_E2E_REPORT_DIR:-/tmp}/bifrost-fileops-$$.log"
+    : > "$BIFROST_FILE_OPS_DEBUG_LOG" || true
     log "Starting target bifrost on port $ADMIN_PORT..."
     admin_start_bifrost
     CLIENT_ADMIN_URL="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
