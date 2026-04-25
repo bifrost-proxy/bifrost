@@ -682,6 +682,20 @@ function describeGrantMode(mode: string): string {
   }
 }
 
+/**
+ * Humanize an exec_mode value (argv_exec / shell_text) for display.
+ */
+function describeExecMode(mode: string): string {
+  switch (mode) {
+    case "argv_exec":
+      return "Specific command";
+    case "shell_text":
+      return "Shell text";
+    default:
+      return mode;
+  }
+}
+
 function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
   if (grant.grant_scope === "remote_query") {
     return "query";
@@ -2399,17 +2413,17 @@ export default function RemoteInvokeTab() {
                               </Tooltip>
                             )}
                             {c.exec_mode && (
-                              <Tooltip title={c.exec_mode}>
+                              <Tooltip title={`exec_mode: ${c.exec_mode}`}>
                                 <Tag
                                   color="blue"
                                   style={{
-                                    maxWidth: 120,
+                                    maxWidth: 140,
                                     overflow: "hidden",
                                     textOverflow: "ellipsis",
                                     whiteSpace: "nowrap",
                                   }}
                                 >
-                                  {c.exec_mode}
+                                  {describeExecMode(c.exec_mode)}
                                 </Tag>
                               </Tooltip>
                             )}
@@ -2532,7 +2546,9 @@ export default function RemoteInvokeTab() {
                     key: "exec_mode",
                     label: "Exec Mode",
                     children: selectedCall.exec_mode ? (
-                      <Tag color="blue">{selectedCall.exec_mode}</Tag>
+                      <Tooltip title={`exec_mode: ${selectedCall.exec_mode}`}>
+                        <Tag color="blue">{describeExecMode(selectedCall.exec_mode)}</Tag>
+                      </Tooltip>
                     ) : (
                       "-"
                     ),
