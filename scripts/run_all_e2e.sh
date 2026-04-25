@@ -850,7 +850,7 @@ run_shell_batch_parallel() {
         {
           echo "[PR-G-CI-FIX] timeout residual trace before kill:"
           pgrep -af "bifrost|mock_|uvicorn" 2>/dev/null || true
-        } >>"${pid_logs[$i]}" 2>&1 || true
+        } >"${pid_logs[$i]}.residual" 2>&1 || true
         kill -TERM -- "-${this_pid}" 2>/dev/null || kill -TERM "$this_pid" 2>/dev/null || true
         sleep 1
         kill -KILL -- "-${this_pid}" 2>/dev/null || kill -KILL "$this_pid" 2>/dev/null || true
@@ -863,11 +863,12 @@ run_shell_batch_parallel() {
         local dur=$((end_ts - pid_starts[$i]))
         local sname="${pid_scripts[$i]}"
         local slog="${pid_logs[$i]}"
-        # PR-G-CI-FIX: residual trace
+        # PR-G-CI-FIX: residual trace (sidecar file to avoid polluting
+        # failure-reason extraction that reads the last non-empty line of $slog)
         {
           echo "[PR-G-CI-FIX] post-test residual after ${sname} (${dur}s):"
           pgrep -af "bifrost|mock_|uvicorn" 2>/dev/null || echo "  (none)"
-        } >>"$slog" 2>&1 || true
+        } >"${slog}.residual" 2>&1 || true
 
         if [[ "$exit_code" -eq 0 ]]; then
           register_suite "shell:${sname}" "passed" "$slog" "" "$dur"
