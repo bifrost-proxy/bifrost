@@ -1152,7 +1152,7 @@ test_gap_write_preserves_mode() {
     fi
 
     local mode
-    mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || echo "?")
+    mode=$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || echo "?")
     if [[ "$mode" == "755" ]]; then
         _log_pass "TC-GAP-01: executable bit preserved after file.write"
     else
@@ -1634,8 +1634,8 @@ PATCH
 
     # 期望原子回滚:两个文件都回到 v1;可执行位仍是 755
     local a_mode b_mode a_content b_content
-    a_mode=$(stat -f '%Lp' "$a" 2>/dev/null || stat -c '%a' "$a" 2>/dev/null || echo "?")
-    b_mode=$(stat -f '%Lp' "$b" 2>/dev/null || stat -c '%a' "$b" 2>/dev/null || echo "?")
+    a_mode=$(stat -c '%a' "$a" 2>/dev/null || stat -f '%Lp' "$a" 2>/dev/null || echo "?")
+    b_mode=$(stat -c '%a' "$b" 2>/dev/null || stat -f '%Lp' "$b" 2>/dev/null || echo "?")
     a_content=$(cat "$a")
     b_content=$(cat "$b")
 
