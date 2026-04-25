@@ -1456,6 +1456,8 @@ pub enum RemoteFileCommands {
         path: Option<String>,
         #[arg(long, default_value_t = 1, help = "Max recursion depth")]
         depth: u32,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
         #[arg(
             long = "exclude",
             help = "Additional directory names to exclude (repeatable)"
@@ -1481,6 +1483,8 @@ pub enum RemoteFileCommands {
         pattern: String,
         #[arg(long, help = "Max matches to return")]
         max_matches: Option<usize>,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
         #[arg(
             long = "exclude",
             help = "Additional directory names to exclude (repeatable)"
@@ -1505,6 +1509,19 @@ pub enum RemoteFileCommands {
         context_before: Option<u32>,
         #[arg(long, short = 'A', help = "Number of context lines after each match")]
         context_after: Option<u32>,
+        #[arg(
+            long = "case-insensitive",
+            short = 'i',
+            help = "Case-insensitive regex search"
+        )]
+        case_insensitive: bool,
+        #[arg(
+            long = "glob",
+            help = "Only search files matching this glob (e.g. '*.rs')"
+        )]
+        glob: Option<String>,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
         #[arg(
             long = "exclude",
             help = "Additional directory names to exclude (repeatable)"
@@ -1532,10 +1549,17 @@ pub enum RemoteFileCommands {
         path: String,
         #[arg(long, value_hint = ValueHint::FilePath, help = "Read content from a local file (or '-' for stdin)")]
         content_file: Option<String>,
+        #[arg(
+            long = "content-b64",
+            help = "Provide content as a base64-encoded string (overrides --content-file)"
+        )]
+        content_b64: Option<String>,
         #[arg(long, help = "Expected current sha256 for optimistic locking")]
         base_sha256: Option<String>,
         #[arg(long, help = "Allow overwrite even if policy default forbids")]
         allow_overwrite: Option<bool>,
+        #[arg(long = "create-parents", help = "Create missing parent directories")]
+        create_parents: bool,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]
@@ -1592,7 +1616,12 @@ pub enum RemoteFileCommands {
     #[command(about = "Apply a unified diff across multiple files atomically")]
     ApplyPatch {
         #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
-        patch_file: String,
+        patch_file: Option<String>,
+        #[arg(
+            long = "patch-b64",
+            help = "Provide the unified diff as a base64 string (overrides --patch-file)"
+        )]
+        patch_b64: Option<String>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]

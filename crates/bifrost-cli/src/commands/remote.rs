@@ -2044,6 +2044,7 @@ fn build_remote_file_command(
         RemoteFileCommands::List {
             path,
             depth,
+            no_ignore,
             exclude_patterns,
             cwd,
             output,
@@ -2053,6 +2054,7 @@ fn build_remote_file_command(
             json!({
                 "path": path,
                 "depth": depth,
+                "respect_gitignore": !no_ignore,
                 "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "cwd": cwd,
             }),
@@ -2067,6 +2069,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Glob {
             pattern,
             max_matches,
+            no_ignore,
             exclude_patterns,
             cwd,
             output,
@@ -2076,6 +2079,7 @@ fn build_remote_file_command(
             json!({
                 "pattern": pattern,
                 "max_matches": max_matches,
+                "respect_gitignore": !no_ignore,
                 "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "cwd": cwd,
             }),
@@ -2086,6 +2090,9 @@ fn build_remote_file_command(
             path,
             max_matches,
             max_scan,
+            case_insensitive,
+            glob,
+            no_ignore,
             exclude_patterns,
             context_before,
             context_after,
@@ -2099,6 +2106,9 @@ fn build_remote_file_command(
                 "path": path,
                 "max_matches": max_matches,
                 "max_scan_bytes": max_scan,
+                "case_insensitive": case_insensitive,
+                "glob": glob,
+                "respect_gitignore": !no_ignore,
                 "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "context_before": context_before,
                 "context_after": context_after,
@@ -2120,29 +2130,35 @@ fn build_remote_file_command(
         RemoteFileCommands::Write {
             path,
             content_file,
+            content_b64: cli_content_b64,
             base_sha256,
             allow_overwrite,
+            create_parents,
             cwd,
             output,
         } => {
-            let content_b64 = match content_file.as_deref() {
-                Some("-") | None => {
-                    use std::io::Read;
-                    let mut buf = Vec::new();
-                    std::io::stdin().read_to_end(&mut buf).map_err(|e| {
-                        BifrostError::Io(std::io::Error::other(format!(
-                            "read stdin for file.write: {e}"
-                        )))
-                    })?;
-                    base64::engine::general_purpose::STANDARD.encode(&buf)
+            let content_b64 = if let Some(b64) = cli_content_b64.as_deref() {
+                b64.to_string()
+            } else {
+                match content_file.as_deref() {
+                    Some("-") | None => {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        std::io::stdin().read_to_end(&mut buf).map_err(|e| {
+                            BifrostError::Io(std::io::Error::other(format!(
+                                "read stdin for file.write: {e}"
+                            )))
+                        })?;
+                        base64::engine::general_purpose::STANDARD.encode(&buf)
+                    }
+                    Some(p) => std::fs::read(p)
+                        .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
+                        .map_err(|e| {
+                            BifrostError::Io(std::io::Error::other(format!(
+                                "read content file {p}: {e}"
+                            )))
+                        })?,
                 }
-                Some(path) => std::fs::read(path)
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
-                    .map_err(|e| {
-                        BifrostError::Io(std::io::Error::other(format!(
-                            "read content file {path}: {e}"
-                        )))
-                    })?,
             };
             (
                 "file.write",
@@ -2152,6 +2168,7 @@ fn build_remote_file_command(
                     "content_b64": content_b64,
                     "base_sha256": base_sha256,
                     "allow_overwrite": allow_overwrite,
+                    "create_parents": create_parents,
                     "cwd": cwd,
                 }),
                 output.clone(),
@@ -2213,24 +2230,42 @@ fn build_remote_file_command(
         ),
         RemoteFileCommands::ApplyPatch {
             patch_file,
+            patch_b64,
             cwd,
             output,
         } => {
-            let patch_text = if patch_file == "-" {
-                use std::io::Read;
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+            let patch_text = if let Some(b64) = patch_b64.as_deref() {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!("decode --patch-b64: {e}")))
+                    })?;
+                String::from_utf8(decoded).map_err(|e| {
                     BifrostError::Io(std::io::Error::other(format!(
-                        "read stdin for file.apply-patch: {e}"
-                    )))
-                })?;
-                buf
-            } else {
-                std::fs::read_to_string(patch_file).map_err(|e| {
-                    BifrostError::Io(std::io::Error::other(format!(
-                        "read patch file {patch_file}: {e}"
+                        "patch-b64 is not valid utf-8: {e}"
                     )))
                 })?
+            } else if let Some(pf) = patch_file.as_deref() {
+                if pf == "-" {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read stdin for file.apply-patch: {e}"
+                        )))
+                    })?;
+                    buf
+                } else {
+                    std::fs::read_to_string(pf).map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read patch file {pf}: {e}"
+                        )))
+                    })?
+                }
+            } else {
+                return Err(BifrostError::Config(
+                    "apply-patch requires --patch-file or --patch-b64".to_string(),
+                ));
             };
             (
                 "file.apply_patch",
