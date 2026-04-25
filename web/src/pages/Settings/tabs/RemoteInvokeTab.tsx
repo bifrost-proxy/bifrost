@@ -3260,8 +3260,10 @@ export default function RemoteInvokeTab() {
                           />
                         </div>
                       </Col>
-                      <Col xs={24} md={4}>
-                        <Text type="secondary">Exec mode</Text>
+                      <Col xs={24} md={6}>
+                        <Tooltip title="Match commands by exact program name (argv_exec) or by a shell text pattern (shell_text). Underlying field: exec_mode">
+                          <Text type="secondary">Match by</Text>
+                        </Tooltip>
                         <Select
                           style={{ width: "100%" }}
                           value={policy.exec_mode}
@@ -3275,8 +3277,8 @@ export default function RemoteInvokeTab() {
                             )
                           }
                         >
-                          <Option value="argv_exec">argv_exec</Option>
-                          <Option value="shell_text">shell_text</Option>
+                          <Option value="argv_exec">Specific commands (argv list)</Option>
+                          <Option value="shell_text">Shell text pattern (regex)</Option>
                         </Select>
                       </Col>
                       <Col xs={24}>
