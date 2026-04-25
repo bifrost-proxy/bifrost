@@ -28,7 +28,7 @@ fn unique_tmp(prefix: &str) -> PathBuf {
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         // ---------------------------------------------------------------
-        //  Phase 1 — read-only policy tests
+        //  Read-only policy tests
         // ---------------------------------------------------------------
         TestCase::standalone(
             "remote_file_policy_allows_file_inside_root",
@@ -163,7 +163,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "remote_file_op_as_str_round_trip",
-            "FileOp::as_str returns stable lowercase tokens for all ops (Phase 1+2+3)",
+            "FileOp::as_str returns stable lowercase tokens for all ops",
             "remote_file_api",
             || async {
                 let cases = [
@@ -193,7 +193,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         // ---------------------------------------------------------------
-        //  Phase 2 — write policy tests
+        //  Write policy tests
         // ---------------------------------------------------------------
         TestCase::standalone(
             "remote_file_readonly_policy_rejects_write_op",

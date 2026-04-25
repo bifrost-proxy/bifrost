@@ -619,6 +619,183 @@ test_file_delete() {
 }
 
 # ---------------------------------------------------------------------------
+#  TC-FILE-10: file.glob
+# ---------------------------------------------------------------------------
+test_file_glob() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-10: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-10: file.glob — glob *.txt in sandbox"
+    local out
+    out=$(run_remote_file_cmd glob "*.txt" --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-10: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.matches' >/dev/null 2>&1; then
+        local count
+        count=$(echo "$out" | jq '.matches | length')
+        if [[ "$count" -ge 1 ]]; then
+            _log_pass "TC-FILE-10: file.glob returns matches (count=$count)"
+        else
+            _log_fail "TC-FILE-10: file.glob returns matches" ">=1" "$count"
+        fi
+        # hello.txt should be among the matches
+        if echo "$out" | jq -r '.matches[]' | grep -q "hello.txt"; then
+            _log_pass "TC-FILE-10: file.glob matches include hello.txt"
+        else
+            _log_fail "TC-FILE-10: file.glob matches include hello.txt" "hello.txt in matches" "$out"
+        fi
+    else
+        _log_fail "TC-FILE-10: file.glob returns valid JSON with matches" "JSON with matches array" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-11: file.search
+# ---------------------------------------------------------------------------
+test_file_search() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-11: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-11: file.search — search 'hello' in sandbox"
+    local out
+    out=$(run_remote_file_cmd search "hello" --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-11: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.matches' >/dev/null 2>&1; then
+        local count
+        count=$(echo "$out" | jq '.matches | length')
+        if [[ "$count" -ge 1 ]]; then
+            _log_pass "TC-FILE-11: file.search returns matches (count=$count)"
+        else
+            _log_fail "TC-FILE-11: file.search returns matches" ">=1" "$count"
+        fi
+        # Verify match structure includes path/line/preview
+        local first_path first_line
+        first_path=$(echo "$out" | jq -r '.matches[0].path // ""')
+        first_line=$(echo "$out" | jq -r '.matches[0].line // ""')
+        if [[ -n "$first_path" && "$first_path" != "null" && -n "$first_line" && "$first_line" != "null" ]]; then
+            _log_pass "TC-FILE-11: file.search match has path and line fields"
+        else
+            _log_fail "TC-FILE-11: file.search match has path and line fields" "path+line" "path=$first_path line=$first_line"
+        fi
+    else
+        _log_fail "TC-FILE-11: file.search returns valid JSON with matches" "JSON with matches array" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-12: file.edit
+# ---------------------------------------------------------------------------
+test_file_edit() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-12: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-12: file.edit — edit editable.txt, replace line 2"
+    local edits_json='[{"start_line":2,"end_line":2,"replacement":"replaced line two\n"}]'
+    local out
+    out=$(run_remote_file_cmd edit editable.txt --edits "$edits_json" --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-12: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.bytes_written // .applied_edits' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-12: file.edit returns success JSON"
+
+        # Verify file content on disk
+        if [[ -f "$SANDBOX_DIR/editable.txt" ]]; then
+            local line2
+            line2=$(sed -n '2p' "$SANDBOX_DIR/editable.txt")
+            if [[ "$line2" == "replaced line two" ]]; then
+                _log_pass "TC-FILE-12: editable.txt line 2 correctly replaced"
+            else
+                _log_fail "TC-FILE-12: editable.txt line 2 correctly replaced" "replaced line two" "$line2"
+            fi
+        else
+            _log_fail "TC-FILE-12: editable.txt exists after edit" "file present" "file missing"
+        fi
+    else
+        _log_fail "TC-FILE-12: file.edit returns valid JSON" "JSON with bytes_written or applied_edits" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-13: file.apply_patch
+# ---------------------------------------------------------------------------
+test_file_apply_patch() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-13: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-13: file.apply_patch — patch patchable.txt"
+    local patch_file
+    patch_file="$(mktemp)"
+    cat > "$patch_file" <<'PATCH'
+--- a/patchable.txt
++++ b/patchable.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta-patched
+ gamma
+PATCH
+
+    local out
+    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    rm -f "$patch_file"
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-13: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.files' >/dev/null 2>&1; then
+        local patched_count
+        patched_count=$(echo "$out" | jq '.files | length')
+        if [[ "$patched_count" -ge 1 ]]; then
+            _log_pass "TC-FILE-13: file.apply_patch returns files array (count=$patched_count)"
+        else
+            _log_fail "TC-FILE-13: file.apply_patch returns files array" ">=1" "$patched_count"
+        fi
+
+        # Verify file content on disk
+        if [[ -f "$SANDBOX_DIR/patchable.txt" ]]; then
+            local line2
+            line2=$(sed -n '2p' "$SANDBOX_DIR/patchable.txt")
+            if [[ "$line2" == "beta-patched" ]]; then
+                _log_pass "TC-FILE-13: patchable.txt line 2 correctly patched"
+            else
+                _log_fail "TC-FILE-13: patchable.txt line 2 correctly patched" "beta-patched" "$line2"
+            fi
+        else
+            _log_fail "TC-FILE-13: patchable.txt exists after patch" "file present" "file missing"
+        fi
+    else
+        _log_fail "TC-FILE-13: file.apply_patch returns valid JSON" "JSON with files array" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 #  TC-FILE-09: readonly scope rejection
 # ---------------------------------------------------------------------------
 test_readonly_rejection() {
@@ -709,6 +886,8 @@ setup_sandbox() {
     echo "hello world" > "$SANDBOX_DIR/hello.txt"
     echo "to move" > "$SANDBOX_DIR/moveme.txt"
     echo "to delete" > "$SANDBOX_DIR/deleteme.txt"
+    printf 'line one\nline two\nline three\n' > "$SANDBOX_DIR/editable.txt"
+    printf 'alpha\nbeta\ngamma\n' > "$SANDBOX_DIR/patchable.txt"
 }
 
 write_file_access_policy() {
@@ -795,6 +974,10 @@ EOF
     test_file_mkdir
     test_file_move
     test_file_delete
+    test_file_glob
+    test_file_search
+    test_file_edit
+    test_file_apply_patch
     test_readonly_rejection
 
     print_test_summary

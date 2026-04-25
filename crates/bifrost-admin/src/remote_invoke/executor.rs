@@ -382,7 +382,7 @@ impl RemoteInvokeExecutor {
 
         let default_path = ".".to_string();
         let requested_path = match file_op_name {
-            "file.glob" | "file.search" | "file.list" => {
+            "file.glob" | "file.search" | "file.list" | "file.apply_patch" => {
                 params.path.clone().unwrap_or(default_path)
             }
             _ => params.path.clone().ok_or_else(|| {

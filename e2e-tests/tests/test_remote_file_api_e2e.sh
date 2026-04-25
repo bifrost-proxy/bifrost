@@ -3,10 +3,9 @@
 # Remote File API — full CLI contract test.
 #
 # This test verifies that ALL `bifrost remote file` subcommands
-# (Phase 1 read-only + Phase 2 write + Phase 3 apply-patch) are
-# wired correctly — twelve subcommands are present and their
-# --help text mentions the documented flags. It is intentionally
-# hermetic (no relay, no daemon, no network): it only invokes the local
+# (twelve subcommands) are wired correctly and their --help text
+# mentions the documented flags. It is intentionally hermetic
+# (no relay, no daemon, no network): it only invokes the local
 # binary's help output.
 #
 # The matching Rust integration test
@@ -60,7 +59,7 @@ ensure_binary() {
 }
 
 # ---------------------------------------------------------------------------
-#  Phase 1 — read-only subcommands
+#  Read-only subcommands
 # ---------------------------------------------------------------------------
 
 test_remote_file_root_help() {
@@ -156,7 +155,7 @@ test_hash_help() {
 }
 
 # ---------------------------------------------------------------------------
-#  Phase 2 — write subcommands
+#  Write subcommands
 # ---------------------------------------------------------------------------
 
 test_write_help() {
@@ -224,7 +223,7 @@ test_rm_help() {
 }
 
 # ---------------------------------------------------------------------------
-#  Phase 3 — apply-patch
+#  Apply-patch
 # ---------------------------------------------------------------------------
 
 test_apply_patch_help() {
@@ -342,7 +341,7 @@ test_missing_required_apply_patch_file_fails() {
 main() {
     ensure_binary
 
-    # Phase 1 read-only
+    # Read-only
     test_remote_file_root_help
     test_read_help
     test_list_help
@@ -351,14 +350,14 @@ main() {
     test_search_help
     test_hash_help
 
-    # Phase 2 write
+    # Write
     test_write_help
     test_edit_help
     test_mkdir_help
     test_mv_help
     test_rm_help
 
-    # Phase 3 apply-patch
+    # Apply-patch
     test_apply_patch_help
 
     # Cross-cutting
