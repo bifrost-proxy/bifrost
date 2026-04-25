@@ -34,7 +34,6 @@ const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "__pycache__",
-    ".DS_Store",
     ".svn",
     ".hg",
 ];
@@ -180,14 +179,19 @@ pub async fn handle_file_read(
     }
 
     let sha256 = sha256_hex(&buf);
-    Ok(json!({
+    let mut result = json!({
         "content_b64": base64::engine::general_purpose::STANDARD.encode(&buf),
         "size": buf.len() as u64,
         "total_size": total_size,
         "truncated": bytes_truncated,
         "sha256": sha256,
         "mtime_unix": mtime_unix,
-    }))
+    });
+    // Include total_lines for text content so coding agents can plan chunked reads.
+    if let Ok(text) = std::str::from_utf8(&buf) {
+        result["total_lines"] = json!(text.lines().count() as u32);
+    }
+    Ok(result)
 }
 
 /// `file.list` — breadth-first directory listing up to `depth` levels.
@@ -494,7 +498,7 @@ pub async fn handle_file_search(
     }))
 }
 
-/// `file.hash` — content hash. Phase 1 supports only `sha256`.
+/// `file.hash` — content hash. Currently only `sha256` is supported.
 pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Hash);
     let algo = algo.unwrap_or("sha256").to_ascii_lowercase();
@@ -518,9 +522,9 @@ pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> 
     Ok(json!({ "algo": "sha256", "hex": hex, "size": md.len() }))
 }
 
-// === Phase 2/3 handlers: file.write / edit / mkdir / move / delete / apply_patch ===
+// === Write handlers: file.write / edit / mkdir / move / delete / apply_patch ===
 //
-// All handlers here assume the executor has already invoked
+// All handlers assume the executor has already invoked
 // `FileAccessPolicy::check` and produced a `PolicyDecision`. They perform no
 // additional access control; they only translate the decision into
 // tokio::fs calls and a wire response.
@@ -707,7 +711,10 @@ pub async fn handle_file_edit(
             cursor += 1;
         }
         out.push_str(&e.replacement);
-        if !e.replacement.ends_with('\n') && (e.end_line as usize) < lines.len() {
+        if !e.replacement.is_empty()
+            && !e.replacement.ends_with('\n')
+            && (e.end_line as usize) < lines.len()
+        {
             out.push('\n');
         }
         cursor = e.end_line + 1;
@@ -1071,6 +1078,10 @@ mod tests {
         FileAccessPolicy::new_readonly("t", vec![root.to_path_buf()])
     }
 
+    fn mk_rw_policy(root: &Path) -> FileAccessPolicy {
+        FileAccessPolicy::new_read_write("t", vec![root.to_path_buf()])
+    }
+
     #[tokio::test]
     async fn read_small_text_file_roundtrips() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1255,5 +1266,400 @@ mod tests {
         // node_modules and .git should be excluded from recursive listing
         // but they still appear at depth=0 as direct children — the skip applies to recursion into them
         // Actually they should still show up in listing but not be traversed
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.read — offset beyond EOF
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn read_offset_beyond_eof_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("short.txt"), "aaa\nbbb\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("short.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        let v = handle_file_read(&dec, None, false, Some(999), Some(5))
+            .await
+            .unwrap();
+        assert_eq!(v["size"].as_u64().unwrap(), 0);
+        assert_eq!(v["total_lines"].as_u64().unwrap(), 2);
+        // start_line clamped to total_lines + 1 area; end_line should be start-1 range (empty)
+        let content_b64 = v["content_b64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(content_b64)
+            .unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.read — empty file with offset/limit
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn read_empty_file_with_offset_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("empty.txt"), "").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("empty.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        let v = handle_file_read(&dec, None, false, Some(1), Some(10))
+            .await
+            .unwrap();
+        assert_eq!(v["total_lines"].as_u64().unwrap(), 0);
+        assert_eq!(v["size"].as_u64().unwrap(), 0);
+        assert!(!v["truncated"].as_bool().unwrap());
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.read — limit=0 returns empty
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn read_limit_zero_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "aaa\nbbb\nccc\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        let v = handle_file_read(&dec, None, false, Some(1), Some(0))
+            .await
+            .unwrap();
+        assert_eq!(v["size"].as_u64().unwrap(), 0);
+        assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
+        assert!(v["truncated"].as_bool().unwrap()); // 0 < 3
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.read — non-offset mode includes total_lines
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn read_non_offset_includes_total_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "aaa\nbbb\nccc\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        let v = handle_file_read(&dec, None, false, None, None)
+            .await
+            .unwrap();
+        // Non-offset mode should include total_lines for text files
+        assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.search — match at first line with context_before
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn search_match_at_first_line_with_context_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("first.txt"), "MATCH_HERE\nsecond\nthird\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let v = handle_file_search(&dec, "MATCH_HERE", None, None, &[], Some(3), Some(1))
+            .await
+            .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        let ctx = matches[0]["context"].as_array().unwrap();
+        // Line 1 matched, context_before=3 but only line 1 available (saturating_sub)
+        let ctx_lines: Vec<u64> = ctx.iter().map(|c| c["line"].as_u64().unwrap()).collect();
+        assert_eq!(*ctx_lines.first().unwrap(), 1); // can't go before line 1
+        assert!(ctx_lines.contains(&2)); // after
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.search — match at last line with context_after
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn search_match_at_last_line_with_context_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("last.txt"), "first\nsecond\nLAST_MATCH\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let v = handle_file_search(&dec, "LAST_MATCH", None, None, &[], Some(1), Some(5))
+            .await
+            .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        let ctx = matches[0]["context"].as_array().unwrap();
+        let ctx_lines: Vec<u64> = ctx.iter().map(|c| c["line"].as_u64().unwrap()).collect();
+        assert!(ctx_lines.contains(&2)); // before
+        assert!(ctx_lines.contains(&3)); // match (last line)
+                                         // context_after=5 but only 3 lines total — no crash, just clamped
+        assert_eq!(ctx.len(), 2); // line 2 + line 3
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.search — no matches returns empty
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn search_no_matches_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hello world\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let v = handle_file_search(
+            &dec,
+            "NONEXISTENT_PATTERN_XYZ",
+            None,
+            None,
+            &[],
+            Some(2),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert!(matches.is_empty());
+        assert!(!v["truncated"].as_bool().unwrap());
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.search — invalid regex returns error
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn search_invalid_regex_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "content\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let err = handle_file_search(&dec, "[invalid", None, None, &[], None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.invalid_regex"));
+    }
+
+    // ---------------------------------------------------------------
+    //  Bug regression: file.edit — empty replacement deletes line cleanly
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn edit_empty_replacement_deletes_line_without_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("three.txt");
+        std::fs::write(&file, "line1\nline2\nline3\n").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("three.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+
+        let edits = vec![EditRange {
+            start_line: 2,
+            end_line: 2,
+            replacement: String::new(),
+        }];
+        let v = handle_file_edit(&dec, None, &edits).await.unwrap();
+        assert_eq!(v["applied_edits"].as_u64().unwrap(), 1);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        // Should be "line1\nline3\n" — NO extra blank line
+        assert_eq!(content, "line1\nline3\n");
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.edit — multiple non-overlapping ranges
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn edit_multiple_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("multi.txt");
+        std::fs::write(&file, "aa\nbb\ncc\ndd\nee\n").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("multi.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+
+        let edits = vec![
+            EditRange {
+                start_line: 1,
+                end_line: 1,
+                replacement: "AA\n".to_string(),
+            },
+            EditRange {
+                start_line: 3,
+                end_line: 4,
+                replacement: "CC_DD\n".to_string(),
+            },
+        ];
+        let v = handle_file_edit(&dec, None, &edits).await.unwrap();
+        assert_eq!(v["applied_edits"].as_u64().unwrap(), 2);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "AA\nbb\nCC_DD\nee\n");
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.edit — overlapping ranges rejected
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn edit_overlapping_ranges_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f.txt");
+        std::fs::write(&file, "aa\nbb\ncc\n").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+
+        let edits = vec![
+            EditRange {
+                start_line: 1,
+                end_line: 2,
+                replacement: "X\n".to_string(),
+            },
+            EditRange {
+                start_line: 2,
+                end_line: 3,
+                replacement: "Y\n".to_string(),
+            },
+        ];
+        let err = handle_file_edit(&dec, None, &edits).await.unwrap_err();
+        assert!(err.to_string().contains("overlap"));
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.write + read roundtrip
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn write_and_read_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = mk_rw_policy(tmp.path());
+
+        let content = "hello from test\n";
+        let content_b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+
+        let write_dec = policy
+            .check(Path::new("out.txt"), tmp.path(), FileOp::Write)
+            .unwrap();
+        let wv = handle_file_write(&write_dec, &content_b64, None, None)
+            .await
+            .unwrap();
+        assert_eq!(wv["bytes_written"].as_u64().unwrap(), 16);
+        assert!(wv["sha256"].is_string());
+        assert!(wv["previous_sha256"].is_null()); // new file, no previous
+
+        // Read back
+        let read_dec = policy
+            .check(Path::new("out.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+        let rv = handle_file_read(&read_dec, None, false, None, None)
+            .await
+            .unwrap();
+        let decoded_b64 = rv["content_b64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(decoded_b64)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), content);
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.write — sha256 precondition mismatch
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn write_sha256_precondition_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "original").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::Write)
+            .unwrap();
+
+        let content_b64 = base64::engine::general_purpose::STANDARD.encode(b"new content");
+        let err = handle_file_write(&dec, &content_b64, Some("wrong_sha"), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.precondition_failed"));
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.glob — custom exclude patterns
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn glob_custom_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), b"fn main(){}").unwrap();
+        std::fs::create_dir(tmp.path().join("build")).unwrap();
+        std::fs::write(tmp.path().join("build/out.o"), b"x").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Glob)
+            .unwrap();
+
+        let v = handle_file_glob(&dec, "**/*", None, &["build".to_string()])
+            .await
+            .unwrap();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(matches.iter().any(|m| m.contains("main.rs")));
+        assert!(!matches.iter().any(|m| m.contains("build")));
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.apply_patch — simple create
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn apply_patch_creates_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("new.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("new.txt".to_string(), dec);
+
+        let patch = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
+        let v = handle_file_apply_patch(&decisions, patch).await.unwrap();
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+
+        let content = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
+        assert_eq!(content, "hello\nworld\n");
+    }
+
+    // ---------------------------------------------------------------
+    //  Edge case: file.apply_patch — context mismatch
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn apply_patch_context_mismatch_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "actual_line\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("f.txt".to_string(), dec);
+
+        let patch = "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-wrong_context\n+replacement\n";
+        let err = handle_file_apply_patch(&decisions, patch)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("mismatch"));
     }
 }

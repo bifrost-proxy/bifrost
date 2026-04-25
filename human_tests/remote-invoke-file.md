@@ -343,6 +343,100 @@ bifrost remote file list --depth 3 --cwd /Users/eden/work/github/bifrost-remote-
 - `entries` 中不递归进入 `.git/`、`target/`、`node_modules/` 目录
 - 但这些目录本身作为条目仍然可见（仅不递归遍历其内部）
 
+### TC-3.10 file.read — offset 超出文件末尾
+**步骤**：
+```bash
+bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `size: 0`，`content_b64` 解码后为空
+- `total_lines` 为文件实际行数
+- 无错误返回（优雅降级为空）
+
+### TC-3.11 file.read — limit=0 返回空
+**步骤**：
+```bash
+bifrost remote file read Cargo.toml --offset 1 --limit 0 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `size: 0`，`content_b64` 解码后为空
+- `truncated: true`（还有更多行可读）
+
+### TC-3.12 file.read — 非 offset 模式返回 total_lines
+**步骤**：
+```bash
+bifrost remote file read Cargo.toml --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 响应中包含 `total_lines` 字段，值为文件实际行数
+- coding agent 可据此规划分段读取
+
+### TC-3.13 file.edit — 空 replacement 删除行（回归）
+**步骤**：
+```bash
+# 准备三行文件
+printf 'line1\nline2\nline3\n' | bifrost remote file write edit-test.txt --content-file - --cwd /Users/eden/work/github/bifrost-remote-file
+# 删除第 2 行（空 replacement）
+bifrost remote file edit edit-test.txt --edits '[{"start_line":2,"end_line":2,"replacement":""}]' --cwd /Users/eden/work/github/bifrost-remote-file
+# 读取验证
+bifrost remote file read edit-test.txt --cwd /Users/eden/work/github/bifrost-remote-file
+```
+**预期**：
+- 结果为 `line1\nline3\n`，**不应有多余空白行**（修复前 bug 会产生 `line1\n\nline3\n`）
+
+### TC-3.14 file.search — 无匹配时带 context 不崩溃
+**步骤**：
+```bash
+bifrost remote file search "NONEXISTENT_PATTERN_XYZ_12345" -B 3 -A 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `matches` 为空数组
+- `truncated: false`
+- 无错误
+
+### TC-3.15 file.search — 首行匹配 + context_before 不越界
+**步骤**：
+```bash
+bifrost remote file search "^\[package\]" -B 5 -A 2 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 匹配 Cargo.toml 第 1 行 `[package]`
+- `context` 数组中 `line` 最小值为 1（不为负数或 0）
+
+### TC-3.16 file.search — 非法正则返回清晰错误
+**步骤**：
+```bash
+bifrost remote file search "[invalid_regex" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 返回错误，错误码包含 `file.invalid_regex`
+
+### TC-3.17 file.write — sha256 前置条件不匹配拒绝
+**步骤**：
+```bash
+printf 'data' | bifrost remote file write precond.txt --content-file - --cwd /Users/eden/work/github/bifrost-remote-file
+printf 'new' | bifrost remote file write precond.txt --content-file - --base-sha256 wrong_sha --cwd /Users/eden/work/github/bifrost-remote-file
+```
+**预期**：
+- 第二次写入失败，错误码包含 `file.precondition_failed`
+- 原有内容未被覆盖
+
+### TC-3.18 file.apply_patch — context mismatch 拒绝
+**步骤**：
+```bash
+cat >/tmp/bifrost-bad.patch <<'PATCH'
+--- a/precond.txt
++++ b/precond.txt
+@@ -1,1 +1,1 @@
+-this_line_does_not_exist
++replacement
+PATCH
+bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users/eden/work/github/bifrost-remote-file
+```
+**预期**：
+- 返回错误，包含 `mismatch`
+- 原文件内容未被修改
+
 ---
 
 ## 自动化覆盖
@@ -366,3 +460,20 @@ bifrost remote file list --depth 3 --cwd /Users/eden/work/github/bifrost-remote-
 | 2026-04-25 | TC-3.6 file.glob 默认排除 | `cargo test -p bifrost-admin -- glob_excludes_default_dirs` | PASS：src/main.rs 存在，.git/config 和 node_modules/pkg.js 被排除 |
 | 2026-04-25 | TC-3.9 file.list 默认排除 | `cargo test -p bifrost-admin -- list_excludes_default_dirs` | PASS：src 可见，.git/node_modules 不被递归遍历 |
 | 2026-04-25 | CLI help 验证 | `./target/release/bifrost remote file read/search/glob/list --help` | PASS：20/20 CLI 合约测试通过，--offset/--limit/-B/-A/--exclude 全部出现 |
+| 2026-04-25 | TC-3.10 offset 超出 EOF | `cargo test -p bifrost-admin -- read_offset_beyond_eof_returns_empty` | PASS：size=0, total_lines=2, 内容为空 |
+| 2026-04-25 | TC-3.11 limit=0 | `cargo test -p bifrost-admin -- read_limit_zero_returns_empty` | PASS：size=0, truncated=true |
+| 2026-04-25 | TC-3.12 非 offset 返回 total_lines | `cargo test -p bifrost-admin -- read_non_offset_includes_total_lines` | PASS：total_lines=3 |
+| 2026-04-25 | TC-3.13 空 replacement 删除行 | `cargo test -p bifrost-admin -- edit_empty_replacement_deletes_line_without_blank` | PASS：结果为 "line1\nline3\n"，无多余空白行 |
+| 2026-04-25 | TC-3.14 search 无匹配 | `cargo test -p bifrost-admin -- search_no_matches_returns_empty` | PASS：matches 为空数组 |
+| 2026-04-25 | TC-3.15 首行 context_before | `cargo test -p bifrost-admin -- search_match_at_first_line_with_context_before` | PASS：context 行号最小为 1 |
+| 2026-04-25 | TC-3.16 非法正则 | `cargo test -p bifrost-admin -- search_invalid_regex_returns_error` | PASS：file.invalid_regex |
+| 2026-04-25 | TC-3.17 sha256 前置条件 | `cargo test -p bifrost-admin -- write_sha256_precondition_mismatch` | PASS：file.precondition_failed |
+| 2026-04-25 | TC-3.18 patch context mismatch | `cargo test -p bifrost-admin -- apply_patch_context_mismatch_rejected` | PASS：mismatch 拒绝 |
+| 2026-04-25 | 多区间编辑 | `cargo test -p bifrost-admin -- edit_multiple_ranges` | PASS："AA\nbb\nCC_DD\nee\n" |
+| 2026-04-25 | 重叠编辑拒绝 | `cargo test -p bifrost-admin -- edit_overlapping_ranges_rejected` | PASS：overlap 错误 |
+| 2026-04-25 | write+read 往返 | `cargo test -p bifrost-admin -- write_and_read_roundtrip` | PASS：写入 16 字节，读回一致 |
+| 2026-04-25 | patch 创建新文件 | `cargo test -p bifrost-admin -- apply_patch_creates_new_file` | PASS："hello\nworld\n" |
+| 2026-04-25 | glob 自定义 exclude | `cargo test -p bifrost-admin -- glob_custom_exclude` | PASS：build/ 被排除 |
+| 2026-04-25 | 空文件 offset | `cargo test -p bifrost-admin -- read_empty_file_with_offset_returns_empty` | PASS：total_lines=0 |
+| 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
+| 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |

@@ -344,6 +344,212 @@ test_missing_required_apply_patch_file_fails() {
 }
 
 # ---------------------------------------------------------------------------
+#  Missing required positional args (additional subcommands)
+# ---------------------------------------------------------------------------
+
+test_missing_required_glob_pattern_fails() {
+    header "missing required <PATTERN>: glob should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file glob 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "glob without pattern correctly rejected (exit=$rc)"
+    else
+        fail "glob without pattern not rejected: $out"
+    fi
+}
+
+test_missing_required_search_pattern_fails() {
+    header "missing required <PATTERN>: search should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file search 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "search without pattern correctly rejected (exit=$rc)"
+    else
+        fail "search without pattern not rejected: $out"
+    fi
+}
+
+test_missing_required_hash_path_fails() {
+    header "missing required <PATH>: hash should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file hash 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "hash without path correctly rejected (exit=$rc)"
+    else
+        fail "hash without path not rejected: $out"
+    fi
+}
+
+test_missing_required_stat_path_fails() {
+    header "missing required <PATH>: stat should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file stat 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "stat without path correctly rejected (exit=$rc)"
+    else
+        fail "stat without path not rejected: $out"
+    fi
+}
+
+test_missing_required_rm_path_fails() {
+    header "missing required <PATH>: rm should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file rm 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "rm without path correctly rejected (exit=$rc)"
+    else
+        fail "rm without path not rejected: $out"
+    fi
+}
+
+test_missing_required_mkdir_path_fails() {
+    header "missing required <PATH>: mkdir should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file mkdir 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "mkdir without path correctly rejected (exit=$rc)"
+    else
+        fail "mkdir without path not rejected: $out"
+    fi
+}
+
+test_missing_required_write_path_fails() {
+    header "missing required <PATH>: write should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file write 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+        pass "write without path correctly rejected (exit=$rc)"
+    else
+        fail "write without path not rejected: $out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Coding-agent enhancement flags
+# ---------------------------------------------------------------------------
+
+test_read_offset_limit_help_description() {
+    header "read --help: --offset mentions '1-based', --limit mentions 'lines'"
+    local out
+    out=$(run_bifrost remote file read --help)
+    local ok=1
+    if ! echo "$out" | grep -i -- "--offset" | grep -qi "1-based\|start line"; then
+        fail "read --offset help missing '1-based' or 'start line'"
+        ok=0
+    fi
+    if ! echo "$out" | grep -i -- "--limit" | grep -qi "line"; then
+        fail "read --limit help missing 'line'"
+        ok=0
+    fi
+    if [[ $ok -eq 1 ]]; then
+        pass "read --offset/--limit help descriptions are agent-friendly"
+    fi
+}
+
+test_search_short_flags_B_A() {
+    header "search --help: -B and -A short flags accepted"
+    local out
+    out=$(run_bifrost remote file search --help)
+    if echo "$out" | grep -qE -- "-B" \
+       && echo "$out" | grep -qE -- "-A"; then
+        pass "search -B / -A short flags present"
+    else
+        fail "search missing -B / -A short flags"
+        echo "$out" | head -30
+    fi
+}
+
+test_search_exclude_flag() {
+    header "search --help: --exclude flag present"
+    local out
+    out=$(run_bifrost remote file search --help)
+    if echo "$out" | grep -q -- "--exclude"; then
+        pass "search --exclude flag present"
+    else
+        fail "search --exclude flag missing"
+        echo "$out" | head -30
+    fi
+}
+
+test_list_exclude_flag() {
+    header "list --help: --exclude flag present"
+    local out
+    out=$(run_bifrost remote file list --help)
+    if echo "$out" | grep -q -- "--exclude"; then
+        pass "list --exclude flag present"
+    else
+        fail "list --exclude flag missing"
+        echo "$out" | head -30
+    fi
+}
+
+test_glob_exclude_flag() {
+    header "glob --help: --exclude flag present"
+    local out
+    out=$(run_bifrost remote file glob --help)
+    if echo "$out" | grep -q -- "--exclude"; then
+        pass "glob --exclude flag present"
+    else
+        fail "glob --exclude flag missing"
+        echo "$out" | head -30
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  No "Phase" text in any subcommand help
+# ---------------------------------------------------------------------------
+
+test_no_phase_text_in_help() {
+    header "no subcommand --help contains 'Phase' text"
+    local any_fail=0
+    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+        local out
+        out=$(run_bifrost remote file "$sub" --help)
+        if echo "$out" | grep -qi "phase"; then
+            fail "subcommand $sub --help contains 'Phase' text"
+            any_fail=1
+        fi
+    done
+    # Also check the root help
+    local root_out
+    root_out=$(run_bifrost remote file --help)
+    if echo "$root_out" | grep -qi "phase"; then
+        fail "remote file --help contains 'Phase' text"
+        any_fail=1
+    fi
+    if [[ $any_fail -eq 0 ]]; then
+        pass "no 'Phase' text in any file subcommand help"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Subcommand about descriptions are meaningful
+# ---------------------------------------------------------------------------
+
+test_subcommand_about_descriptions() {
+    header "all subcommands have non-empty about descriptions"
+    local root_out
+    root_out=$(run_bifrost remote file --help)
+    local any_fail=0
+    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+        if ! echo "$root_out" | grep -qiE "$sub[[:space:]]"; then
+            fail "subcommand $sub not visible in root help"
+            any_fail=1
+        fi
+    done
+    if [[ $any_fail -eq 0 ]]; then
+        pass "all twelve subcommands visible in root help with about text"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 
@@ -377,6 +583,26 @@ main() {
     test_missing_required_edit_edits_fails
     test_missing_required_mv_to_fails
     test_missing_required_apply_patch_file_fails
+
+    # Additional missing-arg rejections
+    test_missing_required_glob_pattern_fails
+    test_missing_required_search_pattern_fails
+    test_missing_required_hash_path_fails
+    test_missing_required_stat_path_fails
+    test_missing_required_rm_path_fails
+    test_missing_required_mkdir_path_fails
+    test_missing_required_write_path_fails
+
+    # Coding-agent enhancement flags
+    test_read_offset_limit_help_description
+    test_search_short_flags_B_A
+    test_search_exclude_flag
+    test_list_exclude_flag
+    test_glob_exclude_flag
+
+    # Sanitization
+    test_no_phase_text_in_help
+    test_subcommand_about_descriptions
 
     echo ""
     echo -e "${BLUE}===============================================================${NC}"
