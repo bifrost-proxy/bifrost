@@ -91,6 +91,10 @@ cleanup() {
 trap cleanup EXIT
 
 build_bifrost() {
+    if [[ "${SKIP_BUILD:-}" == "true" ]]; then
+        header "Skip bifrost build (SKIP_BUILD=true)"
+        return 0
+    fi
     header "Build bifrost release binary"
     (
         cd "$ROOT_DIR"
