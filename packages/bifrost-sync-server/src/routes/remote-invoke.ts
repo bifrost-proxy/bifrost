@@ -32,12 +32,12 @@ import { customAlphabet } from 'nanoid';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
 
-const registerLimiter = new RateLimiter(60, 60_000);
-const clientQueryLimiter = new RateLimiter(240, 60_000);
-const clientDataLimiter = new RateLimiter(1_500, 10_000);
-const callerLookupLimiter = new RateLimiter(240, 60_000);
-const callerOpenLimiter = new RateLimiter(120, 60_000);
-const callerControlLimiter = new RateLimiter(240, 60_000);
+const registerLimiter = new RateLimiter(5000000, 60_000);
+const clientQueryLimiter = new RateLimiter(5000000, 60_000);
+const clientDataLimiter = new RateLimiter(5000000, 10_000);
+const callerLookupLimiter = new RateLimiter(5000000, 60_000);
+const callerOpenLimiter = new RateLimiter(5000000, 60_000);
+const callerControlLimiter = new RateLimiter(5000000, 60_000);
 
 let serviceInstance: RemoteInvokeService | null = null;
 

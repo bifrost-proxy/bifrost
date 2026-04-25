@@ -2415,6 +2415,11 @@ impl RemoteInvokeWorker {
 
             let start = std::time::Instant::now();
             let mut next_seq = 1u64;
+            // PR B: track absolute stdout byte offset so stream_frame emission
+            // carries the real head. CLI's CallerStreamState verifies contiguity
+            // against this offset; a stuck 0u64 causes all frames after the first
+            // to be treated as reconnect/dedup candidates.
+            let mut next_stdout_offset: u64 = 0;
             // PR #4c-2: register a session in the global ring so tee/resume can work.
             let _session_registered = session_ring::register_session_str(&cid);
 
@@ -2426,19 +2431,21 @@ impl RemoteInvokeWorker {
                     let grant_crypto = grant_crypto.clone();
                     let seq = next_seq;
                     next_seq += 1;
+                    let offset_for_stream = next_stdout_offset;
+                    next_stdout_offset = next_stdout_offset.saturating_add(chunk.len() as u64);
 
                     async move {
                         // PR #4c-2: mirror stdout bytes into the session ring
                         // for resume. Silent no-op if cid is not a UUID.
-                        session_ring::tee_stdout_str(&cid, chunk.as_bytes());
+                        session_ring::tee_stdout_str(&cid, &chunk);
                         // PR#6c: clone before chunk/instance_id get moved into legacy path
-                        let chunk_bytes_for_stream = chunk.as_bytes().to_vec();
+                        let chunk_bytes_for_stream = chunk.clone();
                         let instance_id_for_stream = instance_id.clone();
                         let envelope = Self::encrypt_call_frame(
                             &grant_crypto,
                             &cid,
                             seq,
-                            chunk,
+                            String::from_utf8_lossy(&chunk).into_owned(),
                             command_kind_for_stream,
                             grant_scope_for_stream,
                         )?;
@@ -2456,8 +2463,11 @@ impl RemoteInvokeWorker {
                         // PR will thread the pre-tee absolute head in. Failure
                         // on this path is swallowed so it never breaks the
                         // legacy envelope path (which `legacy_result` tracks).
-                        let stream_frame =
-                            stream_emit::build_stdout_frame(seq, 0u64, &chunk_bytes_for_stream);
+                        let stream_frame = stream_emit::build_stdout_frame(
+                            seq,
+                            offset_for_stream,
+                            &chunk_bytes_for_stream,
+                        );
                         if let Some(frame_json) = stream_emit::frame_to_json(&stream_frame) {
                             let stream_req = ClientCallStreamFrameRequest {
                                 call_id: cid.clone(),

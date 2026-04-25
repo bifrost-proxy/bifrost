@@ -3706,7 +3706,7 @@ impl CallerRelayClient {
 
                                 if line.is_empty() {
                                     if !event_name.is_empty() && !data_buf.is_empty() {
-                                        if event_name == "frame" {
+                                        if event_name == "stream_frame" {
                                             if let Some(frame) = parse_stream_frame_from_sse_data(&data_buf) {
                                                 match state.feed(&frame).map_err(|e| BifrostError::Config(format!("stream ingest error: {e:?}")))? {
                                                     StreamDecision::Continue => {}
@@ -3738,6 +3738,21 @@ impl CallerRelayClient {
                                                         return Ok(StreamingSubscriptionOutcome::Cancelled);
                                                     }
                                                 }
+                                            }
+                                        } else if event_name == "exit" {
+                                            // PR E: relay pushes the terminal `exit` event when the target
+                                            // finishes executing. Treat it as a Completed outcome so the
+                                            // streaming caller loop can terminate rather than entering an
+                                            // infinite reconnect loop waiting for a Done frame that worker
+                                            // never emits today.
+                                            if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                                                let duration_ms = v.get("duration_ms").and_then(|x| x.as_u64());
+                                                return Ok(StreamingSubscriptionOutcome::Completed {
+                                                    exit_code,
+                                                    duration_ms,
+                                                    digest_ok: true,
+                                                });
                                             }
                                         }
                                     }
@@ -4750,6 +4765,7 @@ mod tests {
         assert!(prefs.is_streaming());
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn test_streaming_prefs_is_streaming_implied_by_output_or_resume() {
         let mut p = StreamingPrefs::default();

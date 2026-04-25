@@ -224,7 +224,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ..Default::default()
                 };
 
-                let chunks: Arc<Mutex<Vec<(String, u128)>>> = Arc::new(Mutex::new(Vec::new()));
+                #[allow(clippy::type_complexity)]
+                let chunks: Arc<Mutex<Vec<(Vec<u8>, u128)>>> = Arc::new(Mutex::new(Vec::new()));
                 let sink = Arc::clone(&chunks);
                 let started = Instant::now();
                 let response = executor
@@ -261,7 +262,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         *chunks
                     ));
                 }
-                if chunks[0].0 != "stream-one" || chunks[1].0 != "stream-two" {
+                if chunks[0].0.as_slice() != b"stream-one" || chunks[1].0.as_slice() != b"stream-two" {
                     return Err(format!("unexpected streamed chunks: {:?}", *chunks));
                 }
                 if chunks[0].1 >= 250 {

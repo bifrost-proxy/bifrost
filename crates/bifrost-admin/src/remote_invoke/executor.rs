@@ -249,7 +249,7 @@ impl RemoteInvokeExecutor {
         mut on_stdout: F,
     ) -> Result<RemoteInvokeResponse>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         let start = Instant::now();
@@ -606,7 +606,7 @@ impl RemoteInvokeExecutor {
         on_stdout: &mut F,
     ) -> Result<String>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         match query {
@@ -1102,7 +1102,7 @@ impl RemoteInvokeExecutor {
         on_stdout: &mut F,
     ) -> Result<RemoteInvokeResponse>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         let policy = self.resolve_shell_policy(command)?;
@@ -1267,7 +1267,7 @@ impl RemoteInvokeExecutor {
                             &stdout_buf[..read],
                             policy.max_output_bytes,
                         );
-                        on_stdout(String::from_utf8_lossy(&stdout_buf[..read]).into_owned()).await?;
+                        on_stdout(stdout_buf[..read].to_vec()).await?;
                     }
                 }
                 read = stderr_reader.read(&mut stderr_buf), if stderr_open => {
@@ -1791,7 +1791,7 @@ impl RemoteInvokeExecutor {
         on_stdout: &mut F,
     ) -> Result<String>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         match command {
@@ -1955,11 +1955,11 @@ impl RemoteInvokeExecutor {
 
     async fn emit_stdout<F, Fut>(&self, on_stdout: &mut F, body: String) -> Result<String>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         if !body.is_empty() {
-            on_stdout(body.clone()).await?;
+            on_stdout(body.clone().into_bytes()).await?;
         }
         Ok(body)
     }
@@ -2041,7 +2041,7 @@ impl RemoteInvokeExecutor {
         on_stdout: &mut F,
     ) -> Result<String>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         let service = self
@@ -2143,7 +2143,7 @@ impl RemoteInvokeExecutor {
         on_stdout: &mut F,
     ) -> Result<String>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         let url = format!("{}/_bifrost/api/search/stream", self.base_url());
@@ -2310,11 +2310,11 @@ async fn emit_search_chunk<F, Fut>(
     chunk: String,
 ) -> Result<()>
 where
-    F: FnMut(String) -> Fut,
+    F: FnMut(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     full_output.push_str(&chunk);
-    on_stdout(chunk).await
+    on_stdout(chunk.into_bytes()).await
 }
 
 fn validate_string_param(
@@ -2905,7 +2905,8 @@ mod tests {
             ..Default::default()
         };
 
-        let received_at: Arc<Mutex<Vec<(String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        #[allow(clippy::type_complexity)]
+        let received_at: Arc<Mutex<Vec<(Vec<u8>, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received_at);
         let started = Instant::now();
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -2928,8 +2929,8 @@ mod tests {
             "expected multiple streamed chunks, got {:?}",
             *received
         );
-        assert_eq!(received[0].0, expected_chunks[0]);
-        assert_eq!(received[1].0, expected_chunks[1]);
+        assert_eq!(received[0].0.as_slice(), expected_chunks[0].as_bytes());
+        assert_eq!(received[1].0.as_slice(), expected_chunks[1].as_bytes());
         assert!(
             received[0].1 < Duration::from_millis(250),
             "first chunk should arrive before the command exits, got {:?}",
@@ -3167,7 +3168,7 @@ mod tests {
         .await;
 
         let executor = RemoteInvokeExecutor::new(&host, port);
-        let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&chunks);
         let stdout = executor
             .search_stream("nextoncall", None, Some(5), None, &mut |chunk| {
@@ -3180,7 +3181,14 @@ mod tests {
             .await
             .unwrap();
 
-        let joined_chunks = chunks.lock().unwrap().join("");
+        let joined_chunks: String = {
+            let guard = chunks.lock().unwrap();
+            let mut buf: Vec<u8> = Vec::new();
+            for c in guard.iter() {
+                buf.extend_from_slice(c);
+            }
+            String::from_utf8(buf).expect("utf8 chunks")
+        };
         assert!(joined_chunks.contains("event: progress"));
         assert!(joined_chunks.contains("\"total_searched\":12"));
         assert!(joined_chunks.contains("event: result"));

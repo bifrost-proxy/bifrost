@@ -796,10 +796,8 @@ export class RemoteInvokeService {
       throw new Error('client_mismatch');
     }
 
-    pushToCallerStream(req.call_id, 'stream_frame', {
-      call_id: req.call_id,
-      frame_json: req.frame_json,
-    });
+    let __pf;try{__pf=JSON.parse(req.frame_json);}catch{__pf={raw:req.frame_json};}
+    pushToCallerStream(req.call_id, 'stream_frame', __pf);
 
     await this.storage.remoteInvoke.appendEvent({
       id: nanoid(),

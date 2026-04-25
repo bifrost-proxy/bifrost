@@ -1450,11 +1450,12 @@ mod tests {
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const PROTOCOL_FEATURE_LARGE_OUTPUT_V1: &str = "large_output_v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputTransport {
     /// Legacy: stdout/stderr returned inline inside `RemoteInvokeResponse`,
     /// bounded by `max_output_bytes`. Preserves pre-v1 behaviour.
+    #[default]
     Inline,
     /// v1: executor emits StreamFrame::Stdout/Stderr chunks with monotonic
     /// seq and base64-encoded payload. Final response carries digest + size.
@@ -1462,12 +1463,6 @@ pub enum OutputTransport {
     /// v1: executor uploads full stdout/stderr to object storage; final
     /// response carries an `ObjectRef`. SSE still emitted for live tailing.
     SideChannel,
-}
-
-impl Default for OutputTransport {
-    fn default() -> Self {
-        OutputTransport::Inline
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1480,6 +1475,11 @@ pub struct ObjectRef {
     pub content_type: Option<String>,
 }
 
+// StreamFrame variants have a large size spread (Done carries digests
+// and optional ObjectRef, Ack/Heartbeat are tiny). Boxing the large
+// variants would change the wire-format / serde layout and break
+// cross-version compatibility, so we allow the lint on the enum itself.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamFrame {
