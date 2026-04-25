@@ -787,18 +787,7 @@ run_shell_batch_parallel() {
 
       (
         shell_data_dir="$(mktemp -d "$E2E_SANDBOX_DIR/shell-${log_slug}-XXXXXX")"
-        # PR-G-CI-FIX: recursive cleanup
-        # $(jobs -p) only lists direct children of this subshell. Any bifrost
-        # or python mock the test spawned further down the tree becomes an
-        # orphan and can hold $shell_data_dir fds, causing rm -rf to hang.
-        # pkill -P $$ recursively targets the whole descendant group with a
-        # bounded fallback to SIGKILL.
-        trap '_pr_g_cleanup() {
-                pkill -TERM -P $$ 2>/dev/null || true
-                sleep 0.5
-                pkill -KILL -P $$ 2>/dev/null || true
-                rm -rf "$shell_data_dir" 2>/dev/null || true
-              }; _pr_g_cleanup' EXIT
+        trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$shell_data_dir" 2>/dev/null || true' EXIT
         ADMIN_PORT="$shell_admin_port" \
         ADMIN_HOST="127.0.0.1" \
         PROXY_PORT="$shell_port" \
@@ -834,8 +823,10 @@ run_shell_batch_parallel() {
       next_index=$((next_index + 1))
     done
 
-    # PR-G-CI-FIX: per-test timeout
-    local shell_per_test_timeout="${BIFROST_E2E_SHELL_TEST_TIMEOUT:-600}"
+    # PR-G-CI-FIX: per-test timeout (kill direct pid only; avoid PGID
+    # because children do not run in independent process groups and a
+    # group kill would take out sibling parallel tests).
+    local shell_per_test_timeout="${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}"
     local now_ts
     now_ts="$(date +%s)"
     for i in "${!pids[@]}"; do
@@ -847,13 +838,9 @@ run_shell_batch_parallel() {
       local this_age=$((now_ts - this_start))
       if kill -0 "$this_pid" 2>/dev/null && [[ "$this_age" -gt "$shell_per_test_timeout" ]]; then
         echo "[TIMEOUT] shell:${pid_scripts[$i]} exceeded ${shell_per_test_timeout}s, age=${this_age}s pid=${this_pid}"
-        {
-          echo "[PR-G-CI-FIX] timeout residual trace before kill:"
-          pgrep -af "bifrost|mock_|uvicorn" 2>/dev/null || true
-        } >"${pid_logs[$i]}.residual" 2>&1 || true
-        kill -TERM -- "-${this_pid}" 2>/dev/null || kill -TERM "$this_pid" 2>/dev/null || true
+        kill -TERM "$this_pid" 2>/dev/null || true
         sleep 1
-        kill -KILL -- "-${this_pid}" 2>/dev/null || kill -KILL "$this_pid" 2>/dev/null || true
+        kill -KILL "$this_pid" 2>/dev/null || true
       fi
       if [[ -n "${pids[$i]:-}" ]] && ! kill -0 "${pids[$i]}" 2>/dev/null; then
         local exit_code=0
@@ -863,13 +850,6 @@ run_shell_batch_parallel() {
         local dur=$((end_ts - pid_starts[$i]))
         local sname="${pid_scripts[$i]}"
         local slog="${pid_logs[$i]}"
-        # PR-G-CI-FIX: residual trace (sidecar file to avoid polluting
-        # failure-reason extraction that reads the last non-empty line of $slog)
-        {
-          echo "[PR-G-CI-FIX] post-test residual after ${sname} (${dur}s):"
-          pgrep -af "bifrost|mock_|uvicorn" 2>/dev/null || echo "  (none)"
-        } >"${slog}.residual" 2>&1 || true
-
         if [[ "$exit_code" -eq 0 ]]; then
           register_suite "shell:${sname}" "passed" "$slog" "" "$dur"
           echo "[PASS] shell:${sname} (${dur}s)"
