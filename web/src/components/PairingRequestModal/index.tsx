@@ -190,7 +190,7 @@ export default function PairingRequestModal({
       title={
         <Space>
           <WarningOutlined style={{ color: "#faad14" }} />
-          <span>Pairing Request</span>
+          <span>A remote device wants to connect</span>
         </Space>
       }
       onCancel={onClose}
@@ -236,15 +236,18 @@ export default function PairingRequestModal({
 
         <div>
           <Text strong style={{ display: "block", marginBottom: 8 }}>
-            Access Level
+            How much access to grant
+          </Text>
+          <Text type="secondary" style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
+            Pick the smallest scope that lets the remote agent do its job.
           </Text>
           {!hasShellPolicies && (
             <Alert
               showIcon
               type="warning"
               style={{ marginBottom: 12 }}
-              message="No enabled shell policy found on this device"
-              description="Shell-related presets are unavailable. Configure Shell Access policies first, or use Query/File only."
+              message="No command groups enabled on this device"
+              description="This device has no command groups that agents are allowed to run. The shell-related presets below are disabled. You can still grant Files-only or Read-only access, or open Shell access settings to add a group first."
             />
           )}
           <Radio.Group
@@ -256,50 +259,126 @@ export default function PairingRequestModal({
               <Radio value="full" disabled={!hasShellPolicies}>
                 <Space>
                   <ThunderboltOutlined />
-                  <span>Full Access</span>
+                  <span><b>Full trust</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Shell + File + Interactive
+                    — Run any allowed command, read &amp; write files, open interactive terminals
                   </Text>
                 </Space>
               </Radio>
               <Radio value="shell_only" disabled={!hasShellPolicies}>
                 <Space>
                   <CodeOutlined />
-                  <span>Shell</span>
+                  <span><b>Run commands &amp; read/write files</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Shell + File + Query
+                    — Execute allowed commands and edit files. No interactive shells.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="file_only">
                 <Space>
                   <FileOutlined />
-                  <span>File</span>
+                  <span><b>Files only</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read & write files + Query
+                    — Read &amp; write files. Cannot run any shell commands.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="query">
                 <Space>
                   <SearchOutlined />
-                  <span>Query</span>
+                  <span><b>Read-only watch</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Built-in read-only queries
+                    — Can see status and traffic. No commands, no file writes.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="custom">
                 <Space>
                   <SettingOutlined />
-                  <span>Custom</span>
+                  <span><b>Custom</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Configure individually
+                    — Pick shell + file + terminal access individually
                   </Text>
                 </Space>
               </Radio>
             </Space>
           </Radio.Group>
+
+          <Alert
+            showIcon
+            type={
+              preset === "full"
+                ? "warning"
+                : preset === "query"
+                ? "success"
+                : "info"
+            }
+            style={{ marginBottom: 16 }}
+            message="Preview — what this device will be able to do"
+            description={
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {(() => {
+                  const bullets: string[] = [];
+                  const shellAllowed =
+                    preset === "full" ||
+                    preset === "shell_only" ||
+                    (preset === "custom" && shellMode !== "none");
+                  const fileScope =
+                    preset === "full" || preset === "shell_only"
+                      ? "read_write"
+                      : preset === "file_only"
+                      ? "read_write"
+                      : preset === "query"
+                      ? "none"
+                      : fileAccess;
+                  const isInteractive =
+                    preset === "full" || (preset === "custom" && interactiveAllowed);
+                  const acceptsStdin =
+                    preset === "full" || (preset === "custom" && stdinAllowed);
+
+                  if (shellAllowed) {
+                    if (preset === "custom" && shellMode === "selected") {
+                      const names = enabledPolicies
+                        .filter((p) => selectedPolicies.includes(p.id))
+                        .map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from: " + names.join(", ")
+                          : "Run commands from: (none selected yet)"
+                      );
+                    } else {
+                      const names = enabledPolicies.map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from any of: " + names.join(", ")
+                          : "No command groups enabled on this device"
+                      );
+                    }
+                    bullets.push(
+                      isInteractive
+                        ? "Can open an interactive terminal"
+                        : acceptsStdin
+                        ? "Can send stdin to commands, but no interactive terminal"
+                        : "No stdin, no interactive terminal"
+                    );
+                  } else {
+                    bullets.push("Cannot run any shell commands");
+                  }
+
+                  if (fileScope === "read_write") {
+                    bullets.push("Can read and write files on this device");
+                  } else if (fileScope === "read") {
+                    bullets.push("Can read files but cannot modify them");
+                  } else {
+                    bullets.push("No file access");
+                  }
+
+                  bullets.push("Can always see status and inspect traffic records");
+                  return bullets.map((b, i) => <li key={i}>{b}</li>);
+                })()}
+              </ul>
+            }
+          />
 
           {preset === "custom" && (
             <div
@@ -312,21 +391,21 @@ export default function PairingRequestModal({
             >
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Shell Access</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>What commands can this device run?</Text>
                   <Select
                     value={shellMode}
                     onChange={setShellMode}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No shell access" },
+                      { value: "none", label: "No commands at all" },
                       {
                         value: "selected",
-                        label: "Selected shell policies",
+                        label: "Only commands from selected groups",
                         disabled: !hasShellPolicies,
                       },
                       {
                         value: "all",
-                        label: "All enabled shell policies",
+                        label: "Any command from enabled groups",
                         disabled: !hasShellPolicies,
                       },
                     ]}
@@ -347,12 +426,12 @@ export default function PairingRequestModal({
                 )}
                 {shellMode !== "none" && (
                   <Space>
-                    <Text type="secondary">Allow stdin</Text>
+                    <Text type="secondary">Allow stdin (piped input)</Text>
                     <Switch
                       checked={stdinAllowed}
                       onChange={setStdinAllowed}
                     />
-                    <Text type="secondary">Interactive</Text>
+                    <Text type="secondary">Interactive terminal</Text>
                     <Switch
                       checked={interactiveAllowed}
                       onChange={setInteractiveAllowed}
@@ -360,15 +439,15 @@ export default function PairingRequestModal({
                   </Space>
                 )}
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>File Access</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>What file access to grant?</Text>
                   <Select
                     value={fileAccess}
                     onChange={setFileAccess}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No file access" },
-                      { value: "read", label: "Read only" },
-                      { value: "read_write", label: "Read & Write" },
+                      { value: "none", label: "No file access (cannot read or write files)" },
+                      { value: "read", label: "Read-only (can open files, cannot modify)" },
+                      { value: "read_write", label: "Read & write (can modify files)" },
                     ]}
                   />
                 </div>

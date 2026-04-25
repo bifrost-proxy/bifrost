@@ -269,10 +269,16 @@ interface ShellProfileEditorItem {
   extra_metadata: Record<string, unknown>;
 }
 
+interface ShellAccessCapability {
+  allowed: boolean;
+  text: string;
+}
+
 interface ShellAccessPresetDefinition {
   mode: Exclude<ShellAccessMode, "custom">;
   label: string;
   description: string;
+  capabilities: ShellAccessCapability[];
   policies: ShellPolicyEditorItem[];
   profiles: ShellProfileEditorItem[];
 }
@@ -442,9 +448,15 @@ const DEFAULT_SANDBOX_ENV = {
 function createSandboxPreset(): ShellAccessPresetDefinition {
   return {
     mode: "sandbox",
-    label: "Default Sandbox",
+    label: "Safe Sandbox (coming soon)",
     description:
-      "Reserve a future sandboxed execution mode. Right now Bifrost will reject execution attempts until the sandbox runtime lands.",
+      "A future locked-down execution mode. Until the sandbox runtime lands, Bifrost will reject shell execution attempts for this preset.",
+    capabilities: [
+      { allowed: true,  text: "Reserved for upcoming isolated sandbox runtime" },
+      { allowed: false, text: "Does not run any commands today (rejects with a clear reason)" },
+      { allowed: false, text: "No stdin / no interactive shells" },
+      { allowed: false, text: "No sudo / no system modification" },
+    ],
     profiles: [
       {
         id: "default-sandbox",
@@ -461,7 +473,7 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
           inherit_env: false,
           default_env: DEFAULT_SANDBOX_ENV,
           reject_reason:
-            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+            "sandbox execution is not implemented yet on this target; choose Trusted (Full Access) or Custom Rules",
         },
       },
     ],
@@ -484,7 +496,7 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
         extra_metadata: {
           shell: "/bin/bash",
           reject_reason:
-            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+            "sandbox execution is not implemented yet on this target; choose Trusted (Full Access) or Custom Rules",
         },
       },
     ],
@@ -494,9 +506,16 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
 function createFullAccessPreset(): ShellAccessPresetDefinition {
   return {
     mode: "full-access",
-    label: "Full Access",
+    label: "Trusted (Full Access)",
     description:
-      "Allow unrestricted argv and shell text execution with inherited environment, stdin, and interactive access.",
+      "Trust the remote caller with unrestricted shell execution on this device. Only use for agents you fully trust.",
+    capabilities: [
+      { allowed: true,  text: "Run any command (argv or shell text) with the caller's choice of arguments" },
+      { allowed: true,  text: "Inherit this device's environment variables (PATH, tokens, etc.)" },
+      { allowed: true,  text: "Open interactive terminals and accept stdin" },
+      { allowed: true,  text: "Run long-running commands without a timeout cap" },
+      { allowed: false, text: "Still cannot bypass the file-access scope negotiated in the pairing" },
+    ],
     profiles: [],
     policies: [
       {
@@ -573,11 +592,11 @@ function inferShellAccessMode(
 function shellAccessModeLabel(mode: ShellAccessMode): string {
   switch (mode) {
     case "sandbox":
-      return "Default Sandbox";
+      return "Safe Sandbox";
     case "full-access":
-      return "Full Access";
+      return "Trusted (Full Access)";
     default:
-      return "Custom Policies";
+      return "Custom Rules";
   }
 }
 
@@ -2542,50 +2561,128 @@ export default function RemoteInvokeTab() {
               <Radio value="full" disabled={enabledShellPolicies.length === 0}>
                 <Space>
                   <ThunderboltOutlined />
-                  <span>Full Access</span>
+                  <span><b>Full trust</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Shell + File + Interactive
+                    — Run any allowed command, read &amp; write files, open interactive terminals
                   </Text>
                 </Space>
               </Radio>
               <Radio value="shell_only" disabled={enabledShellPolicies.length === 0}>
                 <Space>
                   <CodeOutlined />
-                  <span>Shell</span>
+                  <span><b>Run commands &amp; read/write files</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Shell + File + Query
+                    — Can execute allowed commands, edit files, and inspect traffic. No interactive shells.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="file_only">
                 <Space>
                   <FileOutlined />
-                  <span>File</span>
+                  <span><b>Files only</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read & write files + Query
+                    — Can read &amp; write files and inspect traffic. Cannot run any shell commands.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="query">
                 <Space>
                   <SearchOutlined />
-                  <span>Query</span>
+                  <span><b>Read-only watch</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Built-in read-only queries
+                    — Can see status and traffic. Cannot run commands and cannot touch files.
                   </Text>
                 </Space>
               </Radio>
               <Radio value="custom">
                 <Space>
                   <SettingOutlined />
-                  <span>Custom</span>
+                  <span><b>Custom</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Configure individually
+                    — Pick shell + file + terminal access individually
                   </Text>
                 </Space>
               </Radio>
             </Space>
           </Radio.Group>
+          <Alert
+            showIcon
+            type={
+              grantEditorPreset === "full"
+                ? "warning"
+                : grantEditorPreset === "query"
+                ? "success"
+                : "info"
+            }
+            message="Preview — what this caller will be able to do"
+            description={
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {(() => {
+                  const bullets: string[] = [];
+                  const shellAllowed =
+                    grantEditorPreset === "full" ||
+                    grantEditorPreset === "shell_only" ||
+                    (grantEditorPreset === "custom" && grantEditorAccessMode !== "query");
+                  const fileScope =
+                    grantEditorPreset === "full" || grantEditorPreset === "shell_only"
+                      ? "read_write"
+                      : grantEditorPreset === "file_only"
+                      ? "read_write"
+                      : grantEditorPreset === "query"
+                      ? "none"
+                      : grantEditorFileAccess;
+                  const interactive =
+                    grantEditorPreset === "full" ||
+                    (grantEditorPreset === "custom" && grantEditorInteractiveAllowed);
+                  const stdin =
+                    grantEditorPreset === "full" ||
+                    (grantEditorPreset === "custom" && grantEditorStdinAllowed);
+
+                  if (shellAllowed) {
+                    if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected") {
+                      const names = enabledShellPolicies
+                        .filter((p) => grantEditorSelectedPolicies.includes(p.id))
+                        .map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from: " + names.join(", ")
+                          : "Run commands from: (none selected — pick groups below)"
+                      );
+                    } else {
+                      const names = enabledShellPolicies.map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from any of: " + names.join(", ")
+                          : "No command groups are enabled yet; add one in Shell Access settings"
+                      );
+                    }
+                    bullets.push(
+                      interactive
+                        ? "Can open an interactive terminal"
+                        : stdin
+                        ? "Can send stdin (one-shot input) but no interactive terminal"
+                        : "No stdin, no interactive terminal"
+                    );
+                  } else {
+                    bullets.push("Cannot run any shell commands");
+                  }
+
+                  if (fileScope === "read_write") {
+                    bullets.push("Can read and write files on this device");
+                  } else if (fileScope === "read") {
+                    bullets.push("Can read files but cannot modify them");
+                  } else {
+                    bullets.push("No file access");
+                  }
+
+                  bullets.push("Can see connection status and inspect traffic records");
+
+                  return bullets.map((b, i) => <li key={i}>{b}</li>);
+                })()}
+              </ul>
+            }
+            style={{ marginTop: 4 }}
+          />
           {grantEditorPreset === "custom" && (
             <div
               style={{
@@ -2602,15 +2699,15 @@ export default function RemoteInvokeTab() {
                     onChange={setGrantEditorAccessMode}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "query", label: "No shell access" },
+                      { value: "query", label: "Just watch traffic (no commands)" },
                       {
                         value: "selected",
-                        label: "Selected shell policies",
+                        label: "Run only commands from selected groups",
                         disabled: enabledShellPolicies.length === 0,
                       },
                       {
                         value: "all",
-                        label: "All enabled shell policies",
+                        label: "Run commands from any enabled group",
                         disabled: enabledShellPolicies.length === 0,
                       },
                     ]}
@@ -2650,9 +2747,9 @@ export default function RemoteInvokeTab() {
                     onChange={setGrantEditorFileAccess}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No file access" },
-                      { value: "read", label: "Read only" },
-                      { value: "read_write", label: "Read & Write" },
+                      { value: "none", label: "No file access (cannot read or write files)" },
+                      { value: "read", label: "Read-only (can open files, cannot modify)" },
+                      { value: "read_write", label: "Read & write (can modify files)" },
                     ]}
                   />
                 </div>
@@ -2663,7 +2760,7 @@ export default function RemoteInvokeTab() {
       </Modal>
       <Modal
         open={shellEditorOpen}
-        title="Manage Shell Access"
+        title="Shell access — what remote agents can run on this device"
         okText="Save"
         cancelText="Cancel"
         onCancel={() => setShellEditorOpen(false)}
@@ -2683,40 +2780,65 @@ export default function RemoteInvokeTab() {
           <Card size="small" title="Access Mode">
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Text type="secondary">
-                Choose a simple preset for common cases, or switch to Custom Policies
-                when you need detailed allowlists and sandbox rules.
+                Pick a preset for the common cases, or choose <b>Custom Rules</b>
+                to define exactly which commands and folders are allowed.
               </Text>
-              <Select<ShellAccessMode>
+              <Radio.Group
                 value={shellEditorMode}
-                onChange={(value) => applyShellAccessMode(value)}
-                options={[
-                  {
-                    value: "sandbox",
-                    label: "Default Sandbox",
-                  },
-                  {
-                    value: "full-access",
-                    label: "Full Access",
-                  },
-                  {
-                    value: "custom",
-                    label: "Custom Policies",
-                  },
-                ]}
-              />
+                onChange={(e) => applyShellAccessMode(e.target.value)}
+                optionType="button"
+                buttonStyle="solid"
+                style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
+              >
+                <Radio.Button value="sandbox">Safe Sandbox</Radio.Button>
+                <Radio.Button value="full-access">Trusted (Full Access)</Radio.Button>
+                <Radio.Button value="custom">Custom Rules</Radio.Button>
+              </Radio.Group>
               {shellEditorMode === "custom" ? (
                 <Alert
                   showIcon
                   type="info"
-                  message="Advanced editing enabled"
-                  description="Profiles and policies below map directly to remote_shell.json for fine-grained configuration."
+                  message="Custom rules"
+                  description={
+                    <div>
+                      <div style={{ marginBottom: 4 }}>
+                        Define exactly which commands an agent can run and where.
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        <li>Create one or more <b>command groups</b> below.</li>
+                        <li>Each group is a set of allowed commands + an execution environment.</li>
+                        <li>Bind a group to a caller when you approve a pairing request.</li>
+                      </ul>
+                    </div>
+                  }
                 />
               ) : (
                 <Alert
                   showIcon
                   type={shellEditorMode === "full-access" ? "warning" : "success"}
                   message={shellPresetDefinition(shellEditorMode).label}
-                  description={shellPresetDefinition(shellEditorMode).description}
+                  description={
+                    <div>
+                      <div style={{ marginBottom: 6 }}>
+                        {shellPresetDefinition(shellEditorMode).description}
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {shellPresetDefinition(shellEditorMode).capabilities.map((cap, idx) => (
+                          <li
+                            key={idx}
+                            style={{
+                              color: cap.allowed ? "var(--ant-color-success, #52c41a)" : "var(--ant-color-text-tertiary, #999)",
+                            }}
+                          >
+                            <span style={{ fontWeight: 600, marginRight: 6 }}>
+                              {cap.allowed ? "✓" : "✗"}
+                            </span>
+                            <span style={{ color: "var(--ant-color-text, inherit)" }}>{cap.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  }
                 />
               )}
             </Space>
@@ -2730,7 +2852,7 @@ export default function RemoteInvokeTab() {
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Profiles
+                Execution environments <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>(profiles)</Text>
               </Title>
               <Button
                 icon={<PlusOutlined />}
@@ -2758,12 +2880,13 @@ export default function RemoteInvokeTab() {
                   ]);
                 }}
               >
-                Add Profile
+                Add execution environment
               </Button>
             </Space>
             <Text type="secondary">
-              Profiles define sandbox boundaries such as cwd, env allowlist,
-              timeout, stdin, and interactive mode.
+              <b>Execution environments</b> — how the agent's commands will run:
+              which folders, which environment variables it can see, timeout, and
+              whether stdin / interactive terminals are allowed.
             </Text>
             <Divider style={{ margin: "12px 0" }} />
 
@@ -2972,7 +3095,7 @@ export default function RemoteInvokeTab() {
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Policies
+                Command groups <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>(policies)</Text>
               </Title>
               <Button
                 icon={<PlusOutlined />}
@@ -3004,7 +3127,7 @@ export default function RemoteInvokeTab() {
                   ]);
                 }}
               >
-                Add Policy
+                Add command group
               </Button>
             </Space>
             <Text type="secondary">
@@ -3318,7 +3441,7 @@ export default function RemoteInvokeTab() {
                   showIcon
                   type="info"
                   message="This preset still saves into the standard shell policy store"
-                  description="You can switch back to Custom Policies at any time if you want to fine-tune cwd, env, timeout, stdin, or interactive settings."
+                  description="You can switch back to <b>Custom Rules</b> any time to fine-tune allowed commands, folders, timeouts, stdin, or interactive terminals."
                 />
               </Space>
             </Card>
