@@ -3107,7 +3107,13 @@ fn shell_grant_provision(
     requested_stdin_allowed: Option<bool>,
 ) -> Result<ShellGrantProvision> {
     let grant_scope = requested_grant_scope.unwrap_or(GrantScope::RemoteShellExec);
-    let file_access = requested_file_access.unwrap_or_default();
+    // 层级模型：Shell 自动包含 File(read_write) + Query，File 包含 Query
+    let file_access = requested_file_access.unwrap_or(match grant_scope {
+        GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => {
+            FileAccessScope::ReadWrite
+        }
+        GrantScope::RemoteQuery => FileAccessScope::None,
+    });
 
     let store = RemoteShellStore::new()?;
     let set = store.load()?;
@@ -3151,7 +3157,13 @@ fn updated_shell_grant_provision(
     requested_stdin_allowed: Option<bool>,
 ) -> Result<ShellGrantProvision> {
     let desired_scope = requested_grant_scope.unwrap_or(existing.grant_scope);
-    let file_access = requested_file_access.unwrap_or(existing.file_access);
+    // 层级模型：shell scope 自动包含 file read_write
+    let file_access = requested_file_access.unwrap_or(match desired_scope {
+        GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => {
+            FileAccessScope::ReadWrite
+        }
+        GrantScope::RemoteQuery => existing.file_access,
+    });
     if desired_scope == GrantScope::RemoteQuery {
         let mut provision = default_query_grant_provision();
         provision.file_access = file_access;
@@ -3710,6 +3722,8 @@ mod tests {
             shell_grant_provision(None, None, None, None, None).expect("shell grant provision");
 
         assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        // Shell scope 层级模型：默认自动带 file_access read_write
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
         assert_eq!(provision.shell_policy_set_version_snapshot, Some(7));
         assert_eq!(
             provision
@@ -3738,6 +3752,8 @@ mod tests {
         .expect("shell grant provision");
 
         assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        // Shell scope 自动带 file_access read_write
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
         assert_eq!(provision.stdin_allowed, Some(true));
         assert_eq!(
             provision

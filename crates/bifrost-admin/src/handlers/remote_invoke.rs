@@ -62,6 +62,9 @@ pub async fn handle_remote_invoke(
     if sub == "/shell-config" || sub == "/shell-config/" {
         return handle_shell_config(req).await;
     }
+    if sub == "/file-access-config" || sub == "/file-access-config/" {
+        return handle_file_access_config(req).await;
+    }
     if let Some(rest) = sub.strip_prefix("/grants/") {
         let grant_id = rest.trim_end_matches('/');
         if !grant_id.is_empty() && !grant_id.contains('/') {
@@ -383,6 +386,45 @@ async fn handle_shell_config(req: Request<Incoming>) -> Response<BoxBody> {
                     &format!("Failed to save remote shell config: {error}"),
                 ),
             }
+        }
+        _ => method_not_allowed(),
+    }
+}
+
+async fn handle_file_access_config(req: Request<Incoming>) -> Response<BoxBody> {
+    use crate::remote_invoke::file_policy_store::{load_raw_config, save_raw_config, RawConfig};
+
+    match *req.method() {
+        Method::GET => {
+            let config = load_raw_config();
+            json_response(&config)
+        }
+        Method::PUT => {
+            let body = match req.collect().await {
+                Ok(body) => body.to_bytes(),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {error}"),
+                    );
+                }
+            };
+
+            let config: RawConfig = match serde_json::from_slice(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {error}"),
+                    );
+                }
+            };
+
+            if let Err(msg) = save_raw_config(&config) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg);
+            }
+
+            json_response(&config)
         }
         _ => method_not_allowed(),
     }

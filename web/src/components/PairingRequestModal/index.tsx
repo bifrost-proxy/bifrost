@@ -112,11 +112,11 @@ export default function PairingRequestModal({
         };
       case "shell_only":
         return {
-          grant_scope: "remote_shell_interactive" as const,
-          file_access: "none" as const,
+          grant_scope: "remote_shell_exec" as const,
+          file_access: "read_write" as const,
           policy_binding: { mode: "all" as const },
-          interactive_allowed: true,
-          stdin_allowed: true,
+          interactive_allowed: false,
+          stdin_allowed: false,
         };
       case "file_only":
         return {
@@ -265,27 +265,27 @@ export default function PairingRequestModal({
               <Radio value="shell_only" disabled={!hasShellPolicies}>
                 <Space>
                   <CodeOutlined />
-                  <span>Shell Only</span>
+                  <span>Shell</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Execute commands, no file access
+                    — Shell + File + Query
                   </Text>
                 </Space>
               </Radio>
               <Radio value="file_only">
                 <Space>
                   <FileOutlined />
-                  <span>File Only</span>
+                  <span>File</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read & write files, no shell
+                    — Read & write files + Query
                   </Text>
                 </Space>
               </Radio>
               <Radio value="query">
                 <Space>
                   <SearchOutlined />
-                  <span>Query Only</span>
+                  <span>Query</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read-only queries
+                    — Built-in read-only queries
                   </Text>
                 </Space>
               </Radio>

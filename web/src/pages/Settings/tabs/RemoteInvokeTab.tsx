@@ -77,6 +77,13 @@ import {
   type RemoteInvokeStatus,
   type RemoteShellSet,
   type FileAccessScope,
+  getFileAccessConfig,
+  updateFileAccessConfig,
+  type FileAccessConfig,
+  type FileAccessGrantPolicy,
+  type FileOp,
+  ALL_FILE_OPS,
+  FILE_READ_OPS,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -704,6 +711,11 @@ export default function RemoteInvokeTab() {
     ShellProfileEditorItem[]
   >([]);
   const [shellSaveLoading, setShellSaveLoading] = useState(false);
+  const [fileAccessConfig, setFileAccessConfig] = useState<FileAccessConfig | null>(null);
+  const [fileAccessLoading, setFileAccessLoading] = useState(false);
+  const [fileAccessEditorOpen, setFileAccessEditorOpen] = useState(false);
+  const [fileAccessEditorGrants, setFileAccessEditorGrants] = useState<FileAccessGrantPolicy[]>([]);
+  const [fileAccessSaveLoading, setFileAccessSaveLoading] = useState(false);
   const [grantEditorOpen, setGrantEditorOpen] = useState(false);
   const [editingGrant, setEditingGrant] = useState<Grant | null>(null);
   const [grantEditorPreset, setGrantEditorPreset] = useState<"query" | "full" | "shell_only" | "file_only" | "custom">("full");
@@ -813,6 +825,30 @@ export default function RemoteInvokeTab() {
     [],
   );
 
+  const refreshFileAccessConfig = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setFileAccessLoading(true);
+      }
+      try {
+        const config = await getFileAccessConfig();
+        setFileAccessConfig(config);
+      } catch (e) {
+        if (!silent && !isConnectionIssueError(e)) {
+          message.error(
+            e instanceof Error ? e.message : "Failed to load file access config",
+          );
+        }
+      } finally {
+        if (!silent) {
+          setFileAccessLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   const refreshSshKey = useCallback(
     async (options?: { silent?: boolean }) => {
       const silent = options?.silent ?? false;
@@ -850,7 +886,8 @@ export default function RemoteInvokeTab() {
     void refreshCalls();
     void refreshSshKey();
     void refreshShellConfig();
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig]);
+    void refreshFileAccessConfig();
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
@@ -858,6 +895,7 @@ export default function RemoteInvokeTab() {
       void refreshGrants();
       void refreshCalls();
       void refreshShellConfig({ silent: true });
+      void refreshFileAccessConfig({ silent: true });
       if (sshApiAvailable) {
         void refreshSshKey({ silent: true });
       }
@@ -865,7 +903,7 @@ export default function RemoteInvokeTab() {
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, sshApiAvailable]);
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig, sshApiAvailable]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -960,7 +998,7 @@ export default function RemoteInvokeTab() {
     let preset: "query" | "full" | "shell_only" | "file_only" | "custom";
     if (isShell && hasFile && grant.interactive_allowed) {
       preset = "full";
-    } else if (isShell && !hasFile) {
+    } else if (isShell && hasFile && !grant.interactive_allowed) {
       preset = "shell_only";
     } else if (!isShell && hasFile) {
       preset = "file_only";
@@ -1010,11 +1048,11 @@ export default function RemoteInvokeTab() {
           };
         case "shell_only":
           return {
-            grant_scope: "remote_shell_interactive",
-            file_access: "none" as const,
+            grant_scope: "remote_shell_exec",
+            file_access: "read_write" as const,
             policy_binding: { mode: "all" },
-            interactive_allowed: true,
-            stdin_allowed: true,
+            interactive_allowed: false,
+            stdin_allowed: false,
           };
         case "file_only":
           return {
@@ -1159,6 +1197,53 @@ export default function RemoteInvokeTab() {
       );
     } finally {
       setShellSaveLoading(false);
+    }
+  };
+
+  const openFileAccessEditor = () => {
+    setFileAccessEditorGrants(fileAccessConfig?.grant?.map(g => ({ ...g })) ?? []);
+    setFileAccessEditorOpen(true);
+  };
+
+  const handleSaveFileAccessConfig = async () => {
+    for (const g of fileAccessEditorGrants) {
+      if (!g.grant_id.trim()) {
+        message.error("Every file access policy needs a grant ID");
+        return;
+      }
+    }
+    const grantIds = new Set<string>();
+    for (const g of fileAccessEditorGrants) {
+      const id = g.grant_id.trim();
+      if (grantIds.has(id)) {
+        message.error(`Duplicate grant ID: ${id}`);
+        return;
+      }
+      grantIds.add(id);
+    }
+
+    setFileAccessSaveLoading(true);
+    try {
+      const saved = await updateFileAccessConfig({
+        grant: fileAccessEditorGrants.map(g => ({
+          ...g,
+          grant_id: g.grant_id.trim(),
+          name: g.name?.trim() || undefined,
+          roots: g.roots?.filter(r => r.trim()) ?? [],
+          denies: g.denies?.filter(d => d.trim()) ?? [],
+          write_denies: g.write_denies?.filter(d => d.trim()) ?? [],
+          ops: g.ops && g.ops.length > 0 ? g.ops : undefined,
+        })),
+      });
+      setFileAccessConfig(saved);
+      setFileAccessEditorOpen(false);
+      message.success("File access config saved");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to save file access config",
+      );
+    } finally {
+      setFileAccessSaveLoading(false);
     }
   };
 
@@ -1820,6 +1905,106 @@ export default function RemoteInvokeTab() {
 
         <Col xs={24}>
           <Card
+            data-testid="settings-remote-invoke-file-access-card"
+            title={
+              <Space>
+                <FileOutlined />
+                <span>File Access</span>
+              </Space>
+            }
+            extra={
+              <Space>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void refreshFileAccessConfig()}
+                  loading={fileAccessLoading}
+                />
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={openFileAccessEditor}
+                  disabled={fileAccessLoading}
+                >
+                  Manage Policies
+                </Button>
+              </Space>
+            }
+            size="small"
+          >
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="File access is governed by per-grant policies stored in file-access.toml"
+              description="Each grant can have its own roots, deny patterns, allowed operations, and byte limits. Without explicit config, a default read-only policy applies."
+            />
+            <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="Grant Policies">
+                {fileAccessConfig?.grant?.length ?? 0} configured
+              </Descriptions.Item>
+            </Descriptions>
+            {!fileAccessConfig || (fileAccessConfig.grant?.length ?? 0) === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No per-grant file access policies configured. Default read-only policy applies."
+              />
+            ) : (
+              <List
+                size="small"
+                dataSource={fileAccessConfig.grant}
+                renderItem={(policy) => {
+                  const readOps = (policy.ops ?? []).filter(op => !["write","edit","mkdir","move","delete","apply_patch"].includes(op));
+                  const writeOps = (policy.ops ?? []).filter(op => ["write","edit","mkdir","move","delete","apply_patch"].includes(op));
+                  return (
+                    <List.Item>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text strong>{policy.name || policy.grant_id}</Text>
+                            <Tag>{policy.grant_id}</Tag>
+                            {writeOps.length > 0 ? (
+                              <Tag color="orange">read+write</Tag>
+                            ) : (
+                              <Tag color="blue">read-only</Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space size={4} wrap>
+                            {(policy.roots?.length ?? 0) > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                roots: {policy.roots!.join(", ")}
+                              </Text>
+                            )}
+                            {readOps.length > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · read ops {readOps.length}
+                              </Text>
+                            )}
+                            {writeOps.length > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · write ops {writeOps.length}
+                              </Text>
+                            )}
+                            {(policy.denies?.length ?? 0) > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · denies {policy.denies!.length}
+                              </Text>
+                            )}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  );
+                }}
+              />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24}>
+          <Card
             title={
               <Space>
                 <span>Pending Pairing Requests</span>
@@ -2366,27 +2551,27 @@ export default function RemoteInvokeTab() {
               <Radio value="shell_only" disabled={enabledShellPolicies.length === 0}>
                 <Space>
                   <CodeOutlined />
-                  <span>Shell Only</span>
+                  <span>Shell</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Execute commands, no file access
+                    — Shell + File + Query
                   </Text>
                 </Space>
               </Radio>
               <Radio value="file_only">
                 <Space>
                   <FileOutlined />
-                  <span>File Only</span>
+                  <span>File</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read & write files, no shell
+                    — Read & write files + Query
                   </Text>
                 </Space>
               </Radio>
               <Radio value="query">
                 <Space>
                   <SearchOutlined />
-                  <span>Query Only</span>
+                  <span>Query</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read-only queries
+                    — Built-in read-only queries
                   </Text>
                 </Space>
               </Radio>
@@ -3137,6 +3322,226 @@ export default function RemoteInvokeTab() {
                 />
               </Space>
             </Card>
+          )}
+        </Space>
+      </Modal>
+      <Modal
+        open={fileAccessEditorOpen}
+        title="Manage File Access Policies"
+        okText="Save"
+        cancelText="Cancel"
+        onCancel={() => setFileAccessEditorOpen(false)}
+        onOk={() => void handleSaveFileAccessConfig()}
+        confirmLoading={fileAccessSaveLoading}
+        width={960}
+        destroyOnClose
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message="Per-grant file access policies"
+          description="Each entry maps a grant_id to its file access rules. Grants without an entry use a default read-only policy rooted at the caller's working directory."
+        />
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
+            <Title level={5} style={{ margin: 0 }}>Grant Policies</Title>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={() => {
+                setFileAccessEditorGrants(prev => [
+                  ...prev,
+                  {
+                    grant_id: "",
+                    name: "",
+                    roots: [],
+                    denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
+                    write_denies: [],
+                    ops: [...FILE_READ_OPS],
+                    respect_gitignore: true,
+                    allow_overwrite: true,
+                    allow_recursive_delete: false,
+                  },
+                ]);
+              }}
+            >
+              Add Policy
+            </Button>
+          </Space>
+
+          {fileAccessEditorGrants.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No per-grant policies. Add one to customize file access for specific grants."
+            />
+          ) : (
+            fileAccessEditorGrants.map((grant, index) => (
+              <Card
+                key={`fa-grant-${index}`}
+                size="small"
+                title={grant.name || grant.grant_id || `Policy ${index + 1}`}
+                extra={
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => {
+                      setFileAccessEditorGrants(prev => prev.filter((_, i) => i !== index));
+                    }}
+                  />
+                }
+              >
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Grant ID *</Text>
+                      <Input
+                        value={grant.grant_id}
+                        placeholder="e.g. g-abc123"
+                        onChange={e => {
+                          const val = e.target.value;
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, grant_id: val } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
+                      <Input
+                        value={grant.name ?? ""}
+                        placeholder="Human-readable label"
+                        onChange={e => {
+                          const val = e.target.value;
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, name: val } : g));
+                        }}
+                      />
+                    </Col>
+                  </Row>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 2, maxRows: 5 }}
+                      value={(grant.roots ?? []).join("\n")}
+                      placeholder="/Users/eden/work/project"
+                      onChange={e => {
+                        const roots = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, roots } : g));
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Operations</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Select
+                        mode="multiple"
+                        style={{ width: "100%" }}
+                        value={grant.ops ?? []}
+                        onChange={(ops: FileOp[]) => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops } : g));
+                        }}
+                        options={ALL_FILE_OPS.map(op => ({ value: op, label: op }))}
+                      />
+                      <Space style={{ marginTop: 4 }}>
+                        <Button size="small" onClick={() => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...FILE_READ_OPS] } : g));
+                        }}>Read Only</Button>
+                        <Button size="small" onClick={() => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...ALL_FILE_OPS] } : g));
+                        }}>All Ops</Button>
+                      </Space>
+                    </div>
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Deny Patterns (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 2, maxRows: 4 }}
+                      value={(grant.denies ?? []).join("\n")}
+                      placeholder={"**/.git/**\n**/target/**"}
+                      onChange={e => {
+                        const denies = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, denies } : g));
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Write Deny Patterns (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 1, maxRows: 4 }}
+                      value={(grant.write_denies ?? []).join("\n")}
+                      placeholder={"**/Cargo.lock\n**/*.lock"}
+                      onChange={e => {
+                        const write_denies = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, write_denies } : g));
+                      }}
+                    />
+                  </div>
+
+                  <Row gutter={12}>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Max Read Bytes</Text>
+                      <InputNumber
+                        style={{ width: "100%" }}
+                        value={grant.max_read_bytes}
+                        placeholder="2097152"
+                        min={0}
+                        onChange={val => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_read_bytes: val ?? undefined } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Max Write Bytes</Text>
+                      <InputNumber
+                        style={{ width: "100%" }}
+                        value={grant.max_write_bytes}
+                        placeholder="2097152"
+                        min={0}
+                        onChange={val => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_write_bytes: val ?? undefined } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Space direction="vertical" size={4}>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.respect_gitignore ?? true}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, respect_gitignore: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Respect .gitignore</Text>
+                        </Space>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.allow_overwrite ?? true}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_overwrite: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Overwrite</Text>
+                        </Space>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.allow_recursive_delete ?? false}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_recursive_delete: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Recursive Delete</Text>
+                        </Space>
+                      </Space>
+                    </Col>
+                  </Row>
+                </Space>
+              </Card>
+            ))
           )}
         </Space>
       </Modal>

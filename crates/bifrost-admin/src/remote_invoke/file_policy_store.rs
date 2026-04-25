@@ -21,40 +21,40 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bifrost_core::file_access::{FileAccessPolicy, FileOp};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 const CONFIG_FILE_NAME: &str = "file-access.toml";
 
-#[derive(Debug, Default, Deserialize)]
-struct RawConfig {
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub(crate) struct RawConfig {
     #[serde(default, rename = "grant")]
-    grants: Vec<RawGrantPolicy>,
+    pub grants: Vec<RawGrantPolicy>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawGrantPolicy {
-    grant_id: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    roots: Vec<PathBuf>,
-    #[serde(default)]
-    denies: Vec<String>,
-    #[serde(default)]
-    write_denies: Vec<String>,
-    #[serde(default)]
-    ops: Vec<FileOp>,
-    #[serde(default)]
-    max_read_bytes: Option<u64>,
-    #[serde(default)]
-    max_write_bytes: Option<u64>,
-    #[serde(default)]
-    respect_gitignore: Option<bool>,
-    #[serde(default)]
-    allow_overwrite: Option<bool>,
-    #[serde(default)]
-    allow_recursive_delete: Option<bool>,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RawGrantPolicy {
+    pub grant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_denies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<FileOp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_read_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_write_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respect_gitignore: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_overwrite: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_recursive_delete: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -154,6 +154,44 @@ impl FileAccessPolicyStore {
 
 fn default_config_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONFIG_FILE_NAME)
+}
+
+/// Load the raw TOML config for the HTTP API. Returns the parsed
+/// `RawConfig` so the frontend can display/edit each grant entry.
+pub(crate) fn load_raw_config() -> RawConfig {
+    let path = default_config_path();
+    if !path.exists() {
+        return RawConfig::default();
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to read file-access config");
+            return RawConfig::default();
+        }
+    };
+    match toml::from_str(&raw) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to parse file-access config");
+            RawConfig::default()
+        }
+    }
+}
+
+/// Save the raw config back to `<data-dir>/file-access.toml`.
+pub(crate) fn save_raw_config(config: &RawConfig) -> Result<(), String> {
+    let path = default_config_path();
+    let content = toml::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize file-access config: {e}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create data directory: {e}"))?;
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write file-access config: {e}"))?;
+    debug!(path = %path.display(), "saved file-access config");
+    Ok(())
 }
 
 #[cfg(test)]
