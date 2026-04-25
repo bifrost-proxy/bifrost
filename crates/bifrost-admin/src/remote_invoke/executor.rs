@@ -365,12 +365,16 @@ impl RemoteInvokeExecutor {
             to_path: Option<String>,
             recursive: Option<bool>,
             parents: Option<bool>,
+            create_parents: Option<bool>,
             patch_text: Option<String>,
             exclude_patterns: Option<Vec<String>>,
             context_before: Option<u32>,
             context_after: Option<u32>,
             offset: Option<u32>,
             limit: Option<u32>,
+            case_insensitive: Option<bool>,
+            glob: Option<String>,
+            respect_gitignore: Option<bool>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -426,7 +430,13 @@ impl RemoteInvokeExecutor {
             }
             "file.list" => {
                 let excludes = params.exclude_patterns.clone().unwrap_or_default();
-                super::file_ops::handle_file_list(&decision, params.depth, &excludes).await?
+                super::file_ops::handle_file_list(
+                    &decision,
+                    params.depth,
+                    &excludes,
+                    params.respect_gitignore.unwrap_or(true),
+                )
+                .await?
             }
             "file.stat" => super::file_ops::handle_file_stat(&decision).await?,
             "file.glob" => {
@@ -441,6 +451,7 @@ impl RemoteInvokeExecutor {
                     &pattern,
                     params.max_matches,
                     &excludes,
+                    params.respect_gitignore.unwrap_or(true),
                 )
                 .await?
             }
@@ -459,6 +470,9 @@ impl RemoteInvokeExecutor {
                     &excludes,
                     params.context_before,
                     params.context_after,
+                    params.case_insensitive.unwrap_or(false),
+                    params.glob.as_deref(),
+                    params.respect_gitignore.unwrap_or(true),
                 )
                 .await?
             }
@@ -476,6 +490,7 @@ impl RemoteInvokeExecutor {
                     content,
                     params.base_sha256.as_deref(),
                     params.allow_overwrite,
+                    params.create_parents.unwrap_or(false),
                 )
                 .await?
             }

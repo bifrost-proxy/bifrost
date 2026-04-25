@@ -36,6 +36,7 @@ url = "2"
 qrcode = "0.14"
 base64 = "0.22"
 regex = "1"
+ignore = "0.4"
 dashmap = "6"
 futures-util = { version = "0.3", features = ["sink"] }
 sha1 = "0.10"
