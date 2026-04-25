@@ -2921,6 +2921,7 @@ export default function RemoteInvokeTab() {
               </Tooltip>
             </Space>
           </div>
+          {shellEditorExpertMode && (
           <div>
             <Space
               align="center"
@@ -3164,6 +3165,7 @@ export default function RemoteInvokeTab() {
               )}
             </Space>
           </div>
+          )}
           <div>
             <Space
               align="center"
