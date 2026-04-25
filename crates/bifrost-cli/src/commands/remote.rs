@@ -2024,6 +2024,8 @@ fn build_remote_file_command(
             path,
             max_bytes,
             allow_binary,
+            offset,
+            limit,
             cwd,
             output,
         } => (
@@ -2033,6 +2035,8 @@ fn build_remote_file_command(
                 "path": path,
                 "max_bytes": max_bytes,
                 "allow_binary": allow_binary,
+                "offset": offset,
+                "limit": limit,
                 "cwd": cwd,
             }),
             output.clone(),
@@ -2040,12 +2044,18 @@ fn build_remote_file_command(
         RemoteFileCommands::List {
             path,
             depth,
+            exclude_patterns,
             cwd,
             output,
         } => (
             "file.list",
             format!("file.list {}", path.clone().unwrap_or_else(|| ".".into())),
-            json!({ "path": path, "depth": depth, "cwd": cwd }),
+            json!({
+                "path": path,
+                "depth": depth,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                "cwd": cwd,
+            }),
             output.clone(),
         ),
         RemoteFileCommands::Stat { path, cwd, output } => (
@@ -2057,6 +2067,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Glob {
             pattern,
             max_matches,
+            exclude_patterns,
             cwd,
             output,
         } => (
@@ -2065,6 +2076,7 @@ fn build_remote_file_command(
             json!({
                 "pattern": pattern,
                 "max_matches": max_matches,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "cwd": cwd,
             }),
             output.clone(),
@@ -2074,6 +2086,9 @@ fn build_remote_file_command(
             path,
             max_matches,
             max_scan,
+            exclude_patterns,
+            context_before,
+            context_after,
             cwd,
             output,
         } => (
@@ -2084,6 +2099,9 @@ fn build_remote_file_command(
                 "path": path,
                 "max_matches": max_matches,
                 "max_scan_bytes": max_scan,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                "context_before": context_before,
+                "context_after": context_after,
                 "cwd": cwd,
             }),
             output.clone(),

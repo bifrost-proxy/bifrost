@@ -1,8 +1,8 @@
-# Remote Invoke File API — 人工测试用例（Phase 1/2/3）
+# Remote Invoke File API — 人工测试用例
 
 > 关联设计：[`design/remote-invoke-file-api.md`](../design/remote-invoke-file-api.md)
 > 关联分支：`feat/remote-file-api`
-> 场景范围：Phase 1 只读能力 + Phase 2 写/编辑能力 + Phase 3 apply-patch
+> 场景范围：读取/写入/编辑/patch 全操作 + coding agent 增强能力
 > 硬性约束：本技能涉及跨设备文件访问，所有用例必须在真实设备上由人工执行；严禁仅依赖单测通过即判定完成。
 
 ---
@@ -253,6 +253,98 @@ bifrost remote file read --help
 
 ---
 
+## 3. Coding Agent 增强能力用例
+
+### TC-3.1 file.read — offset/limit 行范围读取
+**步骤**：
+```bash
+# 先读取整个文件确认行数
+bifrost remote file read Cargo.toml --cwd /Users/eden/work/github/bifrost-remote-file --output json | jq .total_size
+
+# 读取第 5-10 行
+bifrost remote file read Cargo.toml --offset 5 --limit 6 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 返回 `start_line: 5`, `end_line: 10`, `total_lines` 为文件实际行数
+- `content_b64` 解码后只包含第 5-10 行内容
+- `truncated: true`（因为未读到文件末尾）
+
+### TC-3.2 file.read — offset 超出文件末尾
+**步骤**：
+```bash
+bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 返回 `start_line` 等于 `total_lines + 1`（或 clamped），`end_line` 等于 `start_line - 1`
+- `content_b64` 解码后为空
+- `size: 0`
+
+### TC-3.3 file.read — 仅指定 offset 读到文件末尾
+**步骤**：
+```bash
+bifrost remote file read Cargo.toml --offset 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `start_line: 3`, `end_line` 等于 `total_lines`
+- `truncated: false`
+- `content_b64` 解码后从第 3 行开始到文件末尾
+
+### TC-3.4 file.search — 带上下文行
+**步骤**：
+```bash
+bifrost remote file search "name" -B 2 -A 2 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 每个 match 对象包含 `context` 数组
+- `context` 中每个元素有 `line`（行号）和 `content`（内容）
+- 上下文范围覆盖匹配行前 2 行和后 2 行
+
+### TC-3.5 file.search — 不带上下文（默认行为不变）
+**步骤**：
+```bash
+bifrost remote file search "name" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- 每个 match 对象只有 `path`/`line`/`column`/`preview`，**没有** `context` 字段
+
+### TC-3.6 file.glob — 默认排除 .git / node_modules / target
+**步骤**：
+```bash
+# 确保目标目录下有 .git 和 target 目录
+bifrost remote file glob "**/*" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `matches` 中不包含任何以 `.git/` 或 `target/` 或 `node_modules/` 开头的路径
+- 正常文件（如 `src/main.rs`, `Cargo.toml`）正常返回
+
+### TC-3.7 file.glob — 自定义 --exclude
+**步骤**：
+```bash
+bifrost remote file glob "**/*" --exclude "src" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `matches` 中不包含 `src/` 开头的路径
+- 其他目录下的文件正常返回
+
+### TC-3.8 file.search — 默认排除 .git / node_modules / target
+**步骤**：
+```bash
+bifrost remote file search "fn" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `matches` 中无来自 `.git/`、`target/`、`node_modules/` 的结果
+
+### TC-3.9 file.list — 默认排除 .git / node_modules / target
+**步骤**：
+```bash
+bifrost remote file list --depth 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+```
+**预期**：
+- `entries` 中不递归进入 `.git/`、`target/`、`node_modules/` 目录
+- 但这些目录本身作为条目仍然可见（仅不递归遍历其内部）
+
+---
+
 ## 自动化覆盖
 
 | 来源 | 覆盖点 |
@@ -268,3 +360,9 @@ bifrost remote file read --help
 | 日期 | 用例 | 执行命令 | 结果 |
 |------|------|----------|------|
 | 2026-04-25 | TC-2.5 只读 policy 拒绝写操作（回归） | `CARGO_TARGET_DIR=./.codex-target/remote-file-readonly-policy cargo run -p bifrost-e2e -- --test remote_file_readonly_policy_rejects_write_op` | PASS：1/1 passed，确认只读 policy 写操作返回 `file.permission_denied` |
+| 2026-04-25 | TC-3.1 file.read offset/limit | `cargo test -p bifrost-admin -- read_with_offset_limit_returns_line_range` | PASS：start_line=2, end_line=3, total_lines=5, truncated=true, 内容只含 line2/line3 |
+| 2026-04-25 | TC-3.2/3.3 file.read offset 边界 | `cargo test -p bifrost-admin -- read_with_offset_only_returns_from_offset_to_end` | PASS：start_line=2, end_line=3, truncated=false, 从 offset 读到末尾 |
+| 2026-04-25 | TC-3.4 file.search context | `cargo test -p bifrost-admin -- search_with_context_lines` | PASS：context 数组含 line 2/3/4，匹配行前后各 1 行 |
+| 2026-04-25 | TC-3.6 file.glob 默认排除 | `cargo test -p bifrost-admin -- glob_excludes_default_dirs` | PASS：src/main.rs 存在，.git/config 和 node_modules/pkg.js 被排除 |
+| 2026-04-25 | TC-3.9 file.list 默认排除 | `cargo test -p bifrost-admin -- list_excludes_default_dirs` | PASS：src 可见，.git/node_modules 不被递归遍历 |
+| 2026-04-25 | CLI help 验证 | `./target/release/bifrost remote file read/search/glob/list --help` | PASS：20/20 CLI 合约测试通过，--offset/--limit/-B/-A/--exclude 全部出现 |

@@ -352,6 +352,11 @@ impl RemoteInvokeExecutor {
             recursive: Option<bool>,
             parents: Option<bool>,
             patch_text: Option<String>,
+            exclude_patterns: Option<Vec<String>>,
+            context_before: Option<u32>,
+            context_after: Option<u32>,
+            offset: Option<u32>,
+            limit: Option<u32>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -400,10 +405,15 @@ impl RemoteInvokeExecutor {
                     &decision,
                     params.max_bytes,
                     params.allow_binary.unwrap_or(false),
+                    params.offset,
+                    params.limit,
                 )
                 .await?
             }
-            "file.list" => super::file_ops::handle_file_list(&decision, params.depth).await?,
+            "file.list" => {
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
+                super::file_ops::handle_file_list(&decision, params.depth, &excludes).await?
+            }
             "file.stat" => super::file_ops::handle_file_stat(&decision).await?,
             "file.glob" => {
                 let pattern = params.pattern.clone().ok_or_else(|| {
@@ -411,7 +421,14 @@ impl RemoteInvokeExecutor {
                         "[file.invalid_args] 'pattern' is required for file.glob".to_string(),
                     )
                 })?;
-                super::file_ops::handle_file_glob(&decision, &pattern, params.max_matches).await?
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
+                super::file_ops::handle_file_glob(
+                    &decision,
+                    &pattern,
+                    params.max_matches,
+                    &excludes,
+                )
+                .await?
             }
             "file.search" => {
                 let pattern = params.pattern.clone().ok_or_else(|| {
@@ -419,11 +436,15 @@ impl RemoteInvokeExecutor {
                         "[file.invalid_args] 'pattern' is required for file.search".to_string(),
                     )
                 })?;
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
                 super::file_ops::handle_file_search(
                     &decision,
                     &pattern,
                     params.max_matches,
                     params.max_scan_bytes,
+                    &excludes,
+                    params.context_before,
+                    params.context_after,
                 )
                 .await?
             }

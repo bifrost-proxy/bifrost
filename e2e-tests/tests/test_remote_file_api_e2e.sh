@@ -81,11 +81,13 @@ test_remote_file_root_help() {
 }
 
 test_read_help() {
-    header "remote file read --help has --max-bytes / --allow-binary / --cwd"
+    header "remote file read --help has --max-bytes / --allow-binary / --offset / --limit / --cwd"
     local out
     out=$(run_bifrost remote file read --help)
     if echo "$out" | grep -q -- "--max-bytes" \
        && echo "$out" | grep -qi "allow-binary\|binary" \
+       && echo "$out" | grep -q -- "--offset" \
+       && echo "$out" | grep -q -- "--limit" \
        && echo "$out" | grep -qi "cwd"; then
         pass "read --help surface ok"
     else
@@ -95,13 +97,14 @@ test_read_help() {
 }
 
 test_list_help() {
-    header "remote file list --help has --depth"
+    header "remote file list --help has --depth / --exclude"
     local out
     out=$(run_bifrost remote file list --help)
-    if echo "$out" | grep -q -- "--depth"; then
-        pass "list --help has --depth"
+    if echo "$out" | grep -q -- "--depth" \
+       && echo "$out" | grep -q -- "--exclude"; then
+        pass "list --help has --depth / --exclude"
     else
-        fail "list --help missing --depth"
+        fail "list --help missing --depth or --exclude"
         echo "$out" | head -30
     fi
 }
@@ -119,11 +122,13 @@ test_stat_help() {
 }
 
 test_glob_help() {
-    header "remote file glob --help has --max-matches"
+    header "remote file glob --help has --max-matches / --exclude"
     local out
     out=$(run_bifrost remote file glob --help)
-    if echo "$out" | grep -qi "pattern\|glob" && echo "$out" | grep -q -- "--max-matches"; then
-        pass "glob --help has pattern / --max-matches"
+    if echo "$out" | grep -qi "pattern\|glob" \
+       && echo "$out" | grep -q -- "--max-matches" \
+       && echo "$out" | grep -q -- "--exclude"; then
+        pass "glob --help has pattern / --max-matches / --exclude"
     else
         fail "glob --help missing"
         echo "$out" | head -20
@@ -131,14 +136,18 @@ test_glob_help() {
 }
 
 test_search_help() {
-    header "remote file search --help has --path / --max-scan"
+    header "remote file search --help has --path / --max-scan / --context-before / --context-after / --exclude"
     local out
     out=$(run_bifrost remote file search --help)
-    if echo "$out" | grep -q -- "--path" && echo "$out" | grep -q -- "--max-scan"; then
-        pass "search --help has --path / --max-scan"
+    if echo "$out" | grep -q -- "--path" \
+       && echo "$out" | grep -q -- "--max-scan" \
+       && echo "$out" | grep -q -- "--context-before" \
+       && echo "$out" | grep -q -- "--context-after" \
+       && echo "$out" | grep -q -- "--exclude"; then
+        pass "search --help has --path / --max-scan / context / exclude"
     else
-        fail "search --help missing"
-        echo "$out" | head -20
+        fail "search --help missing flags"
+        echo "$out" | head -30
     fi
 }
 

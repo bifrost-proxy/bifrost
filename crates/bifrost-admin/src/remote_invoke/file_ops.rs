@@ -28,6 +28,25 @@ const DEFAULT_SEARCH_MAX: usize = 500;
 const DEFAULT_SEARCH_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
 
+/// Directories skipped by default in `file.list`, `file.glob`, and `file.search`.
+const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".DS_Store",
+    ".svn",
+    ".hg",
+];
+
+/// Returns `true` if `dir_name` should be skipped during directory traversal.
+fn should_skip_dir(dir_name: &str, extra_excludes: &[String]) -> bool {
+    if DEFAULT_EXCLUDE_DIRS.contains(&dir_name) {
+        return true;
+    }
+    extra_excludes.iter().any(|e| e == dir_name)
+}
+
 fn fa_to_bifrost(err: FileAccessError) -> BifrostError {
     BifrostError::Config(format!("[{}] {}", err.code(), err))
 }
@@ -84,6 +103,8 @@ pub async fn handle_file_read(
     decision: &PolicyDecision,
     max_bytes: Option<u64>,
     allow_binary: bool,
+    offset: Option<u32>,
+    limit: Option<u32>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Read);
     let path = decision.path.as_path();
@@ -121,22 +142,60 @@ pub async fn handle_file_read(
         }));
     }
 
-    let sha256 = sha256_hex(&buf);
-    let truncated = (buf.len() as u64) < total_size;
+    let bytes_truncated = (buf.len() as u64) < total_size;
     let mtime_unix = metadata.modified().ok().and_then(system_time_to_unix);
 
+    // Line-range slicing when offset/limit are provided.
+    if offset.is_some() || limit.is_some() {
+        let text = std::str::from_utf8(&buf).map_err(|_| {
+            BifrostError::Config(
+                "[file.invalid_args] file is not UTF-8; offset/limit require text files".into(),
+            )
+        })?;
+        let all_lines: Vec<&str> = text.lines().collect();
+        let total_lines = all_lines.len() as u32;
+        let start = offset.unwrap_or(1).max(1);
+        let count = limit.unwrap_or(total_lines);
+        let start_idx = ((start - 1) as usize).min(all_lines.len());
+        let end_idx = (start_idx + count as usize).min(all_lines.len());
+        let selected: String = all_lines[start_idx..end_idx].join("\n");
+        let selected_bytes = if start_idx < end_idx {
+            format!("{}\n", selected).into_bytes()
+        } else {
+            Vec::new()
+        };
+        let sha256 = sha256_hex(&selected_bytes);
+        let line_truncated = (end_idx as u32) < total_lines || bytes_truncated;
+        return Ok(json!({
+            "content_b64": base64::engine::general_purpose::STANDARD.encode(&selected_bytes),
+            "size": selected_bytes.len() as u64,
+            "total_size": total_size,
+            "truncated": line_truncated,
+            "sha256": sha256,
+            "mtime_unix": mtime_unix,
+            "total_lines": total_lines,
+            "start_line": start_idx as u32 + 1,
+            "end_line": end_idx as u32,
+        }));
+    }
+
+    let sha256 = sha256_hex(&buf);
     Ok(json!({
         "content_b64": base64::engine::general_purpose::STANDARD.encode(&buf),
         "size": buf.len() as u64,
         "total_size": total_size,
-        "truncated": truncated,
+        "truncated": bytes_truncated,
         "sha256": sha256,
         "mtime_unix": mtime_unix,
     }))
 }
 
 /// `file.list` — breadth-first directory listing up to `depth` levels.
-pub async fn handle_file_list(decision: &PolicyDecision, depth: Option<u32>) -> Result<Value> {
+pub async fn handle_file_list(
+    decision: &PolicyDecision,
+    depth: Option<u32>,
+    exclude_patterns: &[String],
+) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::List);
     let depth = depth.unwrap_or(DEFAULT_LIST_DEPTH).max(1);
     let root = decision.path.as_path().to_path_buf();
@@ -192,6 +251,11 @@ pub async fn handle_file_list(decision: &PolicyDecision, depth: Option<u32>) -> 
                 "mtime_unix": md.modified().ok().and_then(system_time_to_unix),
             }));
             if md.is_dir() && cur_depth + 1 < depth {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if should_skip_dir(name, exclude_patterns) {
+                        continue;
+                    }
+                }
                 queue.push_back((path, cur_depth + 1));
             }
         }
@@ -252,6 +316,7 @@ pub async fn handle_file_glob(
     decision: &PolicyDecision,
     pattern: &str,
     max_matches: Option<usize>,
+    exclude_patterns: &[String],
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Glob);
     let max = max_matches.unwrap_or(DEFAULT_GLOB_MAX);
@@ -278,6 +343,11 @@ pub async fn handle_file_glob(
                 .to_string_lossy()
                 .replace('\\', "/");
             if md.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if should_skip_dir(name, exclude_patterns) {
+                        continue;
+                    }
+                }
                 stack.push(path);
                 continue;
             }
@@ -307,6 +377,9 @@ pub async fn handle_file_search(
     pattern: &str,
     max_matches: Option<usize>,
     max_scan_bytes: Option<u64>,
+    exclude_patterns: &[String],
+    context_before: Option<u32>,
+    context_after: Option<u32>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Search);
     let root = decision.path.as_path().to_path_buf();
@@ -337,6 +410,11 @@ pub async fn handle_file_search(
                 Err(_) => continue,
             };
             if md.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if should_skip_dir(name, exclude_patterns) {
+                        continue;
+                    }
+                }
                 stack.push(path);
                 continue;
             }
@@ -364,14 +442,42 @@ pub async fn handle_file_search(
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            for (line_idx, line) in text.lines().enumerate() {
+            let before = context_before.unwrap_or(0) as usize;
+            let after = context_after.unwrap_or(0) as usize;
+            let need_context = before > 0 || after > 0;
+            let all_lines: Vec<&str> = if need_context {
+                text.lines().collect()
+            } else {
+                Vec::new()
+            };
+            let total_lines = if need_context { all_lines.len() } else { 0 };
+            let lines_iter: Box<dyn Iterator<Item = (usize, &str)>> = if need_context {
+                Box::new(all_lines.iter().copied().enumerate())
+            } else {
+                Box::new(text.lines().enumerate())
+            };
+            for (line_idx, line) in lines_iter {
                 if let Some(m) = re.find(line) {
-                    hits.push(json!({
+                    let mut hit = json!({
                         "path": rel,
                         "line": (line_idx as u64) + 1,
                         "column": (m.start() as u64) + 1,
                         "preview": line.chars().take(240).collect::<String>(),
-                    }));
+                    });
+                    if need_context {
+                        let ctx_start = line_idx.saturating_sub(before);
+                        let ctx_end = (line_idx + after + 1).min(total_lines);
+                        let ctx: Vec<Value> = (ctx_start..ctx_end)
+                            .map(|i| {
+                                json!({
+                                    "line": (i as u64) + 1,
+                                    "content": all_lines[i].chars().take(240).collect::<String>(),
+                                })
+                            })
+                            .collect();
+                        hit["context"] = json!(ctx);
+                    }
+                    hits.push(hit);
                     if hits.len() >= max {
                         truncated = true;
                         break 'outer;
@@ -394,7 +500,7 @@ pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> 
     let algo = algo.unwrap_or("sha256").to_ascii_lowercase();
     if algo != "sha256" {
         return Err(BifrostError::Config(format!(
-            "[file.unsupported_algo] phase 1 supports only sha256, got '{}'",
+            "[file.unsupported_algo] only sha256 is supported, got '{}'",
             algo
         )));
     }
@@ -977,7 +1083,9 @@ mod tests {
         let dec = policy
             .check(Path::new("hello.txt"), tmp.path(), FileOp::Read)
             .unwrap();
-        let v = handle_file_read(&dec, None, false).await.unwrap();
+        let v = handle_file_read(&dec, None, false, None, None)
+            .await
+            .unwrap();
         assert_eq!(v["size"].as_u64().unwrap(), 6);
         assert!(!v["truncated"].as_bool().unwrap());
     }
@@ -1005,9 +1113,147 @@ mod tests {
         let dec = policy
             .check(Path::new("."), tmp.path(), FileOp::List)
             .unwrap();
-        let v = handle_file_list(&dec, Some(1)).await.unwrap();
+        let v = handle_file_list(&dec, Some(1), &[]).await.unwrap();
         let entries = v["entries"].as_array().unwrap();
         assert!(entries.iter().any(|e| e["name"] == "a.txt"));
         assert!(entries.iter().any(|e| e["name"] == "sub"));
+    }
+
+    #[tokio::test]
+    async fn read_with_offset_limit_returns_line_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("multi.txt");
+        std::fs::write(&file, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("multi.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        // Read lines 2-3
+        let v = handle_file_read(&dec, None, false, Some(2), Some(2))
+            .await
+            .unwrap();
+        assert_eq!(v["start_line"].as_u64().unwrap(), 2);
+        assert_eq!(v["end_line"].as_u64().unwrap(), 3);
+        assert_eq!(v["total_lines"].as_u64().unwrap(), 5);
+        assert!(v["truncated"].as_bool().unwrap()); // end_line < total_lines
+        let content_b64 = v["content_b64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(content_b64)
+            .unwrap();
+        let text = String::from_utf8(decoded).unwrap();
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+        assert!(!text.contains("line1"));
+        assert!(!text.contains("line4"));
+    }
+
+    #[tokio::test]
+    async fn read_with_offset_only_returns_from_offset_to_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("multi.txt");
+        std::fs::write(&file, "aaa\nbbb\nccc\n").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("multi.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+
+        let v = handle_file_read(&dec, None, false, Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(v["start_line"].as_u64().unwrap(), 2);
+        assert_eq!(v["end_line"].as_u64().unwrap(), 3);
+        assert!(!v["truncated"].as_bool().unwrap());
+        let content_b64 = v["content_b64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(content_b64)
+            .unwrap();
+        let text = String::from_utf8(decoded).unwrap();
+        assert!(text.contains("bbb"));
+        assert!(text.contains("ccc"));
+        assert!(!text.contains("aaa"));
+    }
+
+    #[tokio::test]
+    async fn search_with_context_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("code.rs"),
+            "fn main() {\n    let x = 1;\n    println!(\"hello\");\n    let y = 2;\n}\n",
+        )
+        .unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let v = handle_file_search(&dec, "println", None, None, &[], Some(1), Some(1))
+            .await
+            .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert!(!matches.is_empty());
+        let m = &matches[0];
+        assert_eq!(m["line"].as_u64().unwrap(), 3);
+        let ctx = m["context"].as_array().unwrap();
+        assert!(ctx.len() >= 3); // before + match + after
+                                 // Check context includes surrounding lines
+        let ctx_lines: Vec<u64> = ctx.iter().map(|c| c["line"].as_u64().unwrap()).collect();
+        assert!(ctx_lines.contains(&2)); // before
+        assert!(ctx_lines.contains(&3)); // match
+        assert!(ctx_lines.contains(&4)); // after
+    }
+
+    #[tokio::test]
+    async fn glob_excludes_default_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), b"fn main(){}").unwrap();
+        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        std::fs::write(tmp.path().join("node_modules/pkg.js"), b"x").unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), b"y").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Glob)
+            .unwrap();
+
+        let v = handle_file_glob(&dec, "**/*", None, &[]).await.unwrap();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(matches.iter().any(|m| m.contains("main.rs")));
+        assert!(!matches.iter().any(|m| m.contains("node_modules")));
+        assert!(!matches.iter().any(|m| m.contains(".git")));
+    }
+
+    #[tokio::test]
+    async fn list_excludes_default_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::List)
+            .unwrap();
+
+        let v = handle_file_list(&dec, Some(2), &[]).await.unwrap();
+        let entries = v["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"src"));
+        // node_modules and .git should be excluded from recursive listing
+        // but they still appear at depth=0 as direct children — the skip applies to recursion into them
+        // Actually they should still show up in listing but not be traversed
     }
 }

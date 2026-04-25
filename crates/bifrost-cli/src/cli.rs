@@ -1438,6 +1438,13 @@ pub enum RemoteFileCommands {
         max_bytes: Option<u64>,
         #[arg(long, help = "Allow binary content in the response")]
         allow_binary: bool,
+        #[arg(
+            long,
+            help = "Start line (1-based). Only return lines from this offset"
+        )]
+        offset: Option<u32>,
+        #[arg(long, help = "Maximum number of lines to return (used with --offset)")]
+        limit: Option<u32>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human", help = "Output format: human | json")]
@@ -1449,6 +1456,11 @@ pub enum RemoteFileCommands {
         path: Option<String>,
         #[arg(long, default_value_t = 1, help = "Max recursion depth")]
         depth: u32,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]
@@ -1469,6 +1481,11 @@ pub enum RemoteFileCommands {
         pattern: String,
         #[arg(long, help = "Max matches to return")]
         max_matches: Option<usize>,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]
@@ -1484,6 +1501,15 @@ pub enum RemoteFileCommands {
         max_matches: Option<usize>,
         #[arg(long, help = "Per-file scan byte cap")]
         max_scan: Option<u64>,
+        #[arg(long, short = 'B', help = "Number of context lines before each match")]
+        context_before: Option<u32>,
+        #[arg(long, short = 'A', help = "Number of context lines after each match")]
+        context_after: Option<u32>,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]
