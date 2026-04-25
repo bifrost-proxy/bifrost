@@ -350,6 +350,10 @@ pub struct RemoteCommand {
     pub output_mode: Option<OutputMode>,
     #[serde(skip)]
     pub grant_id: Option<String>,
+    /// The grant's file_access scope, injected by the worker before execution.
+    /// Used by the executor to reject write ops when the grant only allows read.
+    #[serde(skip)]
+    pub file_access: FileAccessScope,
 }
 
 impl RemoteCommand {

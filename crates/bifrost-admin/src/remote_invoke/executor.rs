@@ -331,6 +331,20 @@ impl RemoteInvokeExecutor {
             }
         };
 
+        // Enforce grant-level file_access: if the grant only allows read,
+        // reject any write operation before we even load the file policy.
+        if op.is_write()
+            && !matches!(
+                command.file_access,
+                super::types::FileAccessScope::ReadWrite
+            )
+        {
+            return Err(BifrostError::Config(format!(
+                "[file.permission_denied] grant file_access={:?} does not allow write operation '{}'",
+                command.file_access, file_op_name
+            )));
+        }
+
         #[derive(serde::Deserialize, Default)]
         #[serde(default)]
         struct FileParams {

@@ -2268,6 +2268,7 @@ impl RemoteInvokeWorker {
             return;
         }
         command.grant_id = Some(grant_id.clone());
+        command.file_access = file_access;
 
         if let Some(query) = &command.query {
             if command_kind == CommandKind::QueryReadonly
@@ -2360,6 +2361,7 @@ impl RemoteInvokeWorker {
                     pty: command.pty.clone(),
                     output_mode: command.output_mode,
                     grant_id: None,
+                    file_access: Default::default(),
                 },
                 source_ip: None,
                 caller_display_name,
@@ -3993,6 +3995,7 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4027,6 +4030,7 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4060,6 +4064,7 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4095,6 +4100,7 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4137,6 +4143,7 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(None, &command, CommandKind::QueryReadonly);
@@ -4182,6 +4189,7 @@ mod tests {
                 pty: None,
                 output_mode: None,
                 grant_id: None,
+                file_access: Default::default(),
             },
             source_ip: None,
             caller_display_name: Some("TestCaller".to_string()),

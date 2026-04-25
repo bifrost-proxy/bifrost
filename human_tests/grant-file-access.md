@@ -210,6 +210,36 @@ cargo run --bin bifrost -- remote grant update <grant_id> --scope remote_file_re
 - list 返回写入的文件条目
 - read 返回正确的 `content_b64`、`total_lines`、`start_line`、`end_line`
 
+### TC-GFA-17: 端到端 — 三策略动态切换验证（自动化脚本）
+
+**操作步骤**：
+1. 运行自动化测试脚本 `/tmp/test_three_policies.sh`，脚本自动搭建完整环境（Relay + TARGET + CALLER）
+2. 策略一（`file_access=read_write`）：审批后验证 file.read、file.write、file.mkdir、file.list 均成功
+3. 策略二（`file_access=read`）：通过 PATCH API 降级为 read-only，验证 file.read/list 成功，file.write/mkdir 被拒绝
+4. 策略三（`file_access=none`）：通过 PATCH API 降级为 none，验证 file.read/list/write/mkdir 均被拒绝
+5. 恢复验证：通过 PATCH API 恢复为 read_write，验证 file.read/write 恢复正常
+
+**预期结果**（14 个子用例）：
+- TC-P1-01~04: read_write 下 read ✅、write ✅、mkdir ✅、list ✅
+- TC-P2-01~04: read 下 read ✅、list ✅、write 被拒绝（`grant file_access=Read does not allow write`）、mkdir 被拒绝
+- TC-P3-01~04: none 下 read/list/write/mkdir 全部被拒绝（`scope does not allow command kind File`）
+- TC-P4-01~02: 恢复 read_write 后 read ✅、write ✅
+
+**实际测试结果**：2026-04-25 全部 14/14 通过 ✅
+
+### TC-GFA-18: 回归 — file_access=read 时 executor 阻止写操作
+
+**操作步骤**：
+1. 配对连接后，设置 grant 为 `file_access: "read"`
+2. 发送 `remote file write` 命令
+3. 检查错误消息
+
+**预期结果**：
+- 错误包含 `grant file_access=Read does not allow write operation`
+- 写操作在 executor 层被拒绝，不会到达文件系统
+
+**实际测试结果**：2026-04-25 通过 ✅（修复了 executor 中缺少 grant 级别写权限检查的 bug）
+
 ---
 
 ## 清理步骤
