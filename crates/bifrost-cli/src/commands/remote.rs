@@ -3488,7 +3488,12 @@ impl CallerRelayClient {
                             let text = String::from_utf8_lossy(&bytes);
                             partial_line.push_str(&text);
                             // PR #5a: reset idle deadline on each received chunk.
-                            timeout.as_mut().reset(tokio::time::Instant::now() + idle);
+                            // Post-exit: keep the 3s grace timer authoritative and
+                            // do NOT let late stream_frame chunks / keep-alives
+                            // seed it back to the 300s idle window.
+                            if !exit_received {
+                                timeout.as_mut().reset(tokio::time::Instant::now() + idle);
+                            }
 
                             while let Some(pos) = partial_line.find('\n') {
                                 let line = partial_line[..pos].trim_end_matches('\r').to_string();
@@ -3560,6 +3565,16 @@ impl CallerRelayClient {
                                                 }
                                                 if !stream_stdout && !stdout_parts.is_empty() {
                                                     result.stdout = Some(stdout_parts.join(""));
+                                                    return Ok(result);
+                                                }
+                                                // Consuming renderer (search/traffic) drains frames
+                                                // directly into renderer state, so stdout_parts is
+                                                // empty at exit-time. Treat exit as terminal here —
+                                                // the "delayed frame" grace path is for the raw
+                                                // stdout-buffering case and risks holding the idle
+                                                // timer open forever under post-exit stream_frame
+                                                // races + 30s relay keep-alives.
+                                                if !stream_stdout && search_renderer.is_some() {
                                                     return Ok(result);
                                                 }
                                                 debug!("exit received with empty stdout, waiting for delayed frame");
