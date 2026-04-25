@@ -23,6 +23,7 @@ import {
   buildRegistrationSignaturePayload,
   grantModeTtlMs,
   normalizeGrantScope,
+  normalizeFileAccess,
   resolveCommandKind,
   grantScopeAllowsCommand,
 } from './types';
@@ -472,6 +473,7 @@ export class RemoteInvokeService {
       client_ephemeral_pub: req.client_ephemeral_pub,
       grant_mode: grantMode as any,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      file_access: normalizeFileAccess(req.file_access),
       ssh_key_id: '',
       ssh_key_fingerprint: '',
       status: 'active',
@@ -512,6 +514,7 @@ export class RemoteInvokeService {
       caller_fingerprint: pairing.caller_fingerprint,
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      file_access: normalizeFileAccess(req.file_access),
       caller_ephemeral_pub: pairing.caller_ephemeral_pub,
       client_ephemeral_pub: req.client_ephemeral_pub,
     });
@@ -933,6 +936,7 @@ export class RemoteInvokeService {
         client_ephemeral_pub: req.client_ephemeral_pub ?? '',
         grant_mode: grantMode,
         grant_scope: normalizeGrantScope(req.grant_scope),
+        file_access: normalizeFileAccess(req.file_access),
         ssh_key_id: '',
         ssh_key_fingerprint: result.ssh_key_fingerprint,
         status: 'active',
@@ -1097,10 +1101,12 @@ export class RemoteInvokeService {
     }
 
     const normalizedScope = normalizeGrantScope(req.grant_scope ?? grant.grant_scope);
+    const normalizedFileAccess = normalizeFileAccess(req.file_access ?? grant.file_access);
     const now = new Date().toISOString();
 
     await this.storage.remoteInvoke.updateGrant(grantId, {
       grant_scope: normalizedScope,
+      file_access: normalizedFileAccess,
       update_time: now,
     });
 
@@ -1112,6 +1118,7 @@ export class RemoteInvokeService {
     pushToClient(updated.client_instance_id, 'grant_updated', {
       grant_id: grantId,
       grant_scope: normalizedScope,
+      file_access: normalizedFileAccess,
     });
 
     await this.storage.remoteInvoke.appendEvent({

@@ -598,6 +598,7 @@ impl RemoteInvokeWorker {
         Ok(Some(session))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn approve_pairing(
         &self,
         pairing_id: &str,
@@ -642,7 +643,9 @@ impl RemoteInvokeWorker {
         )
         .unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed, fallback to remote_query");
-            default_query_grant_provision()
+            let mut provision = default_query_grant_provision();
+            provision.file_access = requested_file_access.unwrap_or_default();
+            provision
         });
 
         let req = GrantDecisionRequest {
@@ -748,7 +751,8 @@ impl RemoteInvokeWorker {
             };
             self.local_grants
                 .write()
-                .insert(grant_id.clone(), grant_info);
+                .insert(grant_id.clone(), grant_info.clone());
+            self.persist_grant_info(&grant_id, &grant_info);
             self.persist_grant_policy(
                 &grant_id,
                 &StoredGrantPolicy {

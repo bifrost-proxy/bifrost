@@ -140,12 +140,14 @@ export interface GrantDecisionRequest {
   decision: 'approve' | 'reject';
   grant_mode?: GrantMode;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
   client_ephemeral_pub?: string;
 }
 
 export interface UpdateGrantRequest {
   client_instance_id?: string;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
 }
 
 export interface PublishPairCodeRequest {
@@ -266,6 +268,7 @@ export interface SshConnectResultRequest {
   caller_fingerprint?: string;
   grant_mode?: GrantMode;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
   caller_ephemeral_pub?: string;
   client_ephemeral_pub?: string;
 }

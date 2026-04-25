@@ -171,6 +171,45 @@ cargo run --bin bifrost -- remote grant update <grant_id> --scope remote_file_re
 - 读操作（list/read/search/glob）成功
 - 写操作（write/edit/mkdir/remove 等）被拒绝
 
+### TC-GFA-14: 回归 — SSE grant_created 事件包含 file_access
+
+**操作步骤**：
+1. 搭建完整本地测试环境（Relay + TARGET + CALLER）
+2. 发起配对，在 TARGET 用 Full Access 审批
+3. 检查 TARGET 的 `remote_invoke_grant_info.json` 文件
+
+**预期结果**：
+- grant_info 中 `file_access` 为 `"read_write"`（非 `"none"`）
+- TARGET 日志中不出现 `file_access None` 相关的权限拒绝
+
+### TC-GFA-15: 回归 — approve_pairing 持久化 grant_info
+
+**操作步骤**：
+1. 完成配对审批后，立即检查 TARGET 的 `remote_invoke_grant_info.json`
+2. 对比 `remote_invoke_grant_policy.json` 中的 `file_access`
+
+**预期结果**：
+- 两个文件的 `file_access` 值一致
+- `grant_info.json` 中 `file_access` 不为 `"none"`（消除竞态条件）
+
+### TC-GFA-16: 端到端 — Full Access 授权后执行文件操作
+
+**操作步骤**：
+1. 搭建本地 Relay（端口 13579，启用 remote-invoke）
+2. 启动 TARGET（端口 18800），连接 Relay
+3. 从 CALLER 发起 `remote connect`，TARGET 用 Full Access 审批
+4. 配置 `file-access.toml`，添加目标目录为 root
+5. 执行 `remote file mkdir` 创建目录
+6. 执行 `remote file write` 写入文件（stdin 管道）
+7. 执行 `remote file list` 验证文件存在
+8. 执行 `remote file read --offset 1 --limit 5` 验证内容
+
+**预期结果**：
+- mkdir 返回 `created: true`
+- write 返回正确的 `bytes_written` 和 `sha256`
+- list 返回写入的文件条目
+- read 返回正确的 `content_b64`、`total_lines`、`start_line`、`end_line`
+
 ---
 
 ## 清理步骤
