@@ -2458,16 +2458,11 @@ impl RemoteInvokeWorker {
                         };
 
                         let legacy_result = relay_client.post_call_frame(&cid, &frame_req).await;
-                        // PR#6c (fire-and-forget): the new /stream-frame
-                        // emission is intentionally detached so its latency
-                        // (and relay rate-limit/429 retries) cannot add to
-                        // the per-chunk critical path. Under CI load, the
-                        // prior serial `.await` on both endpoints pushed
-                        // single-test wall time past the 900s orchestrator
-                        // budget and caused `remote search` / `traffic
-                        // search` to hang. Failures are still logged; the
-                        // legacy envelope path (tracked by `legacy_result`)
-                        // remains the source of truth.
+                        // PR#6c: parallel emission to the new /stream-frame
+                        // endpoint. Offset is left at 0 for now; a follow-up
+                        // PR will thread the pre-tee absolute head in. Failure
+                        // on this path is swallowed so it never breaks the
+                        // legacy envelope path (which `legacy_result` tracks).
                         let stream_frame = stream_emit::build_stdout_frame(
                             seq,
                             offset_for_stream,
@@ -2479,20 +2474,15 @@ impl RemoteInvokeWorker {
                                 client_instance_id: instance_id_for_stream,
                                 frame_json,
                             };
-                            let relay_client_for_stream = Arc::clone(&relay_client);
-                            let cid_for_stream = cid.clone();
-                            tokio::spawn(async move {
-                                if let Err(err) = relay_client_for_stream
-                                    .post_call_stream_frame(&cid_for_stream, &stream_req)
-                                    .await
-                                {
-                                    tracing::debug!(
-                                        call_id = %cid_for_stream,
-                                        ?err,
-                                        "parallel stream_frame post failed"
-                                    );
-                                }
-                            });
+                            if let Err(err) =
+                                relay_client.post_call_stream_frame(&cid, &stream_req).await
+                            {
+                                tracing::debug!(
+                                    call_id = %cid,
+                                    ?err,
+                                    "parallel stream_frame post failed"
+                                );
+                            }
                         }
                         legacy_result
                     }
