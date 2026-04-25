@@ -3172,7 +3172,10 @@ export default function RemoteInvokeTab() {
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Command groups <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>(policies)</Text>
+                Command groups
+                {shellEditorExpertMode && (
+                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}> (policies)</Text>
+                )}
               </Title>
               <Button
                 icon={<PlusOutlined />}
