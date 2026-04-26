@@ -1133,14 +1133,19 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 
     let remote_content = fs::read_to_string(remote_skill).expect("remote skill content");
     assert!(remote_content.contains("name: \"bifrost-remote\""));
-    assert!(remote_content.contains("remote shell ..."));
-    assert!(remote_content.contains("不代表 Agent 不能操作目标设备"));
-    assert!(remote_content.contains("两类操作的前置准备工作"));
-    assert!(remote_content.contains("`query` 访问模式"));
-    assert!(remote_content.contains("bifrost remote shell profile add"));
-    assert!(remote_content.contains("bifrost remote shell policy add"));
+    // Current namespace: `bifrost setting shell ...` (old `bifrost remote
+    // shell/grant` is a deprecated alias and must still be mentioned for
+    // migration guidance).
+    assert!(remote_content.contains("bifrost setting shell profile add"));
+    assert!(remote_content.contains("bifrost setting shell policy add"));
+    assert!(remote_content.contains("deprecated"));
+    // Access mode vocabulary must stay stable for doc consumers.
+    assert!(remote_content.contains("query"));
     assert!(remote_content.contains("selected"));
     assert!(remote_content.contains("all"));
+    // Bifrost remote file-API guidance (core value of the rewrite).
+    assert!(remote_content.contains("bifrost remote file"));
+    assert!(remote_content.contains("FileAccessPolicy"));
     assert!(
         !remote_content.contains("bifrost remote traffic clear"),
         "remote skill should not provide executable traffic clear examples"

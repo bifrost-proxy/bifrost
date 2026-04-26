@@ -334,8 +334,19 @@ fn default_denies() -> Vec<String> {
     // Sensitive file suffixes (match anywhere under roots).
     out.push("**/*.key".into());
     out.push("**/*.pem".into());
+    out.push("**/*.pfx".into());
+    out.push("**/*.p12".into());
+    // dotenv and scoped env files.
     out.push("**/.env".into());
     out.push("**/.env.*".into());
+    // Tool-specific credential files that commonly leak tokens.
+    out.push("**/.npmrc".into());
+    out.push("**/.netrc".into());
+    // SSH private keys stored outside ~/.ssh (e.g. id_rsa copied
+    // into a project dir). `id_rsa*` also matches id_rsa.pub /
+    // id_rsa_old / id_rsa_backup etc.; operators who need access
+    // can override via an explicit `[[grant]]` entry.
+    out.push("**/id_rsa*".into());
     out
 }
 
@@ -482,6 +493,59 @@ mod tests {
         std::fs::write(root.join(".env.local"), b"x").unwrap();
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for f in [".env", ".env.local"] {
+            let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
+            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_tool_credential_files() {
+        // .npmrc / .netrc commonly contain auth tokens.
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_tool_cred_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".npmrc"), b"//registry.npmjs.org/:_authToken=xxx").unwrap();
+        std::fs::write(
+            root.join(".netrc"),
+            b"machine example.com login u password p",
+        )
+        .unwrap();
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+        for f in [".npmrc", ".netrc"] {
+            let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
+            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_ssh_private_key_files() {
+        // id_rsa* anywhere under a root (not just inside ~/.ssh).
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_idrsa_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("id_rsa"), b"-----BEGIN-----").unwrap();
+        std::fs::write(root.join("id_rsa.pub"), b"ssh-rsa ...").unwrap();
+        std::fs::write(root.join("id_rsa_backup"), b"-----BEGIN-----").unwrap();
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+        for f in ["id_rsa", "id_rsa.pub", "id_rsa_backup"] {
+            let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
+            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_pfx_and_p12_bundles() {
+        // PKCS#12 / PFX bundles carry private keys.
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_pfx_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("client.pfx"), b"\x30\x82").unwrap();
+        std::fs::write(root.join("client.p12"), b"\x30\x82").unwrap();
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+        for f in ["client.pfx", "client.p12"] {
             let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
             assert_eq!(err.code(), "file.permission_denied", "file={f}");
         }

@@ -146,17 +146,25 @@ bifrost setting shell policy add \
 
 ```toml
 # 绑定当前 caller 的 ssh key（推荐）
+# 字段名以代码里的 serde 为准：写入/读取策略是 `ops`（不是 `allow`），
+# 值用下划线命名：read / list / stat / glob / search / hash /
+# write / edit / mkdir / move / delete / apply_patch。
 [[grant]]
 match.ssh_fingerprint = "5f02477634441d5d..."
 roots = ["/Users/eden/work/github/bifrost"]
-allow = ["read", "list", "stat", "glob", "search", "hash",
-         "write", "edit", "mkdir", "mv", "rm", "apply-patch"]
+ops = ["read", "list", "stat", "glob", "search", "hash",
+       "write", "edit", "mkdir", "move", "delete", "apply_patch"]
+# write_denies 只在写类操作（write/edit/mkdir/move/delete/apply_patch）上
+# 生效，读类仍可访问。适合「能读 Cargo.lock 做分析，但不让 agent 写坏它」。
+write_denies = ["**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml"]
 
-# 默认策略：其他设备连上来只能只读 $HOME
+# 默认策略：其他设备连上来只能只读 $HOME，并且默认把敏感路径拉黑。
+# default_denies() 内置会再叠加一层（.git/.ssh/.aws/.env*/id_rsa*/*.pfx/*.p12 等），
+# 这里的 denies 是在此基础上额外追加的项目级规则。
 [default]
 roots = ["/Users/eden"]
-allow = ["read", "list", "stat", "glob", "search", "hash"]
-denies = ["**/.ssh/**", "**/.aws/**", "**/.env*", "**/*.key", "**/*.pem"]
+ops = ["read", "list", "stat", "glob", "search", "hash"]
+denies = ["**/secrets/**", "**/*.secret.toml"]
 ```
 
 改完文件后无需重启 Bifrost，下次请求会自动热加载。

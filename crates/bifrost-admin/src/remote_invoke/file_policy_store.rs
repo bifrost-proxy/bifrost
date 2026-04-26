@@ -61,7 +61,7 @@ pub(crate) struct RawConfig {
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
-pub struct GrantMatch {
+pub(crate) struct GrantMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +166,23 @@ impl FileAccessPolicyStore {
         Self::from_raw(cfg)
     }
 
+    /// Build a store from an already-parsed config.
+    ///
+    /// # Fingerprint trust root
+    ///
+    /// The caller/ssh fingerprints used by [`Self::resolve`] are NOT
+    /// taken from the remote-invoke wire payload. They are resolved
+    /// locally by the worker from the `local_grants` admin table
+    /// (see `worker.rs` where `caller_fp` / `ssh_fp` are written into
+    /// `RemoteCommand` and marked `#[serde(skip)]` on the type).
+    ///
+    /// This means a malicious peer cannot spoof a fingerprint match:
+    /// the fingerprints this store sees come from grants the local
+    /// user explicitly approved on this device. `from_raw` itself is
+    /// trust-agnostic — it just materializes whatever the operator
+    /// put in `file-access.toml` — but the overall match chain is
+    /// only sound because of this upstream binding. Keep that
+    /// invariant in mind when refactoring callers.
     pub(crate) fn from_raw(cfg: RawConfig) -> Self {
         let mut entries: Vec<(GrantMatch, FileAccessPolicy)> = Vec::with_capacity(cfg.grants.len());
         for mut g in cfg.grants {
@@ -583,6 +600,72 @@ ops = ["read", "write"]
         let p = store.resolve("unknown", None, Some("dup-fp"), cwd);
         assert_eq!(p.name, "first");
         assert_eq!(p.roots, vec![PathBuf::from("/first")]);
+    }
+
+    #[test]
+    fn cross_tier_priority_grant_id_beats_ssh_fp_beats_caller_fp() {
+        // All three tiers match the same request. The resolver must
+        // pick tier 1 (grant_id). If we then remove the grant_id
+        // entry it must fall to tier 2 (ssh_fingerprint); removing
+        // that must fall to tier 3 (caller_fingerprint).
+        //
+        // NOTE: the three entries are listed here in DESCENDING
+        // specificity order; the test verifies precedence is driven
+        // by tier, not by file order.
+        let all_three = r#"
+[[grant]]
+match.caller_fingerprint = "caller-fp"
+name = "via-caller-fp"
+roots = ["/caller"]
+ops = ["read"]
+
+[[grant]]
+match.ssh_fingerprint = "ssh-fp"
+name = "via-ssh-fp"
+roots = ["/ssh"]
+ops = ["read", "list"]
+
+[[grant]]
+match.grant_id = "g-top"
+name = "via-grant-id"
+roots = ["/grant"]
+ops = ["read", "list", "write"]
+"#;
+        let cwd = Path::new("/tmp");
+
+        // Tier 1 wins.
+        let p = parse(all_three).resolve("g-top", Some("caller-fp"), Some("ssh-fp"), cwd);
+        assert_eq!(p.name, "via-grant-id");
+        assert!(p.ops.contains(&FileOp::Write));
+
+        // Drop tier-1 entry -> tier 2 (ssh_fp) wins.
+        let without_grant_id = r#"
+[[grant]]
+match.caller_fingerprint = "caller-fp"
+name = "via-caller-fp"
+roots = ["/caller"]
+ops = ["read"]
+
+[[grant]]
+match.ssh_fingerprint = "ssh-fp"
+name = "via-ssh-fp"
+roots = ["/ssh"]
+ops = ["read", "list"]
+"#;
+        let p = parse(without_grant_id).resolve("g-top", Some("caller-fp"), Some("ssh-fp"), cwd);
+        assert_eq!(p.name, "via-ssh-fp");
+        assert!(!p.ops.contains(&FileOp::Write));
+
+        // Drop tier-2 entry too -> tier 3 (caller_fp) wins.
+        let caller_only = r#"
+[[grant]]
+match.caller_fingerprint = "caller-fp"
+name = "via-caller-fp"
+roots = ["/caller"]
+ops = ["read"]
+"#;
+        let p = parse(caller_only).resolve("g-top", Some("caller-fp"), Some("ssh-fp"), cwd);
+        assert_eq!(p.name, "via-caller-fp");
     }
 
     // --- Legacy tests preserved below ---

@@ -673,10 +673,36 @@ pub enum Commands {
     VersionCheck,
     #[command(
         about = "Manage local Bifrost settings (shell policies, grants)",
-        long_about = "Manage local Bifrost settings and policies on THIS machine.\n\n\
-            Unlike `bifrost remote` (which operates on a connected remote device),\n\
-            `bifrost setting` always targets the current machine's data directory:\n\
-            Shell Access profiles/policies and local remote-invoke grants."
+        long_about = concat!(
+            "Manage local Bifrost settings and policies on THIS machine.\n",
+            "\n",
+            "Unlike `bifrost remote` (which operates on a connected remote\n",
+            "device), `bifrost setting` always targets the current machine's\n",
+            "data directory: Shell Access profiles/policies and local\n",
+            "remote-invoke grants.\n",
+            "\n",
+            "EXAMPLES:\n",
+            "\n",
+            "  # List local Shell Access policies\n",
+            "  bifrost setting shell policy list\n",
+            "\n",
+            "  # Add a Shell Access profile that the policy below will bind to\n",
+            "  bifrost setting shell profile add --id default --name Default \\\n",
+            "      --cwd \"$HOME\" --env PATH --env HOME --timeout-ms 30000\n",
+            "\n",
+            "  # Add a Shell Access policy (shell_text regex mode)\n",
+            "  bifrost setting shell policy add --id allow-bifrost-cli \\\n",
+            "      --name \"Allow Bifrost CLI\" --mode shell_text \\\n",
+            "      --pattern '^bifrost\\s+' --shell /bin/bash --profile default\n",
+            "\n",
+            "  # Inspect / revoke local remote-invoke grants\n",
+            "  bifrost setting grant list\n",
+            "  bifrost setting grant revoke --grant-id <grant-id>\n",
+            "\n",
+            "Note: these commands never touch a remote device. To configure a\n",
+            "remote machine, run the equivalent `bifrost setting ...` there via\n",
+            "`bifrost remote command exec -- bifrost setting ...`.",
+        )
     )]
     Setting {
         #[command(subcommand)]
