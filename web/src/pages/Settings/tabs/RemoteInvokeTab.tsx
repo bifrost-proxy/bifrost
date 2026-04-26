@@ -14,6 +14,7 @@ import {
   List,
   Modal,
   Popconfirm,
+  Radio,
   Row,
   Select,
   Space,
@@ -26,18 +27,23 @@ import {
 } from "antd";
 import {
   ApiOutlined,
+  CodeOutlined,
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
   EyeOutlined,
+  FileOutlined,
   HistoryOutlined,
   KeyOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyOutlined,
   ScanOutlined,
+  SearchOutlined,
+  SettingOutlined,
   StopOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
   clearCalls,
@@ -57,6 +63,7 @@ import {
   revokeRemoteInvokeSshKey,
   updateGrant,
   updateRemoteShellConfig,
+  matchRemoteShellCommand,
   getCallArgsPreviewSource,
   getCall,
   type CreateRemoteInvokeSshKeyInput,
@@ -70,6 +77,14 @@ import {
   type RemoteInvokeSshKeySecretPayload,
   type RemoteInvokeStatus,
   type RemoteShellSet,
+  type FileAccessScope,
+  getFileAccessConfig,
+  updateFileAccessConfig,
+  type FileAccessConfig,
+  type FileAccessGrantPolicy,
+  type FileOp,
+  ALL_FILE_OPS,
+  FILE_READ_OPS,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -89,7 +104,7 @@ const recentCallItemStyle: CSSProperties = {
 
 const recentCallRowStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto auto",
+  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 500px) auto",
   alignItems: "center",
   gap: 8,
   width: "100%",
@@ -255,10 +270,16 @@ interface ShellProfileEditorItem {
   extra_metadata: Record<string, unknown>;
 }
 
+interface ShellAccessCapability {
+  allowed: boolean;
+  text: string;
+}
+
 interface ShellAccessPresetDefinition {
   mode: Exclude<ShellAccessMode, "custom">;
   label: string;
   description: string;
+  capabilities: ShellAccessCapability[];
   policies: ShellPolicyEditorItem[];
   profiles: ShellProfileEditorItem[];
 }
@@ -428,9 +449,15 @@ const DEFAULT_SANDBOX_ENV = {
 function createSandboxPreset(): ShellAccessPresetDefinition {
   return {
     mode: "sandbox",
-    label: "Default Sandbox",
+    label: "Safe Sandbox (coming soon)",
     description:
-      "Reserve a future sandboxed execution mode. Right now Bifrost will reject execution attempts until the sandbox runtime lands.",
+      "A future locked-down execution mode. Until the sandbox runtime lands, Bifrost will reject shell execution attempts for this preset.",
+    capabilities: [
+      { allowed: true,  text: "Reserved for upcoming isolated sandbox runtime" },
+      { allowed: false, text: "Does not run any commands today (rejects with a clear reason)" },
+      { allowed: false, text: "No stdin / no interactive shells" },
+      { allowed: false, text: "No sudo / no system modification" },
+    ],
     profiles: [
       {
         id: "default-sandbox",
@@ -447,7 +474,7 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
           inherit_env: false,
           default_env: DEFAULT_SANDBOX_ENV,
           reject_reason:
-            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+            "sandbox execution is not implemented yet on this target; choose Trusted (Full Access) or Custom Rules",
         },
       },
     ],
@@ -470,7 +497,7 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
         extra_metadata: {
           shell: "/bin/bash",
           reject_reason:
-            "sandbox execution is not implemented yet on this target; choose Full Access or Custom Policies",
+            "sandbox execution is not implemented yet on this target; choose Trusted (Full Access) or Custom Rules",
         },
       },
     ],
@@ -480,9 +507,16 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
 function createFullAccessPreset(): ShellAccessPresetDefinition {
   return {
     mode: "full-access",
-    label: "Full Access",
+    label: "Trusted (Full Access)",
     description:
-      "Allow unrestricted argv and shell text execution with inherited environment, stdin, and interactive access.",
+      "Trust the remote caller with unrestricted shell execution on this device. Only use for agents you fully trust.",
+    capabilities: [
+      { allowed: true,  text: "Run any command (argv or shell text) with the caller's choice of arguments" },
+      { allowed: true,  text: "Inherit this device's environment variables (PATH, tokens, etc.)" },
+      { allowed: true,  text: "Open interactive terminals and accept stdin" },
+      { allowed: true,  text: "Run long-running commands without a timeout cap" },
+      { allowed: false, text: "Still cannot bypass the file-access scope negotiated in the pairing" },
+    ],
     profiles: [],
     policies: [
       {
@@ -559,11 +593,11 @@ function inferShellAccessMode(
 function shellAccessModeLabel(mode: ShellAccessMode): string {
   switch (mode) {
     case "sandbox":
-      return "Default Sandbox";
+      return "Safe Sandbox";
     case "full-access":
-      return "Full Access";
+      return "Trusted (Full Access)";
     default:
-      return "Custom Policies";
+      return "Custom Rules";
   }
 }
 
@@ -610,6 +644,87 @@ function formatCountdown(expiresAt: number): string {
   const s = remaining % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
+
+/**
+ * Humanize a grant_scope value for display in UI tags.
+ * Keeps the raw scope accessible via tooltip for power users.
+ */
+function describeGrantScope(scope: string): { label: string; color: string } {
+  switch (scope) {
+    case "remote_query":
+      return { label: "Read-only", color: "default" };
+    case "remote_shell_exec":
+      return { label: "Can run commands", color: "purple" };
+    case "remote_shell_interactive":
+      return { label: "Can run commands + interactive", color: "magenta" };
+    default:
+      return { label: scope, color: "default" };
+  }
+}
+
+/**
+ * Humanize a grant_mode value for display in UI tags.
+ * Keeps the raw mode accessible via tooltip.
+ */
+function describeGrantMode(mode: string): string {
+  switch (mode) {
+    case "once":
+      return "One-shot";
+    case "30m":
+      return "Valid 30 min";
+    case "1h":
+      return "Valid 1 hour";
+    case "1d":
+      return "Valid 1 day";
+    case "permanent":
+      return "Permanent";
+    default:
+      return mode;
+  }
+}
+
+/**
+ * Humanize an exec_mode value (argv_exec / shell_text) for display.
+ */
+function describeExecMode(mode: string): string {
+  switch (mode) {
+    case "argv_exec":
+      return "Specific command";
+    case "shell_text":
+      return "Shell text";
+    default:
+      return mode;
+  }
+}
+
+function escapeRegExpForPrefix(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Build a "starts with" regex that allows the prefix followed by end-of-string,
+// whitespace, or a non-word/non-slash separator. Stored in allowed_shell_patterns.
+function buildPrefixPattern(prefix: string): string {
+  const escaped = escapeRegExpForPrefix(prefix);
+  return "^" + escaped + "(\\s|$)";
+}
+
+// If the stored pattern was produced by buildPrefixPattern, decode it back so
+// the UI can show it as a plain prefix. Otherwise return null to signal "custom regex".
+function tryDecodePrefix(pattern: string): string | null {
+  const m = /^\^(.*)\(\\s\|\$\)$/.exec(pattern);
+  if (!m) return null;
+  const body = m[1];
+  // Reject bodies that still contain unescaped regex metacharacters — means
+  // the user hand-wrote a regex that happens to end with the same suffix.
+  try {
+    const unescaped = body.replace(/\\(.)/g, "$1");
+    if (buildPrefixPattern(unescaped) !== pattern) return null;
+    return unescaped;
+  } catch {
+    return null;
+  }
+}
+
 
 function getGrantAccessMode(grant: Grant): "query" | "selected" | "all" {
   if (grant.grant_scope === "remote_query") {
@@ -690,19 +805,135 @@ export default function RemoteInvokeTab() {
   const [shellLoading, setShellLoading] = useState(false);
   const [shellEditorOpen, setShellEditorOpen] = useState(false);
   const [shellEditorMode, setShellEditorMode] = useState<ShellAccessMode>("custom");
+  // Expert mode: when enabled, show raw Profiles & Policies dual-column view.
+  // When disabled (default), the UI presents a unified "Command group" view
+  // hiding the Profile/Policy distinction from end users.
+  const [shellEditorExpertMode, setShellEditorExpertMode] = useState<boolean>(false);
+  const [shellEditorTestInput, setShellEditorTestInput] = useState<Record<string, string>>({});
+  const [shellEditorTestMode, setShellEditorTestMode] = useState<Record<string, "argv_exec" | "shell_text">>({});
+  const [shellEditorTestResult, setShellEditorTestResult] = useState<
+    Record<string, { matched: boolean; matched_policy_id: string | null; reason: string } | null>
+  >({});
+  const [shellEditorTestLoading, setShellEditorTestLoading] = useState<Record<string, boolean>>({});
+  const [cliPreviewOpen, setCliPreviewOpen] = useState<boolean>(false);
+  const [cliPreviewText, setCliPreviewText] = useState<string>("");
+
+  const runShellPolicyTest = async (policyId: string) => {
+    const command = (shellEditorTestInput[policyId] ?? "").trim();
+    const execMode = shellEditorTestMode[policyId] ?? "shell_text";
+    if (!command) {
+      message.warning("Enter a command to test");
+      return;
+    }
+    setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: true }));
+    try {
+      const result = await matchRemoteShellCommand({
+        command,
+        exec_mode: execMode,
+      });
+      setShellEditorTestResult((prev) => ({ ...prev, [policyId]: result }));
+    } catch (error) {
+      setShellEditorTestResult((prev) => ({
+        ...prev,
+        [policyId]: {
+          matched: false,
+          matched_policy_id: null,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      }));
+    } finally {
+      setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: false }));
+    }
+  };
+
+  const generateShellCliCommands = (
+    profiles: ShellProfileEditorItem[],
+    policies: ShellPolicyEditorItem[],
+  ): string => {
+    const sh = (v: string): string => {
+      if (v === "") return "''" + "''";
+      if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(v)) return v;
+      return "'" + v.replace(/'/g, "'\\''") + "'";
+    };
+    const lines: string[] = [];
+    lines.push("# Generated from the current Shell Access editor state.");
+    lines.push("# Run these on the TARGET device (the one receiving remote commands).");
+    lines.push("");
+    for (const pr of profiles) {
+      const parts: string[] = [
+        "bifrost remote shell profile add",
+        "--id " + sh(pr.id),
+        "--name " + sh(pr.name || pr.id),
+      ];
+      if (pr.description) parts.push("--description " + sh(pr.description));
+      for (const c of pr.cwd_allowlist) if (c) parts.push("--cwd " + sh(c));
+      for (const e of pr.env_allowlist) if (e) parts.push("--env " + sh(e));
+      if (pr.default_cwd) parts.push("--default-cwd " + sh(pr.default_cwd));
+      if (typeof pr.max_timeout_ms === "number")
+        parts.push("--timeout-ms " + String(pr.max_timeout_ms));
+      if (pr.stdin_allowed) parts.push("--stdin");
+      if (pr.interactive_allowed) parts.push("--interactive");
+      if (!pr.enabled) parts.push("--disabled");
+      lines.push(parts.join(" \\\n  "));
+      lines.push("");
+    }
+    for (const pl of policies) {
+      const parts: string[] = [
+        "bifrost remote shell policy add",
+        "--id " + sh(pl.id),
+        "--name " + sh(pl.name || pl.id),
+        "--mode " + pl.exec_mode,
+      ];
+      if (pl.description) parts.push("--description " + sh(pl.description));
+      if (pl.profile_id) parts.push("--profile " + sh(pl.profile_id));
+      for (const ex of pl.allowed_executables) if (ex) parts.push("--program " + sh(ex));
+      for (const pt of pl.allowed_shell_patterns) if (pt) parts.push("--pattern " + sh(pt));
+      for (const c of pl.cwd_allowlist) if (c) parts.push("--cwd " + sh(c));
+      for (const e of pl.env_allowlist) if (e) parts.push("--env " + sh(e));
+      if (pl.default_cwd) parts.push("--default-cwd " + sh(pl.default_cwd));
+      if (typeof pl.max_timeout_ms === "number")
+        parts.push("--timeout-ms " + String(pl.max_timeout_ms));
+      if (pl.stdin_allowed) parts.push("--stdin");
+      if (pl.interactive_allowed) parts.push("--interactive");
+      if (!pl.enabled) parts.push("--disabled");
+      lines.push(parts.join(" \\\n  "));
+      lines.push("");
+    }
+    return lines.join("\n");
+  };
+
+  const openCliPreview = () => {
+    const text = generateShellCliCommands(shellEditorProfiles, shellEditorPolicies);
+    setCliPreviewText(text);
+    setCliPreviewOpen(true);
+  };
+
   const [shellEditorPolicies, setShellEditorPolicies] = useState<
     ShellPolicyEditorItem[]
   >([]);
+  // UI-only override: entries force the per-row Select to show "Regex"
+  // even when the stored pattern is decodable as a prefix. Keyed by
+  // `${policy.id}|${patIdx}`. Cleared when a pattern row is removed.
+  const [shellPatternRegexOverride, setShellPatternRegexOverride] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
   const [shellEditorProfiles, setShellEditorProfiles] = useState<
     ShellProfileEditorItem[]
   >([]);
   const [shellSaveLoading, setShellSaveLoading] = useState(false);
+  const [fileAccessConfig, setFileAccessConfig] = useState<FileAccessConfig | null>(null);
+  const [fileAccessLoading, setFileAccessLoading] = useState(false);
+  const [fileAccessEditorOpen, setFileAccessEditorOpen] = useState(false);
+  const [fileAccessEditorGrants, setFileAccessEditorGrants] = useState<FileAccessGrantPolicy[]>([]);
+  const [fileAccessSaveLoading, setFileAccessSaveLoading] = useState(false);
   const [grantEditorOpen, setGrantEditorOpen] = useState(false);
   const [editingGrant, setEditingGrant] = useState<Grant | null>(null);
+  const [grantEditorPreset, setGrantEditorPreset] = useState<"query" | "full" | "shell_only" | "file_only" | "custom">("full");
   const [grantEditorAccessMode, setGrantEditorAccessMode] = useState<"query" | "selected" | "all">("query");
   const [grantEditorSelectedPolicies, setGrantEditorSelectedPolicies] = useState<string[]>([]);
   const [grantEditorStdinAllowed, setGrantEditorStdinAllowed] = useState(false);
   const [grantEditorInteractiveAllowed, setGrantEditorInteractiveAllowed] = useState(false);
+  const [grantEditorFileAccess, setGrantEditorFileAccess] = useState<FileAccessScope>("none");
   const [grantSaveLoading, setGrantSaveLoading] = useState(false);
   const [callDetailOpen, setCallDetailOpen] = useState(false);
   const [callDetailLoading, setCallDetailLoading] = useState(false);
@@ -804,6 +1035,30 @@ export default function RemoteInvokeTab() {
     [],
   );
 
+  const refreshFileAccessConfig = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setFileAccessLoading(true);
+      }
+      try {
+        const config = await getFileAccessConfig();
+        setFileAccessConfig(config);
+      } catch (e) {
+        if (!silent && !isConnectionIssueError(e)) {
+          message.error(
+            e instanceof Error ? e.message : "Failed to load file access config",
+          );
+        }
+      } finally {
+        if (!silent) {
+          setFileAccessLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   const refreshSshKey = useCallback(
     async (options?: { silent?: boolean }) => {
       const silent = options?.silent ?? false;
@@ -841,7 +1096,8 @@ export default function RemoteInvokeTab() {
     void refreshCalls();
     void refreshSshKey();
     void refreshShellConfig();
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig]);
+    void refreshFileAccessConfig();
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
@@ -849,6 +1105,7 @@ export default function RemoteInvokeTab() {
       void refreshGrants();
       void refreshCalls();
       void refreshShellConfig({ silent: true });
+      void refreshFileAccessConfig({ silent: true });
       if (sshApiAvailable) {
         void refreshSshKey({ silent: true });
       }
@@ -856,7 +1113,7 @@ export default function RemoteInvokeTab() {
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
-  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, sshApiAvailable]);
+  }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig, sshApiAvailable]);
 
   useEffect(() => {
     const session = status?.discovery_session;
@@ -943,11 +1200,31 @@ export default function RemoteInvokeTab() {
 
   const openGrantEditor = (grant: Grant) => {
     const accessMode = getGrantAccessMode(grant);
+    const fa = grant.file_access || "none";
+    const isShell = accessMode === "selected" || accessMode === "all";
+    const hasFile = fa === "read" || fa === "read_write";
+
+    // Derive preset from current grant state
+    let preset: "query" | "full" | "shell_only" | "file_only" | "custom";
+    if (isShell && hasFile && grant.interactive_allowed) {
+      preset = "full";
+    } else if (isShell && hasFile && !grant.interactive_allowed) {
+      preset = "shell_only";
+    } else if (!isShell && hasFile) {
+      preset = "file_only";
+    } else if (!isShell && !hasFile) {
+      preset = "query";
+    } else {
+      preset = "custom";
+    }
+
     setEditingGrant(grant);
+    setGrantEditorPreset(preset);
     setGrantEditorAccessMode(accessMode);
     setGrantEditorSelectedPolicies(getGrantSelectedPolicies(grant));
     setGrantEditorStdinAllowed(Boolean(grant.stdin_allowed));
     setGrantEditorInteractiveAllowed(Boolean(grant.interactive_allowed));
+    setGrantEditorFileAccess(fa as FileAccessScope);
     setGrantEditorOpen(true);
   };
 
@@ -955,23 +1232,61 @@ export default function RemoteInvokeTab() {
     if (!editingGrant) {
       return;
     }
-    if (grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
+    if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
       message.error("Choose at least one shell policy");
       return;
     }
 
-    const payload =
-      grantEditorAccessMode === "query"
-        ? {
+    // Resolve preset to actual grant parameters
+    const resolvePayload = () => {
+      switch (grantEditorPreset) {
+        case "query":
+          return {
             grant_scope: "remote_query",
+            file_access: "none" as const,
             policy_binding: null,
             interactive_allowed: false,
             stdin_allowed: false,
+          };
+        case "full":
+          return {
+            grant_scope: "remote_shell_interactive",
+            file_access: "read_write" as const,
+            policy_binding: { mode: "all" },
+            interactive_allowed: true,
+            stdin_allowed: true,
+          };
+        case "shell_only":
+          return {
+            grant_scope: "remote_shell_exec",
+            file_access: "read_write" as const,
+            policy_binding: { mode: "all" },
+            interactive_allowed: false,
+            stdin_allowed: false,
+          };
+        case "file_only":
+          return {
+            grant_scope: "remote_query",
+            file_access: "read_write" as const,
+            policy_binding: null,
+            interactive_allowed: false,
+            stdin_allowed: false,
+          };
+        case "custom":
+          if (grantEditorAccessMode === "query") {
+            return {
+              grant_scope: "remote_query",
+              file_access: grantEditorFileAccess,
+              policy_binding: null,
+              interactive_allowed: false,
+              stdin_allowed: false,
+            };
           }
-        : {
+          return {
             grant_scope: grantEditorInteractiveAllowed
               ? "remote_shell_interactive"
               : "remote_shell_exec",
+            file_access: grantEditorFileAccess,
             policy_binding:
               grantEditorAccessMode === "all"
                 ? { mode: "all" }
@@ -979,7 +1294,10 @@ export default function RemoteInvokeTab() {
             interactive_allowed: grantEditorInteractiveAllowed,
             stdin_allowed: grantEditorStdinAllowed,
           };
+      }
+    };
 
+    const payload = resolvePayload();
     setGrantSaveLoading(true);
     try {
       await updateGrant(editingGrant.grant_id, payload);
@@ -1089,6 +1407,53 @@ export default function RemoteInvokeTab() {
       );
     } finally {
       setShellSaveLoading(false);
+    }
+  };
+
+  const openFileAccessEditor = () => {
+    setFileAccessEditorGrants(fileAccessConfig?.grant?.map(g => ({ ...g })) ?? []);
+    setFileAccessEditorOpen(true);
+  };
+
+  const handleSaveFileAccessConfig = async () => {
+    for (const g of fileAccessEditorGrants) {
+      if (!g.grant_id.trim()) {
+        message.error("Every file access policy needs a grant ID");
+        return;
+      }
+    }
+    const grantIds = new Set<string>();
+    for (const g of fileAccessEditorGrants) {
+      const id = g.grant_id.trim();
+      if (grantIds.has(id)) {
+        message.error(`Duplicate grant ID: ${id}`);
+        return;
+      }
+      grantIds.add(id);
+    }
+
+    setFileAccessSaveLoading(true);
+    try {
+      const saved = await updateFileAccessConfig({
+        grant: fileAccessEditorGrants.map(g => ({
+          ...g,
+          grant_id: g.grant_id.trim(),
+          name: g.name?.trim() || undefined,
+          roots: g.roots?.filter(r => r.trim()) ?? [],
+          denies: g.denies?.filter(d => d.trim()) ?? [],
+          write_denies: g.write_denies?.filter(d => d.trim()) ?? [],
+          ops: g.ops && g.ops.length > 0 ? g.ops : undefined,
+        })),
+      });
+      setFileAccessConfig(saved);
+      setFileAccessEditorOpen(false);
+      message.success("File access config saved");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to save file access config",
+      );
+    } finally {
+      setFileAccessSaveLoading(false);
     }
   };
 
@@ -1750,6 +2115,106 @@ export default function RemoteInvokeTab() {
 
         <Col xs={24}>
           <Card
+            data-testid="settings-remote-invoke-file-access-card"
+            title={
+              <Space>
+                <FileOutlined />
+                <span>File Access</span>
+              </Space>
+            }
+            extra={
+              <Space>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void refreshFileAccessConfig()}
+                  loading={fileAccessLoading}
+                />
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={openFileAccessEditor}
+                  disabled={fileAccessLoading}
+                >
+                  Manage Policies
+                </Button>
+              </Space>
+            }
+            size="small"
+          >
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="File access is governed by per-grant policies stored in file-access.toml"
+              description="Each grant can have its own roots, deny patterns, allowed operations, and byte limits. Without explicit config, a default read-only policy applies."
+            />
+            <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="Grant Policies">
+                {fileAccessConfig?.grant?.length ?? 0} configured
+              </Descriptions.Item>
+            </Descriptions>
+            {!fileAccessConfig || (fileAccessConfig.grant?.length ?? 0) === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No per-grant file access policies configured. Default read-only policy applies."
+              />
+            ) : (
+              <List
+                size="small"
+                dataSource={fileAccessConfig.grant}
+                renderItem={(policy) => {
+                  const readOps = (policy.ops ?? []).filter(op => !["write","edit","mkdir","move","delete","apply_patch"].includes(op));
+                  const writeOps = (policy.ops ?? []).filter(op => ["write","edit","mkdir","move","delete","apply_patch"].includes(op));
+                  return (
+                    <List.Item>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text strong>{policy.name || policy.grant_id}</Text>
+                            <Tag>{policy.grant_id}</Tag>
+                            {writeOps.length > 0 ? (
+                              <Tag color="orange">read+write</Tag>
+                            ) : (
+                              <Tag color="blue">read-only</Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space size={4} wrap>
+                            {(policy.roots?.length ?? 0) > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                roots: {policy.roots!.join(", ")}
+                              </Text>
+                            )}
+                            {readOps.length > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · read ops {readOps.length}
+                              </Text>
+                            )}
+                            {writeOps.length > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · write ops {writeOps.length}
+                              </Text>
+                            )}
+                            {(policy.denies?.length ?? 0) > 0 && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · denies {policy.denies!.length}
+                              </Text>
+                            )}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  );
+                }}
+              />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24}>
+          <Card
             title={
               <Space>
                 <span>Pending Pairing Requests</span>
@@ -1891,10 +2356,19 @@ export default function RemoteInvokeTab() {
                           <Tag color={g.status === "active" ? "green" : "default"}>
                             {g.status}
                           </Tag>
-                          <Tag>{g.grant_mode}</Tag>
-                          <Tag color={g.grant_scope === "remote_query" ? "default" : "purple"}>
-                            {g.grant_scope}
-                          </Tag>
+                          <Tooltip title={`grant_mode: ${g.grant_mode}`}>
+                            <Tag>{describeGrantMode(g.grant_mode)}</Tag>
+                          </Tooltip>
+                          <Tooltip title={`grant_scope: ${g.grant_scope}`}>
+                            <Tag color={describeGrantScope(g.grant_scope).color}>
+                              {describeGrantScope(g.grant_scope).label}
+                            </Tag>
+                          </Tooltip>
+                          {g.file_access && g.file_access !== "none" && (
+                            <Tag color="blue">
+                              {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
+                            </Tag>
+                          )}
                           {g.shell_policy_set_version_snapshot != null && (
                             <Tag color="blue">
                               shell set v{g.shell_policy_set_version_snapshot}
@@ -2078,17 +2552,17 @@ export default function RemoteInvokeTab() {
                               </Tooltip>
                             )}
                             {c.exec_mode && (
-                              <Tooltip title={c.exec_mode}>
+                              <Tooltip title={`exec_mode: ${c.exec_mode}`}>
                                 <Tag
                                   color="blue"
                                   style={{
-                                    maxWidth: 120,
+                                    maxWidth: 140,
                                     overflow: "hidden",
                                     textOverflow: "ellipsis",
                                     whiteSpace: "nowrap",
                                   }}
                                 >
-                                  {c.exec_mode}
+                                  {describeExecMode(c.exec_mode)}
                                 </Tag>
                               </Tooltip>
                             )}
@@ -2211,7 +2685,9 @@ export default function RemoteInvokeTab() {
                     key: "exec_mode",
                     label: "Exec Mode",
                     children: selectedCall.exec_mode ? (
-                      <Tag color="blue">{selectedCall.exec_mode}</Tag>
+                      <Tooltip title={`exec_mode: ${selectedCall.exec_mode}`}>
+                        <Tag color="blue">{describeExecMode(selectedCall.exec_mode)}</Tag>
+                      </Tooltip>
                     ) : (
                       "-"
                     ),
@@ -2273,55 +2749,215 @@ export default function RemoteInvokeTab() {
               },
             ]}
           />
-          <Select
-            value={grantEditorAccessMode}
-            onChange={(value) =>
-              setGrantEditorAccessMode(value as "query" | "selected" | "all")
+          <Radio.Group
+            value={grantEditorPreset}
+            onChange={(e) => setGrantEditorPreset(e.target.value)}
+            style={{ width: "100%" }}
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size={4}>
+              <Radio value="full" disabled={enabledShellPolicies.length === 0}>
+                <Space>
+                  <ThunderboltOutlined />
+                  <span><b>Full trust</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Run any allowed command, read &amp; write files, open interactive terminals
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="shell_only" disabled={enabledShellPolicies.length === 0}>
+                <Space>
+                  <CodeOutlined />
+                  <span><b>Run commands &amp; read/write files</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Can execute allowed commands, edit files, and inspect traffic. No interactive shells.
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="file_only">
+                <Space>
+                  <FileOutlined />
+                  <span><b>Files only</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Can read &amp; write files and inspect traffic. Cannot run any shell commands.
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="query">
+                <Space>
+                  <SearchOutlined />
+                  <span><b>Read-only watch</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Can see status and traffic. Cannot run commands and cannot touch files.
+                  </Text>
+                </Space>
+              </Radio>
+              <Radio value="custom">
+                <Space>
+                  <SettingOutlined />
+                  <span><b>Custom</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    — Pick shell + file + terminal access individually
+                  </Text>
+                </Space>
+              </Radio>
+            </Space>
+          </Radio.Group>
+          <Alert
+            showIcon
+            type={
+              grantEditorPreset === "full"
+                ? "warning"
+                : grantEditorPreset === "query"
+                ? "success"
+                : "info"
             }
-            options={[
-              { value: "query", label: "Read-only queries" },
-              {
-                value: "selected",
-                label: "Selected shell policies",
-                disabled: enabledShellPolicies.length === 0,
-              },
-              {
-                value: "all",
-                label: "All enabled shell policies",
-                disabled: enabledShellPolicies.length === 0,
-              },
-            ]}
+            message="Preview — what this caller will be able to do"
+            description={
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {(() => {
+                  const bullets: string[] = [];
+                  const shellAllowed =
+                    grantEditorPreset === "full" ||
+                    grantEditorPreset === "shell_only" ||
+                    (grantEditorPreset === "custom" && grantEditorAccessMode !== "query");
+                  const fileScope =
+                    grantEditorPreset === "full" || grantEditorPreset === "shell_only"
+                      ? "read_write"
+                      : grantEditorPreset === "file_only"
+                      ? "read_write"
+                      : grantEditorPreset === "query"
+                      ? "none"
+                      : grantEditorFileAccess;
+                  const interactive =
+                    grantEditorPreset === "full" ||
+                    (grantEditorPreset === "custom" && grantEditorInteractiveAllowed);
+                  const stdin =
+                    grantEditorPreset === "full" ||
+                    (grantEditorPreset === "custom" && grantEditorStdinAllowed);
+
+                  if (shellAllowed) {
+                    if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected") {
+                      const names = enabledShellPolicies
+                        .filter((p) => grantEditorSelectedPolicies.includes(p.id))
+                        .map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from: " + names.join(", ")
+                          : "Run commands from: (none selected — pick groups below)"
+                      );
+                    } else {
+                      const names = enabledShellPolicies.map((p) => p.name || p.id);
+                      bullets.push(
+                        names.length
+                          ? "Run commands from any of: " + names.join(", ")
+                          : "No command groups are enabled yet; add one in Shell Access settings"
+                      );
+                    }
+                    bullets.push(
+                      interactive
+                        ? "Can open an interactive terminal"
+                        : stdin
+                        ? "Can send stdin (one-shot input) but no interactive terminal"
+                        : "No stdin, no interactive terminal"
+                    );
+                  } else {
+                    bullets.push("Cannot run any shell commands");
+                  }
+
+                  if (fileScope === "read_write") {
+                    bullets.push("Can read and write files on this device");
+                  } else if (fileScope === "read") {
+                    bullets.push("Can read files but cannot modify them");
+                  } else {
+                    bullets.push("No file access");
+                  }
+
+                  bullets.push("Can see connection status and inspect traffic records");
+
+                  return bullets.map((b, i) => <li key={i}>{b}</li>);
+                })()}
+              </ul>
+            }
+            style={{ marginTop: 4 }}
           />
-          <Select
-            mode="multiple"
-            placeholder="Choose shell policies for this grant"
-            disabled={grantEditorAccessMode !== "selected"}
-            value={grantEditorSelectedPolicies}
-            onChange={setGrantEditorSelectedPolicies}
-            options={enabledShellPolicies.map((policy) => ({
-              value: policy.id,
-              label: `${policy.name} (${policy.id})`,
-            }))}
-          />
-          <Space>
-            <Text type="secondary">Allow stdin</Text>
-            <Switch
-              checked={grantEditorStdinAllowed}
-              disabled={grantEditorAccessMode === "query"}
-              onChange={setGrantEditorStdinAllowed}
-            />
-            <Text type="secondary">Allow interactive shell</Text>
-            <Switch
-              checked={grantEditorInteractiveAllowed}
-              disabled={grantEditorAccessMode === "query"}
-              onChange={setGrantEditorInteractiveAllowed}
-            />
-          </Space>
+          {grantEditorPreset === "custom" && (
+            <div
+              style={{
+                padding: 12,
+                background: "var(--ant-color-bg-container-disabled, #fafafa)",
+                borderRadius: 8,
+              }}
+            >
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Shell Access</Text>
+                  <Select
+                    value={grantEditorAccessMode}
+                    onChange={setGrantEditorAccessMode}
+                    style={{ width: "100%", marginTop: 4 }}
+                    options={[
+                      { value: "query", label: "Just watch traffic (no commands)" },
+                      {
+                        value: "selected",
+                        label: "Run only commands from selected groups",
+                        disabled: enabledShellPolicies.length === 0,
+                      },
+                      {
+                        value: "all",
+                        label: "Run commands from any enabled group",
+                        disabled: enabledShellPolicies.length === 0,
+                      },
+                    ]}
+                  />
+                </div>
+                {grantEditorAccessMode === "selected" && (
+                  <Select
+                    mode="multiple"
+                    placeholder="Choose shell policies"
+                    value={grantEditorSelectedPolicies}
+                    onChange={setGrantEditorSelectedPolicies}
+                    style={{ width: "100%" }}
+                    options={enabledShellPolicies.map((policy) => ({
+                      value: policy.id,
+                      label: `${policy.name} (${policy.id})`,
+                    }))}
+                  />
+                )}
+                {grantEditorAccessMode !== "query" && (
+                  <Space>
+                    <Text type="secondary">Allow stdin</Text>
+                    <Switch
+                      checked={grantEditorStdinAllowed}
+                      onChange={setGrantEditorStdinAllowed}
+                    />
+                    <Text type="secondary">Interactive</Text>
+                    <Switch
+                      checked={grantEditorInteractiveAllowed}
+                      onChange={setGrantEditorInteractiveAllowed}
+                    />
+                  </Space>
+                )}
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>File Access</Text>
+                  <Select
+                    value={grantEditorFileAccess}
+                    onChange={setGrantEditorFileAccess}
+                    style={{ width: "100%", marginTop: 4 }}
+                    options={[
+                      { value: "none", label: "No file access (cannot read or write files)" },
+                      { value: "read", label: "Read-only (can open files, cannot modify)" },
+                      { value: "read_write", label: "Read & write (can modify files)" },
+                    ]}
+                  />
+                </div>
+              </Space>
+            </div>
+          )}
         </Space>
       </Modal>
       <Modal
         open={shellEditorOpen}
-        title="Manage Shell Access"
+        title="Shell access — what remote agents can run on this device"
         okText="Save"
         cancelText="Cancel"
         onCancel={() => setShellEditorOpen(false)}
@@ -2341,40 +2977,65 @@ export default function RemoteInvokeTab() {
           <Card size="small" title="Access Mode">
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Text type="secondary">
-                Choose a simple preset for common cases, or switch to Custom Policies
-                when you need detailed allowlists and sandbox rules.
+                Pick a preset for the common cases, or choose <b>Custom Rules</b>
+                to define exactly which commands and folders are allowed.
               </Text>
-              <Select<ShellAccessMode>
+              <Radio.Group
                 value={shellEditorMode}
-                onChange={(value) => applyShellAccessMode(value)}
-                options={[
-                  {
-                    value: "sandbox",
-                    label: "Default Sandbox",
-                  },
-                  {
-                    value: "full-access",
-                    label: "Full Access",
-                  },
-                  {
-                    value: "custom",
-                    label: "Custom Policies",
-                  },
-                ]}
-              />
+                onChange={(e) => applyShellAccessMode(e.target.value)}
+                optionType="button"
+                buttonStyle="solid"
+                style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
+              >
+                <Radio.Button value="sandbox">Safe Sandbox</Radio.Button>
+                <Radio.Button value="full-access">Trusted (Full Access)</Radio.Button>
+                <Radio.Button value="custom">Custom Rules</Radio.Button>
+              </Radio.Group>
               {shellEditorMode === "custom" ? (
                 <Alert
                   showIcon
                   type="info"
-                  message="Advanced editing enabled"
-                  description="Profiles and policies below map directly to remote_shell.json for fine-grained configuration."
+                  message="Custom rules"
+                  description={
+                    <div>
+                      <div style={{ marginBottom: 4 }}>
+                        Define exactly which commands an agent can run and where.
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        <li>Create one or more <b>command groups</b> below.</li>
+                        <li>Each group is a set of allowed commands + an execution environment.</li>
+                        <li>Bind a group to a caller when you approve a pairing request.</li>
+                      </ul>
+                    </div>
+                  }
                 />
               ) : (
                 <Alert
                   showIcon
                   type={shellEditorMode === "full-access" ? "warning" : "success"}
                   message={shellPresetDefinition(shellEditorMode).label}
-                  description={shellPresetDefinition(shellEditorMode).description}
+                  description={
+                    <div>
+                      <div style={{ marginBottom: 6 }}>
+                        {shellPresetDefinition(shellEditorMode).description}
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {shellPresetDefinition(shellEditorMode).capabilities.map((cap, idx) => (
+                          <li
+                            key={idx}
+                            style={{
+                              color: cap.allowed ? "var(--ant-color-success, #52c41a)" : "var(--ant-color-text-tertiary, #999)",
+                            }}
+                          >
+                            <span style={{ fontWeight: 600, marginRight: 6 }}>
+                              {cap.allowed ? "✓" : "✗"}
+                            </span>
+                            <span style={{ color: "var(--ant-color-text, inherit)" }}>{cap.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  }
                 />
               )}
             </Space>
@@ -2382,13 +3043,30 @@ export default function RemoteInvokeTab() {
 
           {shellEditorMode === "custom" ? (
           <>
+          <div style={{ marginBottom: 8 }}>
+            <Space>
+              <Switch
+                checked={shellEditorExpertMode}
+                onChange={setShellEditorExpertMode}
+                size="small"
+              />
+              <Text>Expert mode</Text>
+              <Tooltip title="Show the raw Profiles (execution environments) and Policies (command whitelists) as separate sections. Leave this off for the simpler unified Command groups view.">
+                <Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>(what is this?)</Text>
+              </Tooltip>
+              <Button size="small" onClick={openCliPreview}>
+                Generate CLI command
+              </Button>
+            </Space>
+          </div>
+          {shellEditorExpertMode && (
           <div>
             <Space
               align="center"
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Profiles
+                Execution environments <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>(profiles)</Text>
               </Title>
               <Button
                 icon={<PlusOutlined />}
@@ -2416,12 +3094,13 @@ export default function RemoteInvokeTab() {
                   ]);
                 }}
               >
-                Add Profile
+                Add execution environment
               </Button>
             </Space>
             <Text type="secondary">
-              Profiles define sandbox boundaries such as cwd, env allowlist,
-              timeout, stdin, and interactive mode.
+              <b>Execution environments</b> — how the agent's commands will run:
+              which folders, which environment variables it can see, timeout, and
+              whether stdin / interactive terminals are allowed.
             </Text>
             <Divider style={{ margin: "12px 0" }} />
 
@@ -2624,13 +3303,17 @@ export default function RemoteInvokeTab() {
               )}
             </Space>
           </div>
+          )}
           <div>
             <Space
               align="center"
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Policies
+                Command groups
+                {shellEditorExpertMode && (
+                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}> (policies)</Text>
+                )}
               </Title>
               <Button
                 icon={<PlusOutlined />}
@@ -2640,6 +3323,32 @@ export default function RemoteInvokeTab() {
                     shellEditorPolicies.map((policy) => policy.id),
                   );
                   const nextIndex = shellEditorPolicies.length + 1;
+                  // In Simple mode, auto-create a matching profile so the new
+                  // group has an execution environment attached.
+                  let profileIdForNewGroup = shellEditorProfiles[0]?.id;
+                  if (!shellEditorExpertMode) {
+                    const profileId = nextShellItemId(
+                      "profile",
+                      shellEditorProfiles.map((profile) => profile.id),
+                    );
+                    profileIdForNewGroup = profileId;
+                    setShellEditorProfiles((prev) => [
+                      ...prev,
+                      {
+                        id: profileId,
+                        name: `Profile ${nextIndex}`,
+                        description: "Auto-created for command group",
+                        enabled: true,
+                        cwd_allowlist: [],
+                        env_allowlist: [...DEFAULT_SANDBOX_ENV_KEYS],
+                        default_cwd: "",
+                        max_timeout_ms: 30000,
+                        stdin_allowed: false,
+                        interactive_allowed: false,
+                        extra_metadata: {},
+                      },
+                    ]);
+                  }
                   setShellEditorPolicies((prev) => [
                     ...prev,
                     {
@@ -2647,7 +3356,7 @@ export default function RemoteInvokeTab() {
                       name: `Policy ${nextIndex}`,
                       description: "",
                       enabled: true,
-                      profile_id: shellEditorProfiles[0]?.id,
+                      profile_id: profileIdForNewGroup,
                       exec_mode: "argv_exec",
                       allowed_executables: [],
                       allowed_shell_patterns: [],
@@ -2662,7 +3371,7 @@ export default function RemoteInvokeTab() {
                   ]);
                 }}
               >
-                Add Policy
+                Add command group
               </Button>
             </Space>
             <Text type="secondary">
@@ -2737,8 +3446,10 @@ export default function RemoteInvokeTab() {
                           />
                         </div>
                       </Col>
-                      <Col xs={24} md={4}>
-                        <Text type="secondary">Exec mode</Text>
+                      <Col xs={24} md={6}>
+                        <Tooltip title="Match commands by exact program name (argv_exec) or by a shell text pattern (shell_text). Underlying field: exec_mode">
+                          <Text type="secondary">Match by</Text>
+                        </Tooltip>
                         <Select
                           style={{ width: "100%" }}
                           value={policy.exec_mode}
@@ -2752,8 +3463,8 @@ export default function RemoteInvokeTab() {
                             )
                           }
                         >
-                          <Option value="argv_exec">argv_exec</Option>
-                          <Option value="shell_text">shell_text</Option>
+                          <Option value="argv_exec">Specific commands (argv list)</Option>
+                          <Option value="shell_text">Shell text pattern (regex)</Option>
                         </Select>
                       </Col>
                       <Col xs={24}>
@@ -2810,23 +3521,143 @@ export default function RemoteInvokeTab() {
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed shell patterns</Text>
-                        <Select
-                          mode="tags"
-                          style={{ width: "100%" }}
-                          value={policy.allowed_shell_patterns}
-                          onChange={(value) =>
-                            setShellEditorPolicies((prev) =>
-                              prev.map((item, current) =>
-                                current === index
-                                  ? { ...item, allowed_shell_patterns: value }
-                                  : item,
-                              ),
-                            )
-                          }
-                          tokenSeparators={[","]}
-                          placeholder="Add regex patterns"
-                        />
+                        <Tooltip title="Each row allows one shell command. Use 'Starts with' for a literal command prefix (recommended), or switch to 'Regex' for full control.">
+                          <Text type="secondary">Allowed shell patterns</Text>
+                        </Tooltip>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          {policy.allowed_shell_patterns.length === 0 && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              No patterns yet. Click Add to allow a command.
+                            </Text>
+                          )}
+                          {policy.allowed_shell_patterns.map((pat, patIdx) => {
+                            const overrideKey = `${policy.id}|${patIdx}`;
+                            const forcedRegex = shellPatternRegexOverride.has(overrideKey);
+                            const decoded = forcedRegex ? null : tryDecodePrefix(pat);
+                            const isPrefix = decoded !== null;
+                            return (
+                              <Space.Compact
+                                key={`${policy.id}-pat-${patIdx}`}
+                                style={{ width: "100%" }}
+                              >
+                                <Select
+                                  style={{ width: 130 }}
+                                  value={isPrefix ? "prefix" : "regex"}
+                                  onChange={(nextMode: "prefix" | "regex") => {
+                                    if (nextMode === "prefix") {
+                                      // Clear any regex-override for this row. If the stored
+                                      // pattern is not already a decodable prefix we reset the
+                                      // body to empty rather than mechanically re-escaping an
+                                      // arbitrary regex into a literal prefix (which would
+                                      // silently produce a non-matching pattern).
+                                      setShellPatternRegexOverride((prevSet) => {
+                                        if (!prevSet.has(overrideKey)) return prevSet;
+                                        const nextSet = new Set(prevSet);
+                                        nextSet.delete(overrideKey);
+                                        return nextSet;
+                                      });
+                                      setShellEditorPolicies((prev) =>
+                                        prev.map((item, current) => {
+                                          if (current !== index) return item;
+                                          const next = [...item.allowed_shell_patterns];
+                                          const body = tryDecodePrefix(pat) ?? "";
+                                          next[patIdx] = buildPrefixPattern(body);
+                                          return { ...item, allowed_shell_patterns: next };
+                                        }),
+                                      );
+                                    } else {
+                                      // Force Regex UI for this row, keeping the stored
+                                      // pattern as-is so the user can hand-edit it.
+                                      setShellPatternRegexOverride((prevSet) => {
+                                        if (prevSet.has(overrideKey)) return prevSet;
+                                        const nextSet = new Set(prevSet);
+                                        nextSet.add(overrideKey);
+                                        return nextSet;
+                                      });
+                                    }
+                                  }}
+                                  options={[
+                                    { value: "prefix", label: "Starts with" },
+                                    { value: "regex", label: "Regex" },
+                                  ]}
+                                />
+                                <Input
+                                  style={{ flex: 1 }}
+                                  value={isPrefix ? (decoded as string) : pat}
+                                  placeholder={isPrefix ? "e.g. git status" : "e.g. ^ls(\\s|$)"}
+                                  onChange={(e) => {
+                                    const raw = e.target.value;
+                                    setShellEditorPolicies((prev) =>
+                                      prev.map((item, current) => {
+                                        if (current !== index) return item;
+                                        const next = [...item.allowed_shell_patterns];
+                                        next[patIdx] = isPrefix ? buildPrefixPattern(raw) : raw;
+                                        return { ...item, allowed_shell_patterns: next };
+                                      }),
+                                    );
+                                  }}
+                                />
+                                <Button
+                                  danger
+                                  icon={<DeleteOutlined />}
+                                  onClick={() => {
+                                    setShellPatternRegexOverride((prevSet) => {
+                                      // Drop the deleted row and shift indices > patIdx
+                                      // down by one within this policy.
+                                      const nextSet = new Set<string>();
+                                      prevSet.forEach((key) => {
+                                        const sep = key.indexOf("|");
+                                        if (sep < 0) return;
+                                        const pid = key.slice(0, sep);
+                                        const idxNum = Number(key.slice(sep + 1));
+                                        if (pid !== policy.id) {
+                                          nextSet.add(key);
+                                          return;
+                                        }
+                                        if (idxNum === patIdx) return;
+                                        const shifted = idxNum > patIdx ? idxNum - 1 : idxNum;
+                                        nextSet.add(`${pid}|${shifted}`);
+                                      });
+                                      return nextSet;
+                                    });
+                                    setShellEditorPolicies((prev) =>
+                                      prev.map((item, current) => {
+                                        if (current !== index) return item;
+                                        const next = item.allowed_shell_patterns.filter(
+                                          (_, i) => i !== patIdx,
+                                        );
+                                        return { ...item, allowed_shell_patterns: next };
+                                      }),
+                                    );
+                                  }}
+                                />
+                              </Space.Compact>
+                            );
+                          })}
+                          <Space>
+                            <Button
+                              size="small"
+                              icon={<PlusOutlined />}
+                              onClick={() =>
+                                setShellEditorPolicies((prev) =>
+                                  prev.map((item, current) =>
+                                    current === index
+                                      ? {
+                                          ...item,
+                                          allowed_shell_patterns: [
+                                            ...item.allowed_shell_patterns,
+                                            buildPrefixPattern(""),
+                                          ],
+                                        }
+                                      : item,
+                                  ),
+                                )
+                              }
+                            >
+                              Add command
+                            </Button>
+                          </Space>
+                        </Space>
                       </Col>
                       <Col xs={24} md={12}>
                         <Text type="secondary">Allowed working directories</Text>
@@ -2940,6 +3771,76 @@ export default function RemoteInvokeTab() {
                         </div>
                       </Col>
                     </Row>
+
+                    <Divider style={{ margin: "12px 0" }} />
+                    <div>
+                      <Text strong>🧪 Test this group</Text>
+                      <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                        Check whether a sample command would be allowed by the currently-saved policy set.
+                      </Text>
+                      <Row gutter={[8, 8]} style={{ marginTop: 8 }} align="middle">
+                        <Col xs={24} md={6}>
+                          <Select
+                            style={{ width: "100%" }}
+                            value={shellEditorTestMode[policy.id] ?? "shell_text"}
+                            onChange={(value: "argv_exec" | "shell_text") =>
+                              setShellEditorTestMode((prev) => ({ ...prev, [policy.id]: value }))
+                            }
+                            options={[
+                              { value: "shell_text", label: "Shell text" },
+                              { value: "argv_exec", label: "Argv exec" },
+                            ]}
+                          />
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <Input
+                            placeholder="e.g. ls -la /tmp"
+                            value={shellEditorTestInput[policy.id] ?? ""}
+                            onChange={(e) =>
+                              setShellEditorTestInput((prev) => ({
+                                ...prev,
+                                [policy.id]: e.target.value,
+                              }))
+                            }
+                            onPressEnter={() => runShellPolicyTest(policy.id)}
+                          />
+                        </Col>
+                        <Col xs={24} md={6}>
+                          <Button
+                            type="primary"
+                            block
+                            loading={shellEditorTestLoading[policy.id] ?? false}
+                            onClick={() => runShellPolicyTest(policy.id)}
+                          >
+                            Test
+                          </Button>
+                        </Col>
+                      </Row>
+                      {shellEditorTestResult[policy.id] && (
+                        <Alert
+                          style={{ marginTop: 8 }}
+                          showIcon
+                          type={
+                            shellEditorTestResult[policy.id]!.matched
+                              ? shellEditorTestResult[policy.id]!.matched_policy_id === policy.id
+                                ? "success"
+                                : "warning"
+                              : "error"
+                          }
+                          message={
+                            shellEditorTestResult[policy.id]!.matched
+                              ? shellEditorTestResult[policy.id]!.matched_policy_id === policy.id
+                                ? `✓ Matched this group (policy '${shellEditorTestResult[policy.id]!.matched_policy_id}')`
+                                : `⚠ Matched a different group: '${shellEditorTestResult[policy.id]!.matched_policy_id}'`
+                              : "✗ Not allowed by any enabled policy"
+                          }
+                          description={shellEditorTestResult[policy.id]!.reason}
+                        />
+                      )}
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 6 }}>
+                        Tests run against the saved config on this device. Save your edits first to include them.
+                      </Text>
+                    </div>
                   </Card>
                 ))
               )}
@@ -2976,10 +3877,276 @@ export default function RemoteInvokeTab() {
                   showIcon
                   type="info"
                   message="This preset still saves into the standard shell policy store"
-                  description="You can switch back to Custom Policies at any time if you want to fine-tune cwd, env, timeout, stdin, or interactive settings."
+                  description="You can switch back to <b>Custom Rules</b> any time to fine-tune allowed commands, folders, timeouts, stdin, or interactive terminals."
                 />
               </Space>
             </Card>
+          )}
+        </Space>
+      </Modal>
+      <Modal
+        open={cliPreviewOpen}
+        title="Equivalent CLI commands"
+        onCancel={() => setCliPreviewOpen(false)}
+        width={820}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            onClick={async () => {
+              const ok = await copyToClipboard(cliPreviewText);
+              if (ok) {
+                message.success("Copied");
+              } else {
+                message.error("Copy failed");
+              }
+            }}
+          >
+            Copy
+          </Button>,
+          <Button key="close" onClick={() => setCliPreviewOpen(false)}>
+            Close
+          </Button>,
+        ]}
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 12 }}
+          message="Run on the target device"
+          description="These commands reproduce the current editor state via the local Bifrost CLI. They are NOT executed automatically — copy and run them on the device you want to control."
+        />
+        <pre
+          style={{
+            background: "var(--ant-color-fill-tertiary, #f5f5f5)",
+            padding: 12,
+            borderRadius: 6,
+            maxHeight: 420,
+            overflow: "auto",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {cliPreviewText || "(empty)"}
+        </pre>
+      </Modal>
+      <Modal
+        open={fileAccessEditorOpen}
+        title="Manage File Access Policies"
+        okText="Save"
+        cancelText="Cancel"
+        onCancel={() => setFileAccessEditorOpen(false)}
+        onOk={() => void handleSaveFileAccessConfig()}
+        confirmLoading={fileAccessSaveLoading}
+        width={960}
+        destroyOnClose
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message="Per-grant file access policies"
+          description="Each entry maps a grant_id to its file access rules. Grants without an entry use a default read-only policy rooted at the caller's working directory."
+        />
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
+            <Title level={5} style={{ margin: 0 }}>Grant Policies</Title>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={() => {
+                setFileAccessEditorGrants(prev => [
+                  ...prev,
+                  {
+                    grant_id: "",
+                    name: "",
+                    roots: [],
+                    denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
+                    write_denies: [],
+                    ops: [...FILE_READ_OPS],
+                    respect_gitignore: true,
+                    allow_overwrite: true,
+                    allow_recursive_delete: false,
+                  },
+                ]);
+              }}
+            >
+              Add Policy
+            </Button>
+          </Space>
+
+          {fileAccessEditorGrants.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No per-grant policies. Add one to customize file access for specific grants."
+            />
+          ) : (
+            fileAccessEditorGrants.map((grant, index) => (
+              <Card
+                key={`fa-grant-${index}`}
+                size="small"
+                title={grant.name || grant.grant_id || `Policy ${index + 1}`}
+                extra={
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => {
+                      setFileAccessEditorGrants(prev => prev.filter((_, i) => i !== index));
+                    }}
+                  />
+                }
+              >
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Grant ID *</Text>
+                      <Input
+                        value={grant.grant_id}
+                        placeholder="e.g. g-abc123"
+                        onChange={e => {
+                          const val = e.target.value;
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, grant_id: val } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
+                      <Input
+                        value={grant.name ?? ""}
+                        placeholder="Human-readable label"
+                        onChange={e => {
+                          const val = e.target.value;
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, name: val } : g));
+                        }}
+                      />
+                    </Col>
+                  </Row>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 2, maxRows: 5 }}
+                      value={(grant.roots ?? []).join("\n")}
+                      placeholder="/Users/eden/work/project"
+                      onChange={e => {
+                        const roots = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, roots } : g));
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Operations</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Select
+                        mode="multiple"
+                        style={{ width: "100%" }}
+                        value={grant.ops ?? []}
+                        onChange={(ops: FileOp[]) => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops } : g));
+                        }}
+                        options={ALL_FILE_OPS.map(op => ({ value: op, label: op }))}
+                      />
+                      <Space style={{ marginTop: 4 }}>
+                        <Button size="small" onClick={() => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...FILE_READ_OPS] } : g));
+                        }}>Read Only</Button>
+                        <Button size="small" onClick={() => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...ALL_FILE_OPS] } : g));
+                        }}>All Ops</Button>
+                      </Space>
+                    </div>
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Deny Patterns (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 2, maxRows: 4 }}
+                      value={(grant.denies ?? []).join("\n")}
+                      placeholder={"**/.git/**\n**/target/**"}
+                      onChange={e => {
+                        const denies = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, denies } : g));
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Write Deny Patterns (one per line)</Text>
+                    <TextArea
+                      autoSize={{ minRows: 1, maxRows: 4 }}
+                      value={(grant.write_denies ?? []).join("\n")}
+                      placeholder={"**/Cargo.lock\n**/*.lock"}
+                      onChange={e => {
+                        const write_denies = e.target.value.split("\n");
+                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, write_denies } : g));
+                      }}
+                    />
+                  </div>
+
+                  <Row gutter={12}>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Max Read Bytes</Text>
+                      <InputNumber
+                        style={{ width: "100%" }}
+                        value={grant.max_read_bytes}
+                        placeholder="2097152"
+                        min={0}
+                        onChange={val => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_read_bytes: val ?? undefined } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Max Write Bytes</Text>
+                      <InputNumber
+                        style={{ width: "100%" }}
+                        value={grant.max_write_bytes}
+                        placeholder="2097152"
+                        min={0}
+                        onChange={val => {
+                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_write_bytes: val ?? undefined } : g));
+                        }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Space direction="vertical" size={4}>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.respect_gitignore ?? true}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, respect_gitignore: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Respect .gitignore</Text>
+                        </Space>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.allow_overwrite ?? true}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_overwrite: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Overwrite</Text>
+                        </Space>
+                        <Space>
+                          <Switch
+                            size="small"
+                            checked={grant.allow_recursive_delete ?? false}
+                            onChange={val => {
+                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_recursive_delete: val } : g));
+                            }}
+                          />
+                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Recursive Delete</Text>
+                        </Space>
+                      </Space>
+                    </Col>
+                  </Row>
+                </Space>
+              </Card>
+            ))
           )}
         </Space>
       </Modal>
@@ -3080,6 +4247,7 @@ export default function RemoteInvokeTab() {
           </div>
         </Space>
       </Modal>
+
     </div>
   );
 }

@@ -28,8 +28,8 @@ use tracing::{debug, error, warn};
 use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
-    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteSearchArgs,
-    RemoteTrafficCommands,
+    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteFileCommands,
+    RemoteSearchArgs, RemoteTrafficCommands,
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
@@ -140,6 +140,7 @@ fn validate_streaming_prefs(prefs: &StreamingPrefs) -> Result<(), String> {
 #[derive(Debug, Clone)]
 enum RemoteRenderMode {
     Raw,
+    File,
     Search {
         format: OutputFormat,
         no_color: bool,
@@ -475,6 +476,8 @@ enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
+    #[serde(rename = "file")]
+    File,
 }
 
 impl CommandKind {
@@ -482,6 +485,7 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
+            Self::File => "file",
         }
     }
 }
@@ -1144,7 +1148,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             return Err(BifrostError::Config(msg));
         }
     }
-    let command = build_remote_command(&opts.action);
+    let command = build_remote_command_checked(&opts.action)?;
 
     let grant = caller
         .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
@@ -1943,11 +1947,18 @@ async fn revoke_all_matching_grants(
     Ok(revoked)
 }
 
+#[cfg(test)]
 fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
+    build_remote_command_checked(action).expect("remote command should build")
+}
+
+fn build_remote_command_checked(
+    action: &RemoteCommands,
+) -> bifrost_core::Result<BuiltRemoteCommand> {
     match action {
         RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
         RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
-        RemoteCommands::Status => BuiltRemoteCommand {
+        RemoteCommands::Status => Ok(BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
             label: "status".to_string(),
             command: Some("status".to_string()),
@@ -1956,16 +1967,19 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             shell_exec: None,
             render: RemoteRenderMode::Raw,
             streaming_prefs: None,
-        },
+        }),
         RemoteCommands::Command { action } => match action {
-            RemoteCommandCommands::Exec(exec_args) => build_remote_shell_exec_command(exec_args),
+            RemoteCommandCommands::Exec(exec_args) => {
+                Ok(build_remote_shell_exec_command(exec_args))
+            }
         },
         RemoteCommands::Shell { .. } => unreachable!("shell handled separately"),
         RemoteCommands::Grant { .. } => unreachable!("grant handled separately"),
+        RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
         RemoteCommands::Search(search_args) => {
             let query = CanonicalQueryCommand::Search(command_search_args(search_args));
             let command_id = query.command_id().to_string();
-            BuiltRemoteCommand {
+            Ok(BuiltRemoteCommand {
                 kind: CommandKind::QueryReadonly,
                 label: "search.stream".to_string(),
                 command: Some(command_id),
@@ -1980,7 +1994,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     max_results: search_args.max_results,
                 },
                 streaming_prefs: None,
-            }
+            })
         }
         RemoteCommands::Traffic { action } => match action {
             RemoteTrafficCommands::List(list_args) => {
@@ -2010,7 +2024,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     is_tunnel: list_args.is_tunnel,
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.list".to_string(),
                     command: Some(command_id),
@@ -2022,7 +2036,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         no_color: list_args.no_color,
                     },
                     streaming_prefs: None,
-                }
+                })
             }
             RemoteTrafficCommands::Get {
                 id,
@@ -2037,7 +2051,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     response_body: *response_body,
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.get".to_string(),
                     command: Some(command_id),
@@ -2049,12 +2063,12 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         no_color: *no_color,
                     },
                     streaming_prefs: None,
-                }
+                })
             }
             RemoteTrafficCommands::Search(search_args) => {
                 let query = CanonicalQueryCommand::Search(command_search_args(search_args));
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "search.stream".to_string(),
                     command: Some(command_id),
@@ -2069,7 +2083,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         max_results: search_args.max_results,
                     },
                     streaming_prefs: None,
-                }
+                })
             }
             RemoteTrafficCommands::Clear { ids, yes: _ } => {
                 let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
@@ -2081,7 +2095,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     }),
                 });
                 let command_id = query.command_id().to_string();
-                BuiltRemoteCommand {
+                Ok(BuiltRemoteCommand {
                     kind: CommandKind::QueryReadonly,
                     label: "traffic.clear".to_string(),
                     command: Some(command_id),
@@ -2090,7 +2104,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     shell_exec: None,
                     render: RemoteRenderMode::Raw,
                     streaming_prefs: None,
-                }
+                })
             }
         },
     }
@@ -2189,6 +2203,279 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         render: RemoteRenderMode::Raw,
         streaming_prefs: Some(streaming_prefs),
     }
+}
+
+fn build_remote_file_command(
+    action: &RemoteFileCommands,
+) -> bifrost_core::Result<BuiltRemoteCommand> {
+    use serde_json::json;
+    let (file_op, label, args_value, _output) = match action {
+        RemoteFileCommands::Read {
+            path,
+            max_bytes,
+            allow_binary,
+            offset,
+            limit,
+            cwd,
+            output,
+        } => (
+            "file.read",
+            format!("file.read {}", path),
+            json!({
+                "path": path,
+                "max_bytes": max_bytes,
+                "allow_binary": allow_binary,
+                "offset": offset,
+                "limit": limit,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::List {
+            path,
+            depth,
+            no_ignore,
+            exclude_patterns,
+            cwd,
+            output,
+        } => (
+            "file.list",
+            format!("file.list {}", path.clone().unwrap_or_else(|| ".".into())),
+            json!({
+                "path": path,
+                "depth": depth,
+                "respect_gitignore": !no_ignore,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Stat { path, cwd, output } => (
+            "file.stat",
+            format!("file.stat {}", path),
+            json!({ "path": path, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Glob {
+            pattern,
+            max_matches,
+            no_ignore,
+            exclude_patterns,
+            cwd,
+            output,
+        } => (
+            "file.glob",
+            format!("file.glob {}", pattern),
+            json!({
+                "pattern": pattern,
+                "max_matches": max_matches,
+                "respect_gitignore": !no_ignore,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Search {
+            pattern,
+            path,
+            max_matches,
+            max_scan,
+            case_insensitive,
+            glob,
+            no_ignore,
+            exclude_patterns,
+            context_before,
+            context_after,
+            cwd,
+            output,
+        } => (
+            "file.search",
+            format!("file.search {}", pattern),
+            json!({
+                "pattern": pattern,
+                "path": path,
+                "max_matches": max_matches,
+                "max_scan_bytes": max_scan,
+                "case_insensitive": case_insensitive,
+                "glob": glob,
+                "respect_gitignore": !no_ignore,
+                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                "context_before": context_before,
+                "context_after": context_after,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Hash {
+            path,
+            algo,
+            cwd,
+            output,
+        } => (
+            "file.hash",
+            format!("file.hash {}", path),
+            json!({ "path": path, "algo": algo, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Write {
+            path,
+            content_file,
+            content_b64: cli_content_b64,
+            base_sha256,
+            allow_overwrite,
+            create_parents,
+            cwd,
+            output,
+        } => {
+            let content_b64 = if let Some(b64) = cli_content_b64.as_deref() {
+                b64.to_string()
+            } else {
+                match content_file.as_deref() {
+                    Some("-") | None => {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        std::io::stdin().read_to_end(&mut buf).map_err(|e| {
+                            BifrostError::Io(std::io::Error::other(format!(
+                                "read stdin for file.write: {e}"
+                            )))
+                        })?;
+                        base64::engine::general_purpose::STANDARD.encode(&buf)
+                    }
+                    Some(p) => std::fs::read(p)
+                        .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
+                        .map_err(|e| {
+                            BifrostError::Io(std::io::Error::other(format!(
+                                "read content file {p}: {e}"
+                            )))
+                        })?,
+                }
+            };
+            (
+                "file.write",
+                format!("file.write {}", path),
+                json!({
+                    "path": path,
+                    "content_b64": content_b64,
+                    "base_sha256": base_sha256,
+                    "allow_overwrite": allow_overwrite,
+                    "create_parents": create_parents,
+                    "cwd": cwd,
+                }),
+                output.clone(),
+            )
+        }
+        RemoteFileCommands::Edit {
+            path,
+            edits,
+            base_sha256,
+            cwd,
+            output,
+        } => {
+            let edits_val: serde_json::Value =
+                serde_json::from_str(edits).unwrap_or(serde_json::Value::Null);
+            (
+                "file.edit",
+                format!("file.edit {}", path),
+                json!({
+                    "path": path,
+                    "edits": edits_val,
+                    "base_sha256": base_sha256,
+                    "cwd": cwd,
+                }),
+                output.clone(),
+            )
+        }
+        RemoteFileCommands::Mkdir {
+            path,
+            parents,
+            cwd,
+            output,
+        } => (
+            "file.mkdir",
+            format!("file.mkdir {}", path),
+            json!({ "path": path, "parents": parents, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Mv {
+            from,
+            to,
+            cwd,
+            output,
+        } => (
+            "file.move",
+            format!("file.move {} -> {}", from, to),
+            json!({ "path": from, "to_path": to, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Rm {
+            path,
+            recursive,
+            cwd,
+            output,
+        } => (
+            "file.delete",
+            format!("file.delete {}", path),
+            json!({ "path": path, "recursive": recursive, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::ApplyPatch {
+            patch_file,
+            patch_b64,
+            cwd,
+            output,
+        } => {
+            let patch_text = if let Some(b64) = patch_b64.as_deref() {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!("decode --patch-b64: {e}")))
+                    })?;
+                String::from_utf8(decoded).map_err(|e| {
+                    BifrostError::Io(std::io::Error::other(format!(
+                        "patch-b64 is not valid utf-8: {e}"
+                    )))
+                })?
+            } else if let Some(pf) = patch_file.as_deref() {
+                if pf == "-" {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read stdin for file.apply-patch: {e}"
+                        )))
+                    })?;
+                    buf
+                } else {
+                    std::fs::read_to_string(pf).map_err(|e| {
+                        BifrostError::Io(std::io::Error::other(format!(
+                            "read patch file {pf}: {e}"
+                        )))
+                    })?
+                }
+            } else {
+                return Err(BifrostError::Config(
+                    "apply-patch requires --patch-file or --patch-b64".to_string(),
+                ));
+            };
+            (
+                "file.apply_patch",
+                format!("file.apply_patch ({} bytes)", patch_text.len()),
+                json!({ "patch_text": patch_text, "cwd": cwd }),
+                output.clone(),
+            )
+        }
+    };
+
+    Ok(BuiltRemoteCommand {
+        kind: CommandKind::File,
+        label,
+        command: Some(file_op.to_string()),
+        args_json: Some(args_value.to_string()),
+        query: None,
+        shell_exec: None,
+        render: RemoteRenderMode::File,
+        streaming_prefs: None,
+    })
 }
 
 fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<String, String>> {
@@ -2840,7 +3127,7 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
     if let Some(ref stdout) = result.stdout {
         if !stdout.is_empty() {
             match &command.render {
-                RemoteRenderMode::Raw => {
+                RemoteRenderMode::Raw | RemoteRenderMode::File => {
                     print!("{stdout}");
                     if !stdout.ends_with('\n') {
                         println!();

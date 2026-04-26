@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询，以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''远程执行命令''管理远程授权' 等。"
+description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询，以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash）。"
 ---
 
 # Bifrost
@@ -704,3 +704,107 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - 如果用户只想验证规则，不必启用 TLS 拦截
 - 当用户提供一个少于 6 位的纯数字（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作
 - 遇到不确定的参数或用法，**先执行** **`bifrost <command> -h`** **获取完整手册**，不要猜测
+
+
+## 9. 远程文件 API（coding agent 友好）
+
+受 `FileAccessPolicy` 约束的远程文件访问能力，面向 Claude Code / Cursor / Codex 等 coding agent 打磨。默认策略：`roots=[cwd]`，`denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]`，默认遵守最近 `.gitignore`（可用 `--no-ignore` 关闭）。
+
+### 授权模型（grant scope）
+
+文件能力使用独立 grant scope，**不**由 `remote_query` / `remote_shell_*` 自动授予：
+
+| 能力         | 所需 scope           | 覆盖子命令                                  |
+| ---------- | ------------------ | -------------------------------------- |
+| 只读         | `remote_file_read` | `read` / `list` / `stat` / `glob` / `search` / `hash` |
+| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `mv` / `rm` / `apply-patch` |
+
+### 子命令一览
+
+```bash
+# 只读
+bifrost remote file read   <path> [--max-bytes <N>] [--allow-binary] \
+                                   [--offset <line>] [--limit <lines>]
+bifrost remote file list   [path] [--depth <N>] [--no-ignore] \
+                                   [--exclude <name>]...
+bifrost remote file stat   <path>
+bifrost remote file glob   '<glob>' [--max-matches <N>] [--no-ignore] \
+                                     [--exclude <name>]...
+bifrost remote file search '<regex>' [--path <sub>] [--max-matches <N>] \
+                                      [--max-scan <bytes>] \
+                                      [-B <n>] [-A <n>] \
+                                      [-i|--case-insensitive] \
+                                      [--glob '<pat>'] [--no-ignore] \
+                                      [--exclude <name>]...
+bifrost remote file hash   <path> [--algo sha256]
+
+# 读写
+bifrost remote file write  <path> [--content-file <local|->] \
+                                   [--content-b64 <base64>] \
+                                   [--base-sha256 <sha>] \
+                                   [--allow-overwrite true|false] \
+                                   [--create-parents]
+bifrost remote file edit   <path> --edits '<json>' [--base-sha256 <sha>]
+bifrost remote file mkdir  <path> [--parents]
+bifrost remote file mv     <from> <to>
+bifrost remote file rm     <path> [--recursive]
+bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <base64>)
+```
+
+所有子命令共享 `--cwd <path>`（工作目录覆盖）、`--output human|json`、`--relay-url`、`--client-id`。
+
+### coding-agent 关键语义
+
+- **gitignore 感知**：`list` / `glob` / `search` 默认跳过 `.gitignore` 命中的路径；agent 需要扫隐藏/忽略文件时加 `--no-ignore`。
+- **truncated 标志**：`list` / `glob` / `search` / `read` 超过上限时在 JSON 响应中返回 `"truncated": true`；agent 应据此分片重试或收窄范围。
+- **完整文件 sha256**：`read` 在 `truncated=true` 时响应体额外带 `file_sha256`（整文件哈希，不是截断片段的），用于 agent 做 resume / 一致性校验。
+- **Symlink 语义**：`stat` 和 `list` 对符号链接采用 **lstat** 语义，不跟随链接，额外返回 `symlink_target`；Windows 上自动去除 `\\?\` / `\\?\UNC\` NT verbatim 前缀，跨平台一致。
+- **原子写 + 乐观锁**：`write` / `edit` 采用 tmp+rename 两阶段提交，失败自动快照回滚；传 `--base-sha256` 时若与当前文件不一致，返回错误码 `[file.sha_mismatch]`，agent 应重新 `read` 再重试。
+- **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
+- **`--content-b64` / `--patch-b64`**：用于传输二进制或含特殊字符的文本，caller 在本地 base64，admin 侧解码后写入；比 `--content-file -` + stdin 管道更适合非交互 / Windows agent。
+- **`--create-parents`**：`write` 自带 `mkdir -p` 语义，避免 agent 先 `mkdir` 再 `write` 的两次往返。
+- **搜索过滤**：`search` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 用于在同一次 regex 扫描里按文件名进一步收窄。
+
+### 错误码契约
+
+agent 应按以下错误码做分支逻辑：
+
+| 错误码                          | 含义                              | 典型应对                                |
+| ----------------------------- | ------------------------------- | ----------------------------------- |
+| `file.out_of_scope`           | 路径落在 `roots` 之外                 | 不要自动改 `--cwd`；请用户确认                 |
+| `file.permission_denied`      | 命中 denies 或 policy 不允许写         | 放弃写入；可降级为只读流程                       |
+| `file.binary_not_allowed`     | 二进制且未传 `--allow-binary`         | 加 `--allow-binary` 或改 `hash` + 下载分片 |
+| `file.sha_mismatch`           | 乐观锁失败，文件已被他人修改                  | 重新 `read` + 重算 sha + 重试             |
+| `file.not_found`              | 路径不存在                           | 视任务决定是否 `mkdir` / `write`            |
+| `file.is_a_directory` / `file.not_a_directory` | 类型不匹配        | 改换子命令                               |
+
+### 典型调用链
+
+```bash
+# 1. 侦察
+bifrost remote file list src --depth 2 --output json
+bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
+
+# 2. 精准定位
+bifrost remote file search 'fn handle_file_\w+' --path src --glob '*.rs' \
+  -B 2 -A 2 --output json
+
+# 3. 读取 + 记住 sha
+bifrost remote file read src/lib.rs --output json   # -> 拿到 sha256
+
+# 4. 原子编辑（带乐观锁）
+bifrost remote file edit src/lib.rs \
+  --base-sha256 <sha> \
+  --edits '[{"start_line":10,"end_line":12,"replacement":"// new\n"}]' \
+  --output json
+
+# 5. 大文件直写（base64，适合含换行/特殊字符内容）
+bifrost remote file write docs/notes.md \
+  --content-b64 "$(base64 < ./local-notes.md)" \
+  --create-parents --output json
+
+# 6. 多文件同步
+bifrost remote file apply-patch --patch-file ./refactor.diff --output json
+```
+
+所有子命令支持 `--output json` 做机器可读输出，统一用上述错误码前缀做 failure 分支。

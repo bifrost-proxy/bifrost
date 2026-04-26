@@ -1408,6 +1408,11 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
     },
+    #[command(about = "Remote file operations (read/write/edit/mkdir/move/delete/apply-patch)")]
+    File {
+        #[command(subcommand)]
+        action: Box<RemoteFileCommands>,
+    },
     #[command(about = "Search remote traffic records")]
     Search(Box<RemoteSearchArgs>),
     #[command(about = "Inspect remote traffic records")]
@@ -1421,6 +1426,207 @@ pub enum RemoteCommands {
 pub enum RemoteCommandCommands {
     #[command(about = "Execute a remote command via the encrypted shell.exec channel")]
     Exec(Box<RemoteCommandExecArgs>),
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteFileCommands {
+    #[command(about = "Read a file from the remote host (read-only)")]
+    Read {
+        #[arg(help = "Path (absolute, or relative to --cwd)")]
+        path: String,
+        #[arg(long, help = "Maximum bytes to return (capped by policy)")]
+        max_bytes: Option<u64>,
+        #[arg(long, help = "Allow binary content in the response")]
+        allow_binary: bool,
+        #[arg(
+            long,
+            help = "Start line (1-based). Only return lines from this offset"
+        )]
+        offset: Option<u32>,
+        #[arg(long, help = "Maximum number of lines to return (used with --offset)")]
+        limit: Option<u32>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human", help = "Output format: human | json")]
+        output: String,
+    },
+    #[command(about = "List files under a directory")]
+    List {
+        #[arg(help = "Directory (default '.' = policy root / cwd)")]
+        path: Option<String>,
+        #[arg(long, default_value_t = 1, help = "Max recursion depth")]
+        depth: u32,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Show metadata (size, mtime, mode, sha256) for a path")]
+    Stat {
+        #[arg(help = "Path to stat")]
+        path: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Match files by glob pattern")]
+    Glob {
+        #[arg(help = "Glob pattern (e.g. 'src/**/*.rs')")]
+        pattern: String,
+        #[arg(long, help = "Max matches to return")]
+        max_matches: Option<usize>,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Regex-search file contents under the policy root")]
+    Search {
+        #[arg(help = "Regex pattern")]
+        pattern: String,
+        #[arg(long, help = "Subpath to restrict the search (default: policy root)")]
+        path: Option<String>,
+        #[arg(long, help = "Max matches to return")]
+        max_matches: Option<usize>,
+        #[arg(long, help = "Per-file scan byte cap")]
+        max_scan: Option<u64>,
+        #[arg(long, short = 'B', help = "Number of context lines before each match")]
+        context_before: Option<u32>,
+        #[arg(long, short = 'A', help = "Number of context lines after each match")]
+        context_after: Option<u32>,
+        #[arg(
+            long = "case-insensitive",
+            short = 'i',
+            help = "Case-insensitive regex search"
+        )]
+        case_insensitive: bool,
+        #[arg(
+            long = "glob",
+            help = "Only search files matching this glob (e.g. '*.rs')"
+        )]
+        glob: Option<String>,
+        #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
+        no_ignore: bool,
+        #[arg(
+            long = "exclude",
+            help = "Additional directory names to exclude (repeatable)"
+        )]
+        exclude_patterns: Vec<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Hash a file (sha256 only)")]
+    Hash {
+        #[arg(help = "Path to hash")]
+        path: String,
+        #[arg(long, default_value = "sha256", help = "Digest algorithm")]
+        algo: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Write a file atomically. Content is read from --content-file or stdin.")]
+    Write {
+        #[arg(help = "Target path (absolute, or relative to --cwd)")]
+        path: String,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Read content from a local file (or '-' for stdin)")]
+        content_file: Option<String>,
+        #[arg(
+            long = "content-b64",
+            help = "Provide content as a base64-encoded string (overrides --content-file)"
+        )]
+        content_b64: Option<String>,
+        #[arg(long, help = "Expected current sha256 for optimistic locking")]
+        base_sha256: Option<String>,
+        #[arg(long, help = "Allow overwrite even if policy default forbids")]
+        allow_overwrite: Option<bool>,
+        #[arg(long = "create-parents", help = "Create missing parent directories")]
+        create_parents: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(
+        about = "Apply line-range edits atomically. --edits is a JSON array of {start_line,end_line,replacement}."
+    )]
+    Edit {
+        #[arg(help = "Target path")]
+        path: String,
+        #[arg(long, help = "JSON array of edit ranges")]
+        edits: String,
+        #[arg(long, help = "Expected current sha256 for optimistic locking")]
+        base_sha256: Option<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Create a directory on the remote host")]
+    Mkdir {
+        #[arg(help = "Directory to create")]
+        path: String,
+        #[arg(long, help = "Create intermediate parent directories as needed")]
+        parents: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Move / rename a path on the remote host")]
+    Mv {
+        #[arg(help = "Source path")]
+        from: String,
+        #[arg(help = "Destination path")]
+        to: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Delete a file or directory on the remote host")]
+    Rm {
+        #[arg(help = "Path to delete")]
+        path: String,
+        #[arg(long, help = "Recursively delete a non-empty directory")]
+        recursive: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Apply a unified diff across multiple files atomically")]
+    ApplyPatch {
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
+        patch_file: Option<String>,
+        #[arg(
+            long = "patch-b64",
+            help = "Provide the unified diff as a base64 string (overrides --patch-file)"
+        )]
+        patch_b64: Option<String>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -1460,14 +1666,22 @@ pub enum RemoteGrantCommands {
     Update {
         #[arg(help = "Grant ID to update")]
         grant_id: String,
-        #[arg(long, value_parser = ["query", "selected", "all"], help = "Grant access mode")]
-        access: String,
+        #[arg(long, value_parser = ["query", "selected", "all"], help = "Shell/query access mode")]
+        access: Option<String>,
+        #[arg(
+            long,
+            value_parser = ["remote_query", "remote_shell_exec", "remote_shell_interactive"],
+            help = "Explicit grant scope for shell/query access"
+        )]
+        scope: Option<String>,
         #[arg(long = "policy", action = ArgAction::Append, help = "Bind to this shell policy id (repeatable for selected access)")]
         policy: Vec<String>,
         #[arg(long, help = "Allow stdin: true or false")]
         stdin: Option<bool>,
         #[arg(long, help = "Allow interactive shell: true or false")]
         interactive: Option<bool>,
+        #[arg(long, value_parser = ["none", "read", "read_write"], help = "File access level: none, read, or read_write")]
+        file_access: Option<String>,
     },
     #[command(about = "Revoke a grant")]
     Revoke {

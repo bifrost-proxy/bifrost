@@ -24,6 +24,7 @@ import {
   buildRegistrationSignaturePayload,
   grantModeTtlMs,
   normalizeGrantScope,
+  normalizeFileAccess,
   resolveCommandKind,
   grantScopeAllowsCommand,
 } from './types';
@@ -399,7 +400,7 @@ export class RemoteInvokeService {
     return { pairing_id: pairingId, status: 'pending_approval' };
   }
 
-  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string }> {
+  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string; file_access?: string }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
     if (this.isPendingPairingExpired(pairing)) {
@@ -473,6 +474,7 @@ export class RemoteInvokeService {
       client_ephemeral_pub: req.client_ephemeral_pub,
       grant_mode: grantMode as any,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      file_access: normalizeFileAccess(req.file_access),
       ssh_key_id: '',
       ssh_key_fingerprint: '',
       status: 'active',
@@ -513,6 +515,7 @@ export class RemoteInvokeService {
       caller_fingerprint: pairing.caller_fingerprint,
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      file_access: normalizeFileAccess(req.file_access),
       caller_ephemeral_pub: pairing.caller_ephemeral_pub,
       client_ephemeral_pub: req.client_ephemeral_pub,
     });
@@ -535,6 +538,7 @@ export class RemoteInvokeService {
       platform,
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
+      file_access: normalizeFileAccess(req.file_access),
     };
   }
 
@@ -612,7 +616,7 @@ export class RemoteInvokeService {
     }
 
     const commandKind = resolveCommandKind(req.command_kind);
-    if (!grantScopeAllowsCommand(grant.grant_scope, commandKind)) {
+    if (!grantScopeAllowsCommand(grant.grant_scope, commandKind, grant.file_access)) {
       throw new Error('grant_scope_mismatch');
     }
 
@@ -685,6 +689,7 @@ export class RemoteInvokeService {
       call_id: callId,
       grant_id: grant.id,
       grant_scope: normalizeGrantScope(grant.grant_scope),
+      file_access: normalizeFileAccess(grant.file_access),
       caller_fingerprint: grant.caller_fingerprint,
       caller_pubkey: req.caller_pubkey,
       command_kind: commandKind,
@@ -966,6 +971,7 @@ export class RemoteInvokeService {
         client_ephemeral_pub: req.client_ephemeral_pub ?? '',
         grant_mode: grantMode,
         grant_scope: normalizeGrantScope(req.grant_scope),
+        file_access: normalizeFileAccess(req.file_access),
         ssh_key_id: '',
         ssh_key_fingerprint: result.ssh_key_fingerprint,
         status: 'active',
@@ -1130,10 +1136,12 @@ export class RemoteInvokeService {
     }
 
     const normalizedScope = normalizeGrantScope(req.grant_scope ?? grant.grant_scope);
+    const normalizedFileAccess = normalizeFileAccess(req.file_access ?? grant.file_access);
     const now = new Date().toISOString();
 
     await this.storage.remoteInvoke.updateGrant(grantId, {
       grant_scope: normalizedScope,
+      file_access: normalizedFileAccess,
       update_time: now,
     });
 
@@ -1145,6 +1153,7 @@ export class RemoteInvokeService {
     pushToClient(updated.client_instance_id, 'grant_updated', {
       grant_id: grantId,
       grant_scope: normalizedScope,
+      file_access: normalizedFileAccess,
     });
 
     await this.storage.remoteInvoke.appendEvent({

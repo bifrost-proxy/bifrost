@@ -12,6 +12,7 @@ export type GrantScope =
   | "remote_query"
   | "remote_shell_exec"
   | "remote_shell_interactive";
+export type FileAccessScope = "none" | "read" | "read_write";
 export type RemoteInvokeAuthMethod = "pair_code" | "ssh_publickey";
 
 export interface DiscoverySession {
@@ -116,6 +117,7 @@ export interface PairingApprovalInput {
   policy_binding?: Record<string, unknown> | null;
   interactive_allowed?: boolean;
   stdin_allowed?: boolean;
+  file_access?: FileAccessScope;
 }
 
 export async function approvePairing(
@@ -155,6 +157,7 @@ export interface Grant {
   shell_policy_set_version_snapshot?: number | null;
   interactive_allowed?: boolean | null;
   stdin_allowed?: boolean | null;
+  file_access?: FileAccessScope;
 }
 
 export interface GrantsListResponse {
@@ -285,6 +288,75 @@ export async function updateRemoteShellConfig(
   input: RemoteShellSet,
 ): Promise<RemoteShellSet> {
   return put<RemoteShellSet>("/remote-invoke/shell-config", input);
+}
+
+export interface ShellConfigMatchRequest {
+  command: string;
+  exec_mode: "argv_exec" | "shell_text";
+  argv?: string[];
+}
+
+export interface ShellConfigMatchResponse {
+  matched: boolean;
+  matched_policy_id: string | null;
+  reason: string;
+}
+
+export async function matchRemoteShellCommand(
+  input: ShellConfigMatchRequest,
+): Promise<ShellConfigMatchResponse> {
+  return post<ShellConfigMatchResponse>(
+    "/remote-invoke/shell-config/match",
+    input,
+  );
+}
+
+// --- File Access Config ---
+
+export type FileOp =
+  | "read"
+  | "list"
+  | "stat"
+  | "glob"
+  | "search"
+  | "hash"
+  | "write"
+  | "edit"
+  | "mkdir"
+  | "move"
+  | "delete"
+  | "apply_patch";
+
+export const FILE_READ_OPS: FileOp[] = ["read", "list", "stat", "glob", "search", "hash"];
+export const FILE_WRITE_OPS: FileOp[] = ["write", "edit", "mkdir", "move", "delete", "apply_patch"];
+export const ALL_FILE_OPS: FileOp[] = [...FILE_READ_OPS, ...FILE_WRITE_OPS];
+
+export interface FileAccessGrantPolicy {
+  grant_id: string;
+  name?: string;
+  roots?: string[];
+  denies?: string[];
+  write_denies?: string[];
+  ops?: FileOp[];
+  max_read_bytes?: number;
+  max_write_bytes?: number;
+  respect_gitignore?: boolean;
+  allow_overwrite?: boolean;
+  allow_recursive_delete?: boolean;
+}
+
+export interface FileAccessConfig {
+  grant: FileAccessGrantPolicy[];
+}
+
+export async function getFileAccessConfig(): Promise<FileAccessConfig> {
+  return get<FileAccessConfig>("/remote-invoke/file-access-config");
+}
+
+export async function updateFileAccessConfig(
+  input: FileAccessConfig,
+): Promise<FileAccessConfig> {
+  return put<FileAccessConfig>("/remote-invoke/file-access-config", input);
 }
 
 export interface RemoteInvokeSshCallerInfo {

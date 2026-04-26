@@ -9,6 +9,7 @@ import type {
   CallerInfo,
   CommandSummary,
   RemoteCommand,
+  FileAccessScope,
 } from '../types';
 
 export type {
@@ -21,6 +22,7 @@ export type {
   CallerInfo,
   CommandSummary,
   RemoteCommand,
+  FileAccessScope,
 };
 
 export interface CommandEncryptedPayload {
@@ -138,12 +140,14 @@ export interface GrantDecisionRequest {
   decision: 'approve' | 'reject';
   grant_mode?: GrantMode;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
   client_ephemeral_pub?: string;
 }
 
 export interface UpdateGrantRequest {
   client_instance_id?: string;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
 }
 
 export interface PublishPairCodeRequest {
@@ -275,6 +279,7 @@ export interface SshConnectResultRequest {
   caller_fingerprint?: string;
   grant_mode?: GrantMode;
   grant_scope?: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
   caller_ephemeral_pub?: string;
   client_ephemeral_pub?: string;
 }
@@ -328,6 +333,21 @@ export function normalizeGrantScope(scope?: string | null): RemoteInvokeGrantSco
   }
 }
 
+export function normalizeFileAccess(fileAccess?: string | null): FileAccessScope {
+  switch (fileAccess) {
+    case 'read':
+    case 'read_write':
+      return fileAccess;
+    case 'none':
+    case undefined:
+    case null:
+    case '':
+      return 'none';
+    default:
+      throw Object.assign(new Error('invalid_file_access'), { status: 400, details: `"${fileAccess}" is not a valid file_access value` });
+  }
+}
+
 export function isShellCommandKind(kind?: string | null): kind is 'shell.exec' {
   return kind === 'shell.exec';
 }
@@ -335,18 +355,23 @@ export function isShellCommandKind(kind?: string | null): kind is 'shell.exec' {
 export function resolveCommandKind(
   explicitKind?: string | null,
 ): RemoteCommandKind {
-  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly') {
+  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly' || explicitKind === 'file') {
     return explicitKind;
   }
   throw new Error('command_kind_required');
 }
 
-export function grantScopeAllowsCommand(scope: string | undefined, commandKind: RemoteCommandKind): boolean {
+export function grantScopeAllowsCommand(scope: string | undefined, commandKind: RemoteCommandKind, fileAccess?: string | null): boolean {
+  if (commandKind === 'file') {
+    const normalized = normalizeFileAccess(fileAccess);
+    return normalized === 'read' || normalized === 'read_write';
+  }
   const normalizedScope = normalizeGrantScope(scope);
   if (commandKind === 'shell.exec') {
     return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
   }
-  return normalizedScope === 'remote_query' || normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
+  // query.readonly is always allowed
+  return true;
 }
 
 export function grantModeTtlMs(mode: GrantMode): number | null {

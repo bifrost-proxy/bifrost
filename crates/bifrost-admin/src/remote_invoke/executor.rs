@@ -13,7 +13,7 @@ use regex::Regex;
 use sha1::{Digest, Sha1};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::query_service::AdminQueryService;
 use crate::state::SharedAdminState;
@@ -286,6 +286,10 @@ impl RemoteInvokeExecutor {
                 super::types::CommandKind::ShellExec => {
                     return self.execute_shell_exec(command, &mut on_stdout).await;
                 }
+                super::types::CommandKind::File => {
+                    let body = self.execute_file_op(command).await?;
+                    self.emit_stdout(&mut on_stdout, body).await
+                }
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -330,8 +334,360 @@ impl RemoteInvokeExecutor {
         }
     }
 
+    /// Public entry point for file.* operations.
+    ///
+    /// Wraps [`execute_file_op_inner`] to emit a single `audit.file` tracing
+    /// event per request, recording `grant_id`, `method`, `path_hash`
+    /// (sha256 prefix), `op`, `duration_ms`, and — when the inner handler
+    /// returns JSON with `bytes_written` / `sha256` fields — those too.
+    ///
+    /// On error, logs the file error code extracted from the `[file.xxx]`
+    /// prefix (falls back to `"file.internal"`).
+    async fn execute_file_op(&self, command: &RemoteCommand) -> Result<String> {
+        let started = Instant::now();
+
+        // Best-effort extraction of grant_id / path / method *before* dispatch,
+        // so we can log even when the inner fn returns early with an error.
+        let method = command.command.clone();
+        let (path_for_hash, grant_for_log) = {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct Peek {
+                path: Option<String>,
+                grant_id: Option<String>,
+            }
+            let peek: Peek = command
+                .args_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default();
+            let p = peek.path.unwrap_or_default();
+            let g = command
+                .grant_id
+                .clone()
+                .or(peek.grant_id)
+                .unwrap_or_default();
+            (p, g)
+        };
+        let path_hash = audit_path_hash(&path_for_hash);
+
+        let outcome = self.execute_file_op_inner(command).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        match &outcome {
+            Ok(json) => {
+                // Try to surface bytes_written / sha256 from the handler's JSON.
+                let (bytes, sha) = extract_audit_fields(json);
+                info!(
+                    target = "audit.file",
+                    grant_id = %grant_for_log,
+                    method = %method,
+                    path_hash = %path_hash,
+                    duration_ms,
+                    result = "ok",
+                    bytes = bytes.unwrap_or(0),
+                    sha256 = sha.as_deref().unwrap_or(""),
+                    "file op succeeded"
+                );
+            }
+            Err(err) => {
+                let code = extract_file_error_code(&err.to_string());
+                warn!(
+                    target = "audit.file",
+                    grant_id = %grant_for_log,
+                    method = %method,
+                    path_hash = %path_hash,
+                    duration_ms,
+                    result = "err",
+                    error_code = %code,
+                    "file op failed"
+                );
+            }
+        }
+
+        outcome
+    }
+
+    async fn execute_file_op_inner(&self, command: &RemoteCommand) -> Result<String> {
+        use bifrost_core::file_access::FileOp;
+        use std::path::Path;
+
+        // The specific file operation is carried in command.command (e.g. "file.read")
+        let file_op_name = command.command.as_str();
+        let op = match file_op_name {
+            "file.read" => FileOp::Read,
+            "file.list" => FileOp::List,
+            "file.stat" => FileOp::Stat,
+            "file.glob" => FileOp::Glob,
+            "file.search" => FileOp::Search,
+            "file.hash" => FileOp::Hash,
+            "file.write" => FileOp::Write,
+            "file.edit" => FileOp::Edit,
+            "file.mkdir" => FileOp::Mkdir,
+            "file.move" => FileOp::Move,
+            "file.delete" => FileOp::Delete,
+            "file.apply_patch" => FileOp::ApplyPatch,
+            _ => {
+                return Err(BifrostError::Config(format!(
+                    "unknown file operation: '{}'",
+                    file_op_name
+                )))
+            }
+        };
+
+        // Enforce grant-level file_access: if the grant only allows read,
+        // reject any write operation before we even load the file policy.
+        if op.is_write()
+            && !matches!(
+                command.file_access,
+                super::types::FileAccessScope::ReadWrite
+            )
+        {
+            return Err(BifrostError::Config(format!(
+                "[file.permission_denied] grant file_access={:?} does not allow write operation '{}'",
+                command.file_access, file_op_name
+            )));
+        }
+
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct FileParams {
+            path: Option<String>,
+            max_bytes: Option<u64>,
+            allow_binary: Option<bool>,
+            depth: Option<u32>,
+            pattern: Option<String>,
+            max_matches: Option<usize>,
+            max_scan_bytes: Option<u64>,
+            algo: Option<String>,
+            grant_id: Option<String>,
+            cwd: Option<String>,
+            content_b64: Option<String>,
+            base_sha256: Option<String>,
+            #[serde(default)]
+            if_match_sha256: Option<String>,
+            allow_overwrite: Option<bool>,
+            edits: Option<Vec<super::file_ops::EditRange>>,
+            to_path: Option<String>,
+            recursive: Option<bool>,
+            parents: Option<bool>,
+            create_parents: Option<bool>,
+            patch_text: Option<String>,
+            exclude_patterns: Option<Vec<String>>,
+            context_before: Option<u32>,
+            context_after: Option<u32>,
+            offset: Option<u32>,
+            limit: Option<u32>,
+            case_insensitive: Option<bool>,
+            glob: Option<String>,
+            respect_gitignore: Option<bool>,
+        }
+
+        let params: FileParams = match command.args_json.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => serde_json::from_str(raw).map_err(|e| {
+                BifrostError::Config(format!("[file.invalid_args] bad args_json: {}", e))
+            })?,
+            _ => FileParams::default(),
+        };
+
+        let cwd_str = params
+            .cwd
+            .clone()
+            .or_else(|| command.cwd.clone())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "/".to_string())
+            });
+        let cwd = Path::new(&cwd_str);
+
+        let grant_id = command
+            .grant_id
+            .clone()
+            .or(params.grant_id.clone())
+            .unwrap_or_default();
+        let store = super::file_policy_store::FileAccessPolicyStore::load_default();
+        let policy = store.resolve(&grant_id, cwd);
+
+        let default_path = ".".to_string();
+        let requested_path = match file_op_name {
+            "file.glob" | "file.search" | "file.list" | "file.apply_patch" => {
+                params.path.clone().unwrap_or(default_path)
+            }
+            _ => params.path.clone().ok_or_else(|| {
+                BifrostError::Config("[file.invalid_args] 'path' is required".to_string())
+            })?,
+        };
+
+        let decision = policy
+            .check(Path::new(&requested_path), cwd, op)
+            .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+
+        let value = match file_op_name {
+            "file.read" => {
+                super::file_ops::handle_file_read(
+                    &decision,
+                    params.max_bytes,
+                    params.allow_binary.unwrap_or(false),
+                    params.offset,
+                    params.limit,
+                )
+                .await?
+            }
+            "file.list" => {
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
+                super::file_ops::handle_file_list(
+                    &decision,
+                    params.depth,
+                    &excludes,
+                    params.respect_gitignore.unwrap_or(true),
+                )
+                .await?
+            }
+            "file.stat" => super::file_ops::handle_file_stat(&decision).await?,
+            "file.glob" => {
+                let pattern = params.pattern.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'pattern' is required for file.glob".to_string(),
+                    )
+                })?;
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
+                super::file_ops::handle_file_glob(
+                    &decision,
+                    &pattern,
+                    params.max_matches,
+                    &excludes,
+                    params.respect_gitignore.unwrap_or(true),
+                )
+                .await?
+            }
+            "file.search" => {
+                let pattern = params.pattern.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'pattern' is required for file.search".to_string(),
+                    )
+                })?;
+                let excludes = params.exclude_patterns.clone().unwrap_or_default();
+                super::file_ops::handle_file_search(
+                    &decision,
+                    &pattern,
+                    params.max_matches,
+                    params.max_scan_bytes,
+                    &excludes,
+                    params.context_before,
+                    params.context_after,
+                    params.case_insensitive.unwrap_or(false),
+                    params.glob.as_deref(),
+                    params.respect_gitignore.unwrap_or(true),
+                    &policy.denies,
+                )
+                .await?
+            }
+            "file.hash" => {
+                super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
+            }
+            "file.write" => {
+                let content = params.content_b64.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'content_b64' is required for file.write".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_write(
+                    &decision,
+                    content,
+                    params.base_sha256.as_deref(),
+                    params.allow_overwrite,
+                    params.create_parents.unwrap_or(false),
+                )
+                .await?
+            }
+            "file.edit" => {
+                let edits = params.edits.as_ref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'edits' is required for file.edit".to_string(),
+                    )
+                })?;
+                super::file_ops::handle_file_edit(&decision, params.base_sha256.as_deref(), edits)
+                    .await?
+            }
+            "file.mkdir" => {
+                super::file_ops::handle_file_mkdir(&decision, params.parents.unwrap_or(false))
+                    .await?
+            }
+            "file.move" => {
+                let to = params.to_path.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'to_path' is required for file.move".to_string(),
+                    )
+                })?;
+                let to_decision = policy
+                    .check(Path::new(to), cwd, FileOp::Move)
+                    .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+                super::file_ops::handle_file_move(
+                    &decision,
+                    &to_decision,
+                    params.base_sha256.as_deref(),
+                )
+                .await?
+            }
+            "file.delete" => {
+                super::file_ops::handle_file_delete(
+                    &decision,
+                    params.recursive.unwrap_or(false),
+                    params.if_match_sha256.as_deref(),
+                )
+                .await?
+            }
+            "file.apply_patch" => {
+                let patch_text = params.patch_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config(
+                        "[file.invalid_args] 'patch_text' is required for file.apply_patch"
+                            .to_string(),
+                    )
+                })?;
+                // Use the shared parser so the decision map always matches
+                // what handle_file_apply_patch will iterate over, including
+                // git-extended headers (diff --git, rename, copy, index,
+                // mode changes, binary markers).
+                let entries = super::file_ops::parse_patch(patch_text)?;
+                let mut decisions = std::collections::HashMap::new();
+                for entry in &entries {
+                    // Only content-bearing entries need a decision. The
+                    // handler itself will reject binary/rename/copy/mode
+                    // entries with an explicit error code, but we avoid
+                    // running policy.check on synthetic keys here.
+                    match entry.kind {
+                        super::file_ops::PatchKind::Modify
+                        | super::file_ops::PatchKind::Create
+                        | super::file_ops::PatchKind::Delete => {}
+                        _ => continue,
+                    }
+                    let key = entry.decision_key();
+                    if key.is_empty() || key == "/dev/null" {
+                        continue;
+                    }
+                    if decisions.contains_key(&key) {
+                        continue;
+                    }
+                    let d = policy
+                        .check(Path::new(&key), cwd, FileOp::ApplyPatch)
+                        .map_err(|err| BifrostError::Config(format!("[{}] {}", err.code(), err)))?;
+                    decisions.insert(key, d);
+                }
+                super::file_ops::handle_file_apply_patch(&decisions, patch_text).await?
+            }
+            _ => unreachable!(),
+        };
+
+        serde_json::to_string(&value)
+            .map_err(|e| BifrostError::Config(format!("serialize file op result: {}", e)))
+    }
+
     fn parse_and_validate_args(&self, command: &RemoteCommand) -> Result<CommandArgs> {
-        if command.kind == super::types::CommandKind::ShellExec {
+        if matches!(
+            command.kind,
+            super::types::CommandKind::ShellExec | super::types::CommandKind::File
+        ) {
             return Ok(CommandArgs::default());
         }
 
@@ -3982,5 +4338,96 @@ mod pr7b_policy_enforcement_tests {
             BifrostError::Config(msg) => assert!(msg.contains("from_offset=42000")),
             other => panic!("expected Config, got {other:?}"),
         }
+    }
+}
+
+/// First 16 hex chars of sha256(path). Empty input => "?".
+fn audit_path_hash(path: &str) -> String {
+    if path.is_empty() {
+        return "?".to_string();
+    }
+    use ring::digest::{Context, SHA256};
+    let mut ctx = Context::new(&SHA256);
+    ctx.update(path.as_bytes());
+    let digest = ctx.finish();
+    digest
+        .as_ref()
+        .iter()
+        .take(8)
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// Extract `[file.xxx]` error code from a BifrostError display string.
+/// Falls back to `"file.internal"`.
+fn extract_file_error_code(msg: &str) -> String {
+    if let Some(start) = msg.find("[file.") {
+        let rest = &msg[start + 1..];
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    "file.internal".to_string()
+}
+
+/// Pull `bytes_written` (u64) and `sha256` (string) from a handler's JSON
+/// result, if present. Both fields are optional across ops.
+fn extract_audit_fields(json: &str) -> (Option<u64>, Option<String>) {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let bytes = v
+        .get("bytes_written")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.get("size").and_then(|x| x.as_u64()))
+        .or_else(|| v.get("bytes").and_then(|x| x.as_u64()));
+    let sha = v
+        .get("sha256")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    (bytes, sha)
+}
+
+#[cfg(test)]
+mod audit_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn path_hash_is_stable_and_prefix() {
+        let a = audit_path_hash("/tmp/foo.txt");
+        let b = audit_path_hash("/tmp/foo.txt");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn path_hash_empty_marker() {
+        assert_eq!(audit_path_hash(""), "?");
+    }
+
+    #[test]
+    fn extracts_file_code() {
+        assert_eq!(
+            extract_file_error_code("[file.sha_mismatch] base does not match"),
+            "file.sha_mismatch"
+        );
+        assert_eq!(
+            extract_file_error_code("something wrapped: [file.permission_denied] grant"),
+            "file.permission_denied"
+        );
+        assert_eq!(extract_file_error_code("bare text"), "file.internal");
+    }
+
+    #[test]
+    fn extracts_audit_fields() {
+        let (b, s) = extract_audit_fields(r#"{"bytes_written":42,"sha256":"deadbeef"}"#);
+        assert_eq!(b, Some(42));
+        assert_eq!(s.as_deref(), Some("deadbeef"));
+        let (b, s) = extract_audit_fields("not json");
+        assert!(b.is_none() && s.is_none());
+        let (b, _) = extract_audit_fields(r#"{"size":7}"#);
+        assert_eq!(b, Some(7));
     }
 }

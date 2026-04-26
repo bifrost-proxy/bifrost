@@ -433,7 +433,9 @@ mod tests {
     use bifrost_command::{CanonicalQueryCommand, SearchArgs};
     use tempfile::TempDir;
 
-    use super::super::types::{AuthMethod, CommandKind, CommandSummary, RemoteCommand};
+    use super::super::types::{
+        AuthMethod, CommandKind, CommandSummary, FileAccessScope, RemoteCommand,
+    };
 
     fn make_call_info(call_id: &str) -> CallInfo {
         CallInfo {
@@ -465,6 +467,8 @@ mod tests {
                 timeout_ms: None,
                 pty: None,
                 output_mode: None,
+                file_access: FileAccessScope::default(),
+                grant_id: None,
             },
             source_ip: None,
             caller_display_name: Some("TestCaller".to_string()),

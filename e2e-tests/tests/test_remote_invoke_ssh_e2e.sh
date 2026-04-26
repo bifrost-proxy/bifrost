@@ -362,9 +362,10 @@ print(candidates[0].get("started_at") or 0 if candidates else 0)
 PY
 )"
 SEARCH_OUTPUT="$TMPDIR/search.out"
+SEARCH_STDERR="$TMPDIR/search.err"
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote search "$MARKER" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 10 \
-    >"$SEARCH_OUTPUT" 2>&1
+    >"$SEARCH_OUTPUT" 2>"$SEARCH_STDERR"
 grep -q "$MARKER" "$SEARCH_OUTPUT"
 SEARCH_CALLS_AFTER_JSON="$TMPDIR/search_calls_after.json"
 curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >"$SEARCH_CALLS_AFTER_JSON"
@@ -397,9 +398,17 @@ print(candidates[0].get("started_at") or 0 if candidates else 0)
 PY
 )"
 TRAFFIC_OUTPUT="$TMPDIR/traffic.out"
+TRAFFIC_STDERR="$TMPDIR/traffic.err"
+# Parse stdout as JSON; keep stderr (warn/info logs) in a sidecar file so the
+# JSON parser never sees stray log lines that would otherwise corrupt it.
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic get "$TRAFFIC_ID" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --response-body \
-    >"$TRAFFIC_OUTPUT" 2>&1
+    >"$TRAFFIC_OUTPUT" 2>"$TRAFFIC_STDERR"
+if [[ ! -s "$TRAFFIC_OUTPUT" ]]; then
+    echo "remote traffic get produced no stdout; stderr was:" >&2
+    cat "$TRAFFIC_STDERR" >&2 || true
+    exit 1
+fi
 python3 - "$TRAFFIC_OUTPUT" "$TRAFFIC_ID" "$MARKER" <<'PY'
 import json
 import sys

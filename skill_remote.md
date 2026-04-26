@@ -1,7 +1,7 @@
 ***
 
 name: "bifrost-remote"
-description: "通过 Bifrost Remote Invoke 实现远程设备控制能力：连接另一台电脑上的 Bifrost，指导目标终端安装/启动并开启系统代理，使用 SSH key 或配对码授权，查询远端状态/流量，并通过受 Shell Access policy 控制的 remote command exec 操作目标设备。"
+description: "通过 Bifrost Remote Invoke 实现远程设备控制与远程文件编程能力：连接另一台电脑上的 Bifrost，使用 SSH key 或配对码授权，查询远端状态/流量、通过受 Shell Access policy 控制的 remote command exec 操作目标设备，以及使用受 FileAccessPolicy 约束的 remote file 子命令在远端仓库做 coding-agent 级文件读写/搜索/原子编辑/批量 patch（支持 .gitignore 感知、base64 传输、sha256 乐观锁）。常见触发表述：连接/操作另一台电脑的 bifrost、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、对目标设备文件做读写/patch/grep。"
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Bifrost Remote
@@ -19,6 +19,10 @@ description: "通过 Bifrost Remote Invoke 实现远程设备控制能力：连�
 - 查询远端 Bifrost 状态、流量列表、流量详情或搜索结果。
 - 在远端执行受控 `shell.exec` 命令。
 - 解释授权、grant scope、Shell Access policy、SSH key revoke 等语义。
+- 在远端仓库做代码读写、搜索、重构、批量 patch（`bifrost remote file read/list/stat/glob/search/hash/write/edit/mkdir/mv/rm/apply-patch`）。
+- 让 coding agent（Claude Code / Cursor / Codex 等）把另一台机器的项目当成工作区：侦察目录、定位符号、带 sha256 乐观锁的原子 edit、多文件 apply-patch。
+- 通过 `--content-b64` / `--patch-b64` 在非交互或 Windows 环境传输二进制 / CRLF / 特殊字符内容，避免 stdin 管道翻车。
+- 用户表述中出现「远程改代码」「远端仓库」「另一台电脑的项目」「远程 grep / 搜索代码」「远程 edit / patch 文件」「远端 mkdir/write/rm」等时。
 
 以下场景需要先确认授权和执行路径：
 
@@ -401,3 +405,139 @@ Agent 使用本技能时，遵循以下原则：
 8. caller 侧需要管理目标设备时，优先使用 `remote command exec` 执行目标机命令，而不是误把本地 `remote shell` / `remote grant` 当成 relay-backed API。
 9. 不要承诺 OS 级 sandbox；描述为当前 Shell Access policy 的授权和限制能力。
 
+
+## 十、远程文件操作（coding agent 友好）
+
+Remote File API 是独立于 `remote_query` / `remote_shell_*` 的第三类能力，面向 Claude Code / Cursor / Codex 等 coding agent 设计。所有操作受目标端 `FileAccessPolicy` 约束，默认 `roots=[cwd]`，`denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]`，默认遵守最近 `.gitignore`。
+
+### 10.1 授权前置（必读）
+
+文件能力有专属 grant scope，**不**由 `query` / `selected` / `all` 的 UI access mode 自动授予。目标端用户在授权请求中需显式选择 File Access，并挑选只读或读写范围：
+
+| 能力面       | scope                | 覆盖子命令                                                  |
+| --------- | -------------------- | ------------------------------------------------------ |
+| 只读        | `remote_file_read`   | `read` / `list` / `stat` / `glob` / `search` / `hash`  |
+| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `mv` / `rm` / `apply-patch` |
+
+准备步骤：
+
+1. 目标端 Bifrost 已启动并通过 SSH key 或 pair code 与 caller 建立授权（参考第三、四节）。
+2. 目标端用户在 Remote Invoke 授权请求中勾选 File Access，并选择 read-only / read-write。
+3. caller 可直接使用 `bifrost remote file <cmd>`；若只拿到 `remote_file_read`，写类子命令会以 `file.permission_denied` 拒绝。
+4. 默认 policy 不够用时（如需要访问 roots 之外或被 denies 命中的路径），请用户在目标端本机更新 FileAccessPolicy，caller 侧不可绕过。
+
+### 10.2 子命令签名（来自 `bifrost remote file <cmd> -h`）
+
+```bash
+# —— 只读 ——
+bifrost remote file read   <path> [--max-bytes <N>] [--allow-binary] \
+                                   [--offset <line>] [--limit <lines>] \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file list   [path] [--depth <N>] [--no-ignore] \
+                                   [--exclude <name>]... \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file stat   <path> [--cwd <path>] [--output human|json]
+
+bifrost remote file glob   '<pattern>' [--max-matches <N>] [--no-ignore] \
+                                        [--exclude <name>]... \
+                                        [--cwd <path>] [--output human|json]
+
+bifrost remote file search '<regex>' [--path <sub>] [--max-matches <N>] \
+                                      [--max-scan <bytes>] \
+                                      [-B <n>] [-A <n>] \
+                                      [-i|--case-insensitive] \
+                                      [--glob '<pat>'] [--no-ignore] \
+                                      [--exclude <name>]... \
+                                      [--cwd <path>] [--output human|json]
+
+bifrost remote file hash   <path> [--algo sha256] \
+                                   [--cwd <path>] [--output human|json]
+
+# —— 读写 ——
+bifrost remote file write  <path> [--content-file <local|->] \
+                                   [--content-b64 <base64>] \
+                                   [--base-sha256 <sha>] \
+                                   [--allow-overwrite true|false] \
+                                   [--create-parents] \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file edit   <path> --edits '<json-array>' \
+                                   [--base-sha256 <sha>] \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file mkdir  <path> [--parents] \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file mv     <from> <to> [--cwd <path>] [--output human|json]
+
+bifrost remote file rm     <path> [--recursive] \
+                                   [--cwd <path>] [--output human|json]
+
+bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <base64>) \
+                                   [--cwd <path>] [--output human|json]
+```
+
+所有子命令还共享 `--relay-url <url>`、`--client-id <prefix>`（多连接场景选择目标客户端）。
+
+### 10.3 Agent 行为要点
+
+- **gitignore 默认打开**：`list` / `glob` / `search` 默认跳过 `.gitignore` 命中路径；Agent 要扫被忽略文件时显式加 `--no-ignore`。
+- **truncated 语义**：`list` / `glob` / `search` / `read` 在超过上限时响应含 `"truncated": true`，Agent 应据此分片重试（如 `--offset` + `--limit`、或收窄 `--path` / `--glob`）。
+- **`read` 的整文件 sha256**：当 `truncated=true`，响应额外带 `file_sha256`（整文件哈希，不是截断片段的），Agent 据此做 resume 或乐观锁一致性校验。
+- **Symlink lstat 语义**：`stat` / `list` 不跟随软链，返回 `symlink_target`；Windows 自动去 `\\?\` / `\\?\UNC\` 前缀，跨平台一致。
+- **原子写**：`write` / `edit` 采用 tmp + rename 两阶段提交，失败自动快照回滚。
+- **乐观锁 / sha_mismatch**：`write` / `edit` 传 `--base-sha256` 时，若文件已被修改，返回错误码 `[file.sha_mismatch]`；Agent 应重新 `read` 再重试，不要盲目覆盖。
+- **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
+- **base64 传输**：`--content-b64` / `--patch-b64` 由 caller 本地 base64、admin 侧解码；比 stdin 管道更适合二进制或含 CRLF/特殊字符内容、以及非交互/Windows 环境。
+- **`--create-parents`**：`write` 自带 `mkdir -p`，省去两次往返。
+- **搜索收窄**：`search` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 在同一次正则扫描里按文件名过滤。
+
+### 10.4 错误码契约
+
+Agent 应按以下错误码做分支：
+
+| 错误码                        | 含义                        | 应对                                   |
+| -------------------------- | ------------------------- | ------------------------------------ |
+| `file.out_of_scope`        | 路径在 `roots` 之外            | 不要自动改 `--cwd`；请用户确认                  |
+| `file.permission_denied`   | 命中 denies 或缺少 write scope | 放弃写入或改走只读流程                         |
+| `file.binary_not_allowed`  | 二进制且未传 `--allow-binary`   | 加 `--allow-binary` 或用 `hash` + 分片下载 |
+| `file.sha_mismatch`        | 乐观锁失败，文件已被改               | 重新 `read` + 重算 sha + 重试             |
+| `file.not_found`           | 路径不存在                     | 视任务决定 `mkdir` / `write`              |
+| `file.is_a_directory` / `file.not_a_directory` | 类型不匹配    | 切换子命令                              |
+
+### 10.5 典型调用链（coding agent workflow）
+
+```bash
+# 1. 侦察目标仓库
+bifrost remote file list src --depth 2 --output json
+bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
+
+# 2. 精准定位符号
+bifrost remote file search 'fn handle_file_\w+' --path src --glob '*.rs' \
+  -B 2 -A 2 --output json
+
+# 3. 读取目标文件，记录 sha256
+bifrost remote file read src/lib.rs --output json    # 返回体含 sha256
+
+# 4. 带乐观锁的行级 edit
+bifrost remote file edit src/lib.rs \
+  --base-sha256 <sha> \
+  --edits '[{"start_line":10,"end_line":12,"replacement":"// new\n"}]' \
+  --output json
+
+# 5. base64 直写（推荐用于二进制或含特殊字符文本）
+bifrost remote file write docs/notes.md \
+  --content-b64 "$(base64 < ./local-notes.md)" \
+  --create-parents --output json
+
+# 6. 多文件原子 patch
+bifrost remote file apply-patch --patch-file ./refactor.diff --output json
+```
+
+### 10.6 与 `remote command exec` 的边界
+
+- 文件读/写/编辑/删/改名：**优先** `remote file` 子命令 —— 语义明确、受 FileAccessPolicy 管控、有原子写和乐观锁、不污染 Shell Access audit。
+- 执行业务命令（构建、测试、部署脚本）：用 `remote command exec`（受 Shell Access policy）。
+- 当前 `remote file` 不覆盖的场景（如 `chmod` / `chown` / `ln -s` / `find -exec`）可以通过已授权的 `remote command exec` 完成。

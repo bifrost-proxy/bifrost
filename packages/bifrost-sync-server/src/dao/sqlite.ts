@@ -460,7 +460,7 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, file_access, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       g.id,
       g.user_id,
@@ -471,6 +471,7 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
       g.client_ephemeral_pub ?? '',
       g.grant_mode,
       g.grant_scope,
+      g.file_access ?? 'none',
       g.ssh_key_id ?? '',
       g.ssh_key_fingerprint ?? '',
       g.status,
@@ -818,6 +819,7 @@ export class SqliteStorage implements IStorage {
         client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         grant_mode            TEXT NOT NULL DEFAULT 'once',
         grant_scope           TEXT NOT NULL DEFAULT 'remote_query',
+        file_access           TEXT NOT NULL DEFAULT 'none',
         ssh_key_id            TEXT NOT NULL DEFAULT '',
         ssh_key_fingerprint   TEXT NOT NULL DEFAULT '',
         status                TEXT NOT NULL DEFAULT 'active',
@@ -887,6 +889,7 @@ export class SqliteStorage implements IStorage {
     const required = [
       'ssh_key_id',
       'ssh_key_fingerprint',
+      'file_access',
     ];
     const forbidden = [
       'policy_binding',

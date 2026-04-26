@@ -1,6 +1,8 @@
 pub mod call_history_store;
 pub mod config;
 pub mod executor;
+pub mod file_ops;
+pub mod file_policy_store;
 pub mod grant_crypto_store;
 pub mod grant_info_store;
 pub mod grant_policy_store;

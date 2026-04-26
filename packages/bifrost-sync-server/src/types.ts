@@ -160,7 +160,8 @@ export type GrantStatus = 'active' | 'expired' | 'revoked' | 'consumed' | 'remov
 export type CallStatus = 'pending' | 'authorized' | 'key_exchanged' | 'streaming' | 'completed' | 'failed' | 'cancelled' | 'timeout';
 export type PairingStatus = 'created' | 'code_verified' | 'pending_approval' | 'approved' | 'rejected' | 'expired' | 'cancelled';
 export type RemoteInvokeGrantScope = 'remote_query' | 'remote_shell_exec' | 'remote_shell_interactive';
-export type RemoteCommandKind = 'query.readonly' | 'shell.exec';
+export type FileAccessScope = 'none' | 'read' | 'read_write';
+export type RemoteCommandKind = 'query.readonly' | 'shell.exec' | 'file';
 
 export interface RemoteInvokeConfig {
   enabled: boolean;
@@ -245,6 +246,7 @@ export interface RemoteInvokeGrant {
   client_ephemeral_pub?: string;
   grant_mode: GrantMode;
   grant_scope: RemoteInvokeGrantScope;
+  file_access?: FileAccessScope;
   ssh_key_id?: string;
   ssh_key_fingerprint?: string;
   status: GrantStatus;

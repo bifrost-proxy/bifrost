@@ -32,13 +32,14 @@ use super::stream_emit;
 use super::types::{
     build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
     derive_open_call_session_key, encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms,
-    AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
-    ClientCallStreamFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
-    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
-    EncryptedPayload, EnvelopeAad, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo,
-    GrantMode, GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
-    RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
-    UpdateGrantRequest, WorkerState,
+    scope_allows_command, AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest,
+    ClientCallFrameRequest, ClientCallStreamFrameRequest, ClientHeartbeatRequest,
+    ClientRegistrationChallengeRequest, ClientRegistrationRequest, CommandKind, CommandSummary,
+    DiscoverySession, EncryptedEnvelope, EncryptedPayload, EnvelopeAad, FileAccessScope,
+    FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode, GrantScope,
+    GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig,
+    SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest,
+    WorkerState,
 };
 use crate::state::SharedAdminState;
 
@@ -105,6 +106,7 @@ struct GrantCryptoMaterial {
 #[derive(Debug, Clone)]
 struct ShellGrantProvision {
     grant_scope: GrantScope,
+    file_access: FileAccessScope,
     policy_binding: Option<Value>,
     shell_policy_set_version_snapshot: Option<u64>,
     interactive_allowed: Option<bool>,
@@ -340,6 +342,10 @@ impl RemoteInvokeWorker {
 
     pub fn relay_client(&self) -> &Arc<RelayClient> {
         &self.relay_client
+    }
+
+    pub fn executor(&self) -> &Arc<RemoteInvokeExecutor> {
+        &self.executor
     }
 
     pub fn update_relay_url(&self, new_url: &str) {
@@ -599,11 +605,13 @@ impl RemoteInvokeWorker {
         Ok(Some(session))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn approve_pairing(
         &self,
         pairing_id: &str,
         grant_mode: GrantMode,
         requested_grant_scope: Option<GrantScope>,
+        requested_file_access: Option<FileAccessScope>,
         requested_policy_binding: Option<Value>,
         requested_interactive_allowed: Option<bool>,
         requested_stdin_allowed: Option<bool>,
@@ -635,13 +643,16 @@ impl RemoteInvokeWorker {
         let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
         let shell_grant = shell_grant_provision(
             requested_grant_scope,
+            requested_file_access,
             requested_policy_binding,
             requested_interactive_allowed,
             requested_stdin_allowed,
         )
         .unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed, fallback to remote_query");
-            default_query_grant_provision()
+            let mut provision = default_query_grant_provision();
+            provision.file_access = requested_file_access.unwrap_or_default();
+            provision
         });
 
         let req = GrantDecisionRequest {
@@ -650,6 +661,7 @@ impl RemoteInvokeWorker {
             decision: GrantDecision::Approve,
             grant_mode: Some(grant_mode),
             grant_scope: Some(shell_grant.grant_scope),
+            file_access: Some(shell_grant.file_access),
             client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
         };
 
@@ -719,6 +731,7 @@ impl RemoteInvokeWorker {
                 caller_display_name,
                 grant_mode,
                 grant_scope: shell_grant.grant_scope,
+                file_access: shell_grant.file_access,
                 auth_method: AuthMethod::PairCode,
                 status: GrantStatus::Active,
                 first_authorized_at: now,
@@ -745,11 +758,13 @@ impl RemoteInvokeWorker {
             };
             self.local_grants
                 .write()
-                .insert(grant_id.clone(), grant_info);
+                .insert(grant_id.clone(), grant_info.clone());
+            self.persist_grant_info(&grant_id, &grant_info);
             self.persist_grant_policy(
                 &grant_id,
                 &StoredGrantPolicy {
                     grant_scope: shell_grant.grant_scope,
+                    file_access: shell_grant.file_access,
                     policy_binding: shell_grant.policy_binding.clone(),
                     shell_policy_set_version_snapshot: shell_grant
                         .shell_policy_set_version_snapshot,
@@ -789,6 +804,7 @@ impl RemoteInvokeWorker {
             decision: GrantDecision::Reject,
             grant_mode: None,
             grant_scope: None,
+            file_access: None,
             client_ephemeral_pub: None,
         };
 
@@ -1405,6 +1421,7 @@ impl RemoteInvokeWorker {
         &self,
         grant_id: &str,
         requested_grant_scope: Option<GrantScope>,
+        requested_file_access: Option<FileAccessScope>,
         requested_policy_binding: Option<Value>,
         requested_interactive_allowed: Option<bool>,
         requested_stdin_allowed: Option<bool>,
@@ -1419,6 +1436,7 @@ impl RemoteInvokeWorker {
         let updated_shell_grant = updated_shell_grant_provision(
             &existing,
             requested_grant_scope,
+            requested_file_access,
             requested_policy_binding,
             requested_interactive_allowed,
             requested_stdin_allowed,
@@ -1427,6 +1445,7 @@ impl RemoteInvokeWorker {
         let req = UpdateGrantRequest {
             client_instance_id: self.identity.instance_id.clone(),
             grant_scope: Some(updated_shell_grant.grant_scope),
+            file_access: Some(updated_shell_grant.file_access),
         };
 
         let result = self.relay_client.update_grant(grant_id, &req).await?;
@@ -1442,6 +1461,7 @@ impl RemoteInvokeWorker {
             caller_display_name: existing.caller_display_name.clone(),
             grant_mode: existing.grant_mode,
             grant_scope: updated_shell_grant.grant_scope,
+            file_access: updated_shell_grant.file_access,
             auth_method: existing.auth_method,
             status: existing.status,
             first_authorized_at: existing.first_authorized_at,
@@ -1460,6 +1480,7 @@ impl RemoteInvokeWorker {
             stdin_allowed: updated_shell_grant.stdin_allowed,
         });
         updated_info.policy_binding = updated_shell_grant.policy_binding.clone();
+        updated_info.file_access = updated_shell_grant.file_access;
         updated_info.shell_policy_set_version_snapshot =
             updated_shell_grant.shell_policy_set_version_snapshot;
         updated_info.interactive_allowed = updated_shell_grant.interactive_allowed;
@@ -1472,6 +1493,7 @@ impl RemoteInvokeWorker {
             grant_id,
             &StoredGrantPolicy {
                 grant_scope: updated_shell_grant.grant_scope,
+                file_access: updated_shell_grant.file_access,
                 policy_binding: updated_shell_grant.policy_binding.clone(),
                 shell_policy_set_version_snapshot: updated_shell_grant
                     .shell_policy_set_version_snapshot,
@@ -1750,6 +1772,7 @@ impl RemoteInvokeWorker {
                 caller_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
+                file_access: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
             };
@@ -1767,6 +1790,7 @@ impl RemoteInvokeWorker {
                     caller_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
+                    file_access: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
                 };
@@ -1782,6 +1806,7 @@ impl RemoteInvokeWorker {
                     caller_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
+                    file_access: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
                 };
@@ -1798,6 +1823,7 @@ impl RemoteInvokeWorker {
                 caller_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
+                file_access: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
             };
@@ -1813,6 +1839,7 @@ impl RemoteInvokeWorker {
                 caller_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
+                file_access: None,
                 caller_ephemeral_pub: None,
                 client_ephemeral_pub: None,
             };
@@ -1833,6 +1860,7 @@ impl RemoteInvokeWorker {
                         caller_fingerprint: None,
                         grant_mode: None,
                         grant_scope: None,
+                        file_access: None,
                         caller_ephemeral_pub: None,
                         client_ephemeral_pub: None,
                     };
@@ -1851,6 +1879,7 @@ impl RemoteInvokeWorker {
                     caller_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
+                    file_access: None,
                     caller_ephemeral_pub: None,
                     client_ephemeral_pub: None,
                 };
@@ -1859,7 +1888,7 @@ impl RemoteInvokeWorker {
         let grant_id = uuid::Uuid::new_v4().to_string();
         let grant_mode = GrantMode::Permanent;
         let expires_at = None;
-        let shell_grant = shell_grant_provision(None, None, None, None).unwrap_or_else(|error| {
+        let shell_grant = shell_grant_provision(None, None, None, None, None).unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed for ssh connect, fallback to remote_query");
             default_query_grant_provision()
         });
@@ -1874,6 +1903,7 @@ impl RemoteInvokeWorker {
                 .and_then(|info| info.display_name.clone().or_else(|| info.hostname.clone())),
             grant_mode,
             grant_scope: shell_grant.grant_scope,
+            file_access: shell_grant.file_access,
             auth_method: AuthMethod::SshPublickey,
             status: GrantStatus::Active,
             first_authorized_at: now,
@@ -1897,6 +1927,7 @@ impl RemoteInvokeWorker {
             &grant_id,
             &StoredGrantPolicy {
                 grant_scope: shell_grant.grant_scope,
+                file_access: shell_grant.file_access,
                 policy_binding: shell_grant.policy_binding.clone(),
                 shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
                 interactive_allowed: shell_grant.interactive_allowed,
@@ -1924,6 +1955,7 @@ impl RemoteInvokeWorker {
             caller_fingerprint: Some(active_key.record.ssh_key_fingerprint),
             grant_mode: Some(grant_mode),
             grant_scope: Some(shell_grant.grant_scope),
+            file_access: Some(shell_grant.file_access),
             caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub),
             client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub),
         }
@@ -2070,6 +2102,7 @@ impl RemoteInvokeWorker {
                     caller_display_name: None,
                     grant_mode: GrantMode::Permanent,
                     grant_scope: GrantScope::RemoteQuery,
+                    file_access: Default::default(),
                     auth_method: AuthMethod::PairCode,
                     status: GrantStatus::Active,
                     first_authorized_at: now_millis(),
@@ -2128,11 +2161,11 @@ impl RemoteInvokeWorker {
             "grant validated for call_open"
         );
 
-        let grant_scope = self
+        let (grant_scope, file_access) = self
             .local_grants
             .read()
             .get(&grant_id)
-            .map(|grant| grant.grant_scope)
+            .map(|grant| (grant.grant_scope, grant.file_access))
             .unwrap_or_default();
 
         let transport_command_kind = data
@@ -2174,10 +2207,10 @@ impl RemoteInvokeWorker {
 
         let command_kind = transport_command_kind;
 
-        if !grant_scope.allows_command(command_kind) {
+        if !scope_allows_command(grant_scope, file_access, command_kind) {
             let reason = format!(
-                "grant scope {:?} does not allow command kind {:?}",
-                grant_scope, command_kind
+                "grant scope {:?} / file_access {:?} does not allow command kind {:?}",
+                grant_scope, file_access, command_kind
             );
             warn!(
                 call_id = %call_id,
@@ -2241,6 +2274,8 @@ impl RemoteInvokeWorker {
                 .await;
             return;
         }
+        command.grant_id = Some(grant_id.clone());
+        command.file_access = file_access;
 
         if let Some(query) = &command.query {
             if command_kind == CommandKind::QueryReadonly
@@ -2332,6 +2367,8 @@ impl RemoteInvokeWorker {
                     timeout_ms: command.timeout_ms,
                     pty: command.pty.clone(),
                     output_mode: command.output_mode,
+                    grant_id: None,
+                    file_access: Default::default(),
                 },
                 source_ip: None,
                 caller_display_name,
@@ -3140,6 +3177,7 @@ fn has_usable_grant_crypto(
 fn default_query_grant_provision() -> ShellGrantProvision {
     ShellGrantProvision {
         grant_scope: GrantScope::RemoteQuery,
+        file_access: FileAccessScope::None,
         policy_binding: None,
         shell_policy_set_version_snapshot: None,
         interactive_allowed: None,
@@ -3149,20 +3187,34 @@ fn default_query_grant_provision() -> ShellGrantProvision {
 
 fn shell_grant_provision(
     requested_grant_scope: Option<GrantScope>,
+    requested_file_access: Option<FileAccessScope>,
     requested_policy_binding: Option<Value>,
     requested_interactive_allowed: Option<bool>,
     requested_stdin_allowed: Option<bool>,
 ) -> Result<ShellGrantProvision> {
+    let grant_scope = requested_grant_scope.unwrap_or(GrantScope::RemoteShellExec);
+    // 层级模型：Shell 自动包含 File(read_write) + Query，File 包含 Query
+    let file_access = requested_file_access.unwrap_or(match grant_scope {
+        GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => {
+            FileAccessScope::ReadWrite
+        }
+        GrantScope::RemoteQuery => FileAccessScope::None,
+    });
+
     let store = RemoteShellStore::new()?;
     let set = store.load()?;
     let has_enabled_policy = set.policies.iter().any(|policy| policy.enabled);
     if !has_enabled_policy {
-        return Ok(default_query_grant_provision());
+        // 无 shell policy 降级为 query，file_access 也应按 query 层级决定
+        let mut provision = default_query_grant_provision();
+        provision.file_access = requested_file_access.unwrap_or(FileAccessScope::None);
+        return Ok(provision);
     }
 
-    let grant_scope = requested_grant_scope.unwrap_or(GrantScope::RemoteShellExec);
     if grant_scope == GrantScope::RemoteQuery {
-        return Ok(default_query_grant_provision());
+        let mut provision = default_query_grant_provision();
+        provision.file_access = file_access;
+        return Ok(provision);
     }
 
     let policy_binding = normalize_shell_policy_binding(&set, requested_policy_binding)?;
@@ -3175,6 +3227,7 @@ fn shell_grant_provision(
 
     Ok(ShellGrantProvision {
         grant_scope,
+        file_access,
         policy_binding: Some(policy_binding),
         shell_policy_set_version_snapshot: Some(set.current_version()),
         interactive_allowed: Some(interactive_allowed),
@@ -3185,13 +3238,23 @@ fn shell_grant_provision(
 fn updated_shell_grant_provision(
     existing: &GrantInfo,
     requested_grant_scope: Option<GrantScope>,
+    requested_file_access: Option<FileAccessScope>,
     requested_policy_binding: Option<Value>,
     requested_interactive_allowed: Option<bool>,
     requested_stdin_allowed: Option<bool>,
 ) -> Result<ShellGrantProvision> {
     let desired_scope = requested_grant_scope.unwrap_or(existing.grant_scope);
+    // 层级模型：shell scope 自动包含 file read_write
+    let file_access = requested_file_access.unwrap_or(match desired_scope {
+        GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => {
+            FileAccessScope::ReadWrite
+        }
+        GrantScope::RemoteQuery => existing.file_access,
+    });
     if desired_scope == GrantScope::RemoteQuery {
-        return Ok(default_query_grant_provision());
+        let mut provision = default_query_grant_provision();
+        provision.file_access = file_access;
+        return Ok(provision);
     }
 
     let store = RemoteShellStore::new()?;
@@ -3216,6 +3279,7 @@ fn updated_shell_grant_provision(
 
     Ok(ShellGrantProvision {
         grant_scope: desired_scope,
+        file_access,
         policy_binding: Some(policy_binding),
         shell_policy_set_version_snapshot: Some(set.current_version()),
         interactive_allowed: Some(interactive_allowed),
@@ -3413,6 +3477,10 @@ fn build_grant_info_from_grant_created(
             .get("grant_scope")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
+        file_access: data
+            .get("file_access")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         auth_method,
         status: GrantStatus::Active,
         first_authorized_at: authorized_at,
@@ -3453,6 +3521,7 @@ fn apply_stored_grant_policy(
 ) -> GrantInfo {
     if let Some(stored) = stored {
         grant.grant_scope = stored.grant_scope;
+        grant.file_access = stored.file_access;
         grant.policy_binding = stored.policy_binding.clone();
         grant.shell_policy_set_version_snapshot = stored.shell_policy_set_version_snapshot;
         grant.interactive_allowed = stored.interactive_allowed;
@@ -3480,6 +3549,7 @@ mod tests {
             caller_display_name: None,
             grant_mode: mode,
             grant_scope: GrantScope::RemoteQuery,
+            file_access: Default::default(),
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
@@ -3736,9 +3806,11 @@ mod tests {
         let (_guard, _dir) = setup_remote_shell_store(7);
 
         let provision =
-            shell_grant_provision(None, None, None, None).expect("shell grant provision");
+            shell_grant_provision(None, None, None, None, None).expect("shell grant provision");
 
         assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        // Shell scope 层级模型：默认自动带 file_access read_write
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
         assert_eq!(provision.shell_policy_set_version_snapshot, Some(7));
         assert_eq!(
             provision
@@ -3756,6 +3828,7 @@ mod tests {
 
         let provision = shell_grant_provision(
             Some(GrantScope::RemoteShellExec),
+            None,
             Some(serde_json::json!({
                 "mode": "selected",
                 "policy_ids": ["echo-argv"],
@@ -3766,6 +3839,8 @@ mod tests {
         .expect("shell grant provision");
 
         assert_eq!(provision.grant_scope, GrantScope::RemoteShellExec);
+        // Shell scope 自动带 file_access read_write
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
         assert_eq!(provision.stdin_allowed, Some(true));
         assert_eq!(
             provision
@@ -3782,11 +3857,75 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_grant_provision_with_file_access_without_shell_policy() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("remote shell store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![],
+                profiles: vec![],
+            })
+            .expect("save empty remote shell store");
+
+        let provision =
+            shell_grant_provision(None, Some(FileAccessScope::ReadWrite), None, None, None)
+                .expect("file access should work without shell policy");
+
+        // No enabled shell policy => falls back to RemoteQuery for shell scope
+        assert_eq!(provision.grant_scope, GrantScope::RemoteQuery);
+        // But file_access is preserved
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
+        assert!(provision.policy_binding.is_none());
+        assert!(provision.shell_policy_set_version_snapshot.is_none());
+    }
+
+    #[test]
+    fn test_shell_grant_provision_with_file_access_and_shell_scope() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("remote shell store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![],
+                profiles: vec![],
+            })
+            .expect("save empty remote shell store");
+
+        // When no enabled shell policy, grant_scope falls back to RemoteQuery
+        // but file_access is preserved from the request.
+        let provision = shell_grant_provision(
+            Some(GrantScope::RemoteShellExec),
+            Some(FileAccessScope::ReadWrite),
+            None,
+            None,
+            None,
+        )
+        .expect("file access should work even without shell policy");
+
+        assert_eq!(provision.grant_scope, GrantScope::RemoteQuery);
+        assert_eq!(provision.file_access, FileAccessScope::ReadWrite);
+        assert!(provision.policy_binding.is_none());
+        assert!(provision.shell_policy_set_version_snapshot.is_none());
+    }
+
+    #[test]
     fn test_shell_grant_provision_rejects_unknown_selected_policy() {
         let (_guard, _dir) = setup_remote_shell_store(7);
 
         let error = shell_grant_provision(
             Some(GrantScope::RemoteShellExec),
+            None,
             Some(serde_json::json!({
                 "mode": "selected",
                 "policy_ids": ["missing-policy"],
@@ -3958,6 +4097,8 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -3991,6 +4132,8 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4023,6 +4166,8 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4057,6 +4202,8 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(
@@ -4098,6 +4245,8 @@ mod tests {
             timeout_ms: None,
             pty: None,
             output_mode: None,
+            grant_id: None,
+            file_access: Default::default(),
         };
 
         let summary = build_call_command_summary(None, &command, CommandKind::QueryReadonly);
@@ -4142,6 +4291,8 @@ mod tests {
                 timeout_ms: None,
                 pty: None,
                 output_mode: None,
+                grant_id: None,
+                file_access: Default::default(),
             },
             source_ip: None,
             caller_display_name: Some("TestCaller".to_string()),
@@ -4418,6 +4569,7 @@ mod tests {
             caller_display_name: None,
             grant_mode: GrantMode::Permanent,
             grant_scope: GrantScope::RemoteQuery,
+            file_access: Default::default(),
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,

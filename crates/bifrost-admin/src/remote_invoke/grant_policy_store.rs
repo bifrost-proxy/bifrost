@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use bifrost_core::{BifrostError, Result};
 
-use super::types::GrantScope;
+use super::types::{FileAccessScope, GrantScope};
 
 const GRANT_POLICY_STORE_FILE: &str = "remote_invoke_grant_policy.json";
 const GRANT_POLICY_STORE_VERSION: u32 = 1;
@@ -15,6 +15,8 @@ const GRANT_POLICY_STORE_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredGrantPolicy {
     pub grant_scope: GrantScope,
+    #[serde(default)]
+    pub file_access: FileAccessScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_binding: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

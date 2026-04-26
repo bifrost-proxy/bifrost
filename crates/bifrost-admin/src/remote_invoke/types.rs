@@ -56,15 +56,50 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
+    /// Check whether this shell-level scope allows the given command kind.
+    /// File commands are handled by [`FileAccessScope`] via [`scope_allows_command`].
     pub fn allows_command(self, kind: CommandKind) -> bool {
         matches!(
             (self, kind),
-            (Self::RemoteQuery, CommandKind::QueryReadonly)
-                | (Self::RemoteShellExec, CommandKind::QueryReadonly)
+            (_, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
-                | (Self::RemoteShellInteractive, CommandKind::QueryReadonly)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
         )
+    }
+}
+
+/// Independent file access level, orthogonal to [`GrantScope`].
+/// This allows shell and file permissions to coexist on the same grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FileAccessScope {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "read")]
+    Read,
+    #[serde(rename = "read_write")]
+    ReadWrite,
+}
+
+impl FileAccessScope {
+    /// Check whether this file access level allows the given command kind.
+    pub fn allows_command(self, kind: CommandKind) -> bool {
+        match kind {
+            CommandKind::File => matches!(self, Self::Read | Self::ReadWrite),
+            _ => false,
+        }
+    }
+}
+
+/// Combined permission check: grant_scope handles shell/query, file_access handles file.
+pub fn scope_allows_command(
+    grant_scope: GrantScope,
+    file_access: FileAccessScope,
+    kind: CommandKind,
+) -> bool {
+    match kind {
+        CommandKind::File => file_access.allows_command(kind),
+        _ => grant_scope.allows_command(kind),
     }
 }
 
@@ -75,6 +110,8 @@ pub enum CommandKind {
     QueryReadonly,
     #[serde(rename = "shell.exec")]
     ShellExec,
+    #[serde(rename = "file")]
+    File,
 }
 
 impl CommandKind {
@@ -82,6 +119,7 @@ impl CommandKind {
         match self {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
+            Self::File => "file",
         }
     }
 }
@@ -310,6 +348,12 @@ pub struct RemoteCommand {
     pub pty: Option<RemotePtyRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_mode: Option<OutputMode>,
+    #[serde(skip)]
+    pub grant_id: Option<String>,
+    /// The grant's file_access scope, injected by the worker before execution.
+    /// Used by the executor to reject write ops when the grant only allows read.
+    #[serde(skip)]
+    pub file_access: FileAccessScope,
 }
 
 impl RemoteCommand {
@@ -325,6 +369,7 @@ impl RemoteCommand {
         match self.kind {
             CommandKind::QueryReadonly => "query.readonly",
             CommandKind::ShellExec => "shell.exec",
+            CommandKind::File => "file",
         }
     }
 
@@ -746,6 +791,8 @@ pub enum ClientSseEvent {
         grant_mode: GrantMode,
         #[serde(default)]
         grant_scope: GrantScope,
+        #[serde(default)]
+        file_access: FileAccessScope,
         #[serde(skip_serializing_if = "Option::is_none")]
         policy_binding: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -820,6 +867,8 @@ pub struct GrantInfo {
     pub grant_mode: GrantMode,
     #[serde(default)]
     pub grant_scope: GrantScope,
+    #[serde(default)]
+    pub file_access: FileAccessScope,
     #[serde(default = "default_auth_method")]
     pub auth_method: AuthMethod,
     pub status: GrantStatus,
@@ -1000,6 +1049,8 @@ pub struct GrantDecisionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_scope: Option<GrantScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_access: Option<FileAccessScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ephemeral_pub: Option<String>,
 }
 
@@ -1008,6 +1059,8 @@ pub struct UpdateGrantRequest {
     pub client_instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_scope: Option<GrantScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_access: Option<FileAccessScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1090,6 +1143,8 @@ pub struct SshConnectResultRequest {
     pub grant_mode: Option<GrantMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_scope: Option<GrantScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_access: Option<FileAccessScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_ephemeral_pub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1209,6 +1264,83 @@ mod tests {
             "remote_invoke".to_string(),
         ));
         assert!(scope.is_err());
+    }
+
+    #[test]
+    fn test_file_access_scope_allows_file_commands() {
+        // FileAccessScope::None blocks file commands
+        assert!(!FileAccessScope::None.allows_command(CommandKind::File));
+        // FileAccessScope::Read allows file commands
+        assert!(FileAccessScope::Read.allows_command(CommandKind::File));
+        // FileAccessScope::ReadWrite allows file commands
+        assert!(FileAccessScope::ReadWrite.allows_command(CommandKind::File));
+        // File access does not affect non-file commands
+        assert!(!FileAccessScope::ReadWrite.allows_command(CommandKind::ShellExec));
+        assert!(!FileAccessScope::ReadWrite.allows_command(CommandKind::QueryReadonly));
+    }
+
+    #[test]
+    fn test_grant_scope_allows_query_for_all_levels() {
+        assert!(GrantScope::RemoteQuery.allows_command(CommandKind::QueryReadonly));
+        assert!(GrantScope::RemoteShellExec.allows_command(CommandKind::QueryReadonly));
+        assert!(GrantScope::RemoteShellInteractive.allows_command(CommandKind::QueryReadonly));
+    }
+
+    #[test]
+    fn test_grant_scope_does_not_allow_file_for_shell_scopes() {
+        // Shell scopes should NOT allow file commands (file_access handles that).
+        assert!(!GrantScope::RemoteQuery.allows_command(CommandKind::File));
+        assert!(!GrantScope::RemoteShellExec.allows_command(CommandKind::File));
+        assert!(!GrantScope::RemoteShellInteractive.allows_command(CommandKind::File));
+    }
+
+    #[test]
+    fn test_scope_allows_command_combined() {
+        // Shell interactive + file read_write = full access
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellInteractive,
+            FileAccessScope::ReadWrite,
+            CommandKind::QueryReadonly
+        ));
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellInteractive,
+            FileAccessScope::ReadWrite,
+            CommandKind::ShellExec
+        ));
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellInteractive,
+            FileAccessScope::ReadWrite,
+            CommandKind::File
+        ));
+
+        // Query only + no file = minimal access
+        assert!(scope_allows_command(
+            GrantScope::RemoteQuery,
+            FileAccessScope::None,
+            CommandKind::QueryReadonly
+        ));
+        assert!(!scope_allows_command(
+            GrantScope::RemoteQuery,
+            FileAccessScope::None,
+            CommandKind::ShellExec
+        ));
+        assert!(!scope_allows_command(
+            GrantScope::RemoteQuery,
+            FileAccessScope::None,
+            CommandKind::File
+        ));
+
+        // Shell exec + file read = shell + read-only file
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellExec,
+            FileAccessScope::Read,
+            CommandKind::File
+        ));
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellExec,
+            FileAccessScope::Read,
+            CommandKind::ShellExec
+        ));
     }
 
     #[test]

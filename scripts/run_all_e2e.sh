@@ -37,6 +37,8 @@ STABLE_SHELL_TESTS=(
   "test_tls_intercept_mode_api.sh"
   "test_bifrost_file_syntax_admin_api.sh"
   "test_multiline_rule_filter_e2e.sh"
+  "test_remote_file_api_e2e.sh"
+  "test_remote_file_relay_e2e.sh"
 )
 
 header() {

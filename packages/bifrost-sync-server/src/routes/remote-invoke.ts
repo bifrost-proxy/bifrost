@@ -583,6 +583,7 @@ async function handleGrantDecision(
       decision: body.decision,
       grant_mode: body.grant_mode,
       grant_scope: body.grant_scope,
+      file_access: body.file_access,
       client_ephemeral_pub: body.client_ephemeral_pub,
     });
     sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
@@ -765,6 +766,7 @@ async function handleUpdateGrantByClient(
   try {
     const grant = await service.updateGrantByClient(clientId, grantId, {
       grant_scope: body?.grant_scope,
+      file_access: body?.file_access,
     });
     sendJson(ctx.res, 200, { code: 0, message: 'ok', data: toGrantApi(grant) });
   } catch (e: unknown) {
@@ -870,6 +872,7 @@ function toGrantApi(g: RemoteInvokeGrant) {
     use_count: g.max_calls - g.remaining_calls,
     ssh_key_id: g.ssh_key_id || null,
     ssh_key_fingerprint: g.ssh_key_fingerprint || null,
+    file_access: g.file_access || 'none',
   };
 }
 
