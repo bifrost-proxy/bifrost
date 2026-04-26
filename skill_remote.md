@@ -1,543 +1,361 @@
-***
+---
 
 name: "bifrost-remote"
-description: "通过 Bifrost Remote Invoke 实现远程设备控制与远程文件编程能力：连接另一台电脑上的 Bifrost，使用 SSH key 或配对码授权，查询远端状态/流量、通过受 Shell Access policy 控制的 remote command exec 操作目标设备，以及使用受 FileAccessPolicy 约束的 remote file 子命令在远端仓库做 coding-agent 级文件读写/搜索/原子编辑/批量 patch（支持 .gitignore 感知、base64 传输、sha256 乐观锁）。常见触发表述：连接/操作另一台电脑的 bifrost、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、对目标设备文件做读写/patch/grep。"
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接、状态/流量查询、shell 命令执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/search/read/write/edit/patch。重要：修改远端文件必须优先使用 bifrost remote file 子命令，禁止用 shell + base64 + cat/echo 的方式改代码。"
+
+---
 
 # Bifrost Remote
 
-该技能用于指导用户和 Agent 通过 `bifrost remote` 与目标终端上的 Bifrost 建立 Remote Invoke 连接。Remote command 的目标是在用户明确授权后，让 Agent 可以操作另一台设备；能力边界来自目标终端的授权、Shell Access policy 和当前 CLI 已实现的 relay-backed 子命令。
+本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成三类操作：**远端查询**（status / traffic / search）、**远端 shell 执行**（shell.exec）、**远端文件编程**（`remote file` 子命令，coding-agent 友好）。
 
-## 适用场景
+> **CLI 命名空间约定（重要）**
+>
+> - `bifrost remote ...` — 所有子命令都在**已连接的远端设备**上执行（relay-backed）。
+> - `bifrost setting ...` — 在**当前本机**上管理 Shell Access policy / 本地 grant。
+>
+> 旧写法 `bifrost remote shell` / `bifrost remote grant` 已被标记为 deprecated（仍可用，一次 release cycle 内会被移除），请统一切换到 `bifrost setting shell` / `bifrost setting grant`。
+> 关键判断：看这个命令是否改变远端状态。改**本机配置**一律走 `bifrost setting`。
 
-当用户有以下需求时，应优先使用本技能：
+---
 
-- 让 Agent 连接另一台机器上的 Bifrost。
-- 指导用户在目标终端安装 Bifrost 并准备 Remote Invoke。
-- 使用 SSH key 建立长期可复用连接。
-- 首次通过 6 位配对码建立连接。
-- 查询远端 Bifrost 状态、流量列表、流量详情或搜索结果。
-- 在远端执行受控 `shell.exec` 命令。
-- 解释授权、grant scope、Shell Access policy、SSH key revoke 等语义。
-- 在远端仓库做代码读写、搜索、重构、批量 patch（`bifrost remote file read/list/stat/glob/search/hash/write/edit/mkdir/mv/rm/apply-patch`）。
-- 让 coding agent（Claude Code / Cursor / Codex 等）把另一台机器的项目当成工作区：侦察目录、定位符号、带 sha256 乐观锁的原子 edit、多文件 apply-patch。
-- 通过 `--content-b64` / `--patch-b64` 在非交互或 Windows 环境传输二进制 / CRLF / 特殊字符内容，避免 stdin 管道翻车。
-- 用户表述中出现「远程改代码」「远端仓库」「另一台电脑的项目」「远程 grep / 搜索代码」「远程 edit / patch 文件」「远端 mkdir/write/rm」等时。
+## 黄金法则：修改远端文件用 `remote file`，不要用 `remote command exec + base64`
 
-以下场景需要先确认授权和执行路径：
+这是本技能的第一原则。Agent 经常会踩这个坑——用 `remote command exec --shell-text "echo '$B64' | base64 -d > /path/to/file.rs"` 去改代码，这种做法有 6 个已知缺陷：
 
-- 需要操作目标设备文件、配置、规则、脚本、证书或系统代理时，优先通过已授权的 `bifrost remote command exec ...` 在目标终端执行对应命令。
-- 目标终端未配置匹配的 Shell Access policy 时，引导用户在目标终端本机或 Web UI 中放行对应 policy。
-- 不要绕过目标终端 Web UI 或 SSH key 授权。
-- 如果出现 BEGIN BIFROST KEY 消息表示需要连接远端 bifrost
+1. 没有原子写，失败后留下半文件。
+2. 没有乐观锁，覆盖其他人并发修改时静默丢失。
+3. 要经过 Shell Access policy 审计，污染审计日志。
+4. 被目标端 `.gitignore` / FileAccessPolicy `denies` 命中时，shell 能写但违背用户预期。
+5. 跨平台 quoting 噩梦（Windows CRLF、特殊字符、`$` 展开）。
+6. 无法带 `base_sha256` 一致性校验，不适合多 agent 协作。
 
-## 一、目标终端如何安装 Bifrost
+**正确做法**：直接使用 `bifrost remote file` 子命令。它带原子 tmp+rename、sha256 乐观锁、gitignore 感知、错误码契约、binary/text 自动识别、CRLF 保留、base64 传输等全部能力，由服务端实现而非客户端拼 shell。
 
-优先在目标终端检查 `bifrost` 是否已存在：
+下面是 Agent 在各种"改远端文件"任务下应该选的子命令：
+
+| Agent 的意图 | 选哪个命令 | 不要这么做 |
+|---|---|---|
+| 看一下远端某文件 | `remote file read <path>` | `remote command exec --shell-text "cat <path>"` |
+| 列目录树、找文件名 | `remote file list` / `remote file glob` | `shell-text "find ..." / "ls -R"` |
+| 正则搜代码、定位符号 | `remote file search <regex>` | `shell-text "grep -rn ..."` |
+| 写一个新文件 | `remote file write --content-file ./local.txt --create-parents` | `shell-text "echo ... > file"` |
+| 改已有文件的几行 | `remote file edit --base-sha256 <sha> --edits '[...]'` | `sed -i` / `echo`+重定向 |
+| 多文件统一 patch | `remote file apply-patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
+| 创建目录 | `remote file mkdir --parents` | `shell-text "mkdir -p ..."` |
+| 移动/删除 | `remote file mv` / `remote file rm --recursive` | `shell-text "mv" / "rm -rf"` |
+| 传输大文件 / 二进制 / 特殊字符 | `remote file write --content-b64 "$(base64 < ./blob.bin)"` | echo 管道 base64 |
+| 校验文件哈希 | `remote file hash <path> --algo sha256` | `shell-text "shasum ..."` |
+
+**只有下列场景才回落到 `remote command exec`**：
+- 跑测试 / 构建 / 启动脚本（`cargo test`、`npm run build`、`python app.py`）。
+- `chmod` / `chown` / `ln -s` / `git` 这种文件元信息或 VCS 操作（`remote file` 不覆盖）。
+- 需要 streaming 观察 stdout 的长任务。
+
+---
+
+## 一、适用场景
+
+触发本技能的典型表述：
+
+- 操作另一台电脑上的 bifrost：连接、查询状态/流量、远程执行命令。
+- 远程改代码、远端仓库重构、在远端机器上跑 coding agent。
+- 读远端文件、远程 grep、远程 glob、远程原子 edit、远程批量 patch。
+- 用户表述中出现「另一台电脑的项目」「远端文件」「远程 read/write/edit/search」。
+- 出现 `BEGIN BIFROST KEY` 消息，说明用户要 Agent 连接远端 Bifrost。
+
+---
+
+## 二、目标终端如何安装并启动 Bifrost
+
+在**目标机**上确认二进制：
 
 ```bash
 command -v bifrost
 bifrost --version
 ```
 
-如果命令不存在，优先使用官方安装脚本：
+若不存在，走官方脚本：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-安装完成后再次确认：
-
-```bash
-command -v bifrost
-bifrost --version
-```
-
-## 二、目标终端如何启动 Bifrost
-
-启动前必须先检查是否已有服务在运行：
+检查是否已有实例在跑；有就复用，不要启动第二个：
 
 ```bash
 bifrost status
 ```
 
-如果已有 Bifrost 正在运行，直接复用当前实例，不要启动第二个代理。
-
-如果目标终端尚未运行 Bifrost，面向用户正式使用场景应使用默认数据目录、默认端口和系统代理启动。这样 Remote Invoke、Web UI 和设备流量采集会落在同一个用户预期的本机实例上：
+没有则启动（前台运行，系统代理默认开）：
 
 ```bash
 bifrost start
 ```
 
-该命令默认以前台方式运行。启动成功后，继续执行 `bifrost status`、打开 Web UI、或执行后续 `bifrost remote ...` 命令时，请在另一个终端窗口中操作。
+只有测试场景才用临时数据目录、非 9900 端口或 `--no-system-proxy`。
 
-启动后先检查状态：
+---
 
-```bash
-bifrost status
-```
+## 三、授权准备（三类能力，三套 scope）
 
-只有测试或临时验证场景才应使用临时数据目录、非 9900 端口和 `--no-system-proxy`，避免污染用户正式实例或修改测试机系统代理。
+| 能力 | UI 勾选项 | 底层 scope | 覆盖的 relay-backed 命令 |
+|---|---|---|---|
+| 只读查询 | Access = `query` | `remote_query` | `status` / `search` / `traffic list/get/search` |
+| 远端 shell | Access = `selected` 或 `all` | `remote_shell_exec`（加 stdin/interactive 则升级为 `remote_shell_interactive`） | `command exec` |
+| 远端文件 | File Access = read / read-write | `remote_file_read` / `remote_file_write` | 所有 `file <cmd>` |
 
-## 三、两类操作的前置准备工作
+三类 scope **互相独立**，请用户在目标端 Web UI 的 Remote Invoke 授权请求里按需勾选。比如 Agent 只能调用 `remote file read` 但没勾 File Access=read-write，`remote file write` 会以 `file.permission_denied` 拒绝。
 
-Remote Invoke 有两类常见操作，准备工作不同：
+### 3.1 建议用 SSH key（长期）
 
-- 只读查询类：`remote status`、`remote search`、`remote traffic list/get/search`。
-- 远程设备控制类：`remote command exec`，用于在目标设备上执行受 Shell Access policy 控制的命令。
+1. 目标端 Web UI `http://127.0.0.1:9900/_bifrost/settings?tab=remote-invoke` → 创建/导出 SSH key。
+2. 将 key 文件安全拷到 caller 机器，推荐 `~/.bifrost/remote-device.key`。
+3. caller 侧：`bifrost remote connect --ssh-key ~/.bifrost/remote-device.key`。
+4. 回收：目标端 Web UI revoke key 即可。
 
-### 3.1 只读查询类：启用 Remote Invoke 授权
+### 3.2 或用 6 位配对码（首次）
 
-在目标终端打开本地 Web UI。端口应以 `bifrost status` 输出为准，默认是：
+1. 目标端 Web UI → Enter Discovery Mode → 显示 6 位码。
+2. caller 侧：`bifrost remote connect <pair-code>`。
+3. 目标端 Web UI 批准请求，勾选需要的能力和时长。
+4. 配对码一次性，复用已保存连接。
 
-```text
-http://127.0.0.1:9900/_bifrost/settings?tab=remote-invoke
-```
+### 3.3 远端 Shell Access policy（启用 `command exec` 必读）
 
-推荐优先使用 SSH key；如果暂时没有 SSH key，再使用配对码。
-
-#### 方式 A：SSH key（推荐，适合长期绑定）
-
-1. 在 `Remote Invoke` 页面创建或导出 Bifrost SSH key。
-2. 将 key 文件安全地交给 Agent 所在终端，建议保存为 `~/.bifrost/remote-device.key`。
-3. Agent 使用该 key 建立一次连接后，后续可长期复用。
-4. 如需吊销该设备，回到 Web UI reset 或 revoke SSH key；SSH 授权预期永久有效直到 key 被撤销或重置。
-
-#### 方式 B：配对码
-
-1. 在 `Remote Invoke` 页面点击 `Enter Discovery Mode`。
-2. 记录页面显示的 6 位配对码。
-3. 保持页面在线，等待 Agent 发起连接。
-4. 当页面弹出授权请求时，由用户选择 `query` 访问模式和授权时长。
-
-说明：
-
-- 配对码只是首次发现目标终端的入口，不是长期凭证。
-- 真正的执行许可来自用户在目标终端上的人工授权，或来自已授权的 SSH key。
-- Pair code 成功消费后不要重复使用；后续应优先复用保存的连接。
-
-完成只读查询类准备后，Agent 在 caller 终端执行连接并验证：
+caller 的 grant 有 `shell_exec` scope 还不够，**目标端还要配一条匹配的 Shell Access policy**。目标端用户用 `bifrost setting shell` 管理本机 policy（旧版为 `bifrost remote shell`，已 deprecated）：
 
 ```bash
-bifrost remote connect --ssh-key ~/.bifrost/remote-device.key
-# 或：
-bifrost remote connect <pair-code>
+# 在目标机上执行
+bifrost setting shell profile add \
+  --id default --name "Default" \
+  --cwd "$HOME" --env PATH --env HOME \
+  --default-cwd "$HOME" --timeout-ms 30000 --inherit-env
 
-bifrost remote status
+bifrost setting shell policy add \
+  --id allow-bifrost-cli --name "Allow Bifrost CLI" \
+  --mode shell_text --pattern '^bifrost\s+' \
+  --shell /bin/bash --profile default
 ```
 
-`bifrost remote status` 成功后，才继续执行 `remote search`、`remote traffic list/get/search`。
+如果希望 Agent 有广泛 shell 能力，目标端可以创建更宽的 policy，并在授权请求里选 `all`。**能力开放程度由目标端用户决定，caller 不能绕过。**
 
-### 3.2 远程设备控制类：启用 Shell Access policy
+### 3.4 远端 FileAccessPolicy（启用 `remote file` 必读）
 
-远程设备控制类操作需要先完成 3.1 的 Remote Invoke 授权；在此基础上，目标终端还必须启用匹配的 Shell Access policy/profile，并在授权请求中选择 `selected` 或 `all` 访问模式。
+目标端的 `~/.bifrost/file-access.toml` 控制 Agent 能访问哪些目录。新版（`feat/remote-file-api` 后）支持多条 `[[grant]]`，按 `ssh_fingerprint` / `caller_fingerprint` / `grant_id` 匹配，再 fallback 到 `[default]`。示例：
 
-目标终端上的准备流程：
+```toml
+# 绑定当前 caller 的 ssh key（推荐）
+[[grant]]
+match.ssh_fingerprint = "5f02477634441d5d..."
+roots = ["/Users/eden/work/github/bifrost"]
+allow = ["read", "list", "stat", "glob", "search", "hash",
+         "write", "edit", "mkdir", "mv", "rm", "apply-patch"]
 
-1. 用户在目标终端本机或 Web UI 中配置 Shell Access profile，定义允许的 cwd、env、timeout、stdin/interactive 等执行环境。
-2. 用户在目标终端本机或 Web UI 中配置 Shell Access policy，定义允许的 argv 程序或 shell\_text 正则。
-3. 用户在目标终端 `Remote Invoke` 授权请求中选择：
-   - `selected`：只绑定指定 Shell Access policy。
-   - `all`：允许当前已启用 Shell Access policy 覆盖的命令。
-4. 如果需要 stdin 或 interactive 能力，授权时还要开启对应选项；底层 grant scope 会对应 `remote_shell_interactive`。
-
-目标终端本机 CLI 示例：
-
-```bash
-bifrost remote shell profile add \
-  --id default \
-  --name "Default" \
-  --cwd "$HOME" \
-  --env PATH \
-  --env HOME \
-  --default-cwd "$HOME" \
-  --timeout-ms 30000 \
-  --inherit-env
-
-bifrost remote shell policy add \
-  --id allow-bifrost-cli \
-  --name "Allow Bifrost CLI" \
-  --mode shell_text \
-  --pattern '^bifrost\s+' \
-  --shell /bin/bash \
-  --profile default
+# 默认策略：其他设备连上来只能只读 $HOME
+[default]
+roots = ["/Users/eden"]
+allow = ["read", "list", "stat", "glob", "search", "hash"]
+denies = ["**/.ssh/**", "**/.aws/**", "**/.env*", "**/*.key", "**/*.pem"]
 ```
 
-如果用户希望 Agent 完整操作目标设备，可以在目标终端明确创建更宽的 Shell Access policy，并在授权请求中选择 `all` 或绑定对应 policy。能力开放程度由目标终端用户决定。
+改完文件后无需重启 Bifrost，下次请求会自动热加载。
 
-caller 终端验证远程设备控制能力：
+---
 
-```bash
-bifrost remote command exec --shell-text "bifrost status"
-```
+## 四、Agent 工作流
 
-如果 caller 当前只有 `query` 授权，目标终端用户需要重新授权或在目标终端本机更新 grant，使该 caller 获得 `selected` 或 `all` 访问模式，以及对应 Shell Access policy binding。
+### 4.1 连接
 
-## 四、Agent 如何与目标终端建立连接
-
-Agent 在正式执行远程查询前，先确认本地是否已有已保存连接。如果没有，优先使用 SSH key 建立长期连接；没有 SSH key 时，再使用配对码连接。
-
-如果需要先查看完整命令结构和参数说明，可以执行：
+先看本地有没有已保存连接；有就直接查询。没有再走 SSH key / pair code：
 
 ```bash
-bifrost remote -h
-```
-
-### 1. 使用 SSH key 建立长期连接
-
-```bash
-bifrost remote connect --ssh-key <path>
-```
-
-示例：
-
-```bash
-bifrost remote connect --ssh-key ~/.bifrost/remote-device.key
-```
-
-还支持以下输入形式：
-
-- `--ssh-key env:KEY_NAME`
-- `--ssh-key -` 从标准输入读取
-
-SSH connect 成功后会把连接信息保存到本地。只要目标端 SSH key 未被 reset/revoke，后续不需要重复 connect。
-
-### 2. 使用配对码连接
-
-```bash
+bifrost remote status                                   # 已有连接？
+bifrost remote connect --ssh-key ~/.bifrost/remote-device.key   # 或
 bifrost remote connect <pair-code>
 ```
 
-示例：
+多连接场景：`--client-id <prefix>` 显式指定目标；非交互环境下必传。
 
-```bash
-bifrost remote connect 123456
-```
-
-连接流程如下：
-
-1. Agent 输入配对码并发起连接。
-2. 目标终端 Web UI 出现待授权请求。
-3. 用户在目标终端批准授权。
-4. 本地终端保存连接信息到 Bifrost 数据目录下的 `remote-connections.json`。
-5. 后续优先使用已保存连接执行 `remote status`、`remote traffic ...`、`remote search ...`。
-
-如果授权过期、被撤销或本地没有连接缓存，重新执行 `remote connect`。
-
-### 3. 多连接场景下选择目标客户端
-
-如果本地保存了多个远程连接，优先显式指定：
-
-```bash
-bifrost remote status --client-id <client-prefix>
-```
-
-如果不指定且当前环境是交互终端，CLI 可能会提示用户选择连接；非交互环境下应显式传 `--client-id`。如果需要覆盖默认 relay，再额外显式传入 `--relay-url <url>`。
-
-## 五、建立连接后可以执行哪些命令
-
-远程能力分为只读查询和受控 `shell.exec` 两层，具体能力取决于用户批准的访问模式和底层 grant scope。
-
-### 授权模型
-
-| UI 访问模式    | 底层 grant scope                                   | 允许的操作                                           |
-| ---------- | ------------------------------------------------ | ----------------------------------------------- |
-| `query`    | `remote_query`                                   | 只读查询：status、search、traffic list/get/search      |
-| `selected` | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 绑定指定 Shell Access policy 的 `shell.exec`    |
-| `all`      | `remote_shell_exec` 或 `remote_shell_interactive` | 查询 + 所有已启用 Shell Access policy 覆盖的 `shell.exec` |
-
-`remote_shell_interactive` 表示 grant 允许 stdin/interactive 相关能力；当前是否能形成完整交互体验取决于 CLI/PTY 能力和目标端 policy。
-
-### 1. 查看远端状态
+### 4.2 远端查询（`remote_query` scope）
 
 ```bash
 bifrost remote status
+bifrost remote search <keyword> --max-results 50 --max-scan 200 \
+    [--url|--headers|--body|--req-header|--res-body] \
+    [--method GET --status 2xx --host example.com --protocol HTTPS]
+bifrost remote traffic list  --limit 50 [--method --status --protocol --host --path ...]
+bifrost remote traffic get   <id> [--request-body --response-body]
+bifrost remote traffic search <keyword> --max-results 50
 ```
 
-### 2. 搜索远端流量
+输出格式统一：`--format table|compact|json|json-pretty`，`--no-color` 适合非交互。
 
-```bash
-bifrost remote search <keyword> --max-results 50 --max-scan 200
-```
-
-其中：
-
-- `--max-results` 控制最多返回多少条命中结果。
-- `--max-scan` 控制远端执行端最多扫描多少条记录。
-- `--limit` 仍可作为 `--max-results` 的兼容别名使用。
-
-支持过滤选项：
-
-```bash
-bifrost remote search <keyword> --url
-bifrost remote search <keyword> --headers
-bifrost remote search <keyword> --body
-bifrost remote search <keyword> --req-header
-bifrost remote search <keyword> --res-body
-
-bifrost remote search <keyword> --method GET --status 2xx --host example.com
-bifrost remote search <keyword> --protocol HTTPS --content-type json --domain "*.api.com"
-```
-
-### 3. 列出远端流量记录
-
-```bash
-bifrost remote traffic list --limit 50
-```
-
-支持过滤和分页：
-
-```bash
-bifrost remote traffic list --limit 20 --method GET --status 200
-bifrost remote traffic list --method POST --status-min 400 --status-max 499
-bifrost remote traffic list --protocol https --host example.com --path "/api/"
-bifrost remote traffic list --content-type json --client-ip 192.168.1.1
-bifrost remote traffic list --has-rule-hit true --is-websocket false
-bifrost remote traffic list --limit 20 --cursor <cursor> --direction forward
-bifrost remote traffic list --format json-pretty
-bifrost remote traffic list --format compact --no-color
-```
-
-### 4. 查看远端流量详情
-
-```bash
-bifrost remote traffic get <id>
-```
-
-如需附带 body：
-
-```bash
-bifrost remote traffic get <id> --request-body --response-body
-```
-
-支持格式选项：`--format table|compact|json|json-pretty`。
-
-### 5. 搜索远端流量详情
-
-```bash
-bifrost remote traffic search <keyword> --max-results 50 --max-scan 200
-```
-
-`traffic search` 支持与顶层 `search` 相同的过滤选项。
-
-### 6. 在远端执行受控 shell 命令
-
-需要用户授权 `selected` 或 `all` 访问模式，且目标终端已配置匹配的 Shell Access policy。
+### 4.3 远端 shell 执行（`remote_shell_exec` scope）
 
 ```bash
 bifrost remote command exec --shell-text "ls -la /tmp"
 bifrost remote command exec -- ls -la /tmp
-bifrost remote command exec --cwd /home/user --env MY_VAR=hello --shell-text "echo $MY_VAR"
-bifrost remote command exec --timeout-ms 10000 --shell-text "sleep 5 && echo done"
+bifrost remote command exec --cwd /Users/eden/work/repo --env FOO=bar --shell-text "echo $FOO"
+bifrost remote command exec --timeout-ms 10000 --shell-text "cargo test 2>&1 | tail -30"
 ```
 
-说明：
+注意：`$FOO` 是远端 shell 展开，不是 caller 的 env。caller 的 env 要通过 `--env` 显式传入。
 
-- `shell.exec` 通过目标终端的 Shell Access policy 做命令、cwd、env、stdin、timeout 等限制。
-- 当前实现会在目标终端本机按 policy 启动进程；Agent 可以在授权允许范围内操作目标设备。
-- 如果目标策略是未实现的 sandbox policy，执行端会拒绝执行并提示 sandbox execution is not implemented。
-- 命令内容和输出通过 encrypted remote invoke 通道传输，但 relay 仍会保存必要的路由、审计和摘要元数据。
+### 4.4 远端文件编程（`remote_file_*` scope）
 
-### 7. 撤销本地保存的远端授权
+**这是本技能的主要价值点。**`remote file` 的完整子命令集：
 
 ```bash
-bifrost remote disconnect
+# —— 只读（需 remote_file_read）——
+bifrost remote file read   <path> [--max-bytes N] [--allow-binary] \
+                                   [--offset LINE] [--limit N]
+bifrost remote file list   [path] [--depth N] [--no-ignore] [--exclude NAME]...
+bifrost remote file stat   <path>
+bifrost remote file glob   '<pattern>'  [--max-matches N] [--no-ignore]
+bifrost remote file search '<regex>'    [--path <sub>] [--max-matches N] \
+                                         [-B N] [-A N] [-i] [--glob '<pat>']
+bifrost remote file hash   <path> [--algo sha256]
+
+# —— 读写（需 remote_file_write）——
+bifrost remote file write  <path> (--content-file <local|->) | (--content-b64 <b64>) \
+                                   [--base-sha256 SHA] [--allow-overwrite true|false] \
+                                   [--create-parents]
+bifrost remote file edit   <path> --edits '<json>' [--base-sha256 SHA]
+bifrost remote file mkdir  <path> [--parents]
+bifrost remote file mv     <from> <to>
+bifrost remote file rm     <path> [--recursive]
+bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <b64>)
 ```
 
-如需撤销全部授权或特定 grant：
+所有子命令共享 `--cwd <path>`、`--output human|json`、`--relay-url`、`--client-id`。
+
+#### 行为要点
+
+- **gitignore 默认打开**：`list` / `glob` / `search` 默认跳 `.gitignore` 命中路径。要扫被忽略文件加 `--no-ignore`。
+- **`truncated`**：`list` / `glob` / `search` / `read` 超限时响应带 `"truncated": true`。Agent 应据此分片（`--offset`+`--limit`、收窄 `--path` / `--glob`）。
+- **整文件 sha256**：`read` 当 `truncated=true` 时响应额外带 `file_sha256`（整文件），可用于 resume 或乐观锁一致性校验。
+- **原子写**：`write` / `edit` 采用 tmp+rename，失败自动回滚。
+- **乐观锁**：`write` / `edit` 传 `--base-sha256` 后，文件已被改动会返回 `file.sha_mismatch`；Agent 应重新 `read` 再重试，不要盲目覆盖。
+- **EOL 保留**：`edit` 自动识别并保留 LF / CRLF 风格。
+- **`--content-b64` / `--patch-b64`**：由 caller 本地 base64、目标端解码；适合二进制、含 CRLF、含特殊字符的文本。远比 echo 管道 base64 + shell 重定向安全。
+- **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
+- **Symlink lstat 语义**：`stat` / `list` 不跟随软链；Windows 自动去 `\\?\` / `\\?\UNC\` 前缀。
+
+#### 错误码契约
+
+| 错误码 | 含义 | Agent 应对 |
+|---|---|---|
+| `file.out_of_scope` | 路径在 `roots` 之外 | **不要擅自改 `--cwd`**，请用户在目标端更新 FileAccessPolicy |
+| `file.permission_denied` | 命中 denies，或缺 write scope | 如果是 denies（比如 `.ssh`、`target`），说明用户不想给；如果是缺 scope，请用户重新授权 |
+| `file.binary_not_allowed` | 是二进制但没加 `--allow-binary` | 显式加 `--allow-binary`，或改用 `hash` + 分片 |
+| `file.sha_mismatch` | 乐观锁失败 | 重新 `read` + 重算 sha + 重试 |
+| `file.not_found` | 路径不存在 | 视任务决定 `mkdir` / `write --create-parents` |
+| `file.is_a_directory` / `file.not_a_directory` | 类型不匹配 | 切换子命令 |
+
+#### Coding agent 典型 workflow
 
 ```bash
-bifrost remote disconnect --all
-bifrost remote disconnect --grant-id <grant-id>
-```
-
-## 六、当前支持的 relay-backed 远程命令
-
-### 查询类命令（`query.readonly`）
-
-以下命令在 `remote_query` 及以上 scope 下可用：
-
-- `status` — 查询远端状态。
-- `search.stream` — 搜索远端流量。
-- `traffic.list` — 列出远端流量记录。
-- `traffic.get` — 查看远端流量详情。
-
-### Shell 执行命令（`shell.exec`）
-
-以下命令在 `remote_shell_exec` 或 `remote_shell_interactive` scope 下可用：
-
-- `shell.exec` — 在目标终端按 Shell Access policy 执行受控命令。
-
-Agent 应将远程能力理解为“查询远端运行状态与流量记录”加上“在授权和策略控制下操作目标设备的 shell.exec”。
-
-## 七、本地管理命令与远端操作路径
-
-`bifrost remote shell ...` 和 `bifrost remote grant ...` 是目标终端本机管理命令：
-
-- `bifrost remote shell ...` 管理当前机器数据目录中的 Shell Access policy/profile。
-- `bifrost remote grant ...` 管理当前机器 admin API 中的 local grants。
-
-caller 侧不应把这两个子命令当成 relay-backed 管理 API 直接调用；如果用户希望远程管理目标设备，可以通过 `bifrost remote command exec ...` 在目标终端执行等价的本机命令，前提是目标端 policy 已授权。
-
-如果需要让远端允许某个 `shell.exec`，正确流程是：
-
-1. 用户或 Agent 在目标终端本机配置 Shell Access policy。
-2. 用户在目标终端 Web UI 授权 caller 的访问模式和 policy binding。
-3. caller 再执行 `bifrost remote command exec ...`。
-
-## 八、当前 relay-backed 子命令边界
-
-`traffic clear` 当前不是已启用的 relay-backed query 子命令；如果用户要清理目标端流量记录，应通过已授权的 `remote command exec` 在目标端执行本机 CLI/API 操作。
-
-类似地，rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表 Agent 不能操作目标设备；应切换到 `remote command exec`，在用户授权和 Shell Access policy 允许范围内执行目标机命令。
-
-## 九、Agent 执行约束
-
-Agent 使用本技能时，遵循以下原则：
-
-1. 先判断是否已有本地保存连接，避免重复 `remote connect`。
-2. 有 SSH key 时优先用 SSH key 建立长期连接，不要默认每次都走配对码。
-3. 连接失败时，优先检查 SSH key 是否有效，或检查配对码是否过期、目标终端是否在线、Web UI 是否已授权。
-4. 查询操作可直接执行；`shell.exec` 需确认用户已授权 shell 访问且目标终端已配置匹配 policy。
-5. 在多客户端场景下，明确确认目标客户端，避免误操作到错误设备。
-6. 如果 grant 失效，重新走配对或 SSH connect，不要伪造本地连接文件。
-7. 若用户只需要本机本地操作，优先使用普通 `bifrost` CLI，不必绕到 `remote`。
-8. caller 侧需要管理目标设备时，优先使用 `remote command exec` 执行目标机命令，而不是误把本地 `remote shell` / `remote grant` 当成 relay-backed API。
-9. 不要承诺 OS 级 sandbox；描述为当前 Shell Access policy 的授权和限制能力。
-
-
-## 十、远程文件操作（coding agent 友好）
-
-Remote File API 是独立于 `remote_query` / `remote_shell_*` 的第三类能力，面向 Claude Code / Cursor / Codex 等 coding agent 设计。所有操作受目标端 `FileAccessPolicy` 约束，默认 `roots=[cwd]`，`denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]`，默认遵守最近 `.gitignore`。
-
-### 10.1 授权前置（必读）
-
-文件能力有专属 grant scope，**不**由 `query` / `selected` / `all` 的 UI access mode 自动授予。目标端用户在授权请求中需显式选择 File Access，并挑选只读或读写范围：
-
-| 能力面       | scope                | 覆盖子命令                                                  |
-| --------- | -------------------- | ------------------------------------------------------ |
-| 只读        | `remote_file_read`   | `read` / `list` / `stat` / `glob` / `search` / `hash`  |
-| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `mv` / `rm` / `apply-patch` |
-
-准备步骤：
-
-1. 目标端 Bifrost 已启动并通过 SSH key 或 pair code 与 caller 建立授权（参考第三、四节）。
-2. 目标端用户在 Remote Invoke 授权请求中勾选 File Access，并选择 read-only / read-write。
-3. caller 可直接使用 `bifrost remote file <cmd>`；若只拿到 `remote_file_read`，写类子命令会以 `file.permission_denied` 拒绝。
-4. 默认 policy 不够用时（如需要访问 roots 之外或被 denies 命中的路径），请用户在目标端本机更新 FileAccessPolicy，caller 侧不可绕过。
-
-### 10.2 子命令签名（来自 `bifrost remote file <cmd> -h`）
-
-```bash
-# —— 只读 ——
-bifrost remote file read   <path> [--max-bytes <N>] [--allow-binary] \
-                                   [--offset <line>] [--limit <lines>] \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file list   [path] [--depth <N>] [--no-ignore] \
-                                   [--exclude <name>]... \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file stat   <path> [--cwd <path>] [--output human|json]
-
-bifrost remote file glob   '<pattern>' [--max-matches <N>] [--no-ignore] \
-                                        [--exclude <name>]... \
-                                        [--cwd <path>] [--output human|json]
-
-bifrost remote file search '<regex>' [--path <sub>] [--max-matches <N>] \
-                                      [--max-scan <bytes>] \
-                                      [-B <n>] [-A <n>] \
-                                      [-i|--case-insensitive] \
-                                      [--glob '<pat>'] [--no-ignore] \
-                                      [--exclude <name>]... \
-                                      [--cwd <path>] [--output human|json]
-
-bifrost remote file hash   <path> [--algo sha256] \
-                                   [--cwd <path>] [--output human|json]
-
-# —— 读写 ——
-bifrost remote file write  <path> [--content-file <local|->] \
-                                   [--content-b64 <base64>] \
-                                   [--base-sha256 <sha>] \
-                                   [--allow-overwrite true|false] \
-                                   [--create-parents] \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file edit   <path> --edits '<json-array>' \
-                                   [--base-sha256 <sha>] \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file mkdir  <path> [--parents] \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file mv     <from> <to> [--cwd <path>] [--output human|json]
-
-bifrost remote file rm     <path> [--recursive] \
-                                   [--cwd <path>] [--output human|json]
-
-bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <base64>) \
-                                   [--cwd <path>] [--output human|json]
-```
-
-所有子命令还共享 `--relay-url <url>`、`--client-id <prefix>`（多连接场景选择目标客户端）。
-
-### 10.3 Agent 行为要点
-
-- **gitignore 默认打开**：`list` / `glob` / `search` 默认跳过 `.gitignore` 命中路径；Agent 要扫被忽略文件时显式加 `--no-ignore`。
-- **truncated 语义**：`list` / `glob` / `search` / `read` 在超过上限时响应含 `"truncated": true`，Agent 应据此分片重试（如 `--offset` + `--limit`、或收窄 `--path` / `--glob`）。
-- **`read` 的整文件 sha256**：当 `truncated=true`，响应额外带 `file_sha256`（整文件哈希，不是截断片段的），Agent 据此做 resume 或乐观锁一致性校验。
-- **Symlink lstat 语义**：`stat` / `list` 不跟随软链，返回 `symlink_target`；Windows 自动去 `\\?\` / `\\?\UNC\` 前缀，跨平台一致。
-- **原子写**：`write` / `edit` 采用 tmp + rename 两阶段提交，失败自动快照回滚。
-- **乐观锁 / sha_mismatch**：`write` / `edit` 传 `--base-sha256` 时，若文件已被修改，返回错误码 `[file.sha_mismatch]`；Agent 应重新 `read` 再重试，不要盲目覆盖。
-- **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
-- **base64 传输**：`--content-b64` / `--patch-b64` 由 caller 本地 base64、admin 侧解码；比 stdin 管道更适合二进制或含 CRLF/特殊字符内容、以及非交互/Windows 环境。
-- **`--create-parents`**：`write` 自带 `mkdir -p`，省去两次往返。
-- **搜索收窄**：`search` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 在同一次正则扫描里按文件名过滤。
-
-### 10.4 错误码契约
-
-Agent 应按以下错误码做分支：
-
-| 错误码                        | 含义                        | 应对                                   |
-| -------------------------- | ------------------------- | ------------------------------------ |
-| `file.out_of_scope`        | 路径在 `roots` 之外            | 不要自动改 `--cwd`；请用户确认                  |
-| `file.permission_denied`   | 命中 denies 或缺少 write scope | 放弃写入或改走只读流程                         |
-| `file.binary_not_allowed`  | 二进制且未传 `--allow-binary`   | 加 `--allow-binary` 或用 `hash` + 分片下载 |
-| `file.sha_mismatch`        | 乐观锁失败，文件已被改               | 重新 `read` + 重算 sha + 重试             |
-| `file.not_found`           | 路径不存在                     | 视任务决定 `mkdir` / `write`              |
-| `file.is_a_directory` / `file.not_a_directory` | 类型不匹配    | 切换子命令                              |
-
-### 10.5 典型调用链（coding agent workflow）
-
-```bash
-# 1. 侦察目标仓库
+# 1. 侦察
 bifrost remote file list src --depth 2 --output json
 bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
 
-# 2. 精准定位符号
+# 2. 定位符号
 bifrost remote file search 'fn handle_file_\w+' --path src --glob '*.rs' \
   -B 2 -A 2 --output json
 
-# 3. 读取目标文件，记录 sha256
-bifrost remote file read src/lib.rs --output json    # 返回体含 sha256
+# 3. 读 + 拿 sha256
+bifrost remote file read src/lib.rs --output json        # 响应含 sha256
 
-# 4. 带乐观锁的行级 edit
+# 4. 乐观锁 edit
 bifrost remote file edit src/lib.rs \
-  --base-sha256 <sha> \
-  --edits '[{"start_line":10,"end_line":12,"replacement":"// new\n"}]' \
+  --base-sha256 <sha-from-step-3> \
+  --edits '[{"start_line":10,"end_line":12,"replacement":"// new impl\n"}]' \
   --output json
 
-# 5. base64 直写（推荐用于二进制或含特殊字符文本）
-bifrost remote file write docs/notes.md \
+# 5. 新建 / 覆盖写（二进制、特殊字符统一走 b64）
+bifrost remote file write docs/changelog.md \
   --content-b64 "$(base64 < ./local-notes.md)" \
   --create-parents --output json
 
-# 6. 多文件原子 patch
+# 6. 多文件 patch
 bifrost remote file apply-patch --patch-file ./refactor.diff --output json
+
+# 7. 跑测试（这一步才用 shell.exec）
+bifrost remote command exec --cwd /Users/eden/work/github/repo \
+  --timeout-ms 300000 --shell-text "cargo test 2>&1 | tail -30"
 ```
 
-### 10.6 与 `remote command exec` 的边界
+### 4.5 断开与回收
 
-- 文件读/写/编辑/删/改名：**优先** `remote file` 子命令 —— 语义明确、受 FileAccessPolicy 管控、有原子写和乐观锁、不污染 Shell Access audit。
-- 执行业务命令（构建、测试、部署脚本）：用 `remote command exec`（受 Shell Access policy）。
-- 当前 `remote file` 不覆盖的场景（如 `chmod` / `chown` / `ln -s` / `find -exec`）可以通过已授权的 `remote command exec` 完成。
+```bash
+bifrost remote disconnect                    # 撤销当前 client 的 grants
+bifrost remote disconnect --all              # 所有 client
+bifrost remote disconnect --grant-id <gid>   # 指定 grant
+```
+
+---
+
+## 五、当前 relay-backed 命令清单
+
+| Scope | 子命令 |
+|---|---|
+| `remote_query` | `status` · `search.stream` · `traffic.list` · `traffic.get` |
+| `remote_shell_exec` / `remote_shell_interactive` | `shell.exec` |
+| `remote_file_read` | `file.read/list/stat/glob/search/hash` |
+| `remote_file_write` | `file.write/edit/mkdir/mv/rm/apply_patch` |
+
+不在此清单内的管理面（rule / config / script / value / CA / 系统代理 / traffic clear）**没有**专用 relay-backed 子命令。caller 想远程管理这些模块，应通过已授权的 `remote command exec` 在目标端跑等价的本机 CLI。
+
+---
+
+## 六、本地管理 vs 远端操作
+
+| 你想做 | 在哪里执行 | 命令 |
+|---|---|---|
+| 管理**本机** Shell Access policy/profile | 本机 | `bifrost setting shell ...`（旧：`bifrost remote shell`，deprecated） |
+| 管理**本机** remote-invoke grants | 本机 | `bifrost setting grant ...`（旧：`bifrost remote grant`，deprecated） |
+| 操作**已连接的远端设备** | caller | `bifrost remote <connect/disconnect/status/command/file/search/traffic>` |
+| 给远端改 Shell Access policy | 远端 | `bifrost remote command exec --shell-text "bifrost setting shell policy add ..."` |
+| 给远端改 FileAccessPolicy | 远端 | 请用户在目标端编辑 `~/.bifrost/file-access.toml`（会热加载）；或在 shell 授权允许的情况下用 `remote command exec` 辅助 |
+
+> **不要**把 `bifrost setting ...` 或 `bifrost remote shell/grant`（deprecated 别名）当成 relay-backed 管理 API 直接调，它们只作用于**执行该命令的那台机器**。
+
+---
+
+## 七、Agent 执行约束（强制）
+
+按优先级阅读：
+
+1. **先用 `remote file`，再考虑 `remote command exec`**。任何修改远端文件内容的操作，先看是否能用 `remote file write/edit/mv/rm/mkdir/apply-patch` 完成。**严禁**用 `command exec --shell-text "echo '$B64' | base64 -d > ..."` 这类 shell 拼接写文件。违反此条 = 违反本技能。
+2. **不要重复 `remote connect`**：先跑 `bifrost remote status` 看已有连接是否可用。
+3. **SSH key 优于 pair code**：有 key 先用 key，一次连接永久复用（直到 key 被 reset/revoke）。
+4. **多 client 场景**：显式 `--client-id <prefix>`，不要依赖交互式选择。
+5. **失败分类**：
+   - `file.out_of_scope` / `file.permission_denied` → 告诉用户需要调 FileAccessPolicy，不自作主张改 `--cwd` 绕过。
+   - `file.sha_mismatch` → 重 read 重算 sha 再重试。
+   - connect 失败 → 检查 SSH key 有效性、pair code 是否过期、目标是否在线、Web UI 是否授权。grant 失效就重新 connect，**不要**伪造本地连接文件。
+6. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
+7. **不要承诺 OS 级 sandbox**：`shell.exec` 是 Shell Access policy 级限制，不是 sandbox。
+8. **长任务超时**：构建、测试类 `command exec` 记得 `--timeout-ms 300000`（默认 30s 不够用）。
+9. **大文件/二进制传输**：`--content-file -` 从 stdin，`--content-b64` / `--patch-b64` 适合非交互；避免 echo 管道 base64。
+10. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
+
+---
+
+## 八、FAQ
+
+**Q: 为什么我 `remote file read` 返回 `file.out_of_scope`？**
+A: 目标端 `~/.bifrost/file-access.toml` 里没有把该路径加入 `roots`。让用户追加一条 `[[grant]]` 或扩大 `[default].roots`。
+
+**Q: 我想改远端 `Cargo.toml` 的 version，该用哪个命令？**
+A: `remote file read` 拿到 sha → `remote file edit --base-sha256 <sha> --edits '[...]'`。不要用 `shell-text "sed -i ..."`。
+
+**Q: 我要把本地一个 500KB 的二进制部署到远端？**
+A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./local.bin)" --allow-overwrite true --create-parents`。
+
+**Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
+A: `remote command exec`：`--cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`。git / 测试用 shell，代码改动用 file。
+
+**Q: `bifrost remote shell` 和 `bifrost setting shell` 到底有什么差别？**
+A: 完全一样的管理能力，都改**本机**数据目录。`bifrost remote shell` 是历史遗留别名，已 deprecated，运行时会打印 warning；请统一改用 `bifrost setting shell`。
