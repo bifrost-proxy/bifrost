@@ -1017,6 +1017,16 @@ pub struct ClientCallFrameRequest {
     pub envelope_json: String,
 }
 
+/// PR#6c: wire payload for POST /v4/remote-invoke/client/calls/:id/stream-frame.
+/// `frame_json` is the canonical JSON serialization of a `StreamFrame`
+/// (see `stream_emit::frame_to_json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientCallStreamFrameRequest {
+    pub call_id: String,
+    pub client_instance_id: String,
+    pub frame_json: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientCallExitRequest {
     pub call_id: String,
@@ -1122,18 +1132,46 @@ pub struct RemoteInvokeRequest {
     pub command_summary: CommandSummary,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteInvokeResponse {
+    #[serde(default)]
     pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// SHA-1 digest of the (possibly truncated) inline  field.
+    /// Kept for backward compatibility with legacy clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_digest: Option<String>,
+    #[serde(default)]
     pub duration_ms: u64,
+    // PR#2 large-output fields (all optional, additive, backward compatible):
+    /// Total byte count of the full stdout stream as seen by the executor.
+    /// When present and greater than , the
+    /// inline field was truncated by the executor's output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_total_bytes: Option<u64>,
+    /// Same for stderr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_total_bytes: Option<u64>,
+    /// Hex-encoded SHA-256 of the **full** stdout bytes (not the truncated
+    /// inline preview). Callers MUST use this for end-to-end verification
+    /// when reassembling stdout from streamed chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_sha256_full: Option<String>,
+    /// Same for stderr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_sha256_full: Option<String>,
+    /// True iff the executor truncated either stream when building the
+    /// inline preview. Callers may use this as a hint to fall back to
+    /// streamed chunks or a side-channel download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_truncated: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,3 +1439,238 @@ mod tests {
         );
     }
 }
+
+// BEGIN PR#1 large-output protocol extensions
+//
+// ADDITIVE types for the `large_output_v1` protocol revision. Older peers
+// that do not understand the new variants negotiate down to
+// `OutputTransport::Inline` via `ProtocolFeatures` during handshake. No
+// existing on-wire form is broken by this block.
+
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_FEATURE_LARGE_OUTPUT_V1: &str = "large_output_v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTransport {
+    /// Legacy: stdout/stderr returned inline inside `RemoteInvokeResponse`,
+    /// bounded by `max_output_bytes`. Preserves pre-v1 behaviour.
+    #[default]
+    Inline,
+    /// v1: executor emits StreamFrame::Stdout/Stderr chunks with monotonic
+    /// seq and base64-encoded payload. Final response carries digest + size.
+    Streaming,
+    /// v1: executor uploads full stdout/stderr to object storage; final
+    /// response carries an `ObjectRef`. SSE still emitted for live tailing.
+    SideChannel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectRef {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+    pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+// StreamFrame variants have a large size spread (Done carries digests
+// and optional ObjectRef, Ack/Heartbeat are tiny). Boxing the large
+// variants would change the wire-format / serde layout and break
+// cross-version compatibility, so we allow the lint on the enum itself.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamFrame {
+    Stdout {
+        seq: u64,
+        /// PR#3b: absolute byte offset of the first byte in `data_b64` within
+        /// the total stdout stream. Enables receivers to detect gaps, dedup
+        /// on resume, and reassemble in order even across reconnects.
+        #[serde(default)]
+        offset: u64,
+        data_b64: String,
+    },
+    Stderr {
+        seq: u64,
+        #[serde(default)]
+        offset: u64,
+        data_b64: String,
+    },
+    Heartbeat {
+        ts: u64,
+        /// PR#3b: last stdout/stderr offsets the executor has emitted so a
+        /// disconnected receiver can tell whether it is behind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdout_offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stderr_offset: Option<u64>,
+    },
+    /// PR#3b: advisory signal from executor to receiver: "the current relay
+    /// connection is approaching its wall-clock limit; please reconnect soon
+    /// with Resume(call_id, from_offset)". Receivers that ignore this will
+    /// still get correct data, but may hit a hard relay-side disconnect.
+    Reconnect {
+        reason: String,
+        stdout_offset: u64,
+        stderr_offset: u64,
+    },
+    Ack {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdout_seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stderr_seq: Option<u64>,
+    },
+    Done {
+        exit_code: i32,
+        total_stdout: u64,
+        total_stderr: u64,
+        stdout_sha256: String,
+        stderr_sha256: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdout_object: Option<ObjectRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stderr_object: Option<ObjectRef>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolFeatures {
+    pub version: u32,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inline_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_bytes: Option<u64>,
+}
+
+impl Default for ProtocolFeatures {
+    fn default() -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            features: vec![PROTOCOL_FEATURE_LARGE_OUTPUT_V1.to_string()],
+            max_inline_bytes: Some(4 * 1024 * 1024),
+            max_frame_bytes: Some(256 * 1024),
+        }
+    }
+}
+
+impl ProtocolFeatures {
+    pub fn negotiates_large_output(&self, peer: &ProtocolFeatures) -> bool {
+        self.features
+            .iter()
+            .any(|f| f == PROTOCOL_FEATURE_LARGE_OUTPUT_V1)
+            && peer
+                .features
+                .iter()
+                .any(|f| f == PROTOCOL_FEATURE_LARGE_OUTPUT_V1)
+    }
+    pub fn effective_max_frame_bytes(&self, peer: &ProtocolFeatures) -> u64 {
+        let a = self.max_frame_bytes.unwrap_or(256 * 1024);
+        let b = peer.max_frame_bytes.unwrap_or(256 * 1024);
+        a.min(b)
+    }
+    pub fn effective_max_inline_bytes(&self, peer: &ProtocolFeatures) -> u64 {
+        let a = self.max_inline_bytes.unwrap_or(4 * 1024 * 1024);
+        let b = peer.max_inline_bytes.unwrap_or(4 * 1024 * 1024);
+        a.min(b)
+    }
+}
+
+#[cfg(test)]
+mod pr1_large_output_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn output_transport_roundtrip() {
+        for t in [
+            OutputTransport::Inline,
+            OutputTransport::Streaming,
+            OutputTransport::SideChannel,
+        ] {
+            let s = serde_json::to_string(&t).unwrap();
+            let back: OutputTransport = serde_json::from_str(&s).unwrap();
+            assert_eq!(t, back);
+        }
+    }
+
+    #[test]
+    fn stream_frame_roundtrip() {
+        let frames = vec![
+            StreamFrame::Stdout {
+                seq: 0,
+                offset: 0,
+                data_b64: "YQ==".into(),
+            },
+            StreamFrame::Stderr {
+                seq: 7,
+                offset: 0,
+                data_b64: "Yg==".into(),
+            },
+            StreamFrame::Heartbeat {
+                ts: 1_700_000_000_000,
+                stdout_offset: Some(65536),
+                stderr_offset: Some(0),
+            },
+            StreamFrame::Reconnect {
+                reason: "relay-wall-clock".into(),
+                stdout_offset: 65536,
+                stderr_offset: 0,
+            },
+            StreamFrame::Ack {
+                stdout_seq: Some(5),
+                stderr_seq: None,
+            },
+            StreamFrame::Done {
+                exit_code: 0,
+                total_stdout: 123,
+                total_stderr: 0,
+                stdout_sha256: "deadbeef".into(),
+                stderr_sha256: "cafe".into(),
+                duration_ms: 12,
+                stdout_object: None,
+                stderr_object: None,
+            },
+            StreamFrame::Error {
+                code: "policy.denied".into(),
+                message: "nope".into(),
+            },
+        ];
+        for f in frames {
+            let s = serde_json::to_string(&f).unwrap();
+            let back: StreamFrame = serde_json::from_str(&s).unwrap();
+            assert_eq!(s, serde_json::to_string(&back).unwrap());
+        }
+    }
+
+    #[test]
+    fn object_ref_roundtrip() {
+        let r = ObjectRef {
+            url: "https://store.example/abc".into(),
+            size: 123,
+            sha256: "beef".into(),
+            expires_at: 1_700_000_000,
+            content_type: Some("application/octet-stream".into()),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        let back: ObjectRef = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.url, r.url);
+        assert_eq!(back.size, r.size);
+    }
+
+    #[test]
+    fn features_negotiation() {
+        let a = ProtocolFeatures::default();
+        let b = ProtocolFeatures::default();
+        assert!(a.negotiates_large_output(&b));
+        assert_eq!(a.effective_max_frame_bytes(&b), 256 * 1024);
+    }
+}
+// END PR#1 large-output protocol extensions

@@ -3,6 +3,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::commands::caller_stream_frame::{
+    parse_stream_frame_from_sse_data, CallerStreamState, StreamDecision,
+};
 use base64::Engine;
 use bifrost_command::{
     CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope,
@@ -30,7 +33,10 @@ use crate::cli::{
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
-const CALL_EVENT_TIMEOUT_SECS: u64 = 120;
+// PR #5a: interpreted as an IDLE deadline (resets on every chunk/event),
+// not an overall wall-clock deadline. 300s matches executor-side
+// DEFAULT_IDLE_TIMEOUT_MS so client and server agree on liveness.
+const CALL_EVENT_TIMEOUT_SECS: u64 = 300;
 const CANCEL_SETTLE_TIMEOUT_SECS: u64 = 10;
 const CANCEL_SETTLE_TOTAL_TIMEOUT_SECS: u64 = 15;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
@@ -69,6 +75,9 @@ struct BuiltRemoteCommand {
     query: Option<CanonicalQueryCommand>,
     shell_exec: Option<ShellExecPayload>,
     render: RemoteRenderMode,
+    /// PR #5e-1: populated only for shell.exec; None otherwise.
+    #[allow(dead_code)]
+    streaming_prefs: Option<StreamingPrefs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +95,46 @@ struct ShellExecPayload {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
+}
+
+/// PR #5e-1: caller-side streaming preferences derived from CLI flags.
+/// `stream=true` routes the call through `subscribe_call_events_streaming`.
+/// `output_file=Some(..)` implies streaming and writes stdout to that file.
+/// `resume_call_id=Some(..)` bypasses open_call and rejoins an existing
+/// session (PR #5e-3).
+#[derive(Debug, Clone, Default)]
+struct StreamingPrefs {
+    pub stream: bool,
+    pub output_file: Option<std::path::PathBuf>,
+    pub resume_call_id: Option<String>,
+    pub resume_relay_token: Option<String>,
+    pub no_verify_digest: bool,
+}
+
+impl StreamingPrefs {
+    /// Effective streaming mode: explicit --stream, or implied by --output-file
+    /// or --resume-call-id.
+    pub fn is_streaming(&self) -> bool {
+        self.stream || self.output_file.is_some() || self.resume_call_id.is_some()
+    }
+}
+
+/// PR #5e-3: cross-field validation for resume flags.
+/// `--resume-call-id` and `--resume-relay-token` must be provided together; if
+/// either appears without the other, return a helpful error string.
+fn validate_streaming_prefs(prefs: &StreamingPrefs) -> Result<(), String> {
+    match (
+        prefs.resume_call_id.as_ref(),
+        prefs.resume_relay_token.as_ref(),
+    ) {
+        (Some(_), None) => Err(
+            "--resume-call-id requires --resume-relay-token to rejoin an existing call".to_string(),
+        ),
+        (None, Some(_)) => Err(
+            "--resume-relay-token requires --resume-call-id to rejoin an existing call".to_string(),
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1087,6 +1136,14 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     ensure_remote_command_confirmed(&opts.action)?;
+    if let RemoteCommands::Command {
+        action: RemoteCommandCommands::Exec(exec_args),
+    } = &opts.action
+    {
+        if let Err(msg) = validate_remote_command_exec_flags(exec_args) {
+            return Err(BifrostError::Config(msg));
+        }
+    }
     let command = build_remote_command(&opts.action);
 
     let grant = caller
@@ -1147,6 +1204,51 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             )
             .bright_green()
         );
+    }
+
+    // PR #5e-3: if the caller passed `--resume-call-id` together with
+    // `--resume-relay-token`, skip open_call entirely and dive straight into
+    // the streaming subscriber, seeded with offsets (0, 0). Validation of the
+    // pair is performed via `validate_streaming_prefs`.
+    if let Some(prefs) = command.streaming_prefs.as_ref() {
+        if let Err(msg) = validate_streaming_prefs(prefs) {
+            return Err(BifrostError::Config(msg));
+        }
+        if let (Some(resume_id), Some(resume_token)) = (
+            prefs.resume_call_id.as_ref(),
+            prefs.resume_relay_token.as_ref(),
+        ) {
+            debug!(call_id = %resume_id, "resume-call-id bypass: skipping open_call and rejoining existing call");
+            if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
+                println!(
+                    "{}",
+                    format!(
+                        "→ Rejoining existing remote call (call_id: {})...",
+                        &resume_id[..resume_id.len().min(8)]
+                    )
+                    .dimmed()
+                );
+            }
+            let stream_result = tokio::select! {
+                result = run_streaming_dispatch(
+                    &caller,
+                    resume_id,
+                    resume_token,
+                    prefs,
+                ) => result?,
+                _ = wait_for_remote_call_cancel_signal() => {
+                    eprintln!("{}", "→ Cancellation requested, notifying remote device...".bright_yellow());
+                    let _ = caller
+                        .cancel_call(resume_id, resume_token)
+                        .await;
+                    synthesized_cancelled_result()
+                }
+            };
+            if stream_result.exit_code != 0 {
+                std::process::exit(stream_result.exit_code);
+            }
+            return Ok(());
+        }
     }
 
     let mut transport = merge_transport_context(&conn, &grant)?;
@@ -1249,6 +1351,38 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
+    }
+
+    let streaming_enabled = command
+        .streaming_prefs
+        .as_ref()
+        .map(|p| p.is_streaming())
+        .unwrap_or(false);
+
+    if streaming_enabled {
+        let prefs = command
+            .streaming_prefs
+            .as_ref()
+            .expect("streaming_prefs present when streaming_enabled");
+        let stream_result = tokio::select! {
+            result = run_streaming_dispatch(
+                &caller,
+                &call_result.call_id,
+                &call_result.relay_token,
+                prefs,
+            ) => result?,
+            _ = wait_for_remote_call_cancel_signal() => {
+                eprintln!("{}", "→ Cancellation requested, notifying remote device...".bright_yellow());
+                let _ = caller
+                    .cancel_call(&call_result.call_id, &call_result.relay_token)
+                    .await;
+                synthesized_cancelled_result()
+            }
+        };
+        if stream_result.exit_code != 0 {
+            std::process::exit(stream_result.exit_code);
+        }
+        return Ok(());
     }
 
     let result = tokio::select! {
@@ -1821,6 +1955,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         },
         RemoteCommands::Command { action } => match action {
             RemoteCommandCommands::Exec(exec_args) => build_remote_shell_exec_command(exec_args),
@@ -1844,6 +1979,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     max_scan: search_args.max_scan,
                     max_results: search_args.max_results,
                 },
+                streaming_prefs: None,
             }
         }
         RemoteCommands::Traffic { action } => match action {
@@ -1885,6 +2021,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: list_args.format.parse().unwrap_or(OutputFormat::Table),
                         no_color: list_args.no_color,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Get {
@@ -1911,6 +2048,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         format: format.parse().unwrap_or(OutputFormat::JsonPretty),
                         no_color: *no_color,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Search(search_args) => {
@@ -1930,6 +2068,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                         max_scan: search_args.max_scan,
                         max_results: search_args.max_results,
                     },
+                    streaming_prefs: None,
                 }
             }
             RemoteTrafficCommands::Clear { ids, yes: _ } => {
@@ -1950,6 +2089,7 @@ fn build_remote_command(action: &RemoteCommands) -> BuiltRemoteCommand {
                     query: Some(query),
                     shell_exec: None,
                     render: RemoteRenderMode::Raw,
+                    streaming_prefs: None,
                 }
             }
         },
@@ -1961,6 +2101,47 @@ fn build_open_call_command_summary(command: &BuiltRemoteCommand) -> OpenCallComm
         command_preview: command.label.clone(),
         masked_args_json: command.args_json.clone(),
     }
+}
+
+/// Phase 6 (review fix): pure helper that encodes the post-exit scheduling
+/// contract. Exposed for unit testing so that regression coverage does not
+/// have to spin up a full SSE stream.
+///
+/// Returns `true` if the outer subscribe loop should reset its idle-deadline
+/// timer on this incoming chunk, `false` if the current timer (typically the
+/// 3-second post-exit grace) must be left untouched.
+///
+/// The rule is simple: once `exit_received` is true, a late frame or
+/// keep-alive MUST NOT push the deadline further out, otherwise a post-exit
+/// `stream_frame` cadence tighter than the grace window keeps the loop
+/// alive forever.
+pub(crate) fn should_reset_idle_deadline_on_chunk(exit_received: bool) -> bool {
+    !exit_received
+}
+
+/// Phase 6 (review fix): reject semantically conflicting CLI flags that clap
+/// cannot express directly. `--resume-call-id` rejoins an existing remote
+/// call (bypassing open_call), so a fresh command body (`--shell-text` /
+/// trailing `argv`) would be silently ignored, confusing operators. Fail
+/// fast at arg-parse time with an actionable message.
+pub(crate) fn validate_remote_command_exec_flags(
+    exec_args: &RemoteCommandExecArgs,
+) -> Result<(), String> {
+    if exec_args.resume_call_id.is_some() {
+        if exec_args.shell_text.is_some() {
+            return Err(
+                "--resume-call-id cannot be combined with --shell-text:                  resume rejoins an existing call and ignores any new command"
+                    .to_string(),
+            );
+        }
+        if !exec_args.argv.is_empty() {
+            return Err(
+                "--resume-call-id cannot be combined with a trailing program/argv:                  resume rejoins an existing call and ignores any new command"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRemoteCommand {
@@ -1990,6 +2171,14 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         .or_else(|| exec_args.argv.first().cloned())
         .unwrap_or_else(|| "shell.exec".to_string());
 
+    let streaming_prefs = StreamingPrefs {
+        stream: exec_args.stream,
+        output_file: exec_args.output_file.as_ref().map(std::path::PathBuf::from),
+        resume_call_id: exec_args.resume_call_id.clone(),
+        resume_relay_token: exec_args.resume_relay_token.clone(),
+        no_verify_digest: exec_args.no_verify_digest,
+    };
+
     BuiltRemoteCommand {
         kind: CommandKind::ShellExec,
         label: "shell.exec".to_string(),
@@ -1998,6 +2187,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         query: None,
         shell_exec: Some(shell_exec),
         render: RemoteRenderMode::Raw,
+        streaming_prefs: Some(streaming_prefs),
     }
 }
 
@@ -2859,6 +3049,32 @@ struct OpenCallResponse {
     relay_token: String,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum StreamingSubscriptionOutcome {
+    /// The call finished with a terminal Done frame.
+    Completed {
+        exit_code: i32,
+        duration_ms: Option<u64>,
+        digest_ok: bool,
+    },
+    /// The executor emitted a Reconnect advisory or we observed a mid-stream
+    /// disconnect that can be resumed; caller should reopen a new SSE
+    /// subscription with these offsets.
+    ReconnectNeeded {
+        stdout_offset: u64,
+        stderr_offset: u64,
+        reason: String,
+    },
+    /// The SSE stream closed or errored without a terminal frame; caller
+    /// should decide whether to resume or surface as a hard failure.
+    Disconnected { reason: String },
+    /// The executor emitted an Error frame; treat as a non-resumable failure.
+    ErrorFrame { code: String, message: String },
+    /// The status channel reported the call was cancelled.
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CallResult {
     exit_code: i32,
@@ -3282,7 +3498,9 @@ impl CallerRelayClient {
         }
 
         let mut stream = response.bytes_stream();
-        let mut timeout = Box::pin(tokio::time::sleep(Duration::from_secs(timeout_secs)));
+        // PR #5a: idle deadline resets on each frame; see pulse() below.
+        let idle = Duration::from_secs(timeout_secs);
+        let mut timeout = Box::pin(tokio::time::sleep(idle));
 
         let mut event_name = String::new();
         let mut data_buf = String::new();
@@ -3318,6 +3536,15 @@ impl CallerRelayClient {
                         Some(Ok(bytes)) => {
                             let text = String::from_utf8_lossy(&bytes);
                             partial_line.push_str(&text);
+                            // PR #5a: reset idle deadline on each received chunk.
+                            // Phase 6 (review fix): the should_reset_idle_deadline_on_chunk
+                            // helper expresses the post-exit-grace contract as a pure fn
+                            // that is unit-testable; keep the 3s grace authoritative and
+                            // do NOT let late stream_frame chunks / keep-alives seed it
+                            // back to the 300s idle window.
+                            if should_reset_idle_deadline_on_chunk(exit_received) {
+                                timeout.as_mut().reset(tokio::time::Instant::now() + idle);
+                            }
 
                             while let Some(pos) = partial_line.find('\n') {
                                 let line = partial_line[..pos].trim_end_matches('\r').to_string();
@@ -3360,8 +3587,13 @@ impl CallerRelayClient {
                                                     }
                                                 }
                                                 if exit_received {
-                                                    debug!("late frame received after exit");
-                                                    timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
+                                                    // Phase 6 (review fix): do NOT re-arm the 3s grace
+                                                    // sleep on every late frame. The grace deadline is
+                                                    // set exactly once when `exit_received` flips true;
+                                                    // otherwise a post-exit stream_frame cadence tighter
+                                                    // than 3s keeps the loop alive indefinitely and the
+                                                    // caller never returns after the remote has finished.
+                                                    debug!("late frame after exit; ignoring grace extension");
                                                 }
                                             }
                                             "exit" => {
@@ -3391,27 +3623,55 @@ impl CallerRelayClient {
                                                     result.stdout = Some(stdout_parts.join(""));
                                                     return Ok(result);
                                                 }
+                                                // Consuming renderer (search/traffic) drains frames
+                                                // directly into renderer state, so stdout_parts is
+                                                // empty at exit-time. Treat exit as terminal here —
+                                                // the "delayed frame" grace path is for the raw
+                                                // stdout-buffering case and risks holding the idle
+                                                // timer open forever under post-exit stream_frame
+                                                // races + 30s relay keep-alives.
+                                                if !stream_stdout && search_renderer.is_some() {
+                                                    return Ok(result);
+                                                }
                                                 debug!("exit received with empty stdout, waiting for delayed frame");
                                                 exit_received = true;
                                                 timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
                                             }
                                             "error" => {
-                                                if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
-                                                    let msg = v.get("message")
-                                                        .or_else(|| v.get("error"))
-                                                        .and_then(|m| m.as_str())
-                                                        .unwrap_or("unknown error");
-                                                    error!(error = %msg, "call error from relay");
-                                                    result.exit_code = -1;
-                                                    result.stderr = Some(msg.to_string());
+                                                if exit_received {
+                                                    // Phase 6 (review fix): after a terminal exit,
+                                                    // a trailing `error` event from the relay (most
+                                                    // commonly a harmless race against the exit
+                                                    // finalize) must not overwrite the captured exit
+                                                    // code back to -1. Ignore and keep waiting for
+                                                    // the grace deadline or stream close.
+                                                    debug!("ignoring post-exit error event");
+                                                } else {
+                                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                        let msg = v.get("message")
+                                                            .or_else(|| v.get("error"))
+                                                            .and_then(|m| m.as_str())
+                                                            .unwrap_or("unknown error");
+                                                        error!(error = %msg, "call error from relay");
+                                                        result.exit_code = -1;
+                                                        result.stderr = Some(msg.to_string());
+                                                    }
+                                                    if !stream_stdout {
+                                                        result.stdout = Some(stdout_parts.join(""));
+                                                    }
+                                                    return Ok(result);
                                                 }
-                                                if !stream_stdout {
-                                                    result.stdout = Some(stdout_parts.join(""));
-                                                }
-                                                return Ok(result);
                                             }
                                             "status" => {
-                                                if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                if exit_received {
+                                                    // Phase 6 (review fix): a trailing status event
+                                                    // after the exit has been observed must not flip
+                                                    // exit_code to 130 / cancelled=true. This can
+                                                    // happen when the caller cancels late and the
+                                                    // relay finalizes the status after exit has
+                                                    // already landed.
+                                                    debug!("ignoring post-exit status event");
+                                                } else if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
                                                     if let Some(status) = parse_call_terminal_status(&v) {
                                                         if status == "cancelled" {
                                                             result.exit_code = 130;
@@ -3451,6 +3711,167 @@ impl CallerRelayClient {
                                 result.stdout = Some(stdout_parts.join(""));
                             }
                             return Ok(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// PR #5d-2: streaming variant of subscribe_call_events that routes
+    /// recognised StreamFrame-shaped payloads through CallerStreamState
+    /// and surfaces a structured outcome so the dispatcher can implement an
+    /// outer reconnect-with-offset loop.
+    ///
+    /// Legacy envelope payloads (envelope_json / ciphertext) are NOT handled
+    /// here; callers should fall back to `subscribe_call_events` when the
+    /// remote does not yet emit StreamFrames. Detection is strict via
+    /// `parse_stream_frame_from_sse_data`.
+    ///
+    /// The `resume_from` parameter, when Some, pre-positions the state
+    /// machine heads so duplicate bytes across a reconnect are deduped.
+    async fn subscribe_call_events_streaming<W: std::io::Write, E: std::io::Write>(
+        &self,
+        call_id: &str,
+        relay_token: &str,
+        state: &mut CallerStreamState<W, E>,
+        resume_from: Option<(u64, u64)>,
+        timeout_secs: u64,
+    ) -> bifrost_core::Result<StreamingSubscriptionOutcome> {
+        if let Some((so, se)) = resume_from {
+            state.set_heads(so, se);
+        }
+
+        let url = format!(
+            "{}/v4/remote-invoke/calls/{}/events",
+            self.base_url, call_id
+        );
+        let sse_http = direct_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
+        let response = sse_http
+            .get(&url)
+            .header("Authorization", format!("Bearer {relay_token}"))
+            .send()
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!("subscribe streaming events failed: {e}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "streaming events returned {status}: {body}"
+            )));
+        }
+
+        let mut stream = response.bytes_stream();
+        let idle = Duration::from_secs(timeout_secs);
+        let mut timeout = Box::pin(tokio::time::sleep(idle));
+
+        let mut event_name = String::new();
+        let mut data_buf = String::new();
+        let mut partial_line = String::new();
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    warn!("streaming events idle timeout");
+                    return Ok(StreamingSubscriptionOutcome::Disconnected {
+                        reason: "idle_timeout".to_string(),
+                    });
+                }
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            partial_line.push_str(&text);
+                            timeout.as_mut().reset(tokio::time::Instant::now() + idle);
+
+                            while let Some(pos) = partial_line.find('\n') {
+                                let line = partial_line[..pos].trim_end_matches('\r').to_string();
+                                partial_line = partial_line[pos + 1..].to_string();
+
+                                if line.is_empty() {
+                                    if !event_name.is_empty() && !data_buf.is_empty() {
+                                        if event_name == "stream_frame" {
+                                            if let Some(frame) = parse_stream_frame_from_sse_data(&data_buf) {
+                                                match state.feed(&frame).map_err(|e| BifrostError::Config(format!("stream ingest error: {e:?}")))? {
+                                                    StreamDecision::Continue => {}
+                                                    StreamDecision::ReconnectAt { stdout_offset, stderr_offset, reason } => {
+                                                        return Ok(StreamingSubscriptionOutcome::ReconnectNeeded {
+                                                            stdout_offset,
+                                                            stderr_offset,
+                                                            reason,
+                                                        });
+                                                    }
+                                                    StreamDecision::Done { exit_code, duration_ms, digest_ok, .. } => {
+                                                        return Ok(StreamingSubscriptionOutcome::Completed {
+                                                            exit_code,
+                                                            duration_ms: Some(duration_ms),
+                                                            digest_ok,
+                                                        });
+                                                    }
+                                                    StreamDecision::Error { code, message } => {
+                                                        return Ok(StreamingSubscriptionOutcome::ErrorFrame { code, message });
+                                                    }
+                                                }
+                                            } else {
+                                                debug!("streaming path saw non-StreamFrame frame payload; ignoring");
+                                            }
+                                        } else if event_name == "status" {
+                                            if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                if let Some(status) = parse_call_terminal_status(&v) {
+                                                    if status == "cancelled" {
+                                                        return Ok(StreamingSubscriptionOutcome::Cancelled);
+                                                    }
+                                                }
+                                            }
+                                        } else if event_name == "exit" {
+                                            // PR E: relay pushes the terminal `exit` event when the target
+                                            // finishes executing. Treat it as a Completed outcome so the
+                                            // streaming caller loop can terminate rather than entering an
+                                            // infinite reconnect loop waiting for a Done frame that worker
+                                            // never emits today.
+                                            //
+                                            // PR review fix: mark digest_ok=false so the outer dispatcher
+                                            // does not silently mask a missing digest check when
+                                            // --no-verify-digest is not set. A warn! documents the
+                                            // downgrade for operators.
+                                            if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                                                let duration_ms = v.get("duration_ms").and_then(|x| x.as_u64());
+                                                if state.digest_verification_enabled() {
+                                                    warn!("streaming subscribe ended on legacy exit event; digest not verified");
+                                                }
+                                                return Ok(StreamingSubscriptionOutcome::Completed {
+                                                    exit_code,
+                                                    duration_ms,
+                                                    digest_ok: !state.digest_verification_enabled(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    event_name.clear();
+                                    data_buf.clear();
+                                } else if let Some(ev) = line.strip_prefix("event:") {
+                                    event_name = ev.trim().to_string();
+                                } else if let Some(d) = line.strip_prefix("data:") {
+                                    if !data_buf.is_empty() { data_buf.push('\n'); }
+                                    data_buf.push_str(d.trim());
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            return Ok(StreamingSubscriptionOutcome::Disconnected {
+                                reason: format!("sse error: {e}"),
+                            });
+                        }
+                        None => {
+                            return Ok(StreamingSubscriptionOutcome::Disconnected {
+                                reason: "sse stream closed".to_string(),
+                            });
                         }
                     }
                 }
@@ -3780,6 +4201,149 @@ fn parse_call_terminal_status(payload: &Value) -> Option<&str> {
         .get("status")
         .and_then(|status| status.as_str())
         .filter(|status| matches!(*status, "cancelled" | "completed" | "failed" | "timeout"))
+}
+
+/// PR #5e-2: pure helper that converts a [`StreamingSubscriptionOutcome`]
+/// into the next dispatch step taken by [`run_streaming_dispatch`].
+#[derive(Debug)]
+enum StreamingDispatchStep {
+    Complete(CallResult),
+    Reconnect((u64, u64), String),
+    DisconnectResume((u64, u64), String),
+    Error(String),
+    Cancelled,
+}
+
+fn streaming_result_from_outcome(
+    outcome: StreamingSubscriptionOutcome,
+    verify: bool,
+    current_heads: (u64, u64),
+) -> StreamingDispatchStep {
+    match outcome {
+        StreamingSubscriptionOutcome::Completed {
+            exit_code,
+            duration_ms,
+            digest_ok,
+        } => {
+            if verify && !digest_ok {
+                StreamingDispatchStep::Error("stream digest mismatch".to_string())
+            } else {
+                StreamingDispatchStep::Complete(CallResult {
+                    exit_code,
+                    stdout: None,
+                    stderr: None,
+                    duration_ms,
+                    cancelled: false,
+                })
+            }
+        }
+        StreamingSubscriptionOutcome::ReconnectNeeded {
+            stdout_offset,
+            stderr_offset,
+            reason,
+        } => StreamingDispatchStep::Reconnect((stdout_offset, stderr_offset), reason),
+        StreamingSubscriptionOutcome::Disconnected { reason } => {
+            StreamingDispatchStep::DisconnectResume(current_heads, reason)
+        }
+        StreamingSubscriptionOutcome::ErrorFrame { code, message } => {
+            StreamingDispatchStep::Error(format!("remote error frame {code}: {message}"))
+        }
+        StreamingSubscriptionOutcome::Cancelled => StreamingDispatchStep::Cancelled,
+    }
+}
+
+/// PR #5e-2: route a call through [`CallerRelayClient::subscribe_call_events_streaming`]
+/// with an outer reconnect-with-offset loop. stdout is written to either the
+/// caller-provided `--output-file` or to this process's stdout. stderr is
+/// always forwarded to this process's stderr.
+async fn run_streaming_dispatch(
+    caller: &CallerRelayClient,
+    call_id: &str,
+    relay_token: &str,
+    prefs: &StreamingPrefs,
+) -> bifrost_core::Result<CallResult> {
+    let stdout_sink: Box<dyn std::io::Write + Send> = match prefs.output_file.as_ref() {
+        // PR review fix: use the shared append-mode BufWriter sink so resume
+        // semantics are preserved. File::create truncates the output file on
+        // every reconnect, defeating --resume-call-id.
+        Some(path) => Box::new(
+            crate::commands::caller_stream_frame::open_stdout_file_sink(path).map_err(|e| {
+                BifrostError::Network(format!("open --output-file {}: {}", path.display(), e))
+            })?,
+        ),
+        None => Box::new(std::io::stdout()),
+    };
+    let stderr_sink: Box<dyn std::io::Write + Send> = Box::new(std::io::stderr());
+    let verify_digest = !prefs.no_verify_digest;
+    let mut state = CallerStreamState::new(stdout_sink, stderr_sink, verify_digest);
+
+    let max_reconnects: u32 = 16;
+    let mut attempt: u32 = 0;
+    let mut resume_from: Option<(u64, u64)> = None;
+
+    loop {
+        let outcome = caller
+            .subscribe_call_events_streaming(
+                call_id,
+                relay_token,
+                &mut state,
+                resume_from,
+                CALL_EVENT_TIMEOUT_SECS,
+            )
+            .await?;
+
+        let current_heads = (state.stdout_head(), state.stderr_head());
+        match streaming_result_from_outcome(outcome, verify_digest, current_heads) {
+            StreamingDispatchStep::Complete(result) => {
+                // Phase 5 (review C9): flush buffered sinks (e.g. the
+                // BufWriter<File> used for --output-file) before returning
+                // success. A flush failure here surfaces as a Network error
+                // rather than a silent data loss.
+                if let Err(e) = state.finish() {
+                    return Err(BifrostError::Network(format!(
+                        "flush output sinks on completion: {e}"
+                    )));
+                }
+                return Ok(result);
+            }
+            StreamingDispatchStep::Reconnect(offsets, reason) => {
+                warn!(
+                    call_id = %call_id,
+                    reason = %reason,
+                    stdout_offset = offsets.0,
+                    stderr_offset = offsets.1,
+                    "streaming dispatch reconnect requested"
+                );
+                attempt += 1;
+                if attempt > max_reconnects {
+                    return Err(BifrostError::Network(
+                        "exceeded max reconnect attempts".to_string(),
+                    ));
+                }
+                resume_from = Some(offsets);
+            }
+            StreamingDispatchStep::DisconnectResume(offsets, reason) => {
+                warn!(
+                    call_id = %call_id,
+                    reason = %reason,
+                    stdout_head = offsets.0,
+                    stderr_head = offsets.1,
+                    "streaming dispatch disconnected, resuming"
+                );
+                attempt += 1;
+                if attempt > max_reconnects {
+                    return Err(BifrostError::Network(
+                        "exceeded max reconnect attempts".to_string(),
+                    ));
+                }
+                resume_from = Some(offsets);
+            }
+            StreamingDispatchStep::Error(message) => {
+                return Err(BifrostError::Network(message));
+            }
+            StreamingDispatchStep::Cancelled => return Ok(synthesized_cancelled_result()),
+        }
+    }
 }
 
 fn synthesized_cancelled_result() -> CallResult {
@@ -4223,6 +4787,11 @@ mod tests {
                 timeout_ms: Some(600_000),
                 shell_text: Some("printf hello".to_string()),
                 argv: Vec::new(),
+                stream: false,
+                output_file: None,
+                resume_call_id: None,
+                resume_relay_token: None,
+                no_verify_digest: false,
             })),
         });
 
@@ -4255,6 +4824,11 @@ mod tests {
                     "hello".to_string(),
                     "--flag".to_string(),
                 ],
+                stream: false,
+                output_file: None,
+                resume_call_id: None,
+                resume_relay_token: None,
+                no_verify_digest: false,
             })),
         });
 
@@ -4271,6 +4845,129 @@ mod tests {
             ])
         );
         assert_eq!(shell_exec.timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn test_build_remote_command_populates_streaming_prefs_from_exec_args() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: None,
+                env: vec![],
+                timeout_ms: None,
+                shell_text: Some("yes".to_string()),
+                argv: Vec::new(),
+                stream: true,
+                output_file: Some("/tmp/out.bin".to_string()),
+                resume_call_id: Some("ab12cd34".to_string()),
+                resume_relay_token: Some("tok-xyz".to_string()),
+                no_verify_digest: true,
+            })),
+        });
+
+        let prefs = built
+            .streaming_prefs
+            .expect("streaming_prefs should be populated for shell.exec");
+        assert!(prefs.stream);
+        assert_eq!(
+            prefs.output_file,
+            Some(std::path::PathBuf::from("/tmp/out.bin"))
+        );
+        assert_eq!(prefs.resume_call_id.as_deref(), Some("ab12cd34"));
+        assert_eq!(prefs.resume_relay_token.as_deref(), Some("tok-xyz"));
+        assert!(prefs.no_verify_digest);
+        assert!(prefs.is_streaming());
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn test_streaming_prefs_is_streaming_implied_by_output_or_resume() {
+        let mut p = StreamingPrefs::default();
+        assert!(!p.is_streaming());
+        p.output_file = Some(std::path::PathBuf::from("/tmp/x"));
+        assert!(p.is_streaming());
+        let mut p2 = StreamingPrefs::default();
+        p2.resume_call_id = Some("abc".to_string());
+        assert!(p2.is_streaming());
+        let mut p3 = StreamingPrefs::default();
+        p3.stream = true;
+        assert!(p3.is_streaming());
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_requires_token() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: None,
+            no_verify_digest: false,
+        };
+        let err = validate_streaming_prefs(&prefs).expect_err("should reject missing token");
+        assert!(err.contains("--resume-call-id"), "got: {err}");
+        assert!(err.contains("--resume-relay-token"), "got: {err}");
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_token_without_call_id_rejected() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_streaming_prefs(&prefs).expect_err("should reject lone token");
+        assert!(err.contains("--resume-relay-token"), "got: {err}");
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_with_token_ok() {
+        let prefs = StreamingPrefs {
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_streaming_prefs_resume_both_none_ok() {
+        let prefs = StreamingPrefs::default();
+        assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_build_remote_command_populates_resume_fields() {
+        let built = build_remote_command(&RemoteCommands::Command {
+            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
+                cwd: None,
+                env: vec![],
+                timeout_ms: None,
+                shell_text: Some("tail -f /var/log/x".to_string()),
+                argv: Vec::new(),
+                stream: false,
+                output_file: None,
+                resume_call_id: Some("resume-xyz".to_string()),
+                resume_relay_token: Some("relay-tok-42".to_string()),
+                no_verify_digest: false,
+            })),
+        });
+
+        let prefs = built
+            .streaming_prefs
+            .expect("streaming_prefs should be populated");
+        assert_eq!(prefs.resume_call_id.as_deref(), Some("resume-xyz"));
+        assert_eq!(prefs.resume_relay_token.as_deref(), Some("relay-tok-42"));
+        assert!(prefs.is_streaming());
+        assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_build_remote_command_non_shell_exec_has_no_streaming_prefs() {
+        let built = build_remote_command(&RemoteCommands::Status);
+        assert!(built.streaming_prefs.is_none());
     }
 
     #[test]
@@ -4299,6 +4996,7 @@ mod tests {
                 max_scan: None,
                 max_results: None,
             },
+            streaming_prefs: None,
         };
         let status = BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
@@ -4308,6 +5006,7 @@ mod tests {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         };
         let get = BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
@@ -4324,6 +5023,7 @@ mod tests {
                 format: OutputFormat::JsonPretty,
                 no_color: false,
             },
+            streaming_prefs: None,
         };
         assert!(should_stream_remote_command(&search));
         assert!(!should_stream_remote_command(&status));
@@ -4603,6 +5303,7 @@ mod tests {
             query: None,
             shell_exec: None,
             render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
         };
 
         let summary = build_open_call_command_summary(&command);
@@ -4793,5 +5494,277 @@ mod tests {
         );
 
         assert!(is_grant_scope_mismatch_error(&err));
+    }
+
+    #[test]
+    fn streaming_result_completed_ok() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 0,
+                duration_ms: Some(42),
+                digest_ok: true,
+            },
+            true,
+            (10, 20),
+        );
+        match step {
+            StreamingDispatchStep::Complete(r) => {
+                assert_eq!(r.exit_code, 0);
+                assert_eq!(r.duration_ms, Some(42));
+                assert!(!r.cancelled);
+                assert!(r.stdout.is_none());
+                assert!(r.stderr.is_none());
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_completed_digest_mismatch_with_verify_errs() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 0,
+                duration_ms: Some(1),
+                digest_ok: false,
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Error(msg) => assert!(msg.contains("digest")),
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_completed_digest_mismatch_without_verify_completes() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 7,
+                duration_ms: Some(2),
+                digest_ok: false,
+            },
+            false,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Complete(r) => assert_eq!(r.exit_code, 7),
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_reconnect_propagates_offsets() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::ReconnectNeeded {
+                stdout_offset: 123,
+                stderr_offset: 456,
+                reason: "gap".to_string(),
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Reconnect((so, se), reason) => {
+                assert_eq!(so, 123);
+                assert_eq!(se, 456);
+                assert_eq!(reason, "gap");
+            }
+            other => panic!("expected Reconnect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_disconnected_uses_current_heads() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Disconnected {
+                reason: "sse closed".to_string(),
+            },
+            true,
+            (11, 22),
+        );
+        match step {
+            StreamingDispatchStep::DisconnectResume((so, se), reason) => {
+                assert_eq!(so, 11);
+                assert_eq!(se, 22);
+                assert_eq!(reason, "sse closed");
+            }
+            other => panic!("expected DisconnectResume, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_error_frame_maps_to_error() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::ErrorFrame {
+                code: "E_FOO".to_string(),
+                message: "boom".to_string(),
+            },
+            true,
+            (0, 0),
+        );
+        match step {
+            StreamingDispatchStep::Error(msg) => {
+                assert!(msg.contains("E_FOO"));
+                assert!(msg.contains("boom"));
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn streaming_result_cancelled_maps_to_cancelled() {
+        let step =
+            streaming_result_from_outcome(StreamingSubscriptionOutcome::Cancelled, true, (0, 0));
+        match step {
+            StreamingDispatchStep::Cancelled => {}
+            other => panic!("expected Cancelled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_rejects_resume_with_shell_text() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: Some("echo hi".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_remote_command_exec_flags(&args).unwrap_err();
+        assert!(
+            err.contains("--resume-call-id cannot be combined with --shell-text"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_rejects_resume_with_argv() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: None,
+            argv: vec!["ls".to_string(), "-la".to_string()],
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_remote_command_exec_flags(&args).unwrap_err();
+        assert!(
+            err.contains("--resume-call-id cannot be combined with a trailing program"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_allows_plain_resume() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: None,
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        assert!(validate_remote_command_exec_flags(&args).is_ok());
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_allows_fresh_shell_text() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: Some("echo hi".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+        };
+        assert!(validate_remote_command_exec_flags(&args).is_ok());
+    }
+
+    #[test]
+    fn post_exit_guard_prevents_idle_deadline_reset() {
+        // Phase 6: once exit has been observed, the idle-deadline reset
+        // on incoming SSE chunks MUST be suppressed so the 3s grace is
+        // authoritative. A cadence of post-exit frames tighter than the
+        // grace must not extend the timer indefinitely.
+        assert!(should_reset_idle_deadline_on_chunk(false));
+        assert!(!should_reset_idle_deadline_on_chunk(true));
+    }
+
+    #[test]
+    fn sse_stream_frame_with_forward_gap_bubbles_up_offset_ahead() {
+        // Phase 6: integration check that combines the SSE decoder
+        // (parse_stream_frame_from_sse_data) with the state machine
+        // (CallerStreamState::feed). A relay-shaped
+        // {call_id, frame_json: "<Stdout offset=10 ...>"} payload whose
+        // offset starts strictly past head must produce
+        // StreamIngestError::OffsetAhead, not a silent digest mismatch.
+        use crate::commands::caller_stream_frame::{
+            parse_stream_frame_from_sse_data, CallerStreamState, StreamIngestError,
+        };
+
+        // Build the stringified StreamFrame then wrap it in the relay envelope.
+        // Using serde_json::json! avoids fragile manual backslash-escaping.
+        let first_inner = serde_json::json!({
+            "kind": "stdout",
+            "seq": 0u64,
+            "offset": 0u64,
+            "data_b64": "YWJj", // "abc"
+        })
+        .to_string();
+        let first = serde_json::json!({
+            "call_id": "c1",
+            "frame_json": first_inner,
+        })
+        .to_string();
+
+        let mut state = CallerStreamState::new(Vec::new(), Vec::new(), false);
+        let f = parse_stream_frame_from_sse_data(&first).expect("parse first");
+        state.feed(&f).expect("feed first");
+        assert_eq!(state.stdout_head(), 3);
+
+        let gap_inner = serde_json::json!({
+            "kind": "stdout",
+            "seq": 1u64,
+            "offset": 10u64,
+            "data_b64": "WFla", // "XYZ"
+        })
+        .to_string();
+        let gap = serde_json::json!({
+            "call_id": "c1",
+            "frame_json": gap_inner,
+        })
+        .to_string();
+        let f = parse_stream_frame_from_sse_data(&gap).expect("parse gap");
+        let err = state.feed(&f).unwrap_err();
+        match err {
+            StreamIngestError::OffsetAhead {
+                kind,
+                got,
+                expected,
+            } => {
+                assert_eq!(kind, "stdout");
+                assert_eq!(got, 10);
+                assert_eq!(expected, 3);
+            }
+            other => panic!("expected OffsetAhead, got {other:?}"),
+        }
     }
 }

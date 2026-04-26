@@ -9,6 +9,15 @@ use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
 
 use crate::runner::TestCase;
 
+// Tests in this module share process-global state in
+// `bifrost_storage::{data_dir, set_data_dir}` and must not run in
+// parallel with each other, regardless of the top-level test
+// runner's concurrency level. Previously, parallel execution caused
+// intermittent `policy 'echo-argv' not found` failures on Windows
+// runners because a different test would swap the global data_dir
+// mid-flight. This module-scoped mutex guarantees mutual exclusion.
+static DATA_DIR_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn platform_echo_executable() -> String {
     if cfg!(target_os = "windows") {
         let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
@@ -93,6 +102,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .as_nanos()
                 ));
                 fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                let _data_dir_guard = DATA_DIR_MUTEX.lock().await;
                 bifrost_storage::set_data_dir(base.clone());
 
                 let echo_exe = platform_echo_executable();
@@ -190,6 +200,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .as_nanos()
                 ));
                 fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                let _data_dir_guard = DATA_DIR_MUTEX.lock().await;
                 bifrost_storage::set_data_dir(base.clone());
 
                 let store = RemoteShellStore::new().map_err(|e| e.to_string())?;
@@ -224,7 +235,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ..Default::default()
                 };
 
-                let chunks: Arc<Mutex<Vec<(String, u128)>>> = Arc::new(Mutex::new(Vec::new()));
+                #[allow(clippy::type_complexity)]
+                let chunks: Arc<Mutex<Vec<(Vec<u8>, u128)>>> = Arc::new(Mutex::new(Vec::new()));
                 let sink = Arc::clone(&chunks);
                 let started = Instant::now();
                 let response = executor
@@ -261,7 +273,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         *chunks
                     ));
                 }
-                if chunks[0].0 != "stream-one" || chunks[1].0 != "stream-two" {
+                if chunks[0].0.as_slice() != b"stream-one" || chunks[1].0.as_slice() != b"stream-two" {
                     return Err(format!("unexpected streamed chunks: {:?}", *chunks));
                 }
                 if chunks[0].1 >= 250 {
@@ -294,6 +306,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .as_nanos()
                 ));
                 fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                let _data_dir_guard = DATA_DIR_MUTEX.lock().await;
                 bifrost_storage::set_data_dir(base.clone());
 
                 let store = RemoteShellStore::new().map_err(|e| e.to_string())?;
@@ -365,6 +378,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .as_nanos()
                 ));
                 fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                let _data_dir_guard = DATA_DIR_MUTEX.lock().await;
                 bifrost_storage::set_data_dir(base.clone());
 
                 let store = RemoteShellStore::new().map_err(|e| e.to_string())?;

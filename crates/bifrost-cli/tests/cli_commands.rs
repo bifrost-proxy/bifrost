@@ -1468,3 +1468,68 @@ fn traffic_list_all_options_parse() {
         );
     }
 }
+
+#[test]
+fn remote_command_exec_parses_streaming_flags() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "command",
+        "exec",
+        "--stream",
+        "--output-file",
+        "/tmp/out.bin",
+        "--resume-call-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--no-verify-digest",
+        "--shell-text",
+        "echo hi",
+    ])
+    .expect("remote command exec streaming flags should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Command { action } => match action {
+                RemoteCommandCommands::Exec(exec) => {
+                    assert!(exec.stream, "--stream must be true");
+                    assert_eq!(exec.output_file.as_deref(), Some("/tmp/out.bin"));
+                    assert_eq!(
+                        exec.resume_call_id.as_deref(),
+                        Some("00000000-0000-4000-8000-000000000001")
+                    );
+                    assert!(exec.no_verify_digest, "--no-verify-digest must be true");
+                    assert_eq!(exec.shell_text.as_deref(), Some("echo hi"));
+                }
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_command_exec_streaming_flags_default_to_off() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "command",
+        "exec",
+        "--shell-text",
+        "true",
+    ])
+    .expect("minimal exec should parse");
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Command { action } => match action {
+                RemoteCommandCommands::Exec(exec) => {
+                    assert!(!exec.stream);
+                    assert!(exec.output_file.is_none());
+                    assert!(exec.resume_call_id.is_none());
+                    assert!(!exec.no_verify_digest);
+                }
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}

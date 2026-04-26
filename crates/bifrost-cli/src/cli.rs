@@ -1643,6 +1643,38 @@ pub struct RemoteCommandExecArgs {
         help = "Program and arguments to execute after `--`"
     )]
     pub argv: Vec<String>,
+    // PR #5b: large-output / long-running transport controls. Parsed here so
+    // the caller side can opt into streaming semantics and resume. Wiring into
+    // the actual exec pipeline lands in PR #5c.
+    #[arg(
+        long = "stream",
+        help = "Stream stdout as bytes arrive instead of buffering the whole response"
+    )]
+    pub stream: bool,
+    #[arg(
+        long = "output-file",
+        value_name = "PATH",
+        help = "Write streamed stdout to a local file instead of the terminal (implies --stream)"
+    )]
+    pub output_file: Option<String>,
+    #[arg(
+        long = "resume-call-id",
+        value_name = "UUID",
+        help = "Resume an existing remote call by its call_id (requires server-side session retention)"
+    )]
+    pub resume_call_id: Option<String>,
+    #[arg(
+        long = "resume-relay-token",
+        value_name = "TOKEN",
+        requires = "resume_call_id",
+        help = "Relay token for the existing call (required with --resume-call-id)"
+    )]
+    pub resume_relay_token: Option<String>,
+    #[arg(
+        long = "no-verify-digest",
+        help = "Skip the client-side streaming SHA-256 verification against the Done frame digest"
+    )]
+    pub no_verify_digest: bool,
 }
 
 fn parse_env_assignment(value: &str) -> Result<(String, String), String> {

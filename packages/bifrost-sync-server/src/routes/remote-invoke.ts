@@ -38,6 +38,11 @@ const clientDataLimiter = new RateLimiter(1_500, 10_000);
 const callerLookupLimiter = new RateLimiter(240, 60_000);
 const callerOpenLimiter = new RateLimiter(120, 60_000);
 const callerControlLimiter = new RateLimiter(240, 60_000);
+// PR#6a-followup: high-throughput stream_frame endpoint gets its own dedicated
+// limiter so large-output streams do not share quota with legacy /frame.
+const clientStreamFrameLimiter = new RateLimiter(60_000, 10_000);
+// Hard cap on a single stream_frame payload: 2 MiB. Protects relay memory.
+const MAX_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
 
 let serviceInstance: RemoteInvokeService | null = null;
 
@@ -228,6 +233,12 @@ export async function handleRemoteInvoke(
       const auth = await requireClientAuth(ctx, service);
       if (!auth) return true;
       return await handleClientCallFrame(ctx, service, auth.client_instance_id);
+    }
+
+    if (pathname.match(/^\/v4\/remote-invoke\/client\/calls\/[^/]+\/stream-frame$/) && method === 'POST') {
+      const auth = await requireClientAuth(ctx, service);
+      if (!auth) return true;
+      return await handleClientCallStreamFrame(ctx, service, auth.client_instance_id);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/client\/calls\/[^/]+\/exit$/) && method === 'POST') {
@@ -616,6 +627,47 @@ async function handleClientCallFrame(
     sendJson(ctx.res, 200, { code: 0, message: 'ok' });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'frame failed';
+    if (msg === 'client_mismatch') {
+      sendError(ctx.res, 403, msg);
+    } else if (msg === 'call_not_found') {
+      sendError(ctx.res, 404, msg);
+    } else {
+      sendError(ctx.res, 400, msg);
+    }
+  }
+  return true;
+}
+
+async function handleClientCallStreamFrame(
+  ctx: RequestContext,
+  service: RemoteInvokeService,
+  clientId: string,
+): Promise<boolean> {
+  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/stream-frame/);
+  const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, clientStreamFrameLimiter, `call:${callId}:stream_frame`)) {
+    return true;
+  }
+  const body = parseJsonBody<any>(ctx.body);
+
+  if (!body?.frame_json || typeof body.frame_json !== 'string') {
+    sendError(ctx.res, 400, 'frame_json is required');
+    return true;
+  }
+  if (body.frame_json.length > MAX_STREAM_FRAME_BYTES) {
+    sendError(ctx.res, 413, 'frame_json exceeds MAX_STREAM_FRAME_BYTES');
+    return true;
+  }
+
+  try {
+    await service.postClientStreamFrame({
+      call_id: callId,
+      client_instance_id: clientId,
+      frame_json: body.frame_json,
+    });
+    sendJson(ctx.res, 200, { code: 0, message: 'ok' });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'stream_frame failed';
     if (msg === 'client_mismatch') {
       sendError(ctx.res, 403, msg);
     } else if (msg === 'call_not_found') {
