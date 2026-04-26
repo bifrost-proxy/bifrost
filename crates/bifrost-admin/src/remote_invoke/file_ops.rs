@@ -1277,6 +1277,207 @@ pub async fn handle_file_delete(decision: &PolicyDecision, recursive: bool) -> R
 }
 
 /// Minimal unified-diff applier. Accepts a patch in `git diff` / `diff -u`
+/// What a single file entry in a unified/git diff represents. Only
+/// `Modify`, `Create`, and `Delete` correspond to applicable hunk bodies;
+/// the other variants are git-diff extensions that callers must express
+/// with dedicated file ops (`file.move`, `file.write`, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchKind {
+    Modify,
+    Create,
+    Delete,
+    RenameOnly { from: String, to: String },
+    CopyOnly { from: String, to: String },
+    ModeOnly { path: String },
+    Binary { path: String },
+}
+
+/// A single file entry extracted from a patch text.
+#[derive(Debug, Clone)]
+pub struct PatchEntry {
+    pub old_path: String,
+    pub new_path: String,
+    pub body: String,
+    pub kind: PatchKind,
+}
+
+impl PatchEntry {
+    /// Decision-map key: deletes are keyed on old_path, creates and
+    /// modifies on new_path.
+    pub fn decision_key(&self) -> String {
+        if self.new_path == "/dev/null" {
+            self.old_path.clone()
+        } else {
+            self.new_path.clone()
+        }
+    }
+}
+
+fn strip_ab_prefix(s: &str) -> String {
+    let s = s.trim();
+    s.strip_prefix("a/")
+        .or_else(|| s.strip_prefix("b/"))
+        .unwrap_or(s)
+        .to_string()
+}
+
+/// Split a patch text into file-level entries, honouring the plain
+/// `--- / +++` unified format *and* the git-extended format
+/// (diff --git / rename / copy / index / mode / binary).
+pub fn parse_patch(text: &str) -> Result<Vec<PatchEntry>> {
+    let mut entries: Vec<PatchEntry> = Vec::new();
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+
+    // Find section boundaries. A new section begins at either
+    // `diff --git ` or — in the no-git-wrapper case — the first
+    // `--- ` line.
+    let section_starts: Vec<usize> = {
+        let mut v = Vec::new();
+        let mut seen_diff_git = false;
+        for (idx, ln) in lines.iter().enumerate() {
+            let s = ln.trim_end_matches(|c| c == '\n' || c == '\r');
+            if s.starts_with("diff --git ") {
+                v.push(idx);
+                seen_diff_git = true;
+            } else if !seen_diff_git && s.starts_with("--- ") {
+                v.push(idx);
+            }
+        }
+        v
+    };
+
+    if section_starts.is_empty() {
+        return Ok(entries);
+    }
+
+    for (k, &start) in section_starts.iter().enumerate() {
+        let end = section_starts.get(k + 1).copied().unwrap_or(lines.len());
+        let section = &lines[start..end];
+
+        let mut old_path: Option<String> = None;
+        let mut new_path: Option<String> = None;
+        let mut rename_from: Option<String> = None;
+        let mut rename_to: Option<String> = None;
+        let mut copy_from: Option<String> = None;
+        let mut copy_to: Option<String> = None;
+        let mut has_old_mode = false;
+        let mut has_new_mode = false;
+        let mut new_file_mode = false;
+        let mut deleted_file_mode = false;
+        let mut is_binary = false;
+        let mut diff_git_new: Option<String> = None;
+
+        let mut body_start: Option<usize> = None;
+
+        for (idx, ln) in section.iter().enumerate() {
+            let t = ln.trim_end_matches(|c| c == '\n' || c == '\r');
+            if t.starts_with("@@ ") {
+                body_start = Some(idx);
+                break;
+            }
+            if let Some(rest) = t.strip_prefix("diff --git ") {
+                if let Some(sep) = rest.rfind(" b/") {
+                    let b = &rest[sep + 1..];
+                    diff_git_new = Some(strip_ab_prefix(b));
+                }
+            } else if let Some(p) = t.strip_prefix("--- ") {
+                old_path = Some(strip_ab_prefix(p));
+            } else if let Some(p) = t.strip_prefix("+++ ") {
+                new_path = Some(strip_ab_prefix(p));
+            } else if let Some(p) = t.strip_prefix("rename from ") {
+                rename_from = Some(p.trim().to_string());
+            } else if let Some(p) = t.strip_prefix("rename to ") {
+                rename_to = Some(p.trim().to_string());
+            } else if let Some(p) = t.strip_prefix("copy from ") {
+                copy_from = Some(p.trim().to_string());
+            } else if let Some(p) = t.strip_prefix("copy to ") {
+                copy_to = Some(p.trim().to_string());
+            } else if t.starts_with("old mode ") {
+                has_old_mode = true;
+            } else if t.starts_with("new mode ") {
+                has_new_mode = true;
+            } else if t.starts_with("new file mode ") {
+                new_file_mode = true;
+            } else if t.starts_with("deleted file mode ") {
+                deleted_file_mode = true;
+            } else if t.starts_with("Binary files ") || t.starts_with("GIT binary patch") {
+                is_binary = true;
+            }
+        }
+
+        let body: String = if let Some(bs) = body_start {
+            section[bs..].concat()
+        } else {
+            String::new()
+        };
+
+        let op = old_path.clone();
+        let np = new_path.clone();
+        let gnew = diff_git_new.clone().unwrap_or_default();
+
+        let kind = if is_binary {
+            PatchKind::Binary {
+                path: np.clone().unwrap_or_else(|| gnew.clone()),
+            }
+        } else if let (Some(from), Some(to)) = (rename_from.clone(), rename_to.clone()) {
+            PatchKind::RenameOnly { from, to }
+        } else if let (Some(from), Some(to)) = (copy_from.clone(), copy_to.clone()) {
+            PatchKind::CopyOnly { from, to }
+        } else if body_start.is_none() && (has_old_mode || has_new_mode) {
+            PatchKind::ModeOnly {
+                path: np.clone().or(op.clone()).unwrap_or_else(|| gnew.clone()),
+            }
+        } else if body_start.is_some() {
+            let (ops, nps) = match (op.as_deref(), np.as_deref()) {
+                (Some(o), Some(n)) => (o.to_string(), n.to_string()),
+                _ => {
+                    return Err(BifrostError::Config(
+                        "[file.invalid_args] malformed unified diff: missing --- or +++ header"
+                            .to_string(),
+                    ));
+                }
+            };
+            if ops == "/dev/null" && nps == "/dev/null" {
+                return Err(BifrostError::Config(
+                    "[file.invalid_args] malformed unified diff: both sides are /dev/null"
+                        .to_string(),
+                ));
+            }
+            if ops == "/dev/null" || new_file_mode {
+                PatchKind::Create
+            } else if nps == "/dev/null" || deleted_file_mode {
+                PatchKind::Delete
+            } else {
+                PatchKind::Modify
+            }
+        } else {
+            continue;
+        };
+
+        let final_old = match &kind {
+            PatchKind::RenameOnly { from, .. } | PatchKind::CopyOnly { from, .. } => from.clone(),
+            PatchKind::ModeOnly { path } => path.clone(),
+            PatchKind::Binary { path } => path.clone(),
+            _ => op.unwrap_or_default(),
+        };
+        let final_new = match &kind {
+            PatchKind::RenameOnly { to, .. } | PatchKind::CopyOnly { to, .. } => to.clone(),
+            PatchKind::ModeOnly { path } => path.clone(),
+            PatchKind::Binary { path } => path.clone(),
+            _ => np.unwrap_or_default(),
+        };
+
+        entries.push(PatchEntry {
+            old_path: final_old,
+            new_path: final_new,
+            body,
+            kind,
+        });
+    }
+
+    Ok(entries)
+}
+
 /// form. For each file header (`--- a/FOO` + `+++ b/FOO`) we resolve the
 /// target against the provided decisions map (policy pre-checked upstream),
 /// verify the context lines match, and apply hunks atomically per-file.
@@ -1299,11 +1500,7 @@ pub async fn handle_file_apply_patch(
     //             which case we do a best-effort rollback of renames that
     //             already succeeded.
 
-    let normalized = if patch_text.starts_with("--- ") {
-        format!("\n{}", patch_text)
-    } else {
-        patch_text.to_string()
-    };
+    let entries = parse_patch(patch_text)?;
 
     struct Staged {
         target: PathBuf,
@@ -1322,36 +1519,43 @@ pub async fn handle_file_apply_patch(
         }
     }
 
-    let mut files = normalized.split("\n--- ");
-    let _preamble = files.next();
-
-    for raw in files {
-        let mut it = raw.splitn(2, '\n');
-        let old_line = it.next().unwrap_or("");
-        let rest = it.next().unwrap_or("");
-        let mut it2 = rest.splitn(2, '\n');
-        let new_line = it2.next().unwrap_or("");
-        let body = it2.next().unwrap_or("");
-        if !new_line.starts_with("+++ ") {
-            cleanup_tmps(&staged).await;
-            return Err(BifrostError::Config(
-                "[file.invalid_args] malformed unified diff: expected '+++' line".to_string(),
-            ));
+    for entry in &entries {
+        match &entry.kind {
+            PatchKind::Binary { path } => {
+                cleanup_tmps(&staged).await;
+                return Err(BifrostError::Config(format!(
+                    "[file.binary_patch_unsupported] binary diff for '{}' is not supported by file.apply_patch",
+                    path
+                )));
+            }
+            PatchKind::RenameOnly { from, to } => {
+                cleanup_tmps(&staged).await;
+                return Err(BifrostError::Config(format!(
+                    "[file.unsupported_diff] rename from '{}' to '{}' is not supported by file.apply_patch; use file.move",
+                    from, to
+                )));
+            }
+            PatchKind::CopyOnly { from, to } => {
+                cleanup_tmps(&staged).await;
+                return Err(BifrostError::Config(format!(
+                    "[file.unsupported_diff] copy from '{}' to '{}' is not supported by file.apply_patch; use file.read + file.write",
+                    from, to
+                )));
+            }
+            PatchKind::ModeOnly { path } => {
+                cleanup_tmps(&staged).await;
+                return Err(BifrostError::Config(format!(
+                    "[file.unsupported_diff] mode-only change for '{}' is not supported by file.apply_patch",
+                    path
+                )));
+            }
+            PatchKind::Modify | PatchKind::Create | PatchKind::Delete => {}
         }
-        let strip = |s: &str| -> String {
-            let s = s.trim();
-            s.strip_prefix("a/")
-                .or_else(|| s.strip_prefix("b/"))
-                .unwrap_or(s)
-                .to_string()
-        };
-        let old_path = strip(old_line);
-        let new_path = strip(new_line.trim_start_matches("+++ "));
-        let key = if new_path == "/dev/null" {
-            old_path.clone()
-        } else {
-            new_path.clone()
-        };
+
+        let _old_path = entry.old_path.clone();
+        let new_path = entry.new_path.clone();
+        let body = entry.body.as_str();
+        let key = entry.decision_key();
         let decision = match decisions.get(&key) {
             Some(d) => d,
             None => {
@@ -2844,6 +3048,205 @@ mod tests {
             paths.iter().any(|p| p.contains("notes.txt")),
             "denies should still surface notes.txt, got {:?}",
             paths
+        );
+    }
+
+    // ---------------------------------------------------------------
+    //  P0-2: parse_patch — git extended headers
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_patch_handles_diff_git_wrapper() {
+        let patch = concat!(
+            "diff --git a/f.txt b/f.txt\n",
+            "index 0000001..0000002 100644\n",
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].old_path, "f.txt");
+        assert_eq!(entries[0].new_path, "f.txt");
+        assert!(matches!(entries[0].kind, PatchKind::Modify));
+        assert!(entries[0].body.starts_with("@@ "));
+    }
+
+    #[test]
+    fn parse_patch_classifies_new_file_mode_as_create() {
+        let patch = concat!(
+            "diff --git a/new.txt b/new.txt\n",
+            "new file mode 100644\n",
+            "index 0000000..abc1234\n",
+            "--- /dev/null\n",
+            "+++ b/new.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+hi\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].kind, PatchKind::Create));
+        assert_eq!(entries[0].new_path, "new.txt");
+    }
+
+    #[test]
+    fn parse_patch_classifies_deleted_file_mode_as_delete() {
+        let patch = concat!(
+            "diff --git a/gone.txt b/gone.txt\n",
+            "deleted file mode 100644\n",
+            "--- a/gone.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-bye\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].kind, PatchKind::Delete));
+        assert_eq!(entries[0].decision_key(), "gone.txt");
+    }
+
+    #[test]
+    fn parse_patch_rename_only_is_classified() {
+        let patch = concat!(
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0].kind {
+            PatchKind::RenameOnly { from, to } => {
+                assert_eq!(from, "from.txt");
+                assert_eq!(to, "to.txt");
+            }
+            other => panic!("expected RenameOnly, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_patch_copy_only_is_classified() {
+        let patch = concat!(
+            "diff --git a/orig.txt b/dup.txt\n",
+            "similarity index 100%\n",
+            "copy from orig.txt\n",
+            "copy to dup.txt\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].kind, PatchKind::CopyOnly { .. }));
+    }
+
+    #[test]
+    fn parse_patch_mode_only_is_classified() {
+        let patch = concat!(
+            "diff --git a/run.sh b/run.sh\n",
+            "old mode 100644\n",
+            "new mode 100755\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0].kind {
+            PatchKind::ModeOnly { path } => assert_eq!(path, "run.sh"),
+            other => panic!("expected ModeOnly, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_patch_binary_patch_is_classified() {
+        let patch = concat!(
+            "diff --git a/img.png b/img.png\n",
+            "index 1111..2222 100644\n",
+            "Binary files a/img.png and b/img.png differ\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].kind, PatchKind::Binary { .. }));
+    }
+
+    #[test]
+    fn parse_patch_multi_file_mixed() {
+        let patch = concat!(
+            "diff --git a/a.txt b/a.txt\n",
+            "--- a/a.txt\n",
+            "+++ b/a.txt\n",
+            "@@ -1 +1 @@\n",
+            "-x\n",
+            "+y\n",
+            "diff --git a/b.txt b/b.txt\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/b.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+new\n",
+        );
+        let entries = parse_patch(patch).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0].kind, PatchKind::Modify));
+        assert!(matches!(entries[1].kind, PatchKind::Create));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_binary_with_clear_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("img.png"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("img.png".to_string(), dec);
+        let patch = concat!(
+            "diff --git a/img.png b/img.png\n",
+            "Binary files a/img.png and b/img.png differ\n",
+        );
+        let err = handle_file_apply_patch(&decisions, patch)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("file.binary_patch_unsupported"), "got {}", msg);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_rename_only_with_clear_code() {
+        let decisions = std::collections::HashMap::new();
+        let patch = concat!(
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+        let err = handle_file_apply_patch(&decisions, patch)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("file.unsupported_diff"), "got {}", msg);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_still_works_with_diff_git_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "old\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("f.txt".to_string(), dec);
+        let patch = concat!(
+            "diff --git a/f.txt b/f.txt\n",
+            "index 0000001..0000002 100644\n",
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+        );
+        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
+            "new\n"
         );
     }
 }
