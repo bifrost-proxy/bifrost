@@ -1136,6 +1136,14 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     ensure_remote_command_confirmed(&opts.action)?;
+    if let RemoteCommands::Command {
+        action: RemoteCommandCommands::Exec(exec_args),
+    } = &opts.action
+    {
+        if let Err(msg) = validate_remote_command_exec_flags(exec_args) {
+            return Err(BifrostError::Config(msg));
+        }
+    }
     let command = build_remote_command(&opts.action);
 
     let grant = caller
@@ -2093,6 +2101,47 @@ fn build_open_call_command_summary(command: &BuiltRemoteCommand) -> OpenCallComm
         command_preview: command.label.clone(),
         masked_args_json: command.args_json.clone(),
     }
+}
+
+/// Phase 6 (review fix): pure helper that encodes the post-exit scheduling
+/// contract. Exposed for unit testing so that regression coverage does not
+/// have to spin up a full SSE stream.
+///
+/// Returns `true` if the outer subscribe loop should reset its idle-deadline
+/// timer on this incoming chunk, `false` if the current timer (typically the
+/// 3-second post-exit grace) must be left untouched.
+///
+/// The rule is simple: once `exit_received` is true, a late frame or
+/// keep-alive MUST NOT push the deadline further out, otherwise a post-exit
+/// `stream_frame` cadence tighter than the grace window keeps the loop
+/// alive forever.
+pub(crate) fn should_reset_idle_deadline_on_chunk(exit_received: bool) -> bool {
+    !exit_received
+}
+
+/// Phase 6 (review fix): reject semantically conflicting CLI flags that clap
+/// cannot express directly. `--resume-call-id` rejoins an existing remote
+/// call (bypassing open_call), so a fresh command body (`--shell-text` /
+/// trailing `argv`) would be silently ignored, confusing operators. Fail
+/// fast at arg-parse time with an actionable message.
+pub(crate) fn validate_remote_command_exec_flags(
+    exec_args: &RemoteCommandExecArgs,
+) -> Result<(), String> {
+    if exec_args.resume_call_id.is_some() {
+        if exec_args.shell_text.is_some() {
+            return Err(
+                "--resume-call-id cannot be combined with --shell-text:                  resume rejoins an existing call and ignores any new command"
+                    .to_string(),
+            );
+        }
+        if !exec_args.argv.is_empty() {
+            return Err(
+                "--resume-call-id cannot be combined with a trailing program/argv:                  resume rejoins an existing call and ignores any new command"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRemoteCommand {
@@ -3488,10 +3537,12 @@ impl CallerRelayClient {
                             let text = String::from_utf8_lossy(&bytes);
                             partial_line.push_str(&text);
                             // PR #5a: reset idle deadline on each received chunk.
-                            // Post-exit: keep the 3s grace timer authoritative and
-                            // do NOT let late stream_frame chunks / keep-alives
-                            // seed it back to the 300s idle window.
-                            if !exit_received {
+                            // Phase 6 (review fix): the should_reset_idle_deadline_on_chunk
+                            // helper expresses the post-exit-grace contract as a pure fn
+                            // that is unit-testable; keep the 3s grace authoritative and
+                            // do NOT let late stream_frame chunks / keep-alives seed it
+                            // back to the 300s idle window.
+                            if should_reset_idle_deadline_on_chunk(exit_received) {
                                 timeout.as_mut().reset(tokio::time::Instant::now() + idle);
                             }
 
@@ -3536,8 +3587,13 @@ impl CallerRelayClient {
                                                     }
                                                 }
                                                 if exit_received {
-                                                    debug!("late frame received after exit");
-                                                    timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
+                                                    // Phase 6 (review fix): do NOT re-arm the 3s grace
+                                                    // sleep on every late frame. The grace deadline is
+                                                    // set exactly once when `exit_received` flips true;
+                                                    // otherwise a post-exit stream_frame cadence tighter
+                                                    // than 3s keeps the loop alive indefinitely and the
+                                                    // caller never returns after the remote has finished.
+                                                    debug!("late frame after exit; ignoring grace extension");
                                                 }
                                             }
                                             "exit" => {
@@ -3582,22 +3638,40 @@ impl CallerRelayClient {
                                                 timeout = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
                                             }
                                             "error" => {
-                                                if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
-                                                    let msg = v.get("message")
-                                                        .or_else(|| v.get("error"))
-                                                        .and_then(|m| m.as_str())
-                                                        .unwrap_or("unknown error");
-                                                    error!(error = %msg, "call error from relay");
-                                                    result.exit_code = -1;
-                                                    result.stderr = Some(msg.to_string());
+                                                if exit_received {
+                                                    // Phase 6 (review fix): after a terminal exit,
+                                                    // a trailing `error` event from the relay (most
+                                                    // commonly a harmless race against the exit
+                                                    // finalize) must not overwrite the captured exit
+                                                    // code back to -1. Ignore and keep waiting for
+                                                    // the grace deadline or stream close.
+                                                    debug!("ignoring post-exit error event");
+                                                } else {
+                                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                        let msg = v.get("message")
+                                                            .or_else(|| v.get("error"))
+                                                            .and_then(|m| m.as_str())
+                                                            .unwrap_or("unknown error");
+                                                        error!(error = %msg, "call error from relay");
+                                                        result.exit_code = -1;
+                                                        result.stderr = Some(msg.to_string());
+                                                    }
+                                                    if !stream_stdout {
+                                                        result.stdout = Some(stdout_parts.join(""));
+                                                    }
+                                                    return Ok(result);
                                                 }
-                                                if !stream_stdout {
-                                                    result.stdout = Some(stdout_parts.join(""));
-                                                }
-                                                return Ok(result);
                                             }
                                             "status" => {
-                                                if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                                if exit_received {
+                                                    // Phase 6 (review fix): a trailing status event
+                                                    // after the exit has been observed must not flip
+                                                    // exit_code to 130 / cancelled=true. This can
+                                                    // happen when the caller cancels late and the
+                                                    // relay finalizes the status after exit has
+                                                    // already landed.
+                                                    debug!("ignoring post-exit status event");
+                                                } else if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
                                                     if let Some(status) = parse_call_terminal_status(&v) {
                                                         if status == "cancelled" {
                                                             result.exit_code = 130;
@@ -5545,6 +5619,152 @@ mod tests {
         match step {
             StreamingDispatchStep::Cancelled => {}
             other => panic!("expected Cancelled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_rejects_resume_with_shell_text() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: Some("echo hi".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_remote_command_exec_flags(&args).unwrap_err();
+        assert!(
+            err.contains("--resume-call-id cannot be combined with --shell-text"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_rejects_resume_with_argv() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: None,
+            argv: vec!["ls".to_string(), "-la".to_string()],
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        let err = validate_remote_command_exec_flags(&args).unwrap_err();
+        assert!(
+            err.contains("--resume-call-id cannot be combined with a trailing program"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_allows_plain_resume() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: None,
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("abc".to_string()),
+            resume_relay_token: Some("tok".to_string()),
+            no_verify_digest: false,
+        };
+        assert!(validate_remote_command_exec_flags(&args).is_ok());
+    }
+
+    #[test]
+    fn validate_remote_command_exec_flags_allows_fresh_shell_text() {
+        let args = RemoteCommandExecArgs {
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            shell_text: Some("echo hi".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+        };
+        assert!(validate_remote_command_exec_flags(&args).is_ok());
+    }
+
+    #[test]
+    fn post_exit_guard_prevents_idle_deadline_reset() {
+        // Phase 6: once exit has been observed, the idle-deadline reset
+        // on incoming SSE chunks MUST be suppressed so the 3s grace is
+        // authoritative. A cadence of post-exit frames tighter than the
+        // grace must not extend the timer indefinitely.
+        assert!(should_reset_idle_deadline_on_chunk(false));
+        assert!(!should_reset_idle_deadline_on_chunk(true));
+    }
+
+    #[test]
+    fn sse_stream_frame_with_forward_gap_bubbles_up_offset_ahead() {
+        // Phase 6: integration check that combines the SSE decoder
+        // (parse_stream_frame_from_sse_data) with the state machine
+        // (CallerStreamState::feed). A relay-shaped
+        // {call_id, frame_json: "<Stdout offset=10 ...>"} payload whose
+        // offset starts strictly past head must produce
+        // StreamIngestError::OffsetAhead, not a silent digest mismatch.
+        use crate::commands::caller_stream_frame::{
+            parse_stream_frame_from_sse_data, CallerStreamState, StreamIngestError,
+        };
+
+        // Build the stringified StreamFrame then wrap it in the relay envelope.
+        // Using serde_json::json! avoids fragile manual backslash-escaping.
+        let first_inner = serde_json::json!({
+            "kind": "stdout",
+            "seq": 0u64,
+            "offset": 0u64,
+            "data_b64": "YWJj", // "abc"
+        })
+        .to_string();
+        let first = serde_json::json!({
+            "call_id": "c1",
+            "frame_json": first_inner,
+        })
+        .to_string();
+
+        let mut state = CallerStreamState::new(Vec::new(), Vec::new(), false);
+        let f = parse_stream_frame_from_sse_data(&first).expect("parse first");
+        state.feed(&f).expect("feed first");
+        assert_eq!(state.stdout_head(), 3);
+
+        let gap_inner = serde_json::json!({
+            "kind": "stdout",
+            "seq": 1u64,
+            "offset": 10u64,
+            "data_b64": "WFla", // "XYZ"
+        })
+        .to_string();
+        let gap = serde_json::json!({
+            "call_id": "c1",
+            "frame_json": gap_inner,
+        })
+        .to_string();
+        let f = parse_stream_frame_from_sse_data(&gap).expect("parse gap");
+        let err = state.feed(&f).unwrap_err();
+        match err {
+            StreamIngestError::OffsetAhead {
+                kind,
+                got,
+                expected,
+            } => {
+                assert_eq!(kind, "stdout");
+                assert_eq!(got, 10);
+                assert_eq!(expected, 3);
+            }
+            other => panic!("expected OffsetAhead, got {other:?}"),
         }
     }
 }
