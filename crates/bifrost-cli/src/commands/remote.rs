@@ -3760,13 +3760,21 @@ impl CallerRelayClient {
                                             // streaming caller loop can terminate rather than entering an
                                             // infinite reconnect loop waiting for a Done frame that worker
                                             // never emits today.
+                                            //
+                                            // PR review fix: mark digest_ok=false so the outer dispatcher
+                                            // does not silently mask a missing digest check when
+                                            // --no-verify-digest is not set. A warn! documents the
+                                            // downgrade for operators.
                                             if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
                                                 let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
                                                 let duration_ms = v.get("duration_ms").and_then(|x| x.as_u64());
+                                                if state.digest_verification_enabled() {
+                                                    warn!("streaming subscribe ended on legacy exit event; digest not verified");
+                                                }
                                                 return Ok(StreamingSubscriptionOutcome::Completed {
                                                     exit_code,
                                                     duration_ms,
-                                                    digest_ok: true,
+                                                    digest_ok: !state.digest_verification_enabled(),
                                                 });
                                             }
                                         }
@@ -4181,9 +4189,14 @@ async fn run_streaming_dispatch(
     prefs: &StreamingPrefs,
 ) -> bifrost_core::Result<CallResult> {
     let stdout_sink: Box<dyn std::io::Write + Send> = match prefs.output_file.as_ref() {
-        Some(path) => Box::new(std::fs::File::create(path).map_err(|e| {
-            BifrostError::Network(format!("open --output-file {}: {}", path.display(), e))
-        })?),
+        // PR review fix: use the shared append-mode BufWriter sink so resume
+        // semantics are preserved. File::create truncates the output file on
+        // every reconnect, defeating --resume-call-id.
+        Some(path) => Box::new(
+            crate::commands::caller_stream_frame::open_stdout_file_sink(path).map_err(|e| {
+                BifrostError::Network(format!("open --output-file {}: {}", path.display(), e))
+            })?,
+        ),
         None => Box::new(std::io::stdout()),
     };
     let stderr_sink: Box<dyn std::io::Write + Send> = Box::new(std::io::stderr());

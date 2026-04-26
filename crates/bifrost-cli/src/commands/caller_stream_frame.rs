@@ -114,6 +114,13 @@ impl From<io::Error> for StreamIngestError {
 }
 
 impl<W: Write, E: Write> CallerStreamState<W, E> {
+    /// Whether Done.digest_ok semantics are enforced. Used by the streaming
+    /// subscriber to decide whether to downgrade  on legacy
+    /// exit-event terminations.
+    pub fn digest_verification_enabled(&self) -> bool {
+        self.verify_digest
+    }
+
     /// Construct a fresh state, starting at stream offsets (0, 0).
     pub fn new(stdout_sink: W, stderr_sink: E, verify_digest: bool) -> Self {
         Self {
