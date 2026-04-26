@@ -18,8 +18,10 @@
 //!     ring evicts purely by capacity. `last_ack_offset` is exposed so the
 //!     caller / future PR can grow/shrink capacity heuristically.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Default ring capacity per stream (stdout or stderr) per call_id: 64 MiB.
@@ -171,6 +173,10 @@ pub struct SessionState {
     pub stdout: ByteRing,
     pub stderr: ByteRing,
     pub status: SessionStatus,
+    /// Set when status transitions to a terminal variant; the registry
+    /// reaper uses this to drop rings for long-completed calls so the
+    /// global registry cannot grow without bound.
+    pub finalized_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,45 +205,84 @@ impl SessionRegistry {
             stdout: ByteRing::new(capacity),
             stderr: ByteRing::new(capacity),
             status: SessionStatus::Running,
+            finalized_at: None,
         }));
-        self.inner
-            .lock()
-            .expect("registry lock")
-            .insert(call_id, Arc::clone(&state));
+        self.inner.lock().insert(call_id, Arc::clone(&state));
         (call_id, state)
     }
 
     pub fn get(&self, call_id: &Uuid) -> Option<Arc<Mutex<SessionState>>> {
-        self.inner
-            .lock()
-            .expect("registry lock")
-            .get(call_id)
-            .cloned()
+        self.inner.lock().get(call_id).cloned()
     }
 
     pub fn remove(&self, call_id: &Uuid) -> Option<Arc<Mutex<SessionState>>> {
-        self.inner.lock().expect("registry lock").remove(call_id)
+        self.inner.lock().remove(call_id)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("registry lock").len()
+        self.inner.lock().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().expect("registry lock").is_empty()
+        self.inner.lock().is_empty()
     }
 
     /// PR #4c-1: insert a session keyed by a caller-specified id so the
     /// relay's canonical call_id stays the primary handle. No-op if an
     /// entry already exists.
+    /// Drop entries whose status is terminal and whose finalize
+    /// timestamp is older than `max_age`. Returns the number of rings
+    /// reaped. Safe to call from any thread; collects victims under
+    /// the outer-map lock, then frees the rings *outside* that lock so
+    /// a large eviction burst does not stall concurrent tee/resume.
+    pub fn reap_finalized_older_than(&self, max_age: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let victims: Vec<Uuid> = {
+            let map = self.inner.lock();
+            map.iter()
+                .filter_map(|(id, state_arc)| {
+                    let state = state_arc.lock();
+                    let terminal = matches!(
+                        state.status,
+                        SessionStatus::Done { .. }
+                            | SessionStatus::Failed { .. }
+                            | SessionStatus::Abandoned
+                    );
+                    let expired = state
+                        .finalized_at
+                        .map(|t| now.duration_since(t) >= max_age)
+                        .unwrap_or(false);
+                    if terminal && expired {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut reaped = 0usize;
+        for id in victims {
+            let removed = {
+                let mut map = self.inner.lock();
+                map.remove(&id)
+            };
+            if let Some(arc) = removed {
+                drop(arc);
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+
     pub fn insert_with_id(&self, id: Uuid, capacity: usize) {
-        let mut map = self.inner.lock().expect("registry lock");
+        let mut map = self.inner.lock();
         map.entry(id).or_insert_with(|| {
             Arc::new(Mutex::new(SessionState {
                 call_id: id,
                 stdout: ByteRing::new(capacity),
                 stderr: ByteRing::new(capacity),
                 status: SessionStatus::Running,
+                finalized_at: None,
             }))
         });
     }
@@ -275,7 +320,7 @@ pub fn register_session(capacity: usize) -> Uuid {
 /// session is registered for this call_id (keeps legacy callers unchanged).
 pub fn tee_stdout(call_id: &Uuid, bytes: &[u8]) {
     if let Some(state_arc) = global_registry().get(call_id) {
-        let mut state = state_arc.lock().expect("session state poisoned");
+        let mut state = state_arc.lock();
         state.stdout.append(bytes);
     }
 }
@@ -283,7 +328,7 @@ pub fn tee_stdout(call_id: &Uuid, bytes: &[u8]) {
 /// Mirror a stderr chunk into the session's ring. Silent no-op if absent.
 pub fn tee_stderr(call_id: &Uuid, bytes: &[u8]) {
     if let Some(state_arc) = global_registry().get(call_id) {
-        let mut state = state_arc.lock().expect("session state poisoned");
+        let mut state = state_arc.lock();
         state.stderr.append(bytes);
     }
 }
@@ -292,8 +337,9 @@ pub fn tee_stderr(call_id: &Uuid, bytes: &[u8]) {
 /// still succeed for any retained bytes so the CLI can drain after Done.
 pub fn finalize_session(call_id: &Uuid, status: SessionStatus) {
     if let Some(state_arc) = global_registry().get(call_id) {
-        let mut state = state_arc.lock().expect("session state poisoned");
+        let mut state = state_arc.lock();
         state.status = status;
+        state.finalized_at = Some(Instant::now());
     }
 }
 
@@ -307,7 +353,7 @@ pub fn resume_stdout(
     let state_arc = global_registry()
         .get(call_id)
         .ok_or(ResumeError::UnknownCallId)?;
-    let state = state_arc.lock().expect("session state poisoned");
+    let state = state_arc.lock();
     let head = state.stdout.head();
     // Pre-size buffer to exactly the available range; read_from fills it.
     let available = head.saturating_sub(from_offset) as usize;
@@ -325,7 +371,7 @@ pub fn resume_stderr(
     let state_arc = global_registry()
         .get(call_id)
         .ok_or(ResumeError::UnknownCallId)?;
-    let state = state_arc.lock().expect("session state poisoned");
+    let state = state_arc.lock();
     let head = state.stderr.head();
     let available = head.saturating_sub(from_offset) as usize;
     let mut out = vec![0u8; available];
@@ -474,9 +520,9 @@ mod tests {
         let (id, state) = reg.create(DEFAULT_SESSION_RING_CAPACITY);
         assert_eq!(reg.len(), 1);
         assert!(reg.get(&id).is_some());
-        state.lock().unwrap().stdout.append(b"xyz");
+        state.lock().stdout.append(b"xyz");
         let got = reg.get(&id).unwrap();
-        assert_eq!(got.lock().unwrap().stdout.head(), 3);
+        assert_eq!(got.lock().stdout.head(), 3);
         reg.remove(&id).unwrap();
         assert!(reg.is_empty());
         assert!(reg.get(&id).is_none());
@@ -488,10 +534,10 @@ mod tests {
         let (a, sa) = reg.create(128);
         let (b, sb) = reg.create(128);
         assert_ne!(a, b);
-        sa.lock().unwrap().stdout.append(b"aa");
-        sb.lock().unwrap().stdout.append(b"bbbb");
-        assert_eq!(reg.get(&a).unwrap().lock().unwrap().stdout.head(), 2);
-        assert_eq!(reg.get(&b).unwrap().lock().unwrap().stdout.head(), 4);
+        sa.lock().stdout.append(b"aa");
+        sb.lock().stdout.append(b"bbbb");
+        assert_eq!(reg.get(&a).unwrap().lock().stdout.head(), 2);
+        assert_eq!(reg.get(&b).unwrap().lock().stdout.head(), 4);
     }
 
     // ---- PR #4b: global singleton + tee/resume helpers ----
@@ -615,5 +661,39 @@ mod tests {
         global_registry().insert_with_id(id, 1024);
         let (bytes, _, _) = resume_stdout(&id, 0).unwrap();
         assert_eq!(bytes, b"first");
+    }
+
+    #[test]
+    fn reaper_drops_finalized_entries_older_than_max_age() {
+        use std::thread::sleep;
+        let reg = SessionRegistry::new();
+        let (a, _) = reg.create(16);
+        let (b, _) = reg.create(16);
+        // a is finalized, b stays Running.
+        if let Some(state_arc) = reg.get(&a) {
+            let mut st = state_arc.lock();
+            st.status = SessionStatus::Done { exit_code: 0 };
+            st.finalized_at = Some(Instant::now());
+        }
+        sleep(std::time::Duration::from_millis(20));
+        let reaped = reg.reap_finalized_older_than(std::time::Duration::from_millis(10));
+        assert_eq!(reaped, 1);
+        assert!(reg.get(&a).is_none(), "finalized entry should be reaped");
+        assert!(reg.get(&b).is_some(), "running entry must survive reaper");
+    }
+
+    #[test]
+    fn reaper_respects_max_age_and_skips_fresh_finalized() {
+        let reg = SessionRegistry::new();
+        let (a, _) = reg.create(16);
+        if let Some(state_arc) = reg.get(&a) {
+            let mut st = state_arc.lock();
+            st.status = SessionStatus::Failed { code: "x".into() };
+            st.finalized_at = Some(Instant::now());
+        }
+        // Age threshold is 10 s: the just-finalized entry must NOT be reaped.
+        let reaped = reg.reap_finalized_older_than(std::time::Duration::from_secs(10));
+        assert_eq!(reaped, 0);
+        assert!(reg.get(&a).is_some());
     }
 }
