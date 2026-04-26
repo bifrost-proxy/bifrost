@@ -638,6 +638,15 @@ run_shell_tests_parallel() {
     "test_memory_pressure_e2e.sh"
   )
 
+  # PR-G-CI-FIX: isolated-after tests
+  # These tests spawn long-lived bifrost/python children that escape the
+  # per-test subshell trap. Run serially and call kill_all_bifrost after each
+  # to prevent orphan processes from holding the parent job's wait/cleanup.
+  local ISOLATED_AFTER_TESTS=(
+    "test_remote_connect_overload_retry_e2e.sh"
+    "test_client_process_transport_attribution.sh"
+  )
+
   for script_name in "${shell_tests[@]}"; do
     if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
       skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
@@ -652,7 +661,16 @@ run_shell_tests_parallel() {
       fi
     done
 
-    if [[ "$is_mock_managing" -eq 1 ]]; then
+    # PR-G-CI-FIX: isolated-after tests
+    local is_isolated_after=0
+    for it in "${ISOLATED_AFTER_TESTS[@]}"; do
+      if [[ "$script_name" == "$it" ]]; then
+        is_isolated_after=1
+        break
+      fi
+    done
+
+    if [[ "$is_mock_managing" -eq 1 || "$is_isolated_after" -eq 1 ]]; then
       serial_tests+=("$script_name")
     else
       parallel_tests+=("$script_name")
@@ -676,6 +694,14 @@ run_shell_tests_parallel() {
     for script_name in "${serial_tests[@]}"; do
       log_info "Queue serial shell test: $script_name"
       run_shell_test_isolated "$script_name"
+      # PR-G-CI-FIX: isolated-after tests - clean up any orphan bifrost procs
+      for it in "${ISOLATED_AFTER_TESTS[@]}"; do
+        if [[ "$script_name" == "$it" ]]; then
+          echo "[CLEANUP] post ${script_name}: killing residual bifrost processes"
+          kill_all_bifrost 2>/dev/null || true
+          break
+        fi
+      done
     done
   fi
 }
@@ -799,7 +825,25 @@ run_shell_batch_parallel() {
       next_index=$((next_index + 1))
     done
 
+    # PR-G-CI-FIX: per-test timeout (kill direct pid only; avoid PGID
+    # because children do not run in independent process groups and a
+    # group kill would take out sibling parallel tests).
+    local shell_per_test_timeout="${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}"
+    local now_ts
+    now_ts="$(date +%s)"
     for i in "${!pids[@]}"; do
+      if [[ -z "${pids[$i]:-}" ]]; then
+        continue
+      fi
+      local this_pid="${pids[$i]}"
+      local this_start="${pid_starts[$i]}"
+      local this_age=$((now_ts - this_start))
+      if kill -0 "$this_pid" 2>/dev/null && [[ "$this_age" -gt "$shell_per_test_timeout" ]]; then
+        echo "[TIMEOUT] shell:${pid_scripts[$i]} exceeded ${shell_per_test_timeout}s, age=${this_age}s pid=${this_pid}"
+        kill -TERM "$this_pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$this_pid" 2>/dev/null || true
+      fi
       if [[ -n "${pids[$i]:-}" ]] && ! kill -0 "${pids[$i]}" 2>/dev/null; then
         local exit_code=0
         wait "${pids[$i]}" 2>/dev/null || exit_code=$?
@@ -808,7 +852,6 @@ run_shell_batch_parallel() {
         local dur=$((end_ts - pid_starts[$i]))
         local sname="${pid_scripts[$i]}"
         local slog="${pid_logs[$i]}"
-
         if [[ "$exit_code" -eq 0 ]]; then
           register_suite "shell:${sname}" "passed" "$slog" "" "$dur"
           echo "[PASS] shell:${sname} (${dur}s)"

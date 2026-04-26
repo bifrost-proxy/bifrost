@@ -9,6 +9,7 @@ import type {
   PublishPairCodeRequest,
   ClientHeartbeatRequest,
   ClientCallFrameRequest,
+  ClientCallStreamFrameRequest,
   ClientCallExitRequest,
   OpenCallRequest,
   CallsQueryParams,
@@ -785,6 +786,38 @@ export class RemoteInvokeService {
       seq: 0,
       direction: 'client_to_caller',
       event_summary_json: JSON.stringify({ size: req.envelope_json.length }),
+      create_time: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * PR#6a: forward a worker-side StreamFrame to the caller SSE as an
+   * `stream_frame` event. Payload is the raw StreamFrame JSON string.
+   */
+  async postClientStreamFrame(req: ClientCallStreamFrameRequest): Promise<void> {
+    const call = await this.storage.remoteInvoke.getCall(req.call_id);
+    if (!call) throw new Error('call_not_found');
+    if (call.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_mismatch');
+    }
+
+    // PR#6a-followup: forward frame_json verbatim as inner string so the
+    // caller SSE consumer parses a single well-formed JSON object. Re-parsing
+    // here and letting pushToCallerStream JSON.stringify a second time both
+    // risks floating-point precision loss and breaks the {call_id, frame_json}
+    // contract asserted by remote-invoke-stream-frame.test.ts.
+    pushToCallerStream(req.call_id, 'stream_frame', {
+      call_id: req.call_id,
+      frame_json: req.frame_json,
+    });
+
+    await this.storage.remoteInvoke.appendEvent({
+      id: nanoid(),
+      call_id: req.call_id,
+      event_type: 'call_stream_frame_out',
+      seq: 0,
+      direction: 'client_to_caller',
+      event_summary_json: JSON.stringify({ size: req.frame_json.length }),
       create_time: new Date().toISOString(),
     });
   }

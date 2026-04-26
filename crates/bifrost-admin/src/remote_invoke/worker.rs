@@ -26,17 +26,20 @@ use super::grant_info_store::GrantInfoStore;
 use super::grant_policy_store::{GrantPolicyStore, StoredGrantPolicy};
 use super::identity::Identity;
 use super::relay_client::RelayClient;
+use super::session_ring;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
+use super::stream_emit;
 use super::types::{
     build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
     derive_open_call_session_key, encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms,
     scope_allows_command, AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest,
-    ClientCallFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
-    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
-    EncryptedPayload, EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision,
-    GrantDecisionRequest, GrantInfo, GrantMode, GrantScope, GrantStatus, PairingRequest,
-    PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig, SshConnectEvent,
-    SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest, WorkerState,
+    ClientCallFrameRequest, ClientCallStreamFrameRequest, ClientHeartbeatRequest,
+    ClientRegistrationChallengeRequest, ClientRegistrationRequest, CommandKind, CommandSummary,
+    DiscoverySession, EncryptedEnvelope, EncryptedPayload, EnvelopeAad, FileAccessScope,
+    FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode, GrantScope,
+    GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig,
+    SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest,
+    WorkerState,
 };
 use crate::state::SharedAdminState;
 
@@ -2449,6 +2452,14 @@ impl RemoteInvokeWorker {
 
             let start = std::time::Instant::now();
             let mut next_seq = 1u64;
+            // PR B: track absolute stdout byte offset so stream_frame emission
+            // carries the real head. CLI's CallerStreamState verifies contiguity
+            // against this offset; a stuck 0u64 causes all frames after the first
+            // to be treated as reconnect/dedup candidates.
+            let mut next_stdout_offset: u64 = 0;
+            // PR #4c-2: register a session in the global ring so tee/resume can work.
+            let _session_registered = session_ring::register_session_str(&cid);
+
             let result = executor
                 .execute_with_stdout_sink(&command, |chunk| {
                     let relay_client = Arc::clone(&relay_client);
@@ -2457,13 +2468,21 @@ impl RemoteInvokeWorker {
                     let grant_crypto = grant_crypto.clone();
                     let seq = next_seq;
                     next_seq += 1;
+                    let offset_for_stream = next_stdout_offset;
+                    next_stdout_offset = next_stdout_offset.saturating_add(chunk.len() as u64);
 
                     async move {
+                        // PR #4c-2: mirror stdout bytes into the session ring
+                        // for resume. Silent no-op if cid is not a UUID.
+                        session_ring::tee_stdout_str(&cid, &chunk);
+                        // PR#6c: clone before chunk/instance_id get moved into legacy path
+                        let chunk_bytes_for_stream = chunk.clone();
+                        let instance_id_for_stream = instance_id.clone();
                         let envelope = Self::encrypt_call_frame(
                             &grant_crypto,
                             &cid,
                             seq,
-                            chunk,
+                            String::from_utf8_lossy(&chunk).into_owned(),
                             command_kind_for_stream,
                             grant_scope_for_stream,
                         )?;
@@ -2475,7 +2494,45 @@ impl RemoteInvokeWorker {
                             envelope_json,
                         };
 
-                        relay_client.post_call_frame(&cid, &frame_req).await
+                        // PR#6c-followup: run the legacy /frame POST and the
+                        // new /stream-frame POST concurrently with tokio::join!
+                        // so neither RTT serializes the stdout chunk sink. The
+                        // stream_frame result is intentionally best-effort (the
+                        // legacy envelope path remains the source of truth
+                        // until PR #5e flips the caller default), but running
+                        // both in parallel prevents either slow leg from
+                        // blocking the executor read loop — the root cause of
+                        // the CI hang reverted in f1e2f88.
+                        let legacy_fut = relay_client.post_call_frame(&cid, &frame_req);
+                        let stream_frame = stream_emit::build_stdout_frame(
+                            seq,
+                            offset_for_stream,
+                            &chunk_bytes_for_stream,
+                        );
+                        let stream_frame_json = stream_emit::frame_to_json(&stream_frame);
+                        let cid_for_stream = cid.clone();
+                        let relay_for_stream = Arc::clone(&relay_client);
+                        let stream_fut = async move {
+                            if let Some(frame_json) = stream_frame_json {
+                                let stream_req = ClientCallStreamFrameRequest {
+                                    call_id: cid_for_stream.clone(),
+                                    client_instance_id: instance_id_for_stream,
+                                    frame_json,
+                                };
+                                if let Err(err) = relay_for_stream
+                                    .post_call_stream_frame(&cid_for_stream, &stream_req)
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        call_id = %cid_for_stream,
+                                        ?err,
+                                        "parallel stream_frame post failed"
+                                    );
+                                }
+                            }
+                        };
+                        let (legacy_result, ()) = tokio::join!(legacy_fut, stream_fut);
+                        legacy_result
                     }
                 })
                 .await;
@@ -2483,6 +2540,13 @@ impl RemoteInvokeWorker {
 
             match result {
                 Ok(response) => {
+                    // PR #4c-2: finalize the session ring for successful exit.
+                    session_ring::finalize_session_str(
+                        &cid,
+                        super::session_ring::SessionStatus::Done {
+                            exit_code: response.exit_code,
+                        },
+                    );
                     if active_call_for_task.is_cancelled() {
                         info!(call_id = %cid, "skip completion update because call was cancelled");
                         active_calls.write().remove(&cid);
@@ -2499,6 +2563,13 @@ impl RemoteInvokeWorker {
                     ) {
                         Ok(payload) => Some(payload),
                         Err(error) => {
+                            // PR #4c-2: finalize the session ring for failure.
+                            session_ring::finalize_session_str(
+                                &cid,
+                                super::session_ring::SessionStatus::Failed {
+                                    code: error.to_string(),
+                                },
+                            );
                             error!(
                                 error = %error,
                                 call_id = %cid,
@@ -2564,6 +2635,17 @@ impl RemoteInvokeWorker {
                         return;
                     }
                     error!(error = %e, call_id = %cid, "remote command execution failed");
+                    // PR#8-followup: the success branch already finalizes the
+                    // session ring on Done; the error branch previously skipped
+                    // finalize, leaking the 128 MiB ring forever. Close it now
+                    // so the global registry does not grow unbounded for
+                    // failed calls.
+                    session_ring::finalize_session_str(
+                        &cid,
+                        super::session_ring::SessionStatus::Failed {
+                            code: e.to_string(),
+                        },
+                    );
                     let stderr = e.to_string();
                     let exit_encrypted = match Self::encrypt_call_exit(
                         &grant_crypto,

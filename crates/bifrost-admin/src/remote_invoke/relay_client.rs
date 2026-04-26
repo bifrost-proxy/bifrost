@@ -5,10 +5,10 @@ use parking_lot::RwLock;
 use serde::Deserialize;
 
 use super::types::{
-    ClientCallExitRequest, ClientCallFrameRequest, ClientHeartbeatRequest,
-    ClientRegistrationChallengeRequest, ClientRegistrationChallengeResponse,
-    ClientRegistrationRequest, ClientRegistrationResponse, GrantDecisionRequest,
-    PublishPairCodeRequest, SshConnectResultRequest, UpdateGrantRequest,
+    ClientCallExitRequest, ClientCallFrameRequest, ClientCallStreamFrameRequest,
+    ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
+    ClientRegistrationChallengeResponse, ClientRegistrationRequest, ClientRegistrationResponse,
+    GrantDecisionRequest, PublishPairCodeRequest, SshConnectResultRequest, UpdateGrantRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +187,29 @@ impl RelayClient {
                 BifrostError::Network(format!("relay post call frame request failed: {e}"))
             })?;
         self.parse_response_empty(response, "post_call_frame").await
+    }
+
+    /// PR#6c: post a StreamFrame JSON to the relay `/stream-frame` endpoint.
+    pub async fn post_call_stream_frame(
+        &self,
+        call_id: &str,
+        req: &ClientCallStreamFrameRequest,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/v4/remote-invoke/client/calls/{}/stream-frame",
+            self.base_url(),
+            call_id
+        );
+        let response = self
+            .authorized_post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!("relay post call stream_frame request failed: {e}"))
+            })?;
+        self.parse_response_empty(response, "post_call_stream_frame")
+            .await
     }
 
     pub async fn post_call_exit(&self, call_id: &str, req: &ClientCallExitRequest) -> Result<()> {
