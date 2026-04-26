@@ -1223,11 +1223,36 @@ pub async fn handle_file_mkdir(decision: &PolicyDecision, parents: bool) -> Resu
 pub async fn handle_file_move(
     decision: &PolicyDecision,
     to_decision: &PolicyDecision,
+    base_sha256: Option<&str>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Move);
     debug_assert_eq!(to_decision.op, FileOp::Move);
     let from = decision.path.as_path();
     let to = to_decision.path.as_path();
+
+    // Optimistic lock: if the caller supplied `base_sha256`, verify the
+    // source file hashes match before renaming. This prevents a losing
+    // writer in a two-agent race from clobbering an already-moved target.
+    // Directories do not have a sha and are rejected with sha_mismatch
+    // so callers get a stable error code.
+    if let Some(expected) = base_sha256 {
+        let meta = fs::symlink_metadata(from)
+            .await
+            .map_err(|e| io_err("stat", e))?;
+        if !meta.file_type().is_file() {
+            return Err(BifrostError::Config(
+                "[file.sha_mismatch] base_sha256 is only valid for regular files".to_string(),
+            ));
+        }
+        let actual = sha256_file(from).await?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(BifrostError::Config(format!(
+                "[file.sha_mismatch] source file sha mismatch: expected {}, actual {}",
+                expected, actual
+            )));
+        }
+    }
+
     if fs::metadata(to).await.is_ok() && !decision.allow_overwrite {
         return Err(precondition_failed(
             "destination exists and overwrite is disabled",
@@ -1242,13 +1267,34 @@ pub async fn handle_file_move(
     }))
 }
 
-pub async fn handle_file_delete(decision: &PolicyDecision, recursive: bool) -> Result<Value> {
+pub async fn handle_file_delete(
+    decision: &PolicyDecision,
+    recursive: bool,
+    if_match_sha256: Option<&str>,
+) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Delete);
     let path = decision.path.as_path();
     let meta = fs::symlink_metadata(path)
         .await
         .map_err(|e| io_err("stat", e))?;
     let ft = meta.file_type();
+
+    // Optimistic lock (files only): verify content hash before deleting.
+    // Directories are silently skipped — their content is multi-file and
+    // a single sha has no meaning; callers should rely on recursive +
+    // allow_recursive_delete for dir protection instead.
+    if let Some(expected) = if_match_sha256 {
+        if ft.is_file() {
+            let actual = sha256_file(path).await?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(BifrostError::Config(format!(
+                    "[file.sha_mismatch] target file sha mismatch: expected {}, actual {}",
+                    expected, actual
+                )));
+            }
+        }
+    }
+
     if ft.is_dir() {
         if recursive {
             if !decision.allow_recursive_delete {
@@ -3248,5 +3294,155 @@ mod tests {
             std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
             "new\n"
         );
+    }
+
+    // ---- P1-5 / P1-6: move/delete optimistic lock (base_sha256/if_match_sha256) ----
+
+    #[tokio::test]
+    async fn move_accepts_matching_base_sha_p1_5() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("a.txt");
+        let to = tmp.path().join("b.txt");
+        std::fs::write(&from, b"hello").unwrap();
+        let sha = crate::remote_invoke::file_ops::sha256_hex(b"hello");
+
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d_from = pol
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let d_to = pol
+            .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let out = handle_file_move(&d_from, &d_to, Some(&sha)).await.unwrap();
+        assert!(out["from"].as_str().unwrap().ends_with("a.txt"));
+        assert!(to.exists());
+        assert!(!from.exists());
+    }
+
+    #[tokio::test]
+    async fn move_rejects_base_sha_mismatch_p1_5() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("a.txt");
+        let to = tmp.path().join("b.txt");
+        std::fs::write(&from, b"hello").unwrap();
+        let bogus = "0".repeat(64);
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d_from = pol
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let d_to = pol
+            .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let err = handle_file_move(&d_from, &d_to, Some(&bogus))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("[file.sha_mismatch]"),
+            "expected sha_mismatch, got {}",
+            err
+        );
+        // Source must be unchanged on mismatch.
+        assert!(from.exists(), "source file must survive rejected move");
+        assert!(!to.exists());
+    }
+
+    #[tokio::test]
+    async fn move_rejects_base_sha_for_directory_p1_5() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("dir_a");
+        let to = tmp.path().join("dir_b");
+        std::fs::create_dir(&from).unwrap();
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d_from = pol
+            .check(Path::new("dir_a"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let d_to = pol
+            .check(Path::new("dir_b"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let err = handle_file_move(&d_from, &d_to, Some(&"0".repeat(64)))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("[file.sha_mismatch]"),
+            "directory move with base_sha256 must reject, got {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_accepts_matching_if_match_p1_6() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a.txt");
+        std::fs::write(&p, b"bye").unwrap();
+        let sha = crate::remote_invoke::file_ops::sha256_hex(b"bye");
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d = pol
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Delete)
+            .unwrap();
+        let out = handle_file_delete(&d, false, Some(&sha)).await.unwrap();
+        assert_eq!(out["deleted"], serde_json::Value::Bool(true));
+        assert!(!p.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_if_match_mismatch_p1_6() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a.txt");
+        std::fs::write(&p, b"bye").unwrap();
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d = pol
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Delete)
+            .unwrap();
+        let err = handle_file_delete(&d, false, Some(&"1".repeat(64)))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("[file.sha_mismatch]"),
+            "expected sha_mismatch, got {}",
+            err
+        );
+        // File must survive.
+        assert!(p.exists(), "file must survive rejected delete");
+    }
+
+    #[tokio::test]
+    async fn delete_skips_sha_check_for_directory_p1_6() {
+        // Directory deletion never computes a sha; a bogus if_match_sha256
+        // is silently ignored for dirs (a single sha is undefined for a
+        // multi-file target). The recursive + allow_recursive_delete flags
+        // remain the authoritative protection for directories.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("sub");
+        std::fs::create_dir(&p).unwrap();
+        let mut pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        pol.allow_recursive_delete = true;
+        let d = pol
+            .check(Path::new("sub"), tmp.path(), FileOp::Delete)
+            .unwrap();
+        let _ = handle_file_delete(&d, false, Some(&"2".repeat(64)))
+            .await
+            .unwrap();
+        assert!(!p.exists());
     }
 }

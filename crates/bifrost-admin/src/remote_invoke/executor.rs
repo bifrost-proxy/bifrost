@@ -360,6 +360,8 @@ impl RemoteInvokeExecutor {
             cwd: Option<String>,
             content_b64: Option<String>,
             base_sha256: Option<String>,
+            #[serde(default)]
+            if_match_sha256: Option<String>,
             allow_overwrite: Option<bool>,
             edits: Option<Vec<super::file_ops::EditRange>>,
             to_path: Option<String>,
@@ -517,11 +519,20 @@ impl RemoteInvokeExecutor {
                 let to_decision = policy
                     .check(Path::new(to), cwd, FileOp::Move)
                     .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
-                super::file_ops::handle_file_move(&decision, &to_decision).await?
+                super::file_ops::handle_file_move(
+                    &decision,
+                    &to_decision,
+                    params.base_sha256.as_deref(),
+                )
+                .await?
             }
             "file.delete" => {
-                super::file_ops::handle_file_delete(&decision, params.recursive.unwrap_or(false))
-                    .await?
+                super::file_ops::handle_file_delete(
+                    &decision,
+                    params.recursive.unwrap_or(false),
+                    params.if_match_sha256.as_deref(),
+                )
+                .await?
             }
             "file.apply_patch" => {
                 let patch_text = params.patch_text.as_deref().ok_or_else(|| {
