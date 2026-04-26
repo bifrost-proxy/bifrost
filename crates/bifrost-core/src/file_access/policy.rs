@@ -319,12 +319,24 @@ impl FileAccessPolicy {
 }
 
 fn default_denies() -> Vec<String> {
-    vec![
-        "**/.git/**".into(),
-        "**/target/**".into(),
-        "**/*.key".into(),
-        "**/*.pem".into(),
-    ]
+    let mut out: Vec<String> = Vec::new();
+    // Sensitive directories: deny BOTH the directory itself (so `file.list`
+    // can't enumerate its contents) AND everything inside it. A single
+    // `**/dir/**` pattern does not match the bare `dir` path, which would
+    // otherwise let callers list its entries.
+    for dir in [".git", "target", "node_modules", ".ssh", ".aws", ".gnupg"] {
+        out.push(format!("**/{dir}"));
+        out.push(format!("**/{dir}/**"));
+    }
+    // macOS Keychains lives under Library/.
+    out.push("**/Library/Keychains".into());
+    out.push("**/Library/Keychains/**".into());
+    // Sensitive file suffixes (match anywhere under roots).
+    out.push("**/*.key".into());
+    out.push("**/*.pem".into());
+    out.push("**/.env".into());
+    out.push("**/.env.*".into());
+    out
 }
 
 #[cfg(test)]
@@ -420,6 +432,59 @@ mod tests {
         assert_eq!(decision.op, FileOp::Mkdir);
         assert!(decision.path.as_path().ends_with("sub/nested"));
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_ssh_directory_listing() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_ssh_dir_test");
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/id_rsa"), b"x").unwrap();
+
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+
+        // Listing the .ssh directory itself must be denied.
+        let err = policy
+            .check(Path::new(".ssh"), &root, FileOp::List)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.permission_denied");
+
+        // Reading a file inside .ssh must also be denied.
+        let err = policy
+            .check(Path::new(".ssh/id_rsa"), &root, FileOp::Read)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.permission_denied");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_target_and_node_modules_directory() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_target_nm_test");
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+        for d in ["target", "node_modules"] {
+            let err = policy.check(Path::new(d), &root, FileOp::List).unwrap_err();
+            assert_eq!(err.code(), "file.permission_denied", "dir={d}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_denies_blocks_env_files() {
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_env_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), b"x").unwrap();
+        std::fs::write(root.join(".env.local"), b"x").unwrap();
+        let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
+        for f in [".env", ".env.local"] {
+            let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
+            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 }
