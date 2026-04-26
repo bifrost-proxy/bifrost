@@ -478,6 +478,30 @@ pub enum Commands {
     },
     #[command(about = "Stop the proxy server")]
     Stop,
+    #[command(
+        about = "Stop the proxy (if running) and start a fresh detached daemon",
+        long_about = concat!(
+            "Stop the proxy (if running) and start a fresh detached daemon.\n",
+            "\n",
+            "Typical use: after `bifrost upgrade` replaced the binary on disk,\n",
+            "run `bifrost restart` to pick up the new version.\n",
+            "\n",
+            "Safe to invoke remotely via `bifrost remote command exec`: the new\n",
+            "daemon is fully detached from the caller's shell pipes (setsid +\n",
+            "/dev/null stdio) so the shell.exec channel reaping the restart\n",
+            "invocation does not take the fresh daemon down with it.\n",
+        )
+    )]
+    Restart {
+        #[arg(short, long, help = "HTTP proxy port override for the fresh daemon")]
+        port: Option<u16>,
+        #[arg(short = 'H', long, value_hint = ValueHint::Hostname, help = "Listen address override")]
+        host: Option<String>,
+        #[arg(long, help = "Log level override")]
+        log_level: Option<String>,
+        #[arg(long, help = "Force a start even if no live pid is found")]
+        force: bool,
+    },
     #[command(visible_alias = "st", about = "Show proxy server status")]
     Status {
         #[arg(short, long, help = "Show interactive TUI dashboard")]

@@ -1617,3 +1617,67 @@ fn remote_shell_still_parses_as_deprecated_alias() {
         _ => panic!("unexpected command"),
     }
 }
+
+// ----- restart subcommand parsing -----
+
+#[test]
+fn restart_parses_with_no_flags() {
+    use bifrost_cli::cli::Commands;
+    let cli = bifrost_cli::cli::Cli::try_parse_from(["bifrost", "restart"])
+        .expect("bifrost restart should parse");
+    match cli.command {
+        Some(Commands::Restart {
+            port,
+            host,
+            log_level,
+            force,
+        }) => {
+            assert!(port.is_none());
+            assert!(host.is_none());
+            assert!(log_level.is_none());
+            assert!(!force);
+        }
+        _ => panic!("expected Commands::Restart"),
+    }
+}
+
+#[test]
+fn restart_parses_with_port_host_force() {
+    use bifrost_cli::cli::Commands;
+    let cli = bifrost_cli::cli::Cli::try_parse_from([
+        "bifrost",
+        "restart",
+        "--port",
+        "9901",
+        "--host",
+        "127.0.0.1",
+        "--log-level",
+        "debug",
+        "--force",
+    ])
+    .expect("bifrost restart with flags should parse");
+    match cli.command {
+        Some(Commands::Restart {
+            port,
+            host,
+            log_level,
+            force,
+        }) => {
+            assert_eq!(port, Some(9901));
+            assert_eq!(host.as_deref(), Some("127.0.0.1"));
+            assert_eq!(log_level.as_deref(), Some("debug"));
+            assert!(force);
+        }
+        _ => panic!("expected Commands::Restart"),
+    }
+}
+
+#[test]
+fn restart_options_default_is_all_none() {
+    // Smoke test for the RestartOptions struct re-exported from commands.
+    let o = bifrost_cli::commands::RestartOptions::default();
+    assert!(o.port.is_none());
+    assert!(o.host.is_none());
+    assert!(o.log_level.is_none());
+    assert!(!o.force);
+}
