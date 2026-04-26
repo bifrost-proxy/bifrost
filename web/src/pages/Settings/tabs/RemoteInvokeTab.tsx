@@ -2754,52 +2754,24 @@ export default function RemoteInvokeTab() {
             onChange={(e) => setGrantEditorPreset(e.target.value)}
             style={{ width: "100%" }}
           >
-            <Space direction="vertical" style={{ width: "100%" }} size={4}>
-              <Radio value="full" disabled={enabledShellPolicies.length === 0}>
-                <Space>
-                  <ThunderboltOutlined />
-                  <span><b>Full trust</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Run any allowed command, read &amp; write files, open interactive terminals
-                  </Text>
-                </Space>
-              </Radio>
-              <Radio value="shell_only" disabled={enabledShellPolicies.length === 0}>
-                <Space>
-                  <CodeOutlined />
-                  <span><b>Run commands &amp; read/write files</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Can execute allowed commands, edit files, and inspect traffic. No interactive shells.
-                  </Text>
-                </Space>
-              </Radio>
-              <Radio value="file_only">
-                <Space>
-                  <FileOutlined />
-                  <span><b>Files only</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Can read &amp; write files and inspect traffic. Cannot run any shell commands.
-                  </Text>
-                </Space>
-              </Radio>
-              <Radio value="query">
-                <Space>
-                  <SearchOutlined />
-                  <span><b>Read-only watch</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Can see status and traffic. Cannot run commands and cannot touch files.
-                  </Text>
-                </Space>
-              </Radio>
-              <Radio value="custom">
-                <Space>
-                  <SettingOutlined />
-                  <span><b>Custom</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Pick shell + file + terminal access individually
-                  </Text>
-                </Space>
-              </Radio>
+            <Space direction="vertical" style={{ width: "100%" }} size={2}>
+              {([
+                { value: "full" as const, icon: <ThunderboltOutlined />, name: "Full trust", desc: "Run any allowed command, read & write files, open interactive terminals", disabled: enabledShellPolicies.length === 0 },
+                { value: "shell_only" as const, icon: <CodeOutlined />, name: "Run commands & read/write files", desc: "Can execute allowed commands, edit files, and inspect traffic. No interactive shells.", disabled: enabledShellPolicies.length === 0 },
+                { value: "file_only" as const, icon: <FileOutlined />, name: "Files only", desc: "Can read & write files and inspect traffic. Cannot run any shell commands.", disabled: false },
+                { value: "query" as const, icon: <SearchOutlined />, name: "Read-only watch", desc: "Can see status and traffic. Cannot run commands and cannot touch files.", disabled: false },
+                { value: "custom" as const, icon: <SettingOutlined />, name: "Custom", desc: "Pick shell + file + terminal access individually", disabled: false },
+              ] as const).map((opt) => (
+                <Radio key={opt.value} value={opt.value} disabled={opt.disabled} style={{ display: "flex", alignItems: "flex-start", width: "100%", padding: "6px 0" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, lineHeight: "22px" }}>
+                      <span style={{ color: "var(--ant-color-text-secondary)", marginRight: 6 }}>{opt.icon}</span>
+                      {opt.name}
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 22 }}>{opt.desc}</Text>
+                  </div>
+                </Radio>
+              ))}
             </Space>
           </Radio.Group>
           <Alert
