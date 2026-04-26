@@ -1335,7 +1335,7 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchEntry>> {
         let mut v = Vec::new();
         let mut seen_diff_git = false;
         for (idx, ln) in lines.iter().enumerate() {
-            let s = ln.trim_end_matches(|c| c == '\n' || c == '\r');
+            let s = ln.trim_end_matches(['\n', '\r']);
             if s.starts_with("diff --git ") {
                 v.push(idx);
                 seen_diff_git = true;
@@ -1370,7 +1370,7 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchEntry>> {
         let mut body_start: Option<usize> = None;
 
         for (idx, ln) in section.iter().enumerate() {
-            let t = ln.trim_end_matches(|c| c == '\n' || c == '\r');
+            let t = ln.trim_end_matches(['\n', '\r']);
             if t.starts_with("@@ ") {
                 body_start = Some(idx);
                 break;
