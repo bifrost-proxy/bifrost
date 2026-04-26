@@ -1415,6 +1415,17 @@ pub async fn handle_file_apply_patch(
                 out.push_str(orig_lines[src_cursor]);
                 src_cursor += 1;
             }
+            // Track the most recent emitted op so a `\ No newline at
+            // end of file` marker can retroactively strip the trailing
+            // newline we (optimistically) appended for the previous `+`
+            // or context line.
+            #[derive(Copy, Clone)]
+            enum LastEmit {
+                None,
+                Context,
+                Plus,
+            }
+            let mut last_emit = LastEmit::None;
             for line in content.split_inclusive('\n') {
                 let body_line = line.strip_suffix('\n').unwrap_or(line);
                 if body_line.is_empty() && !line.ends_with('\n') {
@@ -1439,6 +1450,7 @@ pub async fn handle_file_apply_patch(
                         }
                         out.push_str(orig_lines[src_cursor]);
                         src_cursor += 1;
+                        last_emit = LastEmit::Context;
                     }
                     '-' => {
                         if src_cursor >= orig_lines.len()
@@ -1455,12 +1467,34 @@ pub async fn handle_file_apply_patch(
                             break 'hunk_loop;
                         }
                         src_cursor += 1;
+                        // `-` emits nothing to `out`; leave last_emit as-is
+                        // so a subsequent `\` marker still refers to the
+                        // *original* line (handled implicitly by not touching
+                        // out, and by src orig_lines preserving its EOL).
                     }
                     '+' => {
                         out.push_str(tail);
                         out.push_str(eol.newline());
+                        last_emit = LastEmit::Plus;
                     }
-                    '\\' => { /* "\ No newline at end of file" — ignore */ }
+                    '\\' => {
+                        // "\ No newline at end of file" applies to the
+                        // immediately preceding hunk line. For `+` and context,
+                        // strip the trailing EOL we just wrote to `out`. For
+                        // `-`, there is nothing to strip in `out`; we just
+                        // remember that the original ended without a newline
+                        // (orig_lines already reflects that via split_inclusive).
+                        match last_emit {
+                            LastEmit::Plus | LastEmit::Context => {
+                                let nl = eol.newline();
+                                if out.ends_with(nl) {
+                                    out.truncate(out.len() - nl.len());
+                                }
+                            }
+                            LastEmit::None => {}
+                        }
+                        last_emit = LastEmit::None;
+                    }
                     _ => {
                         hunk_err = Some(BifrostError::Config(format!(
                             "[file.invalid_args] unknown hunk char '{}' in '{}'",
@@ -2402,6 +2436,70 @@ mod tests {
             .collect();
         assert!(matches.iter().any(|m| m.contains("main.rs")));
         assert!(!matches.iter().any(|m| m.contains("build")));
+    }
+
+    // ---------------------------------------------------------------
+    //  Regression: `\\ No newline at end of file` must be honoured so
+    //  patched files do not gain a spurious trailing newline.
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn apply_patch_respects_no_newline_at_eof_for_plus() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Start with a file that ends with a newline.
+        std::fs::write(tmp.path().join("f.txt"), "line1\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("f.txt".to_string(), dec);
+
+        // Replace line1 (which ends with \n) by a final line that has
+        // NO trailing newline — as signalled by `\ No newline at end of
+        // file` after the `+` line.
+        let patch = concat!(
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1,1 +1,1 @@\n",
+            "-line1\n",
+            "+final\n",
+            "\\ No newline at end of file\n",
+        );
+        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+        assert_eq!(content, "final", "got {:?}", content);
+    }
+
+    // ---------------------------------------------------------------
+    //  Regression: context line followed by `\ No newline at end of file`
+    //  is also respected (file end unchanged).
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn apply_patch_respects_no_newline_at_eof_for_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Original file has NO trailing newline.
+        std::fs::write(tmp.path().join("f.txt"), "alpha\nbeta").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("f.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("f.txt".to_string(), dec);
+
+        // Change alpha -> ALPHA; keep beta as context with no-newline
+        // marker so beta stays the final line without gaining a \n.
+        let patch = concat!(
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-alpha\n",
+            "+ALPHA\n",
+            " beta\n",
+            "\\ No newline at end of file\n",
+        );
+        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+        assert_eq!(content, "ALPHA\nbeta", "got {:?}", content);
     }
 
     // ---------------------------------------------------------------
