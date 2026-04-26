@@ -704,9 +704,17 @@ pub async fn handle_file_search(
     case_insensitive: bool,
     file_glob: Option<&str>,
     respect_gitignore: bool,
+    denies: &[String],
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Search);
     let root = decision.path.as_path().to_path_buf();
+    let deny_matcher = if denies.is_empty() {
+        None
+    } else {
+        Some(DenyMatcher::new(denies).map_err(|e| {
+            BifrostError::Config(format!("[file.invalid_deny] bad deny pattern: {}", e))
+        })?)
+    };
     let max = max_matches.unwrap_or(DEFAULT_SEARCH_MAX);
     let per_file_cap = max_scan_bytes
         .unwrap_or(DEFAULT_SEARCH_SCAN_BYTES)
@@ -776,6 +784,11 @@ pub async fn handle_file_search(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
+            if let Some(ref dm) = deny_matcher {
+                if dm.match_raw(&rel).is_some() {
+                    continue;
+                }
+            }
             if let Some(ref gm) = file_glob_matcher {
                 if !gm.is_match(&rel) {
                     continue;
@@ -1775,6 +1788,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -1951,6 +1965,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -1986,6 +2001,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -2022,6 +2038,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -2053,6 +2070,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap_err();
@@ -2546,6 +2564,7 @@ mod tests {
             false,
             None,
             true,
+            &[],
         )
         .await
         .unwrap();
@@ -2577,6 +2596,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -2590,6 +2610,77 @@ mod tests {
             paths2.iter().any(|p| p.contains("dist/")),
             "disabling gitignore should surface dist/*, got {:?}",
             paths2
+        );
+    }
+
+    #[tokio::test]
+    async fn search_respects_policy_denies() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets/api.key"), "SECRET_TOKEN=xyz\n").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "SECRET_TOKEN=visible\n").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        // Without denies: both files match.
+        let v_all = handle_file_search(
+            &dec,
+            "SECRET_TOKEN",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        let all_paths: Vec<String> = v_all["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(all_paths.iter().any(|p| p.contains("api.key")));
+
+        // With denies on **/*.key: only notes.txt should surface.
+        let denies = vec!["**/*.key".to_string()];
+        let v = handle_file_search(
+            &dec,
+            "SECRET_TOKEN",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            false,
+            &denies,
+        )
+        .await
+        .unwrap();
+        let paths: Vec<String> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("api.key")),
+            "denies should filter out api.key, got {:?}",
+            paths
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("notes.txt")),
+            "denies should still surface notes.txt, got {:?}",
+            paths
         );
     }
 }

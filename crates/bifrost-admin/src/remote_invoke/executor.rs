@@ -473,6 +473,7 @@ impl RemoteInvokeExecutor {
                     params.case_insensitive.unwrap_or(false),
                     params.glob.as_deref(),
                     params.respect_gitignore.unwrap_or(true),
+                    &policy.denies,
                 )
                 .await?
             }
