@@ -3123,8 +3123,9 @@ fn shell_grant_provision(
     let set = store.load()?;
     let has_enabled_policy = set.policies.iter().any(|policy| policy.enabled);
     if !has_enabled_policy {
+        // 无 shell policy 降级为 query，file_access 也应按 query 层级决定
         let mut provision = default_query_grant_provision();
-        provision.file_access = file_access;
+        provision.file_access = requested_file_access.unwrap_or(FileAccessScope::None);
         return Ok(provision);
     }
 
