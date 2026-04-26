@@ -1131,7 +1131,17 @@ pub async fn handle_file_edit(
         let rep_norm = normalize_to_eol(&e.replacement, eol);
         let rep_ref: &str = rep_norm.as_str();
         out.push_str(rep_ref);
-        if !rep_ref.is_empty() && !rep_ref.ends_with('\n') && (e.end_line as usize) < lines.len() {
+        // We need to restore a separator EOL in two cases:
+        //   (a) hunk is not the last chunk in the file: always needs a
+        //       newline so the next line starts fresh.
+        //   (b) hunk *is* the last chunk but the original file ended
+        //       with a newline — preserve that terminator.
+        let is_last_chunk = (e.end_line as usize) == lines.len();
+        let original_ended_with_newline = lines.last().map(|l| l.ends_with('\n')).unwrap_or(false);
+        let needs_eol = !rep_ref.is_empty()
+            && !rep_ref.ends_with('\n')
+            && (!is_last_chunk || original_ended_with_newline);
+        if needs_eol {
             out.push_str(eol.newline());
         }
         cursor = e.end_line + 1;
@@ -2079,6 +2089,61 @@ mod tests {
 
     // ---------------------------------------------------------------
     //  Bug regression: file.edit — empty replacement deletes line cleanly
+    // ---------------------------------------------------------------
+    //  Regression: replacing the last line must preserve the
+    //  original file's trailing newline.
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn edit_last_line_preserves_trailing_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("three.txt");
+        std::fs::write(&file, "line1\nline2\nline3\n").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("three.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+
+        // Replace the last line with text that itself has NO newline.
+        // Expected: the file must still end with a single \n so the
+        // overall EOL posture is unchanged.
+        let edits = vec![EditRange {
+            start_line: 3,
+            end_line: 3,
+            replacement: "THIRD".to_string(),
+        }];
+        let v = handle_file_edit(&dec, None, &edits).await.unwrap();
+        assert_eq!(v["applied_edits"].as_u64().unwrap(), 1);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nline2\nTHIRD\n");
+    }
+
+    // ---------------------------------------------------------------
+    //  Counterpart: a file without a trailing newline must stay that
+    //  way after replacing the last line with a newline-less string.
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn edit_last_line_no_trailing_newline_stays_as_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("three.txt");
+        std::fs::write(&file, "line1\nline2\nline3").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("three.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+
+        let edits = vec![EditRange {
+            start_line: 3,
+            end_line: 3,
+            replacement: "THIRD".to_string(),
+        }];
+        handle_file_edit(&dec, None, &edits).await.unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nline2\nTHIRD");
+    }
+
     // ---------------------------------------------------------------
     #[tokio::test]
     async fn edit_empty_replacement_deletes_line_without_blank() {
