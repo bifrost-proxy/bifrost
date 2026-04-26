@@ -911,6 +911,12 @@ export default function RemoteInvokeTab() {
   const [shellEditorPolicies, setShellEditorPolicies] = useState<
     ShellPolicyEditorItem[]
   >([]);
+  // UI-only override: entries force the per-row Select to show "Regex"
+  // even when the stored pattern is decodable as a prefix. Keyed by
+  // `${policy.id}|${patIdx}`. Cleared when a pattern row is removed.
+  const [shellPatternRegexOverride, setShellPatternRegexOverride] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
   const [shellEditorProfiles, setShellEditorProfiles] = useState<
     ShellProfileEditorItem[]
   >([]);
@@ -3525,7 +3531,9 @@ export default function RemoteInvokeTab() {
                             </Text>
                           )}
                           {policy.allowed_shell_patterns.map((pat, patIdx) => {
-                            const decoded = tryDecodePrefix(pat);
+                            const overrideKey = `${policy.id}|${patIdx}`;
+                            const forcedRegex = shellPatternRegexOverride.has(overrideKey);
+                            const decoded = forcedRegex ? null : tryDecodePrefix(pat);
                             const isPrefix = decoded !== null;
                             return (
                               <Space.Compact
@@ -3536,25 +3544,37 @@ export default function RemoteInvokeTab() {
                                   style={{ width: 130 }}
                                   value={isPrefix ? "prefix" : "regex"}
                                   onChange={(nextMode: "prefix" | "regex") => {
-                                    setShellEditorPolicies((prev) =>
-                                      prev.map((item, current) => {
-                                        if (current !== index) return item;
-                                        const next = [...item.allowed_shell_patterns];
-                                        if (nextMode === "prefix") {
-                                          // Convert current entry to a prefix pattern.
-                                          const body = isPrefix
-                                            ? (decoded as string)
-                                            : pat.replace(/^\^/, "");
+                                    if (nextMode === "prefix") {
+                                      // Clear any regex-override for this row. If the stored
+                                      // pattern is not already a decodable prefix we reset the
+                                      // body to empty rather than mechanically re-escaping an
+                                      // arbitrary regex into a literal prefix (which would
+                                      // silently produce a non-matching pattern).
+                                      setShellPatternRegexOverride((prevSet) => {
+                                        if (!prevSet.has(overrideKey)) return prevSet;
+                                        const nextSet = new Set(prevSet);
+                                        nextSet.delete(overrideKey);
+                                        return nextSet;
+                                      });
+                                      setShellEditorPolicies((prev) =>
+                                        prev.map((item, current) => {
+                                          if (current !== index) return item;
+                                          const next = [...item.allowed_shell_patterns];
+                                          const body = tryDecodePrefix(pat) ?? "";
                                           next[patIdx] = buildPrefixPattern(body);
-                                        } else {
-                                          // Switch to raw regex mode, show the stored regex as-is.
-                                          next[patIdx] = isPrefix
-                                            ? buildPrefixPattern(decoded as string)
-                                            : pat;
-                                        }
-                                        return { ...item, allowed_shell_patterns: next };
-                                      }),
-                                    );
+                                          return { ...item, allowed_shell_patterns: next };
+                                        }),
+                                      );
+                                    } else {
+                                      // Force Regex UI for this row, keeping the stored
+                                      // pattern as-is so the user can hand-edit it.
+                                      setShellPatternRegexOverride((prevSet) => {
+                                        if (prevSet.has(overrideKey)) return prevSet;
+                                        const nextSet = new Set(prevSet);
+                                        nextSet.add(overrideKey);
+                                        return nextSet;
+                                      });
+                                    }
                                   }}
                                   options={[
                                     { value: "prefix", label: "Starts with" },
@@ -3580,7 +3600,26 @@ export default function RemoteInvokeTab() {
                                 <Button
                                   danger
                                   icon={<DeleteOutlined />}
-                                  onClick={() =>
+                                  onClick={() => {
+                                    setShellPatternRegexOverride((prevSet) => {
+                                      // Drop the deleted row and shift indices > patIdx
+                                      // down by one within this policy.
+                                      const nextSet = new Set<string>();
+                                      prevSet.forEach((key) => {
+                                        const sep = key.indexOf("|");
+                                        if (sep < 0) return;
+                                        const pid = key.slice(0, sep);
+                                        const idxNum = Number(key.slice(sep + 1));
+                                        if (pid !== policy.id) {
+                                          nextSet.add(key);
+                                          return;
+                                        }
+                                        if (idxNum === patIdx) return;
+                                        const shifted = idxNum > patIdx ? idxNum - 1 : idxNum;
+                                        nextSet.add(`${pid}|${shifted}`);
+                                      });
+                                      return nextSet;
+                                    });
                                     setShellEditorPolicies((prev) =>
                                       prev.map((item, current) => {
                                         if (current !== index) return item;
@@ -3589,8 +3628,8 @@ export default function RemoteInvokeTab() {
                                         );
                                         return { ...item, allowed_shell_patterns: next };
                                       }),
-                                    )
-                                  }
+                                    );
+                                  }}
                                 />
                               </Space.Compact>
                             );
