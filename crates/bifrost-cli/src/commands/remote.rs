@@ -4220,7 +4220,18 @@ async fn run_streaming_dispatch(
 
         let current_heads = (state.stdout_head(), state.stderr_head());
         match streaming_result_from_outcome(outcome, verify_digest, current_heads) {
-            StreamingDispatchStep::Complete(result) => return Ok(result),
+            StreamingDispatchStep::Complete(result) => {
+                // Phase 5 (review C9): flush buffered sinks (e.g. the
+                // BufWriter<File> used for --output-file) before returning
+                // success. A flush failure here surfaces as a Network error
+                // rather than a silent data loss.
+                if let Err(e) = state.finish() {
+                    return Err(BifrostError::Network(format!(
+                        "flush output sinks on completion: {e}"
+                    )));
+                }
+                return Ok(result);
+            }
             StreamingDispatchStep::Reconnect(offsets, reason) => {
                 warn!(
                     call_id = %call_id,

@@ -1,5 +1,3 @@
-#![allow(dead_code)] // PR #5c: wiring lands in a follow-up PR.
-
 //! PR #5c: caller-side StreamFrame state machine.
 //!
 //! Consumes a sequence of [`StreamFrame`] values (as produced by the
@@ -147,6 +145,7 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
     /// clients that can't replay (e.g. reading from an append-only file),
     /// set `verify_digest = false` — the `Done.digest_ok` will then be
     /// reported as `true` vacuously and digests will not be enforced.
+    #[allow(dead_code)] // Public API for future external callers.
     pub fn resume(
         stdout_sink: W,
         stderr_sink: E,
@@ -181,10 +180,12 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
         self.stderr_head
     }
     /// Whether a terminal Done or Error has been observed.
+    #[allow(dead_code)] // Public API for future external callers.
     pub fn is_terminal(&self) -> bool {
         self.done_seen
     }
     /// If terminal, the exit code (None otherwise).
+    #[allow(dead_code)] // Public API for future external callers.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
@@ -265,7 +266,12 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
             .map_err(|e| StreamIngestError::Base64(e.to_string()))?;
         match kind {
             ChunkKind::Stdout => {
-                let (accept_from, keep) = dedup_range(offset, bytes.len() as u64, self.stdout_head);
+                let (accept_from, keep) = dedup_range(offset, bytes.len() as u64, self.stdout_head)
+                    .ok_or(StreamIngestError::OffsetAhead {
+                        kind: "stdout",
+                        got: offset,
+                        expected: self.stdout_head,
+                    })?;
                 if keep == 0 {
                     return Ok(());
                 }
@@ -277,7 +283,12 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
                 Ok(())
             }
             ChunkKind::Stderr => {
-                let (accept_from, keep) = dedup_range(offset, bytes.len() as u64, self.stderr_head);
+                let (accept_from, keep) = dedup_range(offset, bytes.len() as u64, self.stderr_head)
+                    .ok_or(StreamIngestError::OffsetAhead {
+                        kind: "stderr",
+                        got: offset,
+                        expected: self.stderr_head,
+                    })?;
                 if keep == 0 {
                     return Ok(());
                 }
@@ -290,6 +301,19 @@ impl<W: Write, E: Write> CallerStreamState<W, E> {
             }
         }
     }
+
+    /// Phase 5 (review fix C9): flush both sinks. Intended to be called once
+    /// the outer dispatch loop has observed a terminal decision and has no
+    /// more frames to feed; surfaces any deferred I/O error from buffered
+    /// writers (e.g. `BufWriter<File>` for `--output-file`). This only
+    /// flushes the in-process buffers. For a durable on-disk guarantee, the
+    /// caller should pair this with an explicit fsync on the underlying
+    /// file handle (see `run_streaming_dispatch` in `remote.rs`).
+    pub fn finish(&mut self) -> io::Result<()> {
+        self.stdout_sink.flush()?;
+        self.stderr_sink.flush()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,29 +324,26 @@ enum ChunkKind {
 
 /// Given an incoming chunk `[offset, offset+len)` and the current stream
 /// head, return the sub-range `[accept_from, accept_from+keep)` that should
-/// be written. Rejects the caller with `OffsetAhead` if there's a gap.
-fn dedup_range(offset: u64, len: u64, head: u64) -> (u64, u64) {
+/// be written, or `None` when the chunk starts strictly past `head` (a
+/// forward gap that would leave a hole in the captured output).
+///
+/// Phase 5 (review fix C8): historically this returned `(head, 0)` for the
+/// gap case, which silently swallowed the missing bytes and let the caller
+/// report a spurious "digest mismatch" much later. Now the gap is made
+/// explicit so `consume_chunk` can surface it as `OffsetAhead` and the
+/// dispatch loop can reconnect with the correct resume offsets.
+fn dedup_range(offset: u64, len: u64, head: u64) -> Option<(u64, u64)> {
     // Entirely in the already-written prefix → drop.
     if offset + len <= head {
-        return (head, 0);
+        return Some((head, 0));
     }
     // Straddles head → keep the tail that extends past head.
     if offset <= head {
         let keep = offset + len - head;
-        return (head, keep);
+        return Some((head, keep));
     }
-    // Pure gap: offset > head. We can't write this without leaving a hole.
-    // Returning (0, 0) here would silently swallow; callers handle the
-    // error by observing the subsequent call to write_all still producing
-    // no bytes. To surface cleanly, we encode "gap" as a (head, 0) where
-    // offset > head; the caller doesn't need to distinguish in this build
-    // because executor contract guarantees offset <= head at all times.
-    //
-    // For defensive correctness, convert gap to an error at the feed()
-    // layer by panicking here? No — return (offset, 0) so caller's next
-    // verify_digest will naturally fail, OR better: propagate via Result
-    // in feed().  See `consume_chunk`'s future refinement in PR #5c.2.
-    (head, 0)
+    // Pure gap: offset > head. Caller must treat as OffsetAhead.
+    None
 }
 
 fn hex_digest(ctx: &Context) -> String {
@@ -387,6 +408,7 @@ mod tests {
             data_b64: B64.encode(s),
         }
     }
+    #[allow(dead_code)]
     fn stderr_frame(offset: u64, s: &[u8]) -> StreamFrame {
         StreamFrame::Stderr {
             seq: 0,
@@ -474,6 +496,43 @@ mod tests {
             StreamDecision::Done { digest_ok, .. } => assert!(digest_ok),
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    #[test]
+    fn forward_gap_chunk_is_rejected_with_offset_ahead() {
+        // Phase 5 (review C8): a chunk whose offset starts strictly past
+        // the current head leaves a hole in the captured output and MUST
+        // be surfaced as an OffsetAhead error, not silently dropped.
+        let mut state = CallerStreamState::new(Vec::new(), Vec::new(), false);
+        state.feed(&stdout_frame(0, b"abc")).unwrap();
+        assert_eq!(state.stdout_head(), 3);
+        let err = state.feed(&stdout_frame(10, b"XYZ")).unwrap_err();
+        match err {
+            StreamIngestError::OffsetAhead {
+                kind,
+                got,
+                expected,
+            } => {
+                assert_eq!(kind, "stdout");
+                assert_eq!(got, 10);
+                assert_eq!(expected, 3);
+            }
+            other => panic!("expected OffsetAhead, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_flushes_buffered_sink() {
+        // Phase 5 (review C9): finish() must drive any buffered writer
+        // through its flush path so deferred I/O errors surface before
+        // the CLI reports success.
+        use std::io::BufWriter;
+        let buf: Vec<u8> = Vec::new();
+        let sink = BufWriter::with_capacity(64 * 1024, buf);
+        let mut state = CallerStreamState::new(sink, Vec::new(), false);
+        state.feed(&stdout_frame(0, b"payload")).unwrap();
+        // finish() should not error on a plain in-memory buffered writer.
+        state.finish().expect("finish flushes cleanly");
     }
 
     #[test]
