@@ -1,5 +1,8 @@
 # Remote Invoke File API 设计方案
 
+> **状态**：已实现（Phase 1/2/3 核心已合入 `feat/remote-file-api`）
+> **最后对齐**：`a7a5115b` — 2026-04-26
+
 ## 背景与目标
 
 当前 `bifrost remote` 已经覆盖两类能力：
@@ -17,218 +20,211 @@
 
 因此在 `query.readonly` 与 `shell.exec` 之间，新增 **File API** 作为第三类 remote 能力，提供 coding agent 所需的语义化文件操作原语，复用现有 relay + encrypted remote invoke 通道，沿用现有授权模型。
 
-## 能力矩阵（当前实现：Phase 1/2/3）
+---
 
-| method           | 语义                                           | 必需 scope              |
-| ---------------- | ---------------------------------------------- | ----------------------- |
-| `file.read`      | 读取文件（支持 offset/length/encoding）        | `remote_file_read`      |
-| `file.list`      | 列出目录（支持 recursive/glob/max_depth）      | `remote_file_read`      |
-| `file.stat`      | 查询元信息（类型/大小/mtime/mode/symlink）     | `remote_file_read`      |
-| `file.glob`      | 路径通配匹配                                    | `remote_file_read`      |
-| `file.search`    | 内容检索（ripgrep 语义）                       | `remote_file_read`      |
-| `file.hash`      | 计算文件哈希（sha256）                         | `remote_file_read`      |
+## 1. 能力矩阵
 
-Phase 1 的只读能力、Phase 2 的写入/编辑能力与 Phase 3 的 unified diff apply 已在当前分支串通。`file.watch` 仍是后续能力，不属于本轮实现。
+### 1.1 Phase 1 — 只读
 
-### Phase 2 写能力
+| method | 语义 | 必需权限 |
+|---|---|---|
+| `file.read` | 读取文件（支持行号 offset/limit、base64 传输） | `file_access ≥ read` |
+| `file.list` | 列出目录（支持 recursive、max_depth、gitignore 感知） | `file_access ≥ read` |
+| `file.stat` | 查询元信息（kind/size/mtime/mode/symlink_target） | `file_access ≥ read` |
+| `file.glob` | 路径通配匹配（gitignore 感知、truncated 标志） | `file_access ≥ read` |
+| `file.search` | 内容检索（regex、case_insensitive、gitignore 感知） | `file_access ≥ read` |
+| `file.hash` | 计算文件哈希（sha256） | `file_access ≥ read` |
 
-| method             | 语义                                            | 必需 scope           |
-| ------------------ | ----------------------------------------------- | -------------------- |
-| `file.write`       | 整文件覆盖写（原子 temp + rename）              | `remote_file_write`  |
-| `file.edit`        | 局部编辑（replace_range/insert_after/find_replace） | `remote_file_write`  |
-| `file.mkdir`       | 创建目录                                         | `remote_file_write`  |
-| `file.move`        | 重命名/移动                                      | `remote_file_write`  |
-| `file.delete`      | 删除文件或目录                                   | `remote_file_write`  |
+### 1.2 Phase 2 — 写入
 
-### Phase 3 patch 能力
+| method | 语义 | 必需权限 |
+|---|---|---|
+| `file.write` | 整文件覆盖写（原子 tmp+rename、base_sha256 乐观锁、create_parents） | `file_access = read_write` |
+| `file.edit` | 行号范围编辑（EditRange[]、base_sha256 乐观锁） | `file_access = read_write` |
+| `file.mkdir` | 创建目录（支持 parents） | `file_access = read_write` |
+| `file.move` | 重命名/移动 | `file_access = read_write` |
+| `file.delete` | 删除文件或目录（recursive 需 policy 显式开启） | `file_access = read_write` |
 
-| method             | 语义                                            | 必需 scope           |
-| ------------------ | ----------------------------------------------- | -------------------- |
-| `file.apply_patch` | 应用 unified diff（多文件）                     | `remote_file_write`  |
-| `file.watch`       | 长连接推送文件变更                              | `remote_file_read`   |
+### 1.3 Phase 3 — Patch
 
-## 架构分层
+| method | 语义 | 必需权限 |
+|---|---|---|
+| `file.apply_patch` | 应用 unified diff（多文件、两阶段 rename+rollback） | `file_access = read_write` |
 
-```
-┌──────────────┐  request (method=file.read, params=…)  ┌────────────┐
-│ Caller (CLI) │ ───────────────────────────────────▶ │   Relay    │
-└──────────────┘                                        └─────┬──────┘
-                                                              ▼
-                                                    ┌─────────────────┐
-                                                    │ Target Client   │
-                                                    │  (bifrost-admin)│
-                                                    └─────────┬───────┘
-                                                              ▼
-                                                    ┌─────────────────┐
-                                                    │ File Access     │
-                                                    │ Policy Guard    │
-                                                    └─────────┬───────┘
-                                                              ▼
-                                                    ┌─────────────────┐
-                                                    │ FS operations   │
-                                                    └─────────────────┘
-```
+### 1.4 未实现 / 显式推迟
 
-- Caller 端新增 `bifrost remote file <subcmd>` 系列子命令，打包请求走 relay。
-- Relay 仅承担路由、转发、审计，不理解 file API 内容（与现有 `query.readonly` 一致，保持端到端加密）。
-- Target 端 `bifrost-admin` 中新增 `remote_invoke::file` 模块，负责：
-  1. 依据 `grant_scope` 拒绝无权请求。
-  2. 依据 `FileAccessPolicy` 做路径归一化、白名单匹配、大小限制、符号链接处理。
-  3. 执行具体文件操作，返回结构化结果。
-- FileAccessPolicy 落在 `crates/bifrost-core` 中作为可复用类型，供 admin 层和 CLI 配置入口共享。
+| 能力 | 状态 |
+|---|---|
+| `file.watch` | 长连接推送文件变更 — 不在当前分支 |
+| `file.chmod` / `file.chown` | 未实现 |
+| `file.symlink` | 未实现 |
+| `GIT binary patch` | apply_patch 遇到 binary diff 返回 `file.binary_patch_unsupported` |
+| rename/copy-only diff | apply_patch 遇到 rename/copy 返回 `file.unsupported_diff`，提示用 `file.move` / `file.read + file.write` |
 
-## 授权模型扩展
+---
 
-### 新 grant scope
+## 2. 授权模型
 
-在 `GrantScope` 枚举上新增两个变体：
+### 2.1 正交双轴模型
+
+File 权限从 `GrantScope` 中独立出来，以 `file_access` 字段与 `grant_scope` 正交：
+
+| 字段 | 作用 | 可选值 |
+|---|---|---|
+| `grant_scope` | Shell / query 访问级别 | `remote_query` / `remote_shell_exec` / `remote_shell_interactive` |
+| `file_access` | 文件访问级别 | `none`（默认）/ `read` / `read_write` |
+
+两字段独立设置、独立检查。一个 grant 可以同时拥有 `remote_shell_interactive` + `file_access: read_write`。
+
+### 2.2 类型定义（实现）
 
 ```rust
-#[serde(rename = "remote_file_read")]
-RemoteFileRead,
-#[serde(rename = "remote_file_write")]
-RemoteFileWrite,
+// crates/bifrost-admin/src/remote_invoke/types.rs
+
+/// 3 种 shell 级别
+pub enum GrantScope {
+    RemoteQuery,
+    RemoteShellExec,
+    RemoteShellInteractive,
+}
+
+/// 独立的 file 级别
+pub enum FileAccessScope {
+    None,       // 默认
+    Read,
+    ReadWrite,
+}
+
+/// 统一的命令类别（3 变体，file.* 统一为 File）
+pub enum CommandKind {
+    QueryReadonly,   // "query.readonly"
+    ShellExec,       // "shell.exec"
+    File,            // "file" — 所有 file.* 方法
+}
+
+/// 组合检查
+pub fn scope_allows_command(grant_scope, file_access, kind) -> bool {
+    match kind {
+        CommandKind::File => file_access ∈ {Read, ReadWrite},
+        CommandKind::ShellExec => grant_scope ∈ {RemoteShellExec, RemoteShellInteractive},
+        CommandKind::QueryReadonly => true,
+    }
+}
 ```
 
-`CommandKind` 枚举上新增：
+> **注意**：早期设计曾在 `GrantScope` 中包含 `RemoteFileRead` / `RemoteFileWrite` 变体，已移除。`CommandKind` 也不再拆为 12 个 per-method 变体（`FileRead`/`FileList`/…），统一为单个 `File`。具体读写权限由 `FileAccessScope` + `FileAccessPolicy.ops` 两层控制。
+
+### 2.3 WebUI 交互预设
+
+| 模式 | grant_scope | file_access |
+|---|---|---|
+| Query only | `remote_query` | `none` |
+| Full Access | `remote_shell_interactive` | `read_write` |
+| Custom | 用户选择 | 用户独立选择 |
+
+---
+
+## 3. File Access Policy
+
+### 3.1 数据结构（实现）
 
 ```rust
-#[serde(rename = "file.read")]
-FileRead,
-#[serde(rename = "file.list")]
-FileList,
-#[serde(rename = "file.stat")]
-FileStat,
-#[serde(rename = "file.glob")]
-FileGlob,
-#[serde(rename = "file.search")]
-FileSearch,
-#[serde(rename = "file.hash")]
-FileHash,
-#[serde(rename = "file.write")]
-FileWrite,
-#[serde(rename = "file.edit")]
-FileEdit,
-#[serde(rename = "file.mkdir")]
-FileMkdir,
-#[serde(rename = "file.move")]
-FileMove,
-#[serde(rename = "file.delete")]
-FileDelete,
-#[serde(rename = "file.apply_patch")]
-FileApplyPatch,
-```
+// crates/bifrost-core/src/file_access/policy.rs
 
-`GrantScope::allows_command` 规则：
-
-- `RemoteFileRead` → 允许所有 `file.*` 只读类命令。
-- `RemoteFileWrite` → 允许所有 `file.*` 命令（含只读）。
-- `RemoteQuery`/`RemoteShellExec`/`RemoteShellInteractive` 均 **不** 授予 file API 能力；避免误授权覆盖。
-
-### File Access Policy
-
-类比 Shell Access policy，新增独立的 File Access policy/profile 存储（放在 bifrost-admin 数据目录下）。首版数据结构：
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileAccessPolicy {
-    pub id: String,
     pub name: String,
-    /// 允许访问的路径白名单（glob 表达式）。
-    pub roots: Vec<String>,
-    /// 强制拒绝的路径黑名单，优先级高于 roots。
-    pub denies: Vec<String>,
-    /// 允许的 method 名（例如 `file.read`）。
-    pub ops: Vec<String>,
-    /// 单文件最大字节数（读）。
-    pub max_read_bytes: u64,
-    /// 单次编辑最大字节数（写）。
-    pub max_edit_bytes: u64,
-    /// 是否跟随符号链接。
-    pub follow_symlinks: bool,
-    /// search / glob 是否默认尊重 .gitignore。
-    pub respect_gitignore: bool,
+    pub roots: Vec<PathBuf>,
+    pub denies: Vec<String>,          // glob，读写均生效
+    pub write_denies: Vec<String>,    // glob，仅写操作叠加
+    pub ops: Vec<FileOp>,             // 允许的操作集合
+    pub max_read_bytes: u64,          // 默认 8 MiB
+    pub max_write_bytes: u64,         // 默认 2 MiB
+    pub respect_gitignore: bool,      // 默认 true
+    pub allow_overwrite: bool,        // 默认 true
+    pub allow_recursive_delete: bool, // 默认 false
 }
 ```
 
-内置默认 policy：
+> **与早期设计差异**：移除了 `id` 字段（由 store 层管理）、`follow_symlinks` 字段（符号链接始终 resolve 到 canonical 路径后做 root 内检查）。新增了 `write_denies`、`max_write_bytes`、`allow_overwrite`、`allow_recursive_delete`。
 
-```toml
-[[file_access_policy]]
-id = "workspace-readonly"
-name = "Workspace Read-only"
-roots = ["${WORKSPACE}/**"]
-denies = [
-  "**/.env*",
-  "**/*.pem",
-  "**/*.key",
-  "**/secrets/**",
-  "**/.git/config",
-  "**/node_modules/**",
-  "**/.pnpm-store/**",
-]
-ops   = ["file.read", "file.list", "file.stat", "file.glob", "file.search", "file.hash"]
-max_read_bytes   = 8_388_608
-max_edit_bytes   = 0
-follow_symlinks  = false
-respect_gitignore = true
+### 3.2 FileOp 枚举
+
+```rust
+pub enum FileOp {
+    Read, List, Stat, Glob, Search, Hash,       // Phase 1
+    Write, Edit, Mkdir, Move, Delete,            // Phase 2
+    ApplyPatch,                                   // Phase 3
+}
 ```
 
-Web UI Settings → Remote Invoke 面板新增 "File Access" 子标签，用法对标现有 "Shell Access"：
+### 3.3 Policy 检查流程
 
-- Policy 列表 / CRUD
-- 授权弹窗中新增 "文件访问" 勾选，支持 `none` / `selected` / `all` 三档。
-- `selected` 时支持绑定具体 File Access Policy。
+1. **路径归一化**：`canonicalize_within_roots(path, &roots)` — 拒绝 `..` 逃逸、拒绝绝对路径超出 roots。
+2. **符号链接检查**：resolve 后的 canonical path 必须仍在 roots 内，否则 `file.symlink_escape`。
+3. **Deny 匹配**：`DenyMatcher` 匹配 root-relative 路径；写操作额外叠加 `write_denies`。
+4. **Op 检查**：请求 op 必须在 `policy.ops` 内。只读 policy 对写操作返回 `file.permission_denied`。
+5. **Gitignore**：`respect_gitignore=true` 时，`file.list`/`file.glob`/`file.search` 走 `ignore` crate 过滤。
+6. 通过后返回 `PolicyDecision`，包含 `path`(canonical)、`op`、`max_read_bytes`、`max_write_bytes`、`respect_gitignore`、`allow_overwrite`、`allow_recursive_delete`、`input_abs`（lstat 用原始绝对路径）。
 
-## 协议细节
+---
 
-remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.kind` 上引入新枚举类别 `FileOperation`（或直接扩展现有 `CommandKind`，本设计采用后者）。
+## 4. 协议细节
 
-### 通用请求字段
+### 4.1 通用请求包络
+
+复用 `RemoteInvokeRequest`：
 
 ```jsonc
 {
-  "kind": "file.read",          // CommandKind
-  "command": "file.read",       // 与 kind 同名，沿用现有 summary_label 路径
-  "args_json": "{…}",           // 每个 method 独立 schema
-  "policy_id": null,            // 可选，用于绑定具体 FileAccessPolicy
-  "grant_scope": "remote_file_read"
+  "kind": "file",              // CommandKind::File
+  "command": "file.read",      // 具体方法名，用于 executor dispatch
+  "args_json": "{…}",          // 每个 method 独立 schema
+  "grant_scope": "remote_shell_exec",
+  "file_access": "read_write"
 }
 ```
 
-### `file.read`
+### 4.2 `file.read`
+
+请求参数：
 
 ```jsonc
-// request.args_json
 {
   "path": "crates/bifrost-core/src/lib.rs",
-  "offset": 0,               // 字节偏移，默认 0
-  "length": 65536,           // 最大读取字节数，默认 min(policy.max_read_bytes, 8MiB)
-  "encoding": "utf8"         // utf8 | binary（后者 content 为 base64）
-}
-
-// response
-{
-  "ok": true,
-  "path": "crates/bifrost-core/src/lib.rs",
-  "size": 4096,
-  "sha256": "…",
-  "content": "…",
-  "encoding": "utf8",
-  "truncated": false
+  "offset": 0,           // 行号偏移（1-based），默认 0 表示从头
+  "limit": 200,          // 最大返回行数
+  "allow_binary": false   // 是否允许二进制文件（base64 返回）
 }
 ```
 
-### `file.list`
+响应：
+
+```jsonc
+{
+  "content_b64": "<base64>",     // 内容（始终 base64 编码传输）
+  "size": 4096,                  // 返回内容字节数
+  "total_size": 12288,           // 文件总字节数
+  "truncated": false,            // 是否被截断
+  "sha256": "abc…",              // 返回内容的 sha256
+  "file_sha256": "abc…",        // 整个文件的 sha256（truncated=true 时与 sha256 不同）
+  "mtime_unix": 1714000000,
+  "total_lines": 120,            // 仅 UTF-8 文件时返回
+  "start_line": 1,               // 实际返回的起始行号（1-based）
+  "end_line": 120                // 实际返回的结束行号
+}
+```
+
+> **注意**：传输格式始终为 `content_b64`（base64），不是纯文本 `content`。`file_sha256` 是整个文件的哈希（用于传给后续 `file.write` 的 `base_sha256`），当 `truncated=true` 时与 `sha256`（片段哈希）不同。
+
+### 4.3 `file.list`
+
+请求参数：
 
 ```jsonc
 {
   "path": "crates/bifrost-core/src",
   "recursive": false,
-  "glob": "**/*.rs",
-  "max_depth": 3,
-  "include_hidden": false,
-  "limit": 500
+  "max_depth": 3
 }
 ```
 
@@ -236,39 +232,41 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 
 ```jsonc
 {
-  "ok": true,
   "entries": [
-    { "name": "lib.rs", "type": "file", "size": 4096, "mtime": "2026-04-24T10:00:00Z", "mode": "0644" },
-    { "name": "matcher", "type": "dir", "size": 0, "mtime": "2026-04-23T08:00:00Z", "mode": "0755" }
+    {
+      "name": "lib.rs",
+      "kind": "file",            // "file" | "dir" | "symlink"
+      "size": 4096,
+      "mtime_unix": 1714000000,
+      "mode": "0644",
+      "symlink_target": null      // 仅 kind="symlink" 时非 null
+    }
   ],
-  "truncated": false
+  "truncated": false,             // 条目数达上限时为 true
+  "root": "/Users/eden/work/github/bifrost/crates/bifrost-core/src"
 }
 ```
 
-### `file.stat`
+> **与早期设计差异**：`type` 字段实际为 `kind`；时间戳为 `mtime_unix`（epoch 秒）不是 ISO 8601；新增 `symlink_target`/`truncated`/`root` 字段。
 
-```jsonc
-{
-  "path": "crates/bifrost-core/src/lib.rs",
-  "with_sha256": false
-}
-```
+### 4.4 `file.stat`
 
 响应：
 
 ```jsonc
 {
-  "ok": true,
-  "type": "file",
+  "kind": "file",
   "size": 4096,
-  "mtime": "2026-04-24T10:00:00Z",
+  "mtime_unix": 1714000000,
   "mode": "0644",
   "symlink_target": null,
-  "sha256": null
+  "sha256": "abc…"               // 仅 is_file && size ≤ max_read_bytes 时计算
 }
 ```
 
-### `file.glob`
+### 4.5 `file.glob`
+
+请求参数：
 
 ```jsonc
 {
@@ -282,21 +280,24 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 
 ```jsonc
 {
-  "ok": true,
-  "paths": ["crates/bifrost-core/src/lib.rs", "…"],
-  "truncated": false
+  "matches": ["crates/bifrost-core/src/lib.rs", "…"],
+  "truncated": false,
+  "root": "/Users/eden/work/github/bifrost"
 }
 ```
 
-### `file.search`
+> **与早期设计差异**：字段名为 `matches`（不是 `paths`）。
+
+### 4.6 `file.search`
+
+请求参数：
 
 ```jsonc
 {
-  "query": "RemoteInvokeRequest",
+  "pattern": "RemoteInvokeRequest",
   "path": "crates",
-  "regex": false,
-  "glob": "**/*.rs",
-  "case_sensitive": false,
+  "regex": true,
+  "case_insensitive": false,      // 注意：字段名是 case_insensitive（不是 case_sensitive）
   "max_results": 200,
   "context_lines": 2
 }
@@ -306,21 +307,38 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 
 ```jsonc
 {
-  "ok": true,
   "matches": [
-    { "file": "crates/bifrost-admin/src/remote_invoke/types.rs", "line": 120, "col": 8, "text": "pub struct RemoteInvokeRequest {", "context_before": ["…"], "context_after": ["…"] }
+    {
+      "file": "crates/bifrost-admin/src/remote_invoke/types.rs",
+      "line": 120,
+      "text": "pub struct RemoteInvokeRequest {"
+    }
   ],
   "truncated": false,
-  "scanned_files": 42
+  "root": "/Users/eden/work/github/bifrost"
 }
 ```
 
-### `file.hash`
+> **与早期设计差异**：参数名为 `case_insensitive`（不是 `case_sensitive`）；不返回 `col`/`context_before`/`context_after`/`scanned_files`。handler 内部遵循 `policy.denies`。
+
+### 4.7 `file.hash`
+
+```jsonc
+// 响应
+{ "algo": "sha256", "sha256": "abc…" }
+```
+
+### 4.8 `file.write`
+
+请求参数：
 
 ```jsonc
 {
-  "path": "crates/bifrost-core/src/lib.rs",
-  "algo": "sha256"
+  "path": "src/new_file.rs",
+  "content_b64": "<base64>",
+  "base_sha256": "abc…",          // 空/null = 期望新建
+  "create_parents": false,
+  "allow_overwrite": true          // 可覆盖 policy 默认值
 }
 ```
 
@@ -328,51 +346,170 @@ remote invoke 请求复用既有 `RemoteInvokeRequest` 包络，但在 `command.
 
 ```jsonc
 {
-  "ok": true,
-  "path": "crates/bifrost-core/src/lib.rs",
-  "algo": "sha256",
-  "sha256": "…"
+  "path": "src/new_file.rs",
+  "bytes_written": 1024,
+  "sha256": "def…",               // 新文件哈希
+  "previous_sha256": "abc…"       // 旧文件哈希；新建时为 null
 }
 ```
 
-### 错误码
+实现细节：
+- 写入流程：`decode b64 → 校验 base_sha256 → create_parents(可选) → write(tmp) → chmod(保留原 mode) → rename(tmp, target)`。
+- `create_parents=true` 时自动创建不存在的父目录。
 
-统一前缀 `file.`：
+### 4.9 `file.edit`
 
-| code                    | 触发场景                                  |
-| ----------------------- | ----------------------------------------- |
-| `file.not_found`        | 路径不存在                                |
-| `file.permission_denied`| 未授权 / policy 拒绝；只读 file policy 拒绝 write/edit/mkdir/move/delete/apply_patch |
-| `file.scope_required`   | grant_scope 未包含 `remote_file_read/write` |
-| `file.too_large`        | 超过 `max_read_bytes` / `max_edit_bytes`  |
-| `file.invalid_encoding` | encoding 声明与实际内容不符               |
-| `file.invalid_argument` | 参数缺失/非法（例如 offset < 0）          |
-| `file.io_error`         | 底层 IO 错误，保留 message                |
-| `file.op_not_permitted` | 请求的 file op 不在当前 policy ops 中，且不是只读策略拒绝写操作 |
-| `file.sha_mismatch`     | （Phase 2）`if_match_sha256` 不符         |
-| `file.patch_rejected`   | （Phase 3）所有 hunk 均未应用             |
-| `file.partial_applied`  | （Phase 3）部分 hunk 应用                 |
+请求参数：
 
-## 安全设计
+```jsonc
+{
+  "path": "src/main.rs",
+  "base_sha256": "abc…",
+  "edits": [
+    { "start_line": 10, "end_line": 15, "replacement": "// new content\n" }
+  ]
+}
+```
 
-- **路径归一化**：所有 `path` 在 guard 中统一 canonicalize，拒绝包含 `..` 的逃逸；拒绝绝对路径超出 `roots` 白名单。
-- **符号链接**：`follow_symlinks=false` 时，解析出的 symlink 目标超出 `roots` 直接拒绝，避免用软链接绕过白名单。
-- **硬链接**：write/edit 路径通过 inode 对照，发现与 deny 列表共享 inode 时拒绝（Phase 2 实现）。
-- **二进制保护**：`encoding=utf8` 模式下，发现 non-UTF8 字节序列即返回 `file.invalid_encoding`。
-- **大小保护**：`file.read` 默认上限 `min(policy.max_read_bytes, 8MiB)`，caller 可传更小的 `length`，不可传更大。
-- **gitignore 感知**：`file.search` / `file.glob` 默认尊重 `.gitignore`，可由 caller 通过参数关闭；`file.read` 不受 gitignore 影响。
-- **审计**：每次请求在 relay 侧记录 `grant_id + method + path_hash + size + sha256`，不存储文件内容；失败请求保留错误码。
-- **路径脱敏**：审计日志在存入时将 `$HOME` / workspace 根路径做缩写。
+`EditRange` 的 `start_line` / `end_line` 为 1-based、inclusive。
 
-## 可观测性
+响应同 `file.write`：`{ path, bytes_written, sha256, previous_sha256 }`。
 
-- `tracing` span 按 `remote_file.<method>` 打点，tag 包含 `method`、`path_len`、`size`、`duration_ms`。
-- admin HTTP 层新增 `/remote-invoke/file/metrics` 汇总（Phase 2+，本 PR 不做）。
-- CLI 输出支持 `--format table|compact|json|json-pretty`，默认为 `table`。
+实现细节：
+- EOL 保留：自动侦测源文件行尾风格（CRLF/LF），替换文本输出时保持一致。
+- 最后一行尾换行保留：如果原文件末尾有换行、替换内容末尾无换行，自动补上（反之亦然）。
 
-## CLI 映射（caller 侧）
+### 4.10 `file.mkdir`
 
-当前子命令骨架：
+```jsonc
+{ "path": "src/new_dir", "parents": true }
+// 响应：{ "path": "src/new_dir", "created": true }
+```
+
+### 4.11 `file.move`
+
+```jsonc
+{ "from": "src/old.rs", "to": "src/new.rs" }
+// 响应：{ "from": "…", "to": "…" }
+```
+
+> **已知缺失**：当前不支持 `base_sha256` 前置校验。多 agent 场景可能丢写。计划下一 PR 补齐。
+
+### 4.12 `file.delete`
+
+```jsonc
+{ "path": "src/old.rs", "recursive": false }
+// 响应：{ "path": "…", "deleted": true, "recursive": false }
+```
+
+`recursive=true` 必须在 policy 中 `allow_recursive_delete=true` 才能生效。
+
+> **已知缺失**：当前不支持 `if_match_sha256` 前置校验。计划下一 PR 补齐。
+
+### 4.13 `file.apply_patch`
+
+请求参数：
+
+```jsonc
+{
+  "patch": "<unified diff text>"
+}
+```
+
+实现细节：
+
+1. **解析**：`parse_patch()` 将 diff 文本拆为 `Vec<PatchEntry>`。每个 entry 包含 `old_path`、`new_path`、`body`、`kind`。
+2. **PatchKind 分类**（按优先级）：
+   - `Binary { path }` → 拒绝，返回 `file.binary_patch_unsupported`
+   - `RenameOnly { from, to }` → 拒绝，返回 `file.unsupported_diff`（提示用 `file.move`）
+   - `CopyOnly { from, to }` → 拒绝，返回 `file.unsupported_diff`（提示用 `file.read + file.write`）
+   - `ModeOnly { path }` → 拒绝，返回 `file.unsupported_diff`
+   - `Modify` / `Create` / `Delete` → 正常处理
+3. **权限检查**：逐文件走 `FileAccessPolicy::check(path, cwd, FileOp::ApplyPatch)`。
+4. **两阶段原子提交**：
+   - Stage 阶段：对每个文件写 `<parent>/.bifrost-patch.<pid>.<nanos>.<i>.tmp`，逐 hunk 校验 context。
+   - 快照 `prior_mode` + `existed_before` 用于 rollback。
+   - Commit 阶段：所有 tmp 校验通过后，逐个 `rename(tmp, target)` + `chmod`。
+   - 任一 rename 失败 → rollback 已 committed 的文件（用快照恢复原内容/删除新建文件）。
+5. **EOL 处理**：侦测目标文件 EOL 风格，hunk 输出保持一致。`\ No newline at end of file` 标记正确处理（不再强补尾换行）。
+6. **diff --git 扩展头**：正确解析 `diff --git a/… b/…`、`index`、`similarity index`、`rename from/to`、`copy from/to`、`old mode`/`new mode`、`new file mode`、`deleted file mode`、`Binary files … differ`。
+
+---
+
+## 5. 错误码
+
+### 5.1 完整错误码表（当前实现）
+
+| 错误码 | 来源 | 触发场景 |
+|---|---|---|
+| `file.not_found` | policy / handler | 路径不存在 |
+| `file.permission_denied` | policy / handler | deny 匹配 / 只读 policy 拒绝写 |
+| `file.out_of_scope` | policy | 路径超出 roots |
+| `file.symlink_escape` | policy | 符号链接解析后超出 roots |
+| `file.ignored_by_gitignore` | policy | respect_gitignore 命中 |
+| `file.binary_not_allowed` | policy | 非 UTF-8 文件 + allow_binary=false |
+| `file.op_not_permitted` | policy | 请求的 op 不在 policy.ops 中 |
+| `file.invalid_args` | handler | 参数缺失/非法 |
+| `file.invalid_glob` | policy / handler | glob 语法错误 |
+| `file.invalid_regex` | handler | 正则语法错误 |
+| `file.invalid_deny` | policy | deny 模式语法错误 |
+| `file.io_error` | handler | 底层 IO 错误 |
+| `file.precondition_failed` | handler | 通用前置条件不满足（目标已存在/不存在等） |
+| `file.sha_mismatch` | handler | `base_sha256` 校验不通过 |
+| `file.size_too_large` | handler | 超过 max_read_bytes / max_write_bytes |
+| `file.unsupported_algo` | handler | hash 算法不支持 |
+| `file.unsupported_diff` | handler | apply_patch 遇到 rename/copy/mode-only diff |
+| `file.binary_patch_unsupported` | handler | apply_patch 遇到 binary diff |
+
+> **与早期设计差异**：
+> - `file.too_large` → 实际为 `file.size_too_large`
+> - `file.invalid_argument` → 实际为 `file.invalid_args`
+> - `file.scope_required` → 由 `scope_allows_command()` 在 executor 层拒绝，不经 file handler
+> - `file.invalid_encoding` → 由 `file.binary_not_allowed` 替代
+> - `file.patch_rejected` / `file.partial_applied` → 未采用；apply_patch 失败统一走 `file.precondition_failed` + rollback
+> - `file.exists` / `file.not_empty` / `file.write_quota_exceeded` / `patch.*` → 未实现，归入 `file.precondition_failed`
+
+---
+
+## 6. 架构分层
+
+```
+┌──────────────┐  request (kind=file, command=file.read)  ┌────────────┐
+│ Caller (CLI) │ ─────────────────────────────────────▶   │   Relay    │
+└──────────────┘                                          └─────┬──────┘
+                                                                ▼
+                                                      ┌─────────────────┐
+                                                      │ bifrost-admin    │
+                                                      │  executor.rs     │
+                                                      └─────────┬───────┘
+                                                                ▼
+                                                      ┌─────────────────┐
+                                                      │ FileAccessPolicy │
+                                                      │  policy.rs       │
+                                                      │  (bifrost-core)  │
+                                                      └─────────┬───────┘
+                                                                ▼
+                                                      ┌─────────────────┐
+                                                      │ file_ops.rs      │
+                                                      │ (~3252 行)       │
+                                                      └─────────────────┘
+```
+
+文件结构：
+
+| 路径 | 职责 |
+|---|---|
+| `crates/bifrost-core/src/file_access/policy.rs` | `FileAccessPolicy`、`PolicyDecision`、`FileOp` |
+| `crates/bifrost-core/src/file_access/matcher.rs` | `DenyMatcher`、`GlobMatcher` |
+| `crates/bifrost-core/src/file_access/path.rs` | `CanonicalPath`、`canonicalize_within_roots` |
+| `crates/bifrost-core/src/file_access/error.rs` | `FileAccessError` 枚举 |
+| `crates/bifrost-admin/src/remote_invoke/executor.rs` | 请求分发、权限检查、apply_patch 解析委托 |
+| `crates/bifrost-admin/src/remote_invoke/file_ops.rs` | 所有 handler 实现、`parse_patch`/`PatchEntry`/`PatchKind` |
+| `crates/bifrost-admin/src/remote_invoke/file_policy_store.rs` | Policy 存储（TOML load） |
+
+---
+
+## 7. CLI 映射
 
 ```
 bifrost remote file read        <path> [--max-bytes N] [--allow-binary]
@@ -389,115 +526,55 @@ bifrost remote file rm          <path> [--recursive]
 bifrost remote file apply-patch --patch-file <local-patch|->
 ```
 
-## 实现拆分
+---
 
-- PR-1（本设计落地）：
-  - `crates/bifrost-core/src/file_access/` 新模块：`FileAccessPolicy`、路径归一化、glob 匹配、错误码类型。
-  - 设计文档与 human_tests 骨架。
-  - **不引入 runtime 依赖变更、不改动现有 crate 公共 API**，保证 CI 可以直接跑通。
-- PR-2：扩展 `GrantScope`、`CommandKind`，新增 `remote_invoke::file` 模块。
-- PR-3：Caller CLI 子命令 `bifrost remote file <subcmd>`。
-- PR-4：Web UI "File Access" 面板。
-- PR-5：Phase 2（write/edit/mkdir/move/delete）。
-- PR-6：Phase 3（apply_patch/watch）。
+## 8. 安全设计
 
-## 与现有能力的分工原则
+| 机制 | 状态 | 说明 |
+|---|---|---|
+| 路径归一化 + roots 白名单 | ✅ 已实现 | `canonicalize_within_roots` 拒绝 `..` 逃逸 |
+| 符号链接 resolve 检查 | ✅ 已实现 | resolve 后超出 roots → `file.symlink_escape` |
+| deny / write_denies glob | ✅ 已实现 | `DenyMatcher` |
+| 二进制保护 | ✅ 已实现 | `file.binary_not_allowed` |
+| 大小保护 | ✅ 已实现 | `max_read_bytes` / `max_write_bytes` |
+| gitignore 感知 | ✅ 已实现 | `ignore` crate 接入 |
+| 文件 mode 保留 | ✅ 已实现 | 写前快照 mode → 写后 chmod |
+| CRLF/EOL 归一 | ✅ 已实现 | 侦测 + 保持 |
+| 硬链接 inode 对照 | ❌ 未实现 | 需跨平台方案，显式推迟 |
+| 审计 tracing | ❌ 未实现 | handler 当前零 tracing；计划补齐 |
+| policy store 缓存 | ❌ 未实现 | 每请求 `load_default()` 读盘 |
 
-| 需求                | 推荐路径                 | 说明                               |
-| ------------------- | ------------------------ | ---------------------------------- |
-| 读/改单个文件       | `file.*`                 | 编码/换行/原子性保障               |
-| 批量 apply diff     | `file.apply_patch`       | Phase 3                            |
-| 目录遍历、内容检索  | `file.list` / `file.search` | 结构化返回                         |
-| 运行 `cargo build` | `shell.exec`             | 触发进程                           |
-| 运行 `git` 命令     | `shell.exec`             | 属于工作流，不归文件 API 管        |
-| 启动前端/运行测试   | `shell.exec`             | 进程级能力                         |
+---
+
+## 9. 已知遗留与下一步
+
+| ID | 项 | 优先级 | 说明 |
+|---|---|---|---|
+| R-1 | `file.move` 加 `base_sha256` | P1 | 防多 agent race |
+| R-2 | `file.delete` 加 `if_match_sha256` | P1 | 防误删 |
+| R-3 | `FileAccessPolicyStore` 缓存 | P1 | `OnceLock<RwLock>` + mtime 失效 |
+| R-4 | handler tracing + audit | P2 | 每个 handler 入口 `tracing::info!(target="audit.file", …)` |
+| R-5 | 硬链接 inode 对照 | P2 | 跨平台，可延后 |
+| R-6 | 默认 exclude 扩展 | P2 | `.venv/dist/build/.next/.nuxt/.pytest_cache` 等 |
+| R-7 | `file.search` 不合并同文件命中 | L | 100 hits 分 5 file 时 agent 需自行 group-by |
+| R-8 | `file.glob` 不返回 mtime | L | 查"近期修改"需额外 stat |
+
+---
+
+## 10. 与现有能力的分工原则
+
+| 需求 | 推荐路径 | 说明 |
+|---|---|---|
+| 读/改单个文件 | `file.*` | 编码/换行/原子性保障 |
+| 批量 apply diff | `file.apply_patch` | 多文件两阶段原子 |
+| 目录遍历、内容检索 | `file.list` / `file.search` | 结构化返回 |
+| 运行 `cargo build` | `shell.exec` | 触发进程 |
+| 运行 `git` 命令 | `shell.exec` | 属于工作流 |
+
+---
 
 ## 参考
 
 - GitHub Contents API — `If-Match-SHA` 乐观锁
 - Claude Code / Codex / Cursor 的 file_read / file_edit / grep / glob / apply_patch 工具
 - 现有 `crates/bifrost-admin/src/remote_invoke/` 的 executor/worker/types 分层
-
----
-
-## 9. Phase 2 — 写入与原子编辑（≈ 2 周）
-
-Phase 2 将引入**写能力**，但遵循与 Phase 1 相同的铁律：任何写入都必须经 `FileAccessPolicy::check(op=Write)` 校验、经审计、并通过 sha 乐观锁防止覆盖他人改动。
-
-### 9.1 新增方法
-
-| 方法 | 说明 | 关键约束 |
-|------|------|----------|
-| `file.write` | 写/覆盖整个文件，可选创建父目录 | 必须携带 `base_sha256`（`new` 文件传空串）做乐观锁；超过 `max_write_bytes` 拒绝 |
-| `file.edit` | 结构化编辑：`[{ range: {start_line, end_line}, replacement }]`；一次 request 一个文件多段 edits | 客户端传 `base_sha256`；服务端校验冲突后原子写入；失败返回 `file.precondition_failed` |
-| `file.mkdir` | 创建目录（支持 `--parents`） | 命中 deny 或非 roots 均拒绝 |
-| `file.move` | 重命名/移动 | 源和目标都必须在 roots 内；跨 root 拒绝 |
-| `file.delete` | 删除文件或空目录（递归删除默认禁用） | `recursive=true` 时必须在 policy 中显式 `allow_recursive_delete=true` |
-
-### 9.2 Grant scope 与 policy
-
-- 新增 `GrantScope::RemoteFileWrite`（Phase 1 已预留枚举变体）。
-- `FileAccessPolicy` 扩展：
-  - `allow_write_roots: Vec<PathBuf>`（可以是 `roots` 子集，进一步收紧）
-  - `max_write_bytes: u64`
-  - `allow_overwrite: bool`（默认 true，只影响 `file.write`）
-  - `allow_recursive_delete: bool`（默认 false）
-  - `write_denies: Vec<String>`（与 read 的 `denies` 合并叠加）
-- `GrantScope::allows_command` 将所有 write 类 CommandKind 收敛到 `RemoteFileWrite`（shell scope 不再默认放行写）。
-
-### 9.3 协议要点
-
-- 所有写请求 body 中必须包含 `base_sha256`（空串表示 "文件不存在，期望创建"）。
-- 响应返回 `{ new_sha256, size, mtime_unix }`，便于调用端继续基于新状态做后续操作。
-- 错误码新增：`file.precondition_failed`、`file.exists`、`file.not_empty`、`file.write_quota_exceeded`。
-
-### 9.4 审计
-
-每次写操作写一条审计记录：`{ grant_id, op, path, base_sha, new_sha, bytes, result }`。失败也写（`result=rejected/failed`），并记录拒绝原因。
-
-### 9.5 human_tests 必须覆盖
-
-- **并发写**：两个 caller 基于同一 `base_sha` 同时写，后到者必须 `file.precondition_failed`。
-- **路径逃逸**：`../../etc/hosts` / 绝对路径 / 跨 root 全部拒绝；
-- **Symlink**：通过符号链接写入 roots 外目标，`file.symlink_escape`；
-- **大文件拒绝**：超过 `max_write_bytes` 必须拒绝，且不在磁盘留下临时残片（原子写：`tmpfile + rename`）；
-- **mkdir/rename/delete 的 deny 拦截**。
-- **只读 policy 写操作拒绝**：`FileAccessPolicy::new_readonly` 对 `write/edit/mkdir/move/delete/apply_patch` 等写操作必须返回 `file.permission_denied`，与一般非只读策略的 op allowlist 缺失错误 `file.op_not_permitted` 区分。
-
-### 9.6 Grant scope 回归防护
-
-`remote_file_read` / `remote_file_write` 是 File API 的独立授权域，不依赖 Remote Shell policy 是否存在或启用。配对批准阶段如果显式请求 file scope，target 必须直接创建对应 file grant；不能先降级为 `remote_query` 再依赖后续 PATCH 修正，否则 relay E2E 在 grant 尚未同步完成时会用 `RemoteQuery` 拒绝 `CommandKind::File`。
-
-验证要求：
-
-- 单元测试：`shell_grant_provision` 在无 shell policy 时仍接受 `RemoteFileRead` / `RemoteFileWrite`，且不写入 shell policy binding。
-- E2E 测试：`test_remote_file_relay_e2e.sh` 批准配对时直接请求 `remote_file_write`，并在执行 file 命令前确认 target grant list 中对应 `grant_id` 已是 `remote_file_write`。
-- 真实场景测试：`human_tests/remote-invoke-file.md` 记录 `TC-4.1`，覆盖 CI 回归路径：配对批准后 file.read/list/edit 必须返回 JSON，不能出现 `grant scope RemoteQuery does not allow command kind File`。
-
----
-
-## 10. Phase 3 — Unified diff & 进阶能力
-
-### 10.1 `file.apply_patch`（多文件 diff）
-
-- 接收标准 unified diff（`git apply` 兼容格式），支持一次 patch 多文件。
-- 服务端流程：
-  1. 解析 diff，提取每个 hunk 的 `before_sha256`。
-  2. 对每个目标文件串行走 `FileAccessPolicy::check(op=Write)`。
-  3. 逐 hunk 比对 `before_sha256`；任一失败则整个 patch 回滚（要么全提交，要么全不提交）。
-  4. 通过后以 `write` 原子落盘，逐文件登记 audit。
-- 错误码：`patch.parse_failed`、`patch.hunk_conflict`、`patch.no_such_file`、`patch.partial_aborted`（部分成功即 abort 的强保护）。
-
-### 10.2 其余进阶能力
-
-| 能力 | 描述 |
-|------|------|
-| `file.watch` | 长连接订阅目录变更事件（FSEvents / inotify），Phase 3.1 |
-| `file.chmod` / `file.chown` | 权限/所有者管理，默认禁用，需显式 `allow_metadata_ops` |
-| `file.symlink` | 创建符号链接，默认禁用；启用后目标必须在 roots 内 |
-| CLI `bifrost remote file apply-patch --patch-file <patch.diff>` | 一键投递 unified diff |
-
-### 10.3 与 Phase 2 的叠加约束
-
-- Phase 3 不引入新的 GrantScope；`file.apply_patch` 复用 `RemoteFileWrite`。
-- Phase 3 强制要求 Phase 2 的审计链已上线，任何 patch 失败都可以从 audit 单文件级别定位回滚点。
