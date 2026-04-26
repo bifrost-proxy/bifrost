@@ -13,7 +13,7 @@ use regex::Regex;
 use sha1::{Digest, Sha1};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::query_service::AdminQueryService;
 use crate::state::SharedAdminState;
@@ -304,7 +304,81 @@ impl RemoteInvokeExecutor {
         }
     }
 
+    /// Public entry point for file.* operations.
+    ///
+    /// Wraps [`execute_file_op_inner`] to emit a single `audit.file` tracing
+    /// event per request, recording `grant_id`, `method`, `path_hash`
+    /// (sha256 prefix), `op`, `duration_ms`, and — when the inner handler
+    /// returns JSON with `bytes_written` / `sha256` fields — those too.
+    ///
+    /// On error, logs the file error code extracted from the `[file.xxx]`
+    /// prefix (falls back to `"file.internal"`).
     async fn execute_file_op(&self, command: &RemoteCommand) -> Result<String> {
+        let started = Instant::now();
+
+        // Best-effort extraction of grant_id / path / method *before* dispatch,
+        // so we can log even when the inner fn returns early with an error.
+        let method = command.command.clone();
+        let (path_for_hash, grant_for_log) = {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct Peek {
+                path: Option<String>,
+                grant_id: Option<String>,
+            }
+            let peek: Peek = command
+                .args_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default();
+            let p = peek.path.unwrap_or_default();
+            let g = command
+                .grant_id
+                .clone()
+                .or(peek.grant_id)
+                .unwrap_or_default();
+            (p, g)
+        };
+        let path_hash = audit_path_hash(&path_for_hash);
+
+        let outcome = self.execute_file_op_inner(command).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        match &outcome {
+            Ok(json) => {
+                // Try to surface bytes_written / sha256 from the handler's JSON.
+                let (bytes, sha) = extract_audit_fields(json);
+                info!(
+                    target = "audit.file",
+                    grant_id = %grant_for_log,
+                    method = %method,
+                    path_hash = %path_hash,
+                    duration_ms,
+                    result = "ok",
+                    bytes = bytes.unwrap_or(0),
+                    sha256 = sha.as_deref().unwrap_or(""),
+                    "file op succeeded"
+                );
+            }
+            Err(err) => {
+                let code = extract_file_error_code(&err.to_string());
+                warn!(
+                    target = "audit.file",
+                    grant_id = %grant_for_log,
+                    method = %method,
+                    path_hash = %path_hash,
+                    duration_ms,
+                    result = "err",
+                    error_code = %code,
+                    "file op failed"
+                );
+            }
+        }
+
+        outcome
+    }
+
+    async fn execute_file_op_inner(&self, command: &RemoteCommand) -> Result<String> {
         use bifrost_core::file_access::FileOp;
         use std::path::Path;
 
@@ -3209,5 +3283,96 @@ mod tests {
             msg.contains("policy 'shell-only'"),
             "must mention policy: {msg}"
         );
+    }
+}
+
+/// First 16 hex chars of sha256(path). Empty input => "?".
+fn audit_path_hash(path: &str) -> String {
+    if path.is_empty() {
+        return "?".to_string();
+    }
+    use ring::digest::{Context, SHA256};
+    let mut ctx = Context::new(&SHA256);
+    ctx.update(path.as_bytes());
+    let digest = ctx.finish();
+    digest
+        .as_ref()
+        .iter()
+        .take(8)
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// Extract `[file.xxx]` error code from a BifrostError display string.
+/// Falls back to `"file.internal"`.
+fn extract_file_error_code(msg: &str) -> String {
+    if let Some(start) = msg.find("[file.") {
+        let rest = &msg[start + 1..];
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    "file.internal".to_string()
+}
+
+/// Pull `bytes_written` (u64) and `sha256` (string) from a handler's JSON
+/// result, if present. Both fields are optional across ops.
+fn extract_audit_fields(json: &str) -> (Option<u64>, Option<String>) {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let bytes = v
+        .get("bytes_written")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.get("size").and_then(|x| x.as_u64()))
+        .or_else(|| v.get("bytes").and_then(|x| x.as_u64()));
+    let sha = v
+        .get("sha256")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    (bytes, sha)
+}
+
+#[cfg(test)]
+mod audit_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn path_hash_is_stable_and_prefix() {
+        let a = audit_path_hash("/tmp/foo.txt");
+        let b = audit_path_hash("/tmp/foo.txt");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn path_hash_empty_marker() {
+        assert_eq!(audit_path_hash(""), "?");
+    }
+
+    #[test]
+    fn extracts_file_code() {
+        assert_eq!(
+            extract_file_error_code("[file.sha_mismatch] base does not match"),
+            "file.sha_mismatch"
+        );
+        assert_eq!(
+            extract_file_error_code("something wrapped: [file.permission_denied] grant"),
+            "file.permission_denied"
+        );
+        assert_eq!(extract_file_error_code("bare text"), "file.internal");
+    }
+
+    #[test]
+    fn extracts_audit_fields() {
+        let (b, s) = extract_audit_fields(r#"{"bytes_written":42,"sha256":"deadbeef"}"#);
+        assert_eq!(b, Some(42));
+        assert_eq!(s.as_deref(), Some("deadbeef"));
+        let (b, s) = extract_audit_fields("not json");
+        assert!(b.is_none() && s.is_none());
+        let (b, _) = extract_audit_fields(r#"{"size":7}"#);
+        assert_eq!(b, Some(7));
     }
 }
