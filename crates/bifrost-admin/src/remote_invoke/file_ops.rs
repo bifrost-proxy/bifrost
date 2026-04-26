@@ -3357,7 +3357,7 @@ mod tests {
     async fn move_rejects_base_sha_for_directory_p1_5() {
         let tmp = tempfile::tempdir().unwrap();
         let from = tmp.path().join("dir_a");
-        let to = tmp.path().join("dir_b");
+        let _to = tmp.path().join("dir_b");
         std::fs::create_dir(&from).unwrap();
         let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
             "t".to_string(),

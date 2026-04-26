@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+use std::time::SystemTime;
 
 use bifrost_core::file_access::{FileAccessPolicy, FileOp};
 use serde::{Deserialize, Serialize};
@@ -69,16 +71,23 @@ impl FileAccessPolicyStore {
         Self::default()
     }
 
-    /// Load from `<data-dir>/file-access.toml` if it exists. Missing file or
-    /// parse errors produce an empty store plus a warning — the relay can
-    /// still serve requests using the default read-only policy.
+    /// Load from `<data-dir>/file-access.toml` with mtime-based caching.
+    ///
+    /// The first call parses the TOML file and caches the resulting store
+    /// keyed by the file's `(size, mtime)` tuple. Subsequent calls reuse
+    /// the cached store as long as the tuple is unchanged — avoiding a
+    /// disk read + TOML parse on every file.* request.
+    ///
+    /// `save_raw_config()` bumps a shared generation so the next call
+    /// re-checks mtime even if the FS reported the same timestamp (some
+    /// filesystems have 1s mtime resolution).
+    ///
+    /// Missing file or parse errors produce an empty store plus a warning
+    /// — the relay can still serve requests using the default read-only
+    /// policy.
     pub fn load_default() -> Self {
         let path = default_config_path();
-        if path.exists() {
-            Self::load_from(&path)
-        } else {
-            Self::empty()
-        }
+        load_cached(&path)
     }
 
     pub fn load_from(path: &Path) -> Self {
@@ -152,6 +161,75 @@ impl FileAccessPolicyStore {
     }
 }
 
+/// Snapshot key: `(size, mtime)` of the TOML file, or `None` if missing.
+/// Two snapshots with the same key are assumed to have identical content.
+type Snapshot = Option<(u64, SystemTime)>;
+
+#[derive(Debug, Clone, Default)]
+struct CacheEntry {
+    snapshot: Snapshot,
+    generation: u64,
+    store: FileAccessPolicyStore,
+}
+
+fn cache() -> &'static RwLock<CacheEntry> {
+    static CACHE: OnceLock<RwLock<CacheEntry>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(CacheEntry::default()))
+}
+
+/// Monotonic generation counter. `save_raw_config()` bumps this so the
+/// next `load_cached()` revalidates mtime even when FS resolution is
+/// coarse.
+fn generation() -> &'static std::sync::atomic::AtomicU64 {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &GEN
+}
+
+fn current_snapshot(path: &Path) -> Snapshot {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some((meta.len(), mtime))
+}
+
+fn load_cached(path: &Path) -> FileAccessPolicyStore {
+    let gen_now = generation().load(std::sync::atomic::Ordering::Acquire);
+    let snap_now = current_snapshot(path);
+
+    // Fast path: read-lock and return cached clone if snapshot + generation
+    // match.
+    {
+        let c = cache().read().unwrap();
+        if c.snapshot == snap_now && c.generation == gen_now {
+            return c.store.clone();
+        }
+    }
+
+    // Slow path: parse and update cache under write lock.
+    let store = if path.exists() {
+        FileAccessPolicyStore::load_from(path)
+    } else {
+        FileAccessPolicyStore::empty()
+    };
+
+    let mut c = cache().write().unwrap();
+    // Re-read snapshot under the write lock — another writer may have
+    // already updated the cache with a fresher snapshot.
+    let snap_fresh = current_snapshot(path);
+    *c = CacheEntry {
+        snapshot: snap_fresh,
+        generation: gen_now,
+        store: store.clone(),
+    };
+    store
+}
+
+/// Invalidate the cache. Called by `save_raw_config()` to guarantee the
+/// next `load_default()` re-parses, even if the new file's mtime matches
+/// the old cached mtime (coarse FS resolution).
+fn invalidate_cache() {
+    generation().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 fn default_config_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONFIG_FILE_NAME)
 }
@@ -190,6 +268,7 @@ pub(crate) fn save_raw_config(config: &RawConfig) -> Result<(), String> {
     }
     std::fs::write(&path, content)
         .map_err(|e| format!("Failed to write file-access config: {e}"))?;
+    invalidate_cache();
     debug!(path = %path.display(), "saved file-access config");
     Ok(())
 }
@@ -245,5 +324,107 @@ allow_recursive_delete = true
     fn missing_file_yields_empty_store() {
         let store = FileAccessPolicyStore::load_from(Path::new("/no/such/file.toml"));
         assert!(store.by_grant.is_empty());
+    }
+
+    #[test]
+    fn load_cached_reuses_snapshot_when_mtime_unchanged() {
+        // Write a TOML file, load twice via load_cached, and assert the
+        // second call sees the same content. We can't directly observe
+        // "parse skipped", but we can overwrite the FILE in place with
+        // unrelated garbage AFTER the first load and verify the cache
+        // still returns the original policy — proving no re-parse.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("fa.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                r#"[[grant]]
+grant_id = "g-1"
+name = "proj-original"
+roots = ["{}"]
+ops = ["read"]
+"#,
+                tmp.path().to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+
+        // First call: cold cache -> parses.
+        let s1 = load_cached(&cfg);
+        assert_eq!(s1.resolve("g-1", tmp.path()).name, "proj-original");
+
+        // Overwrite file content WITHOUT touching mtime by truncating
+        // and writing same-length payload rapidly. On macOS / APFS the
+        // mtime may still bump; use utimes to restore it.
+        let original_meta = std::fs::metadata(&cfg).unwrap();
+        let original_mtime = original_meta.modified().unwrap();
+        std::fs::write(
+            &cfg,
+            format!(
+                r#"[[grant]]
+grant_id = "g-1"
+name = "proj-tampered"
+roots = ["{}"]
+ops = ["read"]
+"#,
+                tmp.path().to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        // Best-effort restore of mtime — if this fails the test is still
+        // valid (the cache-by-mtime contract is only meaningful when
+        // mtime really is unchanged; a tampered mtime is out of scope
+        // for the cache hit path).
+        if let (Ok(()), Ok(_)) = (
+            filetime_set_mtime(&cfg, original_mtime),
+            std::fs::metadata(&cfg).map(|m| m.modified()),
+        ) {
+            let fresh_mtime = std::fs::metadata(&cfg).unwrap().modified().unwrap();
+            if fresh_mtime == original_mtime {
+                // Cache hit path: should still see "proj-original".
+                let s2 = load_cached(&cfg);
+                assert_eq!(
+                    s2.resolve("g-1", tmp.path()).name,
+                    "proj-original",
+                    "cache hit must return the originally-parsed store when mtime is unchanged"
+                );
+            }
+        }
+
+        // After invalidate, the cache must re-read the file and observe
+        // "proj-tampered".
+        invalidate_cache();
+        let s3 = load_cached(&cfg);
+        assert_eq!(s3.resolve("g-1", tmp.path()).name, "proj-tampered");
+    }
+
+    // Tiny helper: set mtime without pulling the filetime crate. On unix we
+    // use libc::utimes; on other platforms we fall back to a no-op error so
+    // the test body skips the assertion (still covers invalidate path).
+    #[cfg(unix)]
+    fn filetime_set_mtime(path: &Path, t: SystemTime) -> std::io::Result<()> {
+        use nix::libc;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::other("path with nul byte"))?;
+        let dur = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let tv = libc::timeval {
+            tv_sec: dur.as_secs() as libc::time_t,
+            tv_usec: dur.subsec_micros() as libc::suseconds_t,
+        };
+        let times = [tv, tv];
+        let ret = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn filetime_set_mtime(_path: &Path, _t: SystemTime) -> std::io::Result<()> {
+        Err(std::io::Error::other("not supported"))
     }
 }
