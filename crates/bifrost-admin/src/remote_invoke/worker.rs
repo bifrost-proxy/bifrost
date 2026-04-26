@@ -2457,33 +2457,44 @@ impl RemoteInvokeWorker {
                             envelope_json,
                         };
 
-                        let legacy_result = relay_client.post_call_frame(&cid, &frame_req).await;
-                        // PR#6c: parallel emission to the new /stream-frame
-                        // endpoint. Offset is left at 0 for now; a follow-up
-                        // PR will thread the pre-tee absolute head in. Failure
-                        // on this path is swallowed so it never breaks the
-                        // legacy envelope path (which `legacy_result` tracks).
+                        // PR#6c-followup: run the legacy /frame POST and the
+                        // new /stream-frame POST concurrently with tokio::join!
+                        // so neither RTT serializes the stdout chunk sink. The
+                        // stream_frame result is intentionally best-effort (the
+                        // legacy envelope path remains the source of truth
+                        // until PR #5e flips the caller default), but running
+                        // both in parallel prevents either slow leg from
+                        // blocking the executor read loop — the root cause of
+                        // the CI hang reverted in f1e2f88.
+                        let legacy_fut = relay_client.post_call_frame(&cid, &frame_req);
                         let stream_frame = stream_emit::build_stdout_frame(
                             seq,
                             offset_for_stream,
                             &chunk_bytes_for_stream,
                         );
-                        if let Some(frame_json) = stream_emit::frame_to_json(&stream_frame) {
-                            let stream_req = ClientCallStreamFrameRequest {
-                                call_id: cid.clone(),
-                                client_instance_id: instance_id_for_stream,
-                                frame_json,
-                            };
-                            if let Err(err) =
-                                relay_client.post_call_stream_frame(&cid, &stream_req).await
-                            {
-                                tracing::debug!(
-                                    call_id = %cid,
-                                    ?err,
-                                    "parallel stream_frame post failed"
-                                );
+                        let stream_frame_json = stream_emit::frame_to_json(&stream_frame);
+                        let cid_for_stream = cid.clone();
+                        let relay_for_stream = Arc::clone(&relay_client);
+                        let stream_fut = async move {
+                            if let Some(frame_json) = stream_frame_json {
+                                let stream_req = ClientCallStreamFrameRequest {
+                                    call_id: cid_for_stream.clone(),
+                                    client_instance_id: instance_id_for_stream,
+                                    frame_json,
+                                };
+                                if let Err(err) = relay_for_stream
+                                    .post_call_stream_frame(&cid_for_stream, &stream_req)
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        call_id = %cid_for_stream,
+                                        ?err,
+                                        "parallel stream_frame post failed"
+                                    );
+                                }
                             }
-                        }
+                        };
+                        let (legacy_result, ()) = tokio::join!(legacy_fut, stream_fut);
                         legacy_result
                     }
                 })
@@ -2587,6 +2598,17 @@ impl RemoteInvokeWorker {
                         return;
                     }
                     error!(error = %e, call_id = %cid, "remote command execution failed");
+                    // PR#8-followup: the success branch already finalizes the
+                    // session ring on Done; the error branch previously skipped
+                    // finalize, leaking the 128 MiB ring forever. Close it now
+                    // so the global registry does not grow unbounded for
+                    // failed calls.
+                    session_ring::finalize_session_str(
+                        &cid,
+                        super::session_ring::SessionStatus::Failed {
+                            code: e.to_string(),
+                        },
+                    );
                     let stderr = e.to_string();
                     let exit_encrypted = match Self::encrypt_call_exit(
                         &grant_crypto,
