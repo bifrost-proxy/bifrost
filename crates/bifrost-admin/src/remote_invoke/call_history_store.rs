@@ -467,6 +467,8 @@ mod tests {
                 timeout_ms: None,
                 pty: None,
                 output_mode: None,
+                caller_fingerprint: None,
+                ssh_fingerprint: None,
                 file_access: FileAccessScope::default(),
                 grant_id: None,
             },

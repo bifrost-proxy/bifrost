@@ -2161,11 +2161,18 @@ impl RemoteInvokeWorker {
             "grant validated for call_open"
         );
 
-        let (grant_scope, file_access) = self
+        let (grant_scope, file_access, caller_fp, ssh_fp) = self
             .local_grants
             .read()
             .get(&grant_id)
-            .map(|grant| (grant.grant_scope, grant.file_access))
+            .map(|grant| {
+                (
+                    grant.grant_scope,
+                    grant.file_access,
+                    Some(grant.caller_fingerprint.clone()),
+                    grant.ssh_key_fingerprint.clone(),
+                )
+            })
             .unwrap_or_default();
 
         let transport_command_kind = data
@@ -2275,6 +2282,8 @@ impl RemoteInvokeWorker {
             return;
         }
         command.grant_id = Some(grant_id.clone());
+        command.caller_fingerprint = caller_fp.clone();
+        command.ssh_fingerprint = ssh_fp.clone();
         command.file_access = file_access;
 
         if let Some(query) = &command.query {
@@ -2368,6 +2377,8 @@ impl RemoteInvokeWorker {
                     pty: command.pty.clone(),
                     output_mode: command.output_mode,
                     grant_id: None,
+                    caller_fingerprint: None,
+                    ssh_fingerprint: None,
                     file_access: Default::default(),
                 },
                 source_ip: None,
@@ -4098,6 +4109,8 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
             file_access: Default::default(),
         };
 
@@ -4133,6 +4146,8 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
             file_access: Default::default(),
         };
 
@@ -4167,6 +4182,8 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
             file_access: Default::default(),
         };
 
@@ -4203,6 +4220,8 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
             file_access: Default::default(),
         };
 
@@ -4246,6 +4265,8 @@ mod tests {
             pty: None,
             output_mode: None,
             grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
             file_access: Default::default(),
         };
 
@@ -4292,6 +4313,8 @@ mod tests {
                 pty: None,
                 output_mode: None,
                 grant_id: None,
+                caller_fingerprint: None,
+                ssh_fingerprint: None,
                 file_access: Default::default(),
             },
             source_ip: None,

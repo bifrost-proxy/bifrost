@@ -507,7 +507,12 @@ impl RemoteInvokeExecutor {
             .or(params.grant_id.clone())
             .unwrap_or_default();
         let store = super::file_policy_store::FileAccessPolicyStore::load_default();
-        let policy = store.resolve(&grant_id, cwd);
+        let policy = store.resolve(
+            &grant_id,
+            command.caller_fingerprint.as_deref(),
+            command.ssh_fingerprint.as_deref(),
+            cwd,
+        );
 
         let default_path = ".".to_string();
         let requested_path = match file_op_name {

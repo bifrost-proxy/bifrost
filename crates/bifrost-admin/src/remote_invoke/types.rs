@@ -350,6 +350,12 @@ pub struct RemoteCommand {
     pub output_mode: Option<OutputMode>,
     #[serde(skip)]
     pub grant_id: Option<String>,
+    /// Caller fingerprint snapshotted from the grant; used for file-policy matching.
+    #[serde(skip)]
+    pub caller_fingerprint: Option<String>,
+    /// SSH key fingerprint snapshotted from the grant (if SSH-authenticated).
+    #[serde(skip)]
+    pub ssh_fingerprint: Option<String>,
     /// The grant's file_access scope, injected by the worker before execution.
     /// Used by the executor to reject write ops when the grant only allows read.
     #[serde(skip)]
