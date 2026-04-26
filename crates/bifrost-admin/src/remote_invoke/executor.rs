@@ -536,24 +536,40 @@ impl RemoteInvokeExecutor {
                     patch_text.to_string()
                 };
                 let mut decisions = std::collections::HashMap::new();
+                let strip_prefix = |s: &str| -> String {
+                    let s = s.trim();
+                    s.strip_prefix("a/")
+                        .or_else(|| s.strip_prefix("b/"))
+                        .unwrap_or(s)
+                        .to_string()
+                };
                 for raw in normalized.split("\n--- ").skip(1) {
                     let mut it = raw.splitn(2, '\n');
-                    let _old = it.next().unwrap_or("");
+                    let old_line = it.next().unwrap_or("");
                     let rest = it.next().unwrap_or("");
                     let new_line = rest.split('\n').next().unwrap_or("");
                     if let Some(p) = new_line.strip_prefix("+++ ") {
-                        let p = p.trim();
-                        let key = p
-                            .strip_prefix("a/")
-                            .or_else(|| p.strip_prefix("b/"))
-                            .unwrap_or(p);
+                        let old_path = strip_prefix(old_line);
+                        let new_path = strip_prefix(p);
+                        // For deletes ("+++ /dev/null") we key on old_path so
+                        // file_ops::handle_file_apply_patch can find the
+                        // decision; for create/modify we key on new_path.
+                        let key = if new_path == "/dev/null" {
+                            old_path
+                        } else {
+                            new_path
+                        };
                         if key == "/dev/null" {
+                            // Both sides /dev/null is malformed; skip.
+                            continue;
+                        }
+                        if decisions.contains_key(&key) {
                             continue;
                         }
                         let d = policy
-                            .check(Path::new(key), cwd, FileOp::ApplyPatch)
+                            .check(Path::new(&key), cwd, FileOp::ApplyPatch)
                             .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
-                        decisions.insert(key.to_string(), d);
+                        decisions.insert(key, d);
                     }
                 }
                 super::file_ops::handle_file_apply_patch(&decisions, patch_text).await?
