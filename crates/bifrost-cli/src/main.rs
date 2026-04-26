@@ -297,17 +297,37 @@ fn main() {
         Some(Commands::VersionCheck) => {
             commands::handle_version_check("127.0.0.1", get_effective_port(cli.port))
         }
+        Some(Commands::Setting { action }) => match action {
+            cli::SettingCommands::Shell { action } => {
+                commands::handle_remote_shell_command(*action)
+            }
+            cli::SettingCommands::Grant { action } => commands::handle_remote_grant_command(
+                *action,
+                "127.0.0.1",
+                get_effective_port(cli.port),
+            ),
+        },
         Some(Commands::Remote {
             action,
             relay_url,
             client_id,
         }) => match action {
-            cli::RemoteCommands::Shell { action } => commands::handle_remote_shell_command(*action),
-            cli::RemoteCommands::Grant { action } => commands::handle_remote_grant_command(
-                *action,
-                "127.0.0.1",
-                get_effective_port(cli.port),
-            ),
+            cli::RemoteCommands::Shell { action } => {
+                eprintln!(
+                    "warning: `bifrost remote shell` is deprecated; use `bifrost setting shell` instead."
+                );
+                commands::handle_remote_shell_command(*action)
+            }
+            cli::RemoteCommands::Grant { action } => {
+                eprintln!(
+                    "warning: `bifrost remote grant` is deprecated; use `bifrost setting grant` instead."
+                );
+                commands::handle_remote_grant_command(
+                    *action,
+                    "127.0.0.1",
+                    get_effective_port(cli.port),
+                )
+            }
             action => {
                 let relay_url = resolve_remote_relay_url(relay_url, cli.port);
                 remote::handle_remote_command(remote::RemoteOptions {

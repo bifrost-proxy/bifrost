@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use bifrost_cli::cli::{Cli, Commands, RemoteCommandCommands, RemoteCommands};
+use bifrost_cli::cli::{Cli, Commands, RemoteCommandCommands, RemoteCommands, SettingCommands};
 use clap::Parser;
 
 fn bifrost_cmd() -> Command {
@@ -1528,6 +1528,85 @@ fn remote_command_exec_streaming_flags_default_to_off() {
                     assert!(!exec.no_verify_digest);
                 }
             },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn setting_shell_policy_add_parses_semantic_flags() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "setting",
+        "shell",
+        "policy",
+        "add",
+        "--id",
+        "pwd-argv",
+        "--name",
+        "Pwd argv",
+        "--mode",
+        "argv_exec",
+        "--program",
+        "/bin/pwd",
+    ])
+    .expect("setting shell policy add should parse");
+
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Setting { action } => match action {
+            SettingCommands::Shell { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("pwd-argv"));
+                assert!(rendered.contains("argv_exec"));
+            }
+            _ => panic!("unexpected setting action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn setting_grant_list_parses() {
+    let cli = Cli::try_parse_from(["bifrost", "setting", "grant", "list"])
+        .expect("setting grant list should parse");
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Setting { action } => match action {
+            SettingCommands::Grant { .. } => {}
+            _ => panic!("unexpected setting action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn setting_grant_revoke_parses() {
+    let cli = Cli::try_parse_from(["bifrost", "setting", "grant", "revoke", "grant-abc"])
+        .expect("setting grant revoke should parse");
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Setting { action } => match action {
+            SettingCommands::Grant { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("grant-abc"));
+            }
+            _ => panic!("unexpected setting action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_shell_still_parses_as_deprecated_alias() {
+    // The old `bifrost remote shell` path must keep working for one release cycle.
+    let cli = Cli::try_parse_from(["bifrost", "remote", "shell", "list"])
+        .expect("deprecated remote shell list should still parse");
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::Shell { .. } => {}
             _ => panic!("unexpected remote action"),
         },
         _ => panic!("unexpected command"),

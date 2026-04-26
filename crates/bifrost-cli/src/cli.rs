@@ -671,6 +671,17 @@ pub enum Commands {
     },
     #[command(about = "Check for new version without upgrading")]
     VersionCheck,
+    #[command(
+        about = "Manage local Bifrost settings (shell policies, grants)",
+        long_about = "Manage local Bifrost settings and policies on THIS machine.\n\n\
+            Unlike `bifrost remote` (which operates on a connected remote device),\n\
+            `bifrost setting` always targets the current machine's data directory:\n\
+            Shell Access profiles/policies and local remote-invoke grants."
+    )]
+    Setting {
+        #[command(subcommand)]
+        action: SettingCommands,
+    },
     #[command(about = "Execute commands on a remote Bifrost instance via relay")]
     Remote {
         #[command(subcommand)]
@@ -1398,12 +1409,24 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: RemoteCommandCommands,
     },
-    #[command(about = "Manage local Shell Access policies and profiles")]
+    #[command(
+        about = "[DEPRECATED] Use `bifrost setting shell` instead",
+        long_about = "[DEPRECATED] `bifrost remote shell` manages settings on the LOCAL machine, \
+not on the connected remote device. It has moved to `bifrost setting shell` and will be \
+removed in a future release.",
+        hide = true
+    )]
     Shell {
         #[command(subcommand)]
         action: Box<RemoteShellCommands>,
     },
-    #[command(about = "Manage local remote-invoke grants")]
+    #[command(
+        about = "[DEPRECATED] Use `bifrost setting grant` instead",
+        long_about = "[DEPRECATED] `bifrost remote grant` manages grants on the LOCAL machine, \
+not on the connected remote device. It has moved to `bifrost setting grant` and will be \
+removed in a future release.",
+        hide = true
+    )]
     Grant {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
@@ -1419,6 +1442,20 @@ pub enum RemoteCommands {
     Traffic {
         #[command(subcommand)]
         action: RemoteTrafficCommands,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum SettingCommands {
+    #[command(about = "Manage local Shell Access policies and profiles")]
+    Shell {
+        #[command(subcommand)]
+        action: Box<RemoteShellCommands>,
+    },
+    #[command(about = "Manage local remote-invoke grants")]
+    Grant {
+        #[command(subcommand)]
+        action: Box<RemoteGrantCommands>,
     },
 }
 
