@@ -338,12 +338,25 @@ fn hex_digest(ctx: &Context) -> String {
 /// new frame during the transition period.
 pub fn parse_stream_frame_from_sse_data(data: &str) -> Option<StreamFrame> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
-    let kind = v.get("kind")?.as_str()?;
+    // PR#6a-followup: the relay forwards stream_frame as
+    // {call_id, frame_json: "<stringified StreamFrame>"}. Unwrap that shape
+    // first, then fall through to the legacy/inline representation where the
+    // SSE data field already carries a StreamFrame object. Accepting both
+    // shapes keeps the caller compatible with older relay builds and keeps
+    // unit-test fixtures that embed StreamFrame directly working.
+    let inner_owned: serde_json::Value;
+    let inner = if let Some(frame_json_str) = v.get("frame_json").and_then(|x| x.as_str()) {
+        inner_owned = serde_json::from_str(frame_json_str).ok()?;
+        &inner_owned
+    } else {
+        &v
+    };
+    let kind = inner.get("kind")?.as_str()?;
     match kind {
         "stdout" | "stderr" | "heartbeat" | "reconnect" | "ack" | "done" | "error" => {}
         _ => return None,
     }
-    serde_json::from_value::<StreamFrame>(v).ok()
+    serde_json::from_value::<StreamFrame>(inner.clone()).ok()
 }
 
 /// PR #5d: open a BufWriter<File> for --output-file, in append mode so that

@@ -32,12 +32,17 @@ import { customAlphabet } from 'nanoid';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
 
-const registerLimiter = new RateLimiter(5000000, 60_000);
-const clientQueryLimiter = new RateLimiter(5000000, 60_000);
-const clientDataLimiter = new RateLimiter(5000000, 10_000);
-const callerLookupLimiter = new RateLimiter(5000000, 60_000);
-const callerOpenLimiter = new RateLimiter(5000000, 60_000);
-const callerControlLimiter = new RateLimiter(5000000, 60_000);
+const registerLimiter = new RateLimiter(60, 60_000);
+const clientQueryLimiter = new RateLimiter(240, 60_000);
+const clientDataLimiter = new RateLimiter(1_500, 10_000);
+const callerLookupLimiter = new RateLimiter(240, 60_000);
+const callerOpenLimiter = new RateLimiter(120, 60_000);
+const callerControlLimiter = new RateLimiter(240, 60_000);
+// PR#6a-followup: high-throughput stream_frame endpoint gets its own dedicated
+// limiter so large-output streams do not share quota with legacy /frame.
+const clientStreamFrameLimiter = new RateLimiter(60_000, 10_000);
+// Hard cap on a single stream_frame payload: 2 MiB. Protects relay memory.
+const MAX_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
 
 let serviceInstance: RemoteInvokeService | null = null;
 
@@ -640,13 +645,17 @@ async function handleClientCallStreamFrame(
 ): Promise<boolean> {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/client\/calls\/([^/]+)\/stream-frame/);
   const callId = parts?.[1] ?? '';
-  if (!applyRateLimit(ctx, clientDataLimiter, `call:${callId}:stream_frame`)) {
+  if (!applyRateLimit(ctx, clientStreamFrameLimiter, `call:${callId}:stream_frame`)) {
     return true;
   }
   const body = parseJsonBody<any>(ctx.body);
 
   if (!body?.frame_json || typeof body.frame_json !== 'string') {
     sendError(ctx.res, 400, 'frame_json is required');
+    return true;
+  }
+  if (body.frame_json.length > MAX_STREAM_FRAME_BYTES) {
+    sendError(ctx.res, 413, 'frame_json exceeds MAX_STREAM_FRAME_BYTES');
     return true;
   }
 

@@ -796,8 +796,15 @@ export class RemoteInvokeService {
       throw new Error('client_mismatch');
     }
 
-    let __pf;try{__pf=JSON.parse(req.frame_json);}catch{__pf={raw:req.frame_json};}
-    pushToCallerStream(req.call_id, 'stream_frame', __pf);
+    // PR#6a-followup: forward frame_json verbatim as inner string so the
+    // caller SSE consumer parses a single well-formed JSON object. Re-parsing
+    // here and letting pushToCallerStream JSON.stringify a second time both
+    // risks floating-point precision loss and breaks the {call_id, frame_json}
+    // contract asserted by remote-invoke-stream-frame.test.ts.
+    pushToCallerStream(req.call_id, 'stream_frame', {
+      call_id: req.call_id,
+      frame_json: req.frame_json,
+    });
 
     await this.storage.remoteInvoke.appendEvent({
       id: nanoid(),
