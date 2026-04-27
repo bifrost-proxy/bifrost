@@ -62,7 +62,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 - 远程改代码、远端仓库重构、在远端机器上跑 coding agent。
 - 读远端文件、远程 grep、远程 glob、远程原子 edit、远程批量 patch。
 - 用户表述中出现「另一台电脑的项目」「远端文件」「远程 read/write/edit/search」。
-- 出现 `BEGIN BIFROST KEY` 消息，说明用户要 Agent 连接远端 Bifrost。
+- 用户粘贴了 `-----BEGIN BIFROST KEY-----` ... `-----END BIFROST KEY-----` 格式的密钥块，说明用户要 Agent 连接远端 Bifrost（详见 4.1.1 自动连接流程）。
 
 ---
 
@@ -184,6 +184,32 @@ bifrost remote connect <pair-code>
 ```
 
 多连接场景：`--client-id <prefix>` 显式指定目标；非交互环境下必传。
+
+#### 4.1.1 用户粘贴 Bifrost Key 时的自动连接流程
+
+当用户消息中包含如下格式的密钥块时：
+
+```
+-----BEGIN BIFROST KEY-----
+Device-Code: xxxxxx
+<base64 encoded key data>
+-----END BIFROST KEY-----
+```
+
+Agent **必须**将其视为「用户想要连接到该密钥对应的远端设备」，并按以下步骤自动执行：
+
+1. **提取密钥内容**：将用户消息中 `-----BEGIN BIFROST KEY-----` 到 `-----END BIFROST KEY-----`（含首尾行）之间的完整文本提取出来。
+2. **保存为本地密钥文件**：将完整密钥文本（含 BEGIN/END 行）写入 `~/.bifrost/remote-device.key`（如目录不存在则创建）。文件权限建议 `chmod 600`。
+3. **检查已有连接**：先执行 `bifrost remote status` 确认是否已有可用连接。如果已经连接到同一设备，跳过 connect 步骤。
+4. **发起连接**：执行 `bifrost remote connect --ssh-key ~/.bifrost/remote-device.key`。
+5. **确认连接成功**：连接成功后执行 `bifrost remote status` 确认远端可达。
+6. **告知用户**：向用户简要报告连接结果（成功/失败及原因）。
+
+**注意事项**：
+- **不要让用户手动保存文件**：Agent 应自动完成密钥文件的保存，用户粘贴即代表授权。
+- **密钥块中的 `Device-Code` 是 Header 元数据**，标识目标设备，无需单独解析——`bifrost remote connect` 会自动处理。
+- **如果连接失败**，按以下顺序排查：密钥是否完整（BEGIN/END 行是否被截断）→ 目标设备是否在线 → 目标设备是否已 revoke 该 key → 网络连通性。
+- **不要将密钥内容输出到日志或回复中**，保存后即可丢弃明文。
 
 ### 4.2 远端查询（`remote_query` scope）
 
