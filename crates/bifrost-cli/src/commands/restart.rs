@@ -133,7 +133,7 @@ fn run_restart_unix(opts: RestartOptions) -> BifrostResult<()> {
 fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
     use nix::sys::wait::{waitpid, WaitPidFlag};
     use nix::unistd::{fork, pipe, ForkResult};
-    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::io::{FromRawFd, IntoRawFd, OwnedFd};
     use std::time::{Duration, Instant};
 
     let self_exe = std::env::current_exe().map_err(|e| {
@@ -143,9 +143,9 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
         ))
     })?;
 
-    // Serialize restart options for the orphan. We pass them through env vars
-    // on the child side via a config struct owned by the orphan closure; no
-    // need to serialize across exec because we fork-and-call, not exec-self.
+    // Package restart options into a struct that the orphan worker will own
+    // after fork. No env vars / no re-exec of self are involved — we just
+    // fork, hand the struct to run_orphan_work, then execvp `bifrost start`.
     let forwarded = ForwardedRestart {
         self_exe: self_exe.clone(),
         port: opts.port,
@@ -155,19 +155,30 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
     };
 
     // Sync pipe: orphan will write 1 byte AFTER it has setsid + closed stdio.
-    let (rd, wr) = pipe().map_err(|e| {
+    //
+    // We convert both ends into *raw* fds immediately. OwnedFd's Drop would
+    // otherwise run on both sides of every fork() and silently double-close
+    // the shared fd-table entries. With raw fds, each side closes exactly
+    // the fd it owns via libc::close and we keep the whole handoff
+    // async-signal-safe.
+    let (rd_owned, wr_owned) = pipe().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("restart: pipe() failed: {}", e))
     })?;
+    let rd_raw = rd_owned.into_raw_fd();
+    let wr_raw = wr_owned.into_raw_fd();
 
     // SAFETY: between fork() and execvp/closure we only call async-signal-
-    // safe operations (setsid, fork, dup2, close, open /dev/null, _exit).
+    // safe operations (setsid, fork, libc::dup2, libc::close, libc::open
+    // /dev/null, libc::write, _exit). No Rust Drop impls are run in the
+    // child post-fork because we only handle raw fds.
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child: child_a }) => {
-            // Close the writable end in the parent; we only read.
-            drop(wr);
-            // SAFETY: rd is a valid fd; wrap it so it's closed on drop.
-            let rd_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(rd.as_raw_fd()) };
-            std::mem::forget(rd); // transferred ownership into rd_fd
+            // Parent only reads: close wr_raw and rebuild rd_raw into an
+            // OwnedFd for RAII close on function return.
+            unsafe { libc::close(wr_raw) };
+            // SAFETY: rd_raw came straight out of our own into_raw_fd() on
+            // an OwnedFd we just created; nobody else has a reference to it.
+            let rd_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(rd_raw) };
 
             // Read 1 byte with a timeout so we don't hang if the child dies
             // before writing.
@@ -205,30 +216,41 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
 
         Ok(ForkResult::Child) => {
             // ==== Intermediate child A ====
+            // A has no business with the read end — close it immediately
+            // so only the orphan B (which inherits wr_raw) can keep the
+            // pipe alive.
+            unsafe { libc::close(rd_raw) };
+
             // Leave parent's session / pgroup before forking B.
             let _ = nix::unistd::setsid();
 
             // Fork B (true orphan).
             match unsafe { fork() } {
                 Ok(ForkResult::Parent { child: _orphan_b }) => {
-                    // A exits right away. B is reparented to PID 1.
+                    // A exits right away. B is reparented to PID 1. Closing
+                    // wr_raw in A is important: otherwise the parent would
+                    // block on read() until A itself exits, racing the
+                    // waitpid loop below and making `got_sync` flap.
+                    unsafe { libc::close(wr_raw) };
                     unsafe { libc::_exit(0) };
                 }
                 Ok(ForkResult::Child) => {
                     // ==== Orphan B ====
-                    // Close all fds >= 3 except wr.
-                    let wr_fd = wr.as_raw_fd();
-                    close_fds_except(wr_fd);
+                    // Close every inherited fd >= 3 except wr_raw.
+                    close_fds_except(wr_raw);
 
                     // Reopen stdio on /dev/null.
                     redirect_stdio_to_devnull();
 
                     // Signal parent that we have escaped the pgroup and
-                    // cleaned stdio. Parent will return 0 after receiving
-                    // this byte.
+                    // cleaned stdio. Use libc::write (async-signal-safe)
+                    // instead of going through nix::unistd::write, which
+                    // borrows an OwnedFd we'd rather not construct here.
                     let sync_byte: [u8; 1] = [b'K'];
-                    let _ = nix::unistd::write(&wr, &sync_byte);
-                    drop(wr);
+                    unsafe {
+                        libc::write(wr_raw, sync_byte.as_ptr() as *const _, 1);
+                        libc::close(wr_raw);
+                    }
 
                     // One more fork to fully divorce from any terminal
                     // session residue. The intermediate B exits; C does the
@@ -311,23 +333,38 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         &format!("port {} free={} after wait", old_port, port_free),
     );
 
+    // P2-2: do NOT execvp the new daemon if the port is still occupied after
+    // the full budget. Exec'ing would just crash with EADDRINUSE and leave
+    // the user with no daemon at all (we already stopped the old one).
+    //
+    // `--force` (set by the operator) is an explicit override: bring up the
+    // new daemon anyway and let it surface the bind failure; this is mostly
+    // useful for debugging or recovering from a wedged pidfile.
+    if !port_free && !forwarded.force {
+        orphan_log(
+            &log,
+            &format!(
+                "CRITICAL: port {} still occupied after {}s; aborting restart                  to avoid an EADDRINUSE crash. Re-run `bifrost restart --force`                  if you want to try anyway.",
+                old_port, PORT_RELEASE_TIMEOUT_SECS
+            ),
+        );
+        return;
+    }
+
     // Build argv for `bifrost start --daemon --yes`.
+    //
+    // Port resolution order: explicit --port from caller > runtime-file old
+    // port > DEFAULT_PORT_FALLBACK. We only push --port once to keep the
+    // argv clean (multiple --port entries would be last-wins but noisy).
+    let resolved_port = forwarded.port.unwrap_or(old_port);
     let mut argv: Vec<std::ffi::OsString> = vec![
         forwarded.self_exe.as_os_str().to_os_string(),
         std::ffi::OsString::from("start"),
         std::ffi::OsString::from("--daemon"),
         std::ffi::OsString::from("--yes"),
+        std::ffi::OsString::from("--port"),
+        resolved_port.to_string().into(),
     ];
-    if let Some(p) = forwarded.port {
-        argv.push("--port".into());
-        argv.push(p.to_string().into());
-    }
-    // Always forward the resolved port so the new daemon re-binds the same
-    // listener. Without this, if the caller did not pass --port explicitly
-    // (the common remote-invoke case), the child falls back to DEFAULT_PORT
-    // (9900) and crashes on EADDRINUSE against any other local listener.
-    argv.push("--port".into());
-    argv.push(old_port.to_string().into());
     if let Some(h) = forwarded.host.as_deref() {
         argv.push("--host".into());
         argv.push(h.into());
@@ -361,7 +398,6 @@ struct ForwardedRestart {
     port: Option<u16>,
     host: Option<String>,
     log_level: Option<String>,
-    #[allow(dead_code)]
     force: bool,
 }
 
