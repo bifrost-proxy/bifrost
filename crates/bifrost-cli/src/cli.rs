@@ -1557,7 +1557,10 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Regex-search file contents under the policy root")]
+    #[command(
+        visible_alias = "search",
+        about = "Regex-search file contents under the policy root"
+    )]
     Find {
         #[arg(help = "Regex pattern")]
         pattern: String,
@@ -1653,7 +1656,10 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Move / rename a path on the remote host")]
+    #[command(
+        visible_alias = "mv",
+        about = "Move / rename a path on the remote host"
+    )]
     Move {
         #[arg(help = "Source path")]
         from: String,
@@ -1664,7 +1670,10 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Delete a file or directory on the remote host")]
+    #[command(
+        visible_alias = "rm",
+        about = "Delete a file or directory on the remote host"
+    )]
     Delete {
         #[arg(help = "Path to delete")]
         path: String,
@@ -1675,7 +1684,10 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Apply a unified diff across multiple files atomically")]
+    #[command(
+        visible_alias = "apply-patch",
+        about = "Apply a unified diff across multiple files atomically"
+    )]
     Patch {
         #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
         patch_file: Option<String>,
