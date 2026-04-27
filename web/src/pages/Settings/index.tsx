@@ -64,6 +64,7 @@ import PerformanceTab from "./tabs/PerformanceTab";
 import SyncTab from "./tabs/SyncTab";
 import RemoteAccessTab from "./tabs/RemoteAccessTab";
 import RemoteInvokeTab from "./tabs/RemoteInvokeTab";
+import KeepAwakeTab from "./tabs/KeepAwakeTab";
 import { updateDesktopProxyPort } from "../../desktop/tauri";
 import {
   getDesktopPlatform,
@@ -1204,6 +1205,15 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           onSyncSignIn={handleSyncSignIn}
         />
       ),
+    },
+    {
+      key: "keepawake",
+      label: (
+        <span>
+          <ThunderboltOutlined /> Keep Awake
+        </span>
+      ),
+      children: <KeepAwakeTab />,
     },
   ];
 
