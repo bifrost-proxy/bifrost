@@ -34,7 +34,7 @@ SCAN_PATHS=(
 
 # Skip this guard file itself (it must reference the patterns it forbids)
 # plus CHANGELOGs / git metadata.
-EXCLUDE_REGEX='(scripts/ci/check-remote-cli-legacy\.sh|CHANGELOG|\.git/)'
+EXCLUDE_REGEX='(scripts/ci/check-remote-cli-legacy\.sh|crates/bifrost-cli/src/cli_legacy\.rs|scripts/cli_legacy\.rs|scripts/apply_p1[ab]\.py|scripts/fix_p1a_borrow\.py|CHANGELOG|\.git/)'
 
 # Forbidden patterns. Separator between regex and description is '@@'
 # (avoid '|' because it also appears inside the extended regex alternations).

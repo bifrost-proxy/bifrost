@@ -3485,13 +3485,7 @@ fn build_grant_info_from_grant_created(
     let file_access: FileAccessScope = data
         .get("file_access")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(match grant_scope {
-            // Layered model: shell scopes auto-include file read_write
-            GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => {
-                FileAccessScope::ReadWrite
-            }
-            GrantScope::RemoteQuery => FileAccessScope::None,
-        });
+        .unwrap_or_else(|| FileAccessScope::default_for(grant_scope));
 
     Some(GrantInfo {
         grant_id,
@@ -3542,14 +3536,13 @@ fn apply_stored_grant_policy(
     if let Some(stored) = stored {
         grant.grant_scope = stored.grant_scope;
         // Layered model migration: old persisted policies may lack file_access
-        // (deserialized as None via #[serde(default)]). Shell scopes auto-include
-        // file read_write per the layered permission model.
-        grant.file_access = match (stored.file_access, stored.grant_scope) {
-            (
-                FileAccessScope::None,
-                GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive,
-            ) => FileAccessScope::ReadWrite,
-            (fa, _) => fa,
+        // (deserialized as None via #[serde(default)]). Route through the
+        // single-source-of-truth helper so Shell* scopes auto-include file
+        // read_write per the layered permission model.
+        grant.file_access = if stored.file_access == FileAccessScope::None {
+            FileAccessScope::default_for(stored.grant_scope)
+        } else {
+            stored.file_access
         };
         grant.policy_binding = stored.policy_binding.clone();
         grant.shell_policy_set_version_snapshot = stored.shell_policy_set_version_snapshot;

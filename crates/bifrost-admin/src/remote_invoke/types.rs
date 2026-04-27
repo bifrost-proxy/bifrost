@@ -89,6 +89,19 @@ impl FileAccessScope {
             _ => false,
         }
     }
+
+    /// Layered permission model default: shell-capable scopes implicitly grant
+    /// file read/write, while query-only scopes grant no file access.
+    ///
+    /// Single source of truth for the "Shell* -> ReadWrite" migration rule;
+    /// callers that materialize a `GrantInfo` from legacy/partial data should
+    /// go through this helper instead of re-implementing the match.
+    pub fn default_for(scope: GrantScope) -> Self {
+        match scope {
+            GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => Self::ReadWrite,
+            GrantScope::RemoteQuery => Self::None,
+        }
+    }
 }
 
 /// Combined permission check: grant_scope handles shell/query, file_access handles file.
