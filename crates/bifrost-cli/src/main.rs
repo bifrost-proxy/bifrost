@@ -7,7 +7,6 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 mod cli;
-mod cli_legacy;
 mod commands;
 mod config;
 mod help;
@@ -95,9 +94,7 @@ fn main() {
     install_panic_hook();
     init_crypto_provider();
 
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let argv = cli_legacy::rewrite_legacy_remote_argv(argv);
-    let cli = Cli::parse_from(argv);
+    let cli = Cli::parse();
 
     let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }));
 
