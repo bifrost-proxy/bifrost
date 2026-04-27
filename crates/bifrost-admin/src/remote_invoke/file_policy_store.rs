@@ -308,6 +308,99 @@ impl FileAccessPolicyStore {
     }
 }
 
+/// Full set of 12 file operations. SSH-key authorization seeds a grant
+/// with this set by default so coding-agent flows can use file.write /
+/// file.edit / file.patch / etc. without extra manual TOML edits.
+pub fn full_file_ops() -> Vec<FileOp> {
+    vec![
+        FileOp::Read,
+        FileOp::List,
+        FileOp::Stat,
+        FileOp::Glob,
+        FileOp::Search,
+        FileOp::Hash,
+        FileOp::Write,
+        FileOp::Edit,
+        FileOp::Mkdir,
+        FileOp::Move,
+        FileOp::Delete,
+        FileOp::ApplyPatch,
+    ]
+}
+
+/// Insert or update a `[[grant]]` entry keyed by `match.ssh_fingerprint`.
+///
+/// Semantics:
+/// - Idempotent: if an existing `[[grant]]` has the same
+///   `match.ssh_fingerprint`, its fields (`roots`, `ops`, `name`, flags) are
+///   overwritten; all other entries and the `[default]` section are preserved
+///   byte-for-byte.
+/// - Callers that want to *preserve* a user's manual edits should check for
+///   the presence of a matching entry before calling this function. The
+///   default use site (`worker::create_ssh_key`) is a fresh key creation, so
+///   overwriting is the desired behavior.
+/// - The cache is invalidated, so the next `load_default()` will re-parse.
+pub fn upsert_ssh_fingerprint_grant(
+    fingerprint: &str,
+    name: Option<String>,
+    roots: Vec<PathBuf>,
+    ops: Vec<FileOp>,
+    allow_overwrite: Option<bool>,
+    allow_recursive_delete: Option<bool>,
+) -> Result<(), String> {
+    let mut cfg = load_raw_config();
+    merge_ssh_fingerprint_grant_in_place(
+        &mut cfg,
+        fingerprint,
+        name,
+        roots,
+        ops,
+        allow_overwrite,
+        allow_recursive_delete,
+    );
+    save_raw_config(&cfg)
+}
+
+/// Pure in-place merge used by [`upsert_ssh_fingerprint_grant`]. Extracted
+/// so tests can exercise the dedup/overwrite rules without touching the
+/// on-disk TOML or the process-global data-dir singleton.
+pub(crate) fn merge_ssh_fingerprint_grant_in_place(
+    cfg: &mut RawConfig,
+    fingerprint: &str,
+    name: Option<String>,
+    roots: Vec<PathBuf>,
+    ops: Vec<FileOp>,
+    allow_overwrite: Option<bool>,
+    allow_recursive_delete: Option<bool>,
+) {
+    let ops_final = if ops.is_empty() { full_file_ops() } else { ops };
+    let new_entry = RawGrantPolicy {
+        match_: GrantMatch {
+            grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: Some(fingerprint.to_string()),
+        },
+        grant_id: None,
+        name,
+        roots,
+        denies: Vec::new(),
+        write_denies: Vec::new(),
+        ops: ops_final,
+        max_read_bytes: None,
+        max_write_bytes: None,
+        respect_gitignore: None,
+        allow_overwrite,
+        allow_recursive_delete,
+    };
+    for g in cfg.grants.iter_mut() {
+        if g.match_.ssh_fingerprint.as_deref() == Some(fingerprint) {
+            *g = new_entry;
+            return;
+        }
+    }
+    cfg.grants.insert(0, new_entry);
+}
+
 fn default_read_ops_if_empty(ops: Vec<FileOp>) -> Vec<FileOp> {
     if ops.is_empty() {
         vec![
@@ -806,5 +899,104 @@ ops = ["read"]
     #[cfg(not(unix))]
     fn filetime_set_mtime(_path: &Path, _t: SystemTime) -> std::io::Result<()> {
         Err(std::io::Error::other("not supported"))
+    }
+
+    #[test]
+    fn full_file_ops_covers_all_twelve_ops() {
+        let ops = full_file_ops();
+        assert_eq!(ops.len(), 12);
+        for expected in [
+            FileOp::Read,
+            FileOp::List,
+            FileOp::Stat,
+            FileOp::Glob,
+            FileOp::Search,
+            FileOp::Hash,
+            FileOp::Write,
+            FileOp::Edit,
+            FileOp::Mkdir,
+            FileOp::Move,
+            FileOp::Delete,
+            FileOp::ApplyPatch,
+        ] {
+            assert!(ops.contains(&expected), "missing op {:?}", expected);
+        }
+    }
+
+    #[test]
+    fn merge_ssh_fingerprint_grant_inserts_then_upserts_then_prepends() {
+        let mut cfg = RawConfig::default();
+
+        // 1) Fresh insert.
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "fp-alpha",
+            Some("ssh-key:laptop".to_string()),
+            vec![PathBuf::from("/Users/tester")],
+            full_file_ops(),
+            Some(true),
+            None,
+        );
+        assert_eq!(cfg.grants.len(), 1);
+        assert_eq!(
+            cfg.grants[0].match_.ssh_fingerprint.as_deref(),
+            Some("fp-alpha")
+        );
+        assert_eq!(cfg.grants[0].ops.len(), 12);
+        assert_eq!(cfg.grants[0].allow_overwrite, Some(true));
+
+        // 2) Same fingerprint, different payload → overwrite, no duplicate.
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "fp-alpha",
+            Some("ssh-key:laptop-v2".to_string()),
+            vec![PathBuf::from("/Users/tester/work")],
+            vec![FileOp::Read, FileOp::List],
+            None,
+            None,
+        );
+        assert_eq!(
+            cfg.grants.len(),
+            1,
+            "must not duplicate same-fingerprint entry"
+        );
+        assert_eq!(cfg.grants[0].ops, vec![FileOp::Read, FileOp::List]);
+        assert_eq!(cfg.grants[0].name.as_deref(), Some("ssh-key:laptop-v2"));
+        assert_eq!(
+            cfg.grants[0].roots,
+            vec![PathBuf::from("/Users/tester/work")]
+        );
+
+        // 3) Different fingerprint → prepended, old entry kept.
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "fp-beta",
+            None,
+            vec![PathBuf::from("/opt/proj")],
+            vec![], // empty → falls back to full_file_ops()
+            None,
+            None,
+        );
+        assert_eq!(cfg.grants.len(), 2);
+        assert_eq!(
+            cfg.grants[0].match_.ssh_fingerprint.as_deref(),
+            Some("fp-beta")
+        );
+        assert_eq!(
+            cfg.grants[0].ops.len(),
+            12,
+            "empty ops must default to full_file_ops"
+        );
+        assert_eq!(
+            cfg.grants[1].match_.ssh_fingerprint.as_deref(),
+            Some("fp-alpha")
+        );
+
+        // 4) Build a store from the merged config and check resolve hits the
+        //    full-ops entry for fp-beta.
+        let store = FileAccessPolicyStore::from_raw(cfg);
+        let p = store.resolve("unknown-gid", None, Some("fp-beta"), Path::new("/tmp"));
+        assert_eq!(p.ops.len(), 12);
+        assert!(p.ops.contains(&FileOp::Write));
     }
 }

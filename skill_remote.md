@@ -145,6 +145,22 @@ bifrost setting shell policy add \
 
 目标端的 `~/.bifrost/file-access.toml` 控制 Agent 能访问哪些目录。支持多条 `[[grant]]`，按 `ssh_fingerprint` / `caller_fingerprint` / `grant_id` 匹配，再 fallback 到 `[default]`。示例：
 
+> **SSH Key 自动种子 grant（v0.0.62+）**：在目标端 Web UI → Settings → Remote Invoke 里
+> 导出 SSH Key 时，会自动往 `~/.bifrost/file-access.toml` 写入一条 `match.ssh_fingerprint`
+> 的 `[[grant]]`，默认 `roots=[$HOME]`、`ops=<12 个 file op 全开>`，
+> `allow_overwrite=true`、`allow_recursive_delete=false`。这样 SSH Key 授权流程
+> 就真的是**长期、全 file 权限、免弹窗**，无需手工编辑 TOML。
+>
+> 如果想收窄 SSH Key 的文件范围，在 Web UI 的 Export SSH Key 弹框里有
+> 「File access scope」区块：可以改 Root directories（逗号分隔绝对路径）、
+> 勾选/取消 ops、切换 allow overwrite / allow recursive delete。
+> 重置 SSH Key（Reset）会用相同默认策略重新 seed 新 fingerprint 的条目；
+> 老 fingerprint 的条目会保留在 TOML 中但不会再被匹配，可手工清理。
+>
+> 手工编辑的 `[[grant]]`（例如 `write_denies = [...]`）会**被重新创建 key 时覆盖**。
+> 需要长期保留的规则请放到 `[default]` 段或另加一个 `match.grant_id` 条目。
+
+
 ```toml
 # 绑定当前 caller 的 ssh key（推荐）
 # 字段名以代码里的 serde 为准：写入/读取策略是 `ops`（不是 `allow`），

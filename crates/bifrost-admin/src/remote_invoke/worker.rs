@@ -21,6 +21,10 @@ use super::call_history_store::{
     finalize_non_terminal_restored_calls, now_millis, sanitize_call_for_history, CallHistoryStore,
 };
 use super::executor::RemoteInvokeExecutor;
+use super::file_policy_store::{
+    full_file_ops as file_policy_full_ops,
+    upsert_ssh_fingerprint_grant as file_policy_upsert_ssh_grant,
+};
 use super::grant_crypto_store::{GrantCryptoStore, StoredGrantCryptoMaterial};
 use super::grant_info_store::GrantInfoStore;
 use super::grant_policy_store::{GrantPolicyStore, StoredGrantPolicy};
@@ -111,6 +115,35 @@ struct ShellGrantProvision {
     shell_policy_set_version_snapshot: Option<u64>,
     interactive_allowed: Option<bool>,
     stdin_allowed: Option<bool>,
+}
+
+/// User-supplied override for the file-access grant auto-seeded when an SSH
+/// key is created. `None` + defaults means: `$HOME` as the single root and
+/// all 12 file ops. UI / HTTP API can narrow this.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct SshKeySeedPolicy {
+    /// Absolute paths. Empty → resolver falls back to `$HOME`.
+    pub roots: Vec<std::path::PathBuf>,
+    /// Explicit ops. Empty → resolver falls back to [`file_policy_full_ops`].
+    pub ops: Vec<bifrost_core::file_access::FileOp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_overwrite: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_recursive_delete: Option<bool>,
+}
+
+impl SshKeySeedPolicy {
+    /// `roots` if non-empty, else `[$HOME]`, else `[]` (fallback tier handles it).
+    pub fn resolved_roots(&self) -> Vec<std::path::PathBuf> {
+        if !self.roots.is_empty() {
+            return self.roots.clone();
+        }
+        match std::env::var_os("HOME") {
+            Some(home) => vec![std::path::PathBuf::from(home)],
+            None => Vec::new(),
+        }
+    }
 }
 
 pub struct RemoteInvokeWorker {
@@ -459,11 +492,17 @@ impl RemoteInvokeWorker {
         self.ssh_key_store.export_active_key_material()
     }
 
-    pub fn create_ssh_key(&self, label: String, grant_mode: GrantMode) -> Result<SshKeyMaterial> {
+    pub fn create_ssh_key(
+        &self,
+        label: String,
+        grant_mode: GrantMode,
+        seed_policy: Option<SshKeySeedPolicy>,
+    ) -> Result<SshKeyMaterial> {
         self.revoke_local_ssh_grants(None);
         let result = self
             .ssh_key_store
             .create_or_replace_key(label, grant_mode)?;
+        self.seed_ssh_file_access_grant(&result.record, seed_policy);
         self.trigger_ssh_route_refresh();
         Ok(result)
     }
@@ -489,8 +528,46 @@ impl RemoteInvokeWorker {
         let reset = self
             .ssh_key_store
             .create_or_replace_key(active_key.label, GrantMode::Permanent)?;
+        // Re-seed grant using the rotated fingerprint so the new key
+        // still has coding-agent-class file permissions out of the box.
+        self.seed_ssh_file_access_grant(&reset.record, None);
         self.trigger_ssh_route_refresh();
         Ok(Some(reset))
+    }
+
+    /// Best-effort: write a `[[grant]]` entry into `file-access.toml` keyed
+    /// by the SSH fingerprint so the SSH-key flow is "full permissions by
+    /// default" (matches the absence of a pair-code scope dialog). Failure
+    /// is logged but non-fatal: the key is still created and can still be
+    /// used via the hardcoded read-only cwd fallback.
+    fn seed_ssh_file_access_grant(&self, record: &SshKeyRecord, policy: Option<SshKeySeedPolicy>) {
+        let policy = policy.unwrap_or_default();
+        let roots = policy.resolved_roots();
+        let ops = if policy.ops.is_empty() {
+            file_policy_full_ops()
+        } else {
+            policy.ops
+        };
+        let name = Some(format!("ssh-key:{}", record.label));
+        if let Err(err) = file_policy_upsert_ssh_grant(
+            &record.ssh_key_fingerprint,
+            name,
+            roots,
+            ops,
+            policy.allow_overwrite,
+            policy.allow_recursive_delete,
+        ) {
+            warn!(
+                fingerprint = %record.ssh_key_fingerprint,
+                error = %err,
+                "failed to seed SSH key file-access grant; falling back to manual config"
+            );
+        } else {
+            info!(
+                fingerprint = %record.ssh_key_fingerprint,
+                "seeded SSH key file-access grant"
+            );
+        }
     }
 
     pub fn revoke_ssh_key(&self) -> Result<Option<SshKeyRecord>> {

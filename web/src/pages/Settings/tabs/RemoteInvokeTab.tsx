@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
   Col,
   Descriptions,
   Divider,
@@ -48,6 +49,9 @@ import {
 import {
   clearCalls,
   createRemoteInvokeSshKey,
+  REMOTE_INVOKE_FILE_OPS,
+  type RemoteInvokeFileOp,
+  type RemoteInvokeSshKeySeedPolicy,
   enterDiscoveryMode,
   exitDiscoveryMode,
   getClientIdentity,
@@ -939,7 +943,16 @@ export default function RemoteInvokeTab() {
   const [callDetailLoading, setCallDetailLoading] = useState(false);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const pollRef = useRef<number | null>(null);
-  const [sshForm] = Form.useForm<CreateRemoteInvokeSshKeyInput>();
+  // The form holds both the API fields and transient UI-only fields
+  // (seed_roots / seed_ops / ...) that `handleSubmitSshForm` repacks
+  // into a `RemoteInvokeSshKeySeedPolicy` before calling the API.
+  type SshFormValues = Omit<CreateRemoteInvokeSshKeyInput, "seed_policy"> & {
+    seed_roots?: string;
+    seed_ops?: RemoteInvokeFileOp[];
+    seed_allow_overwrite?: boolean;
+    seed_allow_recursive_delete?: boolean;
+  };
+  const [sshForm] = Form.useForm<SshFormValues>();
 
   const [reviewPairing, setReviewPairing] = useState<PairingRequest | null>(null);
   const pendingPairings = usePairingRequestStore((s) => s.pendingList);
@@ -1507,7 +1520,32 @@ export default function RemoteInvokeTab() {
     const values = await sshForm.validateFields();
     setSshAction("create");
     try {
-      const payload = await createRemoteInvokeSshKey(values);
+      // Repack the flat form values into the API shape; only send
+      // seed_policy when the user actually customized it.
+      const rawRoots =
+        typeof values.seed_roots === "string"
+          ? (values.seed_roots as string)
+          : "";
+      const roots = rawRoots
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const ops = Array.isArray(values.seed_ops)
+        ? (values.seed_ops as RemoteInvokeFileOp[])
+        : [];
+      const seedPolicy: RemoteInvokeSshKeySeedPolicy = {
+        roots,
+        ops,
+        allow_overwrite: Boolean(values.seed_allow_overwrite),
+        allow_recursive_delete: Boolean(
+          values.seed_allow_recursive_delete,
+        ),
+      };
+      const payload = await createRemoteInvokeSshKey({
+        label: values.label,
+        grant_mode: values.grant_mode,
+        seed_policy: seedPolicy,
+      });
       presentSecretPayload(payload, "created");
       message.success("SSH key created");
       setEditorOpen(false);
@@ -4155,7 +4193,14 @@ export default function RemoteInvokeTab() {
         <Form
           form={sshForm}
           layout="vertical"
-          initialValues={{ label: "", grant_mode: "permanent" satisfies GrantMode }}
+          initialValues={{
+            label: "",
+            grant_mode: "permanent" satisfies GrantMode,
+            seed_roots: "",
+            seed_ops: [...REMOTE_INVOKE_FILE_OPS],
+            seed_allow_overwrite: true,
+            seed_allow_recursive_delete: false,
+          }}
         >
           <Form.Item
             label="Label"
@@ -4169,6 +4214,50 @@ export default function RemoteInvokeTab() {
           </Form.Item>
           <Form.Item name="grant_mode" hidden>
             <Input />
+          </Form.Item>
+          <Divider plain style={{ marginTop: 8 }}>
+            File access scope
+          </Divider>
+          <Alert
+            showIcon
+            type="info"
+            style={{ marginBottom: 12 }}
+            message="SSH Key authorization has no pair-code confirm dialog"
+            description="File permissions below are written into file-access.toml at key-creation time so coding-agent flows (file.read / file.write / file.edit / file.patch) work out of the box. Narrow the roots or ops here if you want to restrict this key."
+          />
+          <Form.Item
+            label="Root directories"
+            name="seed_roots"
+            tooltip="Comma-separated absolute paths. Leave empty to default to $HOME on the target machine."
+          >
+            <Input placeholder="/Users/eden/work, /opt/projects" />
+          </Form.Item>
+          <Form.Item
+            label="Allowed file operations"
+            name="seed_ops"
+            tooltip="Operations the caller may invoke via bifrost remote file. Uncheck to narrow."
+          >
+            <Checkbox.Group
+              options={REMOTE_INVOKE_FILE_OPS.map((op) => ({
+                label: op,
+                value: op,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            label="Allow overwriting existing files"
+            name="seed_allow_overwrite"
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            label="Allow recursive directory deletion"
+            name="seed_allow_recursive_delete"
+            valuePropName="checked"
+            tooltip="Default OFF. Only enable for CI/agent keys that need to clean up build artefacts."
+          >
+            <Switch />
           </Form.Item>
         </Form>
       </Modal>

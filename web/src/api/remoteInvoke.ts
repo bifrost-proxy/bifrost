@@ -467,9 +467,41 @@ export function normalizeRemoteInvokeSshKeyRecord(
   };
 }
 
+/** Full list of file ops the backend understands. Keep in sync with
+ *  `bifrost_core::file_access::FileOp`. */
+export const REMOTE_INVOKE_FILE_OPS = [
+  "read",
+  "list",
+  "stat",
+  "glob",
+  "search",
+  "hash",
+  "write",
+  "edit",
+  "mkdir",
+  "move",
+  "delete",
+  "apply_patch",
+] as const;
+export type RemoteInvokeFileOp = (typeof REMOTE_INVOKE_FILE_OPS)[number];
+
+export interface RemoteInvokeSshKeySeedPolicy {
+  /** Absolute paths. Empty → backend defaults to $HOME. */
+  roots?: string[];
+  /** Subset of REMOTE_INVOKE_FILE_OPS. Empty → backend grants all 12. */
+  ops?: RemoteInvokeFileOp[];
+  allow_overwrite?: boolean;
+  allow_recursive_delete?: boolean;
+}
+
 export interface CreateRemoteInvokeSshKeyInput {
   label: string;
   grant_mode: GrantMode;
+  /** Optional: seed the file-access grant for this SSH key. When
+   *  omitted, the backend writes a grant with $HOME + all 12 ops,
+   *  matching the "full permissions by default" semantics of SSH
+   *  Key authorization (no pair-code dialog to prompt the user). */
+  seed_policy?: RemoteInvokeSshKeySeedPolicy;
 }
 
 export interface UpdateRemoteInvokeSshKeyInput {

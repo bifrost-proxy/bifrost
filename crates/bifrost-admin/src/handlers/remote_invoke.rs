@@ -688,10 +688,13 @@ async fn handle_ssh_key(
             ),
         },
         (Method::POST, "/ssh-key" | "/ssh-key/") => {
+            use crate::remote_invoke::worker::SshKeySeedPolicy;
             #[derive(serde::Deserialize)]
             struct CreateBody {
                 label: String,
                 grant_mode: GrantMode,
+                #[serde(default)]
+                seed_policy: Option<SshKeySeedPolicy>,
             }
 
             let parsed: CreateBody = match parse_json_body(req).await {
@@ -699,7 +702,7 @@ async fn handle_ssh_key(
                 Err(response) => return response,
             };
 
-            match worker.create_ssh_key(parsed.label, parsed.grant_mode) {
+            match worker.create_ssh_key(parsed.label, parsed.grant_mode, parsed.seed_policy) {
                 Ok(result) => json_response(&result),
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
