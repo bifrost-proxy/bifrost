@@ -44,12 +44,13 @@
 
 `skill_remote.md` 描述 relay-backed remote invoke 能力：
 
-- 支持：`remote status`、`remote search`、`remote traffic list/get/search`、`remote command exec`、`remote disconnect`。
-- 只读查询类前置条件：目标 Bifrost 已启动、Relay Connection 在线、目标端 Remote Invoke 页面已通过 SSH key 或 pair code 授权 caller，并可用 `bifrost remote status` 验证。
-- 远程设备控制类前置条件：满足只读查询前置条件，且目标端已配置 Shell Access profile/policy，授权请求选择 `selected` 或 `all`，必要时开启 stdin/interactive。
-- `remote traffic clear` 当前不是已启用的 relay-backed query 子命令；需要清理目标端记录时，可通过已授权的 `remote command exec` 执行目标端本机 CLI/API 操作。
-- rule/config/script/ca/value/系统代理等没有专门的 `bifrost remote <module>` 子命令时，应通过 `remote command exec` 在目标终端执行等价本机命令。
-- `remote shell ...` 和 `remote grant ...` 是当前机器本地管理命令；caller 要管理目标设备时，应切换到 `remote command exec`。
+- 支持：`remote conn status/down/up`、`remote traffic list/get/search`、`remote exec`、`remote file ...`。
+- 查询类前置条件：目标 Bifrost 已启动、Relay Connection 在线、目标端 Remote Invoke 页面已通过 SSH key 或 pair code 授权 caller，并可用 `bifrost remote conn status` 验证。
+- shell 执行类前置条件：满足查询类前置条件，且目标端已配置 Shell Access profile/policy，授权请求选择 `selected` 或 `all`，必要时开启 stdin/interactive。
+- 文件操作类前置条件：目标端 File Access policy 授权 read 或 read-write，修改远端文件时优先使用 `bifrost remote file`。
+- `traffic.clear` 是写操作，不提供 `bifrost remote traffic clear` 子命令；需要清理目标端记录时，必须先取得 shell 授权，再通过 `remote exec` 执行目标端本机命令或 API。
+- rule/config/script/ca/value/系统代理等没有专门的 `bifrost remote <module>` 子命令时，应通过 `remote exec` 在目标终端执行等价本机命令。
+- Shell Access policy/profile 等当前本机管理命令应使用 `bifrost setting ...`；caller 要管理目标设备时，应切换到 `remote exec`。
 
 ### 安全语义
 
@@ -74,13 +75,14 @@
 
 - `install_skill_installs_remote_skill_from_embedded_bundle`：使用 `BIFROST_INSTALL_SKILL_SOURCE=embedded` 和 `--dir` 安装，验证主 skill 与 sibling `bifrost-remote/SKILL.md` 均写入。
 - 验证 remote skill 内容包含 `name: "bifrost-remote"`。
-- 验证 remote skill 不包含 `remote traffic clear` 可执行示例。
+- 验证 remote skill 不包含 `deprecated` 等历史版本迁移文案。
+- 验证 remote skill 不包含 `traffic.clear` 或 `bifrost remote traffic clear` 命令示例。
 
 ### E2E 测试
 
 - 使用 `cargo run -p bifrost-cli -- install-skill --tool codex --dir <tmp>/skills/bifrost -y` 执行真实 CLI 安装。
 - 断言 `<tmp>/skills/bifrost/SKILL.md` 和 `<tmp>/skills/bifrost-remote/SKILL.md` 均存在。
-- 断言 remote skill 明确说明 `remote shell` / `remote grant` 是目标本地管理命令，不是 relay-backed 远程命令。
+- 断言 remote skill 明确说明当前本机 Shell Access policy / grant 管理使用 `bifrost setting ...`，远端管理使用 `remote exec`，并且不包含历史别名迁移文案。
 
 ### 真实场景测试
 
@@ -88,9 +90,9 @@
 
 - 安装后 remote skill 可发现。
 - remote skill 面向用户正式场景推荐默认目录和系统代理启动。
-- remote skill 明确两类操作前置准备：只读查询如何启用 Remote Invoke 授权，远程设备控制如何启用 Shell Access policy。
-- remote skill 不把 `remote traffic clear` 描述为已启用的 relay-backed query 子命令，并指向 `remote command exec` 替代路径。
-- remote skill 不把 caller 本地 `remote shell` / `remote grant` 描述为 relay-backed 管理 API，并指向 `remote command exec` 操作目标设备。
+- remote skill 明确三类 scope 前置准备：查询如何启用 Remote Invoke 授权，shell 如何启用 Shell Access policy，文件操作如何使用 File Access policy。
+- remote skill 不把 `remote traffic clear` 描述为可直接使用的 remote CLI 子命令，并说明这是写操作。
+- remote skill 使用当前 `bifrost setting ...` 命名空间描述本机管理命令，并使用 `remote exec` 描述目标设备管理路径，不包含 `deprecated` 等历史版本信息。
 
 ## 校验要求
 

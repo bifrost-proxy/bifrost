@@ -255,6 +255,21 @@ fn traffic_clear_command_parse() {
 }
 
 #[test]
+fn remote_traffic_clear_is_not_exposed() {
+    let help = run_help(&["remote", "traffic"]);
+    assert!(help.contains("list"), "remote traffic should list records");
+    assert!(help.contains("get"), "remote traffic should get records");
+    assert!(
+        help.contains("search"),
+        "remote traffic should search records"
+    );
+    assert!(
+        !help.contains("clear"),
+        "remote traffic clear is a mutating operation and must not be exposed"
+    );
+}
+
+#[test]
 fn rule_rename_command_parse() {
     let help = run_help(&["rule", "rename"]);
     assert!(help.contains("NAME"), "rule rename should have name arg");
@@ -947,12 +962,13 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 
     let remote_content = fs::read_to_string(remote_skill).expect("remote skill content");
     assert!(remote_content.contains("name: \"bifrost-remote\""));
-    // Current namespace: `bifrost setting shell ...` (old `bifrost remote
-    // shell/grant` is a deprecated alias and must still be mentioned for
-    // migration guidance).
+    // Current namespace: `bifrost setting shell ...`. The installed remote
+    // skill should describe the current command surface, not historical alias
+    // migration notes.
     assert!(remote_content.contains("bifrost setting shell profile add"));
     assert!(remote_content.contains("bifrost setting shell policy add"));
-    assert!(remote_content.contains("deprecated"));
+    assert!(!remote_content.contains("deprecated"));
+    assert!(!remote_content.contains("old `bifrost remote"));
     // Access mode vocabulary must stay stable for doc consumers.
     assert!(remote_content.contains("query"));
     assert!(remote_content.contains("selected"));
@@ -960,10 +976,10 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
     // Bifrost remote file-API guidance (core value of the rewrite).
     assert!(remote_content.contains("bifrost remote file"));
     assert!(remote_content.contains("FileAccessPolicy"));
-    assert!(
-        !remote_content.contains("bifrost remote traffic clear"),
-        "remote skill should not provide executable traffic clear examples"
-    );
+    // `traffic.clear` is mutating and must not be advertised by the installed
+    // remote skill.
+    assert!(!remote_content.contains("traffic.clear"));
+    assert!(remote_content.contains("remote traffic {list,get,search}"));
 }
 
 #[test]

@@ -556,7 +556,6 @@ bifrost remote conn down [--all|--grant-id <g>] # 回收 grant
 bifrost remote traffic search <query>           # 远程搜索流量
 bifrost remote traffic list   [OPTIONS]         # 远程流量列表
 bifrost remote traffic get    <id> [OPTIONS]    # 远程获取流量详情
-bifrost remote traffic clear  [--before <ms>]   # 清理远端流量
 bifrost remote exec --shell-text "pwd"          # 受 Shell Access policy 限制的 shell.exec
 bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo test
 ```
@@ -567,6 +566,7 @@ bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo 
 
 - 只读查询类操作需要目标设备先启动 Bifrost、在 Remote Invoke 页面启用 SSH key 或配对码授权，并由 caller 用 `bifrost remote conn status` 验证连接。
 - 远程设备控制类操作还需要目标设备启用 Shell Access profile/policy，并在授权请求中选择 `selected` 或 `all` 访问模式。
+- `remote traffic clear` 是写操作，不提供 remote CLI 子命令；如确需清理目标设备流量记录，应在明确 shell 授权后通过 `remote exec` 执行目标机本地命令或 API。
 - `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令（已 deprecated，请改用 `bifrost setting shell` / `bifrost setting grant`）；caller 要管理目标设备时，应通过 `remote exec` 执行目标机命令。
 - `shell.exec` 受目标终端 Shell Access policy 约束；当前不能承诺 OS 级 sandbox 隔离。
 - rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote exec`。

@@ -1421,7 +1421,7 @@ pub enum RemoteCommands {
         #[command(subcommand)]
         action: Box<RemoteFileCommands>,
     },
-    #[command(about = "Inspect remote traffic records (list / get / search / clear)")]
+    #[command(about = "Inspect remote traffic records (list / get / search)")]
     Traffic {
         #[command(subcommand)]
         action: RemoteTrafficCommands,
@@ -2146,13 +2146,6 @@ pub enum RemoteTrafficCommands {
     },
     #[command(about = "Search remote traffic records")]
     Search(Box<RemoteSearchArgs>),
-    #[command(about = "Clear remote traffic records")]
-    Clear {
-        #[arg(long, help = "Delete specific records by ID (comma-separated)")]
-        ids: Option<String>,
-        #[arg(short = 'y', long, help = "Skip confirmation prompt")]
-        yes: bool,
-    },
 }
 
 pub struct ImportArgs {

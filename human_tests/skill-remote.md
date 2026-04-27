@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、只读查询与远程控制两类操作的前置准备、当前 relay-backed 子命令边界，以及 `remote command exec` 的授权操作路径。
+验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
 
 ## 前置条件
 
@@ -48,16 +48,18 @@
 
 操作步骤：
 
-1. 在安装产物中检查 description：
+1. 在安装产物中检查 description 和启动指引：
    ```bash
-   rg -n '远程设备控制能力|remote command exec 操作目标设备|开启系统代理' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '远程操作另一台电脑' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '远端 shell 执行|remote exec' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '系统代理默认开' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 
 预期结果：
 
-- description 明确 remote 用于远程设备控制能力。
-- description 明确可通过 `remote command exec` 操作目标设备。
-- description 明确目标端启动应开启系统代理。
+- description 明确 remote 用于远程操作另一台电脑。
+- description 明确可通过 `remote exec` 操作目标设备。
+- description 明确目标端启动时系统代理默认开启。
 
 ### TC-SR-03 目标端启动指引默认使用正式实例
 
@@ -78,63 +80,93 @@
 - Web UI 默认 URL 为 `127.0.0.1:9900`。
 - 文档不再推荐正式用户使用 `9899` 或 `.bifrost-remote-target`。
 
-### TC-SR-04 当前子命令边界指向 remote command exec 替代路径
+### TC-SR-04 当前子命令边界与 remote exec 替代路径
 
 操作步骤：
 
-1. 检查 remote skill 不提供 `bifrost remote traffic clear` 可执行示例：
+1. 检查 remote skill 只列出只读 traffic 子命令：
    ```bash
-   ! rg -n 'bifrost remote traffic clear' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'remote traffic \\{list,get,search\\}' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ! rg -n 'remote traffic \\{list,get,search,clear\\}|bifrost remote traffic clear|traffic\\.clear' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-2. 检查写操作被引导到 `remote command exec`：
+2. 检查没有专门 remote 子命令的管理面被引导到 `remote exec`：
    ```bash
-   rg -n '不代表 Agent 不能操作目标设备|remote command exec.*目标机命令|traffic clear.*remote command exec' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '没有.*专用 relay-backed 子命令|应通过已授权的 `remote exec`' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 3. 检查本地管理命令边界：
    ```bash
-   rg -n 'remote shell .*当前机器本地管理命令|remote grant .*当前机器本地管理命令|caller 要管理目标设备' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'bifrost setting .*当前本机|改.*本机配置.*bifrost setting|给远端改 Shell Access policy' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 
 预期结果：
 
-- 文档不提供不可用的 `bifrost remote traffic clear` 直接执行示例。
-- 对 rule/config/script/value/CA/系统代理等目标设备操作，文档引导走已授权的 `remote command exec`。
-- 文档明确 caller 本地 `remote shell` / `remote grant` 不是 relay-backed 管理 API，管理目标设备时应通过 `remote command exec`。
+- 文档只把 `list/get/search` 列为 remote traffic 查询能力。
+- 文档不提供 `bifrost remote traffic clear` 写操作命令。
+- 对 rule/config/script/value/CA/系统代理等目标设备操作，文档引导走已授权的 `remote exec`。
+- 文档明确当前本机 Shell Access policy / grant 管理使用 `bifrost setting ...`，管理目标设备时应通过 `remote exec`。
 
-### TC-SR-05 两类操作的前置准备清晰可执行
+### TC-SR-05 三类能力的前置准备清晰可执行
 
 操作步骤：
 
-1. 检查 remote skill 明确区分两类操作：
+1. 检查 remote skill 明确区分三类 scope：
    ```bash
-   rg -n '两类操作的前置准备工作|只读查询类|远程设备控制类' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '三类能力，三套 scope|只读查询|远端 shell|远端文件' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-2. 检查只读查询类写明目标端如何启用 Remote Invoke 授权：
+2. 检查查询类写明目标端如何启用 Remote Invoke 授权：
    ```bash
    rg -n 'SSH key' "$tmpdir/skills/bifrost-remote/SKILL.md"
    rg -n 'Enter Discovery Mode' "$tmpdir/skills/bifrost-remote/SKILL.md"
-   rg -n 'query.*访问模式' "$tmpdir/skills/bifrost-remote/SKILL.md"
-   rg -n 'bifrost remote status' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'Access = `query`|remote_query' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'bifrost remote conn status' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 3. 检查远程设备控制类写明目标端如何启用 Shell Access policy/profile：
    ```bash
    rg -n 'Shell Access policy' "$tmpdir/skills/bifrost-remote/SKILL.md"
-   rg -n 'remote shell profile add' "$tmpdir/skills/bifrost-remote/SKILL.md"
-   rg -n 'remote shell policy add' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'bifrost setting shell profile add' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'bifrost setting shell policy add' "$tmpdir/skills/bifrost-remote/SKILL.md"
    rg -n 'selected' "$tmpdir/skills/bifrost-remote/SKILL.md"
    rg -n 'all' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-4. 检查 caller 侧验证命令：
+4. 检查 caller 侧远端 shell 执行示例：
    ```bash
-   rg -n 'bifrost remote command exec --shell-text "bifrost status"' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'bifrost remote exec --shell-text "ls -la /tmp"' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 
 预期结果：
 
-- 文档把只读查询和远程设备控制分成两类前置准备。
-- 只读查询类包含 SSH key、配对码、`Enter Discovery Mode`、`query` 访问模式和 `remote status` 验证。
+- 文档把查询、shell、文件分成三类能力和 scope。
+- 查询类包含 SSH key、配对码、`Enter Discovery Mode`、`query` 访问模式和 `remote conn status` 验证。
 - 远程设备控制类包含 Shell Access profile/policy 配置示例，并说明需要 `selected` 或 `all` 授权。
-- caller 侧有可执行的 `remote command exec --shell-text "bifrost status"` 验证命令。
+- caller 侧有可执行的 `remote exec --shell-text ...` 示例命令。
+
+### TC-SR-06 不包含历史版本迁移文案
+
+操作步骤：
+
+1. 检查安装产物不包含历史别名迁移文案：
+   ```bash
+   ! rg -n 'deprecated|old `bifrost remote|历史版本|迁移文案' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+
+预期结果：
+
+- remote skill 只描述当前命令面，不要求用户阅读 `deprecated` 或历史别名迁移信息。
+
+### TC-SR-07 CLI 不暴露 remote traffic clear
+
+操作步骤：
+
+1. 检查 CLI help 中不暴露 clear 子命令：
+   ```bash
+   HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 \
+     cargo run --bin bifrost -- remote traffic --help
+   ```
+
+预期结果：
+
+- help 中包含 `list`、`get`、`search`。
+- help 中不包含 `clear`。
 
 ## 清理步骤
 

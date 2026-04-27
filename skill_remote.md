@@ -237,10 +237,11 @@ bifrost remote traffic get    <id> [--request-body --response-body]
 bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
     [--url|--headers|--body|--req-header|--res-body] \
     [--method GET --status 2xx --host example.com --protocol HTTPS]
-bifrost remote traffic clear  [--before <epoch-ms>]
 ```
 
 输出格式统一：`--output human|json|json-pretty`，`--no-color` 适合非交互。
+
+清理目标设备流量记录属于写操作，不提供对应的 `bifrost remote traffic` 子命令。确需清理时，必须先取得 shell 授权，再用 `bifrost remote exec` 在目标设备上执行本机命令或 API。
 
 ### 4.3 远端 shell 执行（`exec`，`remote_shell_exec` scope）
 
@@ -364,7 +365,7 @@ bifrost remote conn down --grant-id <gid>    # 指定 grant
 
 | Scope | RPC method | CLI |
 |---|---|---|
-| `remote_query` | `status`、`traffic.list`、`traffic.get`、`traffic.search`、`traffic.clear` | `remote conn status`、`remote traffic {list,get,search,clear}` |
+| `remote_query` | `status`、`traffic.list`、`traffic.get`、`traffic.search` | `remote conn status`、`remote traffic {list,get,search}` |
 | `remote_shell_exec` / `remote_shell_interactive` | `shell.exec` | `remote exec` |
 | `remote_file_read` | `file.read` / `file.list` / `file.stat` / `file.glob` / `file.find` / `file.hash` | `remote file {read,list,stat,glob,find,hash}` |
 | `remote_file_write` | `file.write` / `file.edit` / `file.mkdir` / `file.move` / `file.delete` / `file.patch` | `remote file {write,edit,mkdir,move,delete,patch}` |

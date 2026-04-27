@@ -8,8 +8,8 @@ use crate::commands::caller_stream_frame::{
 };
 use base64::Engine;
 use bifrost_command::{
-    CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope,
-    TrafficClearArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
+    CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope, TrafficGetArgs,
+    TrafficListArgs, TrafficListDirection,
 };
 use bifrost_core::{direct_reqwest_client_builder, BifrostError};
 use colored::Colorize;
@@ -1145,7 +1145,6 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         conn.caller_fingerprint.clone()
     };
 
-    ensure_remote_command_confirmed(&opts.action)?;
     if let RemoteCommands::Exec(exec_args) = &opts.action {
         if let Err(msg) = validate_remote_command_exec_flags(exec_args) {
             return Err(BifrostError::Config(msg));
@@ -1472,34 +1471,6 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
     if result.exit_code != 0 {
         std::process::exit(result.exit_code);
-    }
-
-    Ok(())
-}
-
-fn ensure_remote_command_confirmed(action: &RemoteCommands) -> bifrost_core::Result<()> {
-    if let RemoteCommands::Traffic {
-        action:
-            RemoteTrafficCommands::Clear {
-                ids: None,
-                yes: false,
-            },
-    } = action
-    {
-        if !std::io::stdin().is_terminal() {
-            return Err(BifrostError::Config(
-                "Use --yes to confirm clearing all remote traffic records in non-interactive mode"
-                    .to_string(),
-            ));
-        }
-        print!("Clear ALL remote traffic records? This cannot be undone. [y/N] ");
-        std::io::stdout().flush().ok();
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).ok();
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Cancelled.");
-            std::process::exit(0);
-        }
     }
 
     Ok(())
@@ -2067,27 +2038,6 @@ fn build_remote_command_checked(
                         format: format.parse().unwrap_or(OutputFormat::JsonPretty),
                         no_color: *no_color,
                     },
-                    streaming_prefs: None,
-                })
-            }
-            RemoteTrafficCommands::Clear { ids, yes: _ } => {
-                let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
-                    ids: ids.as_ref().map(|value| {
-                        value
-                            .split(',')
-                            .map(|item| item.trim().to_string())
-                            .collect()
-                    }),
-                });
-                let command_id = query.command_id().to_string();
-                Ok(BuiltRemoteCommand {
-                    kind: CommandKind::QueryReadonly,
-                    label: "traffic.clear".to_string(),
-                    command: Some(command_id),
-                    args_json: query_args_json(&query),
-                    query: Some(query),
-                    shell_exec: None,
-                    render: RemoteRenderMode::Raw,
                     streaming_prefs: None,
                 })
             }
@@ -5014,37 +4964,6 @@ mod tests {
                 assert_eq!(args.id, "REQ-69e304e7-000033");
                 assert!(args.request_body);
                 assert!(!args.response_body);
-            }
-            other => panic!("unexpected query: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_build_remote_command_for_traffic_clear_uses_typed_ids() {
-        let built = build_remote_command(&RemoteCommands::Traffic {
-            action: RemoteTrafficCommands::Clear {
-                ids: Some("REQ-1, REQ-2".to_string()),
-                yes: true,
-            },
-        });
-
-        assert_eq!(built.kind, CommandKind::QueryReadonly);
-        assert_eq!(built.label, "traffic.clear");
-        assert_eq!(built.command.as_deref(), Some("traffic.clear"));
-        let raw_args = built.args_json.as_deref().expect("args_json should exist");
-        let json: serde_json::Value = serde_json::from_str(raw_args).expect("traffic clear json");
-        assert_eq!(
-            json.get("ids")
-                .and_then(|v| v.as_array())
-                .map(|ids| ids.len()),
-            Some(2)
-        );
-        match built.query.expect("query should exist") {
-            CanonicalQueryCommand::TrafficClear(args) => {
-                assert_eq!(
-                    args.ids,
-                    Some(vec!["REQ-1".to_string(), "REQ-2".to_string()])
-                );
             }
             other => panic!("unexpected query: {:?}", other),
         }

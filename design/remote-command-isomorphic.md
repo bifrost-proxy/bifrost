@@ -365,7 +365,7 @@ allowed_commands = [
 本次改造只纳入下面两组命令：
 
 - 本地：`bifrost search`、`bifrost traffic search`、`bifrost traffic list`、`bifrost traffic get`、`bifrost traffic clear`
-- 远端：`bifrost remote search`、`bifrost remote traffic search`、`bifrost remote traffic list`、`bifrost remote traffic get`、`bifrost remote traffic clear`
+- 远端：`bifrost remote search`、`bifrost remote traffic search`、`bifrost remote traffic list`、`bifrost remote traffic get`
 
 ### 必须修改的模块
 
@@ -477,7 +477,7 @@ allowed_commands = [
 
 风险：
 
-- 在 capability 和 policy 没稳定前，把 `traffic clear` 放进 remote 默认集，安全边界不清
+- 在 capability 和 policy 没稳定前，把 `traffic clear` 放进 remote 命令面，安全边界不清
 
 应对：
 
@@ -534,7 +534,7 @@ allowed_commands = [
 2. `bifrost remote traffic search` 与 `bifrost remote search` 结果一致
 3. `bifrost remote traffic list` 的过滤行为与本地一致
 4. `bifrost remote traffic get` 的详情、请求体、响应体输出与本地一致
-5. `bifrost remote traffic clear` 的 allowlist 拦截与开放行为符合 policy
+5. `bifrost remote traffic clear` 不暴露为 CLI 子命令；清理远端流量需要明确 shell 授权后走 `remote exec`
 
 #### 3. 流式输出回归
 
@@ -561,8 +561,7 @@ allowed_commands = [
 
 1. 未开放的 canonical command 会被 caller 前置校验拒绝
 2. 未开放的 canonical command 会被 client 最终校验拒绝
-3. `traffic.clear` 在未开放 policy 下不能被 remote 执行
-4. `traffic.clear` 在开放 policy 后可以被 remote 执行
+3. `traffic.clear` 不能通过 `remote traffic` CLI 执行
 
 #### 7. 非改动范围回归
 
@@ -623,7 +622,7 @@ allowed_commands = [
 
 1. 共享命令模型放在 `crates/bifrost-command`
 2. `bifrost-admin` 内部 service backend 是唯一执行内核
-3. `traffic clear` 进入第一阶段 canonical command 模型，但默认不进入 remote readonly allowlist
+3. `traffic clear` 保留本地 canonical command 模型，但不进入 `remote traffic` CLI 命令面
 4. legacy 查询协议不保留兼容窗口，随本次改造一次性删除
 
 ## 与现有设计的关系
