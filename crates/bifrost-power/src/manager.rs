@@ -360,9 +360,9 @@ mod tests {
             assert!(m.is_active(), "force_on should acquire");
             m.set_mode(Mode::Auto).unwrap();
             assert!(!m.is_active(), "force_on -> auto should release per spec");
-            m.set_mode(Mode::Off).unwrap();
-            assert!(!m.is_active());
         }
+        m.set_mode(Mode::Off).unwrap();
+        assert!(!m.is_active());
 
         let history = p.history.lock().clone();
         assert!(
