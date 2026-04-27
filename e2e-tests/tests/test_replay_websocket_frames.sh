@@ -32,8 +32,6 @@ if [[ -z "$ADMIN_PORT" ]]; then
 fi
 
 ADMIN_HOST_HEADER="${ADMIN_HOST}:${ADMIN_PORT}"
-WS_BASE_URL="ws://${WS_HOST}:${WS_PORT}"
-WSS_BASE_URL="wss://${WS_HOST}:${WSS_PORT}"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
@@ -42,10 +40,22 @@ source "$SCRIPT_DIR/../test_utils/process.sh"
 TESTS_PASSED=0
 TESTS_FAILED=0
 
+INITIAL_BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
 BIFROST_DATA_DIR=""
 BIFROST_PID=""
 WS_SERVER_PID=""
 WSS_SERVER_PID=""
+WS_SERVER_LOG=""
+WSS_SERVER_LOG=""
+RUN_DATA_DIR="$INITIAL_BIFROST_DATA_DIR"
+CREATED_RUN_DATA_DIR=0
+WS_BASE_URL=""
+WSS_BASE_URL=""
+
+refresh_base_urls() {
+    WS_BASE_URL="ws://${WS_HOST}:${WS_PORT}"
+    WSS_BASE_URL="wss://${WS_HOST}:${WSS_PORT}"
+}
 
 cleanup() {
     if [[ -n "$BIFROST_PID" ]]; then
@@ -64,6 +74,10 @@ cleanup() {
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
         rm -rf "$BIFROST_DATA_DIR"
+    fi
+
+    if [[ "$CREATED_RUN_DATA_DIR" -eq 1 && -n "$RUN_DATA_DIR" && -d "$RUN_DATA_DIR" ]]; then
+        rm -rf "$RUN_DATA_DIR"
     fi
 
     if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
@@ -114,29 +128,86 @@ wait_for_port() {
     return 1
 }
 
+prepare_run_data_dir() {
+    if [[ -z "$RUN_DATA_DIR" ]]; then
+        RUN_DATA_DIR="$(mktemp -d)"
+        CREATED_RUN_DATA_DIR=1
+    fi
+    mkdir -p "$RUN_DATA_DIR/mock-logs"
+}
+
+ensure_port_available_or_reassign() {
+    local var_name="$1"
+    local current_port="${!var_name}"
+
+    if port_is_available "$current_port"; then
+        return 0
+    fi
+
+    local new_port
+    new_port="$(allocate_free_port)"
+    printf -v "$var_name" '%s' "$new_port"
+    echo "Port ${current_port} for ${var_name} is busy; reassigned to ${new_port}"
+}
+
+tail_server_log() {
+    local label="$1"
+    local log_file="$2"
+    if [[ -n "$log_file" && -f "$log_file" ]]; then
+        echo "--- ${label} log (tail -120) ---"
+        tail -n 120 "$log_file" || true
+        echo "--- end ${label} log ---"
+    fi
+}
+
 start_ws_server() {
-    python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > /dev/null 2>&1 &
+    prepare_run_data_dir
+    ensure_port_available_or_reassign WS_PORT
+    refresh_base_urls
+
+    WS_SERVER_LOG="$RUN_DATA_DIR/mock-logs/replay_ws_${WS_PORT}.log"
+    echo "Starting replay WS server on ${WS_HOST}:${WS_PORT}"
+    python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > "$WS_SERVER_LOG" 2>&1 &
     WS_SERVER_PID=$!
     if ! wait_for_port "$WS_PORT" 20; then
-        kill -0 "$WS_SERVER_PID" 2>/dev/null
+        if ! kill -0 "$WS_SERVER_PID" 2>/dev/null; then
+            echo "Replay WS server exited before port ${WS_PORT} became ready"
+        else
+            echo "Timed out waiting for replay WS server on port ${WS_PORT}"
+        fi
+        tail_server_log "replay WS server" "$WS_SERVER_LOG"
         return 1
     fi
 }
 
 start_wss_server() {
-    python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WSS_PORT" --ssl > /dev/null 2>&1 &
+    prepare_run_data_dir
+    ensure_port_available_or_reassign WSS_PORT
+    refresh_base_urls
+
+    WSS_SERVER_LOG="$RUN_DATA_DIR/mock-logs/replay_wss_${WSS_PORT}.log"
+    echo "Starting replay WSS server on ${WS_HOST}:${WSS_PORT}"
+    python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WSS_PORT" --ssl > "$WSS_SERVER_LOG" 2>&1 &
     WSS_SERVER_PID=$!
     if ! wait_for_port "$WSS_PORT" 20; then
-        kill -0 "$WSS_SERVER_PID" 2>/dev/null
+        if ! kill -0 "$WSS_SERVER_PID" 2>/dev/null; then
+            echo "Replay WSS server exited before port ${WSS_PORT} became ready"
+        else
+            echo "Timed out waiting for replay WSS server on port ${WSS_PORT}"
+        fi
+        tail_server_log "replay WSS server" "$WSS_SERVER_LOG"
         return 1
     fi
 }
 
 start_bifrost() {
-    BIFROST_DATA_DIR="$(mktemp -d)"
+    prepare_run_data_dir
+    BIFROST_DATA_DIR="$RUN_DATA_DIR/bifrost"
+    mkdir -p "$BIFROST_DATA_DIR"
     export BIFROST_DATA_DIR
 
     local log_file="$BIFROST_DATA_DIR/proxy.log"
+    echo "Starting Bifrost replay test proxy on ${PROXY_HOST}:${PROXY_PORT} (data_dir=${BIFROST_DATA_DIR})"
     BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" start --skip-cert-check --unsafe-ssl --no-system-proxy > "$log_file" 2>&1 &
     BIFROST_PID=$!
     sleep 1
