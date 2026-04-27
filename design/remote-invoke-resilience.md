@@ -29,6 +29,14 @@
 - 启动时从磁盘恢复 → 合并到 local_grants
 - grant 变更时同步写盘（insert/remove）
 - SSE 重连对账时批量写盘
+- Grants 列表面向排障展示两个时间：
+  - `first_connected_at`：等同本地 `first_authorized_at`，表示该 grant 第一次在 target 侧建立授权/连接的时间；pair-code grant 来自审批落地时间，SSH grant 来自 SSH connect 成功时间。
+  - `last_command_at`：仅在 `call_open` 通过本地 grant 校验并准备执行真实远程命令时更新；单纯 SSH 连接、grant 列表刷新、SSE 对账不会更新该字段。
+
+**展示要求**：
+- Admin API `GET /_bifrost/api/remote-invoke/grants` 返回 `first_connected_at` 与 `last_command_at`，并保留 `first_authorized_at` / `last_used_at` 兼容字段。
+- WebUI Settings → Remote Invoke → Grants 行内展示 `connected <time>` 与 `last command <time>`，未执行过命令时显示 `-`。
+- CLI `bifrost setting grant list` 展示 `first connected` 与 `last command`，便于不用打开 UI 也能判断授权是否只是连上、还是实际执行过命令。
 
 ### 改进 3：Caller 侧容错
 
@@ -44,9 +52,12 @@
 - `test_grant_info_store_round_trip`: 验证写入/读取/按 relay 过滤
 - `test_grant_info_store_remove`: 验证移除后不再出现
 - `test_sse_reconcile_purges_stale_grants`: 验证对账逻辑
+- `test_validate_grant_accepts_active_permanent`: 验证有效 grant 执行命令时同步写入 `last_command_at`
+- `test_validate_grant_accepts_once_and_consumes`: 验证 once grant 消耗时也写入 `last_command_at`
 
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账
+- 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：pair-code 授权后先断言 Grants API 有 `first_connected_at` 且 `last_command_at` 为空；执行一次远程搜索命令后断言 `last_command_at` 非空且不早于 `first_connected_at`。
 
 ### 真实场景测试
-- 在 human_tests/ 创建对应文档验证
+- 更新 `human_tests/remote-invoke.md`，新增 Grants 时间字段回归用例，并按文档逐条执行：进入 discovery、批准授权、查看 Grants、执行远程命令、再次查看 Grants。

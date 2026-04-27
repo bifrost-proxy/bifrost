@@ -147,8 +147,10 @@ export interface Grant {
   grant_scope: string;
   status: string;
   created_at: number;
+  first_connected_at?: number;
   first_authorized_at: number;
   expires_at: number | null;
+  last_command_at?: number | null;
   last_used_at: number | null;
   max_calls: number;
   remaining_calls: number;
@@ -330,9 +332,20 @@ export type FileOp =
 export const FILE_READ_OPS: FileOp[] = ["read", "list", "stat", "glob", "search", "hash"];
 export const FILE_WRITE_OPS: FileOp[] = ["write", "edit", "mkdir", "move", "delete", "apply_patch"];
 export const ALL_FILE_OPS: FileOp[] = [...FILE_READ_OPS, ...FILE_WRITE_OPS];
+export const FILE_ACCESS_ALL_ROOTS = ["/"];
+
+export type FileAccessPolicyAccess = "read" | "read_write";
+export type FileAccessPolicyRootScope = "selected" | "all";
+
+export interface FileAccessGrantMatch {
+  grant_id?: string;
+  caller_fingerprint?: string;
+  ssh_fingerprint?: string;
+}
 
 export interface FileAccessGrantPolicy {
-  grant_id: string;
+  match?: FileAccessGrantMatch;
+  grant_id?: string;
   name?: string;
   roots?: string[];
   denies?: string[];
@@ -347,6 +360,64 @@ export interface FileAccessGrantPolicy {
 
 export interface FileAccessConfig {
   grant: FileAccessGrantPolicy[];
+}
+
+export function getFileAccessPolicyAccess(
+  policy: Pick<FileAccessGrantPolicy, "ops">,
+): FileAccessPolicyAccess {
+  return (policy.ops ?? []).some((op) => FILE_WRITE_OPS.includes(op))
+    ? "read_write"
+    : "read";
+}
+
+export function getFileAccessPolicyRootScope(
+  policy: Pick<FileAccessGrantPolicy, "roots">,
+): FileAccessPolicyRootScope {
+  const roots = policy.roots ?? [];
+  return roots.length === 1 && roots[0] === FILE_ACCESS_ALL_ROOTS[0]
+    ? "all"
+    : "selected";
+}
+
+export function buildFileAccessPolicy(
+  grant: Pick<Grant, "grant_id" | "caller_display_name" | "caller_fingerprint">,
+  access: FileAccessPolicyAccess,
+  rootScope: FileAccessPolicyRootScope,
+  roots: string[],
+): FileAccessGrantPolicy {
+  return {
+    grant_id: grant.grant_id,
+    name: grant.caller_display_name || grant.grant_id,
+    roots: rootScope === "all" ? [...FILE_ACCESS_ALL_ROOTS] : roots,
+    denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
+    write_denies: [],
+    ops: access === "read_write" ? [...ALL_FILE_OPS] : [...FILE_READ_OPS],
+    respect_gitignore: true,
+    allow_overwrite: true,
+    allow_recursive_delete: false,
+  };
+}
+
+export function buildSshFileAccessPolicy(
+  sshFingerprint: string,
+  label: string,
+  access: FileAccessPolicyAccess,
+  rootScope: FileAccessPolicyRootScope,
+  roots: string[],
+  allowOverwrite: boolean,
+  allowRecursiveDelete: boolean,
+): FileAccessGrantPolicy {
+  return {
+    match: { ssh_fingerprint: sshFingerprint },
+    name: `ssh-key:${label || sshFingerprint}`,
+    roots: rootScope === "all" ? [...FILE_ACCESS_ALL_ROOTS] : roots,
+    denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
+    write_denies: [],
+    ops: access === "read_write" ? [...ALL_FILE_OPS] : [...FILE_READ_OPS],
+    respect_gitignore: true,
+    allow_overwrite: allowOverwrite,
+    allow_recursive_delete: allowRecursiveDelete,
+  };
 }
 
 export async function getFileAccessConfig(): Promise<FileAccessConfig> {

@@ -86,9 +86,14 @@ import {
   updateFileAccessConfig,
   type FileAccessConfig,
   type FileAccessGrantPolicy,
-  type FileOp,
+  type FileAccessPolicyAccess,
+  type FileAccessPolicyRootScope,
   ALL_FILE_OPS,
+  buildFileAccessPolicy,
+  buildSshFileAccessPolicy,
   FILE_READ_OPS,
+  getFileAccessPolicyAccess,
+  getFileAccessPolicyRootScope,
 } from "../../../api/remoteInvoke";
 import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -928,8 +933,19 @@ export default function RemoteInvokeTab() {
   const [fileAccessConfig, setFileAccessConfig] = useState<FileAccessConfig | null>(null);
   const [fileAccessLoading, setFileAccessLoading] = useState(false);
   const [fileAccessEditorOpen, setFileAccessEditorOpen] = useState(false);
-  const [fileAccessEditorGrants, setFileAccessEditorGrants] = useState<FileAccessGrantPolicy[]>([]);
+  const [fileAccessEditingGrant, setFileAccessEditingGrant] = useState<Grant | null>(null);
+  const [fileAccessDraft, setFileAccessDraft] = useState<FileAccessGrantPolicy | null>(null);
   const [fileAccessSaveLoading, setFileAccessSaveLoading] = useState(false);
+  const [sshFilePolicyOpen, setSshFilePolicyOpen] = useState(false);
+  const [sshFilePolicyAccess, setSshFilePolicyAccess] =
+    useState<FileAccessPolicyAccess>("read_write");
+  const [sshFilePolicyRootScope, setSshFilePolicyRootScope] =
+    useState<FileAccessPolicyRootScope>("selected");
+  const [sshFilePolicyRoots, setSshFilePolicyRoots] = useState("");
+  const [sshFilePolicyAllowOverwrite, setSshFilePolicyAllowOverwrite] = useState(true);
+  const [sshFilePolicyAllowRecursiveDelete, setSshFilePolicyAllowRecursiveDelete] =
+    useState(false);
+  const [sshFilePolicySaving, setSshFilePolicySaving] = useState(false);
   const [grantEditorOpen, setGrantEditorOpen] = useState(false);
   const [editingGrant, setEditingGrant] = useState<Grant | null>(null);
   const [grantEditorPreset, setGrantEditorPreset] = useState<"query" | "full" | "shell_only" | "file_only" | "custom">("full");
@@ -958,6 +974,18 @@ export default function RemoteInvokeTab() {
   const pendingPairings = usePairingRequestStore((s) => s.pendingList);
   const storeFetchPairings = usePairingRequestStore((s) => s.fetchPendingList);
   const enabledShellPolicies = shellConfig?.policies.filter((policy) => policy.enabled) ?? [];
+  const activeGrants = grants.filter((grant) => grant.status === "active");
+  const sshFilePolicy = sshKey
+    ? fileAccessConfig?.grant?.find(
+        (policy) =>
+          policy.match?.ssh_fingerprint === sshKey.ssh_key_fingerprint,
+      )
+    : undefined;
+  const sshFilePolicyAccessLabel = sshFilePolicy
+    ? getFileAccessPolicyAccess(sshFilePolicy) === "read_write"
+      ? "read-write"
+      : "read-only"
+    : "not configured";
 
   const refresh = useCallback(async () => {
     try {
@@ -977,7 +1005,11 @@ export default function RemoteInvokeTab() {
   const refreshGrants = useCallback(async () => {
     try {
       const res = await listGrants();
-      const sorted = (res.grants ?? []).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+      const sorted = (res.grants ?? []).sort(
+        (a, b) =>
+          (b.first_connected_at ?? b.first_authorized_at ?? b.created_at ?? 0) -
+          (a.first_connected_at ?? a.first_authorized_at ?? a.created_at ?? 0),
+      );
       setGrants(sorted);
     } catch {
       // ignore
@@ -1206,6 +1238,7 @@ export default function RemoteInvokeTab() {
       await revokeGrant(grantId);
       message.success("Grant revoked");
       void refreshGrants();
+      void refreshFileAccessConfig({ silent: true });
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Failed to revoke grant");
     }
@@ -1436,43 +1469,127 @@ export default function RemoteInvokeTab() {
     }
   };
 
-  const openFileAccessEditor = () => {
-    setFileAccessEditorGrants(fileAccessConfig?.grant?.map(g => ({ ...g })) ?? []);
+  const openFileAccessEditor = (grant: Grant) => {
+    const existing = fileAccessConfig?.grant?.find(
+      (policy) => policy.grant_id === grant.grant_id,
+    );
+    const fallbackAccess: FileAccessPolicyAccess =
+      grant.file_access === "read_write" ? "read_write" : "read";
+    setFileAccessEditingGrant(grant);
+    setFileAccessDraft(
+      existing
+        ? { ...existing }
+        : buildFileAccessPolicy(grant, fallbackAccess, "selected", []),
+    );
     setFileAccessEditorOpen(true);
   };
 
-  const handleSaveFileAccessConfig = async () => {
-    for (const g of fileAccessEditorGrants) {
-      if (!g.grant_id.trim()) {
-        message.error("Every file access policy needs a grant ID");
-        return;
-      }
+  const openSshFilePolicyEditor = () => {
+    if (!sshKey) return;
+    const policy = sshFilePolicy;
+    setSshFilePolicyAccess(
+      policy ? getFileAccessPolicyAccess(policy) : "read_write",
+    );
+    setSshFilePolicyRootScope(
+      policy ? getFileAccessPolicyRootScope(policy) : "selected",
+    );
+    setSshFilePolicyRoots((policy?.roots ?? []).join("\n"));
+    setSshFilePolicyAllowOverwrite(policy?.allow_overwrite ?? true);
+    setSshFilePolicyAllowRecursiveDelete(policy?.allow_recursive_delete ?? false);
+    setSshFilePolicyOpen(true);
+  };
+
+  const handleSaveSshFilePolicy = async () => {
+    if (!sshKey) return;
+    const roots = sshFilePolicyRoots
+      .split(/\r?\n|,/)
+      .map((root) => root.trim())
+      .filter(Boolean);
+    if (sshFilePolicyRootScope === "selected" && roots.length === 0) {
+      message.error("Enter at least one allowed directory");
+      return;
     }
-    const grantIds = new Set<string>();
-    for (const g of fileAccessEditorGrants) {
-      const id = g.grant_id.trim();
-      if (grantIds.has(id)) {
-        message.error(`Duplicate grant ID: ${id}`);
-        return;
-      }
-      grantIds.add(id);
+
+    const nextPolicy = buildSshFileAccessPolicy(
+      sshKey.ssh_key_fingerprint,
+      sshKey.label,
+      sshFilePolicyAccess,
+      sshFilePolicyRootScope,
+      roots,
+      sshFilePolicyAllowOverwrite,
+      sshFilePolicyAllowRecursiveDelete,
+    );
+    const current = fileAccessConfig?.grant ?? [];
+    const existingIndex = current.findIndex(
+      (policy) =>
+        policy.match?.ssh_fingerprint === sshKey.ssh_key_fingerprint,
+    );
+    const nextGrantPolicies =
+      existingIndex >= 0
+        ? current.map((policy, index) =>
+            index === existingIndex ? nextPolicy : policy,
+          )
+        : [nextPolicy, ...current];
+
+    setSshFilePolicySaving(true);
+    try {
+      const saved = await updateFileAccessConfig({
+        grant: nextGrantPolicies,
+      });
+      setFileAccessConfig(saved);
+      setSshFilePolicyOpen(false);
+      message.success("SSH key default file policy saved");
+    } catch (e) {
+      message.error(
+        e instanceof Error ? e.message : "Failed to save SSH key file policy",
+      );
+    } finally {
+      setSshFilePolicySaving(false);
+    }
+  };
+
+  const handleSaveFileAccessConfig = async () => {
+    if (!fileAccessEditingGrant || !fileAccessDraft) {
+      return;
+    }
+    const grantId = fileAccessEditingGrant.grant_id;
+    if (!activeGrants.some((grant) => grant.grant_id === grantId)) {
+      message.error(`Grant is not connected: ${grantId}`);
+      return;
+    }
+    if (
+      getFileAccessPolicyRootScope(fileAccessDraft) === "selected" &&
+      (fileAccessDraft.roots?.filter((root) => root.trim()).length ?? 0) === 0
+    ) {
+      message.error("Enter at least one allowed directory");
+      return;
     }
 
     setFileAccessSaveLoading(true);
     try {
+      const otherPolicies =
+        fileAccessConfig?.grant?.filter((policy) => policy.grant_id !== grantId) ?? [];
+      const nextPolicy = {
+        ...fileAccessDraft,
+        grant_id: grantId,
+        name: fileAccessDraft.name?.trim() || undefined,
+        roots: fileAccessDraft.roots?.map((root) => root.trim()).filter(Boolean) ?? [],
+        denies:
+          fileAccessDraft.denies?.map((deny) => deny.trim()).filter(Boolean) ?? [],
+        write_denies:
+          fileAccessDraft.write_denies?.map((deny) => deny.trim()).filter(Boolean) ?? [],
+        ops:
+          fileAccessDraft.ops && fileAccessDraft.ops.length > 0
+            ? fileAccessDraft.ops
+            : undefined,
+      };
       const saved = await updateFileAccessConfig({
-        grant: fileAccessEditorGrants.map(g => ({
-          ...g,
-          grant_id: g.grant_id.trim(),
-          name: g.name?.trim() || undefined,
-          roots: g.roots?.filter(r => r.trim()) ?? [],
-          denies: g.denies?.filter(d => d.trim()) ?? [],
-          write_denies: g.write_denies?.filter(d => d.trim()) ?? [],
-          ops: g.ops && g.ops.length > 0 ? g.ops : undefined,
-        })),
+        grant: [...otherPolicies, nextPolicy],
       });
       setFileAccessConfig(saved);
       setFileAccessEditorOpen(false);
+      setFileAccessEditingGrant(null);
+      setFileAccessDraft(null);
       message.success("File access config saved");
     } catch (e) {
       message.error(
@@ -1886,6 +2003,31 @@ export default function RemoteInvokeTab() {
                       children: `${formatSshGrantMode(sshKey.grant_mode)} until key revoke`,
                     },
                     {
+                      key: "file_policy",
+                      label: "File Access",
+                      children: (
+                        <Space size={8} wrap>
+                          <Tag color={sshFilePolicy ? "orange" : "default"}>
+                            {sshFilePolicyAccessLabel}
+                          </Tag>
+                          {sshFilePolicy?.roots?.length ? (
+                            <Text type="secondary">
+                              {getFileAccessPolicyRootScope(sshFilePolicy) === "all"
+                                ? "all directories"
+                                : `${sshFilePolicy.roots.length} root(s)`}
+                            </Text>
+                          ) : null}
+                          <Button
+                            size="small"
+                            icon={<FileOutlined />}
+                            onClick={openSshFilePolicyEditor}
+                          >
+                            Configure
+                          </Button>
+                        </Space>
+                      ),
+                    },
+                    {
                       key: "status",
                       label: "Status",
                       children: (
@@ -2168,106 +2310,6 @@ export default function RemoteInvokeTab() {
 
         <Col xs={24}>
           <Card
-            data-testid="settings-remote-invoke-file-access-card"
-            title={
-              <Space>
-                <FileOutlined />
-                <span>File Access</span>
-              </Space>
-            }
-            extra={
-              <Space>
-                <Button
-                  size="small"
-                  icon={<ReloadOutlined />}
-                  onClick={() => void refreshFileAccessConfig()}
-                  loading={fileAccessLoading}
-                />
-                <Button
-                  size="small"
-                  icon={<EditOutlined />}
-                  onClick={openFileAccessEditor}
-                  disabled={fileAccessLoading}
-                >
-                  Manage Policies
-                </Button>
-              </Space>
-            }
-            size="small"
-          >
-            <Alert
-              showIcon
-              type="info"
-              style={{ marginBottom: 16 }}
-              message="File access is governed by per-grant policies stored in file-access.toml"
-              description="Each grant can have its own roots, deny patterns, allowed operations, and byte limits. Without explicit config, a default read-only policy applies."
-            />
-            <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="Grant Policies">
-                {fileAccessConfig?.grant?.length ?? 0} configured
-              </Descriptions.Item>
-            </Descriptions>
-            {!fileAccessConfig || (fileAccessConfig.grant?.length ?? 0) === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No per-grant file access policies configured. Default read-only policy applies."
-              />
-            ) : (
-              <List
-                size="small"
-                dataSource={fileAccessConfig.grant}
-                renderItem={(policy) => {
-                  const readOps = (policy.ops ?? []).filter(op => !["write","edit","mkdir","move","delete","apply_patch"].includes(op));
-                  const writeOps = (policy.ops ?? []).filter(op => ["write","edit","mkdir","move","delete","apply_patch"].includes(op));
-                  return (
-                    <List.Item>
-                      <List.Item.Meta
-                        title={
-                          <Space wrap>
-                            <Text strong>{policy.name || policy.grant_id}</Text>
-                            <Tag>{policy.grant_id}</Tag>
-                            {writeOps.length > 0 ? (
-                              <Tag color="orange">read+write</Tag>
-                            ) : (
-                              <Tag color="blue">read-only</Tag>
-                            )}
-                          </Space>
-                        }
-                        description={
-                          <Space size={4} wrap>
-                            {(policy.roots?.length ?? 0) > 0 && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                roots: {policy.roots!.join(", ")}
-                              </Text>
-                            )}
-                            {readOps.length > 0 && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                · read ops {readOps.length}
-                              </Text>
-                            )}
-                            {writeOps.length > 0 && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                · write ops {writeOps.length}
-                              </Text>
-                            )}
-                            {(policy.denies?.length ?? 0) > 0 && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                · denies {policy.denies!.length}
-                              </Text>
-                            )}
-                          </Space>
-                        }
-                      />
-                    </List.Item>
-                  );
-                }}
-              />
-            )}
-          </Card>
-        </Col>
-
-        <Col xs={24}>
-          <Card
             title={
               <Space>
                 <span>Pending Pairing Requests</span>
@@ -2355,11 +2397,13 @@ export default function RemoteInvokeTab() {
               </Space>
             }
             extra={
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                onClick={() => void refreshGrants()}
-              />
+              <Space size={4}>
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void refreshGrants()}
+                />
+              </Space>
             }
             size="small"
           >
@@ -2376,6 +2420,15 @@ export default function RemoteInvokeTab() {
                 renderItem={(g) => (
                   <List.Item
                     actions={g.status === "removed" ? [] : [
+                      <Button
+                        key="file-access"
+                        size="small"
+                        icon={<FileOutlined />}
+                        onClick={() => openFileAccessEditor(g)}
+                        loading={fileAccessLoading}
+                      >
+                        File Access
+                      </Button>,
                       <Button
                         key="edit"
                         size="small"
@@ -2432,13 +2485,14 @@ export default function RemoteInvokeTab() {
                       description={
                         <Space size={4} wrap>
                           <Text type="secondary" style={{ fontSize: 11 }}>
-                            Used {g.use_count}x
+                            Used {g.use_count ?? 0}x
                           </Text>
-                          {g.last_used_at && (
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              · last active {new Date(g.last_used_at).toLocaleString()}
-                            </Text>
-                          )}
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            · last command {formatTimestamp(g.last_command_at)}
+                          </Text>
                           {g.expires_at != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               · expires {new Date(g.expires_at).toLocaleDateString()}
@@ -3957,220 +4011,292 @@ export default function RemoteInvokeTab() {
       </Modal>
       <Modal
         open={fileAccessEditorOpen}
-        title="Manage File Access Policies"
+        title={
+          fileAccessEditingGrant
+            ? `File Access: ${
+                fileAccessEditingGrant.caller_display_name ||
+                formatFingerprint(fileAccessEditingGrant.caller_fingerprint)
+              }`
+            : "File Access"
+        }
         okText="Save"
         cancelText="Cancel"
-        onCancel={() => setFileAccessEditorOpen(false)}
+        onCancel={() => {
+          setFileAccessEditorOpen(false);
+          setFileAccessEditingGrant(null);
+          setFileAccessDraft(null);
+        }}
         onOk={() => void handleSaveFileAccessConfig()}
         confirmLoading={fileAccessSaveLoading}
-        width={960}
+        width={820}
         destroyOnClose
       >
         <Alert
           showIcon
           type="info"
           style={{ marginBottom: 16 }}
-          message="Per-grant file access policies"
-          description="Each entry maps a grant_id to its file access rules. Grants without an entry use a default read-only policy rooted at the caller's working directory."
+          message="This policy is bound to the selected grant"
+          description="Choose the access type and directory scope for this active grant. When the grant is revoked, its file access policy is removed with it."
+        />
+        {fileAccessEditingGrant && fileAccessDraft ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Row gutter={12}>
+              <Col xs={24} md={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Grant ID</Text>
+                <Input value={fileAccessEditingGrant.grant_id} disabled />
+              </Col>
+              <Col xs={24} md={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
+                <Input
+                  value={fileAccessDraft.name ?? ""}
+                  placeholder="Human-readable label"
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    setFileAccessDraft((prev) => prev ? { ...prev, name } : prev);
+                  }}
+                />
+              </Col>
+            </Row>
+
+            <Row gutter={12}>
+              <Col xs={24} md={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Type</Text>
+                <Radio.Group
+                  style={{ width: "100%" }}
+                  value={getFileAccessPolicyAccess(fileAccessDraft)}
+                  onChange={(e) => {
+                    const access = e.target.value as FileAccessPolicyAccess;
+                    const ops = access === "read_write"
+                      ? [...ALL_FILE_OPS]
+                      : [...FILE_READ_OPS];
+                    setFileAccessDraft((prev) => prev ? { ...prev, ops } : prev);
+                  }}
+                  optionType="button"
+                  buttonStyle="solid"
+                  options={[
+                    { label: "Read Only", value: "read" },
+                    { label: "Read Write", value: "read_write" },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Directories</Text>
+                <Radio.Group
+                  style={{ width: "100%" }}
+                  value={getFileAccessPolicyRootScope(fileAccessDraft)}
+                  onChange={(e) => {
+                    const rootScope = e.target.value as FileAccessPolicyRootScope;
+                    setFileAccessDraft((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            roots: rootScope === "all" ? ["/"] : [],
+                          }
+                        : prev,
+                    );
+                  }}
+                  optionType="button"
+                  buttonStyle="solid"
+                  options={[
+                    { label: "Selected", value: "selected" },
+                    { label: "All", value: "all" },
+                  ]}
+                />
+              </Col>
+            </Row>
+
+            {getFileAccessPolicyRootScope(fileAccessDraft) === "selected" && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+                <TextArea
+                  data-testid="file-access-roots-input"
+                  autoSize={{ minRows: 3, maxRows: 6 }}
+                  value={(fileAccessDraft.roots ?? []).join("\n")}
+                  placeholder="/Users/eden/work/project"
+                  onChange={(e) => {
+                    const roots = e.target.value.split("\n");
+                    setFileAccessDraft((prev) => prev ? { ...prev, roots } : prev);
+                  }}
+                />
+              </div>
+            )}
+
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Deny Patterns (one per line)</Text>
+              <TextArea
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                value={(fileAccessDraft.denies ?? []).join("\n")}
+                placeholder={"**/.git/**\n**/target/**"}
+                onChange={(e) => {
+                  const denies = e.target.value.split("\n");
+                  setFileAccessDraft((prev) => prev ? { ...prev, denies } : prev);
+                }}
+              />
+            </div>
+
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Write Deny Patterns (one per line)</Text>
+              <TextArea
+                autoSize={{ minRows: 1, maxRows: 4 }}
+                value={(fileAccessDraft.write_denies ?? []).join("\n")}
+                placeholder={"**/Cargo.lock\n**/*.lock"}
+                onChange={(e) => {
+                  const write_denies = e.target.value.split("\n");
+                  setFileAccessDraft((prev) => prev ? { ...prev, write_denies } : prev);
+                }}
+              />
+            </div>
+
+            <Row gutter={12}>
+              <Col xs={24} md={8}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Max Read Bytes</Text>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  value={fileAccessDraft.max_read_bytes}
+                  placeholder="2097152"
+                  min={0}
+                  onChange={(val) => {
+                    setFileAccessDraft((prev) =>
+                      prev ? { ...prev, max_read_bytes: val ?? undefined } : prev,
+                    );
+                  }}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Max Write Bytes</Text>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  value={fileAccessDraft.max_write_bytes}
+                  placeholder="2097152"
+                  min={0}
+                  onChange={(val) => {
+                    setFileAccessDraft((prev) =>
+                      prev ? { ...prev, max_write_bytes: val ?? undefined } : prev,
+                    );
+                  }}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Space direction="vertical" size={4}>
+                  <Space>
+                    <Switch
+                      size="small"
+                      checked={fileAccessDraft.respect_gitignore ?? true}
+                      onChange={(val) => {
+                        setFileAccessDraft((prev) =>
+                          prev ? { ...prev, respect_gitignore: val } : prev,
+                        );
+                      }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>Respect .gitignore</Text>
+                  </Space>
+                  <Space>
+                    <Switch
+                      size="small"
+                      checked={fileAccessDraft.allow_overwrite ?? true}
+                      onChange={(val) => {
+                        setFileAccessDraft((prev) =>
+                          prev ? { ...prev, allow_overwrite: val } : prev,
+                        );
+                      }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allow Overwrite</Text>
+                  </Space>
+                  <Space>
+                    <Switch
+                      size="small"
+                      checked={fileAccessDraft.allow_recursive_delete ?? false}
+                      onChange={(val) => {
+                        setFileAccessDraft((prev) =>
+                          prev ? { ...prev, allow_recursive_delete: val } : prev,
+                        );
+                      }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>Allow Recursive Delete</Text>
+                  </Space>
+                </Space>
+              </Col>
+            </Row>
+          </Space>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No grant selected" />
+        )}
+      </Modal>
+      <Modal
+        open={sshFilePolicyOpen}
+        title="SSH Key Default File Policy"
+        okText="Save"
+        cancelText="Cancel"
+        onCancel={() => setSshFilePolicyOpen(false)}
+        onOk={() => void handleSaveSshFilePolicy()}
+        confirmLoading={sshFilePolicySaving}
+        destroyOnClose
+      >
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message="Applies to callers connected through the current SSH key"
+          description="The policy is matched by SSH key fingerprint, so new grants created by this key inherit these file roots and operations."
         />
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
-            <Title level={5} style={{ margin: 0 }}>Grant Policies</Title>
-            <Button
-              icon={<PlusOutlined />}
-              onClick={() => {
-                setFileAccessEditorGrants(prev => [
-                  ...prev,
-                  {
-                    grant_id: (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") ? crypto.randomUUID() : `g-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`,
-                    name: "",
-                    roots: [],
-                    denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
-                    write_denies: [],
-                    ops: [...FILE_READ_OPS],
-                    respect_gitignore: true,
-                    allow_overwrite: true,
-                    allow_recursive_delete: false,
-                  },
-                ]);
-              }}
-            >
-              Add Policy
-            </Button>
-          </Space>
-
-          {fileAccessEditorGrants.length === 0 ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="No per-grant policies. Add one to customize file access for specific grants."
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>Access</Text>
+            <Radio.Group
+              style={{ width: "100%" }}
+              value={sshFilePolicyAccess}
+              onChange={(e) => setSshFilePolicyAccess(e.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+              options={[
+                { label: "Read Only", value: "read" },
+                { label: "Read Write", value: "read_write" },
+              ]}
             />
-          ) : (
-            fileAccessEditorGrants.map((grant, index) => (
-              <Card
-                key={`fa-grant-${index}`}
-                size="small"
-                title={grant.name || grant.grant_id || `Policy ${index + 1}`}
-                extra={
-                  <Button
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={() => {
-                      setFileAccessEditorGrants(prev => prev.filter((_, i) => i !== index));
-                    }}
-                  />
-                }
-              >
-                <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                  <Row gutter={12}>
-                    <Col span={12}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Grant ID</Text>
-                      <Input
-                        value={grant.grant_id}
-                        placeholder="Auto-generated"
-                        readOnly
-                        disabled
-                      />
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
-                      <Input
-                        value={grant.name ?? ""}
-                        placeholder="Human-readable label"
-                        onChange={e => {
-                          const val = e.target.value;
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, name: val } : g));
-                        }}
-                      />
-                    </Col>
-                  </Row>
-
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
-                    <TextArea
-                      autoSize={{ minRows: 2, maxRows: 5 }}
-                      value={(grant.roots ?? []).join("\n")}
-                      placeholder="/Users/eden/work/project"
-                      onChange={e => {
-                        const roots = e.target.value.split("\n");
-                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, roots } : g));
-                      }}
-                    />
-                  </div>
-
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Allowed Operations</Text>
-                    <div style={{ marginTop: 4 }}>
-                      <Select
-                        mode="multiple"
-                        style={{ width: "100%" }}
-                        value={grant.ops ?? []}
-                        onChange={(ops: FileOp[]) => {
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops } : g));
-                        }}
-                        options={ALL_FILE_OPS.map(op => ({ value: op, label: op }))}
-                      />
-                      <Space style={{ marginTop: 4 }}>
-                        <Button size="small" onClick={() => {
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...FILE_READ_OPS] } : g));
-                        }}>Read Only</Button>
-                        <Button size="small" onClick={() => {
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, ops: [...ALL_FILE_OPS] } : g));
-                        }}>All Ops</Button>
-                      </Space>
-                    </div>
-                  </div>
-
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Deny Patterns (one per line)</Text>
-                    <TextArea
-                      autoSize={{ minRows: 2, maxRows: 4 }}
-                      value={(grant.denies ?? []).join("\n")}
-                      placeholder={"**/.git/**\n**/target/**"}
-                      onChange={e => {
-                        const denies = e.target.value.split("\n");
-                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, denies } : g));
-                      }}
-                    />
-                  </div>
-
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>Write Deny Patterns (one per line)</Text>
-                    <TextArea
-                      autoSize={{ minRows: 1, maxRows: 4 }}
-                      value={(grant.write_denies ?? []).join("\n")}
-                      placeholder={"**/Cargo.lock\n**/*.lock"}
-                      onChange={e => {
-                        const write_denies = e.target.value.split("\n");
-                        setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, write_denies } : g));
-                      }}
-                    />
-                  </div>
-
-                  <Row gutter={12}>
-                    <Col span={8}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Max Read Bytes</Text>
-                      <InputNumber
-                        style={{ width: "100%" }}
-                        value={grant.max_read_bytes}
-                        placeholder="2097152"
-                        min={0}
-                        onChange={val => {
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_read_bytes: val ?? undefined } : g));
-                        }}
-                      />
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Max Write Bytes</Text>
-                      <InputNumber
-                        style={{ width: "100%" }}
-                        value={grant.max_write_bytes}
-                        placeholder="2097152"
-                        min={0}
-                        onChange={val => {
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, max_write_bytes: val ?? undefined } : g));
-                        }}
-                      />
-                    </Col>
-                    <Col span={8}>
-                      <Space direction="vertical" size={4}>
-                        <Space>
-                          <Switch
-                            size="small"
-                            checked={grant.respect_gitignore ?? true}
-                            onChange={val => {
-                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, respect_gitignore: val } : g));
-                            }}
-                          />
-                          <Text type="secondary" style={{ fontSize: 12 }}>Respect .gitignore</Text>
-                        </Space>
-                        <Space>
-                          <Switch
-                            size="small"
-                            checked={grant.allow_overwrite ?? true}
-                            onChange={val => {
-                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_overwrite: val } : g));
-                            }}
-                          />
-                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Overwrite</Text>
-                        </Space>
-                        <Space>
-                          <Switch
-                            size="small"
-                            checked={grant.allow_recursive_delete ?? false}
-                            onChange={val => {
-                              setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, allow_recursive_delete: val } : g));
-                            }}
-                          />
-                          <Text type="secondary" style={{ fontSize: 12 }}>Allow Recursive Delete</Text>
-                        </Space>
-                      </Space>
-                    </Col>
-                  </Row>
-                </Space>
-              </Card>
-            ))
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>Directories</Text>
+            <Radio.Group
+              style={{ width: "100%" }}
+              value={sshFilePolicyRootScope}
+              onChange={(e) => setSshFilePolicyRootScope(e.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+              options={[
+                { label: "Selected", value: "selected" },
+                { label: "All", value: "all" },
+              ]}
+            />
+          </div>
+          {sshFilePolicyRootScope === "selected" && (
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+              <TextArea
+                autoSize={{ minRows: 3, maxRows: 6 }}
+                value={sshFilePolicyRoots}
+                placeholder="/Users/eden/work/code/nextoncall/next_agent"
+                onChange={(e) => setSshFilePolicyRoots(e.target.value)}
+              />
+            </div>
           )}
+          <Space direction="vertical" size={8}>
+            <Space>
+              <Switch
+                size="small"
+                checked={sshFilePolicyAllowOverwrite}
+                onChange={setSshFilePolicyAllowOverwrite}
+              />
+              <Text type="secondary">Allow overwriting existing files</Text>
+            </Space>
+            <Space>
+              <Switch
+                size="small"
+                checked={sshFilePolicyAllowRecursiveDelete}
+                onChange={setSshFilePolicyAllowRecursiveDelete}
+              />
+              <Text type="secondary">Allow recursive directory deletion</Text>
+            </Space>
+          </Space>
         </Space>
       </Modal>
       <Modal

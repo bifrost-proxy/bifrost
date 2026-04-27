@@ -1,4 +1,5 @@
 use bifrost_core::{BifrostError, Result};
+use chrono::{DateTime, Local};
 use serde_json::{json, Value};
 
 use crate::cli::RemoteGrantCommands;
@@ -207,11 +208,37 @@ fn print_grant_summary(payload: &Value) {
             .and_then(Value::as_bool)
             .map(|value| if value { "on" } else { "off" })
             .unwrap_or("-");
+        let first_connected = grant
+            .get("first_connected_at")
+            .or_else(|| grant.get("first_authorized_at"))
+            .and_then(Value::as_u64)
+            .map(format_millis)
+            .unwrap_or_else(|| "-".to_string());
+        let last_command = grant
+            .get("last_command_at")
+            .and_then(Value::as_u64)
+            .map(format_millis)
+            .unwrap_or_else(|| "-".to_string());
         println!("  - {} {}", grant_id, caller);
         println!("    scope: {} | mode: {}", scope, mode);
+        println!(
+            "    first connected: {} | last command: {}",
+            first_connected, last_command
+        );
         println!("    binding: {}", binding);
         println!("    stdin: {} | interactive: {}", stdin, interactive);
     }
+}
+
+fn format_millis(value: u64) -> String {
+    DateTime::from_timestamp_millis(value as i64)
+        .map(|date_time| {
+            date_time
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| value.to_string())
 }
 
 #[cfg(test)]

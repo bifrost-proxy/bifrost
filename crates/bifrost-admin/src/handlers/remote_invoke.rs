@@ -68,7 +68,7 @@ pub async fn handle_remote_invoke(
         return handle_shell_config_match(req, &worker).await;
     }
     if sub == "/file-access-config" || sub == "/file-access-config/" {
-        return handle_file_access_config(req).await;
+        return handle_file_access_config(req, &worker).await;
     }
     if sub == "/file-access/validate-path" || sub == "/file-access/validate-path/" {
         return handle_file_access_validate_path(req).await;
@@ -489,11 +489,20 @@ async fn handle_shell_config_match(
     json_response(&response)
 }
 
-async fn handle_file_access_config(req: Request<Incoming>) -> Response<BoxBody> {
+async fn handle_file_access_config(
+    req: Request<Incoming>,
+    worker: &RemoteInvokeWorker,
+) -> Response<BoxBody> {
     use crate::remote_invoke::file_policy_store::{load_raw_config, save_raw_config, RawConfig};
 
     match *req.method() {
         Method::GET => {
+            if let Err(e) = worker.ensure_active_ssh_file_access_policy() {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to restore ssh file access policy: {e}"),
+                );
+            }
             let config = load_raw_config();
             json_response(&config)
         }
@@ -522,7 +531,14 @@ async fn handle_file_access_config(req: Request<Incoming>) -> Response<BoxBody> 
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg);
             }
 
-            json_response(&config)
+            if let Err(e) = worker.ensure_active_ssh_file_access_policy() {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to restore ssh file access policy: {e}"),
+                );
+            }
+
+            json_response(&load_raw_config())
         }
         _ => method_not_allowed(),
     }

@@ -22,7 +22,9 @@ use super::call_history_store::{
 };
 use super::executor::RemoteInvokeExecutor;
 use super::file_policy_store::{
-    full_file_ops as file_policy_full_ops,
+    full_file_ops as file_policy_full_ops, has_ssh_fingerprint_grant as file_policy_has_ssh_grant,
+    rekey_ssh_fingerprint_grant as file_policy_rekey_ssh_grant,
+    remove_grant_id_grant as file_policy_remove_grant_id_grant,
     upsert_ssh_fingerprint_grant as file_policy_upsert_ssh_grant,
 };
 use super::grant_crypto_store::{GrantCryptoStore, StoredGrantCryptoMaterial};
@@ -488,6 +490,16 @@ impl RemoteInvokeWorker {
         Ok(self.ssh_key_store.get_active_key()?.map(|key| key.record))
     }
 
+    pub fn ensure_active_ssh_file_access_policy(&self) -> Result<Option<SshKeyRecord>> {
+        let Some(record) = self.get_active_ssh_key()? else {
+            return Ok(None);
+        };
+        if !file_policy_has_ssh_grant(&record.ssh_key_fingerprint) {
+            self.seed_ssh_file_access_grant(&record, None);
+        }
+        Ok(Some(record))
+    }
+
     pub fn export_active_ssh_key(&self) -> Result<Option<SshKeyMaterial>> {
         self.ssh_key_store.export_active_key_material()
     }
@@ -528,9 +540,23 @@ impl RemoteInvokeWorker {
         let reset = self
             .ssh_key_store
             .create_or_replace_key(active_key.label, GrantMode::Permanent)?;
-        // Re-seed grant using the rotated fingerprint so the new key
-        // still has coding-agent-class file permissions out of the box.
-        self.seed_ssh_file_access_grant(&reset.record, None);
+        // Reuse the operator's previous SSH file policy across rotation.
+        // If the old key never had an explicit policy, seed the default.
+        let moved = file_policy_rekey_ssh_grant(
+            &active_key.ssh_key_fingerprint,
+            &reset.record.ssh_key_fingerprint,
+            Some(format!("ssh-key:{}", reset.record.label)),
+        )
+        .unwrap_or_else(|err| {
+            warn!(
+                error = %err,
+                "failed to migrate SSH key file-access policy during reset"
+            );
+            false
+        });
+        if !moved {
+            self.seed_ssh_file_access_grant(&reset.record, None);
+        }
         self.trigger_ssh_route_refresh();
         Ok(Some(reset))
     }
@@ -812,6 +838,7 @@ impl RemoteInvokeWorker {
                 auth_method: AuthMethod::PairCode,
                 status: GrantStatus::Active,
                 first_authorized_at: now,
+                last_command_at: None,
                 expires_at,
                 last_used_at: None,
                 max_calls: if grant_mode == GrantMode::Once {
@@ -1444,7 +1471,14 @@ impl RemoteInvokeWorker {
         for (id, info) in grants.iter() {
             if is_grant_info_dead(info, now) {
                 dead_ids.push(id.clone());
-            } else if let Ok(val) = serde_json::to_value(info) {
+            } else if let Ok(mut val) = serde_json::to_value(info) {
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert(
+                        "first_connected_at".to_string(),
+                        json!(info.first_authorized_at),
+                    );
+                    obj.insert("created_at".to_string(), json!(info.first_authorized_at));
+                }
                 live.push(val);
             }
         }
@@ -1542,6 +1576,7 @@ impl RemoteInvokeWorker {
             auth_method: existing.auth_method,
             status: existing.status,
             first_authorized_at: existing.first_authorized_at,
+            last_command_at: existing.last_command_at,
             expires_at: existing.expires_at,
             last_used_at: existing.last_used_at,
             max_calls: existing.max_calls,
@@ -1621,6 +1656,15 @@ impl RemoteInvokeWorker {
         self.grant_policy.write().remove(grant_id);
         if let Err(error) = self.grant_policy_store.remove(grant_id) {
             warn!(error = %error, grant_id = %grant_id, "remove persisted grant policy failed");
+        }
+        match file_policy_remove_grant_id_grant(grant_id) {
+            Ok(true) => {
+                info!(grant_id = %grant_id, "removed per-grant file access policy");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, grant_id = %grant_id, "remove per-grant file access policy failed");
+            }
         }
     }
 
@@ -1984,6 +2028,7 @@ impl RemoteInvokeWorker {
             auth_method: AuthMethod::SshPublickey,
             status: GrantStatus::Active,
             first_authorized_at: now,
+            last_command_at: None,
             expires_at,
             last_used_at: Some(now),
             max_calls: None,
@@ -2164,44 +2209,31 @@ impl RemoteInvokeWorker {
             return;
         }
 
+        let command_kind = data
+            .get("command_kind")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+
         {
             let needs_insert = !self.local_grants.read().contains_key(&grant_id);
             if needs_insert {
-                let caller_fp = data
-                    .get("caller_fingerprint")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let grant_info = GrantInfo {
-                    grant_id: grant_id.clone(),
-                    client_instance_id: self.identity.instance_id.clone(),
-                    caller_fingerprint: caller_fp,
-                    caller_display_name: None,
-                    grant_mode: GrantMode::Permanent,
-                    grant_scope: GrantScope::RemoteQuery,
-                    file_access: Default::default(),
-                    auth_method: AuthMethod::PairCode,
-                    status: GrantStatus::Active,
-                    first_authorized_at: now_millis(),
-                    expires_at: None,
-                    last_used_at: None,
-                    max_calls: None,
-                    remaining_calls: None,
-                    ssh_key_id: None,
-                    ssh_key_fingerprint: None,
-                    caller_ephemeral_pub: data
-                        .get("caller_ephemeral_pub")
-                        .and_then(|v| v.as_str())
-                        .map(|value| value.to_string()),
-                    client_ephemeral_pub: data
-                        .get("client_ephemeral_pub")
-                        .and_then(|v| v.as_str())
-                        .map(|value| value.to_string()),
-                    policy_binding: None,
-                    shell_policy_set_version_snapshot: None,
-                    interactive_allowed: None,
-                    stdin_allowed: None,
-                };
+                let active_ssh_key = self.get_active_ssh_key().ok().flatten();
+                let grant_info = recover_grant_info_from_call_open(
+                    &data,
+                    grant_id.clone(),
+                    &self.identity.instance_id,
+                    command_kind,
+                    active_ssh_key.as_ref(),
+                );
+                if grant_info.ssh_key_fingerprint.is_some() {
+                    if let Err(error) = self.ensure_active_ssh_file_access_policy() {
+                        warn!(
+                            error = %error,
+                            grant_id = %grant_id,
+                            "auto-recovered SSH grant but failed to restore default file policy"
+                        );
+                    }
+                }
                 self.persist_grant_info(&grant_id, &grant_info);
                 self.local_grants
                     .write()
@@ -2217,7 +2249,13 @@ impl RemoteInvokeWorker {
         let grant_reject_reason: Option<String> = {
             let now = now_millis();
             let mut grants = self.local_grants.write();
-            validate_grant_for_call(&mut grants, &grant_id, now)
+            let result = validate_grant_for_call(&mut grants, &grant_id, now);
+            if result.is_none() {
+                if let Some(grant) = grants.get(&grant_id) {
+                    self.persist_grant_info(&grant_id, grant);
+                }
+            }
+            result
         };
 
         if let Some(reason) = grant_reject_reason {
@@ -2252,11 +2290,6 @@ impl RemoteInvokeWorker {
             })
             .unwrap_or_default();
 
-        let transport_command_kind = data
-            .get("command_kind")
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default();
-
         if data.get("command").is_some() {
             warn!(
                 call_id = %call_id,
@@ -2288,8 +2321,6 @@ impl RemoteInvokeWorker {
             .await;
             return;
         }
-
-        let command_kind = transport_command_kind;
 
         if !scope_allows_command(grant_scope, file_access, command_kind) {
             let reason = format!(
@@ -3224,10 +3255,12 @@ fn validate_grant_for_call(
                     if remaining - 1 == 0 {
                         grant.status = GrantStatus::Consumed;
                     }
+                    grant.last_command_at = Some(now);
                     grant.last_used_at = Some(now);
                     None
                 }
             } else {
+                grant.last_command_at = Some(now);
                 grant.last_used_at = Some(now);
                 None
             }
@@ -3575,6 +3608,7 @@ fn build_grant_info_from_grant_created(
         auth_method,
         status: GrantStatus::Active,
         first_authorized_at: authorized_at,
+        last_command_at: data.get("last_command_at").and_then(|v| v.as_u64()),
         expires_at,
         last_used_at: None,
         max_calls: if grant_mode == GrantMode::Once {
@@ -3606,6 +3640,81 @@ fn build_grant_info_from_grant_created(
     })
 }
 
+fn recover_grant_info_from_call_open(
+    data: &Value,
+    grant_id: String,
+    client_instance_id: &str,
+    command_kind: CommandKind,
+    active_ssh_key: Option<&SshKeyRecord>,
+) -> GrantInfo {
+    let caller_fingerprint = data
+        .get("caller_info")
+        .and_then(|ci| ci.get("fingerprint"))
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get("caller_fingerprint").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let caller_display_name = data
+        .get("caller_info")
+        .and_then(|ci| ci.get("display_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let active_ssh_key =
+        active_ssh_key.filter(|record| record.ssh_key_fingerprint == caller_fingerprint);
+    let grant_scope: GrantScope = data
+        .get("grant_scope")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(GrantScope::RemoteQuery);
+    let file_access: FileAccessScope = data
+        .get("file_access")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_else(|| {
+            if active_ssh_key.is_some() && command_kind == CommandKind::File {
+                FileAccessScope::ReadWrite
+            } else {
+                FileAccessScope::default_for(grant_scope)
+            }
+        });
+
+    GrantInfo {
+        grant_id,
+        client_instance_id: client_instance_id.to_string(),
+        caller_fingerprint,
+        caller_display_name,
+        grant_mode: GrantMode::Permanent,
+        grant_scope,
+        file_access,
+        auth_method: if active_ssh_key.is_some() {
+            AuthMethod::SshPublickey
+        } else {
+            AuthMethod::PairCode
+        },
+        status: GrantStatus::Active,
+        first_authorized_at: now_millis(),
+        last_command_at: data.get("last_command_at").and_then(|v| v.as_u64()),
+        expires_at: None,
+        last_used_at: None,
+        max_calls: None,
+        remaining_calls: None,
+        ssh_key_id: active_ssh_key.map(|record| record.id.clone()),
+        ssh_key_fingerprint: active_ssh_key.map(|record| record.ssh_key_fingerprint.clone()),
+        caller_ephemeral_pub: data
+            .get("caller_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string()),
+        client_ephemeral_pub: data
+            .get("client_ephemeral_pub")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string()),
+        policy_binding: data.get("policy_binding").cloned(),
+        shell_policy_set_version_snapshot: data
+            .get("shell_policy_set_version_snapshot")
+            .and_then(|v| v.as_u64()),
+        interactive_allowed: data.get("interactive_allowed").and_then(|v| v.as_bool()),
+        stdin_allowed: data.get("stdin_allowed").and_then(|v| v.as_bool()),
+    }
+}
+
 fn apply_stored_grant_policy(
     mut grant: GrantInfo,
     stored: Option<&StoredGrantPolicy>,
@@ -3632,9 +3741,15 @@ fn apply_stored_grant_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_invoke::file_policy_store::{
+        load_raw_config, save_raw_config, GrantMatch, RawConfig, RawGrantPolicy,
+    };
+    use crate::remote_invoke::ssh_keys::SshKeyStatus;
     use crate::remote_invoke::types::ShellExecMode;
+    use crate::state::AdminState;
     use base64::Engine;
     use bifrost_command::{CanonicalQueryCommand, SearchArgs};
+    use bifrost_core::file_access::FileOp;
     use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
     use ring::agreement::EphemeralPrivateKey;
     use ring::rand::SystemRandom;
@@ -3652,6 +3767,7 @@ mod tests {
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
+            last_command_at: None,
             expires_at: None,
             last_used_at: None,
             max_calls: if mode == GrantMode::Once {
@@ -3703,6 +3819,68 @@ mod tests {
     }
 
     #[test]
+    fn remove_grant_policy_removes_exact_file_access_policy_but_keeps_fingerprint_policy() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir.clone());
+
+        save_raw_config(&RawConfig {
+            grants: vec![
+                RawGrantPolicy {
+                    match_: GrantMatch {
+                        grant_id: Some("grant-deleted".to_string()),
+                        ..Default::default()
+                    },
+                    name: Some("exact-grant".to_string()),
+                    roots: vec![data_dir.clone()],
+                    ops: vec![FileOp::Read],
+                    ..Default::default()
+                },
+                RawGrantPolicy {
+                    match_: GrantMatch {
+                        ssh_fingerprint: Some("ssh-fp".to_string()),
+                        ..Default::default()
+                    },
+                    name: Some("ssh-default".to_string()),
+                    roots: vec![data_dir],
+                    ops: vec![FileOp::Read],
+                    ..Default::default()
+                },
+            ],
+            default: None,
+        })
+        .expect("save file access config");
+
+        let worker = RemoteInvokeWorker::new(
+            RemoteInvokeConfig::default(),
+            Identity::load_or_create(dir.path()).expect("identity"),
+            None,
+            Arc::new(AdminState::new(0)),
+            "127.0.0.1",
+            0,
+        );
+
+        worker.remove_grant_policy("grant-deleted");
+
+        let cfg = load_raw_config();
+        assert_eq!(cfg.grants.len(), 1);
+        assert_eq!(cfg.grants[0].name.as_deref(), Some("ssh-default"));
+        assert_eq!(
+            cfg.grants[0].match_.ssh_fingerprint.as_deref(),
+            Some("ssh-fp")
+        );
+        assert!(cfg
+            .grants
+            .iter()
+            .all(
+                |policy| policy.match_.grant_id.as_deref() != Some("grant-deleted")
+                    && policy.grant_id.as_deref() != Some("grant-deleted")
+            ));
+    }
+
+    #[test]
     fn test_validate_grant_rejects_missing_grant() {
         let mut grants = HashMap::new();
         let result = validate_grant_for_call(&mut grants, "nonexistent", 5000);
@@ -3719,6 +3897,7 @@ mod tests {
         );
         let result = validate_grant_for_call(&mut grants, "g1", 5000);
         assert!(result.is_none());
+        assert_eq!(grants["g1"].last_command_at, Some(5000));
         assert_eq!(grants["g1"].last_used_at, Some(5000));
     }
 
@@ -3732,6 +3911,7 @@ mod tests {
         assert!(result.is_none());
         assert_eq!(grants["g1"].remaining_calls, Some(0));
         assert_eq!(grants["g1"].status, GrantStatus::Consumed);
+        assert_eq!(grants["g1"].last_command_at, Some(5000));
         assert_eq!(grants["g1"].last_used_at, Some(5000));
     }
 
@@ -4684,6 +4864,7 @@ mod tests {
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
             first_authorized_at: 1000,
+            last_command_at: None,
             expires_at: None,
             last_used_at: None,
             max_calls: None,
@@ -4705,6 +4886,69 @@ mod tests {
             "auto-recovered grant should pass validation"
         );
         assert_eq!(grants["auto-g"].last_used_at, Some(5000));
+    }
+
+    #[test]
+    fn test_recover_call_open_ssh_file_grant_preserves_file_access() {
+        let active_key = SshKeyRecord {
+            id: "ssh-key-1".to_string(),
+            device_code: "BF-TEST".to_string(),
+            label: "mira".to_string(),
+            public_key_pem: "pub".to_string(),
+            ssh_key_fingerprint: "ssh-fp".to_string(),
+            grant_mode: GrantMode::Permanent,
+            status: SshKeyStatus::Active,
+            created_at: 1,
+            last_used_at: None,
+            last_caller_info: None,
+        };
+        let payload = serde_json::json!({
+            "caller_fingerprint": "ssh-fp",
+            "caller_ephemeral_pub": "caller-epk",
+            "client_ephemeral_pub": "client-epk"
+        });
+
+        let grant = recover_grant_info_from_call_open(
+            &payload,
+            "ghost-file-grant".to_string(),
+            "client-x",
+            CommandKind::File,
+            Some(&active_key),
+        );
+
+        assert_eq!(grant.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(grant.file_access, FileAccessScope::ReadWrite);
+        assert_eq!(grant.ssh_key_fingerprint.as_deref(), Some("ssh-fp"));
+        assert!(scope_allows_command(
+            grant.grant_scope,
+            grant.file_access,
+            CommandKind::File
+        ));
+    }
+
+    #[test]
+    fn test_recover_call_open_uses_payload_file_access_for_non_ssh_grant() {
+        let payload = serde_json::json!({
+            "caller_fingerprint": "pair-fp",
+            "grant_scope": "remote_query",
+            "file_access": "read"
+        });
+
+        let grant = recover_grant_info_from_call_open(
+            &payload,
+            "relay-prevalidated-file-grant".to_string(),
+            "client-x",
+            CommandKind::File,
+            None,
+        );
+
+        assert_eq!(grant.auth_method, AuthMethod::PairCode);
+        assert_eq!(grant.file_access, FileAccessScope::Read);
+        assert!(scope_allows_command(
+            grant.grant_scope,
+            grant.file_access,
+            CommandKind::File
+        ));
     }
 
     #[test]

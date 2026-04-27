@@ -70,7 +70,7 @@ pub(crate) struct GrantMatch {
     pub ssh_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub(crate) struct RawGrantPolicy {
     #[serde(default, rename = "match")]
     pub match_: GrantMatch,
@@ -359,6 +359,82 @@ pub fn upsert_ssh_fingerprint_grant(
         allow_recursive_delete,
     );
     save_raw_config(&cfg)
+}
+
+pub fn has_ssh_fingerprint_grant(fingerprint: &str) -> bool {
+    raw_config_has_ssh_fingerprint_grant(&load_raw_config(), fingerprint)
+}
+
+pub(crate) fn raw_config_has_ssh_fingerprint_grant(cfg: &RawConfig, fingerprint: &str) -> bool {
+    cfg.grants
+        .iter()
+        .any(|g| g.match_.ssh_fingerprint.as_deref() == Some(fingerprint))
+}
+
+/// Remove `[[grant]]` entries that are pinned to an exact grant id.
+///
+/// This is called when a remote-invoke grant is deleted locally so the
+/// per-grant file policy does not survive as a ghost config. Fingerprint
+/// policies are intentionally preserved because they can apply to future
+/// grants created by the same SSH key or caller.
+pub fn remove_grant_id_grant(grant_id: &str) -> Result<bool, String> {
+    let mut cfg = load_raw_config();
+    if !remove_grant_id_grant_in_place(&mut cfg, grant_id) {
+        return Ok(false);
+    }
+    save_raw_config(&cfg)?;
+    Ok(true)
+}
+
+pub(crate) fn remove_grant_id_grant_in_place(cfg: &mut RawConfig, grant_id: &str) -> bool {
+    let before = cfg.grants.len();
+    cfg.grants.retain(|g| {
+        g.match_.grant_id.as_deref() != Some(grant_id) && g.grant_id.as_deref() != Some(grant_id)
+    });
+    cfg.grants.len() != before
+}
+
+/// Move an existing SSH-key policy from one fingerprint to another.
+///
+/// Used when an SSH key is rotated: the new key has a different fingerprint,
+/// but the operator's configured roots/ops should follow the key unless no
+/// explicit policy existed.
+pub fn rekey_ssh_fingerprint_grant(
+    old_fingerprint: &str,
+    new_fingerprint: &str,
+    name: Option<String>,
+) -> Result<bool, String> {
+    let mut cfg = load_raw_config();
+    if !rekey_ssh_fingerprint_grant_in_place(&mut cfg, old_fingerprint, new_fingerprint, name) {
+        return Ok(false);
+    }
+    save_raw_config(&cfg)?;
+    Ok(true)
+}
+
+pub(crate) fn rekey_ssh_fingerprint_grant_in_place(
+    cfg: &mut RawConfig,
+    old_fingerprint: &str,
+    new_fingerprint: &str,
+    name: Option<String>,
+) -> bool {
+    let Some(index) = cfg
+        .grants
+        .iter()
+        .position(|g| g.match_.ssh_fingerprint.as_deref() == Some(old_fingerprint))
+    else {
+        return false;
+    };
+
+    let mut moved = cfg.grants.remove(index);
+    moved.match_.ssh_fingerprint = Some(new_fingerprint.to_string());
+    if let Some(name) = name {
+        moved.name = Some(name);
+    }
+    cfg.grants
+        .retain(|g| g.match_.ssh_fingerprint.as_deref() != Some(new_fingerprint));
+    cfg.grants.insert(0, moved);
+    true
 }
 
 /// Pure in-place merge used by [`upsert_ssh_fingerprint_grant`]. Extracted
@@ -998,5 +1074,123 @@ ops = ["read"]
         let p = store.resolve("unknown-gid", None, Some("fp-beta"), Path::new("/tmp"));
         assert_eq!(p.ops.len(), 12);
         assert!(p.ops.contains(&FileOp::Write));
+    }
+
+    #[test]
+    fn rekey_ssh_fingerprint_policy_preserves_roots_and_ops() {
+        let mut cfg = RawConfig::default();
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "old-fp",
+            Some("ssh-key:old".to_string()),
+            vec![PathBuf::from("/Users/tester/work")],
+            vec![FileOp::Read, FileOp::List, FileOp::Write],
+            Some(false),
+            Some(false),
+        );
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "new-fp",
+            Some("ssh-key:stale-new".to_string()),
+            vec![PathBuf::from("/tmp/stale")],
+            vec![FileOp::Read],
+            None,
+            None,
+        );
+
+        assert!(rekey_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "old-fp",
+            "new-fp",
+            Some("ssh-key:new".to_string()),
+        ));
+
+        assert_eq!(cfg.grants.len(), 1);
+        assert_eq!(
+            cfg.grants[0].match_.ssh_fingerprint.as_deref(),
+            Some("new-fp")
+        );
+        assert_eq!(cfg.grants[0].name.as_deref(), Some("ssh-key:new"));
+        assert_eq!(
+            cfg.grants[0].roots,
+            vec![PathBuf::from("/Users/tester/work")]
+        );
+        assert_eq!(
+            cfg.grants[0].ops,
+            vec![FileOp::Read, FileOp::List, FileOp::Write]
+        );
+        assert_eq!(cfg.grants[0].allow_overwrite, Some(false));
+    }
+
+    #[test]
+    fn rekey_ssh_fingerprint_policy_returns_false_when_missing() {
+        let mut cfg = RawConfig::default();
+        assert!(!rekey_ssh_fingerprint_grant_in_place(
+            &mut cfg, "missing", "new-fp", None,
+        ));
+        assert!(cfg.grants.is_empty());
+    }
+
+    #[test]
+    fn remove_grant_id_policy_removes_match_and_legacy_entries_only() {
+        let mut cfg = RawConfig {
+            grants: vec![
+                RawGrantPolicy {
+                    match_: GrantMatch {
+                        grant_id: Some("grant-deleted".to_string()),
+                        ..Default::default()
+                    },
+                    name: Some("match-grant".to_string()),
+                    roots: vec![PathBuf::from("/grant")],
+                    ops: vec![FileOp::Read],
+                    ..Default::default()
+                },
+                RawGrantPolicy {
+                    grant_id: Some("grant-deleted".to_string()),
+                    name: Some("legacy-grant".to_string()),
+                    roots: vec![PathBuf::from("/legacy")],
+                    ops: vec![FileOp::Read],
+                    ..Default::default()
+                },
+                RawGrantPolicy {
+                    match_: GrantMatch {
+                        ssh_fingerprint: Some("ssh-fp".to_string()),
+                        ..Default::default()
+                    },
+                    name: Some("ssh-policy".to_string()),
+                    roots: vec![PathBuf::from("/ssh")],
+                    ops: vec![FileOp::Read],
+                    ..Default::default()
+                },
+            ],
+            default: Some(RawDefaultPolicy {
+                roots: vec![PathBuf::from("/default")],
+                ops: vec![FileOp::Read],
+                ..Default::default()
+            }),
+        };
+
+        assert!(remove_grant_id_grant_in_place(&mut cfg, "grant-deleted"));
+        assert_eq!(cfg.grants.len(), 1);
+        assert_eq!(cfg.grants[0].name.as_deref(), Some("ssh-policy"));
+        assert!(cfg.default.is_some());
+        assert!(!remove_grant_id_grant_in_place(&mut cfg, "grant-deleted"));
+    }
+
+    #[test]
+    fn raw_config_has_ssh_fingerprint_grant_detects_present_policy() {
+        let mut cfg = RawConfig::default();
+        merge_ssh_fingerprint_grant_in_place(
+            &mut cfg,
+            "fp-present",
+            None,
+            vec![PathBuf::from("/tmp")],
+            vec![FileOp::Read],
+            None,
+            None,
+        );
+
+        assert!(raw_config_has_ssh_fingerprint_grant(&cfg, "fp-present"));
+        assert!(!raw_config_has_ssh_fingerprint_grant(&cfg, "fp-missing"));
     }
 }

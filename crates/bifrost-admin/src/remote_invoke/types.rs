@@ -893,6 +893,8 @@ pub struct GrantInfo {
     pub status: GrantStatus,
     pub first_authorized_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_command_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<u64>,

@@ -4441,6 +4441,46 @@ PY
 
 ---
 
+### TC-RI-回归-138：Grants 列表展示首次连接时间与最近一次执行命令时间
+
+**背景**：用户在 Grants 列表中只能看到授权状态、scope、mode 等信息，无法区分“caller 首次连接成功但还没有执行命令”和“已经执行过命令”。本次要求 Grants 列表同时展示首次连接上来的时间和最近一次执行命令的时间。
+
+**前置条件**：
+- 使用隔离的 target admin / caller / relay 数据目录
+- target admin 使用动态端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 当前 shell 显式设置 `HTTP_PROXY=http://127.0.0.1:9900` 与 `HTTPS_PROXY=http://127.0.0.1:9900`，但测试服务本身不得占用 `9900`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 脚本启动本地 relay、隔离 target admin、caller，并完成 pair-code 授权。
+3. 脚本在执行任何远程命令前读取 `/_bifrost/api/remote-invoke/grants`。
+4. 记录同一条 grant 的 `grant_id`、`first_connected_at`、`last_command_at`。
+5. 脚本执行一次真实 remote search 命令。
+6. 脚本再次读取 `/_bifrost/api/remote-invoke/grants`，按步骤 4 的 `grant_id` 查回同一条 grant。
+7. 打开 WebUI `Settings → Remote Invoke → Grants`，检查对应 grant 行文案。
+8. 执行 `bifrost setting grant list -p <admin_port>`，检查 CLI 输出。
+
+**预期结果**：
+- 首次读取 Grants API 时，`first_connected_at` 非空，且等于或兼容 `first_authorized_at`
+- 首次读取 Grants API 时，`last_command_at` 为空，表示仅连接/授权，还没有执行命令
+- 执行 remote search 后，再次读取同一 grant 时 `first_connected_at` 不变化
+- 执行 remote search 后，再次读取同一 grant 时 `last_command_at` 非空，且不早于 `first_connected_at`
+- WebUI Grants 行展示 `connected <时间>` 与 `last command <时间或 ->`
+- CLI grant list 展示 `first connected: <时间> | last command: <时间或 ->`
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-138 执行结果（2026-04-27，Grants 时间字段）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-138 | ✅ PASS | 2026-04-27 在当前 checkout 执行 `HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 完成 release 重建与完整回归；随后用已构建二进制执行 `HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 复测新增 CLI 断言。两轮均使用随机 relay/admin/mock 端口，target admin 使用隔离数据目录和 `--no-system-proxy`。脚本在执行命令前读取 Grants API，确认 `grant_id` 与 `first_connected_at` 非空、`last_command_at` 为空；执行真实 `remote traffic search` 后再次读取同一 grant，确认 `first_connected_at` 不变化、`last_command_at` 非空且不早于首次连接时间；第二轮额外执行 `bifrost -p <admin_port> setting grant list`，输出包含 `first connected:` 与 `last command:`。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

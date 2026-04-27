@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildFileAccessPolicy,
+  getFileAccessPolicyAccess,
+  getFileAccessPolicyRootScope,
   getCallArgsPreviewSource,
   normalizeRemoteInvokeSshCallerInfo,
   normalizeRemoteInvokeSshKeyRecord,
@@ -114,5 +117,39 @@ describe("getCallArgsPreviewSource", () => {
         },
       }),
     ).toBe('{"keyword":"needle","limit":5,"max_scan":50}');
+  });
+});
+
+describe("file access policy helpers", () => {
+  const grant = {
+    grant_id: "grant-active-1",
+    caller_display_name: "mira",
+    caller_fingerprint: "abc123",
+  };
+
+  it("builds a read-only policy for selected roots from an active grant", () => {
+    const policy = buildFileAccessPolicy(
+      grant,
+      "read",
+      "selected",
+      ["/Users/eden/work/github/bifrost"],
+    );
+
+    expect(policy.grant_id).toBe("grant-active-1");
+    expect(policy.name).toBe("mira");
+    expect(policy.roots).toEqual(["/Users/eden/work/github/bifrost"]);
+    expect(getFileAccessPolicyAccess(policy)).toBe("read");
+    expect(getFileAccessPolicyRootScope(policy)).toBe("selected");
+    expect(policy.ops).toEqual(["read", "list", "stat", "glob", "search", "hash"]);
+  });
+
+  it("builds a read-write all-directories policy as root slash", () => {
+    const policy = buildFileAccessPolicy(grant, "read_write", "all", []);
+
+    expect(policy.roots).toEqual(["/"]);
+    expect(getFileAccessPolicyAccess(policy)).toBe("read_write");
+    expect(getFileAccessPolicyRootScope(policy)).toBe("all");
+    expect(policy.ops).toContain("apply_patch");
+    expect(policy.allow_recursive_delete).toBe(false);
   });
 });
