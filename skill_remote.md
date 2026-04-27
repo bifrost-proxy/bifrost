@@ -1,22 +1,13 @@
 ---
 
 name: "bifrost-remote"
-description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接管理、状态/流量查询、远端 shell 执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/find/read/write/edit/patch。重要：修改远端文件必须优先使用 bifrost remote file 子命令，禁止用 shell + base64 + cat/echo 的方式改代码。"
+description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接管理、状态/流量查询、远端 shell 执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/find/read/write/edit/patch。重要：修改远端文件必须优先使用 bifrost remote file 子命令。"
 
 ---
 
 # Bifrost Remote
 
 本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成四类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
-
-> **CLI 命名空间约定（重要）**
->
-> - `bifrost remote ...` — 所有子命令都在**已连接的远端设备**上执行（relay-backed）。
-> - `bifrost setting ...` — 在**当前本机**上管理 Shell Access policy / 本地 grant。
->
-> 关键判断：看这个命令是否改变远端状态。改**本机配置**一律走 `bifrost setting`。
-
-`bifrost remote` 的顶层子命令组为：**`conn` / `exec` / `file` / `traffic`**。
 
 ---
 
@@ -121,72 +112,6 @@ bifrost start
 2. caller 侧：`bifrost remote conn up <pair-code>`。
 3. 目标端 Web UI 批准请求，勾选需要的能力和时长。
 4. 配对码一次性，复用已保存连接。
-
-### 3.3 远端 Shell Access policy（启用 `exec` 必读）
-
-caller 的 grant 有 `shell_exec` scope 还不够，**目标端还要配一条匹配的 Shell Access policy**。目标端用户用 `bifrost setting shell` 管理本机 policy：
-
-```bash
-# 在目标机上执行
-bifrost setting shell profile add \
-  --id default --name "Default" \
-  --cwd "$HOME" --env PATH --env HOME \
-  --default-cwd "$HOME" --timeout-ms 30000 --inherit-env
-
-bifrost setting shell policy add \
-  --id allow-bifrost-cli --name "Allow Bifrost CLI" \
-  --mode shell_text --pattern '^bifrost\s+' \
-  --shell /bin/bash --profile default
-```
-
-如果希望 Agent 有广泛 shell 能力，目标端可以创建更宽的 policy，并在授权请求里选 `all`。**能力开放程度由目标端用户决定，caller 不能绕过。**
-
-### 3.4 远端 FileAccessPolicy（启用 `remote file` 必读）
-
-目标端的 `~/.bifrost/file-access.toml` 控制 Agent 能访问哪些目录。支持多条 `[[grant]]`，按 `ssh_fingerprint` / `caller_fingerprint` / `grant_id` 匹配，再 fallback 到 `[default]`。示例：
-
-> **SSH Key 自动种子 grant（v0.0.62+）**：在目标端 Web UI → Settings → Remote Invoke 里
-> 导出 SSH Key 时，会自动往 `~/.bifrost/file-access.toml` 写入一条 `match.ssh_fingerprint`
-> 的 `[[grant]]`，默认 `roots=[$HOME]`、`ops=<12 个 file op 全开>`，
-> `allow_overwrite=true`、`allow_recursive_delete=false`。这样 SSH Key 授权流程
-> 就真的是**长期、全 file 权限、免弹窗**，无需手工编辑 TOML。
->
-> 如果想收窄 SSH Key 的文件范围，在 Web UI 的 Export SSH Key 弹框里有
-> 「File access scope」区块：可以改 Root directories（逗号分隔绝对路径）、
-> 勾选/取消 ops、切换 allow overwrite / allow recursive delete。
-> 重置 SSH Key（Reset）会用相同默认策略重新 seed 新 fingerprint 的条目；
-> 老 fingerprint 的条目会保留在 TOML 中但不会再被匹配，可手工清理。
->
-> 手工编辑的 `[[grant]]`（例如 `write_denies = [...]`）会**被重新创建 key 时覆盖**。
-> 需要长期保留的规则请放到 `[default]` 段或另加一个 `match.grant_id` 条目。
-
-
-```toml
-# 绑定当前 caller 的 ssh key（推荐）
-# 字段名以代码里的 serde 为准：写入/读取策略是 `ops`（不是 `allow`），
-# 值用下划线命名：read / list / stat / glob / find / hash /
-# write / edit / mkdir / move / delete / patch。
-[[grant]]
-match.ssh_fingerprint = "5f02477634441d5d..."
-roots = ["/Users/eden/work/github/bifrost"]
-ops = ["read", "list", "stat", "glob", "find", "hash",
-       "write", "edit", "mkdir", "move", "delete", "patch"]
-# write_denies 只在写类操作（write/edit/mkdir/move/delete/patch）上
-# 生效，读类仍可访问。适合「能读 Cargo.lock 做分析，但不让 agent 写坏它」。
-write_denies = ["**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml"]
-
-# 默认策略：其他设备连上来只能只读 $HOME，并且默认把敏感路径拉黑。
-# default_denies() 内置会再叠加一层（.git/.ssh/.aws/.env*/id_rsa*/*.pfx/*.p12 等），
-# 这里的 denies 是在此基础上额外追加的项目级规则。
-[default]
-roots = ["/Users/eden"]
-ops = ["read", "list", "stat", "glob", "find", "hash"]
-denies = ["**/secrets/**", "**/*.secret.toml"]
-```
-
-改完文件后无需重启 Bifrost，下次请求会自动热加载。
-
----
 
 ## 四、Agent 工作流
 
@@ -383,36 +308,10 @@ bifrost remote conn status
 ```
 
 这一步会清掉本地缓存的 relay token 和 per-connection 状态，用 SSH key 重新建立长连接。不要手工修改 `remote-connections.*` 文件。
----
 
-## 五、当前 relay-backed 命令清单
 
-| Scope | RPC method | CLI |
-|---|---|---|
-| `remote_query` | `status`、`traffic.list`、`traffic.get`、`traffic.search` | `remote conn status`、`remote traffic {list,get,search}` |
-| `remote_shell_exec` / `remote_shell_interactive` | `shell.exec` | `remote exec` |
-| `remote_file_read` | `file.read` / `file.list` / `file.stat` / `file.glob` / `file.find` / `file.hash` | `remote file {read,list,stat,glob,find,hash}` |
-| `remote_file_write` | `file.write` / `file.edit` / `file.mkdir` / `file.move` / `file.delete` / `file.patch` | `remote file {write,edit,mkdir,move,delete,patch}` |
 
-不在此清单内的管理面（rule / config / script / value / CA / 系统代理）**没有**专用 relay-backed 子命令。caller 想远程管理这些模块，应通过已授权的 `remote exec` 在目标端跑等价的本机 CLI。
-
----
-
-## 六、本地管理 vs 远端操作
-
-| 你想做 | 在哪里执行 | 命令 |
-|---|---|---|
-| 管理**本机** Shell Access policy/profile | 本机 | `bifrost setting shell ...` |
-| 管理**本机** remote-invoke grants | 本机 | `bifrost setting grant ...` |
-| 操作**已连接的远端设备** | caller | `bifrost remote {conn, exec, file, traffic}` |
-| 给远端改 Shell Access policy | 远端 | `bifrost remote exec --shell-text "bifrost setting shell policy add ..."` |
-| 给远端改 FileAccessPolicy | 远端 | 请用户在目标端编辑 `~/.bifrost/file-access.toml`（会热加载）；或在 shell 授权允许的情况下用 `remote exec` 辅助 |
-
-> **不要**把 `bifrost setting ...` 当成 relay-backed 管理 API 直接调，它只作用于**执行该命令的那台机器**。
-
----
-
-## 七、Agent 执行约束（强制）
+## 五、Agent 执行约束（强制）
 
 按优先级阅读：
 
@@ -432,7 +331,7 @@ bifrost remote conn status
 
 ---
 
-## 八、FAQ
+## 六、FAQ
 
 **Q: 为什么我 `remote file read` 返回 `file.out_of_scope`？**
 A: 目标端 `~/.bifrost/file-access.toml` 里没有把该路径加入 `roots`。让用户追加一条 `[[grant]]` 或扩大 `[default].roots`。
