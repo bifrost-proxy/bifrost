@@ -15,7 +15,15 @@ fn normalize_replaced_path(path: &str) -> String {
         return path.to_string();
     }
 
-    MULTI_SLASH_PATH_REGEX.replace_all(path, "/").to_string()
+    let collapsed = MULTI_SLASH_PATH_REGEX.replace_all(path, "/").to_string();
+    if !collapsed.starts_with("/") {
+        // Deleting a prefix like `/api/` from `/api/demo` would otherwise
+        // strip the leading slash and yield a relative-looking path. Always
+        // re-anchor to an absolute path for HTTP request-URIs.
+        format!("/{}", collapsed)
+    } else {
+        collapsed
+    }
 }
 
 pub fn apply_url_params(uri: &Uri, rules: &ResolvedRules) -> Uri {
@@ -125,7 +133,20 @@ pub fn apply_url_replace(
         }
     }
 
-    let new_uri_str = format!("{}{}", path, query);
+    // Re-assemble the URI while preserving scheme + authority when the
+    // original is an absolute form (proxy-style target). Using only
+    // `format!("{}{}", path, query)` would drop scheme/host, so downstream
+    // `extract_host_port` can no longer find the target.
+    let uri_str = uri.to_string();
+    let new_uri_str = if uri_str.starts_with("/") {
+        format!("{}{}", path, query)
+    } else {
+        let scheme = uri.scheme_str().unwrap_or("http");
+        match uri.authority() {
+            Some(authority) => format!("{}://{}{}{}", scheme, authority.as_str(), path, query),
+            None => format!("{}{}", path, query),
+        }
+    };
     new_uri_str.parse().unwrap_or_else(|_| uri.clone())
 }
 
@@ -567,5 +588,51 @@ mod tests {
             extract_target_path_from_host_rule("http://localhost:9000/api/"),
             Some("/api/".to_string())
         );
+    }
+
+    #[test]
+    fn test_apply_url_replace_preserves_scheme_and_authority_on_absolute_uri() {
+        // Regression: absolute-form proxy URIs must retain scheme + authority
+        // after URL replace; otherwise downstream `extract_host_port` cannot
+        // locate the target. See `www.example.com urlReplace://api/=`.
+        let uri: Uri = "http://www.example.com/api/demo".parse().unwrap();
+        let rules = ResolvedRules {
+            url_replace: vec![("api/".to_string(), "".to_string())],
+            ..Default::default()
+        };
+
+        let result = apply_url_replace(&uri, &rules, false, &mock_ctx());
+        assert_eq!(result.scheme_str(), Some("http"));
+        assert_eq!(result.host(), Some("www.example.com"));
+        assert_eq!(result.path(), "/demo");
+    }
+
+    #[test]
+    fn test_apply_url_replace_absolute_https_preserves_query() {
+        let uri: Uri = "https://www.example.com/api/demo?x=1&y=2".parse().unwrap();
+        let rules = ResolvedRules {
+            url_replace: vec![("api/".to_string(), "".to_string())],
+            ..Default::default()
+        };
+
+        let result = apply_url_replace(&uri, &rules, false, &mock_ctx());
+        assert_eq!(result.scheme_str(), Some("https"));
+        assert_eq!(result.host(), Some("www.example.com"));
+        assert_eq!(result.path(), "/demo");
+        assert_eq!(result.query(), Some("x=1&y=2"));
+    }
+
+    #[test]
+    fn test_apply_url_replace_delete_prefix_with_leading_slash() {
+        // Regression: deleting `/api/` from `/api/demo` must not strip the
+        // leading `/` (would yield the relative-looking path `demo`).
+        let uri: Uri = "/api/demo".parse().unwrap();
+        let rules = ResolvedRules {
+            url_replace: vec![("/api/".to_string(), "".to_string())],
+            ..Default::default()
+        };
+
+        let result = apply_url_replace(&uri, &rules, false, &mock_ctx());
+        assert_eq!(result.path(), "/demo");
     }
 }
