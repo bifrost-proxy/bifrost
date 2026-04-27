@@ -118,6 +118,37 @@ Device-Code: BF-A1B2C3D4E5F6A7B8
 - E2E：
   - 运行 `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
   - 重点覆盖 reset 后重新申请 challenge、签名 connect、等待 `ssh_publickey` grant 出现
+
+## 2026-04-28 Caller ID 隔离修复
+
+### 问题
+
+SSH key connect 之前把 SSH key fingerprint 复用为 `caller_fingerprint`，pair-code connect 也曾基于 `username + hostname` 派生 caller fingerprint。这会让同一机器、同一沙箱模板、或同一把 SSH key 在多个 caller 沙箱中反复连接时命中同一个 caller identity。
+
+Relay 的 reusable grant 索引是 `{client_instance_id, caller_fingerprint}`。当多个 caller 共享同一个 fingerprint 时，新 SSH connect 会撤销/覆盖同 caller 的旧 active grant，表现为多个 caller 竞争同一 target grant。
+
+### 方案
+
+- CLI caller 在 `{BIFROST_DATA_DIR}/remote-caller-identity.json` 中保存随机生成的 `caller_fingerprint`，格式为 `caller-<128-bit-hex>`。
+- caller ID 首次使用时生成，同一 `BIFROST_DATA_DIR` 内持久复用；不同沙箱/数据目录自然生成不同 ID。
+- `CallerInfo.display_name` / `hostname` / `username` 继续优先使用系统信息，只作为可读展示名称，不参与 relay grant 归属。
+- SSH key fingerprint 只表示“这把 key 被 target 信任”，继续写入 `ssh_key_fingerprint` 字段，用于审计、展示和 file policy 的 `match.ssh_fingerprint`。
+- target 处理 `ssh_connect` 时用 `caller_info.fingerprint` 作为 grant 的 `caller_fingerprint`；仅当旧 caller 未发送 fingerprint 时，才兼容回退到 SSH key fingerprint。
+- relay 存储 SSH grant 时按随机 caller ID 建 reusable 索引，同时保留独立 `ssh_key_fingerprint` 字段；`call_open` 下发时也携带 `ssh_key_fingerprint`，方便 target 在本地 grant 恢复路径继续识别 SSH 授权。
+
+### 测试方案
+
+- 单元测试：
+  - `test_random_caller_fingerprint_has_expected_shape` 验证随机 caller ID 格式。
+  - `test_load_or_create_caller_fingerprint_persists_per_data_dir` 验证同一数据目录复用。
+  - `test_load_or_create_caller_fingerprint_differs_across_data_dirs` 验证不同数据目录不重复。
+  - `test_recover_call_open_ssh_file_grant_preserves_file_access` 验证随机 caller ID 与独立 SSH fingerprint 能同时恢复 SSH grant 语义。
+- E2E：
+  - 更新 `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`，使用同一个 exported SSH key 从两个 caller 临时数据目录连接同一 target。
+  - 断言两个 caller 的 `remote-connections.json` 中 `caller_fingerprint` 均为 `caller-*` 且互不相等。
+  - 断言 target grants 中存在两条 `ssh_publickey` grant：`ssh_key_fingerprint` 相同，但 `caller_fingerprint` 分别匹配两个 caller。
+- 真实场景测试：
+  - 新增 `human_tests/remote-invoke-sshkey.md` 的 `TC-RISK-01`，按脚本逐条执行并确认多 caller grant 不再互相覆盖。
 - human_tests：
   - 更新 `human_tests/remote-invoke.md`
   - 重新执行 `TC-RI-回归-104`、`TC-RI-回归-105`，确认 reset 后的首轮 SSH connect 不再因为短暂离线窗口失败

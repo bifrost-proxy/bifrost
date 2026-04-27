@@ -691,6 +691,7 @@ export class RemoteInvokeService {
       grant_scope: normalizeGrantScope(grant.grant_scope),
       file_access: normalizeFileAccess(grant.file_access),
       caller_fingerprint: grant.caller_fingerprint,
+      ssh_key_fingerprint: grant.ssh_key_fingerprint || '',
       caller_pubkey: req.caller_pubkey,
       command_kind: commandKind,
       command_encrypted: req.command_encrypted,

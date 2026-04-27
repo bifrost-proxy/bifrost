@@ -99,6 +99,10 @@ bifrost start
 
 三类 scope **互相独立**，请用户在目标端 Web UI 的 Remote Invoke 授权请求里按需勾选。比如 Agent 只能调用 `remote file read` 但没勾 File Access=read-write，`remote file write` 会以 `file.permission_denied` 拒绝。
 
+Shell Access 的 CLI 配置入口是 `bifrost setting shell profile add` 和 `bifrost setting shell policy add`。只有需要执行 `remote exec` 时才配置 Shell Access；纯文件读写优先配置 FileAccessPolicy 并使用 `bifrost remote file`。
+
+远端流量查询只提供 `bifrost remote traffic {list,get,search}`，不提供清理类写操作。
+
 ### 3.1 建议用 SSH key（长期）
 
 1. 目标端 Web UI `http://127.0.0.1:9900/_bifrost/settings?tab=remote-invoke` → 创建/导出 SSH key。

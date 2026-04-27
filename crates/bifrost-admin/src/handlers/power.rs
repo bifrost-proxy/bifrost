@@ -20,21 +20,21 @@ pub async fn handle_power(
     }
 }
 
-fn require_manager(
-    state: &SharedAdminState,
-) -> std::result::Result<bifrost_power::SharedKeepAwakeManager, Response<BoxBody>> {
-    state.keepawake_manager.clone().ok_or_else(|| {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Keep-awake manager not configured",
-        )
-    })
+fn require_manager(state: &SharedAdminState) -> Option<bifrost_power::SharedKeepAwakeManager> {
+    state.keepawake_manager.clone()
+}
+
+fn manager_unavailable_response() -> Response<BoxBody> {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Keep-awake manager not configured",
+    )
 }
 
 async fn get_status(state: SharedAdminState) -> Response<BoxBody> {
     let mgr = match require_manager(&state) {
-        Ok(m) => m,
-        Err(r) => return r,
+        Some(m) => m,
+        None => return manager_unavailable_response(),
     };
     let status = mgr.status();
     json_ok(&status)
@@ -42,8 +42,8 @@ async fn get_status(state: SharedAdminState) -> Response<BoxBody> {
 
 async fn post_on(state: SharedAdminState) -> Response<BoxBody> {
     let mgr = match require_manager(&state) {
-        Ok(m) => m,
-        Err(r) => return r,
+        Some(m) => m,
+        None => return manager_unavailable_response(),
     };
     match mgr.set_mode(bifrost_power::Mode::ForceOn) {
         Ok(_) => json_ok(&mgr.status()),
@@ -53,8 +53,8 @@ async fn post_on(state: SharedAdminState) -> Response<BoxBody> {
 
 async fn post_off(state: SharedAdminState) -> Response<BoxBody> {
     let mgr = match require_manager(&state) {
-        Ok(m) => m,
-        Err(r) => return r,
+        Some(m) => m,
+        None => return manager_unavailable_response(),
     };
     match mgr.set_mode(bifrost_power::Mode::Off) {
         Ok(_) => json_ok(&mgr.status()),
@@ -69,8 +69,8 @@ struct ModeBody {
 
 async fn post_mode(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
     let mgr = match require_manager(&state) {
-        Ok(m) => m,
-        Err(r) => return r,
+        Some(m) => m,
+        None => return manager_unavailable_response(),
     };
     let bytes = match req.collect().await {
         Ok(c) => c.to_bytes(),

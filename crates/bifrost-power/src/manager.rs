@@ -205,11 +205,9 @@ impl KeepAwakeManager {
             // Off → Auto: nothing to do (stay inactive, wait for call).
             (Mode::Off, Mode::Auto) => {}
             // _ → ForceOn: acquire if not already active.
-            (_, Mode::ForceOn) => {
-                if self.platform.is_supported() && !self.is_active() {
-                    if let Err(e) = self.acquire_locked() {
-                        warn!(error = %e, "keepawake: acquire on set_mode(force_on) failed");
-                    }
+            (_, Mode::ForceOn) if self.platform.is_supported() && !self.is_active() => {
+                if let Err(e) = self.acquire_locked() {
+                    warn!(error = %e, "keepawake: acquire on set_mode(force_on) failed");
                 }
             }
             // _ → Off, or ForceOn → Auto: release if active.
