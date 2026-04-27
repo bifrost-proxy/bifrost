@@ -82,16 +82,13 @@ pub fn rewrite_legacy_remote_argv(args: Vec<OsString>) -> Vec<OsString> {
                     "`bifrost remote search` is deprecated; use `bifrost remote traffic search`",
                 );
             }
-            "command" => {
+            "command" if out.get(pos + 2).and_then(|s| s.to_str()) == Some("exec") => {
                 // `remote command exec <args>` -> `remote exec <args>`
                 // Any other `remote command <sub>` was never shipped; leave as-is so clap errors loudly.
-                if out.get(pos + 2).and_then(|s| s.to_str()) == Some("exec") {
-                    // Replace the two-token span `command exec` with a single `exec`.
-                    out.splice(pos + 1..=pos + 2, ["exec"].iter().map(OsString::from));
-                    notices.push(
-                        "`bifrost remote command exec` is deprecated; use `bifrost remote exec`",
-                    );
-                }
+                // Replace the two-token span `command exec` with a single `exec`.
+                out.splice(pos + 1..=pos + 2, ["exec"].iter().map(OsString::from));
+                notices
+                    .push("`bifrost remote command exec` is deprecated; use `bifrost remote exec`");
             }
             "file" => {
                 // Tier-2 verbs after `remote file`. Copy the borrow to an
