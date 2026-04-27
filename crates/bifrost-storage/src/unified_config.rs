@@ -24,6 +24,7 @@ pub struct UnifiedConfig {
     #[serde(skip)]
     pub paths: PathsConfig,
     pub ui: UiConfig,
+    pub keepawake: KeepAwakeConfig,
 }
 
 impl UnifiedConfig {
@@ -39,6 +40,7 @@ impl UnifiedConfig {
             sandbox: SandboxConfig::default(),
             paths: PathsConfig::for_data_dir(data_dir),
             ui: UiConfig::default(),
+            keepawake: KeepAwakeConfig::default(),
         }
     }
 
@@ -533,5 +535,25 @@ mod tests {
             config.tls.enable_interception,
             parsed.tls.enable_interception
         );
+    }
+}
+
+/// Configuration for the keep-awake (prevent-sleep) feature.
+/// Only the `mode` is persisted; runtime assertion state is volatile
+/// and released when the process exits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeepAwakeConfig {
+    /// One of `off`, `auto`, `force_on`. Default is `auto`:
+    /// inactive until the first remote call arrives, then active
+    /// until manually turned off or the process exits.
+    pub mode: String,
+}
+
+impl Default for KeepAwakeConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+        }
     }
 }

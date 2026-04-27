@@ -9,6 +9,7 @@ members = [
   "crates/bifrost-sync",
   "crates/bifrost-admin",
   "crates/bifrost-cli",
+  "crates/bifrost-power",
   "crates/bifrost-tests",
   "crates/bifrost-e2e",
   "crates/bifrost-script",

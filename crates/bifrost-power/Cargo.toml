@@ -1,0 +1,21 @@
+[package]
+name = "bifrost-power"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Power management (keep-awake) for Bifrost — macOS IOKit assertion based, stubs on other platforms"
+
+[dependencies]
+bifrost-core = { path = "../bifrost-core" }
+parking_lot.workspace = true
+serde.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+
+[dev-dependencies]
+serde_json.workspace = true
