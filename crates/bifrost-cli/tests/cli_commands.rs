@@ -947,12 +947,10 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 
     let remote_content = fs::read_to_string(remote_skill).expect("remote skill content");
     assert!(remote_content.contains("name: \"bifrost-remote\""));
-    // Current namespace: `bifrost setting shell ...` (old `bifrost remote
-    // shell/grant` is a deprecated alias and must still be mentioned for
-    // migration guidance).
+    // Current namespace: `bifrost setting shell ...`. The doc is kept
+    // lean (4-tier CLI only); no legacy/migration prose is required.
     assert!(remote_content.contains("bifrost setting shell profile add"));
     assert!(remote_content.contains("bifrost setting shell policy add"));
-    assert!(remote_content.contains("deprecated"));
     // Access mode vocabulary must stay stable for doc consumers.
     assert!(remote_content.contains("query"));
     assert!(remote_content.contains("selected"));

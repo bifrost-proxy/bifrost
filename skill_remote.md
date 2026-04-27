@@ -237,7 +237,7 @@ bifrost remote traffic get    <id> [--request-body --response-body]
 bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
     [--url|--headers|--body|--req-header|--res-body] \
     [--method GET --status 2xx --host example.com --protocol HTTPS]
-bifrost remote traffic clear  [--before <epoch-ms>]
+# 清理历史流量的子命令有副作用，已故意不在此罗列；如需使用请查阅 `bifrost remote traffic --help`
 ```
 
 输出格式统一：`--output human|json|json-pretty`，`--no-color` 适合非交互。
