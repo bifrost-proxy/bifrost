@@ -115,6 +115,30 @@ bifrost start
 
 ## 四、Agent 工作流
 
+### 4.0 Caller 侧前置自检（本机 bifrost 就绪）
+
+在执行任何 `bifrost remote` 命令之前，Agent **必须**先确认本机（caller 侧）的 `bifrost` CLI 可用。流程如下：
+
+```bash
+# 1. 检查 bifrost 是否已安装
+command -v bifrost && bifrost --version
+```
+
+- **如果已安装**：直接进入 4.1 连接流程。
+- **如果未安装**（`command not found`）：自动执行安装，无需询问用户：
+
+```bash
+# 2. 自动安装（macOS / Linux 通用）
+curl -fsSL https://raw.githubusercontent.com/nicholasgasior/gbin/master/install.sh | bash -s -- bifrost-proxy/bifrost bifrost
+
+# 3. 验证安装成功
+bifrost --version
+```
+
+- **如果安装失败**（网络不通、权限不足等）：向用户报告错误，建议手动安装或排查网络。不要在 bifrost 不可用的情况下继续后续步骤。
+
+> **注意**：此自检仅针对 caller（本机），不涉及目标机。目标机的安装由用户自行完成（参见第二节）。
+
 ### 4.1 连接（`conn`）
 
 先看本地有没有已保存连接；有就直接查询。没有再走 SSH key / pair code：
