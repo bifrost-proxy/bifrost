@@ -1891,6 +1891,7 @@ impl RemoteInvokeWorker {
                 expires_at: None,
                 reason: Some("relay_not_verified".to_string()),
                 caller_fingerprint: None,
+                ssh_key_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
                 file_access: None,
@@ -1909,6 +1910,7 @@ impl RemoteInvokeWorker {
                     expires_at: None,
                     reason: Some("ssh_key_not_found".to_string()),
                     caller_fingerprint: None,
+                    ssh_key_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
                     file_access: None,
@@ -1925,6 +1927,7 @@ impl RemoteInvokeWorker {
                     expires_at: None,
                     reason: Some("ssh_key_store_unavailable".to_string()),
                     caller_fingerprint: None,
+                    ssh_key_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
                     file_access: None,
@@ -1942,6 +1945,7 @@ impl RemoteInvokeWorker {
                 expires_at: None,
                 reason: Some("ssh_key_not_found".to_string()),
                 caller_fingerprint: None,
+                ssh_key_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
                 file_access: None,
@@ -1958,6 +1962,7 @@ impl RemoteInvokeWorker {
                 expires_at: None,
                 reason: Some("ssh_key_fingerprint_mismatch".to_string()),
                 caller_fingerprint: None,
+                ssh_key_fingerprint: None,
                 grant_mode: None,
                 grant_scope: None,
                 file_access: None,
@@ -1979,6 +1984,7 @@ impl RemoteInvokeWorker {
                         expires_at: None,
                         reason: Some("invalid_caller_ephemeral_pub".to_string()),
                         caller_fingerprint: None,
+                        ssh_key_fingerprint: None,
                         grant_mode: None,
                         grant_scope: None,
                         file_access: None,
@@ -1998,6 +2004,7 @@ impl RemoteInvokeWorker {
                             .to_string(),
                     ),
                     caller_fingerprint: None,
+                    ssh_key_fingerprint: None,
                     grant_mode: None,
                     grant_scope: None,
                     file_access: None,
@@ -2009,6 +2016,13 @@ impl RemoteInvokeWorker {
         let grant_id = uuid::Uuid::new_v4().to_string();
         let grant_mode = GrantMode::Permanent;
         let expires_at = None;
+        let caller_fingerprint = event
+            .caller_info
+            .as_ref()
+            .map(|info| info.fingerprint.trim())
+            .filter(|fingerprint| !fingerprint.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| active_key.record.ssh_key_fingerprint.clone());
         let shell_grant = shell_grant_provision(None, None, None, None, None).unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed for ssh connect, fallback to remote_query");
             default_query_grant_provision()
@@ -2017,7 +2031,7 @@ impl RemoteInvokeWorker {
         let grant_info = GrantInfo {
             grant_id: grant_id.clone(),
             client_instance_id: self.identity.instance_id.clone(),
-            caller_fingerprint: active_key.record.ssh_key_fingerprint.clone(),
+            caller_fingerprint: caller_fingerprint.clone(),
             caller_display_name: event
                 .caller_info
                 .as_ref()
@@ -2074,7 +2088,8 @@ impl RemoteInvokeWorker {
             grant_id: Some(grant_id),
             expires_at,
             reason: None,
-            caller_fingerprint: Some(active_key.record.ssh_key_fingerprint),
+            caller_fingerprint: Some(caller_fingerprint),
+            ssh_key_fingerprint: Some(active_key.record.ssh_key_fingerprint),
             grant_mode: Some(grant_mode),
             grant_scope: Some(shell_grant.grant_scope),
             file_access: Some(shell_grant.file_access),
@@ -3320,6 +3335,7 @@ fn shell_grant_provision(
             FileAccessScope::ReadWrite
         }
         GrantScope::RemoteQuery => FileAccessScope::None,
+        GrantScope::RemotePowerMgmt => FileAccessScope::None,
     });
 
     let store = RemoteShellStore::new()?;
@@ -3371,6 +3387,7 @@ fn updated_shell_grant_provision(
             FileAccessScope::ReadWrite
         }
         GrantScope::RemoteQuery => existing.file_access,
+        GrantScope::RemotePowerMgmt => FileAccessScope::None,
     });
     if desired_scope == GrantScope::RemoteQuery {
         let mut provision = default_query_grant_provision();
@@ -3659,8 +3676,12 @@ fn recover_grant_info_from_call_open(
         .and_then(|ci| ci.get("display_name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let active_ssh_key =
-        active_ssh_key.filter(|record| record.ssh_key_fingerprint == caller_fingerprint);
+    let ssh_key_fingerprint = data.get("ssh_key_fingerprint").and_then(|v| v.as_str());
+    let active_ssh_key = active_ssh_key.filter(|record| {
+        ssh_key_fingerprint
+            .map(|fingerprint| record.ssh_key_fingerprint == fingerprint)
+            .unwrap_or_else(|| record.ssh_key_fingerprint == caller_fingerprint)
+    });
     let grant_scope: GrantScope = data
         .get("grant_scope")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -4903,7 +4924,8 @@ mod tests {
             last_caller_info: None,
         };
         let payload = serde_json::json!({
-            "caller_fingerprint": "ssh-fp",
+            "caller_fingerprint": "caller-random-fp",
+            "ssh_key_fingerprint": "ssh-fp",
             "caller_ephemeral_pub": "caller-epk",
             "client_ephemeral_pub": "client-epk"
         });
@@ -4917,6 +4939,7 @@ mod tests {
         );
 
         assert_eq!(grant.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(grant.caller_fingerprint, "caller-random-fp");
         assert_eq!(grant.file_access, FileAccessScope::ReadWrite);
         assert_eq!(grant.ssh_key_fingerprint.as_deref(), Some("ssh-fp"));
         assert!(scope_allows_command(

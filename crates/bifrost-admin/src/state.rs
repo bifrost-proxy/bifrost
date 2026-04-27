@@ -118,6 +118,8 @@ pub struct AdminState {
     pub sync_manager: Option<SharedSyncManager>,
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
+    /// Keep-awake manager; None if not initialized (e.g. in tests).
+    pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
     remote_invoke_worker:
         parking_lot::RwLock<Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
@@ -171,6 +173,7 @@ impl AdminState {
             sync_manager: None,
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
+            keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
@@ -1050,6 +1053,50 @@ impl AdminState {
             self.port(),
         );
         *self.badge_rules_cache.write() = json;
+    }
+    pub fn with_keepawake_manager(mut self, mgr: bifrost_power::SharedKeepAwakeManager) -> Self {
+        self.keepawake_manager = Some(mgr);
+        self
+    }
+
+    pub fn ensure_keepawake_manager_installed(mut self) -> Self {
+        if self.keepawake_manager.is_some() {
+            return self;
+        }
+        let initial_mode: bifrost_power::Mode =
+            match self.config_manager.as_ref().and_then(|cm| cm.try_config()) {
+                Some(c) => c.keepawake.mode.parse().unwrap_or_default(),
+                None => bifrost_power::Mode::default(),
+            };
+        let persister: std::sync::Arc<dyn bifrost_power::ModePersister> =
+            match self.config_manager.clone() {
+                Some(cm) => std::sync::Arc::new(ConfigManagerModePersister { cm }),
+                None => std::sync::Arc::new(bifrost_power::NoopPersister),
+            };
+        self.keepawake_manager = Some(bifrost_power::KeepAwakeManager::new(
+            initial_mode,
+            persister,
+        ));
+        self
+    }
+}
+
+struct ConfigManagerModePersister {
+    cm: bifrost_storage::SharedConfigManager,
+}
+
+impl bifrost_power::ModePersister for ConfigManagerModePersister {
+    fn persist(&self, mode: bifrost_power::Mode) -> std::result::Result<(), String> {
+        let cm = self.cm.clone();
+        let mode_str = mode.as_str().to_string();
+        tokio::spawn(async move {
+            let _ = cm
+                .update_config(|c| {
+                    c.keepawake.mode = mode_str;
+                })
+                .await;
+        });
+        Ok(())
     }
 }
 

@@ -53,6 +53,8 @@ pub enum GrantScope {
     RemoteShellExec,
     #[serde(rename = "remote_shell_interactive")]
     RemoteShellInteractive,
+    #[serde(rename = "remote_power_mgmt")]
+    RemotePowerMgmt,
 }
 
 impl GrantScope {
@@ -64,6 +66,7 @@ impl GrantScope {
             (_, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
+                | (Self::RemotePowerMgmt, CommandKind::PowerMgmt)
         )
     }
 }
@@ -99,6 +102,7 @@ impl FileAccessScope {
     pub fn default_for(scope: GrantScope) -> Self {
         match scope {
             GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => Self::ReadWrite,
+            GrantScope::RemotePowerMgmt => Self::None,
             GrantScope::RemoteQuery => Self::None,
         }
     }
@@ -125,6 +129,8 @@ pub enum CommandKind {
     ShellExec,
     #[serde(rename = "file")]
     File,
+    #[serde(rename = "power.mgmt")]
+    PowerMgmt,
 }
 
 impl CommandKind {
@@ -133,6 +139,7 @@ impl CommandKind {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
             Self::File => "file",
+            Self::PowerMgmt => "power.mgmt",
         }
     }
 }
@@ -389,6 +396,7 @@ impl RemoteCommand {
             CommandKind::QueryReadonly => "query.readonly",
             CommandKind::ShellExec => "shell.exec",
             CommandKind::File => "file",
+            CommandKind::PowerMgmt => "power.mgmt",
         }
     }
 
@@ -1160,6 +1168,8 @@ pub struct SshConnectResultRequest {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_mode: Option<GrantMode>,
     #[serde(skip_serializing_if = "Option::is_none")]

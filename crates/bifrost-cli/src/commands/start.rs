@@ -1162,6 +1162,7 @@ pub fn run_foreground(
                 .with_ca_cert_path(ca_cert_path)
                 .with_system_proxy_manager_shared(system_proxy_manager.clone())
                 .with_config_manager_shared(shared_config_manager.clone())
+                .ensure_keepawake_manager_installed()
                 .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                 .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
                 .with_binary_traffic_performance_mode(
@@ -1874,6 +1875,7 @@ pub fn run_daemon(
                         .with_ca_cert_path(ca_cert_path)
                         .with_system_proxy_manager_shared(system_proxy_manager.clone())
                         .with_config_manager_shared(shared_config_manager.clone())
+                        .ensure_keepawake_manager_installed()
                         .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                         .with_app_icon_cache(app_icon_cache)
                         .with_script_manager(script_manager)

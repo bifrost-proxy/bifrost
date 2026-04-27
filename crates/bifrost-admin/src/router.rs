@@ -18,6 +18,7 @@ use crate::handlers::{
     group_rules::handle_group_rules,
     metrics::handle_metrics,
     notification::handle_notification,
+    power::handle_power,
     proxy::handle_proxy,
     remote_invoke::handle_remote_invoke,
     replay::handle_replay,
@@ -109,6 +110,8 @@ impl AdminRouter {
             handle_traffic(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/metrics") {
             handle_metrics(req, state, path).await
+        } else if path.starts_with("/api/power") {
+            handle_power(req, state, path).await
         } else if path.starts_with("/api/system") {
             handle_system(req, state, path).await
         } else if path.starts_with("/api/values") {

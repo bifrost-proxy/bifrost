@@ -19,7 +19,7 @@ pub mod mode;
 
 mod platform;
 
-pub use manager::{KeepAwakeManager, SharedKeepAwakeManager};
+pub use manager::{KeepAwakeManager, ModePersister, NoopPersister, SharedKeepAwakeManager};
 pub use mode::{Mode, ParseModeError};
 pub use platform::{is_on_battery, PlatformSupport};
 

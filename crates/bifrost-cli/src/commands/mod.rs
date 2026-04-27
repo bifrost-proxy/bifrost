@@ -6,6 +6,7 @@ mod completions;
 pub(crate) mod config;
 mod group;
 mod install_skill;
+pub mod keepawake;
 mod metrics;
 pub mod remote;
 mod remote_grant;

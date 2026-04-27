@@ -56,6 +56,7 @@ pub struct RemoteInvokeExecutor {
     admin_port: u16,
     http: reqwest::Client,
     query_service: Option<AdminQueryService>,
+    keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,12 +230,14 @@ impl RemoteInvokeExecutor {
             admin_port,
             http,
             query_service: None,
+            keepawake_manager: None,
         }
     }
 
     pub fn new_with_state(admin_host: &str, admin_port: u16, state: SharedAdminState) -> Self {
         let mut executor = Self::new(admin_host, admin_port);
-        executor.query_service = Some(AdminQueryService::new(state));
+        executor.query_service = Some(AdminQueryService::new(state.clone()));
+        executor.keepawake_manager = state.keepawake_manager.clone();
         executor
     }
 
@@ -252,6 +255,12 @@ impl RemoteInvokeExecutor {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        // Auto-trigger keep-awake on every remote call (all kinds, including
+        // read-only). Manager internally decides whether to acquire based
+        // on mode; on non-macOS this is a cheap no-op.
+        if let Some(mgr) = &self.keepawake_manager {
+            mgr.on_remote_call();
+        }
         let start = Instant::now();
         let transport_validation = match command.query.as_ref() {
             Some(query) => self.validate_query_transport_kind(command.kind, query),
@@ -288,6 +297,10 @@ impl RemoteInvokeExecutor {
                 }
                 super::types::CommandKind::File => {
                     let body = self.execute_file_op(command).await?;
+                    self.emit_stdout(&mut on_stdout, body).await
+                }
+                super::types::CommandKind::PowerMgmt => {
+                    let body = self.execute_power_op(command).await?;
                     self.emit_stdout(&mut on_stdout, body).await
                 }
             },
@@ -331,6 +344,71 @@ impl RemoteInvokeExecutor {
                     ..Default::default()
                 })
             }
+        }
+    }
+
+    /// Dispatch a remote `power.mgmt` command against this executor's
+    /// keep-awake manager. Returns a JSON string for the response body.
+    ///
+    /// Supported commands:
+    /// - `status`                    — return full Status
+    /// - `on`                        — activate assertion (one-shot)
+    /// - `off`                       — release assertion (one-shot)
+    /// - `set_mode` (args: {"mode":".."}) — change mode
+    async fn execute_power_op(&self, command: &RemoteCommand) -> Result<String> {
+        let Some(mgr) = self.keepawake_manager.clone() else {
+            return Err(BifrostError::Config(
+                "keepawake manager not initialized on this host".to_string(),
+            ));
+        };
+        let cmd = command.command.as_str();
+        match cmd {
+            "status" => {
+                let st = mgr.status();
+                serde_json::to_string(&st)
+                    .map_err(|e| BifrostError::Config(format!("serialize status: {e}")))
+            }
+            "on" => {
+                mgr.activate_once()
+                    .map_err(|e| BifrostError::Config(format!("activate: {e}")))?;
+                let st = mgr.status();
+                serde_json::to_string(&st)
+                    .map_err(|e| BifrostError::Config(format!("serialize status: {e}")))
+            }
+            "off" => {
+                mgr.release_once()
+                    .map_err(|e| BifrostError::Config(format!("release: {e}")))?;
+                let st = mgr.status();
+                serde_json::to_string(&st)
+                    .map_err(|e| BifrostError::Config(format!("serialize status: {e}")))
+            }
+            "set_mode" => {
+                #[derive(serde::Deserialize)]
+                struct Args {
+                    mode: String,
+                }
+                let args: Args = command
+                    .args_json
+                    .as_deref()
+                    .ok_or_else(|| BifrostError::Config("missing args".to_string()))
+                    .and_then(|s| {
+                        serde_json::from_str(s).map_err(|e| BifrostError::Config(e.to_string()))
+                    })?;
+                let mode: bifrost_power::Mode =
+                    args.mode
+                        .parse()
+                        .map_err(|e: bifrost_power::ParseModeError| {
+                            BifrostError::Config(e.to_string())
+                        })?;
+                mgr.set_mode(mode)
+                    .map_err(|e| BifrostError::Config(format!("set_mode: {e}")))?;
+                let st = mgr.status();
+                serde_json::to_string(&st)
+                    .map_err(|e| BifrostError::Config(format!("serialize status: {e}")))
+            }
+            other => Err(BifrostError::Config(format!(
+                "unknown power command: {other}"
+            ))),
         }
     }
 
