@@ -1526,7 +1526,8 @@ export default function RemoteInvokeTab() {
     try {
       const payload = await getRemoteInvokeSshPrivateKey();
       presentSecretPayload(payload, "downloaded");
-      message.success("SSH key file loaded");
+      const copied = await copyToClipboard(payload.bifrost_key_file);
+      message.success(copied ? "Key file copied" : "SSH key file loaded");
     } catch (e) {
       message.error(
         e instanceof Error ? e.message : "Failed to fetch key file",
@@ -1821,9 +1822,10 @@ export default function RemoteInvokeTab() {
                           <Button
                             size="small"
                             icon={<CopyOutlined />}
-                            onClick={() => {
-                              copyToClipboard(sshKey.device_code);
-                              message.success("Device code copied");
+                            onClick={async () => {
+                              const ok = await copyToClipboard(sshKey.device_code);
+                              if (ok) message.success("Device code copied");
+                              else message.error("Copy failed");
                             }}
                           >
                             Copy
@@ -4207,10 +4209,11 @@ export default function RemoteInvokeTab() {
               <Button
                 size="small"
                 icon={<CopyOutlined />}
-                onClick={() => {
+                onClick={async () => {
                   if (!secretModal?.payload.bifrost_key_file) return;
-                  copyToClipboard(secretModal.payload.bifrost_key_file);
-                  message.success("Key file copied");
+                  const ok = await copyToClipboard(secretModal.payload.bifrost_key_file);
+                  if (ok) message.success("Key file copied");
+                  else message.error("Copy failed");
                 }}
               >
                 Copy
