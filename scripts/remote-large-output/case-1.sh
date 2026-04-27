@@ -37,7 +37,7 @@ echo "[case-1] expected sha256=$EXPECTED_SHA bytes=$CASE_1_BYTES"
 # The remote must have a Shell Access policy allowing bash invocation of
 # SRC_SCRIPT. For CI the script is copied to the target via scp or placed
 # in a shared path; for local verification the same path works.
-"$BIFROST_BIN" remote command exec \
+"$BIFROST_BIN" remote exec \
   --stream \
   --output-file "$OUT_FILE" \
   --timeout-ms 1800000 \

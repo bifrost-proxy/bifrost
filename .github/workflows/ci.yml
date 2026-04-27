@@ -50,6 +50,14 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
 
+  cli-legacy-check:
+    name: CLI Legacy Pattern Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for legacy `bifrost remote` CLI patterns
+        run: bash scripts/ci/check-remote-cli-legacy.sh
+
   clippy:
     name: Rust Clippy Check
     runs-on: ubuntu-latest

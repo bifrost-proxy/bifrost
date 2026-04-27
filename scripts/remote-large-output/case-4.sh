@@ -25,7 +25,7 @@ chmod +x "$SRC"
 
 EXPECTED_SHA="$(bash "$SRC" | shasum -a 256 | awk '{print $1}')"
 
-"$BIFROST_BIN" remote command exec \
+"$BIFROST_BIN" remote exec \
   --stream \
   --output-file "$OUT" \
   --timeout-ms 600000 \

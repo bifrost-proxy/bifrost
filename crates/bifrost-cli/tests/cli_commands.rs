@@ -100,15 +100,15 @@ fn remote_command_exec_help_lists_shell_exec_options() {
     );
     assert!(
         help.contains("--env"),
-        "remote command exec help should contain --env"
+        "remote exec help should contain --env"
     );
     assert!(
         help.contains("--timeout-ms"),
-        "remote command exec help should contain --timeout-ms"
+        "remote exec help should contain --timeout-ms"
     );
     assert!(
         help.contains("--shell-text"),
-        "remote command exec help should contain --shell-text"
+        "remote exec help should contain --shell-text"
     );
 }
 
@@ -129,7 +129,7 @@ fn remote_command_exec_parses_shell_text_mode() {
         "--shell-text",
         "printf hello",
     ])
-    .expect("remote command exec --shell-text should parse");
+    .expect("remote exec --shell-text should parse");
 
     match cli.command.expect("command should exist") {
         Commands::Remote { action, .. } => match action {
@@ -166,7 +166,7 @@ fn remote_command_exec_parses_argv_after_double_dash() {
         "hello",
         "--flag",
     ])
-    .expect("remote command exec argv mode should parse");
+    .expect("remote exec argv mode should parse");
 
     match cli.command.expect("command should exist") {
         Commands::Remote { action, .. } => match action {
@@ -1303,7 +1303,7 @@ fn remote_command_exec_parses_streaming_flags() {
         "--shell-text",
         "echo hi",
     ])
-    .expect("remote command exec streaming flags should parse");
+    .expect("remote exec streaming flags should parse");
 
     match cli.command.expect("command should exist") {
         Commands::Remote { action, .. } => match action {

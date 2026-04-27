@@ -320,7 +320,7 @@ pair_caller() {
         exit 1
     }
 
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$pair_code" --relay-url "$RELAY_URL" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$pair_code" --relay-url "$RELAY_URL" \
         >"$CALLER_CONNECT_LOG" 2>&1 &
     CALLER_CONNECT_PID=$!
 
@@ -466,7 +466,7 @@ test_remote_search_formats_and_streaming() {
 
     stream_log="$(mktemp)"
     capture_tty_output "$stream_log" env CI=1 BIFROST_DATA_DIR="$CALLER_DATA_DIR" \
-        "$BIFROST_BIN" remote search "$SEARCH_MARKER" --format table \
+        "$BIFROST_BIN" remote traffic search "$SEARCH_MARKER" --format table \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" || true
     if grep -qaE "Searching\\.{3}|Found [0-9]+ matches|${SEARCH_MARKER}" "$stream_log"; then
         pass "remote search emits streaming progress before completion"

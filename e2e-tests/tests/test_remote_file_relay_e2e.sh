@@ -218,7 +218,7 @@ pair_and_upgrade_grant() {
     assert_not_empty "$pair_code" "pair_code 不应为空" || return 1
 
     CALLER_CONNECT_LOG="$(mktemp)"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$pair_code" --relay-url "$RELAY_URL" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$pair_code" --relay-url "$RELAY_URL" \
         >"$CALLER_CONNECT_LOG" 2>&1 &
     CALLER_CONNECT_PID=$!
 

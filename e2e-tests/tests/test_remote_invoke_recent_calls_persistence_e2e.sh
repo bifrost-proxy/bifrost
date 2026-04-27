@@ -207,7 +207,7 @@ assert_status "200" "$HTTP_STATUS" "进入 discovery 应返回 200"
 PAIR_CODE="$(echo "$HTTP_BODY" | jq -r '.session.pair_code // ""')"
 assert_not_empty "$PAIR_CODE" "pair_code 不应为空"
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
 CALLER_CONNECT_PID=$!
 
 PAIRING_ID=""
@@ -240,7 +240,7 @@ if [[ "$CONNECT_OK" -ne 1 ]]; then
     exit 1
 fi
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" >"$STATUS_LOG" 2>&1
 
