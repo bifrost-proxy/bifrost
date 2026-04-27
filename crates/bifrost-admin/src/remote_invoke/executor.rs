@@ -507,7 +507,12 @@ impl RemoteInvokeExecutor {
             .or(params.grant_id.clone())
             .unwrap_or_default();
         let store = super::file_policy_store::FileAccessPolicyStore::load_default();
-        let policy = store.resolve(&grant_id, cwd);
+        let policy = store.resolve(
+            &grant_id,
+            command.caller_fingerprint.as_deref(),
+            command.ssh_fingerprint.as_deref(),
+            cwd,
+        );
 
         let default_path = ".".to_string();
         let requested_path = match file_op_name {
@@ -2048,7 +2053,7 @@ impl RemoteInvokeExecutor {
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(BifrostError::Config(format!(
-                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote command exec -- <program> [args...]' for argv execution.",
+                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote exec -- <program> [args...]' for argv execution.",
                 policy.policy_id,
                 allowed_modes,
                 shell_exec_mode_label(&exec_mode)

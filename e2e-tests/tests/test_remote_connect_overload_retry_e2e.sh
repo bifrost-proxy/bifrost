@@ -179,9 +179,9 @@ TEST_DATA_DIR="$(mktemp -d "${ROOT_DIR}/.bifrost-e2e-remote-connect-overload.XXX
 start_mock_relay
 
 log "Case 1: transient overload should retry and eventually connect"
-SUCCESS_OUTPUT="$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" remote connect 994430 --relay-url "$RELAY_URL" 2>&1)"
+SUCCESS_OUTPUT="$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" remote conn up 994430 --relay-url "$RELAY_URL" 2>&1)"
 SUCCESS_EXIT=$?
-assert_status "0" "$SUCCESS_EXIT" "transient overload 后 remote connect 应成功" || exit 1
+assert_status "0" "$SUCCESS_EXIT" "transient overload 后 remote conn up 应成功" || exit 1
 assert_body_contains "Relay is temporarily busy, retrying pairing" "$SUCCESS_OUTPUT" "CLI 应提示正在重试" || exit 1
 assert_body_contains "✓ Connected! Authorization granted" "$SUCCESS_OUTPUT" "重试后应连接成功" || exit 1
 
@@ -193,16 +193,16 @@ assert_body_contains "client-retry-ok-123456" "$(cat "$CONNECTIONS_FILE")" "成�
 
 log "Case 2: persistent overload should stop after limited retries with actionable error"
 set +e
-FAIL_OUTPUT="$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" remote connect 994431 --relay-url "$RELAY_URL" 2>&1)"
+FAIL_OUTPUT="$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" remote conn up 994431 --relay-url "$RELAY_URL" 2>&1)"
 FAIL_EXIT=$?
 set -e
 if [[ "$FAIL_EXIT" -eq 0 ]]; then
-    _log_fail "persistent overload 后 remote connect 应失败" "non-zero exit" "0"
+    _log_fail "persistent overload 后 remote conn up 应失败" "non-zero exit" "0"
     exit 1
 fi
-_log_pass "persistent overload 后 remote connect 返回非零退出码"
+_log_pass "persistent overload 后 remote conn up 返回非零退出码"
 assert_body_contains "pairing service is temporarily busy" "$FAIL_OUTPUT" "CLI 应输出可行动的 overload 提示" || exit 1
-assert_body_contains "bifrost remote connect <pair-code>" "$FAIL_OUTPUT" "CLI 应提示稍后重试 connect" || exit 1
+assert_body_contains "bifrost remote conn up <pair-code>" "$FAIL_OUTPUT" "CLI 应提示稍后重试 connect" || exit 1
 
 ATTEMPTS_994431="$(grep -c 'pair_code=994431' "$SERVER_LOG" || true)"
 assert_body_equals "4" "$ATTEMPTS_994431" "persistent overload 场景应限制为 4 次 start_pairing 尝试" || exit 1
@@ -211,4 +211,4 @@ if [[ "$FAILED_ASSERTIONS" -gt 0 ]]; then
     exit 1
 fi
 
-echo "All remote connect overload retry assertions passed."
+echo "All remote conn up overload retry assertions passed."

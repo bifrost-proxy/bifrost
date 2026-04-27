@@ -153,6 +153,45 @@
 
 ---
 
+### TC-PWS-07：Replay WebSocket E2E 启动隔离与诊断回归
+
+**前置条件**：
+- 已执行 `bifrost status`，确认正式代理端口为 `9900`，本用例不得使用该端口作为测试代理端口。
+- 已存在可执行的 `target/release/bifrost` 或先执行 `cargo build --release --bin bifrost`。
+
+**操作步骤**：
+1. 执行以下命令，使用隔离端口和临时数据目录运行 replay WebSocket shell E2E：
+   ```bash
+   env HTTP_PROXY=http://127.0.0.1:9900 \
+     HTTPS_PROXY=http://127.0.0.1:9900 \
+     NO_PROXY=127.0.0.1,localhost \
+     PROXY_HOST=127.0.0.1 \
+     PROXY_PORT=18881 \
+     ADMIN_HOST=127.0.0.1 \
+     ADMIN_PORT=18881 \
+     WS_HOST=127.0.0.1 \
+     WS_PORT=18882 \
+     WSS_PORT=18883 \
+     BIFROST_BIN=target/release/bifrost \
+     bash e2e-tests/tests/test_replay_websocket_frames.sh
+   ```
+2. 检查脚本输出中包含 replay WS/WSS mock 服务启动端口、Bifrost 测试代理端口和临时数据目录。
+3. 检查脚本最终结果行。
+
+**预期结果**：
+- 脚本不使用 `9900` 作为测试代理端口，启动命令包含 `--no-system-proxy`。
+- 如果 mock 端口被占用，脚本会打印端口重分配信息，并继续使用新的空闲端口生成 replay URL。
+- 如果 WS/WSS mock 或 Bifrost 启动失败，脚本会输出对应日志 tail，而不是静默退出为 unknown failure。
+- 正常环境下最终输出 `Replay WebSocket E2E Results: PASSED=9 FAILED=0`。
+
+**本轮执行记录（2026-04-27）**：
+- 先执行 `bifrost status`，确认正式代理运行在 `0.0.0.0:9900`；本用例使用测试代理端口 `18881`，未修改系统代理。
+- 执行上述命令后，脚本打印 `Starting replay WS server on 127.0.0.1:18882`、`Starting replay WSS server on 127.0.0.1:18883`、`Starting Bifrost replay test proxy on 127.0.0.1:18881`。
+- Replay WebSocket echo、frames capture、ping/pong、long connection、permessage-deflate fragmentation、invalid control frame、oversize payload length、wss upstream、subprotocol negotiation 共 9 项均通过。
+- 最终结果为 `Replay WebSocket E2E Results: PASSED=9 FAILED=0`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和本地测试服务：

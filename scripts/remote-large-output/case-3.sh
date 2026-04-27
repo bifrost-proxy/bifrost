@@ -39,10 +39,10 @@ RELAY_TOKEN=""
 for ((i=1; i<=CASE_3_ITERS; i++)); do
   echo "[case-3] iter $i/$CASE_3_ITERS  current_size=$(wc -c < "$OUT_FILE" | tr -d ' ')"
   LOG="$TMPDIR/iter-$i.log"
-  ARGS=(remote command exec --stream --output-file "$OUT_FILE" --timeout-ms 600000
+  ARGS=(remote exec --stream --output-file "$OUT_FILE" --timeout-ms 600000
         --shell-text "bash $SRC_SCRIPT")
   if [[ -n "$CALL_ID" ]]; then
-    ARGS=(remote command exec --stream --output-file "$OUT_FILE" --timeout-ms 600000
+    ARGS=(remote exec --stream --output-file "$OUT_FILE" --timeout-ms 600000
           --resume-call-id "$CALL_ID" --resume-relay-token "$RELAY_TOKEN"
           --shell-text "bash $SRC_SCRIPT")
   fi

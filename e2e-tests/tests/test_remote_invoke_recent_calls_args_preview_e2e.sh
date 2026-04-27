@@ -102,6 +102,7 @@ RELAY_DATA_DIR="$(mktemp -d)"
 CALLER_CONNECT_LOG="$(mktemp)"
 SEARCH_LOG="$(mktemp)"
 LONG_SEARCH_LOG="$(mktemp)"
+GRANT_LIST_LOG="$(mktemp)"
 MOCK_SERVER_LOG="$(mktemp)"
 RELAY_PID=""
 CALLER_CONNECT_PID=""
@@ -139,7 +140,7 @@ cleanup() {
         wait "$RELAY_PID" 2>/dev/null || true
     fi
     rm -rf "$BIFROST_DATA_DIR" "$CALLER_DATA_DIR" "$RELAY_DATA_DIR"
-    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG" "$LONG_SEARCH_LOG" "$MOCK_SERVER_LOG"
+    rm -f "$RELAY_LOG" "$CALLER_CONNECT_LOG" "$SEARCH_LOG" "$LONG_SEARCH_LOG" "$GRANT_LIST_LOG" "$MOCK_SERVER_LOG"
 }
 trap cleanup EXIT
 
@@ -246,7 +247,7 @@ assert_status "200" "$HTTP_STATUS" "进入 discovery 应返回 200"
 PAIR_CODE="$(echo "$HTTP_BODY" | jq -r '.session.pair_code // ""')"
 assert_not_empty "$PAIR_CODE" "pair_code 不应为空"
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
 CALLER_CONNECT_PID=$!
 
 PAIRING_ID=""
@@ -275,7 +276,19 @@ for _ in $(seq 1 30); do
 done
 CALLER_CONNECT_PID=""
 if [[ "$CONNECT_OK" -ne 1 ]]; then
-    _log_fail "remote connect 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
+    _log_fail "remote conn up 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
+    exit 1
+fi
+
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+assert_status "200" "$HTTP_STATUS" "执行命令前读取 Grants API 应返回 200"
+GRANT_ID="$(echo "$HTTP_BODY" | jq -r '.grants[0].grant_id // ""')"
+FIRST_CONNECTED_AT="$(echo "$HTTP_BODY" | jq -r '.grants[0].first_connected_at // .grants[0].first_authorized_at // empty')"
+PRE_COMMAND_AT="$(echo "$HTTP_BODY" | jq -r '.grants[0].last_command_at // ""')"
+assert_not_empty "$GRANT_ID" "grant_id 不应为空"
+assert_not_empty "$FIRST_CONNECTED_AT" "first_connected_at 不应为空"
+if [[ -n "$PRE_COMMAND_AT" ]]; then
+    _log_fail "执行首个命令前 last_command_at 应为空" "empty" "$PRE_COMMAND_AT"
     exit 1
 fi
 
@@ -295,12 +308,12 @@ if [[ "$TRAFFIC_READY" -ne 1 ]]; then
 fi
 sleep 2
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$REMOTE_MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$REMOTE_MARKER" \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --max-results 5 \
     --max-scan 50 >"$SEARCH_LOG" 2>&1 || {
-    log "remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "remote traffic search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
     log "search log: $(cat "$SEARCH_LOG")"
 }
 sleep 1
@@ -337,6 +350,39 @@ LATEST_SEARCH_CALL_ID="$(echo "$HTTP_BODY" | jq -r --arg marker "$REMOTE_MARKER"
 ')"
 assert_not_empty "$LATEST_SEARCH_CALL_ID" "search.stream 的 call_id 不应为空"
 
+http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+assert_status "200" "$HTTP_STATUS" "执行命令后读取 Grants API 应返回 200"
+POST_COMMAND_FIRST_CONNECTED_AT="$(echo "$HTTP_BODY" | jq -r --arg grant_id "$GRANT_ID" '
+    (.grants // [])
+    | map(select(.grant_id == $grant_id))
+    | .[0].first_connected_at // .[0].first_authorized_at // empty
+')"
+POST_COMMAND_LAST_COMMAND_AT="$(echo "$HTTP_BODY" | jq -r --arg grant_id "$GRANT_ID" '
+    (.grants // [])
+    | map(select(.grant_id == $grant_id))
+    | .[0].last_command_at // empty
+')"
+assert_not_empty "$POST_COMMAND_FIRST_CONNECTED_AT" "执行后 first_connected_at 不应为空"
+assert_not_empty "$POST_COMMAND_LAST_COMMAND_AT" "执行后 last_command_at 不应为空"
+if [[ "$POST_COMMAND_FIRST_CONNECTED_AT" != "$FIRST_CONNECTED_AT" ]]; then
+    _log_fail "first_connected_at 执行命令后不应变化" "$FIRST_CONNECTED_AT" "$POST_COMMAND_FIRST_CONNECTED_AT"
+    exit 1
+fi
+if [[ "$POST_COMMAND_LAST_COMMAND_AT" -lt "$FIRST_CONNECTED_AT" ]]; then
+    _log_fail "last_command_at 不应早于 first_connected_at" ">= $FIRST_CONNECTED_AT" "$POST_COMMAND_LAST_COMMAND_AT"
+    exit 1
+fi
+_log_pass "TC-RI-GRANTS-TIME-01: Grants API 展示首次连接时间与最近一次执行命令时间"
+
+"$BIFROST_BIN" -p "$ADMIN_PORT" setting grant list >"$GRANT_LIST_LOG" 2>&1
+if grep -Fq "first connected:" "$GRANT_LIST_LOG" \
+    && grep -Fq "last command:" "$GRANT_LIST_LOG"; then
+    _log_pass "TC-RI-GRANTS-TIME-02: CLI grant list 展示首次连接与最近命令时间"
+else
+    _log_fail "CLI grant list 缺少时间字段" "first connected + last command" "$(cat "$GRANT_LIST_LOG")"
+    exit 1
+fi
+
 if echo "$LATEST_SEARCH_MASKED_ARGS_JSON" | jq -e --arg marker "$REMOTE_MARKER" '
     .keyword == $marker
     and .max_results == 5
@@ -361,12 +407,12 @@ if ! curl -fsS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "$LONG_TRA
     exit 1
 fi
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$LONG_REMOTE_MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$LONG_REMOTE_MARKER" \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --max-results 5 \
     --max-scan 50 >"$LONG_SEARCH_LOG" 2>&1 || {
-    log "long remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "long remote traffic search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
     log "long search log: $(cat "$LONG_SEARCH_LOG")"
 }
 sleep 1

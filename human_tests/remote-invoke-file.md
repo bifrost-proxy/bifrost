@@ -259,6 +259,73 @@ SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh
 - `TC-FILE-09` 降级到 `remote_file_read` 后写入被拒绝，证明 read/write scope 边界仍生效；
 - 总结为 `Total: 56`、`Failed: 0`。
 
+### TC-6.2 回归：SSH Key 默认 File Policy 可配置且 reset 后保留
+
+**触发 Bug**：SSH Key 授权没有 pair-code 弹窗，caller 连接后虽然 shell 可用，但 file scope / file policy 需要用户手动按短 grant_id 补授；key reset 后还会回退到默认 `$HOME + 全部 ops`，导致已收窄的 roots/ops 丢失。
+
+**步骤**：
+```bash
+# 使用隔离数据目录和非 9900 端口启动管理端，禁止修改系统代理
+TEST_DIR="$(mktemp -d)"
+CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost
+BIFROST_DATA_DIR="$TEST_DIR" ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy
+
+# 创建 SSH Key，并通过 API 配置当前 SSH fingerprint 的默认 file policy
+curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key \
+  -H 'content-type: application/json' \
+  -d '{"label":"agent-default","grant_mode":"permanent","seed_policy":{"roots":["/tmp/agent-a"],"ops":["read","list"],"allow_overwrite":false,"allow_recursive_delete":false}}'
+FP="$(curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key | jq -r '.ssh_key_fingerprint')"
+curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/file-access-config \
+  -H 'content-type: application/json' \
+  -X PUT \
+  -d "{\"grant\":[{\"match\":{\"ssh_fingerprint\":\"$FP\"},\"name\":\"ssh-key:agent-default\",\"roots\":[\"/Users/eden/work/code/nextoncall/next_agent\"],\"ops\":[\"read\",\"list\",\"stat\",\"glob\",\"search\",\"hash\",\"write\",\"edit\",\"mkdir\",\"move\",\"delete\",\"apply_patch\"],\"allow_overwrite\":true,\"allow_recursive_delete\":false}]}"
+
+# reset 后确认策略迁移到新 fingerprint，roots/ops 不回退
+curl -sS -X POST http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key/reset
+NEW_FP="$(curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key | jq -r '.ssh_key_fingerprint')"
+curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/file-access-config | jq .
+```
+
+**期望**：
+- SSH Key 卡片展示 File Access 状态，并可通过 Configure 保存 `match.ssh_fingerprint` 策略；
+- `file-access.toml` 中只有新 fingerprint 的 SSH Key 策略，不保留旧 fingerprint 重复项；
+- reset 后策略 roots 仍包含 `/Users/eden/work/code/nextoncall/next_agent`；
+- reset 后策略 ops 仍包含 `write` / `edit` / `apply_patch` 等写操作；
+- Bifrost 测试实例启动命令包含 `--no-system-proxy`，且端口不是 9900。
+
+### TC-6.3 回归：SSH Key 默认 File Policy 被误删后自动恢复落盘
+
+**触发 Bug**：用户在 File Access 策略编辑器或直接编辑 `file-access.toml` 时，可能误删当前 active SSH Key 的 `match.ssh_fingerprint` 策略。缺失后远端 SSH grant 无法自动获得 file policy，需要后端在读取/保存策略时自动恢复默认策略并写回配置文件。
+
+**步骤**：
+```bash
+# 使用隔离数据目录和非 9900 端口启动管理端，禁止修改系统代理
+TEST_DIR="$(mktemp -d)"
+CARGO_TARGET_DIR=./.codex-target/ssh-file-policy-restore cargo build --bin bifrost
+BIFROST_DATA_DIR="$TEST_DIR" ./.codex-target/ssh-file-policy-restore/debug/bifrost start -p 18891 --unsafe-ssl --no-system-proxy
+
+# 创建 SSH Key 后，模拟用户误删所有 file-access grant policies
+curl -sS http://127.0.0.1:18891/_bifrost/api/remote-invoke/ssh-key \
+  -H 'content-type: application/json' \
+  -d '{"label":"agent-restore","grant_mode":"permanent","seed_policy":{"roots":["/tmp/agent-restore"],"ops":["read","list"],"allow_overwrite":false,"allow_recursive_delete":false}}'
+FP="$(curl -sS http://127.0.0.1:18891/_bifrost/api/remote-invoke/ssh-key | jq -r '.ssh_key_fingerprint')"
+curl -sS http://127.0.0.1:18891/_bifrost/api/remote-invoke/file-access-config \
+  -H 'content-type: application/json' \
+  -X PUT \
+  -d '{"grant":[]}'
+
+# GET 应返回自动恢复后的 fingerprint 策略；磁盘 file-access.toml 也必须包含它
+curl -sS http://127.0.0.1:18891/_bifrost/api/remote-invoke/file-access-config | jq .
+grep "$FP" "$TEST_DIR/file-access.toml"
+```
+
+**期望**：
+- PUT 空策略后返回的配置不为空，包含当前 `match.ssh_fingerprint`；
+- 随后的 GET 仍包含当前 `match.ssh_fingerprint`；
+- `$TEST_DIR/file-access.toml` 已落盘恢复该 fingerprint 策略；
+- 恢复策略使用默认 roots（`$HOME`）和 12 个 file ops，确保 SSH Key 连接不会卡在无 file policy 状态；
+- Bifrost 测试实例启动命令包含 `--no-system-proxy`，且端口不是 9900。
+
 ---
 
 ## 完成定义（DoD）
@@ -493,5 +560,7 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users
 | 2026-04-25 | glob 自定义 exclude | `cargo test -p bifrost-admin -- glob_custom_exclude` | PASS：build/ 被排除 |
 | 2026-04-25 | 空文件 offset | `cargo test -p bifrost-admin -- read_empty_file_with_offset_returns_empty` | PASS：total_lines=0 |
 | 2026-04-25 | TC-6.1 配对批准时 remote_file_write 不依赖 Shell Access policy | `SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh` | PASS：输出 `grant available as remote_file_write`，TC-FILE-01/19/20/09 通过，Summary 56/56 passed |
+| 2026-04-27 | TC-6.2 SSH Key 默认 File Policy 可配置且 reset 后保留 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy` + SSH key/file-access/reset API 断言 | PASS：旧 fingerprint `55a9ccae` reset 到新 fingerprint `2a018c79` 后，`file-access-config` 仅保留新 `match.ssh_fingerprint`，roots 仍为 `/Users/eden/work/code/nextoncall/next_agent`，ops 包含 `write/edit/apply_patch` |
+| 2026-04-27 | TC-6.3 SSH Key 默认 File Policy 被误删后自动恢复落盘 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy-restore cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy-restore/debug/bifrost start -p 18891 --unsafe-ssl --no-system-proxy` + `PUT {"grant":[]}` / GET / grep file-access.toml 断言 | PASS：PUT 空策略后自动恢复 fingerprint `fed9b02c`；API 返回 12 个 file ops；`file-access.toml` 已写入 `match.ssh_fingerprint` |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
 | 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |

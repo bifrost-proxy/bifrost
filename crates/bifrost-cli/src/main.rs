@@ -19,9 +19,9 @@ use commands::{
     handle_export_command, handle_group_command, handle_import_command, handle_install_skill,
     handle_metrics_command, handle_rule_command, handle_script_command, handle_sync_command,
     handle_system_proxy_command, handle_upgrade, handle_value_command, handle_whitelist_command,
-    remote, run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_clear,
-    run_traffic_get, run_traffic_list, spawn_update_check_notice, OutputFormat, SearchOptions,
-    TrafficGetOptions, TrafficListOptions,
+    remote, run_restart, run_search, run_start, run_status, run_status_tui, run_stop,
+    run_traffic_clear, run_traffic_get, run_traffic_list, spawn_update_check_notice, OutputFormat,
+    RestartOptions, SearchOptions, TrafficGetOptions, TrafficListOptions,
 };
 use process::read_runtime_port;
 
@@ -198,6 +198,17 @@ fn main() {
             )
         }
         Some(Commands::Stop) => run_stop(),
+        Some(Commands::Restart {
+            port,
+            host,
+            log_level,
+            force,
+        }) => run_restart(RestartOptions {
+            port,
+            host,
+            log_level,
+            force,
+        }),
         Some(Commands::Status { tui }) => {
             if tui {
                 run_status_tui()
@@ -297,26 +308,28 @@ fn main() {
         Some(Commands::VersionCheck) => {
             commands::handle_version_check("127.0.0.1", get_effective_port(cli.port))
         }
-        Some(Commands::Remote {
-            action,
-            relay_url,
-            client_id,
-        }) => match action {
-            cli::RemoteCommands::Shell { action } => commands::handle_remote_shell_command(*action),
-            cli::RemoteCommands::Grant { action } => commands::handle_remote_grant_command(
+        Some(Commands::Setting { action }) => match action {
+            cli::SettingCommands::Shell { action } => {
+                commands::handle_remote_shell_command(*action)
+            }
+            cli::SettingCommands::Grant { action } => commands::handle_remote_grant_command(
                 *action,
                 "127.0.0.1",
                 get_effective_port(cli.port),
             ),
-            action => {
-                let relay_url = resolve_remote_relay_url(relay_url, cli.port);
-                remote::handle_remote_command(remote::RemoteOptions {
-                    relay_url,
-                    client_id,
-                    action,
-                })
-            }
         },
+        Some(Commands::Remote {
+            action,
+            relay_url,
+            client_id,
+        }) => {
+            let relay_url = resolve_remote_relay_url(relay_url, cli.port);
+            remote::handle_remote_command(remote::RemoteOptions {
+                relay_url,
+                client_id,
+                action,
+            })
+        }
         Some(Commands::Traffic { action }) => match action {
             TrafficCommands::List {
                 limit,

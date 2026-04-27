@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PR #8 — End-to-end test matrix for bifrost remote command exec streaming.
+# PR #8 — End-to-end test matrix for bifrost remote exec streaming.
 #
 # Covers:
 #   1. 1 GiB binary stdout byte-exact verification (SHA-256)
@@ -26,7 +26,7 @@
 #   CASE_3_ITERS     kill+resume iterations for case 3 (default: 5)
 #
 # Notes on byte-exact verification:
-#   - `bifrost remote command exec --stream --output-file <path>` writes the
+#   - `bifrost remote exec --stream --output-file <path>` writes the
 #     exact bytes emitted by stdout into <path>. SHA-256 is computed on that
 #     file and compared against the producer's SHA-256.
 #

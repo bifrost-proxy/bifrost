@@ -231,11 +231,11 @@ for _ in $(seq 1 30); do
 done
 assert_equals "200" "$HTTP_CODE" "新 device_code 应能拿到 challenge"
 
-log "Use CLI remote connect --ssh-key"
+log "Use CLI remote conn up --ssh-key"
 CALLER_DATA_DIR="$(mktemp -d)"
 CLI_CONNECT_OUTPUT="$TMPDIR/cli_connect.out"
 printf '%s' "$KEY_FILE" >"$TMPDIR/cli-test.bifrost"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote connect --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
     >"$CLI_CONNECT_OUTPUT" 2>&1
 grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT"
 CALLER_CONNECTIONS_JSON="$CALLER_DATA_DIR/remote-connections.json"
@@ -284,9 +284,9 @@ KEY_AFTER_USE_JSON="$TMPDIR/key_after_use.json"
 curl -s "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" >"$KEY_AFTER_USE_JSON"
 assert_python "$KEY_AFTER_USE_JSON" 'assert obj["last_used_at"] is not None'
 
-log "Execute remote status via saved SSH connection"
+log "Execute remote conn status via saved SSH connection"
 CLI_STATUS_OUTPUT="$TMPDIR/cli_status.out"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote status --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn status --relay-url "$RELAY_URL" \
     >"$CLI_STATUS_OUTPUT" 2>&1
 python3 - "$CLI_STATUS_OUTPUT" "$CLIENT_INSTANCE_ID" <<'PY'
 import json
@@ -363,7 +363,7 @@ PY
 )"
 SEARCH_OUTPUT="$TMPDIR/search.out"
 SEARCH_STDERR="$TMPDIR/search.err"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote search "$MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic search "$MARKER" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 10 \
     >"$SEARCH_OUTPUT" 2>"$SEARCH_STDERR"
 grep -q "$MARKER" "$SEARCH_OUTPUT"

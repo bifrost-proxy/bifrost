@@ -283,7 +283,7 @@ CASE1_DIR="$TEST_ROOT/case1"
 mkdir -p "$CASE1_DIR"
 
 log "Case 1: explicit --relay-url should override running sync config"
-CASE1_OUTPUT="$(run_connect "$CASE1_DIR" --port "$RUNTIME_PORT" remote connect 881001 --relay-url "$EXPLICIT_URL")"
+CASE1_OUTPUT="$(run_connect "$CASE1_DIR" --port "$RUNTIME_PORT" remote conn up 881001 --relay-url "$EXPLICIT_URL")"
 CASE1_EXIT=$?
 assert_status "0" "$CASE1_EXIT" "explicit relay-url should succeed" || exit 1
 assert_body_contains "Connected! Authorization granted" "$CASE1_OUTPUT" "explicit relay-url should connect successfully" || exit 1
@@ -297,7 +297,7 @@ CASE2_DIR="$TEST_ROOT/case2"
 mkdir -p "$CASE2_DIR"
 
 log "Case 2: running sync config should be used when --relay-url is omitted"
-CASE2_OUTPUT="$(run_connect "$CASE2_DIR" --port "$RUNTIME_PORT" remote connect 881002)"
+CASE2_OUTPUT="$(run_connect "$CASE2_DIR" --port "$RUNTIME_PORT" remote conn up 881002)"
 CASE2_EXIT=$?
 assert_status "0" "$CASE2_EXIT" "runtime sync relay-url should succeed" || exit 1
 assert_body_contains "Connected! Authorization granted" "$CASE2_OUTPUT" "runtime sync relay-url should connect successfully" || exit 1
@@ -321,7 +321,7 @@ remote_base_url = "${CONFIG_RELAY_URL}"
 EOF
 
 log "Case 3: local config should be used when runtime sync config is unavailable"
-CASE3_OUTPUT="$(run_connect "$CASE3_DIR" --port "$RUNTIME_PORT" remote connect 881003)"
+CASE3_OUTPUT="$(run_connect "$CASE3_DIR" --port "$RUNTIME_PORT" remote conn up 881003)"
 CASE3_EXIT=$?
 assert_status "0" "$CASE3_EXIT" "configured relay-url should succeed" || exit 1
 assert_body_contains "Connected! Authorization granted" "$CASE3_OUTPUT" "configured relay-url should connect successfully" || exit 1

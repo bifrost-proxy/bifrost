@@ -130,11 +130,20 @@ const DEFAULT_MAX_BODY_PROBE_SIZE: usize = 64 * 1024;
 
 impl AdminState {
     pub fn new(port: u16) -> Self {
+        Self::new_with_rules_storage(port, RulesStorage::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(port: u16, rules_storage: RulesStorage) -> Self {
+        Self::new_with_rules_storage(port, rules_storage)
+    }
+
+    fn new_with_rules_storage(port: u16, rules_storage: RulesStorage) -> Self {
         Self {
             traffic_db_store: None,
             async_traffic_writer: None,
             metrics_collector: Arc::new(MetricsCollector::default()),
-            rules_storage: RulesStorage::default(),
+            rules_storage,
             values_storage: None,
             auth_db: None,
             access_control: None,

@@ -250,8 +250,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let auth_db_path = tmp.path().join("auth.db");
         let auth_db = AuthDb::open(&auth_db_path).expect("auth db");
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(tmp.path().join("rules")).expect("rules db");
 
-        let state = AdminState::new(19998).with_auth_db(auth_db);
+        let state = AdminState::new_for_test(19998, rules_storage).with_auth_db(auth_db);
         let state = std::sync::Arc::new(state);
         state
             .auth_db

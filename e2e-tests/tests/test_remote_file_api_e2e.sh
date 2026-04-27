@@ -67,7 +67,7 @@ test_remote_file_root_help() {
     local out
     out=$(run_bifrost remote file --help)
     local missing=""
-    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+    for sub in read list stat glob find hash write edit mkdir move delete patch; do
         if ! echo "$out" | grep -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
@@ -135,10 +135,10 @@ test_glob_help() {
     fi
 }
 
-test_search_help() {
-    header "remote file search --help has --path / --max-scan / --context-before / --context-after / --exclude"
+test_find_help() {
+    header "remote file find --help has --path / --max-scan / --context-before / --context-after / --exclude"
     local out
-    out=$(run_bifrost remote file search --help)
+    out=$(run_bifrost remote file find --help)
     if echo "$out" | grep -q -- "--path" \
        && echo "$out" | grep -q -- "--max-scan" \
        && echo "$out" | grep -q -- "--context-before" \
@@ -206,10 +206,10 @@ test_mkdir_help() {
     fi
 }
 
-test_mv_help() {
-    header "remote file mv --help accepts <FROM> <TO>"
+test_move_help() {
+    header "remote file move --help accepts <FROM> <TO>"
     local out
-    out=$(run_bifrost remote file mv --help)
+    out=$(run_bifrost remote file move --help)
     if echo "$out" | grep -qi "source\|path" \
        && echo "$out" | grep -qi "destination\|to"; then
         pass "mv --help surface ok"
@@ -219,10 +219,10 @@ test_mv_help() {
     fi
 }
 
-test_rm_help() {
-    header "remote file rm --help has --recursive"
+test_delete_help() {
+    header "remote file delete --help has --recursive"
     local out
-    out=$(run_bifrost remote file rm --help)
+    out=$(run_bifrost remote file delete --help)
     if echo "$out" | grep -q -- "--recursive"; then
         pass "rm --help has --recursive"
     else
@@ -235,10 +235,10 @@ test_rm_help() {
 #  Apply-patch
 # ---------------------------------------------------------------------------
 
-test_apply_patch_help() {
-    header "remote file apply-patch --help has --patch-file"
+test_patch_help() {
+    header "remote file patch --help has --patch-file"
     local out
-    out=$(run_bifrost remote file apply-patch --help)
+    out=$(run_bifrost remote file patch --help)
     if echo "$out" | grep -q -- "--patch-file"; then
         pass "apply-patch --help has --patch-file"
     else
@@ -254,7 +254,7 @@ test_apply_patch_help() {
 test_output_json_supported() {
     header "all twelve subcommands accept --output (human | json)"
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+    for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! echo "$out" | grep -qi -- "--output\|human\|json"; then
@@ -270,7 +270,7 @@ test_output_json_supported() {
 test_all_subcommands_have_cwd() {
     header "all twelve subcommands accept --cwd"
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+    for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! echo "$out" | grep -qi -- "--cwd"; then
@@ -322,7 +322,7 @@ test_missing_required_edit_edits_fails() {
 test_missing_required_mv_to_fails() {
     header "missing required <TO>: mv should fail"
     local out rc
-    out=$("$BIFROST_BIN" remote file mv src.txt 2>&1)
+    out=$("$BIFROST_BIN" remote file move src.txt 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
         pass "mv without <TO> correctly rejected (exit=$rc)"
@@ -334,7 +334,7 @@ test_missing_required_mv_to_fails() {
 test_missing_required_apply_patch_file_fails() {
     header "missing required --patch-file: apply-patch should fail"
     local out rc
-    out=$("$BIFROST_BIN" remote file apply-patch 2>&1)
+    out=$("$BIFROST_BIN" remote file patch 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
         pass "apply-patch without --patch-file correctly rejected (exit=$rc)"
@@ -362,7 +362,7 @@ test_missing_required_glob_pattern_fails() {
 test_missing_required_search_pattern_fails() {
     header "missing required <PATTERN>: search should fail"
     local out rc
-    out=$("$BIFROST_BIN" remote file search 2>&1)
+    out=$("$BIFROST_BIN" remote file find 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
         pass "search without pattern correctly rejected (exit=$rc)"
@@ -398,7 +398,7 @@ test_missing_required_stat_path_fails() {
 test_missing_required_rm_path_fails() {
     header "missing required <PATH>: rm should fail"
     local out rc
-    out=$("$BIFROST_BIN" remote file rm 2>&1)
+    out=$("$BIFROST_BIN" remote file delete 2>&1)
     rc=$?
     if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
         pass "rm without path correctly rejected (exit=$rc)"
@@ -456,7 +456,7 @@ test_read_offset_limit_help_description() {
 test_search_short_flags_B_A() {
     header "search --help: -B and -A short flags accepted"
     local out
-    out=$(run_bifrost remote file search --help)
+    out=$(run_bifrost remote file find --help)
     if echo "$out" | grep -qE -- "-B" \
        && echo "$out" | grep -qE -- "-A"; then
         pass "search -B / -A short flags present"
@@ -469,7 +469,7 @@ test_search_short_flags_B_A() {
 test_search_exclude_flag() {
     header "search --help: --exclude flag present"
     local out
-    out=$(run_bifrost remote file search --help)
+    out=$(run_bifrost remote file find --help)
     if echo "$out" | grep -q -- "--exclude"; then
         pass "search --exclude flag present"
     else
@@ -509,7 +509,7 @@ test_glob_exclude_flag() {
 test_no_phase_text_in_help() {
     header "no subcommand --help contains 'Phase' text"
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+    for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if echo "$out" | grep -qi "phase"; then
@@ -538,7 +538,7 @@ test_subcommand_about_descriptions() {
     local root_out
     root_out=$(run_bifrost remote file --help)
     local any_fail=0
-    for sub in read list stat glob search hash write edit mkdir mv rm apply-patch; do
+    for sub in read list stat glob find hash write edit mkdir move delete patch; do
         if ! echo "$root_out" | grep -qiE "$sub[[:space:]]"; then
             fail "subcommand $sub not visible in root help"
             any_fail=1
@@ -562,18 +562,18 @@ main() {
     test_list_help
     test_stat_help
     test_glob_help
-    test_search_help
+    test_find_help
     test_hash_help
 
     # Write
     test_write_help
     test_edit_help
     test_mkdir_help
-    test_mv_help
-    test_rm_help
+    test_move_help
+    test_delete_help
 
     # Apply-patch
-    test_apply_patch_help
+    test_patch_help
 
     # Cross-cutting
     test_output_json_supported

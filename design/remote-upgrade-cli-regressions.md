@@ -24,7 +24,6 @@
 - `remote search`
 - `remote traffic list`
 - `remote traffic get`
-- `remote traffic clear`
 
 在保留 `query: CanonicalQueryCommand` 的同时，同步生成一份稳定的 `args_json`：
 

@@ -38,7 +38,7 @@ echo "[case-2] expected sha256=$EXPECTED_SHA bytes=$EXPECTED_BYTES duration=${CA
 
 # Use --stream with RUST_LOG=debug so Reconnect frames surface in logs.
 RUST_LOG=bifrost_cli=debug,bifrost_admin=debug \
-  "$BIFROST_BIN" remote command exec \
+  "$BIFROST_BIN" remote exec \
     --stream \
     --output-file "$OUT_FILE" \
     --timeout-ms "$((CASE_2_DURATION * 2 * 1000))" \

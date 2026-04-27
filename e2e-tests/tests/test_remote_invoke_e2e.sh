@@ -377,8 +377,8 @@ assert_not_empty "$PAIR_CODE" "pair_code 不应为空"
 log "Generated pair_code: $PAIR_CODE"
 
 CALLER_CONNECT_LOG="$(mktemp)"
-log "Start bifrost remote connect in background (Caller)..."
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE" --relay-url "$RELAY_URL" \
+log "Start bifrost remote conn up in background (Caller)..."
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" \
     > "$CALLER_CONNECT_LOG" 2>&1 &
 CALLER_CONNECT_PID=$!
 
@@ -453,7 +453,7 @@ http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/discovery/exit" "{}"
 
 # Verify caller connection is healthy before proceeding to dependent tests
 CALLER_CONN_OK=1
-_VERIFY_CONN_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+_VERIFY_CONN_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
 if is_caller_conn_error "$_VERIFY_CONN_OUTPUT"; then
     CALLER_CONN_OK=0
@@ -469,15 +469,15 @@ if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
     STATUS_OUTPUT=""
     _log_warning "TC-RI-02: 跳过（caller 连接不可用）"
 else
-    STATUS_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+    STATUS_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
     if echo "$STATUS_OUTPUT" | grep -qiE "proxy_address|instance_id|platform|version"; then
-        _log_pass "TC-RI-02: remote status 返回了设备信息"
+        _log_pass "TC-RI-02: remote conn status 返回了设备信息"
     elif is_caller_conn_error "$STATUS_OUTPUT"; then
         CALLER_CONN_OK=0
         _log_warning "TC-RI-02: caller 连接失效: $(echo "$STATUS_OUTPUT" | head -1)"
     else
-        _log_fail "TC-RI-02: remote status 未返回预期的设备信息" "包含 proxy_address/instance_id" "$STATUS_OUTPUT"
+        _log_fail "TC-RI-02: remote conn status 未返回预期的设备信息" "包含 proxy_address/instance_id" "$STATUS_OUTPUT"
     fi
 fi
 
@@ -690,7 +690,7 @@ if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
     _log_warning "TC-RI-04: 跳过（caller 连接不可用）"
     _log_warning "TC-RI-04A: 跳过（caller 连接不可用）"
 else
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$REMOTE_MARKER" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$REMOTE_MARKER" \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --max-results 5 --max-scan 50 >"$SEARCH_LOG" 2>&1 &
     SEARCH_PID=$!
 
@@ -712,20 +712,20 @@ else
     rm -f "$SEARCH_LOG"
 
     if [[ "$SEARCH_EXIT" -eq 0 ]] && echo "$SEARCH_OUTPUT" | grep -q "$REMOTE_MARKER" && echo "$SEARCH_OUTPUT" | grep -qE "Found [0-9]+ match"; then
-        _log_pass "TC-RI-04: remote search 返回了目标结果"
+        _log_pass "TC-RI-04: remote traffic search 返回了目标结果"
     elif is_caller_conn_error "$SEARCH_OUTPUT"; then
         CALLER_CONN_OK=0
         _log_warning "TC-RI-04: caller 连接失效: $(echo "$SEARCH_OUTPUT" | head -1)"
     else
-        _log_fail "TC-RI-04: remote search 未返回目标结果" "包含 marker=${REMOTE_MARKER} 与 Found N matches" "$SEARCH_OUTPUT"
+        _log_fail "TC-RI-04: remote traffic search 未返回目标结果" "包含 marker=${REMOTE_MARKER} 与 Found N matches" "$SEARCH_OUTPUT"
     fi
 
     if [[ "$SEARCH_STREAM_SEEN" -eq 1 ]]; then
-        _log_pass "TC-RI-04A: remote search 输出包含流式进度"
+        _log_pass "TC-RI-04A: remote traffic search 输出包含流式进度"
     elif [[ "$CALLER_CONN_OK" -eq 0 ]]; then
         _log_warning "TC-RI-04A: 跳过（caller 连接失效）"
     else
-        _log_fail "TC-RI-04A: remote search 未输出流式进度" "输出包含 Searching..." "$SEARCH_OUTPUT"
+        _log_fail "TC-RI-04A: remote traffic search 未输出流式进度" "输出包含 Searching..." "$SEARCH_OUTPUT"
     fi
 fi
 
@@ -749,12 +749,12 @@ if [[ -z "$LATEST_SEARCH_ARGS_JSON" || "$LATEST_SEARCH_ARGS_JSON" == "null" || "
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
         _log_warning "TC-RI-04B: 跳过（命令未到达 client 侧）"
     else
-        _log_fail "TC-RI-04B: remote search 未透传 max_results/max_scan" 'args_json 包含 "max_results":5 和 "max_scan":50' "${LATEST_SEARCH_ARGS_JSON:-<empty>}"
+        _log_fail "TC-RI-04B: remote traffic search 未透传 max_results/max_scan" 'args_json 包含 "max_results":5 和 "max_scan":50' "${LATEST_SEARCH_ARGS_JSON:-<empty>}"
     fi
 elif echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_results":5' && echo "$LATEST_SEARCH_ARGS_JSON" | grep -q '"max_scan":50'; then
-    _log_pass "TC-RI-04B: remote search 将 max_results/max_scan 透传到执行端"
+    _log_pass "TC-RI-04B: remote traffic search 将 max_results/max_scan 透传到执行端"
 else
-    _log_fail "TC-RI-04B: remote search 未透传 max_results/max_scan" 'args_json 包含 "max_results":5 和 "max_scan":50' "${LATEST_SEARCH_ARGS_JSON:-<empty>}"
+    _log_fail "TC-RI-04B: remote traffic search 未透传 max_results/max_scan" 'args_json 包含 "max_results":5 和 "max_scan":50' "${LATEST_SEARCH_ARGS_JSON:-<empty>}"
 fi
 
 # =========================================================================
@@ -886,7 +886,7 @@ else
     ')
 
     CANCEL_LOG="$(mktemp)"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "httpbin" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "httpbin" \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
         --limit 500 --max-results 500 --max-scan 2000 >"$CANCEL_LOG" 2>&1 &
     CANCEL_PID=$!
@@ -986,7 +986,7 @@ PAIR_CODE_2=$(echo "$HTTP_BODY" | jq -r '.session.pair_code')
 assert_not_empty "$PAIR_CODE_2" "pair_code 不应为空"
 
 REJECT_LOG="$(mktemp)"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE_2" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE_2" --relay-url "$RELAY_URL" \
     > "$REJECT_LOG" 2>&1 &
 REJECT_PID=$!
 
@@ -1043,7 +1043,7 @@ http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/discovery/exit" "{}"
 log "=== TC-RI-06: Security - invalid pair_code ==="
 
 INVALID_CODE_LOG="$(mktemp)"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" timeout 15 "$BIFROST_BIN" remote connect "000000" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" timeout 15 "$BIFROST_BIN" remote conn up "000000" --relay-url "$RELAY_URL" \
     > "$INVALID_CODE_LOG" 2>&1 || true
 INVALID_EXIT=$?
 
@@ -1093,7 +1093,7 @@ else
     _log_fail "TC-RI-07A: 丢失 grant crypto 后 client 仍保留幽灵 grant" "0" "$GRANT_COUNT_AFTER_CRYPTO_LOSS"
 fi
 
-STATUS_AFTER_CRYPTO_LOSS=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+STATUS_AFTER_CRYPTO_LOSS=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
 
 if echo "$STATUS_AFTER_CRYPTO_LOSS" | grep -qiE "expired|revoked|connect"; then
@@ -1126,7 +1126,7 @@ PAIR_CODE_3=$(echo "$HTTP_BODY" | jq -r '.session.pair_code')
 assert_not_empty "$PAIR_CODE_3" "disconnect 回归前新的 pair_code 不应为空"
 
 CALLER_RECONNECT_LOG="$(mktemp)"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE_3" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE_3" --relay-url "$RELAY_URL" \
     > "$CALLER_RECONNECT_LOG" 2>&1 &
 CALLER_RECONNECT_PID=$!
 
@@ -1204,7 +1204,7 @@ else
     _log_fail "TC-RI-08A: 预先删除 relay grant 失败" "200/204" "status=$HTTP_STATUS body=$HTTP_BODY"
 fi
 
-DISCONNECT_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote disconnect --all \
+DISCONNECT_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn down --all \
     --relay-url "$RELAY_URL" 2>&1) || true
 
 if echo "$DISCONNECT_OUTPUT" | grep -qi "already missing on relay\|revoked\|disconnected\|✓"; then
@@ -1225,7 +1225,7 @@ fi
 # =========================================================================
 log "=== TC-RI-09: Disconnected grant cannot be reused ==="
 
-REUSE_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote status \
+REUSE_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" 2>&1) || true
 REUSE_EXIT=$?
 

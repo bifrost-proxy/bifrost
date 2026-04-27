@@ -36,7 +36,7 @@ EXPECTED_SHA="$(bash "$SRC" | shasum -a 256 | awk '{print $1}')"
 echo "[case-5] expected sha=$EXPECTED_SHA bytes=$PAYLOAD_BYTES"
 
 # Track A: streaming (stream_frame).
-"$BIFROST_BIN" remote command exec \
+"$BIFROST_BIN" remote exec \
   --stream \
   --output-file "$STREAM_OUT" \
   --timeout-ms 600000 \
@@ -52,7 +52,7 @@ echo "[case-5] stream track OK"
 
 # Track B: legacy envelope. Use --format json-pretty to get full response
 # metadata including stdout_sha256_full_hex / stdout_total_bytes.
-"$BIFROST_BIN" remote command exec \
+"$BIFROST_BIN" remote exec \
   --format json-pretty \
   --timeout-ms 600000 \
   --shell-text "bash $SRC" \

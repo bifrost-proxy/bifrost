@@ -5,7 +5,7 @@ Branch: `fix/remote-large-output`  Working worktree: `~/work/github/bifrost-larg
 ## Goal
 
 Byte-exact, reconnect-safe streaming of arbitrarily large stdout/stderr from
-`bifrost remote command exec` — including **≥1 GiB binary outputs** and
+`bifrost remote exec` — including **≥1 GiB binary outputs** and
 **multi-hour tasks** — without being killed by:
 
 - the executor's legacy 30s default timeout,
@@ -113,7 +113,7 @@ struct SessionRing {
 
 ### PR #5 (bifrost-cli, +~500 LOC across remote_shell.rs)
 
-- Add `--stream` flag to `bifrost remote command exec` (auto-enabled when negotiation says `large_output_v1`).
+- Add `--stream` flag to `bifrost remote exec` (auto-enabled when negotiation says `large_output_v1`).
 - Frame consumption loop:
   ```
   while let Some(frame) = rx.recv().await {
@@ -183,11 +183,11 @@ struct SessionRing {
 
 ## Operational notes
 
-- Every `bifrost remote command exec` call currently invalidates the SSH grant; PR #7 fixes this. Until then, caller workflow:
+- Every `bifrost remote exec` call currently invalidates the SSH grant; PR #7 fixes this. Until then, caller workflow:
   ```
-  bifrost remote disconnect --all
-  bifrost remote connect --ssh-key ~/.bifrost/remote-device.key
-  bifrost remote command exec ...
+  bifrost remote conn down --all
+  bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key
+  bifrost remote exec ...
   ```
 - The main worktree `~/work/github/bifrost/` is reserved for the call_history_store developer. All large-output work lives in `~/work/github/bifrost-large-output/` on branch `fix/remote-large-output`.
 - `SKIP_FRONTEND_BUILD=1` bypasses the TypeScript check during pre-commit when working on Rust-only patches.
