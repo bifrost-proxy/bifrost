@@ -1124,4 +1124,6 @@ main() {
     echo ""
 }
 
-main "$@"
+if [[ "${BIFROST_INSTALL_BINARY_SKIP_MAIN:-0}" != "1" ]]; then
+    main "$@"
+fi

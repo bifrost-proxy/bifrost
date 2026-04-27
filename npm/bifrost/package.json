@@ -35,6 +35,7 @@
   "files": [
     "bin/bifrost",
     "lib/index.js",
+    "lib/platform.js",
     "install.js",
     "README.md"
   ],
