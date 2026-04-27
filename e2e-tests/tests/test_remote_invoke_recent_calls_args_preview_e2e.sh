@@ -246,7 +246,7 @@ assert_status "200" "$HTTP_STATUS" "进入 discovery 应返回 200"
 PAIR_CODE="$(echo "$HTTP_BODY" | jq -r '.session.pair_code // ""')"
 assert_not_empty "$PAIR_CODE" "pair_code 不应为空"
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" >"$CALLER_CONNECT_LOG" 2>&1 &
 CALLER_CONNECT_PID=$!
 
 PAIRING_ID=""
@@ -275,7 +275,7 @@ for _ in $(seq 1 30); do
 done
 CALLER_CONNECT_PID=""
 if [[ "$CONNECT_OK" -ne 1 ]]; then
-    _log_fail "remote connect 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
+    _log_fail "remote conn up 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
     exit 1
 fi
 
@@ -295,12 +295,12 @@ if [[ "$TRAFFIC_READY" -ne 1 ]]; then
 fi
 sleep 2
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$REMOTE_MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$REMOTE_MARKER" \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --max-results 5 \
     --max-scan 50 >"$SEARCH_LOG" 2>&1 || {
-    log "remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "remote traffic search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
     log "search log: $(cat "$SEARCH_LOG")"
 }
 sleep 1
@@ -361,12 +361,12 @@ if ! curl -fsS --max-time 10 --proxy "http://127.0.0.1:${ADMIN_PORT}" "$LONG_TRA
     exit 1
 fi
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote search "$LONG_REMOTE_MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$LONG_REMOTE_MARKER" \
     --relay-url "$RELAY_URL" \
     --client-id "${CLIENT_INSTANCE_ID:0:12}" \
     --max-results 5 \
     --max-scan 50 >"$LONG_SEARCH_LOG" 2>&1 || {
-    log "long remote search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
+    log "long remote traffic search exited non-zero (acceptable — we only need the call recorded in Recent Calls)"
     log "long search log: $(cat "$LONG_SEARCH_LOG")"
 }
 sleep 1
