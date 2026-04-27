@@ -43,7 +43,7 @@
 //!
 //! Caller (e.g. remote shell.exec) sees exit 0 and a one-line message. The
 //! grant stays alive. The old daemon will be stopped by the orphan a moment
-//! later; the caller can poll `bifrost remote status` to observe the new pid.
+//! later; the caller can poll `bifrost remote conn status` to observe the new pid.
 //!
 //! ## Port release guarantee
 //!

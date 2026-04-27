@@ -486,7 +486,7 @@ pub enum Commands {
             "Typical use: after `bifrost upgrade` replaced the binary on disk,\n",
             "run `bifrost restart` to pick up the new version.\n",
             "\n",
-            "Safe to invoke remotely via `bifrost remote command exec`: the new\n",
+            "Safe to invoke remotely via `bifrost remote exec`: the new\n",
             "daemon is fully detached from the caller's shell pipes (setsid +\n",
             "/dev/null stdio) so the shell.exec channel reaping the restart\n",
             "invocation does not take the fresh daemon down with it.\n",
@@ -725,7 +725,7 @@ pub enum Commands {
             "\n",
             "Note: these commands never touch a remote device. To configure a\n",
             "remote machine, run the equivalent `bifrost setting ...` there via\n",
-            "`bifrost remote command exec -- bifrost setting ...`.",
+            "`bifrost remote exec -- bifrost setting ...`.",
         )
     )]
     Setting {

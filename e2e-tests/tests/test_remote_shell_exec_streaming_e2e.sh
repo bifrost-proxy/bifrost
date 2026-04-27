@@ -180,7 +180,7 @@ wait_for_worker_ready() {
 
 configure_shell_policies() {
     log "Configuring target Shell Access policies..."
-    BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" remote shell policy add \
+    BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" setting shell policy add \
         --id stream-shell \
         --name "Stream Shell" \
         --mode shell_text \
@@ -188,7 +188,7 @@ configure_shell_policies() {
         --shell /bin/sh \
         --timeout-ms 10000 >/dev/null
 
-    BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" remote shell policy add \
+    BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" setting shell policy add \
         --id stream-argv \
         --name "Stream Argv" \
         --mode argv_exec \
@@ -229,7 +229,7 @@ pair_and_upgrade_grant() {
     assert_not_empty "$pair_code" "pair_code 不应为空" || return 1
 
     CALLER_CONNECT_LOG="$(mktemp)"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote connect "$pair_code" --relay-url "$RELAY_URL" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$pair_code" --relay-url "$RELAY_URL" \
         >"$CALLER_CONNECT_LOG" 2>&1 &
     CALLER_CONNECT_PID=$!
 
@@ -264,7 +264,7 @@ pair_and_upgrade_grant() {
         fi
         sleep 1
     done
-    assert_equals "1" "$connect_ok" "caller remote connect should succeed" || return 1
+    assert_equals "1" "$connect_ok" "caller remote conn up should succeed" || return 1
     CALLER_CONNECT_PID=""
 
     if grep -q "Connected! Authorization granted" "$CALLER_CONNECT_LOG"; then
@@ -417,7 +417,7 @@ run_shell_text_streaming_case() {
     shell_log="$(mktemp)"
 
     (
-        BIFROST_DATA_DIR="$CALLER_DATA_DIR" exec "$BIFROST_BIN" remote command exec \
+        BIFROST_DATA_DIR="$CALLER_DATA_DIR" exec "$BIFROST_BIN" remote exec \
             --relay-url "$RELAY_URL" \
             --client-id "$CLIENT_INSTANCE_SHORT" \
             --shell-text "printf shell-one; /bin/sleep 1; printf shell-two"
@@ -464,7 +464,7 @@ run_argv_streaming_case() {
     argv_log="$(mktemp)"
 
     (
-        BIFROST_DATA_DIR="$CALLER_DATA_DIR" exec "$BIFROST_BIN" remote command exec \
+        BIFROST_DATA_DIR="$CALLER_DATA_DIR" exec "$BIFROST_BIN" remote exec \
             --relay-url "$RELAY_URL" \
             --client-id "$CLIENT_INSTANCE_SHORT" \
             -- "$PYTHON_BIN" -u -c 'import sys,time;sys.stdout.write("argv-one");sys.stdout.flush();time.sleep(1.0);sys.stdout.write("argv-two");sys.stdout.flush()'

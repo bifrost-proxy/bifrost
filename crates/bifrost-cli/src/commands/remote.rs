@@ -319,7 +319,7 @@ fn resolve_local_connection(
         match matches.len() {
             0 => {
                 return Err(BifrostError::Config(
-                    "no saved connection matching that prefix, please run `bifrost remote connect <pair-code>` first".to_string(),
+                    "no saved connection matching that prefix, please run `bifrost remote conn up <pair-code>` first".to_string(),
                 ));
             }
             1 => {
@@ -360,7 +360,7 @@ fn resolve_local_connection(
 
     match connections.len() {
         0 => Err(BifrostError::Config(
-            "no saved connection, please run `bifrost remote connect <pair-code>` first"
+            "no saved connection, please run `bifrost remote conn up <pair-code>` first"
                 .to_string(),
         )),
         1 => {
@@ -805,7 +805,7 @@ fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
     }
 
     BifrostError::Config(
-        "saved remote authorization is read-only and does not allow shell.exec. Run `bifrost remote connect <pair-code>` again and approve shell access on the remote device."
+        "saved remote authorization is read-only and does not allow shell.exec. Run `bifrost remote conn up <pair-code>` again and approve shell access on the remote device."
             .to_string(),
     )
 }
@@ -1115,7 +1115,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
         let pair_code = pair_code.as_deref().ok_or_else(|| {
             BifrostError::Config(
-                "either <pair_code> or --ssh-key is required for `bifrost remote connect`"
+                "either <pair_code> or --ssh-key is required for `bifrost remote conn up`"
                     .to_string(),
             )
         })?;
@@ -1185,7 +1185,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 );
             }
             eprintln!(
-                "  {} Run `bifrost remote connect <pair-code>` to re-authorize.",
+                "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
                 "→".bright_yellow()
             );
             std::process::exit(1);
@@ -1462,7 +1462,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             );
         }
         eprintln!(
-            "  {} Run `bifrost remote connect <pair-code>` to re-authorize.",
+            "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
             "→".bright_yellow()
         );
         std::process::exit(1);
@@ -1596,7 +1596,7 @@ async fn handle_connect(
             println!(
                 "{}",
                 format!(
-                    "  You can now run commands like: bifrost remote status --client-id {short_id}"
+                    "  You can now run commands like: bifrost remote conn status --client-id {short_id}"
                 )
                 .dimmed()
             );
@@ -1737,7 +1737,7 @@ async fn handle_connect_with_ssh(
             println!(
                 "{}",
                 format!(
-                    "  You can now run commands like: bifrost remote status --client-id {short_id}"
+                    "  You can now run commands like: bifrost remote conn status --client-id {short_id}"
                 )
                 .dimmed()
             );
@@ -1798,7 +1798,7 @@ fn is_retryable_start_pairing_overload(err: &BifrostError) -> bool {
 
 fn start_pairing_overload_error() -> BifrostError {
     BifrostError::Network(
-        "pairing service is temporarily busy (relay overload protection triggered). Please wait a few seconds and run `bifrost remote connect <pair-code>` again.".to_string(),
+        "pairing service is temporarily busy (relay overload protection triggered). Please wait a few seconds and run `bifrost remote conn up <pair-code>` again.".to_string(),
     )
 }
 
@@ -5351,7 +5351,7 @@ mod tests {
         };
 
         assert!(message.contains("pairing service is temporarily busy"));
-        assert!(message.contains("bifrost remote connect <pair-code>"));
+        assert!(message.contains("bifrost remote conn up <pair-code>"));
     }
 
     #[test]

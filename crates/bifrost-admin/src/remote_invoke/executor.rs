@@ -2053,7 +2053,7 @@ impl RemoteInvokeExecutor {
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(BifrostError::Config(format!(
-                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote command exec -- <program> [args...]' for argv execution.",
+                "policy '{}' allows exec_mode [{}], got {}. Use '--shell-text <cmd>' for shell text, or 'bifrost remote exec -- <program> [args...]' for argv execution.",
                 policy.policy_id,
                 allowed_modes,
                 shell_exec_mode_label(&exec_mode)
