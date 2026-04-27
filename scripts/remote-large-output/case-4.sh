@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Case 4: --output-file local write + SHA-256 digest.
 #
-# Verifies that `bifrost remote command exec --stream --output-file <path>`
+# Verifies that `bifrost remote exec --stream --output-file <path>`
 # writes the byte stream directly to the local path with matching SHA-256
 # to the producer and does not duplicate/drop bytes across retries.
 

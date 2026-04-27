@@ -1407,14 +1407,39 @@ pub enum ExportCommands {
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteCommands {
     #[command(
-        about = "Connect to a remote Bifrost instance (first-time pairing only)",
-        long_about = "Connect to a remote Bifrost instance using a one-time pair code.\n\n\
-            Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n\
-            The pair code is one-time and should not be reused after a successful connect.\n\
-            You can also connect with an exported SSH key file via `--ssh-key`.\n\
-            After connect succeeds, prefer `bifrost remote status` (or other read-only remote commands) instead of running `remote connect` again."
+        about = "Manage the connection to a remote Bifrost instance",
+        long_about = "Manage the connection (up / down / status) to a remote Bifrost instance.\n\n            `up` performs first-time pairing or re-authorization; `down` revokes authorization on the relay; `status` verifies the saved authorization still works."
     )]
-    Connect {
+    Conn {
+        #[command(subcommand)]
+        action: RemoteConnCommands,
+    },
+    #[command(
+        about = "Remote file operations (policy-gated; read/write/edit/patch/mkdir/move/delete/list/find/grep/stat/glob/hash)"
+    )]
+    File {
+        #[command(subcommand)]
+        action: Box<RemoteFileCommands>,
+    },
+    #[command(about = "Inspect remote traffic records (list / get / search / clear)")]
+    Traffic {
+        #[command(subcommand)]
+        action: RemoteTrafficCommands,
+    },
+    #[command(
+        about = "Execute a shell command on the remote host (HIGHEST PRIVILEGE — arbitrary code execution)",
+        long_about = "Execute a shell command on the remote host.\n\n            ⚠  This is the highest-privilege remote command: it can run arbitrary code on the target machine, subject only to the Shell Access policy bound to the active grant. For policy-gated structured writes, prefer `bifrost remote file write/edit/patch`."
+    )]
+    Exec(Box<RemoteCommandExecArgs>),
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteConnCommands {
+    #[command(
+        about = "Establish or re-authorize the connection (first-time pairing or SSH key)",
+        long_about = "Establish or re-authorize the connection to a remote Bifrost instance.\n\n            Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n            The pair code is one-time and should not be reused after a successful connect.\n            You can also connect with an exported SSH key file via `--ssh-key`.\n            After `up` succeeds, prefer `bifrost remote conn status` (or other read-only remote commands) instead of running `up` again."
+    )]
+    Up {
         #[arg(
             help = "One-time pair code displayed on the remote device",
             required_unless_present = "ssh_key"
@@ -1436,63 +1461,19 @@ pub enum RemoteCommands {
     },
     #[command(
         about = "Revoke authorization for a remote Bifrost instance",
-        long_about = "Revoke authorization for a remote Bifrost instance.\n\n\
-            Without flags, revokes all grants for the target client (resolved via --client-id).\n\
-            Use --all to revoke grants for every connected client at once.\n\
-            Use --grant-id to revoke a single specific grant."
+        long_about = "Revoke authorization for a remote Bifrost instance.\n\n            Without flags, revokes all grants for the target client (resolved via --client-id).\n            Use --all to revoke grants for every connected client at once.\n            Use --grant-id to revoke a single specific grant."
     )]
-    Disconnect {
+    Down {
         #[arg(long, help = "Revoke grants for ALL clients (no --client-id needed)")]
         all: bool,
         #[arg(long, help = "Revoke a single specific grant by ID")]
         grant_id: Option<String>,
     },
     #[command(
-        about = "Get remote proxy status",
-        long_about = "Get remote proxy status.\n\n\
-            Use this after a successful `bifrost remote connect` to verify that the saved authorization still works.\n\
-            If a reusable authorization already exists, you do not need to run `remote connect` again."
+        about = "Check whether the saved authorization still works on the relay",
+        long_about = "Check whether the saved authorization still works on the relay.\n\n            Use this after a successful `bifrost remote conn up` to verify that the saved authorization still works.\n            If a reusable authorization already exists, you do not need to run `conn up` again."
     )]
     Status,
-    #[command(about = "Execute a remote shell command")]
-    Command {
-        #[command(subcommand)]
-        action: RemoteCommandCommands,
-    },
-    #[command(
-        about = "[DEPRECATED] Use `bifrost setting shell` instead",
-        long_about = "[DEPRECATED] `bifrost remote shell` manages settings on the LOCAL machine, \
-not on the connected remote device. It has moved to `bifrost setting shell` and will be \
-removed in a future release.",
-        hide = true
-    )]
-    Shell {
-        #[command(subcommand)]
-        action: Box<RemoteShellCommands>,
-    },
-    #[command(
-        about = "[DEPRECATED] Use `bifrost setting grant` instead",
-        long_about = "[DEPRECATED] `bifrost remote grant` manages grants on the LOCAL machine, \
-not on the connected remote device. It has moved to `bifrost setting grant` and will be \
-removed in a future release.",
-        hide = true
-    )]
-    Grant {
-        #[command(subcommand)]
-        action: Box<RemoteGrantCommands>,
-    },
-    #[command(about = "Remote file operations (read/write/edit/mkdir/move/delete/apply-patch)")]
-    File {
-        #[command(subcommand)]
-        action: Box<RemoteFileCommands>,
-    },
-    #[command(about = "Search remote traffic records")]
-    Search(Box<RemoteSearchArgs>),
-    #[command(about = "Inspect remote traffic records")]
-    Traffic {
-        #[command(subcommand)]
-        action: RemoteTrafficCommands,
-    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -1507,12 +1488,6 @@ pub enum SettingCommands {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
     },
-}
-
-#[derive(Subcommand, Clone, Debug)]
-pub enum RemoteCommandCommands {
-    #[command(about = "Execute a remote command via the encrypted shell.exec channel")]
-    Exec(Box<RemoteCommandExecArgs>),
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -1583,7 +1558,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(about = "Regex-search file contents under the policy root")]
-    Search {
+    Find {
         #[arg(help = "Regex pattern")]
         pattern: String,
         #[arg(long, help = "Subpath to restrict the search (default: policy root)")]
@@ -1679,7 +1654,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(about = "Move / rename a path on the remote host")]
-    Mv {
+    Move {
         #[arg(help = "Source path")]
         from: String,
         #[arg(help = "Destination path")]
@@ -1690,7 +1665,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(about = "Delete a file or directory on the remote host")]
-    Rm {
+    Delete {
         #[arg(help = "Path to delete")]
         path: String,
         #[arg(long, help = "Recursively delete a non-empty directory")]
@@ -1701,7 +1676,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(about = "Apply a unified diff across multiple files atomically")]
-    ApplyPatch {
+    Patch {
         #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
         patch_file: Option<String>,
         #[arg(

@@ -2,7 +2,7 @@
 # Case 1: 1 GiB binary stdout byte-exact verification.
 #
 # Produces a deterministic 1 GiB byte stream (SHA-256 computed at source),
-# runs it through `bifrost remote command exec --stream --output-file`, then
+# runs it through `bifrost remote exec --stream --output-file`, then
 # verifies the received file byte-exactly via SHA-256 equality.
 
 set -euo pipefail

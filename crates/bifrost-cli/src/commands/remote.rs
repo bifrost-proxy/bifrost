@@ -28,7 +28,7 @@ use tracing::{debug, error, warn};
 use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
-    RemoteCommandCommands, RemoteCommandExecArgs, RemoteCommands, RemoteFileCommands,
+    RemoteCommandExecArgs, RemoteCommands, RemoteConnCommands, RemoteFileCommands,
     RemoteSearchArgs, RemoteTrafficCommands,
 };
 
@@ -1093,10 +1093,13 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         username: Some(username),
     };
 
-    if let RemoteCommands::Connect {
-        pair_code,
-        ssh_key,
-        device_code,
+    if let RemoteCommands::Conn {
+        action:
+            RemoteConnCommands::Up {
+                pair_code,
+                ssh_key,
+                device_code,
+            },
     } = &opts.action
     {
         if let Some(ssh_key) = ssh_key {
@@ -1121,7 +1124,10 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
     let mut connections = load_connections()?;
 
-    if let RemoteCommands::Disconnect { all, grant_id } = &opts.action {
+    if let RemoteCommands::Conn {
+        action: RemoteConnCommands::Down { all, grant_id },
+    } = &opts.action
+    {
         return handle_disconnect(
             &caller,
             &connections,
@@ -1140,10 +1146,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     ensure_remote_command_confirmed(&opts.action)?;
-    if let RemoteCommands::Command {
-        action: RemoteCommandCommands::Exec(exec_args),
-    } = &opts.action
-    {
+    if let RemoteCommands::Exec(exec_args) = &opts.action {
         if let Err(msg) = validate_remote_command_exec_flags(exec_args) {
             return Err(BifrostError::Config(msg));
         }
@@ -1956,9 +1959,15 @@ fn build_remote_command_checked(
     action: &RemoteCommands,
 ) -> bifrost_core::Result<BuiltRemoteCommand> {
     match action {
-        RemoteCommands::Connect { .. } => unreachable!("connect handled separately"),
-        RemoteCommands::Disconnect { .. } => unreachable!("disconnect handled separately"),
-        RemoteCommands::Status => Ok(BuiltRemoteCommand {
+        RemoteCommands::Conn {
+            action: RemoteConnCommands::Up { .. },
+        } => unreachable!("conn up handled separately"),
+        RemoteCommands::Conn {
+            action: RemoteConnCommands::Down { .. },
+        } => unreachable!("conn down handled separately"),
+        RemoteCommands::Conn {
+            action: RemoteConnCommands::Status,
+        } => Ok(BuiltRemoteCommand {
             kind: CommandKind::QueryReadonly,
             label: "status".to_string(),
             command: Some("status".to_string()),
@@ -1968,15 +1977,11 @@ fn build_remote_command_checked(
             render: RemoteRenderMode::Raw,
             streaming_prefs: None,
         }),
-        RemoteCommands::Command { action } => match action {
-            RemoteCommandCommands::Exec(exec_args) => {
-                Ok(build_remote_shell_exec_command(exec_args))
-            }
-        },
-        RemoteCommands::Shell { .. } => unreachable!("shell handled separately"),
-        RemoteCommands::Grant { .. } => unreachable!("grant handled separately"),
+        RemoteCommands::Exec(exec_args) => Ok(build_remote_shell_exec_command(exec_args)),
         RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
-        RemoteCommands::Search(search_args) => {
+        RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Search(search_args),
+        } => {
             let query = CanonicalQueryCommand::Search(command_search_args(search_args));
             let command_id = query.command_id().to_string();
             Ok(BuiltRemoteCommand {
@@ -2065,26 +2070,6 @@ fn build_remote_command_checked(
                     streaming_prefs: None,
                 })
             }
-            RemoteTrafficCommands::Search(search_args) => {
-                let query = CanonicalQueryCommand::Search(command_search_args(search_args));
-                let command_id = query.command_id().to_string();
-                Ok(BuiltRemoteCommand {
-                    kind: CommandKind::QueryReadonly,
-                    label: "search.stream".to_string(),
-                    command: Some(command_id),
-                    args_json: query_args_json(&query),
-                    query: Some(query),
-                    shell_exec: None,
-                    render: RemoteRenderMode::Search {
-                        format: search_args.format.parse().unwrap_or(OutputFormat::Table),
-                        no_color: search_args.no_color,
-                        keyword: search_args.keyword.clone().unwrap_or_default(),
-                        max_scan: search_args.max_scan,
-                        max_results: search_args.max_results,
-                    },
-                    streaming_prefs: None,
-                })
-            }
             RemoteTrafficCommands::Clear { ids, yes: _ } => {
                 let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
                     ids: ids.as_ref().map(|value| {
@@ -2106,6 +2091,7 @@ fn build_remote_command_checked(
                     streaming_prefs: None,
                 })
             }
+            RemoteTrafficCommands::Search(_) => unreachable!("traffic search handled above"),
         },
     }
 }
@@ -2275,7 +2261,7 @@ fn build_remote_file_command(
             }),
             output.clone(),
         ),
-        RemoteFileCommands::Search {
+        RemoteFileCommands::Find {
             pattern,
             path,
             max_matches,
@@ -2396,7 +2382,7 @@ fn build_remote_file_command(
             json!({ "path": path, "parents": parents, "cwd": cwd }),
             output.clone(),
         ),
-        RemoteFileCommands::Mv {
+        RemoteFileCommands::Move {
             from,
             to,
             cwd,
@@ -2407,7 +2393,7 @@ fn build_remote_file_command(
             json!({ "path": from, "to_path": to, "cwd": cwd }),
             output.clone(),
         ),
-        RemoteFileCommands::Rm {
+        RemoteFileCommands::Delete {
             path,
             recursive,
             cwd,
@@ -2418,7 +2404,7 @@ fn build_remote_file_command(
             json!({ "path": path, "recursive": recursive, "cwd": cwd }),
             output.clone(),
         ),
-        RemoteFileCommands::ApplyPatch {
+        RemoteFileCommands::Patch {
             patch_file,
             patch_b64,
             cwd,
@@ -4674,9 +4660,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{
-        RemoteCommandCommands, RemoteCommandExecArgs, RemoteSearchArgs, RemoteTrafficListArgs,
-    };
+    use crate::cli::{RemoteCommandExecArgs, RemoteSearchArgs, RemoteTrafficListArgs};
     use std::sync::OnceLock;
 
     fn init_test_data_dir() {
@@ -4728,28 +4712,30 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_for_search_uses_streaming_command() {
-        let built = build_remote_command(&RemoteCommands::Search(Box::new(RemoteSearchArgs {
-            keyword: Some("nextoncall".to_string()),
-            limit: 11,
-            format: "compact".to_string(),
-            no_color: true,
-            url: true,
-            headers: false,
-            body: false,
-            req_header: false,
-            res_header: false,
-            req_body: false,
-            res_body: false,
-            status: Some("2xx".to_string()),
-            method: Some("GET".to_string()),
-            host: Some("api.example.com".to_string()),
-            path: Some("/v1".to_string()),
-            protocol: Some("HTTPS".to_string()),
-            content_type: Some("json".to_string()),
-            domain: Some("example.com".to_string()),
-            max_scan: Some(12),
-            max_results: Some(7),
-        })));
+        let built = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Search(Box::new(RemoteSearchArgs {
+                keyword: Some("nextoncall".to_string()),
+                limit: 11,
+                format: "compact".to_string(),
+                no_color: true,
+                url: true,
+                headers: false,
+                body: false,
+                req_header: false,
+                res_header: false,
+                req_body: false,
+                res_body: false,
+                status: Some("2xx".to_string()),
+                method: Some("GET".to_string()),
+                host: Some("api.example.com".to_string()),
+                path: Some("/v1".to_string()),
+                protocol: Some("HTTPS".to_string()),
+                content_type: Some("json".to_string()),
+                domain: Some("example.com".to_string()),
+                max_scan: Some(12),
+                max_results: Some(7),
+            })),
+        });
 
         assert_eq!(built.kind, CommandKind::QueryReadonly);
         assert_eq!(built.label, "search.stream");
@@ -4870,28 +4856,30 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_for_search_supports_filter_only_query() {
-        let built = build_remote_command(&RemoteCommands::Search(Box::new(RemoteSearchArgs {
-            keyword: None,
-            limit: 9,
-            format: "json".to_string(),
-            no_color: false,
-            url: false,
-            headers: false,
-            body: false,
-            req_header: false,
-            res_header: false,
-            req_body: false,
-            res_body: false,
-            status: Some("5xx".to_string()),
-            method: None,
-            host: Some("api.example.com".to_string()),
-            path: None,
-            protocol: None,
-            content_type: None,
-            domain: None,
-            max_scan: Some(20),
-            max_results: Some(9),
-        })));
+        let built = build_remote_command(&RemoteCommands::Traffic {
+            action: RemoteTrafficCommands::Search(Box::new(RemoteSearchArgs {
+                keyword: None,
+                limit: 9,
+                format: "json".to_string(),
+                no_color: false,
+                url: false,
+                headers: false,
+                body: false,
+                req_header: false,
+                res_header: false,
+                req_body: false,
+                res_body: false,
+                status: Some("5xx".to_string()),
+                method: None,
+                host: Some("api.example.com".to_string()),
+                path: None,
+                protocol: None,
+                content_type: None,
+                domain: None,
+                max_scan: Some(20),
+                max_results: Some(9),
+            })),
+        });
 
         match built.query.expect("query should exist") {
             CanonicalQueryCommand::Search(args) => {
@@ -5064,23 +5052,21 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_for_shell_exec_shell_text_uses_shell_exec_kind() {
-        let built = build_remote_command(&RemoteCommands::Command {
-            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
-                cwd: Some("/srv/api".to_string()),
-                env: vec![
-                    ("NODE_ENV".to_string(), "production".to_string()),
-                    ("REGION".to_string(), "sg".to_string()),
-                ],
-                timeout_ms: Some(600_000),
-                shell_text: Some("printf hello".to_string()),
-                argv: Vec::new(),
-                stream: false,
-                output_file: None,
-                resume_call_id: None,
-                resume_relay_token: None,
-                no_verify_digest: false,
-            })),
-        });
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: Some("/srv/api".to_string()),
+            env: vec![
+                ("NODE_ENV".to_string(), "production".to_string()),
+                ("REGION".to_string(), "sg".to_string()),
+            ],
+            timeout_ms: Some(600_000),
+            shell_text: Some("printf hello".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+        })));
 
         assert_eq!(built.kind, CommandKind::ShellExec);
         assert_eq!(built.label, "shell.exec");
@@ -5100,24 +5086,22 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_for_shell_exec_argv_uses_program_preview() {
-        let built = build_remote_command(&RemoteCommands::Command {
-            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
-                cwd: None,
-                env: vec![("A".to_string(), "1".to_string())],
-                timeout_ms: Some(5_000),
-                shell_text: None,
-                argv: vec![
-                    "/bin/echo".to_string(),
-                    "hello".to_string(),
-                    "--flag".to_string(),
-                ],
-                stream: false,
-                output_file: None,
-                resume_call_id: None,
-                resume_relay_token: None,
-                no_verify_digest: false,
-            })),
-        });
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: None,
+            env: vec![("A".to_string(), "1".to_string())],
+            timeout_ms: Some(5_000),
+            shell_text: None,
+            argv: vec![
+                "/bin/echo".to_string(),
+                "hello".to_string(),
+                "--flag".to_string(),
+            ],
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+        })));
 
         assert_eq!(built.kind, CommandKind::ShellExec);
         assert_eq!(built.command.as_deref(), Some("/bin/echo"));
@@ -5136,20 +5120,18 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_populates_streaming_prefs_from_exec_args() {
-        let built = build_remote_command(&RemoteCommands::Command {
-            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
-                cwd: None,
-                env: vec![],
-                timeout_ms: None,
-                shell_text: Some("yes".to_string()),
-                argv: Vec::new(),
-                stream: true,
-                output_file: Some("/tmp/out.bin".to_string()),
-                resume_call_id: Some("ab12cd34".to_string()),
-                resume_relay_token: Some("tok-xyz".to_string()),
-                no_verify_digest: true,
-            })),
-        });
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: None,
+            env: vec![],
+            timeout_ms: None,
+            shell_text: Some("yes".to_string()),
+            argv: Vec::new(),
+            stream: true,
+            output_file: Some("/tmp/out.bin".to_string()),
+            resume_call_id: Some("ab12cd34".to_string()),
+            resume_relay_token: Some("tok-xyz".to_string()),
+            no_verify_digest: true,
+        })));
 
         let prefs = built
             .streaming_prefs
@@ -5227,20 +5209,18 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_populates_resume_fields() {
-        let built = build_remote_command(&RemoteCommands::Command {
-            action: RemoteCommandCommands::Exec(Box::new(RemoteCommandExecArgs {
-                cwd: None,
-                env: vec![],
-                timeout_ms: None,
-                shell_text: Some("tail -f /var/log/x".to_string()),
-                argv: Vec::new(),
-                stream: false,
-                output_file: None,
-                resume_call_id: Some("resume-xyz".to_string()),
-                resume_relay_token: Some("relay-tok-42".to_string()),
-                no_verify_digest: false,
-            })),
-        });
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: None,
+            env: vec![],
+            timeout_ms: None,
+            shell_text: Some("tail -f /var/log/x".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: Some("resume-xyz".to_string()),
+            resume_relay_token: Some("relay-tok-42".to_string()),
+            no_verify_digest: false,
+        })));
 
         let prefs = built
             .streaming_prefs
@@ -5253,7 +5233,9 @@ mod tests {
 
     #[test]
     fn test_build_remote_command_non_shell_exec_has_no_streaming_prefs() {
-        let built = build_remote_command(&RemoteCommands::Status);
+        let built = build_remote_command(&RemoteCommands::Conn {
+            action: RemoteConnCommands::Status,
+        });
         assert!(built.streaming_prefs.is_none());
     }
 
