@@ -346,7 +346,7 @@ pair_caller() {
     CALLER_CONNECT_PID=""
 
     if [[ "$connect_exit" -ne 0 ]] || ! grep -q "Connected! Authorization granted" "$CALLER_CONNECT_LOG"; then
-        echo "remote connect failed" >&2
+        echo "remote conn up failed" >&2
         cat "$CALLER_CONNECT_LOG" >&2 || true
         exit 1
     fi
@@ -417,46 +417,46 @@ seed_traffic() {
 test_remote_search_parity() {
     header "Remote search parity"
     local search_json traffic_search_json filter_only_json
-    search_json="$(run_remote_cli search "$SEARCH_MARKER" --format json)"
+    search_json="$(run_remote_cli traffic search "$SEARCH_MARKER" --format json)"
     traffic_search_json="$(run_remote_cli traffic search "$SEARCH_MARKER" --format json)"
-    filter_only_json="$(run_remote_cli search --status 5xx --host localhost --format json)"
+    filter_only_json="$(run_remote_cli traffic search --status 5xx --host localhost --format json)"
 
-    assert_json_expr "$search_json" '.total_matched > 0' "remote search finds seeded traffic"
+    assert_json_expr "$search_json" '.total_matched > 0' "remote traffic search finds seeded traffic"
     if [[ "$(json_get "$search_json" '.total_matched')" == "$(json_get "$traffic_search_json" '.total_matched')" ]] \
         && [[ "$(json_get "$search_json" '.total_searched')" == "$(json_get "$traffic_search_json" '.total_searched')" ]]; then
-        pass "remote search and remote traffic search keep identical totals"
+        pass "remote traffic search and remote traffic search keep identical totals"
     else
-        fail "remote search and remote traffic search totals diverged"
+        fail "remote traffic search and remote traffic search totals diverged"
     fi
-    assert_json_expr "$filter_only_json" 'all(.results[]?; ((.status // .record.status // 0) >= 500 and (.status // .record.status // 0) < 600))' "remote search supports filter-only 5xx query"
+    assert_json_expr "$filter_only_json" 'all(.results[]?; ((.status // .record.status // 0) >= 500 and (.status // .record.status // 0) < 600))' "remote traffic search supports filter-only 5xx query"
 }
 
 test_remote_search_scope_and_filters() {
     header "Remote search scope and filter coverage"
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --url --format json)" '.total_matched > 0' "remote --url finds URL/path marker"
-    assert_json_expr "$(run_remote_cli search "$HEADER_MARKER" --headers --format json)" '.total_matched > 0' "remote --headers finds header marker"
-    assert_json_expr "$(run_remote_cli search "$BODY_MARKER" --body --format json)" '.total_matched > 0' "remote --body finds body marker"
-    assert_json_expr "$(run_remote_cli search "application/json" --req-header --format json)" '.total_matched > 0' "remote --req-header finds JSON content type"
-    assert_json_expr "$(run_remote_cli search "bifrost-test" --res-header --format json)" '.total_matched > 0' "remote --res-header finds echo response header"
-    assert_json_expr "$(run_remote_cli search "$BODY_MARKER" --req-body --format json)" '.total_matched > 0' "remote --req-body finds request body marker"
-    assert_json_expr "$(run_remote_cli search "$BODY_MARKER" --res-body --format json)" '.total_matched > 0' "remote --res-body finds echoed response body marker"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --url --format json)" '.total_matched > 0' "remote --url finds URL/path marker"
+    assert_json_expr "$(run_remote_cli traffic search "$HEADER_MARKER" --headers --format json)" '.total_matched > 0' "remote --headers finds header marker"
+    assert_json_expr "$(run_remote_cli traffic search "$BODY_MARKER" --body --format json)" '.total_matched > 0' "remote --body finds body marker"
+    assert_json_expr "$(run_remote_cli traffic search "application/json" --req-header --format json)" '.total_matched > 0' "remote --req-header finds JSON content type"
+    assert_json_expr "$(run_remote_cli traffic search "bifrost-test" --res-header --format json)" '.total_matched > 0' "remote --res-header finds echo response header"
+    assert_json_expr "$(run_remote_cli traffic search "$BODY_MARKER" --req-body --format json)" '.total_matched > 0' "remote --req-body finds request body marker"
+    assert_json_expr "$(run_remote_cli traffic search "$BODY_MARKER" --res-body --format json)" '.total_matched > 0' "remote --res-body finds echoed response body marker"
 
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --method GET --format json)" 'all(.results[]?; ((.method // .record.method // "") == "GET"))' "remote --method GET filters correctly"
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --host localhost --format json)" 'all(.results[]?; ((.host // .record.host // "") | contains("localhost")))' "remote --host filters correctly"
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --path /get --format json)" 'all(.results[]?; ((.path // .record.path // "") | contains("/get")))' "remote --path filters correctly"
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --protocol HTTPS --format json)" 'all(.results[]?; ((.protocol // .record.protocol // "") | ascii_downcase) == "https")' "remote --protocol HTTPS filters correctly"
-    assert_json_expr "$(run_remote_cli search "$BODY_MARKER" --content-type json --format json)" '.total_matched > 0' "remote --content-type json filters correctly"
-    assert_json_expr "$(run_remote_cli search "$SEARCH_MARKER" --domain localhost --format json)" '.total_matched > 0' "remote --domain localhost filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --method GET --format json)" 'all(.results[]?; ((.method // .record.method // "") == "GET"))' "remote --method GET filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --host localhost --format json)" 'all(.results[]?; ((.host // .record.host // "") | contains("localhost")))' "remote --host filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --path /get --format json)" 'all(.results[]?; ((.path // .record.path // "") | contains("/get")))' "remote --path filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --protocol HTTPS --format json)" 'all(.results[]?; ((.protocol // .record.protocol // "") | ascii_downcase) == "https")' "remote --protocol HTTPS filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$BODY_MARKER" --content-type json --format json)" '.total_matched > 0' "remote --content-type json filters correctly"
+    assert_json_expr "$(run_remote_cli traffic search "$SEARCH_MARKER" --domain localhost --format json)" '.total_matched > 0' "remote --domain localhost filters correctly"
 }
 
 test_remote_search_formats_and_streaming() {
     header "Remote search format and streaming coverage"
     local json_output pretty_output table_output compact_output no_color_output stream_log
-    json_output="$(run_remote_cli search "$SEARCH_MARKER" --format json)"
-    pretty_output="$(run_remote_cli search "$SEARCH_MARKER" --format json-pretty)"
-    table_output="$(run_remote_cli search "$SEARCH_MARKER" --format table --no-color)"
-    compact_output="$(run_remote_cli search "$SEARCH_MARKER" --format compact --no-color)"
-    no_color_output="$(run_remote_cli search "$SEARCH_MARKER" --format table --no-color)"
+    json_output="$(run_remote_cli traffic search "$SEARCH_MARKER" --format json)"
+    pretty_output="$(run_remote_cli traffic search "$SEARCH_MARKER" --format json-pretty)"
+    table_output="$(run_remote_cli traffic search "$SEARCH_MARKER" --format table --no-color)"
+    compact_output="$(run_remote_cli traffic search "$SEARCH_MARKER" --format compact --no-color)"
+    no_color_output="$(run_remote_cli traffic search "$SEARCH_MARKER" --format table --no-color)"
 
     assert_json_expr "$json_output" '.results | type == "array"' "remote --format json returns valid JSON"
     assert_json_expr "$pretty_output" '.results | type == "array"' "remote --format json-pretty returns valid JSON"
@@ -469,9 +469,9 @@ test_remote_search_formats_and_streaming() {
         "$BIFROST_BIN" remote traffic search "$SEARCH_MARKER" --format table \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" || true
     if grep -qaE "Searching\\.{3}|Found [0-9]+ matches|${SEARCH_MARKER}" "$stream_log"; then
-        pass "remote search emits streaming progress before completion"
+        pass "remote traffic search emits streaming progress before completion"
     else
-        fail "remote search emits streaming progress before completion"
+        fail "remote traffic search emits streaming progress before completion"
     fi
     rm -f "$stream_log"
 }

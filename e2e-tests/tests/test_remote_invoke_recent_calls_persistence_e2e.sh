@@ -236,7 +236,7 @@ for _ in $(seq 1 30); do
 done
 CALLER_CONNECT_PID=""
 if [[ "$CONNECT_OK" -ne 1 ]]; then
-    _log_fail "remote connect 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
+    _log_fail "remote conn up 失败" "exit 0" "$(cat "$CALLER_CONNECT_LOG")"
     exit 1
 fi
 

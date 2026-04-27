@@ -254,7 +254,7 @@ pair_and_upgrade_grant() {
         fi
         sleep 1
     done
-    assert_equals "1" "$connect_ok" "caller remote connect should succeed" || return 1
+    assert_equals "1" "$connect_ok" "caller remote conn up should succeed" || return 1
     CALLER_CONNECT_PID=""
 
     if grep -q "Connected! Authorization granted" "$CALLER_CONNECT_LOG"; then
