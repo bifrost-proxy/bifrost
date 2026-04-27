@@ -232,7 +232,12 @@ Agent **必须**将其视为「用户想要连接到该密钥对应的远端设�
 
 ```bash
 bifrost remote conn status
-bifrost remote traffic list   --limit 50 [--method --status --protocol --host --path ...]
+bifrost remote traffic list   --limit 50 [--cursor <c>] [--direction backward|forward] \
+    [--method GET] [--status 200] [--status-min 200 --status-max 299] \
+    [--protocol http|https|ws|wss|h3] [--host <substr>] [--url <substr>] [--path <substr>] \
+    [--content-type <ct>] [--client-ip <ip>] [--client-app <app>] \
+    [--has-rule-hit true|false] [--is-websocket true|false] [--is-sse true|false] [--is-tunnel true|false] \
+    [-f|--format table|compact|json|json-pretty] [--no-color]
 bifrost remote traffic get    <id> [--request-body --response-body]
 bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
     [--url|--headers|--body|--req-header|--res-body] \
@@ -306,6 +311,7 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 - **`--content-b64` / `--patch-b64`**：由 caller 本地 base64、目标端解码；适合二进制、含 CRLF、含特殊字符的文本。远比 echo 管道 base64 + shell 重定向安全。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
 - **Symlink lstat 语义**：`stat` / `list` 不跟随软链；`stat` 额外返回 `symlink_target`。Windows 自动去 `\\?\` / `\\?\UNC\` 前缀。
+- **`read --output json` 的关键字段**：`content_b64`（base64 编码正文）、`sha256`（返回切片的 sha）、`size`（返回切片字节数）、`total_size` / `total_lines`（整文件）、`truncated`（是否截断）、`file_sha256`（仅 truncated=true 时出现，整文件 sha，用于后续 `--base-sha256` 乐观锁）、`start_line` / `end_line`（使用 `--offset`/`--limit` 时的范围）、`mtime_unix`。
 
 #### 错误码契约
 
@@ -359,6 +365,24 @@ bifrost remote conn down --all               # 所有 client
 bifrost remote conn down --grant-id <gid>    # 指定 grant
 ```
 
+### 4.6 连接漂移 / 流会话错位的恢复
+
+长会话或服务端重启后，caller 侧有时会看到这类错误：
+
+- `Config error: saved connection transport no longer matches relay reusable authorization; reconnect required`（relay reusable authorization 变了）
+- `stream ingest error: OffsetAhead`（流式 session 的 offset 对不上）
+- 其他形如 `grant revoked` / `authorization expired` 的错误
+
+统一恢复流程：
+
+```bash
+bifrost remote conn down --all
+rm -f ~/.bifrost/remote-connections.*
+bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key
+bifrost remote conn status
+```
+
+这一步会清掉本地缓存的 relay token 和 per-connection 状态，用 SSH key 重新建立长连接。不要手工修改 `remote-connections.*` 文件。
 ---
 
 ## 五、当前 relay-backed 命令清单
