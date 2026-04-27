@@ -718,6 +718,7 @@ export default function Settings() {
         void fetchPerformanceConfig();
         break;
       case "sync":
+      case "remote-invoke":
         void fetchSyncStatusData();
         break;
       default:
