@@ -584,10 +584,23 @@ async fn handle_grant_action(
                     "success": true,
                     "data": result,
                 })),
-                Err(e) => error_response(
-                    StatusCode::BAD_REQUEST,
-                    &format!("Failed to update grant: {e}"),
-                ),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let status = match &e {
+                        BifrostError::NotFound(_) => StatusCode::NOT_FOUND,
+                        // Relay returned 403 grant_not_active / 404 — local cache is stale.
+                        // Use 409 Conflict so the frontend can auto-refresh the grants list.
+                        BifrostError::Network(inner)
+                            if inner.contains("grant_not_active")
+                                || inner.contains("403 Forbidden")
+                                || inner.contains("404 Not Found") =>
+                        {
+                            StatusCode::CONFLICT
+                        }
+                        _ => StatusCode::BAD_REQUEST,
+                    };
+                    error_response(status, &format!("Failed to update grant: {msg}"))
+                }
             }
         }
         Method::DELETE => match worker.delete_grant(grant_id).await {

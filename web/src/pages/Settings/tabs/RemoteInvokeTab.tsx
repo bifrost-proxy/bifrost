@@ -1306,7 +1306,20 @@ export default function RemoteInvokeTab() {
       setEditingGrant(null);
       void refreshGrants();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : "Failed to update grant");
+      const rawMsg = e instanceof Error ? e.message : "Failed to update grant";
+      // Backend returns HTTP 409 when the grant is no longer active on the relay
+      // (common when the caller re-paired and the old grant got rotated out).
+      // Auto-refresh the list and surface a friendlier message.
+      if (rawMsg.includes("grant_not_active") || rawMsg.includes("not found")) {
+        message.warning(
+          "This grant is no longer active on the relay. Refreshing the grants list — please retry on the updated row.",
+        );
+        setGrantEditorOpen(false);
+        setEditingGrant(null);
+        void refreshGrants();
+      } else {
+        message.error(rawMsg);
+      }
     } finally {
       setGrantSaveLoading(false);
     }
@@ -3929,7 +3942,7 @@ export default function RemoteInvokeTab() {
                 setFileAccessEditorGrants(prev => [
                   ...prev,
                   {
-                    grant_id: "",
+                    grant_id: (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") ? crypto.randomUUID() : `g-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`,
                     name: "",
                     roots: [],
                     denies: ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"],
@@ -3971,14 +3984,12 @@ export default function RemoteInvokeTab() {
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   <Row gutter={12}>
                     <Col span={12}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Grant ID *</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Grant ID</Text>
                       <Input
                         value={grant.grant_id}
-                        placeholder="e.g. g-abc123"
-                        onChange={e => {
-                          const val = e.target.value;
-                          setFileAccessEditorGrants(prev => prev.map((g, i) => i === index ? { ...g, grant_id: val } : g));
-                        }}
+                        placeholder="Auto-generated"
+                        readOnly
+                        disabled
                       />
                     </Col>
                     <Col span={12}>
