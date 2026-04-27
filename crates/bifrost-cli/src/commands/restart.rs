@@ -177,16 +177,13 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
             // Reap A (it _exit(0)s after forking the orphan). Non-blocking
             // first, then a short blocking wait.
             let deadline = Instant::now() + Duration::from_millis(300);
-            loop {
-                match waitpid(Some(child_a), Some(WaitPidFlag::WNOHANG)) {
-                    Ok(nix::sys::wait::WaitStatus::StillAlive) => {
-                        if Instant::now() >= deadline {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    _ => break,
+            while let Ok(nix::sys::wait::WaitStatus::StillAlive) =
+                waitpid(Some(child_a), Some(WaitPidFlag::WNOHANG))
+            {
+                if Instant::now() >= deadline {
+                    break;
                 }
+                std::thread::sleep(Duration::from_millis(20));
             }
 
             // If we never got the sync byte, warn but still return success:
@@ -331,6 +328,10 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // (9900) and crashes on EADDRINUSE against any other local listener.
     argv.push("--port".into());
     argv.push(old_port.to_string().into());
+    if let Some(h) = forwarded.host.as_deref() {
+        argv.push("--host".into());
+        argv.push(h.into());
+    }
     if let Some(lvl) = forwarded.log_level.as_deref() {
         argv.push("--log-level".into());
         argv.push(lvl.into());
