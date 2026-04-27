@@ -28,15 +28,19 @@ import {
 } from "antd";
 import {
   ApiOutlined,
+  CloudOutlined,
   CodeOutlined,
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
+  ExportOutlined,
   EyeOutlined,
   FileOutlined,
   HistoryOutlined,
   KeyOutlined,
+  LockOutlined,
+  LoginOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyOutlined,
@@ -99,6 +103,7 @@ import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
 import PairingRequestModal from "../../../components/PairingRequestModal";
+import type { SyncStatus } from "../../../api/sync";
 import type { PairingRequest } from "../../../api/remoteInvoke";
 
 const { Text, Title } = Typography;
@@ -790,7 +795,30 @@ function renderStateTag(state: string) {
   }
 }
 
-export default function RemoteInvokeTab() {
+export interface RemoteInvokeTabProps {
+  syncStatus?: SyncStatus | null;
+  onGoToSyncTab?: () => void;
+  onSyncSignIn?: () => void;
+}
+
+export default function RemoteInvokeTab({
+  syncStatus = null,
+  onGoToSyncTab,
+  onSyncSignIn,
+}: RemoteInvokeTabProps = {}) {
+  const syncReady = !!syncStatus?.has_session;
+  const lockedColStyle = syncReady
+    ? undefined
+    : {
+        pointerEvents: "none" as const,
+        opacity: 0.45,
+        filter: "grayscale(0.2)",
+      };
+  const syncAccountLabel =
+    syncStatus?.user?.email ||
+    syncStatus?.user?.nickname ||
+    syncStatus?.user?.user_id ||
+    "Signed in";
   const [status, setStatus] = useState<RemoteInvokeStatus | null>(null);
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
   const [sshKey, setSshKey] = useState<RemoteInvokeSshKeyRecord | null>(null);
@@ -1785,6 +1813,68 @@ export default function RemoteInvokeTab() {
               gap: 16,
             }}
           >
+            {!syncReady ? (
+              <div
+                data-testid="settings-remote-invoke-sync-signin-prompt"
+                style={{
+                  padding: "20px 16px",
+                  background: "#fffbe6",
+                  border: "1px solid #ffe58f",
+                  borderRadius: 6,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                }}
+              >
+                <Space align="start" size={12}>
+                  <LockOutlined
+                    style={{ fontSize: 22, color: "#d48806", marginTop: 2 }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <Text strong style={{ display: "block", fontSize: 14 }}>
+                      Sign in to Sync to enable Remote Invoke
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Remote Invoke relies on your Sync session for relay
+                      authorization. Sign in first, then return here to pair
+                      devices, manage SSH keys and shell policies.
+                    </Text>
+                  </div>
+                </Space>
+                {syncStatus?.remote_base_url ? (
+                  <Descriptions size="small" column={1}>
+                    <Descriptions.Item label="Sync Server">
+                      <Text code style={{ fontSize: 11 }}>
+                        {syncStatus.remote_base_url}
+                      </Text>
+                    </Descriptions.Item>
+                  </Descriptions>
+                ) : null}
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    icon={<LoginOutlined />}
+                    onClick={() => {
+                      onSyncSignIn?.();
+                    }}
+                    disabled={!onSyncSignIn}
+                    data-testid="settings-remote-invoke-sync-signin-btn"
+                  >
+                    Sign in
+                  </Button>
+                  <Button
+                    icon={<ExportOutlined />}
+                    onClick={() => {
+                      onGoToSyncTab?.();
+                    }}
+                    disabled={!onGoToSyncTab}
+                    data-testid="settings-remote-invoke-sync-goto-btn"
+                  >
+                    Open Sync Settings
+                  </Button>
+                </Space>
+              </div>
+            ) : (
             <div
               data-testid="settings-remote-invoke-connection-section"
               style={{
@@ -1819,9 +1909,28 @@ export default function RemoteInvokeTab() {
                     }}
                   />
                 </Descriptions.Item>
+                <Descriptions.Item label="Sync Account">
+                  <Space size={4}>
+                    <CloudOutlined style={{ color: "#52c41a" }} />
+                    <Text style={{ fontSize: 12 }}>{syncAccountLabel}</Text>
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<ExportOutlined />}
+                      onClick={() => {
+                        onGoToSyncTab?.();
+                      }}
+                      disabled={!onGoToSyncTab}
+                      data-testid="settings-remote-invoke-sync-account-link"
+                      style={{ padding: 0 }}
+                    />
+                  </Space>
+                </Descriptions.Item>
               </Descriptions>
             </div>
+            )}
 
+            {syncReady && (
             <div
               data-testid="settings-remote-invoke-discovery-section"
               style={{
@@ -1927,10 +2036,11 @@ export default function RemoteInvokeTab() {
                 </Space>
               )}
             </div>
+          )}
           </Card>
         </Col>
 
-        <Col xs={24} md={12} style={{ display: "flex" }}>
+        <Col xs={24} md={12} style={{ display: "flex", ...(lockedColStyle || {}) }}>
           <Card
             data-testid="settings-remote-invoke-ssh-card"
             title={
@@ -2111,7 +2221,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             data-testid="settings-remote-invoke-shell-card"
             title={
@@ -2308,7 +2418,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             title={
               <Space>
@@ -2387,7 +2497,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             title={
               <Space>
@@ -2523,7 +2633,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             title={
               <Space>
