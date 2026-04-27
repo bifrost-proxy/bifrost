@@ -1,7 +1,9 @@
 # Remote Invoke Full PTY 可执行方案
 
 > 状态：审查修订版，可按 PR 拆分执行
-> 更新时间：2026-04-24
+> 更新时间：2026-04-24（命名已按 2026 Q2 4-tier 重构同步）
+>
+> **⚠ 命名同步**：本文档仍沿用旧命名 `bifrost remote command shell` 描述交互式 PTY 入口。自 `remote` 4-tier 重构（`conn` / `exec` / `file` / `traffic`）后，顶层 `command` 子命令组已被移除（硬切，无过渡别名）。真正落地该方案时，最终命名应与新命令树对齐，候选：`bifrost remote exec --interactive` 或新增 `bifrost remote shell`（区别于 `bifrost setting shell` 的本机 policy 管理入口）。文中后续出现的 `remote command shell` 均按上述候选替换，具体名字由落地 PR 决定。
 
 ## 0. 结论
 

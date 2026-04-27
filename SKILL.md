@@ -546,26 +546,30 @@ bifrost install-skill -t all -y                # 自动安装到所有支持的�
 
 `bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户明确要连接另一台机器、使用 SSH key / pair code、远程查询流量或通过 `shell.exec` 操作目标设备时，应优先使用 `bifrost-remote` skill 中的完整流程。
 
-本节只保留快速索引：
+本节只保留快速索引（完整流程、错误码、典型 workflow 见 `skill_remote.md`）：
 
 ```bash
-bifrost remote connect --ssh-key <path>        # 使用导出的 SSH key 建立长期授权
-bifrost remote connect <code>                  # 使用一次性配对码建立授权
-bifrost remote status                          # 查看远端状态
-bifrost remote search <query>                  # 远程搜索流量
-bifrost remote traffic search <query>          # 远程搜索流量详情
-bifrost remote traffic list [OPTIONS]          # 远程流量列表
-bifrost remote traffic get <id> [OPTIONS]      # 远程获取流量详情
-bifrost remote command exec --shell-text "pwd" # 受 Shell Access policy 限制的 shell.exec
+bifrost remote conn up --ssh-key <path>         # 使用导出的 SSH key 建立长期授权
+bifrost remote conn up <code>                   # 使用一次性配对码建立授权
+bifrost remote conn status                      # 查看远端状态
+bifrost remote conn down [--all|--grant-id <g>] # 回收 grant
+bifrost remote traffic search <query>           # 远程搜索流量
+bifrost remote traffic list   [OPTIONS]         # 远程流量列表
+bifrost remote traffic get    <id> [OPTIONS]    # 远程获取流量详情
+bifrost remote traffic clear  [--before <ms>]   # 清理远端流量
+bifrost remote exec --shell-text "pwd"          # 受 Shell Access policy 限制的 shell.exec
+bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo test
 ```
+
+> **4-tier 命名（2026 Q2）**：旧的 `remote connect / disconnect / status（顶层）/ search（顶层）` 仍有过渡别名但运行时会打印 deprecation warning，下个 minor release 会移除；`remote command exec` 已硬切为 `remote exec`，没有别名。`remote file {mv, rm, search, apply-patch}` 也已硬切为 `{move, delete, find, patch}`。CI 有 `scripts/ci/check-remote-cli-legacy.sh` 守卫，引用旧名会让流水线红。
 
 边界说明：
 
-- 只读查询类操作需要目标设备先启动 Bifrost、在 Remote Invoke 页面启用 SSH key 或配对码授权，并由 caller 用 `bifrost remote status` 验证连接。
+- 只读查询类操作需要目标设备先启动 Bifrost、在 Remote Invoke 页面启用 SSH key 或配对码授权，并由 caller 用 `bifrost remote conn status` 验证连接。
 - 远程设备控制类操作还需要目标设备启用 Shell Access profile/policy，并在授权请求中选择 `selected` 或 `all` 访问模式。
-- `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令；caller 要管理目标设备时，应通过 `remote command exec` 执行目标机命令。
+- `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令（已 deprecated，请改用 `bifrost setting shell` / `bifrost setting grant`）；caller 要管理目标设备时，应通过 `remote exec` 执行目标机命令。
 - `shell.exec` 受目标终端 Shell Access policy 约束；当前不能承诺 OS 级 sandbox 隔离。
-- rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote command exec`。
+- rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote exec`。
 
 ## 推荐工作流
 
@@ -716,8 +720,8 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 
 | 能力         | 所需 scope           | 覆盖子命令                                  |
 | ---------- | ------------------ | -------------------------------------- |
-| 只读         | `remote_file_read` | `read` / `list` / `stat` / `glob` / `search` / `hash` |
-| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `mv` / `rm` / `apply-patch` |
+| 只读         | `remote_file_read` | `read` / `list` / `stat` / `glob` / `find` / `hash` |
+| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `move` / `delete` / `patch` |
 
 ### 子命令一览
 
@@ -730,7 +734,7 @@ bifrost remote file list   [path] [--depth <N>] [--no-ignore] \
 bifrost remote file stat   <path>
 bifrost remote file glob   '<glob>' [--max-matches <N>] [--no-ignore] \
                                      [--exclude <name>]...
-bifrost remote file search '<regex>' [--path <sub>] [--max-matches <N>] \
+bifrost remote file find   '<regex>' [--path <sub>] [--max-matches <N>] \
                                       [--max-scan <bytes>] \
                                       [-B <n>] [-A <n>] \
                                       [-i|--case-insensitive] \
@@ -746,9 +750,9 @@ bifrost remote file write  <path> [--content-file <local|->] \
                                    [--create-parents]
 bifrost remote file edit   <path> --edits '<json>' [--base-sha256 <sha>]
 bifrost remote file mkdir  <path> [--parents]
-bifrost remote file mv     <from> <to>
-bifrost remote file rm     <path> [--recursive]
-bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <base64>)
+bifrost remote file move   <from> <to>
+bifrost remote file delete <path> [--recursive]
+bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <base64>)
 ```
 
 所有子命令共享 `--cwd <path>`（工作目录覆盖）、`--output human|json`、`--relay-url`、`--client-id`。
@@ -763,7 +767,7 @@ bifrost remote file apply-patch (--patch-file <local|->) | (--patch-b64 <base64>
 - **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
 - **`--content-b64` / `--patch-b64`**：用于传输二进制或含特殊字符的文本，caller 在本地 base64，admin 侧解码后写入；比 `--content-file -` + stdin 管道更适合非交互 / Windows agent。
 - **`--create-parents`**：`write` 自带 `mkdir -p` 语义，避免 agent 先 `mkdir` 再 `write` 的两次往返。
-- **搜索过滤**：`search` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 用于在同一次 regex 扫描里按文件名进一步收窄。
+- **搜索过滤**：`find` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 用于在同一次 regex 扫描里按文件名进一步收窄。
 
 ### 错误码契约
 
@@ -786,7 +790,7 @@ bifrost remote file list src --depth 2 --output json
 bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
 
 # 2. 精准定位
-bifrost remote file search 'fn handle_file_\w+' --path src --glob '*.rs' \
+bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' \
   -B 2 -A 2 --output json
 
 # 3. 读取 + 记住 sha
@@ -804,7 +808,7 @@ bifrost remote file write docs/notes.md \
   --create-parents --output json
 
 # 6. 多文件同步
-bifrost remote file apply-patch --patch-file ./refactor.diff --output json
+bifrost remote file patch --patch-file ./refactor.diff --output json
 ```
 
 所有子命令支持 `--output json` 做机器可读输出，统一用上述错误码前缀做 failure 分支。

@@ -1415,7 +1415,7 @@ pub enum RemoteCommands {
         action: RemoteConnCommands,
     },
     #[command(
-        about = "Remote file operations (policy-gated; read/write/edit/patch/mkdir/move/delete/list/find/grep/stat/glob/hash)"
+        about = "Remote file operations (policy-gated; read/write/edit/patch/mkdir/move/delete/list/find/stat/glob/hash)"
     )]
     File {
         #[command(subcommand)]
