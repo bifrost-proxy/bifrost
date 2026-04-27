@@ -34,3 +34,6 @@ npm/*/bin/
 !npm/bifrost/bin/
 npm/bifrost/README.md
 .codex-tmp/
+
+# Local sibling project accidentally placed in the worktree
+bifrost-server-v4/
