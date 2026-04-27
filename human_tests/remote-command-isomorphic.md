@@ -531,7 +531,7 @@ curl -x "http://127.0.0.1:${BIFROST_TEST_PORT}" "http://httpbin.org/headers?mark
 
 ## 本次执行结果
 
-测试日期：待执行
+测试日期：2026-04-27（本次仅执行 TC-RCI-27）
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
 |------|------|------|------|
@@ -561,6 +561,6 @@ curl -x "http://127.0.0.1:${BIFROST_TEST_PORT}" "http://httpbin.org/headers?mark
 | TC-RCI-24 | 远端 `remote traffic list` 格式输出与 `--no-color` 回归 | 待执行 |  |
 | TC-RCI-25 | 远端 `remote traffic get` 通过 `id/seq` 获取详情回归 | 待执行 |  |
 | TC-RCI-26 | 远端 `remote traffic get` body 参数与格式输出回归 | 待执行 |  |
-| TC-RCI-27 | 远端 `remote traffic clear` 不暴露回归 | 待执行 |  |
+| TC-RCI-27 | 远端 `remote traffic clear` 不暴露回归 | 通过 | 执行 `HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 PROXY_PORT=18080 HTTP_PORT=18081 HTTPS_PORT=18082 RELAY_PORT=18083 bash e2e-tests/tests/test_remote_search_traffic_cli_isomorphic_e2e.sh`；确认 `remote traffic --help` 包含 list/get/search 且不包含 clear，脚本汇总 35 passed / 0 failed |
 | TC-RCI-29 | 远端 `remote search` 支持仅过滤条件查询 | 待执行 |  |
 | TC-RCI-30 | 机器可读输出不被 update notice 污染 | 待执行 |  |

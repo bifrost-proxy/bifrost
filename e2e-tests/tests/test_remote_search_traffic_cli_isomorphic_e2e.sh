@@ -523,8 +523,16 @@ test_remote_traffic_list_get_clear() {
     fi
     assert_json_expr "$json_output" '.request_body != null and .response_body != null' "remote traffic get includes body payloads"
 
-    reject_output="$(run_remote_cli traffic clear --ids "$POST_ID" --yes || true)"
-    assert_text_contains "$reject_output" "traffic.clear" "remote traffic clear remains rejected by default"
+    help_output="$(run_remote_cli traffic --help || true)"
+    assert_text_contains "$help_output" "list" "remote traffic help exposes list"
+    assert_text_contains "$help_output" "get" "remote traffic help exposes get"
+    assert_text_contains "$help_output" "search" "remote traffic help exposes search"
+    if printf '%s' "$help_output" | grep -qE '(^|[[:space:]])clear($|[[:space:]])'; then
+        fail "remote traffic clear remains hidden from CLI help"
+        echo "    output: $(printf '%s' "$help_output" | head -n 20)" >&2
+    else
+        pass "remote traffic clear remains hidden from CLI help"
+    fi
 }
 
 print_summary() {
