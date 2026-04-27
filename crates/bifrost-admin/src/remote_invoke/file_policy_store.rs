@@ -392,6 +392,13 @@ fn invalidate_cache() {
     generation().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
+/// Public wrapper so sibling modules (e.g. `file_access_roots`) that surgically
+/// rewrite `file-access.toml` without going through `save_raw_config` can still
+/// signal the cache to re-parse on next `load_default()`.
+pub(crate) fn invalidate_cache_pub() {
+    invalidate_cache();
+}
+
 fn default_config_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONFIG_FILE_NAME)
 }

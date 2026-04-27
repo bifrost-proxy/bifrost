@@ -70,6 +70,17 @@ pub async fn handle_remote_invoke(
     if sub == "/file-access-config" || sub == "/file-access-config/" {
         return handle_file_access_config(req).await;
     }
+    if sub == "/file-access/validate-path" || sub == "/file-access/validate-path/" {
+        return handle_file_access_validate_path(req).await;
+    }
+    if let Some(rest) = sub.strip_prefix("/file-access/grants/") {
+        let rest = rest.trim_end_matches('/');
+        if let Some(grant_id) = rest.strip_suffix("/roots") {
+            if !grant_id.is_empty() && !grant_id.contains('/') {
+                return handle_file_access_grant_roots(req, grant_id).await;
+            }
+        }
+    }
     if let Some(rest) = sub.strip_prefix("/grants/") {
         let grant_id = rest.trim_end_matches('/');
         if !grant_id.is_empty() && !grant_id.contains('/') {
@@ -805,6 +816,135 @@ fn prepare_remote_shell_set_for_save(
     };
 
     requested
+}
+
+async fn handle_file_access_validate_path(req: Request<Incoming>) -> Response<BoxBody> {
+    use crate::remote_invoke::file_access_roots;
+
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read request body: {e}"),
+            );
+        }
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        path: String,
+    }
+    let parsed: Body = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {e}"),
+            );
+        }
+    };
+    let result = file_access_roots::validate_path(std::path::Path::new(&parsed.path));
+    json_response(&result)
+}
+
+async fn handle_file_access_grant_roots(
+    req: Request<Incoming>,
+    grant_id: &str,
+) -> Response<BoxBody> {
+    use crate::remote_invoke::file_access_roots;
+
+    #[derive(serde::Deserialize)]
+    struct PathBody {
+        path: String,
+    }
+
+    match *req.method() {
+        Method::GET => match file_access_roots::list_roots(grant_id) {
+            Ok(roots) => json_response(&serde_json::json!({
+                "success": true,
+                "grant_id": grant_id,
+                "roots": roots,
+            })),
+            Err(e) => {
+                let status = match &e {
+                    file_access_roots::RootEditError::GrantNotFound(_) => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                error_response(status, &e.to_string())
+            }
+        },
+        Method::POST => {
+            let body = match req.collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {e}"),
+                    );
+                }
+            };
+            let parsed: PathBody = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {e}"),
+                    );
+                }
+            };
+            match file_access_roots::add_root(grant_id, std::path::Path::new(&parsed.path)) {
+                Ok(outcome) => json_response(&serde_json::json!({
+                    "success": true,
+                    "data": outcome,
+                })),
+                Err(e) => {
+                    let status = match &e {
+                        file_access_roots::RootEditError::GrantNotFound(_) => StatusCode::NOT_FOUND,
+                        file_access_roots::RootEditError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    error_response(status, &e.to_string())
+                }
+            }
+        }
+        Method::DELETE => {
+            let body = match req.collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to read request body: {e}"),
+                    );
+                }
+            };
+            let parsed: PathBody = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid request body: {e}"),
+                    );
+                }
+            };
+            match file_access_roots::remove_root(grant_id, std::path::Path::new(&parsed.path)) {
+                Ok(removed) => json_response(&serde_json::json!({
+                    "success": true,
+                    "removed": removed,
+                })),
+                Err(e) => {
+                    let status = match &e {
+                        file_access_roots::RootEditError::GrantNotFound(_) => StatusCode::NOT_FOUND,
+                        _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    };
+                    error_response(status, &e.to_string())
+                }
+            }
+        }
+        _ => method_not_allowed(),
+    }
 }
 
 #[cfg(test)]
