@@ -571,7 +571,7 @@ test_file_move() {
 
     log "TC-FILE-07: file.move — move moveme.txt to moved.txt"
     local out
-    out=$(run_remote_file_cmd mv moveme.txt moved.txt --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd move moveme.txt moved.txt --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-07: caller connection error, skipping: $out"
@@ -609,7 +609,7 @@ test_file_delete() {
 
     log "TC-FILE-08: file.delete — delete deleteme.txt"
     local out
-    out=$(run_remote_file_cmd rm deleteme.txt --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd delete deleteme.txt --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-08: caller connection error, skipping: $out"
@@ -680,7 +680,7 @@ test_file_search() {
 
     log "TC-FILE-11: file.search — search 'hello' in sandbox"
     local out
-    out=$(run_remote_file_cmd search "hello" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd find "hello" --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-11: caller connection error, skipping: $out"
@@ -773,7 +773,7 @@ test_file_apply_patch() {
 PATCH
 
     local out
-    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
     rm -f "$patch_file"
 
     if is_caller_conn_error "$out"; then
@@ -895,7 +895,7 @@ test_file_search_context() {
 
     log "TC-FILE-16: file.search NEEDLE -B 1 -A 1 in sandbox"
     local out
-    out=$(run_remote_file_cmd search "NEEDLE" -B 1 -A 1 --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd find "NEEDLE" -B 1 -A 1 --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out"; then
         _log_warning "TC-FILE-16: caller connection error, skipping: $out"
@@ -951,7 +951,7 @@ test_file_search_exclude() {
     # "should be excluded" text is in node_modules/pkg.json
     # With --exclude node_modules, it should NOT be found
     local out_excluded
-    out_excluded=$(run_remote_file_cmd search "excluded" --exclude node_modules --cwd "$SANDBOX_DIR") || true
+    out_excluded=$(run_remote_file_cmd find "excluded" --exclude node_modules --cwd "$SANDBOX_DIR") || true
 
     if is_caller_conn_error "$out_excluded"; then
         _log_warning "TC-FILE-17: caller connection error, skipping: $out_excluded"
@@ -1252,7 +1252,7 @@ PATCH
     local patch_b64
     patch_b64=$(printf '%s\n' "$patch" | base64 | tr -d '\n')
     local out
-    out=$(run_remote_file_cmd apply-patch --cwd "$SANDBOX_DIR" --patch-b64 "$patch_b64") || true
+    out=$(run_remote_file_cmd patch --cwd "$SANDBOX_DIR" --patch-b64 "$patch_b64") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-03: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1288,7 +1288,7 @@ test_gap_gitignore_respected() {
     printf 'MARKER_HIT\n' > "$dir/src/kept.txt"
 
     local out
-    out=$(run_remote_file_cmd search 'MARKER_HIT' --cwd "$dir") || true
+    out=$(run_remote_file_cmd find 'MARKER_HIT' --cwd "$dir") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-04: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1405,7 +1405,7 @@ test_gap_search_case_insensitive_and_glob() {
     printf 'HELLO WORLD\n' > "$dir/b.md"
 
     local out
-    out=$(run_remote_file_cmd search 'hello world' --cwd "$dir" --case-insensitive --glob '**/*.rs') || true
+    out=$(run_remote_file_cmd find 'hello world' --cwd "$dir" --case-insensitive --glob '**/*.rs') || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-08: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1495,7 +1495,7 @@ test_gap_search_char_column() {
     printf '你好啊NEEDLE tail\n' > "$target"
 
     local out
-    out=$(run_remote_file_cmd search "NEEDLE" --cwd "$SANDBOX_DIR" --glob "multibyte.txt") || true
+    out=$(run_remote_file_cmd find "NEEDLE" --cwd "$SANDBOX_DIR" --glob "multibyte.txt") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-11: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1627,7 +1627,7 @@ test_gap_apply_patch_rollback_preserves_mode() {
 PATCH
 
     local out
-    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-14: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1762,7 +1762,7 @@ test_gap_apply_patch_rollback_on_create() {
 PATCH
 
     local out
-    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-17: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1793,7 +1793,7 @@ test_gap_search_ascii_column_regression() {
     printf 'hello NEEDLE world\n' > "$target"
 
     local out
-    out=$(run_remote_file_cmd search "NEEDLE" --cwd "$SANDBOX_DIR" --glob "ascii.txt") || true
+    out=$(run_remote_file_cmd find "NEEDLE" --cwd "$SANDBOX_DIR" --glob "ascii.txt") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-18: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
@@ -1839,7 +1839,7 @@ test_gap_apply_patch_mid_commit_create_rollback() {
 PATCH
 
     local out
-    out=$(run_remote_file_cmd apply-patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
+    out=$(run_remote_file_cmd patch --patch-file "$patch_file" --cwd "$SANDBOX_DIR") || true
     if is_caller_conn_error "$out"; then
         _log_warning "TC-GAP-19: caller conn error: $out"; CALLER_CONN_OK=0; return 0
     fi
