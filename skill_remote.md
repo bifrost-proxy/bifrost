@@ -14,25 +14,9 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 > - `bifrost remote ...` — 所有子命令都在**已连接的远端设备**上执行（relay-backed）。
 > - `bifrost setting ...` — 在**当前本机**上管理 Shell Access policy / 本地 grant。
 >
-> 历史写法 `bifrost remote shell` / `bifrost remote grant` 已 deprecated（仍可用，下个 minor release 会移除），请统一切换到 `bifrost setting shell` / `bifrost setting grant`。
 > 关键判断：看这个命令是否改变远端状态。改**本机配置**一律走 `bifrost setting`。
 
-> **2026 Q2 4-tier 重构注意**
->
-> `bifrost remote` 已被整理为四个顶层子命令组：**`conn` / `exec` / `file` / `traffic`**。
-> 历史 flat 命令仍有过渡别名，但运行时会打印 deprecation warning，并会在下个 minor release 移除：
->
-> | 旧写法 | 新写法 | 过渡别名 |
-> |---|---|---|
-> | `bifrost remote connect` | `bifrost remote conn up` | ✅ 保留一轮 |
-> | `bifrost remote disconnect` | `bifrost remote conn down` | ✅ 保留一轮 |
-> | `bifrost remote status` | `bifrost remote conn status` | ✅ 保留一轮 |
-> | `bifrost remote command exec` | `bifrost remote exec` | ❌ 硬切，已移除 |
-> | `bifrost remote search` (顶层) | `bifrost remote traffic search` | ✅ 保留一轮 |
-> | `bifrost remote file mv` | `bifrost remote file move` | ❌ 硬切 |
-> | `bifrost remote file rm` | `bifrost remote file delete` | ❌ 硬切 |
-> | `bifrost remote file search` | `bifrost remote file find` | ❌ 硬切 |
-> | `bifrost remote file apply-patch` | `bifrost remote file patch` | ❌ 硬切 |
+`bifrost remote` 的顶层子命令组为：**`conn` / `exec` / `file` / `traffic`**。
 
 ---
 
@@ -140,7 +124,7 @@ bifrost start
 
 ### 3.3 远端 Shell Access policy（启用 `exec` 必读）
 
-caller 的 grant 有 `shell_exec` scope 还不够，**目标端还要配一条匹配的 Shell Access policy**。目标端用户用 `bifrost setting shell` 管理本机 policy（旧版为 `bifrost remote shell`，已 deprecated）：
+caller 的 grant 有 `shell_exec` scope 还不够，**目标端还要配一条匹配的 Shell Access policy**。目标端用户用 `bifrost setting shell` 管理本机 policy：
 
 ```bash
 # 在目标机上执行
@@ -184,9 +168,6 @@ ops = ["read", "list", "stat", "glob", "find", "hash"]
 denies = ["**/secrets/**", "**/*.secret.toml"]
 ```
 
-> 注：策略文件里的 op 名走**服务端 RPC 内部名**，与 CLI verb 一一对应但不完全同名：
-> `file find` 对应 op `find`（曾用 `search`），`file patch` 对应 op `patch`（曾用 `apply_patch`）。历史策略里写 `search` / `apply_patch` 也仍会兼容识别，但推荐改成新名以保持一致。
-
 改完文件后无需重启 Bifrost，下次请求会自动热加载。
 
 ---
@@ -198,7 +179,7 @@ denies = ["**/secrets/**", "**/*.secret.toml"]
 先看本地有没有已保存连接；有就直接查询。没有再走 SSH key / pair code：
 
 ```bash
-bifrost remote conn status                                   # 已有连接？
+bifrost remote conn status                                      # 已有连接？
 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key   # 或
 bifrost remote conn up <pair-code>
 ```
@@ -327,7 +308,7 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 bifrost remote file list src --depth 2 --output json
 bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
 
-# 2. 定位符号（file find 取代历史 file search）
+# 2. 定位符号
 bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' \
   -B 2 -A 2 --output json
 
@@ -345,7 +326,7 @@ bifrost remote file write docs/changelog.md \
   --content-b64 "$(base64 < ./local-notes.md)" \
   --create-parents --output json
 
-# 6. 多文件 patch（取代历史 apply-patch）
+# 6. 多文件 patch
 bifrost remote file patch --patch-file ./refactor.diff --output json
 
 # 7. 跑测试（这一步才用 exec）
@@ -380,13 +361,13 @@ bifrost remote conn down --grant-id <gid>    # 指定 grant
 
 | 你想做 | 在哪里执行 | 命令 |
 |---|---|---|
-| 管理**本机** Shell Access policy/profile | 本机 | `bifrost setting shell ...`（旧：`bifrost remote shell`，deprecated） |
-| 管理**本机** remote-invoke grants | 本机 | `bifrost setting grant ...`（旧：`bifrost remote grant`，deprecated） |
+| 管理**本机** Shell Access policy/profile | 本机 | `bifrost setting shell ...` |
+| 管理**本机** remote-invoke grants | 本机 | `bifrost setting grant ...` |
 | 操作**已连接的远端设备** | caller | `bifrost remote {conn, exec, file, traffic}` |
 | 给远端改 Shell Access policy | 远端 | `bifrost remote exec --shell-text "bifrost setting shell policy add ..."` |
 | 给远端改 FileAccessPolicy | 远端 | 请用户在目标端编辑 `~/.bifrost/file-access.toml`（会热加载）；或在 shell 授权允许的情况下用 `remote exec` 辅助 |
 
-> **不要**把 `bifrost setting ...` 或 `bifrost remote shell/grant`（deprecated 别名）当成 relay-backed 管理 API 直接调，它们只作用于**执行该命令的那台机器**。
+> **不要**把 `bifrost setting ...` 当成 relay-backed 管理 API 直接调，它只作用于**执行该命令的那台机器**。
 
 ---
 
@@ -407,7 +388,6 @@ bifrost remote conn down --grant-id <gid>    # 指定 grant
 8. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
 9. **大文件/二进制传输**：`--content-file -` 从 stdin，`--content-b64` / `--patch-b64` 适合非交互；避免 echo 管道 base64。
 10. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
-11. **不要再写旧命令名**：`connect` / `disconnect` / `status`（顶层）/ `command exec` / `file mv` / `file rm` / `file search` / `file apply-patch` 都是 legacy；CI 里有 `scripts/ci/check-remote-cli-legacy.sh` 守卫，引用到会让流水线红。
 
 ---
 
@@ -424,9 +404,3 @@ A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./loca
 
 **Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
 A: `remote exec`：`--cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`。git / 测试用 shell，代码改动用 file。
-
-**Q: 我看到 `warning: bifrost remote connect is deprecated`，是不是我写错了？**
-A: 不是错，但请改名。`connect/disconnect/status/search(顶层)` 都是 legacy 过渡别名，下个 minor release 会移除。改用 `conn up/down/status` 和 `traffic search`。`command exec` 已经硬切，没有别名，必须写 `exec`。
-
-**Q: `bifrost remote shell` 和 `bifrost setting shell` 到底有什么差别？**
-A: 完全一样的管理能力，都改**本机**数据目录。`bifrost remote shell` 是历史遗留别名，已 deprecated，运行时会打印 warning；请统一改用 `bifrost setting shell`。
