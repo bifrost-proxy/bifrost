@@ -103,6 +103,21 @@ Shell Access 的 CLI 配置入口是 `bifrost setting shell profile add` 和 `bi
 
 远端流量查询只提供 `bifrost remote traffic {list,get,search}`，不提供清理类写操作。
 
+当 Access 设为 `selected` 时，目标端需要预先配置 shell profile 和 policy 来限定可执行的命令范围：
+
+```bash
+# 创建一个 shell profile（定义允许使用的 shell）
+bifrost setting shell profile add --id default --name Default \
+    --shell /bin/bash --shell /bin/sh
+
+# 创建一个 shell policy（定义命令匹配规则）
+bifrost setting shell policy add --id allow-bifrost-cli \
+    --name "Allow bifrost CLI" \
+    --pattern '^bifrost\s+' --shell /bin/bash --profile default
+```
+
+Access = `all` 则跳过策略检查，允许执行任意命令。
+
 ### 3.1 建议用 SSH key（长期）
 
 1. 目标端 Web UI `http://127.0.0.1:9900/_bifrost/settings?tab=remote-invoke` → 创建/导出 SSH key。
@@ -201,6 +216,8 @@ bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
 ```
 
 输出格式统一：`--output human|json|json-pretty`，`--no-color` 适合非交互。
+
+总结：`remote traffic {list,get,search}` 涵盖了所有只读流量查询能力。
 
 清理目标设备流量记录属于写操作，不提供对应的 `bifrost remote traffic` 子命令。确需清理时，必须先取得 shell 授权，再用 `bifrost remote exec` 在目标设备上执行本机命令或 API。
 
