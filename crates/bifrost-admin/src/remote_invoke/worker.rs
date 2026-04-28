@@ -1079,7 +1079,20 @@ impl RemoteInvokeWorker {
                     {
                         let gid = gi.grant_id.clone();
                         relay_active_ids.insert(gid.clone());
-                        let gi = apply_stored_grant_policy(gi, synced_policy.get(&gid));
+                        let mut gi = apply_stored_grant_policy(gi, synced_policy.get(&gid));
+                        // Preserve existing local timestamps on SSE reconciliation so
+                        // first_authorized_at (displayed as first_connected_at) is stable
+                        // across reconnects. Only adopt current time if we have never
+                        // seen this grant locally.
+                        if let Some(existing) = self.local_grants.read().get(&gid) {
+                            gi.first_authorized_at = existing.first_authorized_at;
+                            if gi.last_command_at.is_none() {
+                                gi.last_command_at = existing.last_command_at;
+                            }
+                            if gi.last_used_at.is_none() {
+                                gi.last_used_at = existing.last_used_at;
+                            }
+                        }
                         if !has_usable_grant_crypto(&synced_transport, &gi) {
                             warn!(
                                 grant_id = %gid,
