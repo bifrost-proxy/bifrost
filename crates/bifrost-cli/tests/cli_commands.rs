@@ -376,11 +376,13 @@ fn remote_connect_accepts_ssh_key_without_pair_code() {
                         pair_code,
                         ssh_key,
                         device_code,
+                        label,
                     },
             } => {
                 assert_eq!(pair_code, None);
                 assert_eq!(ssh_key.as_deref(), Some("/tmp/test.bifrost"));
                 assert_eq!(device_code, None);
+                assert_eq!(label, None);
             }
             _ => panic!("unexpected remote action"),
         },

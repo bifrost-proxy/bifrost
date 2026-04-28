@@ -151,7 +151,10 @@ bifrost --version
 bifrost remote conn status                                      # 已有连接？
 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key   # 或
 bifrost remote conn up <pair-code>
+bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key --label "my-ci-bot"  # 自定义标签
 ```
+
+**`--label <name>`**：为本次连接指定自定义标签（如 `my-ci-bot`、`eden-macbook`）。标签会显示在远端管理端的 Grants 列表标题区域，方便识别来源。未指定时默认使用本机 hostname。
 
 多连接场景：`--client-id <prefix>` 显式指定目标；非交互环境下必传。
 

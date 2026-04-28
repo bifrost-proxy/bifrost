@@ -2647,6 +2647,9 @@ export default function RemoteInvokeTab({
                 <SafetyOutlined />
                 <span>Grants</span>
                 <Badge count={grants.filter((g) => g.status === "active").length} />
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: "normal" }}>
+                  Total commands: {grants.reduce((sum, g) => sum + (g.use_count ?? 0), 0)}
+                </Text>
               </Space>
             }
             extra={
@@ -2713,7 +2716,7 @@ export default function RemoteInvokeTab({
                       <List.Item.Meta
                         title={
                           <Space>
-                            <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
+                            <Text>{g.label || g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
                             <Tag color={g.status === "active" ? "green" : "default"}>
                               {g.status}
                             </Tag>

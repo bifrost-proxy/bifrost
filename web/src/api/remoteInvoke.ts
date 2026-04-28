@@ -140,6 +140,9 @@ export interface Grant {
   client_instance_id: string;
   caller_fingerprint: string;
   caller_display_name?: string;
+  label?: string;
+  os_version?: string;
+  arch?: string;
   auth_method?: RemoteInvokeAuthMethod | string;
   ssh_key_id?: string | null;
   ssh_key_fingerprint?: string | null;

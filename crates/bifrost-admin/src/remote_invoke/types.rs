@@ -330,6 +330,12 @@ pub struct CallerInfo {
     pub hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -891,6 +897,8 @@ pub struct GrantInfo {
     pub caller_fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub grant_mode: GrantMode,
     #[serde(default)]
     pub grant_scope: GrantScope,
@@ -908,6 +916,8 @@ pub struct GrantInfo {
     pub last_used_at: Option<u64>,
     pub max_calls: Option<u32>,
     pub remaining_calls: Option<u32>,
+    #[serde(default)]
+    pub use_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -924,6 +934,10 @@ pub struct GrantInfo {
     pub interactive_allowed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdin_allowed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1471,6 +1471,11 @@ pub enum RemoteConnCommands {
             help = "Override the device code derived from --ssh-key (debug only)"
         )]
         device_code: Option<String>,
+        #[arg(
+            long,
+            help = "Custom label for this connection (shown on the remote management UI instead of hostname)"
+        )]
+        label: Option<String>,
     },
     #[command(
         about = "Revoke authorization for a remote Bifrost instance",

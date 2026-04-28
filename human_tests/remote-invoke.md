@@ -1959,6 +1959,125 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ---
 
+## Grant Label 与 Use Count 补充用例
+
+### TC-RI-68：`--label` 参数在 Grants 列表中显示自定义标签
+
+**操作步骤**：
+1. 启动 Bifrost 服务和 relay 服务（参考前置条件）
+2. 在 WebUI 开启 Discovery Mode，获取 pair code
+3. 使用调用方 CLI 带 `--label` 连接：
+   ```bash
+   bifrost remote conn up --pair-code <code> --relay-url http://127.0.0.1:8686 --label "my-ci-bot"
+   ```
+4. 在 WebUI 中审批该请求
+5. 查看 Settings > Remote Invoke > Grants 列表
+
+**预期结果**：
+- Grants 列表中对应 grant 的标题区域显示 `my-ci-bot`，而非 hostname
+- API 响应（`GET /api/remote-invoke/grants`）中对应 grant 的 `label` 字段值为 `"my-ci-bot"`
+- `caller_display_name` 字段值也为 `"my-ci-bot"`（CLI 以 label 优先作为 display_name）
+
+---
+
+### TC-RI-69：不带 `--label` 时 Grants 列表显示 hostname
+
+**操作步骤**：
+1. 使用调用方 CLI 不带 `--label` 连接：
+   ```bash
+   bifrost remote conn up --pair-code <code> --relay-url http://127.0.0.1:8686
+   ```
+2. 审批后查看 Grants 列表
+
+**预期结果**：
+- Grants 列表中对应 grant 标题显示调用方机器的 hostname
+- API 响应中 `label` 字段为 `null` 或不存在
+- `caller_display_name` 字段值为调用方 hostname
+
+---
+
+### TC-RI-70-label：`--label` 通过 SSH key 连接时也生效
+
+**操作步骤**：
+1. 使用 SSH key 连接并携带 `--label`：
+   ```bash
+   bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key --label "eden-macbook"
+   ```
+2. 查看 Grants 列表
+
+**预期结果**：
+- Grants 列表中标题显示 `eden-macbook`
+- API 响应中 `label` 字段值为 `"eden-macbook"`
+
+---
+
+### TC-RI-71-usecount：Grant 执行命令后 use_count 递增
+
+**操作步骤**：
+1. 完成配对授权（pair code 或 SSH key）
+2. 执行一条远程命令：
+   ```bash
+   bifrost remote status
+   ```
+3. 查看 Grants 列表中对应 grant 的 `use_count`
+4. 再执行两条远程命令：
+   ```bash
+   bifrost remote exec --shell-text "echo hello"
+   bifrost remote exec --shell-text "echo world"
+   ```
+5. 再次查看 Grants 列表
+
+**预期结果**：
+- 第一次执行后 `use_count` 从 0 变为 1
+- 再执行两条后 `use_count` 变为 3
+- API 响应中每个 grant 的 `use_count` 字段值与实际命令执行次数一致
+
+---
+
+### TC-RI-72-total：Grants 卡片标题区域显示命令执行总数
+
+**操作步骤**：
+1. 配对两个不同的 caller（使用不同 fingerprint），分别执行若干命令
+2. 查看 WebUI Settings > Remote Invoke > Grants 卡片标题区域
+
+**预期结果**：
+- Grants 卡片标题区域（Card header）显示 `Total commands: N`
+- `N` 等于所有 grant 的 `use_count` 之和
+- 如果所有 grant 都未执行过命令，显示 `Total commands: 0`
+
+---
+
+### TC-RI-73-compat：旧版 grant 数据反序列化时 use_count 默认为 0、label 为 null
+
+**操作步骤**：
+1. 停止 Bifrost 服务
+2. 查看 `.bifrost-test` 数据目录中持久化的 grant 数据（如果有旧格式数据）
+3. 启动新版本 Bifrost 服务
+4. 查看 Grants 列表
+
+**预期结果**：
+- 旧版本创建的 grant（不含 `use_count` 和 `label` 字段）正常加载
+- `use_count` 默认为 0
+- `label` 为 null，UI 降级显示 `caller_display_name` 或 fingerprint
+- 不出现反序列化错误
+
+---
+
+### TC-RI-74-sysinfo：Grants 列表展示 caller 系统信息（平台、版本、架构）
+
+**操作步骤**：
+1. 使用调用方 CLI 连接（pair code 或 SSH key）
+2. 查看 Settings > Remote Invoke > Grants 列表 description 区域
+3. 调用 API `GET /api/remote-invoke/grants` 查看返回 JSON
+
+**预期结果**：
+- Grants 列表 description 区域显示系统信息（如 `· 15.5 aarch64` 或 `· Debian GNU/Linux 11 x86_64`）
+- API 响应中每个 grant 包含 `os_version` 和 `arch` 字段
+- macOS 上 `os_version` 为类似 `15.5` 的版本号，`arch` 为 `aarch64` 或 `x86_64`
+- Linux 上 `os_version` 为 `/etc/os-release` 中的 `PRETTY_NAME` 值
+
+---
+
 ### TC-RI-78：多客户端在线时未指定 --client-id 触发交互式选择
 
 **前置条件**：至少两个 Bifrost 客户端同时在线且已通过 relay 注册

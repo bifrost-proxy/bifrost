@@ -291,6 +291,7 @@ export class RemoteInvokeService {
     pairing_id: string;
     caller_fingerprint: string;
     caller_display_name: string;
+    caller_info: any;
     source_ip: string;
     user_agent: string;
     status: string;
@@ -304,6 +305,7 @@ export class RemoteInvokeService {
         pairing_id: p.id,
         caller_fingerprint: p.caller_fingerprint || callerInfo.fingerprint || '',
         caller_display_name: callerInfo.display_name || '',
+        caller_info: callerInfo,
         source_ip: callerInfo.source_ip || '',
         user_agent: callerInfo.user_agent || '',
         status: p.status,
@@ -381,6 +383,7 @@ export class RemoteInvokeService {
       pairing_id: pairingId,
       caller_fingerprint: req.caller_info.fingerprint,
       caller_display_name: req.caller_info.display_name ?? '',
+      caller_info: req.caller_info,
       caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       source_ip: sourceIp,
       user_agent: req.caller_info.user_agent ?? '',
@@ -510,9 +513,14 @@ export class RemoteInvokeService {
       client_ephemeral_pub: req.client_ephemeral_pub,
     });
 
+    let callerInfoObj: any = {};
+    try { callerInfoObj = JSON.parse(pairing.caller_info_json || '{}'); } catch { /* ignore */ }
+
     pushToClient(pairing.client_instance_id, 'grant_created', {
       grant_id: grantId,
       caller_fingerprint: pairing.caller_fingerprint,
+      caller_display_name: callerDisplayName,
+      caller_info: callerInfoObj,
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
       file_access: normalizeFileAccess(req.file_access),
