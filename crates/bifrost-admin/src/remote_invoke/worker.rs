@@ -781,7 +781,13 @@ impl RemoteInvokeWorker {
             Err(error) => return Err(error),
         };
 
-        let (caller_fingerprint_from_pairing, caller_display_name_from_pairing) = self
+        let (
+            caller_fingerprint_from_pairing,
+            caller_display_name_from_pairing,
+            caller_label_from_pairing,
+            caller_os_version_from_pairing,
+            caller_arch_from_pairing,
+        ) = self
             .pending_pairings
             .read()
             .get(pairing_id)
@@ -789,6 +795,9 @@ impl RemoteInvokeWorker {
                 (
                     tp.request.caller_info.fingerprint.clone(),
                     tp.request.caller_info.display_name.clone(),
+                    tp.request.caller_info.label.clone(),
+                    tp.request.caller_info.os_version.clone(),
+                    tp.request.caller_info.arch.clone(),
                 )
             })
             .unwrap_or_default();
@@ -827,11 +836,30 @@ impl RemoteInvokeWorker {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .or(caller_display_name_from_pairing);
+            let caller_label = result
+                .get("caller_info")
+                .and_then(|ci| ci.get("label"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or(caller_label_from_pairing);
+            let caller_os_version = result
+                .get("caller_info")
+                .and_then(|ci| ci.get("os_version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or(caller_os_version_from_pairing);
+            let caller_arch = result
+                .get("caller_info")
+                .and_then(|ci| ci.get("arch"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or(caller_arch_from_pairing);
             let grant_info = GrantInfo {
                 grant_id: grant_id.clone(),
                 client_instance_id,
                 caller_fingerprint,
                 caller_display_name,
+                label: caller_label,
                 grant_mode,
                 grant_scope: shell_grant.grant_scope,
                 file_access: shell_grant.file_access,
@@ -851,6 +879,7 @@ impl RemoteInvokeWorker {
                 } else {
                     None
                 },
+                use_count: 0,
                 ssh_key_id: None,
                 ssh_key_fingerprint: None,
                 caller_ephemeral_pub: None,
@@ -859,6 +888,8 @@ impl RemoteInvokeWorker {
                 shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
                 interactive_allowed: shell_grant.interactive_allowed,
                 stdin_allowed: shell_grant.stdin_allowed,
+                os_version: caller_os_version,
+                arch: caller_arch,
             };
             self.local_grants
                 .write()
@@ -1387,6 +1418,18 @@ impl RemoteInvokeWorker {
                     .get("username")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                label: p
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                os_version: p
+                    .get("os_version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                arch: p
+                    .get("arch")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             };
             let caller_pubkey = p
                 .get("caller_pubkey")
@@ -1583,6 +1626,7 @@ impl RemoteInvokeWorker {
             client_instance_id: existing.client_instance_id.clone(),
             caller_fingerprint: existing.caller_fingerprint.clone(),
             caller_display_name: existing.caller_display_name.clone(),
+            label: existing.label.clone(),
             grant_mode: existing.grant_mode,
             grant_scope: updated_shell_grant.grant_scope,
             file_access: updated_shell_grant.file_access,
@@ -1594,6 +1638,7 @@ impl RemoteInvokeWorker {
             last_used_at: existing.last_used_at,
             max_calls: existing.max_calls,
             remaining_calls: existing.remaining_calls,
+            use_count: existing.use_count,
             ssh_key_id: existing.ssh_key_id.clone(),
             ssh_key_fingerprint: existing.ssh_key_fingerprint.clone(),
             caller_ephemeral_pub: existing.caller_ephemeral_pub.clone(),
@@ -1603,6 +1648,8 @@ impl RemoteInvokeWorker {
                 .shell_policy_set_version_snapshot,
             interactive_allowed: updated_shell_grant.interactive_allowed,
             stdin_allowed: updated_shell_grant.stdin_allowed,
+            os_version: existing.os_version.clone(),
+            arch: existing.arch.clone(),
         });
         updated_info.policy_binding = updated_shell_grant.policy_binding.clone();
         updated_info.file_access = updated_shell_grant.file_access;
@@ -2049,6 +2096,10 @@ impl RemoteInvokeWorker {
                 .caller_info
                 .as_ref()
                 .and_then(|info| info.display_name.clone().or_else(|| info.hostname.clone())),
+            label: event
+                .caller_info
+                .as_ref()
+                .and_then(|info| info.label.clone()),
             grant_mode,
             grant_scope: shell_grant.grant_scope,
             file_access: shell_grant.file_access,
@@ -2060,6 +2111,7 @@ impl RemoteInvokeWorker {
             last_used_at: Some(now),
             max_calls: None,
             remaining_calls: None,
+            use_count: 0,
             ssh_key_id: Some(active_key.record.id.clone()),
             ssh_key_fingerprint: Some(active_key.record.ssh_key_fingerprint.clone()),
             caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub.clone()),
@@ -2068,6 +2120,14 @@ impl RemoteInvokeWorker {
             shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
             interactive_allowed: shell_grant.interactive_allowed,
             stdin_allowed: shell_grant.stdin_allowed,
+            os_version: event
+                .caller_info
+                .as_ref()
+                .and_then(|info| info.os_version.clone()),
+            arch: event
+                .caller_info
+                .as_ref()
+                .and_then(|info| info.arch.clone()),
         };
         self.local_grants
             .write()
@@ -2151,6 +2211,18 @@ impl RemoteInvokeWorker {
                     .map(|s| s.to_string()),
                 username: data
                     .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                label: data
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                os_version: data
+                    .get("os_version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                arch: data
+                    .get("arch")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
             }
@@ -2304,19 +2376,35 @@ impl RemoteInvokeWorker {
             "grant validated for call_open"
         );
 
-        let (grant_scope, file_access, caller_fp, ssh_fp) = self
-            .local_grants
-            .read()
-            .get(&grant_id)
-            .map(|grant| {
-                (
-                    grant.grant_scope,
-                    grant.file_access,
-                    Some(grant.caller_fingerprint.clone()),
-                    grant.ssh_key_fingerprint.clone(),
-                )
-            })
-            .unwrap_or_default();
+        let active_ssh_key_for_repair = self.get_active_ssh_key().ok().flatten();
+        let mut repaired_grant_info: Option<GrantInfo> = None;
+        let (grant_scope, file_access, caller_fp, ssh_fp) = {
+            let mut grants = self.local_grants.write();
+            grants
+                .get_mut(&grant_id)
+                .map(|grant| {
+                    if repair_legacy_ssh_grant_identity(grant, active_ssh_key_for_repair.as_ref()) {
+                        repaired_grant_info = Some(grant.clone());
+                    }
+                    (
+                        grant.grant_scope,
+                        grant.file_access,
+                        Some(grant.caller_fingerprint.clone()),
+                        grant.ssh_key_fingerprint.clone(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        if let Some(repaired) = repaired_grant_info {
+            if let Err(error) = self.ensure_active_ssh_file_access_policy() {
+                warn!(
+                    error = %error,
+                    grant_id = %grant_id,
+                    "repaired legacy SSH grant identity but failed to restore default file policy"
+                );
+            }
+            self.persist_grant_info(&grant_id, &repaired);
+        }
 
         if data.get("command").is_some() {
             warn!(
@@ -3283,11 +3371,13 @@ fn validate_grant_for_call(
                     if remaining - 1 == 0 {
                         grant.status = GrantStatus::Consumed;
                     }
+                    grant.use_count += 1;
                     grant.last_command_at = Some(now);
                     grant.last_used_at = Some(now);
                     None
                 }
             } else {
+                grant.use_count += 1;
                 grant.last_command_at = Some(now);
                 grant.last_used_at = Some(now);
                 None
@@ -3632,6 +3722,16 @@ fn build_grant_info_from_grant_created(
         client_instance_id: client_instance_id.to_string(),
         caller_fingerprint,
         caller_display_name,
+        label: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("label"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
         grant_mode,
         grant_scope,
         file_access,
@@ -3651,6 +3751,7 @@ fn build_grant_info_from_grant_created(
         } else {
             None
         },
+        use_count: data.get("use_count").and_then(|v| v.as_u64()).unwrap_or(0),
         ssh_key_id,
         ssh_key_fingerprint,
         caller_ephemeral_pub: data
@@ -3667,6 +3768,26 @@ fn build_grant_info_from_grant_created(
             .and_then(|v| v.as_u64()),
         interactive_allowed: data.get("interactive_allowed").and_then(|v| v.as_bool()),
         stdin_allowed: data.get("stdin_allowed").and_then(|v| v.as_bool()),
+        os_version: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("os_version"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("os_version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
+        arch: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("arch"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("arch")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
     })
 }
 
@@ -3715,6 +3836,16 @@ fn recover_grant_info_from_call_open(
         client_instance_id: client_instance_id.to_string(),
         caller_fingerprint,
         caller_display_name,
+        label: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("label"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
         grant_mode: GrantMode::Permanent,
         grant_scope,
         file_access,
@@ -3730,6 +3861,7 @@ fn recover_grant_info_from_call_open(
         last_used_at: None,
         max_calls: None,
         remaining_calls: None,
+        use_count: data.get("use_count").and_then(|v| v.as_u64()).unwrap_or(0),
         ssh_key_id: active_ssh_key.map(|record| record.id.clone()),
         ssh_key_fingerprint: active_ssh_key.map(|record| record.ssh_key_fingerprint.clone()),
         caller_ephemeral_pub: data
@@ -3746,6 +3878,26 @@ fn recover_grant_info_from_call_open(
             .and_then(|v| v.as_u64()),
         interactive_allowed: data.get("interactive_allowed").and_then(|v| v.as_bool()),
         stdin_allowed: data.get("stdin_allowed").and_then(|v| v.as_bool()),
+        os_version: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("os_version"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("os_version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
+        arch: data
+            .get("caller_info")
+            .and_then(|ci| ci.get("arch"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("arch")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
     }
 }
 
@@ -3772,6 +3924,32 @@ fn apply_stored_grant_policy(
     grant
 }
 
+fn repair_legacy_ssh_grant_identity(
+    grant: &mut GrantInfo,
+    active_ssh_key: Option<&SshKeyRecord>,
+) -> bool {
+    if grant.auth_method != AuthMethod::SshPublickey {
+        return false;
+    }
+    let Some(active_ssh_key) = active_ssh_key else {
+        return false;
+    };
+    let legacy_or_missing_fingerprint = grant
+        .ssh_key_fingerprint
+        .as_deref()
+        .map(|fingerprint| fingerprint.is_empty() || fingerprint == grant.caller_fingerprint)
+        .unwrap_or(true);
+    if !legacy_or_missing_fingerprint
+        || grant.ssh_key_fingerprint.as_deref() == Some(&active_ssh_key.ssh_key_fingerprint)
+    {
+        return false;
+    }
+
+    grant.ssh_key_id = Some(active_ssh_key.id.clone());
+    grant.ssh_key_fingerprint = Some(active_ssh_key.ssh_key_fingerprint.clone());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3787,6 +3965,7 @@ mod tests {
     use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
     use ring::agreement::EphemeralPrivateKey;
     use ring::rand::SystemRandom;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn make_active_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
@@ -3795,6 +3974,7 @@ mod tests {
             client_instance_id: "test-instance".to_string(),
             caller_fingerprint: "test-fp".to_string(),
             caller_display_name: None,
+            label: None,
             grant_mode: mode,
             grant_scope: GrantScope::RemoteQuery,
             file_access: Default::default(),
@@ -3814,6 +3994,7 @@ mod tests {
             } else {
                 None
             },
+            use_count: 0,
             ssh_key_id: None,
             ssh_key_fingerprint: None,
             caller_ephemeral_pub: None,
@@ -3822,7 +4003,112 @@ mod tests {
             shell_policy_set_version_snapshot: None,
             interactive_allowed: None,
             stdin_allowed: None,
+            os_version: None,
+            arch: None,
         }
+    }
+
+    fn make_active_ssh_key() -> SshKeyRecord {
+        SshKeyRecord {
+            id: "ssh-key-current".to_string(),
+            device_code: "BF-TEST".to_string(),
+            label: "mira".to_string(),
+            public_key_pem: "pub".to_string(),
+            ssh_key_fingerprint: "real-ssh-fingerprint".to_string(),
+            grant_mode: GrantMode::Permanent,
+            status: SshKeyStatus::Active,
+            created_at: 1000,
+            last_used_at: None,
+            last_caller_info: None,
+        }
+    }
+
+    #[test]
+    fn repair_legacy_ssh_grant_identity_replaces_caller_fingerprint_with_active_key() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("legacy-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_id = Some("legacy-key".to_string());
+        grant.ssh_key_fingerprint = Some("caller-fp".to_string());
+
+        assert!(repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        assert_eq!(grant.ssh_key_id.as_deref(), Some("ssh-key-current"));
+        assert_eq!(
+            grant.ssh_key_fingerprint.as_deref(),
+            Some("real-ssh-fingerprint")
+        );
+    }
+
+    #[test]
+    fn repaired_legacy_ssh_grant_resolves_active_key_write_policy() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("legacy-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_fingerprint = Some("caller-fp".to_string());
+
+        let cfg = RawConfig {
+            grants: vec![RawGrantPolicy {
+                match_: GrantMatch {
+                    grant_id: None,
+                    caller_fingerprint: None,
+                    ssh_fingerprint: Some(active_key.ssh_key_fingerprint.clone()),
+                },
+                grant_id: None,
+                name: Some("ssh-key:mira".to_string()),
+                roots: vec![PathBuf::from("/")],
+                denies: Vec::new(),
+                write_denies: Vec::new(),
+                ops: file_policy_full_ops(),
+                max_read_bytes: None,
+                max_write_bytes: None,
+                respect_gitignore: None,
+                allow_overwrite: Some(true),
+                allow_recursive_delete: Some(false),
+            }],
+            default: None,
+        };
+        let store = crate::remote_invoke::file_policy_store::FileAccessPolicyStore::from_raw(cfg);
+
+        assert!(repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        let policy = store.resolve(
+            &grant.grant_id,
+            Some(&grant.caller_fingerprint),
+            grant.ssh_key_fingerprint.as_deref(),
+            Path::new("/Users/eden"),
+        );
+        assert!(
+            policy
+                .check(
+                    Path::new("hello.txt"),
+                    Path::new("/Users/eden"),
+                    FileOp::Write
+                )
+                .is_ok(),
+            "repaired SSH grant should inherit the active key write policy"
+        );
+    }
+
+    #[test]
+    fn repair_legacy_ssh_grant_identity_preserves_explicit_different_key() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("other-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_fingerprint = Some("other-real-key".to_string());
+
+        assert!(!repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        assert_eq!(grant.ssh_key_fingerprint.as_deref(), Some("other-real-key"));
     }
 
     fn setup_remote_shell_store(version: u64) -> (std::sync::MutexGuard<'static, ()>, TempDir) {
@@ -4892,6 +5178,7 @@ mod tests {
             client_instance_id: "inst".to_string(),
             caller_fingerprint: "fp".to_string(),
             caller_display_name: None,
+            label: None,
             grant_mode: GrantMode::Permanent,
             grant_scope: GrantScope::RemoteQuery,
             file_access: Default::default(),
@@ -4903,6 +5190,7 @@ mod tests {
             last_used_at: None,
             max_calls: None,
             remaining_calls: None,
+            use_count: 0,
             ssh_key_id: None,
             ssh_key_fingerprint: None,
             caller_ephemeral_pub: None,
@@ -4911,6 +5199,8 @@ mod tests {
             shell_policy_set_version_snapshot: None,
             interactive_allowed: None,
             stdin_allowed: None,
+            os_version: None,
+            arch: None,
         };
         grants.insert("auto-g".to_string(), auto_grant);
 

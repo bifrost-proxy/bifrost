@@ -326,6 +326,28 @@ grep "$FP" "$TEST_DIR/file-access.toml"
 - 恢复策略使用默认 roots（`$HOME`）和 12 个 file ops，确保 SSH Key 连接不会卡在无 file policy 状态；
 - Bifrost 测试实例启动命令包含 `--no-system-proxy`，且端口不是 9900。
 
+### TC-6.4 回归：旧 SSH grant 使用 caller fingerprint 时 file.write 仍命中 active SSH Key 默认策略
+
+**触发 Bug**：旧版 SSH grant 可能把 `ssh_key_fingerprint` 错存成 caller fingerprint。此时 grant 列表看起来是 SSH key 连接，`file_access=read_write`，SSH Key 默认 File Policy 也已配置为 `roots=["/"]`，但执行 `bifrost remote file write hello.txt --cwd "$HOME"` 时执行端拿错误 fingerprint 查 policy，退回 readonly fallback，报 `readonly policy does not allow write operations`。
+
+**步骤**：
+```bash
+# 前置：target 当前 active SSH Key 已配置 match.ssh_fingerprint 默认策略，roots=["/"]，ops 包含 write/edit/apply_patch。
+# 构造或保留一条旧 SSH grant：auth_method=ssh_publickey，file_access=read_write，
+# 但 ssh_key_fingerprint 缺失或等于 caller_fingerprint。
+printf 'hello\n' > /tmp/bifrost-remote-hello.txt
+HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 \
+  bifrost remote file write hello.txt --cwd "$HOME" \
+  --content-file /tmp/bifrost-remote-hello.txt --output json
+HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 \
+  bifrost remote file read hello.txt --cwd "$HOME" --output json
+```
+
+**期望**：
+- `file.write hello.txt` 成功返回 JSON，不再出现 `[file.permission_denied] readonly policy does not allow write operations`。
+- 后续 `file.read hello.txt` 能读回 `hello\n`。
+- target 侧该旧 grant 的 `ssh_key_fingerprint` 被修正为当前 active SSH Key fingerprint，后续调用继续命中 `match.ssh_fingerprint` 默认策略。
+
 ---
 
 ## 完成定义（DoD）
@@ -562,5 +584,6 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users
 | 2026-04-25 | TC-6.1 配对批准时 remote_file_write 不依赖 Shell Access policy | `SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh` | PASS：输出 `grant available as remote_file_write`，TC-FILE-01/19/20/09 通过，Summary 56/56 passed |
 | 2026-04-27 | TC-6.2 SSH Key 默认 File Policy 可配置且 reset 后保留 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy` + SSH key/file-access/reset API 断言 | PASS：旧 fingerprint `55a9ccae` reset 到新 fingerprint `2a018c79` 后，`file-access-config` 仅保留新 `match.ssh_fingerprint`，roots 仍为 `/Users/eden/work/code/nextoncall/next_agent`，ops 包含 `write/edit/apply_patch` |
 | 2026-04-27 | TC-6.3 SSH Key 默认 File Policy 被误删后自动恢复落盘 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy-restore cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy-restore/debug/bifrost start -p 18891 --unsafe-ssl --no-system-proxy` + `PUT {"grant":[]}` / GET / grep file-access.toml 断言 | PASS：PUT 空策略后自动恢复 fingerprint `fed9b02c`；API 返回 12 个 file ops；`file-access.toml` 已写入 `match.ssh_fingerprint` |
+| 2026-04-28 | TC-6.4 旧 SSH grant 使用 caller fingerprint 时 file.write 仍命中 active SSH Key 默认策略 | `cargo test -p bifrost-admin legacy_ssh_grant -- --nocapture` | PASS：旧 SSH grant 的 `ssh_key_fingerprint=caller_fingerprint` 被修正为 active SSH key fingerprint；随后 `FileAccessPolicyStore::resolve()` 命中 `match.ssh_fingerprint` 的 `roots=["/"]` 写策略，`FileOp::Write` 检查通过，不再走 readonly fallback |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
 | 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |

@@ -208,7 +208,7 @@ metrics <ACTION>                  View real-time metrics and statistics
 
 sync <ACTION>                     Manage remote sync
   status                            Show sync status
-  login                             Login to sync service
+  login [--token <TOKEN> --url <URL>] Login to sync service
   logout                            Logout from sync service
   run                               Trigger manual sync
   config [--enabled] [--auto-sync] [--remote-url]  View or update sync config
@@ -1365,7 +1365,12 @@ pub enum SyncCommands {
     #[command(about = "Show sync status")]
     Status,
     #[command(about = "Login to sync service")]
-    Login,
+    Login {
+        #[arg(long, help = "Sync session token for non-interactive login")]
+        token: Option<String>,
+        #[arg(long, value_hint = ValueHint::Url, help = "Remote sync URL for non-interactive login")]
+        url: Option<String>,
+    },
     #[command(about = "Logout from sync service")]
     Logout,
     #[command(about = "Trigger manual sync")]
@@ -1471,6 +1476,11 @@ pub enum RemoteConnCommands {
             help = "Override the device code derived from --ssh-key (debug only)"
         )]
         device_code: Option<String>,
+        #[arg(
+            long,
+            help = "Custom label for this connection (shown on the remote management UI instead of hostname)"
+        )]
+        label: Option<String>,
     },
     #[command(
         about = "Revoke authorization for a remote Bifrost instance",

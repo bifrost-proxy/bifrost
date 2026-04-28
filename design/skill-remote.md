@@ -9,6 +9,7 @@
 - 执行当前 relay 支持的远端只读查询和受控 `shell.exec`，并在授权范围内操作目标设备。
 - 明确两类操作的前置准备：只读查询需要目标端启用 Remote Invoke 授权；远程设备控制还需要目标端启用 Shell Access profile/policy 并授权 `selected` 或 `all` 访问模式。
 - 明确区分 caller 本地管理命令与通过 `remote command exec` 操作目标设备的路径，避免 Agent 在 caller 本机误执行管理命令。
+- 要求 Agent 在执行任何远端工程任务前，先阅读目标工作目录下的 `AGENTS.md` / `agents.md` 手册，并读取 `.agents/skills/` 下所有 skill 元信息；skill 详细正文只在任务命中时按需加载。
 
 ## 实现逻辑
 
@@ -51,6 +52,7 @@
 - `traffic.clear` 是写操作，不提供 `bifrost remote traffic clear` 子命令；需要清理目标端记录时，必须先取得 shell 授权，再通过 `remote exec` 执行目标端本机命令或 API。
 - rule/config/script/ca/value/系统代理等没有专门的 `bifrost remote <module>` 子命令时，应通过 `remote exec` 在目标终端执行等价本机命令。
 - Shell Access policy/profile 等当前本机管理命令应使用 `bifrost setting ...`；caller 要管理目标设备时，应切换到 `remote exec`。
+- 面向远端仓库/工程的 coding-agent 任务，必须把工程约束读取放在任何搜索、读取、编辑、测试之前：先读取工作目录下 `AGENTS.md` / `agents.md`，再读取 `.agents/skills/*/SKILL.md` 的元信息（frontmatter、名称、描述、触发条件、路径等），详细 skill 内容只在实际需要对应流程时加载。
 
 ### 安全语义
 
@@ -77,12 +79,14 @@
 - 验证 remote skill 内容包含 `name: "bifrost-remote"`。
 - 验证 remote skill 不包含 `deprecated` 等历史版本迁移文案。
 - 验证 remote skill 不包含 `traffic.clear` 或 `bifrost remote traffic clear` 命令示例。
+- 验证 remote skill 明确要求执行任何远端工程任务前先阅读 `AGENTS.md` / `agents.md` 和 `.agents/skills/` 下所有 skill 元信息，且 skill 详细内容按需加载。
 
 ### E2E 测试
 
 - 使用 `cargo run -p bifrost-cli -- install-skill --tool codex --dir <tmp>/skills/bifrost -y` 执行真实 CLI 安装。
 - 断言 `<tmp>/skills/bifrost/SKILL.md` 和 `<tmp>/skills/bifrost-remote/SKILL.md` 均存在。
 - 断言 remote skill 明确说明当前本机 Shell Access policy / grant 管理使用 `bifrost setting ...`，远端管理使用 `remote exec`，并且不包含历史别名迁移文案。
+- 断言 remote skill 的安装产物包含远端工程约束读取要求：先读 `AGENTS.md` / `agents.md`，再读 `.agents/skills/*/SKILL.md` 元信息，详细 skill 内容按需加载。
 
 ### 真实场景测试
 
@@ -93,6 +97,7 @@
 - remote skill 明确三类 scope 前置准备：查询如何启用 Remote Invoke 授权，shell 如何启用 Shell Access policy，文件操作如何使用 File Access policy。
 - remote skill 不把 `remote traffic clear` 描述为可直接使用的 remote CLI 子命令，并说明这是写操作。
 - remote skill 使用当前 `bifrost setting ...` 命名空间描述本机管理命令，并使用 `remote exec` 描述目标设备管理路径，不包含 `deprecated` 等历史版本信息。
+- remote skill 强制要求任何远端工程任务开始前先读取目标工程约束信息：`AGENTS.md` / `agents.md` 与 `.agents/skills/` 全量 skill 元信息，详细 skill 内容按需加载。
 
 ## 校验要求
 

@@ -71,6 +71,8 @@ SSH Key 连接没有 pair-code 授权弹窗，因此需要在 Settings → Remot
 - Reset Key 会生成新的 SSH fingerprint。为了不让用户配置回退到 `$HOME + 全部 ops`，reset 时必须把旧 fingerprint 的 file policy 迁移到新 fingerprint；只有旧 fingerprint 没有显式策略时才重新 seed 默认策略。
 - 如果用户误删了当前 SSH Key 的 fingerprint 策略，`GET/PUT /remote-invoke/file-access-config` 必须自动恢复默认 fingerprint 策略并写回 `file-access.toml`，避免 UI 刷新或保存后进入无法恢复的无 file policy 状态。
 - Grants 列表行级 `File Access` 入口面向 per-grant 策略；SSH Key 默认策略作为 fingerprint 策略保留展示，但不要求在 per-grant 编辑器中绑定 active grant。
+- Grants 行级 `File Access` 编辑器首次打开时必须按执行侧 policy resolver 的同一优先级预填有效策略：`grant_id` exact 策略优先，其次继承 `match.ssh_fingerprint`，再其次继承 `match.caller_fingerprint`。因此 SSH Key 默认策略配置为 `roots = ["/"]` 时，通过该 key 连接出的 active grant 即使还没有 exact `grant_id` 策略，弹窗也必须显示 `Directories = All`，不能回退成空 `Selected`。用户点击保存后再将当前有效值落成该 grant 的 exact 策略。
+- 兼容旧 grant：早期 SSH key grant 可能把 `ssh_key_fingerprint` 错存成 caller fingerprint，导致执行端 file.write 注入的 `command.ssh_fingerprint` 无法命中当前 `match.ssh_fingerprint` 默认策略，最终退回 cwd readonly fallback。`call_open` 校验通过后必须识别 `auth_method=ssh_publickey` 且 `ssh_key_fingerprint` 缺失/等于 `caller_fingerprint` 的旧记录，用当前 active SSH key fingerprint 修复并持久化，再执行 file policy 解析。
 
 ## 修改范围
 

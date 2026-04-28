@@ -415,8 +415,8 @@ key1=value1&key2=value2&keyN=valueN
 
 | 协议 | 说明 |
 | ---- | ---- |
-| `htmlAppend` | 在 HTML 尾部追加内容 |
-| `htmlPrepend` | 在 HTML 头部追加内容 |
+| `htmlAppend` | 在 HTML 元素内部后部追加内容（优先插入 `</html>` 前） |
+| `htmlPrepend` | 在 HTML 元素内部前部追加内容（优先插入 `<html>` 后） |
 | `htmlBody` | 替换 HTML body |
 | `jsAppend` | 在 JavaScript 尾部追加内容 |
 | `jsPrepend` | 在 JavaScript 头部追加内容 |

@@ -28,6 +28,12 @@ struct SaveSessionRequest {
     token: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct LoginRequest {
+    token: Option<String>,
+    remote_base_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginUrlQuery {
     callback_url: String,
@@ -85,13 +91,7 @@ pub async fn handle_sync(
 
     if path == "/api/sync/login" || path == "/api/sync/login/" {
         return match req.method() {
-            &Method::POST => match sync_manager.request_login().await {
-                Ok(()) => json_response(&sync_manager.status().await),
-                Err(error) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to open sync login page: {error}"),
-                ),
-            },
+            &Method::POST => login(req, sync_manager).await,
             _ => method_not_allowed(),
         };
     }
@@ -344,6 +344,57 @@ async fn save_session(
         Err(error) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to save sync session: {error}"),
+        ),
+    }
+}
+
+async fn login(
+    req: Request<Incoming>,
+    sync_manager: bifrost_sync::SharedSyncManager,
+) -> Response<BoxBody> {
+    let body = match req.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {error}"),
+            )
+        }
+    };
+    let request: LoginRequest = if body.is_empty() {
+        LoginRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {error}"))
+            }
+        }
+    };
+
+    match (request.token, request.remote_base_url) {
+        (Some(token), Some(remote_base_url)) => {
+            match sync_manager
+                .save_login_session(token, remote_base_url)
+                .await
+            {
+                Ok(()) => json_response(&sync_manager.status().await),
+                Err(error) => error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Failed to save sync login session: {error}"),
+                ),
+            }
+        }
+        (None, None) => match sync_manager.request_login().await {
+            Ok(()) => json_response(&sync_manager.status().await),
+            Err(error) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to open sync login page: {error}"),
+            ),
+        },
+        _ => error_response(
+            StatusCode::BAD_REQUEST,
+            "token and remote_base_url must be provided together",
         ),
     }
 }

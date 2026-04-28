@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use bifrost_cli::cli::{Cli, Commands, RemoteCommands, SettingCommands};
+use bifrost_cli::cli::{Cli, Commands, RemoteCommands, SettingCommands, SyncCommands};
 use clap::Parser;
 
 fn bifrost_cmd() -> Command {
@@ -59,6 +59,38 @@ fn sync_config_options_parse() {
         help.contains("--remote-url"),
         "sync config should have --remote-url"
     );
+}
+
+#[test]
+fn sync_login_direct_options_parse() {
+    let help = run_help(&["sync", "login"]);
+    assert!(help.contains("--token"), "sync login should have --token");
+    assert!(help.contains("--url"), "sync login should have --url");
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "sync",
+        "login",
+        "--token",
+        "ci-token",
+        "--url",
+        "https://bifrost.bytedance.net",
+    ])
+    .expect("sync login direct options should parse");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: Some(url),
+                },
+        }) => {
+            assert_eq!(token, "ci-token");
+            assert_eq!(url, "https://bifrost.bytedance.net");
+        }
+        _ => panic!("expected sync login command"),
+    }
 }
 
 #[test]
@@ -376,11 +408,13 @@ fn remote_connect_accepts_ssh_key_without_pair_code() {
                         pair_code,
                         ssh_key,
                         device_code,
+                        label,
                     },
             } => {
                 assert_eq!(pair_code, None);
                 assert_eq!(ssh_key.as_deref(), Some("/tmp/test.bifrost"));
                 assert_eq!(device_code, None);
+                assert_eq!(label, None);
             }
             _ => panic!("unexpected remote action"),
         },

@@ -499,6 +499,60 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 ---
 
+### TC-ASN-31：CI/沙箱环境 token + URL 直登
+
+**操作步骤**：
+1. 使用非 9900 动态端口启动本地 mock sync server，提供以下接口：
+   - `GET /v4/sso/check` 返回 200
+   - `GET /v4/sso/info` 在请求头 `x-bifrost-token: ci-token` 时返回用户 `ci-user`
+2. 使用临时数据目录和非 9900 端口启动 Bifrost：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" target/release/bifrost -p <admin_port> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy
+   ```
+3. 执行直登命令：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token ci-token --url "http://127.0.0.1:<mock_sync_port>"
+   ```
+4. 查询同步状态：
+   ```bash
+   curl -s "http://127.0.0.1:<admin_port>/_bifrost/api/sync/status" | jq .
+   ```
+
+**预期结果**：
+- CLI 输出包含 `"Login token saved."`
+- CLI 输出包含传入的 mock sync URL
+- 状态 JSON 中 `has_session` 为 `true`
+- 后台同步完成后 `authorized` 为 `true`
+- 状态 JSON 中 `remote_base_url` 等于传入 URL
+- 状态 JSON 中 `user.user_id` 为 `"ci-user"`
+- 全流程不打开浏览器，不依赖 SSO 回调页面
+
+---
+
+### TC-ASN-32：CI/沙箱环境 token + URL 直登 — 缺少 URL 返回 400
+
+**操作步骤**：
+1. 在临时数据目录和非 9900 端口启动 Bifrost。
+2. 执行：
+   ```bash
+   curl -s -o /tmp/bifrost-sync-login-partial.json -w "%{http_code}" \
+     -X POST "http://127.0.0.1:<admin_port>/_bifrost/api/sync/login" \
+     -H "Content-Type: application/json" \
+     -d '{"token":"ci-token"}'
+   ```
+3. 查看响应体：
+   ```bash
+   cat /tmp/bifrost-sync-login-partial.json
+   ```
+
+**预期结果**：
+- HTTP 状态码为 400
+- 响应体包含 `"token and remote_base_url must be provided together"`
+- 不会写入新的 sync session token
+- 不会修改 `remote_base_url`
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

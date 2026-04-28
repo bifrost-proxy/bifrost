@@ -1158,13 +1158,26 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let hostname = get_hostname();
     let username = get_username();
     let caller_fingerprint = load_or_create_caller_fingerprint()?;
+
+    // Extract --label from conn up if present
+    let label = if let RemoteCommands::Conn {
+        action: RemoteConnCommands::Up { label, .. },
+    } = &opts.action
+    {
+        label.clone()
+    } else {
+        None
+    };
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
-        display_name: Some(hostname.clone()),
+        display_name: Some(label.clone().unwrap_or_else(|| hostname.clone())),
         user_agent: Some(CALLER_USER_AGENT.to_string()),
         platform: Some(std::env::consts::OS.to_string()),
         hostname: Some(hostname),
         username: Some(username),
+        label,
+        os_version: get_os_version(),
+        arch: Some(std::env::consts::ARCH.to_string()),
     };
 
     if let RemoteCommands::Conn {
@@ -1173,6 +1186,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 pair_code,
                 ssh_key,
                 device_code,
+                ..
             },
     } = &opts.action
     {
@@ -3221,6 +3235,48 @@ struct CallerInfo {
     hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arch: Option<String>,
+}
+
+fn get_os_version() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|content| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with("PRETTY_NAME="))
+                    .map(|line| {
+                        line.trim_start_matches("PRETTY_NAME=")
+                            .trim_matches('"')
+                            .to_string()
+                    })
+            })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

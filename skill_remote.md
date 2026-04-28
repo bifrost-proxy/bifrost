@@ -101,7 +101,24 @@ bifrost start
 
 Shell Access 的 CLI 配置入口是 `bifrost setting shell profile add` 和 `bifrost setting shell policy add`。只有需要执行 `remote exec` 时才配置 Shell Access；纯文件读写优先配置 FileAccessPolicy 并使用 `bifrost remote file`。
 
+`bifrost setting ...` 改的是当前本机配置；给远端改 Shell Access policy、rule、config、script、value、CA 或系统代理等目标设备管理项时，如果没有专用 relay-backed 子命令，应通过已授权的 `remote exec` 在目标设备上执行等价本机命令或 API。
+
 远端流量查询只提供 `bifrost remote traffic {list,get,search}`，不提供清理类写操作。
+
+当 Access 设为 `selected` 时，目标端需要预先配置 shell profile 和 policy 来限定可执行的命令范围：
+
+```bash
+# 创建一个 shell profile（定义允许使用的 shell）
+bifrost setting shell profile add --id default --name Default \
+    --shell /bin/bash --shell /bin/sh
+
+# 创建一个 shell policy（定义命令匹配规则）
+bifrost setting shell policy add --id allow-bifrost-cli \
+    --name "Allow bifrost CLI" \
+    --pattern '^bifrost\s+' --shell /bin/bash --profile default
+```
+
+Access = `all` 则跳过策略检查，允许执行任意命令。
 
 ### 3.1 建议用 SSH key（长期）
 
@@ -151,7 +168,10 @@ bifrost --version
 bifrost remote conn status                                      # 已有连接？
 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key   # 或
 bifrost remote conn up <pair-code>
+bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key --label "my-ci-bot"  # 自定义标签
 ```
+
+**`--label <name>`**：为本次连接指定自定义标签（如 `my-ci-bot`、`eden-macbook`）。标签会显示在远端管理端的 Grants 列表标题区域，方便识别来源。未指定时默认使用本机 hostname。
 
 多连接场景：`--client-id <prefix>` 显式指定目标；非交互环境下必传。
 
@@ -198,6 +218,8 @@ bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
 ```
 
 输出格式统一：`--output human|json|json-pretty`，`--no-color` 适合非交互。
+
+总结：`remote traffic {list,get,search}` 涵盖了所有只读流量查询能力。
 
 清理目标设备流量记录属于写操作，不提供对应的 `bifrost remote traffic` 子命令。确需清理时，必须先取得 shell 授权，再用 `bifrost remote exec` 在目标设备上执行本机命令或 API。
 
@@ -280,6 +302,9 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 #### Coding agent 典型 workflow
 
 ```bash
+# 0. 读取目标工程约束信息：先读工作目录下的 AGENTS.md/agents.md，
+#    再读取 .agents/skills/*/SKILL.md 的元信息；skill 详细内容按需加载。
+
 # 1. 侦察
 bifrost remote file list src --depth 2 --output json
 bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
@@ -343,19 +368,20 @@ bifrost remote conn status
 
 按优先级阅读：
 
-1. **先用 `remote file`，再考虑 `remote exec`**。任何修改远端文件内容的操作，先看是否能用 `remote file write/edit/move/delete/mkdir/patch` 完成。**严禁**用 `exec --shell-text "echo '$B64' | base64 -d > ..."` 这类 shell 拼接写文件。违反此条 = 违反本技能。
-2. **不要重复 `remote conn up`**：先跑 `bifrost remote conn status` 看已有连接是否可用。
-3. **SSH key 优于 pair code**：有 key 先用 key，一次连接永久复用（直到 key 被 reset/revoke）。
-4. **多 client 场景**：显式 `--client-id <prefix>`，不要依赖交互式选择。
-5. **失败分类**：
+1. **先读取目标工程约束信息**：执行任何远端工程任务前，必须先阅读工作目录下的 `AGENTS.md` / `agents.md` 手册；然后读取 `.agents/skills/` 下所有 skill 的元信息（如 frontmatter、名称、描述、触发条件和路径）。skill 详细正文只在任务实际命中或需要其流程时按需加载，避免把无关细节塞进上下文。
+2. **先用 `remote file`，再考虑 `remote exec`**。任何修改远端文件内容的操作，先看是否能用 `remote file write/edit/move/delete/mkdir/patch` 完成。**严禁**用 `exec --shell-text "echo '$B64' | base64 -d > ..."` 这类 shell 拼接写文件。违反此条 = 违反本技能。
+3. **不要重复 `remote conn up`**：先跑 `bifrost remote conn status` 看已有连接是否可用。
+4. **SSH key 优于 pair code**：有 key 先用 key，一次连接永久复用（直到 key 被 reset/revoke）。
+5. **多 client 场景**：显式 `--client-id <prefix>`，不要依赖交互式选择。
+6. **失败分类**：
    - `file.out_of_scope` / `file.permission_denied` → 告诉用户需要调 FileAccessPolicy，不自作主张改 `--cwd` 绕过。
    - `file.sha_mismatch` → 重 read 重算 sha 再重试。
    - connect 失败 → 检查 SSH key 有效性、pair code 是否过期、目标是否在线、Web UI 是否授权。grant 失效就重新 `conn up`，**不要**伪造本地连接文件。
-6. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
-7. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
-8. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
-9. **大文件/二进制传输**：`--content-file -` 从 stdin，`--content-b64` / `--patch-b64` 适合非交互；避免 echo 管道 base64。
-10. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
+7. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
+8. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
+9. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
+10. **大文件/二进制传输**：`--content-file -` 从 stdin，`--content-b64` / `--patch-b64` 适合非交互；避免 echo 管道 base64。
+11. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 
 ---
 

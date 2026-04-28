@@ -14,6 +14,8 @@
   - 全局配置项：`traffic.inject_bifrost_badge`，默认 `true`，持久化到 `config.toml`。
   - Web UI：Settings -> Proxy 页提供开关，文案：**“注入 Bifrost 小圆点”**。
   - CLI：启动命令提供 flag（例如 `--disable-badge-injection`）用于覆盖并持久化该配置。
+- Badge hover 弹窗的 `Merged Rules` 展开区域右上角提供复制按钮，一键复制当前合并规则文本。
+- Badge 与 hover 弹窗使用浏览器允许的最高 `z-index`，并加 `!important`，降低被业务页面高层级浮层遮挡的概率。
 
 ## 实现设计
 
@@ -39,7 +41,10 @@
 ### 3. Badge 片段
 
 - 以一个 `div` + 内联样式注入，不依赖外部资源。
-- 样式目标：左下角、固定定位、小圆点、不抢占点击（`pointer-events: none`），`z-index` 极高。
+- 样式目标：左下角、固定定位、小圆点，`z-index: 2147483647 !important`。
+- Hover 弹窗同样固定定位，显示在 Badge 上方；面板、标题与 Merged Rules 内容均由内联脚本渲染。
+- Merged Rules 展开后，代码框右上角显示 `Copy` 按钮。点击后优先使用安全上下文下的 `navigator.clipboard.writeText`，失败或不可用时回退到隐藏 `textarea` + `copy` 事件 `clipboardData.setData('text/plain', text)` + `document.execCommand('copy')`；只有 fallback 真实触发 copy 事件并写入数据后才显示 `Copied`，否则显示 `Failed`，避免假阳性成功提示。
+- 规则数据以内联 JSON 形式进入 `<script>` 前，必须先解析为 JSON，再重新序列化，并统一转义 HTML/JS 敏感字符：`<` -> `\u003C`、`>` -> `\u003E`、`&` -> `\u0026`、U+2028/U+2029 -> `\u2028`/`\u2029`。原因是浏览器 HTML 解析器会在脚本文本中识别标签和脚本结束序列，即使它们位于合法 JS 字符串内部；例如 `htmlAppend://{vconsole-inject}` 的 value 中包含 `</script><script>new VConsole()</script>` 时，未转义会提前闭合 Badge 脚本并把规则文本提升为真实页面脚本。统一转义后，`<script>`、`</script>`、`<!--`、`<iframe srcdoc>`、`</textarea>` 等标签片段都不会以原始 HTML token 形态进入注入脚本。
 
 ### 4. Web UI / Admin API
 
@@ -54,6 +59,12 @@
   - `test_inject_badge_before_body_end`：HTML 含 `</body>` 时插入位置正确。
   - `test_inject_badge_append_when_no_body_end`：无 `</body>` 时回退到末尾追加。
   - `test_inject_badge_gzip_roundtrip`：gzip body 解压->注入->再压缩后，解压结果包含 badge。
+  - `test_badge_panel_uses_top_z_index`：Badge 与 hover 弹窗都使用最高 z-index。
+  - `test_badge_merged_rules_copy_button_present`：注入片段包含 Merged Rules 复制按钮、剪贴板 API 与 fallback。
+  - `test_badge_merged_rules_copy_button_present` 同时断言 fallback 使用 `clipboardData.setData` 且必须有 copy 事件写入标记才成功。
+  - `test_badge_inline_rules_data_escapes_script_close_tag`：验证包含 vConsole 风格 `</script><script>new VConsole()</script>` 的合并规则文本在 Badge 内联数据中转义为 `\u003C/script\u003E`，整段 Badge 只保留自身的一个结束脚本标签。
+  - `test_badge_inline_rules_data_escapes_html_tag_syntax_generally`：验证 `<img onerror>`、`<!--`、`<svg onload>`、`</textarea>`、`<iframe srcdoc>` 等标签注入形态都不会以原始 HTML 片段出现在内联脚本里。
+  - `test_badge_inline_rules_data_falls_back_for_invalid_json`：验证异常数据不会原样拼入脚本，而是回退为空规则数据。
 
 ### E2E 测试
 
@@ -61,12 +72,20 @@
   - 启动本地 http server 返回 `Content-Type: text/html` 的页面。
   - 通过 Bifrost 代理请求该页面。
   - 断言响应 body 包含注入标识（例如 `__bifrost_badge__`）。
+  - 断言响应 body 包含 `__bb_copy`、`Copy merged rules`、`navigator.clipboard` 与 `z-index:2147483647!important`。
+- 回归用例：在 `test_badge_injection_e2e.sh` 中创建未匹配当前页面的启用规则：
+  - `not-current-test.local htmlAppend://{vconsole-inject}`
+  - value 内容包含 `<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script><script>new VConsole();</script>`
+  - 通过代理请求普通 HTML 页面，断言 Merged Rules 仍显示该规则文本，但响应中只存在 `\u003C/script\u003E` 这类转义形式，不存在未转义的 `<script src=...>` 或 `</script>\n<script>new VConsole();</script>` 序列。
 
 ### 真实场景测试
 
 - 按临时数据目录启动：
-  - `BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl`
-- 浏览器设置系统代理后访问任意网页，打开 DevTools 查看页面 HTML，确认出现 `__bifrost_badge__` 节点，且页面未被破坏。
+  - `BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy --enable-badge-injection`
+- 通过代理访问测试 HTML，打开页面后 hover Badge，展开 Merged Rules，确认代码框右上角有复制按钮。
+- 点击复制按钮后，将系统剪贴板内容粘贴到可编辑区域、或读取系统剪贴板/浏览器剪贴板，确认等于当前合并规则文本；不能只看按钮是否显示 `Copied`。
+- 在页面中放置高 z-index 覆盖层，确认 Badge 弹窗仍可显示在其上方。
+- 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-10`：创建包含 vConsole 脚本片段、HTML 注释、事件属性、`srcdoc`、闭合标签等片段的 `htmlAppend://{vconsole-inject}` 规则，但请求不匹配该规则的普通 HTML 页面，确认规则文本只出现在 Badge 的 Merged Rules 展示中，不会逃逸为页面真实脚本或原始 HTML token。
 
 ## 校验要求
 

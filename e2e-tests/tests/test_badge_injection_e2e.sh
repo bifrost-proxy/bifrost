@@ -36,7 +36,8 @@ export TEST_ID="${TEST_ID:-}"
 BIFROST_DATA_DIR_BASE="${PROJECT_DIR}/.bifrost-e2e-badge"
 HTML_DIR="${PROJECT_DIR}/e2e-tests/test_data/badge_injection"
 
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_TARGET_DIR="${CARGO_TARGET_DIR:-${PROJECT_DIR}/target}"
+BIFROST_BIN="${BIFROST_TARGET_DIR}/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -128,6 +129,39 @@ stop_proxy() {
   fi
 }
 
+create_vconsole_rule() {
+  local payload_file
+  payload_file="$(mktemp)"
+  python3 - "$payload_file" <<'PY'
+import json
+import sys
+
+payload = {
+    "name": "badge-vconsole-escaping-regression",
+    "content": "\n".join([
+        "not-current-test.local htmlAppend://{vconsole-inject}",
+        "``` vconsole-inject",
+        '<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>',
+        "<script>new VConsole();</script>",
+        "```",
+    ]),
+    "enabled": True,
+}
+
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(payload, f)
+PY
+
+  local status
+  status="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${payload_file}")"
+  rm -f "$payload_file"
+
+  assert_status "200" "$status" "vConsole regression rule should be created"
+}
+
 fetch_via_proxy() {
   local url="$1"
   local headers_file
@@ -151,9 +185,31 @@ assert_badge_injection() {
 
   if [[ "$expected" == "present" ]]; then
     assert_body_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should be injected"
+    assert_body_contains "__bb_copy" "$HTTP_BODY" "Merged rules copy button should be injected"
+    assert_body_contains "Copy merged rules" "$HTTP_BODY" "Copy button should expose accessible label"
+    assert_body_contains "navigator.clipboard" "$HTTP_BODY" "Copy button should use Clipboard API when available"
+    assert_body_contains "document.execCommand('copy')" "$HTTP_BODY" "Copy button should include execCommand fallback"
+    assert_body_contains "clipboardData.setData('text/plain',text)" "$HTTP_BODY" "Fallback copy should write text via copy event clipboardData"
+    assert_body_contains "ok&&copied?resolve()" "$HTTP_BODY" "Fallback copy should only report success after copy event writes data"
+    assert_body_contains "z-index:2147483647!important" "$HTTP_BODY" "Badge panel should use top z-index"
   else
     assert_body_not_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should not be injected"
+    assert_body_not_contains "__bb_copy" "$HTTP_BODY" "Merged rules copy button should not be injected"
   fi
+}
+
+assert_vconsole_rule_is_not_promoted_to_page_script() {
+  local url="http://127.0.0.1:${HTML_PORT}/index.html"
+
+  create_vconsole_rule || return 1
+  fetch_via_proxy "$url"
+  assert_status "200" "$HTTP_STATUS" "HTML request with vConsole rule in badge data should succeed"
+
+  assert_body_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should still be injected"
+  assert_body_contains "not-current-test.local htmlAppend://{vconsole-inject}" "$HTTP_BODY" "Merged rules should still display the vConsole rule text"
+  assert_body_contains "\\u003C/script\\u003E" "$HTTP_BODY" "Inline badge data should escape HTML tag delimiters"
+  assert_body_not_contains "<script src=\\\"https://unpkg.com/vconsole/dist/vconsole.min.js\\\"" "$HTTP_BODY" "vConsole opening script tag should not appear as raw HTML in badge data"
+  assert_body_not_contains "</script>\n<script>new VConsole();</script>" "$HTTP_BODY" "vConsole script should not escape from badge inline data"
 }
 
 BIFROST_BIN="$(build_bifrost)"
@@ -167,6 +223,11 @@ stop_proxy
 echo "[INFO] Case 2: --enable-badge-injection"
 start_proxy "${BIFROST_DATA_DIR_BASE}-enabled" --enable-badge-injection
 assert_badge_injection "present" || { print_test_summary || true; exit 1; }
+stop_proxy
+
+echo "[INFO] Case 3: badge merged rules escape </script> in vConsole htmlAppend values"
+start_proxy "${BIFROST_DATA_DIR_BASE}-escape" --enable-badge-injection
+assert_vconsole_rule_is_not_promoted_to_page_script || { print_test_summary || true; exit 1; }
 stop_proxy
 
 print_test_summary || exit 1

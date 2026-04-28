@@ -140,6 +140,9 @@ export interface Grant {
   client_instance_id: string;
   caller_fingerprint: string;
   caller_display_name?: string;
+  label?: string;
+  os_version?: string;
+  arch?: string;
   auth_method?: RemoteInvokeAuthMethod | string;
   ssh_key_id?: string | null;
   ssh_key_fingerprint?: string | null;
@@ -360,6 +363,30 @@ export interface FileAccessGrantPolicy {
 
 export interface FileAccessConfig {
   grant: FileAccessGrantPolicy[];
+}
+
+export function findFileAccessPolicyForGrant(
+  config: FileAccessConfig | null | undefined,
+  grant: Pick<Grant, "grant_id" | "caller_fingerprint" | "ssh_key_fingerprint">,
+): FileAccessGrantPolicy | undefined {
+  const policies = config?.grant ?? [];
+  return (
+    policies.find(
+      (policy) =>
+        policy.grant_id === grant.grant_id ||
+        policy.match?.grant_id === grant.grant_id,
+    ) ??
+    (grant.ssh_key_fingerprint
+      ? policies.find(
+          (policy) =>
+            policy.match?.ssh_fingerprint === grant.ssh_key_fingerprint,
+        )
+      : undefined) ??
+    policies.find(
+      (policy) =>
+        policy.match?.caller_fingerprint === grant.caller_fingerprint,
+    )
+  );
 }
 
 export function getFileAccessPolicyAccess(

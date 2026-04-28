@@ -110,8 +110,18 @@ impl ConfigApiClient {
         self.put("/sync/config", req)
     }
 
-    pub fn sync_login(&self) -> Result<SyncStatusResponse, String> {
-        self.post("/sync/login", &serde_json::json!({}))
+    pub fn sync_login(
+        &self,
+        token: Option<&str>,
+        remote_base_url: Option<&str>,
+    ) -> Result<SyncStatusResponse, String> {
+        self.post(
+            "/sync/login",
+            &serde_json::json!({
+                "token": token,
+                "remote_base_url": remote_base_url,
+            }),
+        )
     }
 
     pub fn sync_logout(&self) -> Result<SyncStatusResponse, String> {

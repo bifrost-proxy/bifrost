@@ -368,6 +368,49 @@ test("Rules 页面在内容经 undo 回到原文后，保存会清理未保存�
   await expect(saveButton).toBeDisabled();
 });
 
+test("Rules Dynamic Island 展开的 Merged Rules 支持一键复制", async ({
+  page,
+  context,
+  request,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const ruleName = uniqueName("merged-copy-rule");
+  const ruleContent = [
+    "# merged copy check",
+    "example.com reqHeaders://{copy_headers}",
+    "```copy_headers",
+    "x-merged-copy: ok",
+    "```",
+  ].join("\n");
+
+  const createRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: ruleName,
+      content: ruleContent,
+      enabled: true,
+    },
+  });
+  if (!createRuleRes.ok()) {
+    throw new Error(await createRuleRes.text());
+  }
+
+  await openPage(page, "rules");
+  await expect(page.getByTestId("rules-list")).toBeVisible();
+
+  await page.getByTestId("rules-dynamic-island-trigger").click();
+  await page.getByTestId("rules-dynamic-island-merged-toggle").click();
+
+  const mergedContent = page.getByTestId("rules-dynamic-island-merged-content");
+  await expect(mergedContent).toContainText("x-merged-copy: ok");
+
+  const shownMergedRules = (await mergedContent.textContent())?.trim();
+  await page.getByTestId("rules-dynamic-island-copy-merged").click();
+  await waitForToast(page, "Merged rules copied");
+
+  const clipboardText = await page.evaluate(async () => navigator.clipboard.readText());
+  expect(clipboardText).toBe(shownMergedRules);
+});
+
 test("Rules 列表支持按 / 分组的树状展开/折叠", async ({
   page,
   request,

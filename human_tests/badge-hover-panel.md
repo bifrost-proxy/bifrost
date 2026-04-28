@@ -78,7 +78,41 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-05：暗色模式适配
+### TC-BHP-05：Merged Rules 一键复制
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`
+2. 创建并启用一条包含多行规则内容的规则
+3. 通过代理在浏览器中打开测试 HTML 页面
+4. 鼠标悬浮到左下角 Badge 圆点上
+5. 点击 "▾ Merged Rules" 标题展开代码框
+6. 点击代码框右上角的 "Copy" 按钮
+7. 读取系统剪贴板内容，或粘贴到可编辑输入框中检查内容，禁止只看按钮状态
+
+**预期结果**：
+- Merged Rules 代码框右上角显示复制按钮
+- 点击复制后按钮短暂显示 "Copied"
+- 剪贴板内容等于当前展开的合并规则文本，包含规则换行与缩进
+- 如果浏览器拒绝写入剪贴板，按钮显示 "Failed"，不能在剪贴板为空时显示 "Copied"
+
+---
+
+### TC-BHP-06：Badge 弹窗层级高于页面高 z-index 浮层
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`
+2. 通过代理打开一个包含 `z-index: 2147483646` 固定定位覆盖层的测试 HTML 页面
+3. 鼠标悬浮到左下角 Badge 圆点上
+4. 观察 Badge 和展开后的面板是否被覆盖层遮挡
+
+**预期结果**：
+- Badge 圆点显示在页面覆盖层上方
+- Hover 后面板显示在页面覆盖层上方
+- 面板中的规则列表和 Merged Rules 区域可正常点击
+
+---
+
+### TC-BHP-07：暗色模式适配
 
 **操作步骤**：
 1. 系统切换到暗色模式
@@ -91,7 +125,7 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-06：高性能缓存验证
+### TC-BHP-08：高性能缓存验证
 
 **操作步骤**：
 1. 查看启动日志确认初始缓存加载
@@ -103,7 +137,7 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-07：禁用 badge 后面板不注入
+### TC-BHP-09：禁用 badge 后面板不注入
 
 **操作步骤**：
 ```bash
@@ -117,10 +151,82 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-10：回归 - Merged Rules 中的 HTML/Script 标签片段不会逃逸为页面注入
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-human-badge-escape \
+     CARGO_TARGET_DIR=./.bifrost-target-human-badge-escape \
+     cargo run --bin bifrost -- start -p 18880 --unsafe-ssl --no-system-proxy --enable-badge-injection
+   ```
+2. 启动一个本地 HTML 服务：
+   ```bash
+   python3 -m http.server 18881 --bind 127.0.0.1 --directory e2e-tests/test_data/badge_injection
+   ```
+3. 创建一条启用规则，规则目标不要匹配当前测试页面，但 Merged Rules 内容包含多种 HTML/Script 标签注入形态：
+   ```bash
+   python3 - <<'PY' >/tmp/bifrost-badge-escape-rule.json
+   import json
+   payload = {
+       "name": "badge-html-tag-escaping-regression",
+       "content": "\n".join([
+           "not-current-test.local htmlAppend://{vconsole-inject}",
+           "``` vconsole-inject",
+           '<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>',
+           "<script>new VConsole();</script>",
+           "<!-- <img src=x onerror=alert(1)> <svg onload=alert(1)>",
+           '<iframe srcdoc="<script>alert(1)</script>"></iframe></textarea>',
+           "```",
+       ]),
+       "enabled": True,
+   }
+   print(json.dumps(payload))
+   PY
+   curl -X POST http://127.0.0.1:18880/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     --data-binary @/tmp/bifrost-badge-escape-rule.json -s
+   ```
+4. 通过代理请求不匹配该规则的普通 HTML 页面：
+   ```bash
+   curl -x http://127.0.0.1:18880 http://127.0.0.1:18881/index.html -s -o /tmp/bifrost-badge-escape.html
+   ```
+5. 检查响应 HTML：
+   ```bash
+   python3 - <<'PY'
+   from pathlib import Path
+   html = Path("/tmp/bifrost-badge-escape.html").read_text()
+   assert "__bifrost_badge__" in html
+   assert "not-current-test.local htmlAppend://{vconsole-inject}" in html
+   assert "\\u003Cscript" in html
+   assert "\\u003C/script\\u003E" in html
+   assert "\\u003C!--" in html
+   assert "\\u003Cimg" in html
+   assert "\\u003Csvg" in html
+   assert "\\u003Ciframe" in html
+   assert '<script src=\\"https://unpkg.com/vconsole/dist/vconsole.min.js\\"' not in html
+   assert '</script>\\n<script>new VConsole();</script>' not in html
+   assert "<!-- <img" not in html
+   assert "<svg onload" not in html
+   assert "<iframe srcdoc" not in html
+   print("TC-BHP-10 passed")
+   PY
+   ```
+
+**预期结果**：
+- 页面仍正常注入 Badge，包含 `__bifrost_badge__`
+- Merged Rules 数据中仍可看到规则文本 `not-current-test.local htmlAppend://{vconsole-inject}`
+- 内联数据中的 `<script>`、`</script>`、`<!--`、`<img>`、`<svg>`、`<iframe>`、`</textarea>` 等标签片段全部以 `\u003C...` / `\u003E` 等形式存在
+- 响应 HTML 中不包含从 Merged Rules 逃逸出来的原始 vConsole `<script src=...>`、`<script>new VConsole()`、HTML 注释或事件属性标签片段
+
+---
+
 ## 清理步骤
 
 ```bash
 curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-badge-rule -s
+curl -X DELETE http://127.0.0.1:18880/_bifrost/api/rules/badge-html-tag-escaping-regression -s
 curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
+rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html
 ```

@@ -372,3 +372,5 @@ api.example.com h3://
 ### 内容注入类
 
 `htmlAppend`、`htmlPrepend`、`htmlBody`、`jsAppend`、`jsPrepend`、`jsBody`、`cssAppend`、`cssPrepend`、`cssBody`
+
+其中 `htmlAppend` 优先插入 HTML 元素内部的后部（`</html>` 前），`htmlPrepend` 优先插入 HTML 元素内部的前部（`<html>` 开始标签后）。

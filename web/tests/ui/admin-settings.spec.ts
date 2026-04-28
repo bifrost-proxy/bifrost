@@ -656,7 +656,7 @@ test("Settings Remote Invoke File Access 从 grant 行配置并绑定已连接 g
   await openPage(page, "settings");
   await page.getByText("Remote Invoke", { exact: true }).click();
   await expect(page.getByRole("button", { name: "Manage Policies" })).toHaveCount(0);
-  await page.getByRole("button", { name: "File Access" }).click();
+  await page.locator('button:has-text("File Access")').first().dispatchEvent("click");
 
   const dialog = page.getByRole("dialog", { name: /File Access: mira/ });
   await expect(dialog.locator('input[value="grant-connected-1"]')).toBeDisabled();
@@ -668,6 +668,109 @@ test("Settings Remote Invoke File Access 从 grant 行配置并绑定已连接 g
     grant: [
       {
         grant_id: "grant-connected-1",
+        roots: ["/"],
+      },
+    ],
+  });
+});
+
+test("Settings Remote Invoke File Access 继承 SSH key 默认 All Directories 策略", async ({
+  page,
+}) => {
+  const sshFingerprint = "SHA256:ssh-key-fingerprint";
+  let savedConfig: unknown = null;
+
+  await page.route("**/_bifrost/api/remote-invoke/grants", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        grants: [
+          {
+            grant_id: "grant-ssh-1",
+            client_instance_id: "client-1",
+            caller_fingerprint: "sshcallerabcdef123456",
+            caller_display_name: "ssh caller",
+            auth_method: "ssh_publickey",
+            ssh_key_fingerprint: sshFingerprint,
+            grant_mode: "permanent",
+            grant_scope: "remote_shell_exec",
+            status: "active",
+            created_at: Date.now(),
+            first_authorized_at: Date.now(),
+            expires_at: null,
+            last_used_at: null,
+            max_calls: 0,
+            remaining_calls: 0,
+            use_count: 0,
+            file_access: "read_write",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/remote-invoke/file-access-config", async (route) => {
+    if (route.request().method() === "PUT") {
+      savedConfig = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(savedConfig),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        grant: [
+          {
+            match: { ssh_fingerprint: sshFingerprint },
+            name: "ssh-key:agent-default",
+            roots: ["/"],
+            ops: [
+              "read",
+              "list",
+              "stat",
+              "glob",
+              "search",
+              "hash",
+              "write",
+              "edit",
+              "mkdir",
+              "move",
+              "delete",
+              "apply_patch",
+            ],
+            allow_overwrite: true,
+            allow_recursive_delete: false,
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(page, "settings");
+  await page.getByText("Remote Invoke", { exact: true }).click();
+  await page.locator('button:has-text("File Access")').first().dispatchEvent("click");
+
+  const dialog = page.getByRole("dialog", { name: /File Access: ssh caller/ });
+  await expect(dialog.getByText("Read Write", { exact: true }).locator("..")).toHaveClass(
+    /checked/,
+  );
+  await expect(dialog.getByText("All", { exact: true }).locator("..")).toHaveClass(/checked/);
+  await expect(dialog.getByTestId("file-access-roots-input")).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  await expect.poll(() => savedConfig).toMatchObject({
+    grant: [
+      {
+        match: { ssh_fingerprint: sshFingerprint },
+        roots: ["/"],
+      },
+      {
+        grant_id: "grant-ssh-1",
         roots: ["/"],
       },
     ],

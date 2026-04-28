@@ -57,7 +57,14 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return nativeClipboardWrite(text);
   }
 
-  // 1. Async Clipboard API – works in secure contexts (HTTPS / localhost).
+  // 1. Prefer the synchronous copy path while we are still inside the user's
+  // click gesture. Some embedded browsers report async clipboard success
+  // without making the text pasteable from the app-level clipboard.
+  if (execCommandCopy(text)) {
+    return true;
+  }
+
+  // 2. Async Clipboard API – works in secure contexts (HTTPS / localhost).
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);
@@ -67,6 +74,5 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     }
   }
 
-  // 2. Synchronous execCommand fallback (modal-aware).
-  return execCommandCopy(text);
+  return false;
 }

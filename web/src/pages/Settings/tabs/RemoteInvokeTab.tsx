@@ -97,6 +97,7 @@ import {
   buildFileAccessPolicy,
   buildSshFileAccessPolicy,
   FILE_READ_OPS,
+  findFileAccessPolicyForGrant,
   getFileAccessPolicyAccess,
   getFileAccessPolicyRootScope,
 } from "../../../api/remoteInvoke";
@@ -1549,9 +1550,7 @@ export default function RemoteInvokeTab({
   };
 
   const openFileAccessEditor = (grant: Grant) => {
-    const existing = fileAccessConfig?.grant?.find(
-      (policy) => policy.grant_id === grant.grant_id,
-    );
+    const existing = findFileAccessPolicyForGrant(fileAccessConfig, grant);
     const fallbackAccess: FileAccessPolicyAccess =
       grant.file_access === "read_write" ? "read_write" : "read";
     setFileAccessEditingGrant(grant);
@@ -1651,6 +1650,7 @@ export default function RemoteInvokeTab({
       const nextPolicy = {
         ...fileAccessDraft,
         grant_id: grantId,
+        match: undefined,
         name: fileAccessDraft.name?.trim() || undefined,
         roots: fileAccessDraft.roots?.map((root) => root.trim()).filter(Boolean) ?? [],
         denies:
@@ -2647,6 +2647,9 @@ export default function RemoteInvokeTab({
                 <SafetyOutlined />
                 <span>Grants</span>
                 <Badge count={grants.filter((g) => g.status === "active").length} />
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: "normal" }}>
+                  Total commands: {grants.reduce((sum, g) => sum + (g.use_count ?? 0), 0)}
+                </Text>
               </Space>
             }
             extra={
@@ -2713,7 +2716,7 @@ export default function RemoteInvokeTab({
                       <List.Item.Meta
                         title={
                           <Space>
-                            <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
+                            <Text>{g.label || g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
                             <Tag color={g.status === "active" ? "green" : "default"}>
                               {g.status}
                             </Tag>
@@ -2751,6 +2754,11 @@ export default function RemoteInvokeTab({
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               · last command {formatTimestamp(g.last_command_at)}
                             </Text>
+                            {(g.os_version || g.arch) && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · {[g.os_version, g.arch].filter(Boolean).join(" ")}
+                              </Text>
+                            )}
                             {g.expires_at != null && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
                                 · expires {new Date(g.expires_at).toLocaleDateString()}

@@ -180,7 +180,27 @@ WebUI Settings → Remote Invoke 的 Grants 列表提供行级 `File Access` 按
   - exact `grant_id` 策略被删除。
   - `match.ssh_fingerprint` 默认策略仍保留。
 
+### TC-FAW-17: 回归 — SSH Key grant 继承默认 All Directories 策略
+
+- **触发 Bug**：SSH Key 卡片已配置默认 File Policy 为 `Directories = All`，但通过 SSH Key 连接生成的 active grant 打开行级 `File Access` 弹窗时，页面显示 `Directories = Selected` 且 Allowed Roots 为空。
+- **操作步骤**：
+  1. 使用隔离数据目录和非 9900 端口启动 Bifrost：`BIFROST_DATA_DIR=<tmp> cargo run --bin bifrost -- start -p <port> --unsafe-ssl --no-system-proxy`。
+  2. 创建 active SSH Key，并把 `/remote-invoke/file-access-config` 配置为当前 `match.ssh_fingerprint` 的策略，`roots = ["/"]`，`ops` 包含读写文件操作。
+  3. 准备一个通过该 SSH Key 创建的 active grant，grant 响应中包含同一个 `ssh_key_fingerprint`。
+  4. 打开 Settings → Remote Invoke → Grants，点击该 grant 行的 `File Access`。
+- **预期结果**：
+  - 弹窗 `Directories` 默认选中 `All`。
+  - Allowed Roots 输入框不显示空的 selected 配置。
+  - Type 默认匹配 SSH Key 默认策略的读写级别。
+  - 点击保存后写入当前 grant 的 exact `grant_id` 策略，且不破坏原有 `match.ssh_fingerprint` 默认策略。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务。
 2. 删除测试数据目录：`rm -rf ./.bifrost-test`。
+
+## 执行记录
+
+| 日期 | 用例 | 执行方式 | 结果 |
+| --- | --- | --- | --- |
+| 2026-04-28 | TC-FAW-17 SSH Key grant 继承默认 All Directories 策略 | `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "File Access 继承 SSH key 默认 All Directories"`；Playwright 真实浏览器 mock active SSH grant 与 `match.ssh_fingerprint` 默认 `roots=["/"]` 策略 | PASS：弹窗预填 `Read Write` + `All`，不展示空 Allowed Roots；保存 payload 同时保留 SSH fingerprint 默认策略，并新增当前 `grant_id` exact 策略 |

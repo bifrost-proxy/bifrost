@@ -349,6 +349,7 @@ bifrost upgrade -y --restart
 ```bash
 bifrost sync status
 bifrost sync login
+bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
 bifrost sync logout
 bifrost sync run
 bifrost sync config --enabled true --auto-sync true --remote-url https://example.com

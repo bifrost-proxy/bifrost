@@ -626,6 +626,24 @@
 
 ---
 
+### TC-WRU-39：Dynamic Island Merged Rules 一键复制
+
+**前置条件**：已启用至少 1 个规则文件且规则内容非空
+
+**操作步骤**：
+1. 点击 Dynamic Island 胶囊展开详情
+2. 点击底部的 "Show Merged Rules" 链接
+3. 点击 Merged Rules 代码框右上角的复制按钮
+4. 在文本编辑器或可输入区域粘贴剪贴板内容
+
+**预期结果**：
+- Merged Rules 代码框右上角显示复制按钮
+- 点击复制按钮后显示 "Merged rules copied" Toast
+- 粘贴出的内容与代码框内展示的合并规则文本一致
+- 复制按钮不会触发 Dynamic Island 收起或跳转规则详情
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
