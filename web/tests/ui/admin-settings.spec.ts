@@ -307,6 +307,81 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到同一张状态卡片", async ({
   page,
 }) => {
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: false,
+        remote_base_url: "http://127.0.0.1:8787",
+        has_session: true,
+        reachable: true,
+        authorized: true,
+        syncing: false,
+        reason: "ready",
+        user: {
+          user_id: "sync-user-1",
+          nickname: "Remote Tester",
+          avatar: "",
+          email: "remote-tester@example.test",
+        },
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/remote-invoke/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "connected",
+        discovery_session: null,
+        pending_pairings_count: 0,
+        active_call_ids: ["call-ui-1"],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/remote-invoke/identity", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        instance_id: "client-ui-1",
+        device_name: "UI Test Device",
+        platform: "darwin",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/remote-invoke/calls", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        calls: [
+          {
+            call_id: "call-ui-1",
+            grant_id: "grant-ui-1",
+            client_instance_id: "client-ui-1",
+            caller_fingerprint: "caller-ui-fingerprint",
+            caller_display_name: "Remote Tester",
+            command: { command: "status", kind: "query.readonly" },
+            command_summary: { command_preview: "status" },
+            command_kind: "query.readonly",
+            status: "completed",
+            created_at: Date.now(),
+            started_at: Date.now(),
+            finished_at: Date.now(),
+            ended_at: Date.now(),
+            exit_code: 0,
+            duration_ms: 12,
+            bytes_in: 0,
+            bytes_out: 128,
+          },
+        ],
+      }),
+    });
+  });
+
   await openPage(page, "settings");
   await page.getByRole("tab", { name: /Remote Invoke/ }).click({ force: true });
 
@@ -323,6 +398,7 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
   await expect(statusCard).toBeVisible();
   await expect(connectionSection).toContainText("Connection Status");
   await expect(connectionSection).toContainText("Relay Connection");
+  await expect(connectionSection).not.toContainText("Active Calls");
   await expect(discoverySection).toContainText("Discovery Mode");
   await expect(discoverySection).toContainText("Enter Discovery Mode");
   await expect(sshCard).toBeVisible();
@@ -331,6 +407,118 @@ test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到�
   await expect(shellCard).toContainText("Shell Access");
   await expect(shellCard).toContainText("Configuration Mode");
   await expect(shellCard).toContainText("Policy Set Version");
+  await expect(page.getByText("Recent Calls")).toBeVisible();
+  await expect(page.getByText("by Remote Tester")).toBeVisible();
+});
+
+test("Settings Remote Invoke Grants 展示 SSH key 与 Pair code 连接方式", async ({
+  page,
+}) => {
+  const now = Date.now();
+  await page.route("**/_bifrost/api/remote-invoke/grants", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        grants: [
+          {
+            grant_id: "grant-ssh-1",
+            client_instance_id: "client-1",
+            caller_fingerprint: "sshcallerabcdef123456",
+            caller_display_name: "ssh caller",
+            auth_method: "ssh_publickey",
+            ssh_key_fingerprint: "SHA256:ssh-key-fingerprint",
+            grant_mode: "permanent",
+            grant_scope: "remote_shell_exec",
+            status: "active",
+            created_at: now,
+            first_authorized_at: now,
+            expires_at: null,
+            last_used_at: now,
+            max_calls: 999999,
+            remaining_calls: 999999,
+            use_count: 1,
+            file_access: "none",
+          },
+          {
+            grant_id: "grant-code-1",
+            client_instance_id: "client-1",
+            caller_fingerprint: "codecallerabcdef123456",
+            caller_display_name: "code caller",
+            auth_method: "pair_code",
+            grant_mode: "1h",
+            grant_scope: "remote_query",
+            status: "active",
+            created_at: now,
+            first_authorized_at: now,
+            expires_at: now + 60 * 60 * 1000,
+            last_used_at: now,
+            max_calls: 999999,
+            remaining_calls: 999998,
+            use_count: 1,
+            file_access: "none",
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(page, "settings");
+  await page.getByRole("tab", { name: /Remote Invoke/ }).click({ force: true });
+
+  const grantsCard = page.getByTestId("settings-remote-invoke-grants-card");
+  await expect(grantsCard).toContainText("ssh caller");
+  await expect(grantsCard).toContainText("SSH key");
+  await expect(grantsCard).toContainText("code caller");
+  await expect(grantsCard).toContainText("Pair code");
+});
+
+test("Settings Remote Invoke 未登录 Sync 的 Remote Status 提示兼容黑色主题", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "bifrost-theme",
+      JSON.stringify({ state: { mode: "dark" }, version: 0 }),
+    );
+  });
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: false,
+        remote_base_url: "https://sync.example.test",
+        has_session: false,
+        reachable: true,
+        authorized: false,
+        syncing: false,
+        reason: "not_signed_in",
+        user: null,
+      }),
+    });
+  });
+
+  await openPage(page, "settings");
+  await page.getByRole("tab", { name: /Remote Invoke/ }).click({ force: true });
+
+  const prompt = page.getByTestId("settings-remote-invoke-sync-signin-prompt");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(prompt).toBeVisible();
+  await expect(prompt).toContainText("Sign in to Sync to enable Remote Invoke");
+  await expect(prompt).toContainText("https://sync.example.test");
+
+  const colors = await prompt.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+    };
+  });
+
+  expect(colors.background).not.toBe("rgb(255, 251, 230)");
+  expect(colors.border).not.toBe("rgb(255, 229, 143)");
 });
 
 test("Settings Remote Invoke 的 Shell Access 仅允许修改名称，Policy/Profile ID 为只读", async ({

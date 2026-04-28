@@ -4481,6 +4481,116 @@ PY
 
 ---
 
+### TC-RI-回归-139：Remote Status 卡片不再展示 Active Calls
+
+**背景**：`Remote Status` 卡片中原有的 `Active Calls` 计数信息价值较低，且底部 `Recent Calls` 已经按实际执行记录展示 caller、状态、命令、policy 与详情。为减少重复信息，本次移除状态卡片内的 `Active Calls` 行。
+
+**前置条件**：
+- 使用隔离的 Bifrost 数据目录启动 WebUI 测试环境
+- 测试端口由 Playwright / 测试夹具分配，禁止使用 `9900`
+- Bifrost 启动参数必须包含 `--no-system-proxy`
+- Remote Invoke 页面可打开，底部 `Recent Calls` 区域可见
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts:307
+   ```
+2. 打开 WebUI `Settings -> Remote Invoke`。
+3. 定位 `Remote Status` 卡片中的 `Connection Status` 区块。
+4. 检查该区块展示内容。
+5. 继续检查页面底部 `Recent Calls` 区域的 caller 展示能力。
+
+**预期结果**：
+- `Remote Status` 卡片仍显示 `Connection Status`
+- `Connection Status` 区块仍显示 `Relay Connection`、`Instance ID`、`Device` 与 `Sync Account`
+- `Connection Status` 区块不再显示 `Active Calls`
+- `Discovery Mode`、`SSH Key`、`Shell Access` 等区域仍可见
+- `Recent Calls` 列表中仍通过 `by <caller>` 展示调用方
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-139 执行结果（2026-04-28，Remote Status 移除 Active Calls）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-139 | ✅ PASS | 2026-04-28 在当前 checkout 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts:307`。测试使用 Playwright 夹具模拟已登录 Sync session、connected Remote Invoke 状态和一条 caller 为 `Remote Tester` 的 Recent Call；页面打开 `Settings -> Remote Invoke` 后，`Remote Status` 卡片可见，`Connection Status` 区块包含 `Relay Connection`，且断言不包含 `Active Calls`；`Discovery Mode`、`SSH Key`、`Shell Access` 仍可见；底部 `Recent Calls` 显示 `by Remote Tester`，说明 caller 信息仍由执行记录区承载。该测试未使用 `9900`，也没有修改系统代理。 |
+
+---
+
+### TC-RI-回归-140：未登录 Sync 服务时 Remote Status 登录提示兼容黑色主题
+
+**背景**：未登录 Sync 服务时，`Remote Status` 卡片内的登录提示曾硬编码浅色警告背景、边框和图标颜色。在黑色主题下该提示块与页面卡片不协调，影响阅读体验。本用例验证该分支已改用主题 token，暗色主题下不再出现固定浅黄色提示块。
+
+**前置条件**：
+- 使用隔离的 WebUI 测试环境
+- 测试端口由 Playwright / 测试夹具分配，禁止使用 `9900`
+- Bifrost 启动参数必须包含 `--no-system-proxy`
+- 预置前端主题为 dark
+- mock Sync 状态返回 `has_session=false`，并返回一个可显示的 `remote_base_url`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   pnpm --dir web test:ui -- tests/ui/admin-settings.spec.ts -g "Settings Remote Invoke 未登录 Sync 的 Remote Status 提示兼容黑色主题"
+   ```
+2. 打开 WebUI `Settings -> Remote Invoke`。
+3. 确认页面根节点 `data-theme="dark"`。
+4. 定位 `Remote Status` 卡片中的未登录提示区域。
+5. 检查提示文案、Sync Server 地址、背景色和边框色。
+
+**预期结果**：
+- 未登录提示区域可见，并显示 `Sign in to Sync to enable Remote Invoke`
+- 提示区域显示 mock 的 Sync Server 地址
+- 提示区域背景色不再是浅色主题硬编码值 `rgb(255, 251, 230)`
+- 提示区域边框色不再是浅色主题硬编码值 `rgb(255, 229, 143)`
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-140 执行结果（2026-04-28，Remote Status 未登录暗色主题）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-140 | 待执行 | 文档创建后立即执行。 |
+
+---
+
+### TC-RI-回归-141：Grants 列表展示 SSH key / Pair code 连接方式
+
+**背景**：Remote Invoke 的 grant 既可能来自 pair code 授权，也可能来自 `remote connect --ssh-key` 的 SSH key 授权。之前 Grants 列表只展示 caller、状态、mode、scope 等信息，用户无法直接看出某条 grant 的连接方式。本用例验证列表已基于 `auth_method` 展示 `SSH key` 或 `Pair code` 标签。
+
+**前置条件**：
+- 使用隔离的 WebUI 测试环境
+- 测试端口由 Playwright / 测试夹具分配，禁止使用 `9900`
+- Bifrost 启动参数必须包含 `--no-system-proxy`
+- mock `/remote-invoke/grants` 返回两条 active grant：
+  - `auth_method=ssh_publickey` 的 SSH key grant
+  - `auth_method=pair_code` 的 pair code grant
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   pnpm --dir web test:ui -- tests/ui/admin-settings.spec.ts -g "Settings Remote Invoke Grants 展示 SSH key 与 Pair code 连接方式"
+   ```
+2. 打开 WebUI `Settings -> Remote Invoke`。
+3. 定位底部 `Grants` 列表。
+4. 检查 SSH key grant 行。
+5. 检查 pair code grant 行。
+
+**预期结果**：
+- `Grants` 列表可见
+- SSH key grant 行显示 caller 名称 `ssh caller`
+- SSH key grant 行显示连接方式标签 `SSH key`
+- Pair code grant 行显示 caller 名称 `code caller`
+- Pair code grant 行显示连接方式标签 `Pair code`
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-141 执行结果（2026-04-28，Grants 连接方式展示）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-141 | 待执行 | 文档创建后立即执行。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

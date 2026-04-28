@@ -25,6 +25,7 @@ import {
   Tooltip,
   Typography,
   message,
+  theme,
 } from "antd";
 import {
   ApiOutlined,
@@ -697,6 +698,29 @@ function describeGrantMode(mode: string): string {
   }
 }
 
+function describeGrantAuthMethod(grant: Grant): { label: string; color: string; tooltip: string } {
+  const method = grant.auth_method;
+  if (method === "ssh_publickey" || grant.ssh_key_fingerprint || grant.ssh_key_id) {
+    return {
+      label: "SSH key",
+      color: "purple",
+      tooltip: "Connected with SSH key",
+    };
+  }
+  if (method === "pair_code" || method == null || method === "") {
+    return {
+      label: "Pair code",
+      color: "cyan",
+      tooltip: "Connected with pair code",
+    };
+  }
+  return {
+    label: method,
+    color: "default",
+    tooltip: `auth_method: ${method}`,
+  };
+}
+
 /**
  * Humanize an exec_mode value (argv_exec / shell_text) for display.
  */
@@ -806,6 +830,7 @@ export default function RemoteInvokeTab({
   onGoToSyncTab,
   onSyncSignIn,
 }: RemoteInvokeTabProps = {}) {
+  const { token } = theme.useToken();
   const syncReady = !!syncStatus?.has_session;
   const lockedColStyle = syncReady
     ? undefined
@@ -1818,8 +1843,8 @@ export default function RemoteInvokeTab({
                 data-testid="settings-remote-invoke-sync-signin-prompt"
                 style={{
                   padding: "20px 16px",
-                  background: "#fffbe6",
-                  border: "1px solid #ffe58f",
+                  background: token.colorWarningBg,
+                  border: `1px solid ${token.colorWarningBorder}`,
                   borderRadius: 6,
                   display: "flex",
                   flexDirection: "column",
@@ -1828,10 +1853,17 @@ export default function RemoteInvokeTab({
               >
                 <Space align="start" size={12}>
                   <LockOutlined
-                    style={{ fontSize: 22, color: "#d48806", marginTop: 2 }}
+                    style={{ fontSize: 22, color: token.colorWarning, marginTop: 2 }}
                   />
                   <div style={{ flex: 1 }}>
-                    <Text strong style={{ display: "block", fontSize: 14 }}>
+                    <Text
+                      strong
+                      style={{
+                        color: token.colorWarningText,
+                        display: "block",
+                        fontSize: 14,
+                      }}
+                    >
                       Sign in to Sync to enable Remote Invoke
                     </Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1896,18 +1928,6 @@ export default function RemoteInvokeTab({
                 </Descriptions.Item>
                 <Descriptions.Item label="Device">
                   {identity?.device_name ?? "-"} ({identity?.platform ?? "-"})
-                </Descriptions.Item>
-                <Descriptions.Item label="Active Calls">
-                  <Badge
-                    count={status?.active_call_ids?.length ?? 0}
-                    showZero
-                    style={{
-                      backgroundColor:
-                        (status?.active_call_ids?.length ?? 0) > 0
-                          ? "#52c41a"
-                          : "#d9d9d9",
-                    }}
-                  />
                 </Descriptions.Item>
                 <Descriptions.Item label="Sync Account">
                   <Space size={4}>
@@ -2499,6 +2519,7 @@ export default function RemoteInvokeTab({
 
         <Col xs={24} style={lockedColStyle}>
           <Card
+            data-testid="settings-remote-invoke-grants-card"
             title={
               <Space>
                 <SafetyOutlined />
@@ -2527,107 +2548,113 @@ export default function RemoteInvokeTab({
                 dataSource={grants}
                 size="small"
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
-                renderItem={(g) => (
-                  <List.Item
-                    actions={g.status === "removed" ? [] : [
-                      <Button
-                        key="file-access"
-                        size="small"
-                        icon={<FileOutlined />}
-                        onClick={() => openFileAccessEditor(g)}
-                        loading={fileAccessLoading}
-                      >
-                        File Access
-                      </Button>,
-                      <Button
-                        key="edit"
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={() => openGrantEditor(g)}
-                      >
-                        Edit Access
-                      </Button>,
-                      <Popconfirm
-                        key="revoke"
-                        title="Revoke this grant?"
-                        description="The caller will need to pair again."
-                        onConfirm={() => void handleRevokeGrant(g.grant_id)}
-                        okText="Revoke"
-                        cancelText="Cancel"
-                      >
+                renderItem={(g) => {
+                  const authMethod = describeGrantAuthMethod(g);
+                  return (
+                    <List.Item
+                      actions={g.status === "removed" ? [] : [
                         <Button
-                          danger
+                          key="file-access"
                           size="small"
-                          icon={<DeleteOutlined />}
+                          icon={<FileOutlined />}
+                          onClick={() => openFileAccessEditor(g)}
+                          loading={fileAccessLoading}
                         >
-                          Revoke
-                        </Button>
-                      </Popconfirm>,
-                    ]}
-                  >
-                    <List.Item.Meta
-                      title={
-                        <Space>
-                          <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
-                          <Tag color={g.status === "active" ? "green" : "default"}>
-                            {g.status}
-                          </Tag>
-                          <Tooltip title={`grant_mode: ${g.grant_mode}`}>
-                            <Tag>{describeGrantMode(g.grant_mode)}</Tag>
-                          </Tooltip>
-                          <Tooltip title={`grant_scope: ${g.grant_scope}`}>
-                            <Tag color={describeGrantScope(g.grant_scope).color}>
-                              {describeGrantScope(g.grant_scope).label}
+                          File Access
+                        </Button>,
+                        <Button
+                          key="edit"
+                          size="small"
+                          icon={<EditOutlined />}
+                          onClick={() => openGrantEditor(g)}
+                        >
+                          Edit Access
+                        </Button>,
+                        <Popconfirm
+                          key="revoke"
+                          title="Revoke this grant?"
+                          description="The caller will need to pair again."
+                          onConfirm={() => void handleRevokeGrant(g.grant_id)}
+                          okText="Revoke"
+                          cancelText="Cancel"
+                        >
+                          <Button
+                            danger
+                            size="small"
+                            icon={<DeleteOutlined />}
+                          >
+                            Revoke
+                          </Button>
+                        </Popconfirm>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={
+                          <Space>
+                            <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
+                            <Tag color={g.status === "active" ? "green" : "default"}>
+                              {g.status}
                             </Tag>
-                          </Tooltip>
-                          {g.file_access && g.file_access !== "none" && (
-                            <Tag color="blue">
-                              {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
-                            </Tag>
-                          )}
-                          {g.shell_policy_set_version_snapshot != null && (
-                            <Tag color="blue">
-                              shell set v{g.shell_policy_set_version_snapshot}
-                            </Tag>
-                          )}
-                        </Space>
-                      }
-                      description={
-                        <Space size={4} wrap>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Used {g.use_count ?? 0}x
-                          </Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
-                          </Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            · last command {formatTimestamp(g.last_command_at)}
-                          </Text>
-                          {g.expires_at != null && (
+                            <Tooltip title={authMethod.tooltip}>
+                              <Tag color={authMethod.color}>{authMethod.label}</Tag>
+                            </Tooltip>
+                            <Tooltip title={`grant_mode: ${g.grant_mode}`}>
+                              <Tag>{describeGrantMode(g.grant_mode)}</Tag>
+                            </Tooltip>
+                            <Tooltip title={`grant_scope: ${g.grant_scope}`}>
+                              <Tag color={describeGrantScope(g.grant_scope).color}>
+                                {describeGrantScope(g.grant_scope).label}
+                              </Tag>
+                            </Tooltip>
+                            {g.file_access && g.file_access !== "none" && (
+                              <Tag color="blue">
+                                {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
+                              </Tag>
+                            )}
+                            {g.shell_policy_set_version_snapshot != null && (
+                              <Tag color="blue">
+                                shell set v{g.shell_policy_set_version_snapshot}
+                              </Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space size={4} wrap>
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · expires {new Date(g.expires_at).toLocaleDateString()}
+                              Used {g.use_count ?? 0}x
                             </Text>
-                          )}
-                          <Tooltip title={g.caller_fingerprint}>
-                            <Text type="secondary" style={{ fontSize: 10, fontFamily: "monospace" }}>
-                              {formatFingerprint(g.caller_fingerprint)}
-                            </Text>
-                          </Tooltip>
-                          {g.stdin_allowed != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · stdin {g.stdin_allowed ? "on" : "off"}
+                              · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
                             </Text>
-                          )}
-                          {g.interactive_allowed != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · interactive {g.interactive_allowed ? "on" : "off"}
+                              · last command {formatTimestamp(g.last_command_at)}
                             </Text>
-                          )}
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                )}
+                            {g.expires_at != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · expires {new Date(g.expires_at).toLocaleDateString()}
+                              </Text>
+                            )}
+                            <Tooltip title={g.caller_fingerprint}>
+                              <Text type="secondary" style={{ fontSize: 10, fontFamily: "monospace" }}>
+                                {formatFingerprint(g.caller_fingerprint)}
+                              </Text>
+                            </Tooltip>
+                            {g.stdin_allowed != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · stdin {g.stdin_allowed ? "on" : "off"}
+                              </Text>
+                            )}
+                            {g.interactive_allowed != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · interactive {g.interactive_allowed ? "on" : "off"}
+                              </Text>
+                            )}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  );
+                }}
               />
             )}
           </Card>
