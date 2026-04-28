@@ -14,6 +14,7 @@ pub struct CurlCommand {
     insecure: bool,
     ca_cert: Option<PathBuf>,
     verbose: bool,
+    compressed: bool,
     connect_timeout: Option<u32>,
     max_time: Option<u32>,
 }
@@ -40,6 +41,7 @@ impl CurlCommand {
             insecure: false,
             ca_cert: None,
             verbose: true,
+            compressed: false,
             connect_timeout: Some(10),
             max_time: Some(30),
         }
@@ -56,6 +58,7 @@ impl CurlCommand {
             insecure: false,
             ca_cert: None,
             verbose: true,
+            compressed: false,
             connect_timeout: Some(10),
             max_time: Some(30),
         }
@@ -101,6 +104,11 @@ impl CurlCommand {
         self
     }
 
+    pub fn compressed(mut self) -> Self {
+        self.compressed = true;
+        self
+    }
+
     pub fn connect_timeout(mut self, seconds: u32) -> Self {
         self.connect_timeout = Some(seconds);
         self
@@ -119,6 +127,10 @@ impl CurlCommand {
 
         if self.verbose {
             args.push("-v".to_string());
+        }
+
+        if self.compressed {
+            args.push("--compressed".to_string());
         }
 
         args.push("-i".to_string());

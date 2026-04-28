@@ -991,6 +991,102 @@
 
 ---
 
+### TC-PRA-29D：回归 - gzip HTML 响应命中 htmlAppend 后仍保持有效压缩响应
+
+**背景**：
+- 已知失败请求：sequence `278778` / traffic id `REQ-69f0dc94-000857`
+- 请求：`GET https://nextoncall.bytedance.net/?appType=all&page=1`
+- 命中规则：`HtmlAppend` 内容注入规则
+- 原始响应头：`Content-Encoding: gzip`、`Content-Type: text/html; charset=utf-8`
+- 修复前现象：Traffic 缓存体表现为 gzip/二进制内容后直接拼接明文 vConsole 脚本，`gzip -t` 无法校验，浏览器也无法把响应作为正常 HTML 解析。
+
+**操作步骤**：
+1. 启动 gzip HTML 上游服务：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+   import gzip
+
+   HTML = b'<!doctype html><html><head><title>gzip</title></head><body>page</body></html>'
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           data = gzip.compress(HTML)
+           self.send_response(200)
+           self.send_header("Content-Type", "text/html; charset=utf-8")
+           self.send_header("Content-Encoding", "gzip")
+           self.send_header("Content-Length", str(len(data)))
+           self.end_headers()
+           self.wfile.write(data)
+
+   ThreadingHTTPServer(("127.0.0.1", 18086), Handler).serve_forever()
+   PY
+   ```
+2. 启动临时 Bifrost（独立数据目录、非 9900 端口、禁用系统代理）：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-human-gzip-htmlappend.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy --skip-cert-check -y
+   ```
+3. 创建 gzip HTML 注入规则：
+   ```bash
+   curl -X POST http://127.0.0.1:18886/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name":"test-gzip-htmlappend","content":"gzip-html.local host://127.0.0.1:18086\ngzip-html.local htmlAppend://(<script>gzipHtmlAppend()</script>)","enabled":true}'
+   ```
+4. 通过代理请求 gzip HTML，并要求 curl 解压验证：
+   ```bash
+   curl --compressed -sS -D /tmp/gzip-htmlappend.headers \
+     -x http://127.0.0.1:18886 \
+     http://gzip-html.local/page.html \
+     -o /tmp/gzip-htmlappend.html
+
+   python3 - <<'PY'
+   headers = open("/tmp/gzip-htmlappend.headers").read().lower()
+   body = open("/tmp/gzip-htmlappend.html").read()
+   marker = "<script>gzipHtmlAppend()</script>"
+   assert "content-encoding: gzip" in headers, headers
+   assert marker in body, body
+   assert body.rindex(marker) < body.lower().rindex("</html>"), body
+   assert "<body>page" in body, body
+   print("TC-PRA-29D passed")
+   PY
+   ```
+5. 更新规则为同时删除 `Content-Encoding`，验证最终响应头和响应体保持一致：
+   ```bash
+   curl -X PUT http://127.0.0.1:18886/_bifrost/api/rules/test-gzip-htmlappend \
+     -H "Content-Type: application/json" \
+     -d '{"name":"test-gzip-htmlappend","content":"gzip-html.local host://127.0.0.1:18086\ngzip-html.local htmlAppend://(<script>gzipHtmlAppend()</script>) delete://resHeaders.Content-Encoding","enabled":true}'
+
+   curl -sS -D /tmp/gzip-htmlappend-identity.headers \
+     -x http://127.0.0.1:18886 \
+     http://gzip-html.local/page.html \
+     -o /tmp/gzip-htmlappend-identity.html
+
+   python3 - <<'PY'
+   headers = open("/tmp/gzip-htmlappend-identity.headers").read().lower()
+   body = open("/tmp/gzip-htmlappend-identity.html").read()
+   marker = "<script>gzipHtmlAppend()</script>"
+   assert "content-encoding:" not in headers, headers
+   assert marker in body, body
+   assert "<body>page" in body, body
+   print("TC-PRA-29D identity fallback passed")
+   PY
+   ```
+6. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:18886/_bifrost/api/rules/test-gzip-htmlappend
+   # 停止临时 Bifrost 与 gzip HTML 上游服务
+   ```
+
+**预期结果**：
+- 响应头仍包含 `Content-Encoding: gzip`
+- `curl --compressed` 能成功解压响应体，不出现 gzip 校验或传输错误
+- 解压后的 HTML 中包含 `<script>gzipHtmlAppend()</script>`
+- 注入脚本位于最后一个 `</html>` 之前，原始 HTML 主体 `page` 仍存在（默认 badge 可能继续向 body 内注入面板样式和脚本）
+- 当响应头规则删除 `Content-Encoding` 时，返回体为可直接读取的明文 HTML，不会保留 gzip 字节
+
+---
+
 ### TC-PRA-29C：回归 - mock/file/template 生成资源也执行 HTML/JS/CSS 内容注入
 
 **背景**：

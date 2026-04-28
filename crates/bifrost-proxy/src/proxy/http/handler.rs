@@ -44,8 +44,9 @@ use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
 use crate::transform::decompress_body_with_limit;
 use crate::transform::{
-    apply_body_rules, apply_content_injection, compress_body, maybe_inject_bifrost_badge_html,
-    try_decompress_body_with_limit, Phase,
+    apply_body_rules, apply_content_injection, apply_content_injection_preserving_encoding,
+    compress_body, maybe_inject_bifrost_badge_html, try_decompress_body_with_limit,
+    ContentInjectionEncoding, Phase,
 };
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -1733,6 +1734,7 @@ pub async fn handle_http_request(
         ctx,
         request_origin.as_deref(),
     );
+    let output_res_content_encoding = response_content_encoding(&res_parts);
 
     let res_content_type = get_content_type(&res_parts);
     let force_body_processing_for_badge =
@@ -2100,13 +2102,27 @@ pub async fn handle_http_request(
             ctx,
         );
 
-        apply_content_injection(
+        let injection_result = apply_content_injection_preserving_encoding(
             body_processed,
             &content_type,
+            ContentInjectionEncoding {
+                source: res_content_encoding.as_deref(),
+                output: output_res_content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            },
             &resolved_rules,
             verbose_logging,
             ctx,
-        )
+        );
+        res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+        if let Some(content_encoding) = injection_result.content_encoding.as_deref() {
+            if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
+                res_parts
+                    .headers
+                    .insert(hyper::header::CONTENT_ENCODING, value);
+            }
+        }
+        injection_result.body
     };
 
     let res_script_results = if has_res_scripts {

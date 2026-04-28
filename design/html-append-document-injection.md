@@ -30,6 +30,8 @@ https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
 - 找不到 `<html>` 时回退为旧行为，在文档开头前置；无 doctype 的片段响应仍自动补 `<!DOCTYPE html>`。
 - `htmlBody` 先查找 `<body ...>` 开始标签和最后一个 `</body>`，找到时只替换 body 标签之间的内部 HTML，保留 `<html>`、`<head>`、`<body>` 及 body 属性；找不到 body 标签时才回退为整段替换。
 - JS/CSS 系列保持现有字符串语义：prepend 在开头、append 在末尾、body 替换整段。
+- 当响应带有 `Content-Encoding: gzip/deflate/br/zstd` 且命中 HTML/JS/CSS 内容注入协议时，响应处理链必须先按编码安全解压，再执行 `apply_content_injection`，最后按原编码重新压缩。不能把压缩字节当作 UTF-8 HTML 直接拼接，否则会生成“gzip 数据 + 明文脚本”的损坏响应。
+- 如果解压失败，跳过内容注入并保持原始压缩响应；如果响应头规则删除或改写了 `Content-Encoding`，内容注入后的响应体必须和最终响应头保持一致；如果重压缩失败，降级为 identity 响应并移除 `Content-Encoding`。
 - HTTPS 解包后的 tunnel 响应链路必须和普通 HTTP 响应链路一样执行 `apply_content_injection`；否则 `https://nextoncall.bytedance.net/assistant -> http://localhost:5173/assistant` 这类命中 `HtmlAppend + Http` 的请求只会记录规则命中，不会改写 HTML 响应体。
 - `mock/file/rawfile/template/status` 这类由规则直接生成的立即响应也必须在返回前执行同一套响应体处理链；否则它们会因为提前返回绕过 `html/js/css` 内容注入协议，表现为规则命中但生成资源未被追加、前置或替换。
 - Badge 内联规则数据先解析并重新序列化为 JSON，再把 `</` 转义为 `<\/`，避免规则文本逃逸为真实页面脚本。
@@ -56,12 +58,15 @@ https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
 - `test_js_injection_append_prepend_and_body_replace`：验证 JavaScript append/prepend/body 三种协议及 Content-Type 分发。
 - `test_css_injection_append_prepend_and_body_replace`：验证 CSS append/prepend/body 三种协议及 Content-Type 分发。
 - `test_content_injection_ignores_protocols_when_response_type_differs`：验证不同系列协议不会跨 Content-Type 串用。
+- `test_html_injection_gzip_preserves_encoding`：验证 gzip HTML 响应先解压注入再重新压缩，解压后的脚本位于 `</html>` 前，且仍保持有效 gzip。
 - `test_badge_inline_rules_data_escapes_script_close_tag`：验证 Badge 中的规则文本不会因 `</script>` 提前闭合脚本。
 - `test_badge_inline_rules_data_falls_back_for_invalid_json`：验证异常规则数据回退为空数据。
 
 ### E2E 测试
 
 - `body_htmlAppend_script`：通过 mock HTML 响应与真实代理请求验证 `htmlAppend` 输出完整 HTML 顺序，断言脚本在 `</html>` 前。
+- `body_htmlAppend_gzip_response`：通过真实代理请求验证 gzip HTML 响应命中 `htmlAppend` 后，客户端仍能按 `Content-Encoding: gzip` 正常解压，且脚本注入到 `</html>` 前。
+- `body_htmlAppend_gzip_response_delete_encoding`：验证 gzip HTML 响应同时命中 `htmlAppend` 与删除 `Content-Encoding` 规则时，返回体为可直接读取的 identity HTML，避免 gzip 字节和最终响应头不一致。
 - `body_content_injection_protocol_matrix`：通过本地上游返回真实 `text/html`、`application/javascript`、`text/css` 响应，验证三类协议的 append/prepend/body 矩阵，其中 `htmlPrepend` 断言插入 `<html>` 之后，`htmlBody` 断言只替换 body 内部。
 - `body_content_injection_mock_resources`：验证 `file://`/`tpl://` 等规则生成的 mock 响应在普通 HTTP handler 的提前返回路径中也会执行 HTML/JS/CSS 内容注入。
 - `body_https_htmlAppend_forwarded_http`：验证 HTTPS 解包请求通过 `http://localhost` 上游转发后仍执行 `htmlAppend`，覆盖真实请求 `REQ-69f08a65-002153` 暴露的 tunnel 漏处理问题。
@@ -73,6 +78,7 @@ https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
 - 更新 `human_tests/proxy-rules-advanced.md` 的 `TC-PRA-29A`，覆盖 HTML/JS/CSS 三类协议矩阵。
 - 新增 `human_tests/proxy-rules-advanced.md` 的 `TC-PRA-29B`，覆盖 HTTPS 页面命中 `HtmlAppend` 并通过 `http://localhost` 上游转发时仍应注入。
 - 新增 `human_tests/proxy-rules-advanced.md` 的 `TC-PRA-29C`，覆盖 `file://` 与 `tpl://` 生成资源命中 HTML/JS/CSS 注入协议时仍应生效。
+- 新增 `human_tests/proxy-rules-advanced.md` 的 `TC-PRA-29D`，覆盖 gzip HTML 响应命中 `htmlAppend` 后仍是可解压 gzip，防止真实请求 `78778` 中出现压缩内容和明文脚本混拼。
 - 按用例启动独立端口代理，创建 `htmlAppend` 规则，请求 HTML 文档并断言：
   - `htmlAppend` 注入脚本出现在 `</html>` 之前；
   - `htmlAppend` 注入脚本不会出现在 `</html>` 之后；
@@ -85,12 +91,15 @@ https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
 
 - `cargo test -p bifrost-proxy test_html_injection_append -- --nocapture`
 - `cargo test -p bifrost-proxy test_html_injection_prepend -- --nocapture`
+- `cargo test -p bifrost-proxy test_html_injection_gzip_preserves_encoding -- --nocapture`
 - `cargo run -p bifrost-e2e -- --test body_htmlAppend_script`
+- `cargo run -p bifrost-e2e -- --test body_htmlAppend_gzip_response`
+- `cargo run -p bifrost-e2e -- --test body_htmlAppend_gzip_response_delete_encoding`
 - `cargo run -p bifrost-e2e -- --test body_content_injection_protocol_matrix`
 - `cargo run -p bifrost-e2e -- --test body_content_injection_mock_resources`
 - `cargo run -p bifrost-e2e -- --test body_https_htmlAppend_forwarded_http`
 - `bash e2e-tests/tests/test_badge_injection_e2e.sh`
-- 按 `human_tests/proxy-rules-advanced.md` 执行 `TC-PRA-25`、`TC-PRA-29A` 与 `TC-PRA-29B`
+- 按 `human_tests/proxy-rules-advanced.md` 执行 `TC-PRA-25`、`TC-PRA-29A`、`TC-PRA-29B` 与 `TC-PRA-29D`
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`

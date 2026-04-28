@@ -59,7 +59,9 @@ use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
 use crate::transform::decompress::get_content_encoding;
 use crate::transform::merge_cookie_header_values;
-use crate::transform::{apply_body_rules, apply_content_injection, Phase};
+use crate::transform::{
+    apply_body_rules, apply_content_injection_preserving_encoding, ContentInjectionEncoding, Phase,
+};
 use crate::transform::{compress_body, maybe_inject_bifrost_badge_html};
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -2565,6 +2567,7 @@ async fn handle_intercepted_request_with_protocol(
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
+    let output_res_content_encoding = get_content_encoding(&res_headers);
 
     let needs_processing = needs_body_processing(&resolved_rules);
     let res_content_type_str = res_parts
@@ -3081,21 +3084,36 @@ async fn handle_intercepted_request_with_protocol(
         .headers
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
+    let res_content_type = res_content_type.unwrap_or("").to_string();
     let body_processed = apply_body_rules(
         Bytes::from(res_body_bytes.clone()),
         &resolved_rules,
         Phase::Response,
-        res_content_type,
+        Some(&res_content_type),
         verbose_logging,
         &ctx,
     );
-    let final_body = apply_content_injection(
+    let injection_result = apply_content_injection_preserving_encoding(
         body_processed,
-        res_content_type.unwrap_or(""),
+        &res_content_type,
+        ContentInjectionEncoding {
+            source: res_content_encoding.as_deref(),
+            output: output_res_content_encoding.as_deref(),
+            max_decompress_output_bytes: 10 * 1024 * 1024,
+        },
         &resolved_rules,
         verbose_logging,
         &ctx,
     );
+    res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+    if let Some(content_encoding) = injection_result.content_encoding.as_deref() {
+        if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
+            res_parts
+                .headers
+                .insert(hyper::header::CONTENT_ENCODING, value);
+        }
+    }
+    let final_body = injection_result.body;
 
     let final_body = if inject_bifrost_badge {
         let badge_rules_json = super::handler::build_badge_rules_json(admin_state.as_deref());
