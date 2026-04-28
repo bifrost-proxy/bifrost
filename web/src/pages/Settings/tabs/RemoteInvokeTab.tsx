@@ -2754,6 +2754,11 @@ export default function RemoteInvokeTab({
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               · last command {formatTimestamp(g.last_command_at)}
                             </Text>
+                            {(g.os_version || g.arch) && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · {[g.os_version, g.arch].filter(Boolean).join(" ")}
+                              </Text>
+                            )}
                             {g.expires_at != null && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
                                 · expires {new Date(g.expires_at).toLocaleDateString()}
