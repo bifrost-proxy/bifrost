@@ -38,7 +38,10 @@ pub fn handle_local(action: KeepAwakeAction, port: u16) -> bifrost_core::Result<
 }
 
 async fn run_local(action: KeepAwakeAction, port: u16) -> bifrost_core::Result<()> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|e| bifrost_core::BifrostError::Network(format!("http client: {e}")))?;
     let base = format!("http://127.0.0.1:{port}/api/power");
     let resp: reqwest::Response = match action {
         KeepAwakeAction::Status => client
