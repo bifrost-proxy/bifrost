@@ -4549,7 +4549,7 @@ PY
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-140 | 待执行 | 文档创建后立即执行。 |
+| TC-RI-回归-140 | ✅ PASS | 2026-04-28 在当前 checkout 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Remote Invoke 未登录 Sync 的 Remote Status 提示兼容黑色主题"`。测试通过 Playwright 预置 `bifrost-theme=dark`，mock Sync 状态为 `has_session=false` 且 `remote_base_url=https://sync.example.test`；页面打开 `Settings -> Remote Invoke` 后确认根节点为 `data-theme="dark"`，未登录提示可见并展示 `Sign in to Sync to enable Remote Invoke` 与 Sync Server 地址。读取提示块 computed style 后确认背景不再是 `rgb(255, 251, 230)`，边框不再是 `rgb(255, 229, 143)`。该测试未使用 `9900`，也没有修改系统代理。 |
 
 ---
 
@@ -4587,7 +4587,7 @@ PY
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-141 | 待执行 | 文档创建后立即执行。 |
+| TC-RI-回归-141 | ✅ PASS | 2026-04-28 在当前 checkout 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Remote Invoke Grants 展示 SSH key 与 Pair code 连接方式"`。测试通过 Playwright mock `/remote-invoke/grants` 返回一条 `auth_method=ssh_publickey` grant 和一条 `auth_method=pair_code` grant；页面打开 `Settings -> Remote Invoke` 后，`Grants` 卡片可见，SSH grant 行显示 `ssh caller` 与 `SSH key` 标签，pair-code grant 行显示 `code caller` 与 `Pair code` 标签。该测试未使用 `9900`，也没有修改系统代理。 |
 
 ---
 
