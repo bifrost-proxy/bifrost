@@ -293,7 +293,9 @@ export default function RuleEditor() {
   }
 
   const hasChanges =
-    selectedRuleName && editingContent[selectedRuleName] !== undefined;
+    selectedRuleName &&
+    editingContent[selectedRuleName] !== undefined &&
+    editingContent[selectedRuleName] !== currentRule?.content;
   const metaItems = currentRule
     ? isGroupMode
       ? [
