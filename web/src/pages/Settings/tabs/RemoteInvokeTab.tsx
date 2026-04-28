@@ -106,6 +106,14 @@ import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
 import PairingRequestModal from "../../../components/PairingRequestModal";
 import type { SyncStatus } from "../../../api/sync";
 import type { PairingRequest } from "../../../api/remoteInvoke";
+import {
+  getPowerStatus,
+  setPowerOn,
+  setPowerOff,
+  setPowerMode,
+  type KeepAwakeStatus,
+  type KeepAwakeMode,
+} from "../../../api/power";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -879,6 +887,16 @@ export default function RemoteInvokeTab({
   const [shellEditorTestLoading, setShellEditorTestLoading] = useState<Record<string, boolean>>({});
   const [cliPreviewOpen, setCliPreviewOpen] = useState<boolean>(false);
   const [cliPreviewText, setCliPreviewText] = useState<string>("");
+  const [powerStatus, setPowerStatus] = useState<KeepAwakeStatus | null>(null);
+  const [powerLoading, setPowerLoading] = useState(false);
+  const refreshPowerStatus = useCallback(async () => {
+    try {
+      const s = await getPowerStatus();
+      setPowerStatus(s);
+    } catch {
+      // silent: unsupported OS returns error; ignore
+    }
+  }, []);
 
   const runShellPolicyTest = async (policyId: string) => {
     const command = (shellEditorTestInput[policyId] ?? "").trim();
@@ -1196,6 +1214,14 @@ export default function RemoteInvokeTab({
     void refreshShellConfig();
     void refreshFileAccessConfig();
   }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig]);
+
+  useEffect(() => {
+    void refreshPowerStatus();
+    const id = window.setInterval(() => {
+      void refreshPowerStatus();
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [refreshPowerStatus]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
@@ -1948,6 +1974,102 @@ export default function RemoteInvokeTab({
                 </Descriptions.Item>
               </Descriptions>
             </div>
+            )}
+
+            {syncReady && (
+              <div
+                data-testid="settings-remote-invoke-keepawake-section"
+                style={{
+                  paddingBottom: 16,
+                  borderBottom: "1px solid #f0f0f0",
+                }}
+              >
+                <Space
+                  align="center"
+                  style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}
+                >
+                  <Text strong>
+                    <ThunderboltOutlined style={{ marginRight: 6 }} />Keep Awake
+                  </Text>
+                  <Switch
+                    data-testid="settings-remote-invoke-keepawake-switch"
+                    checked={!!powerStatus?.active}
+                    loading={powerLoading}
+                    disabled={!powerStatus || !powerStatus.supported}
+                    onChange={async (checked) => {
+                      setPowerLoading(true);
+                      try {
+                        if (checked) {
+                          await setPowerOn();
+                        } else {
+                          await setPowerOff();
+                        }
+                        await refreshPowerStatus();
+                      } catch (e) {
+                        message.error(
+                          e instanceof Error ? e.message : "Failed to toggle Keep Awake",
+                        );
+                      } finally {
+                        setPowerLoading(false);
+                      }
+                    }}
+                  />
+                </Space>
+                {powerStatus && !powerStatus.supported ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="Keep Awake is only supported on macOS in this version."
+                    style={{ marginTop: 4 }}
+                  />
+                ) : (
+                  <>
+                    <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                      Prevent this Mac from sleeping (including lid-close) while remote invoke calls are in flight. Uses IOKit IOPMAssertion, no sudo required.
+                    </Text>
+                    <Radio.Group
+                      data-testid="settings-remote-invoke-keepawake-mode"
+                      size="small"
+                      value={powerStatus?.mode ?? "auto"}
+                      disabled={powerLoading || !powerStatus}
+                      onChange={async (e) => {
+                        const next = e.target.value as KeepAwakeMode;
+                        setPowerLoading(true);
+                        try {
+                          await setPowerMode(next);
+                          await refreshPowerStatus();
+                        } catch (err) {
+                          message.error(
+                            err instanceof Error ? err.message : "Failed to set mode",
+                          );
+                        } finally {
+                          setPowerLoading(false);
+                        }
+                      }}
+                    >
+                      <Radio.Button value="off">Off</Radio.Button>
+                      <Radio.Button value="auto">Auto</Radio.Button>
+                      <Radio.Button value="force_on">Force On</Radio.Button>
+                    </Radio.Group>
+                    {powerStatus ? (
+                      <Descriptions size="small" column={1} style={{ marginTop: 8 }}>
+                        <Descriptions.Item label="Active">
+                          {powerStatus.active ? (
+                            <Tag color="green">Holding assertion</Tag>
+                          ) : (
+                            <Tag>Idle</Tag>
+                          )}
+                        </Descriptions.Item>
+                        {powerStatus.battery_warning ? (
+                          <Descriptions.Item label="Battery">
+                            <Text type="warning" style={{ fontSize: 12 }}>{powerStatus.battery_warning}</Text>
+                          </Descriptions.Item>
+                        ) : null}
+                      </Descriptions>
+                    ) : null}
+                  </>
+                )}
+              </div>
             )}
 
             {syncReady && (
