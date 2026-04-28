@@ -329,7 +329,7 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
   }
 });
 
-test("Rules 页面在内容经 undo 回到原文后，保存会清理未保存状态", async ({
+test("Rules 页面在内容经 undo 回到原文后禁用保存，真实变更后可保存", async ({
   page,
   request,
 }) => {
@@ -361,6 +361,9 @@ test("Rules 页面在内容经 undo 回到原文后，保存会清理未保存�
   await expect(saveButton).toBeEnabled();
 
   await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
+  await expect(saveButton).toBeDisabled();
+
+  await editorInput.type("y", { delay: 0 });
   await expect(saveButton).toBeEnabled();
 
   await saveButton.click();
