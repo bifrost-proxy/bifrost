@@ -97,6 +97,7 @@ import {
   buildFileAccessPolicy,
   buildSshFileAccessPolicy,
   FILE_READ_OPS,
+  findFileAccessPolicyForGrant,
   getFileAccessPolicyAccess,
   getFileAccessPolicyRootScope,
 } from "../../../api/remoteInvoke";
@@ -1549,9 +1550,7 @@ export default function RemoteInvokeTab({
   };
 
   const openFileAccessEditor = (grant: Grant) => {
-    const existing = fileAccessConfig?.grant?.find(
-      (policy) => policy.grant_id === grant.grant_id,
-    );
+    const existing = findFileAccessPolicyForGrant(fileAccessConfig, grant);
     const fallbackAccess: FileAccessPolicyAccess =
       grant.file_access === "read_write" ? "read_write" : "read";
     setFileAccessEditingGrant(grant);
@@ -1651,6 +1650,7 @@ export default function RemoteInvokeTab({
       const nextPolicy = {
         ...fileAccessDraft,
         grant_id: grantId,
+        match: undefined,
         name: fileAccessDraft.name?.trim() || undefined,
         roots: fileAccessDraft.roots?.map((root) => root.trim()).filter(Boolean) ?? [],
         denies:

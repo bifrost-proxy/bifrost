@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildFileAccessPolicy,
+  findFileAccessPolicyForGrant,
   getFileAccessPolicyAccess,
   getFileAccessPolicyRootScope,
   getCallArgsPreviewSource,
   normalizeRemoteInvokeSshCallerInfo,
   normalizeRemoteInvokeSshKeyRecord,
+  type FileAccessConfig,
 } from "./remoteInvoke";
 
 describe("remoteInvoke SSH key normalization", () => {
@@ -125,6 +127,7 @@ describe("file access policy helpers", () => {
     grant_id: "grant-active-1",
     caller_display_name: "mira",
     caller_fingerprint: "abc123",
+    ssh_key_fingerprint: null,
   };
 
   it("builds a read-only policy for selected roots from an active grant", () => {
@@ -151,5 +154,54 @@ describe("file access policy helpers", () => {
     expect(getFileAccessPolicyRootScope(policy)).toBe("all");
     expect(policy.ops).toContain("apply_patch");
     expect(policy.allow_recursive_delete).toBe(false);
+  });
+
+  it("resolves the effective policy with grant id before ssh and caller fingerprints", () => {
+    const config: FileAccessConfig = {
+      grant: [
+        {
+          match: { caller_fingerprint: "abc123" },
+          roots: ["/caller"],
+          ops: ["read"],
+        },
+        {
+          match: { ssh_fingerprint: "ssh-fp-1" },
+          roots: ["/"],
+          ops: ["read", "list", "stat", "glob", "search", "hash", "write"],
+        },
+        {
+          grant_id: "grant-active-1",
+          roots: ["/exact"],
+          ops: ["read", "list"],
+        },
+      ],
+    };
+
+    expect(findFileAccessPolicyForGrant(config, {
+      ...grant,
+      ssh_key_fingerprint: "ssh-fp-1",
+    })?.roots).toEqual(["/exact"]);
+  });
+
+  it("falls back to ssh-key policy so grants inherit all-directories defaults", () => {
+    const config: FileAccessConfig = {
+      grant: [
+        {
+          match: { ssh_fingerprint: "ssh-fp-1" },
+          roots: ["/"],
+          ops: ["read", "list", "stat", "glob", "search", "hash", "write"],
+        },
+      ],
+    };
+
+    const policy = findFileAccessPolicyForGrant(config, {
+      ...grant,
+      grant_id: "new-ssh-grant",
+      ssh_key_fingerprint: "ssh-fp-1",
+    });
+
+    expect(policy?.roots).toEqual(["/"]);
+    expect(getFileAccessPolicyRootScope(policy!)).toBe("all");
+    expect(getFileAccessPolicyAccess(policy!)).toBe("read_write");
   });
 });

@@ -38,7 +38,7 @@
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
-| [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 16 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
+| [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 3 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器 |
@@ -57,7 +57,7 @@
 | [remote-command-isomorphic.md](./remote-command-isomorphic.md) | Remote Command 同构化回归 | 29 | 本地与远端 `search/traffic` 命令矩阵回归：覆盖 search/traffic list/get/clear、remote search/traffic list/get 的子命令、参数、默认值、格式输出、流式输出、remote traffic clear 不暴露边界，以及 filter-only query / 机器可读输出回归 |
 | [remote-traffic-cli-enum-size.md](./remote-traffic-cli-enum-size.md) | Remote Traffic CLI 枚举体瘦身 | 3 | `RemoteTrafficCommands` large enum variant 回归：验证 `remote traffic list` 全量过滤参数解析、`remote traffic search` 参数透传，以及 clippy 不再报 `large_enum_variant` |
 | [remote-shell-exec.md](./remote-shell-exec.md) | Remote Shell Exec | 26 | `bifrost remote command exec` 主链路回归：caller 不再传 `policy_id`、target 基于 grant binding 与本地 Shell Access 自动选择唯一策略、query/shell scope 隔离、策略未命中与歧义匹配拒绝、policy version 失效、`Full Access` / `Default Sandbox` 真实语义、grant 的 WebUI / CLI 编辑、target 本地 grant policy overlay 持久化、relay 仅保留最小 `grant_scope` 不存储具体策略绑定，reconnect 覆盖旧 grant / disconnect 清理残留 reusable grants 的验证；Windows shell_text Unix 路径 fallback（`/bin/bash` → `cmd`）与 UTF-8 编码处理（`chcp 65001` / PowerShell OutputEncoding）、`policy update` 命令原地更新策略元数据不破坏 grant 有效性、CLI 对裸 argv 输入的显式拒绝回归、长时间命令 stdout 流式输出回归、Windows 流式 shell 输出 E2E 回归，以及对应 shell E2E 自动化脚本回归 |
-| [remote-invoke-file.md](./remote-invoke-file.md) | Remote Invoke File API | 35 | file.read/list/stat/glob/search/hash/write/edit/mkdir/mv/rm/apply-patch 的正向用例、FileAccessPolicy 的 roots/denies/symlink-escape/scope/二进制/target/只读 policy 拒绝写操作错误码回归用例、shell scope 不自动授予 file API、配对批准时 file scope 不依赖 Shell Access policy 的 CI 回归、SSH Key 默认 File Policy 配置与 reset 保留/误删自愈回归、并发与 grant 过期稳定性、审计日志留痕、CLI --help / --output json UX 验收、以及 coding agent 增强能力（offset/limit 行范围读取、search context 上下文行、glob/search/list 默认排除 .git/node_modules/target） |
+| [remote-invoke-file.md](./remote-invoke-file.md) | Remote Invoke File API | 36 | file.read/list/stat/glob/search/hash/write/edit/mkdir/mv/rm/apply-patch 的正向用例、FileAccessPolicy 的 roots/denies/symlink-escape/scope/二进制/target/只读 policy 拒绝写操作错误码回归用例、shell scope 不自动授予 file API、配对批准时 file scope 不依赖 Shell Access policy 的 CI 回归、SSH Key 默认 File Policy 配置与 reset 保留/误删自愈/旧 grant fingerprint 修复回归、并发与 grant 过期稳定性、审计日志留痕、CLI --help / --output json UX 验收、以及 coding agent 增强能力（offset/limit 行范围读取、search context 上下文行、glob/search/list 默认排除 .git/node_modules/target） |
 | [grant-file-access.md](./grant-file-access.md) | Grant File Access 正交权限模型 | 18 | file_access 独立于 grant_scope 的正交权限模型：WebUI 预设策略模式、API approve/update file_access、CLI --file-access 参数、权限检查、SSE grant_created 包含 file_access 回归、approve_pairing 持久化 grant_info 回归、Full Access 端到端文件操作验证、三策略动态切换验证（read_write/read/none）、executor 写权限检查回归 |
 | [grant-permission-hierarchy.md](./grant-permission-hierarchy.md) | Grant 权限层级模型 | 14 | Shell > File > Query 层级验证：Shell 默认包含 File(read_write) + Query、降级到 Query 后 shell/file 被拒、升级到 File 后 file 可用 shell 仍拒、权限切换后 grant 保持有效、无 shell policy 降级为 query、shell_grant_provision 层级默认值单元测试 |
 
@@ -128,7 +128,7 @@
 
 ---
 
-**总计：67 个测试文件，1285 个测试用例**
+**总计：67 个测试文件，1287 个测试用例**
 
 ## 工作流程
 

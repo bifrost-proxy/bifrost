@@ -2376,19 +2376,35 @@ impl RemoteInvokeWorker {
             "grant validated for call_open"
         );
 
-        let (grant_scope, file_access, caller_fp, ssh_fp) = self
-            .local_grants
-            .read()
-            .get(&grant_id)
-            .map(|grant| {
-                (
-                    grant.grant_scope,
-                    grant.file_access,
-                    Some(grant.caller_fingerprint.clone()),
-                    grant.ssh_key_fingerprint.clone(),
-                )
-            })
-            .unwrap_or_default();
+        let active_ssh_key_for_repair = self.get_active_ssh_key().ok().flatten();
+        let mut repaired_grant_info: Option<GrantInfo> = None;
+        let (grant_scope, file_access, caller_fp, ssh_fp) = {
+            let mut grants = self.local_grants.write();
+            grants
+                .get_mut(&grant_id)
+                .map(|grant| {
+                    if repair_legacy_ssh_grant_identity(grant, active_ssh_key_for_repair.as_ref()) {
+                        repaired_grant_info = Some(grant.clone());
+                    }
+                    (
+                        grant.grant_scope,
+                        grant.file_access,
+                        Some(grant.caller_fingerprint.clone()),
+                        grant.ssh_key_fingerprint.clone(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        if let Some(repaired) = repaired_grant_info {
+            if let Err(error) = self.ensure_active_ssh_file_access_policy() {
+                warn!(
+                    error = %error,
+                    grant_id = %grant_id,
+                    "repaired legacy SSH grant identity but failed to restore default file policy"
+                );
+            }
+            self.persist_grant_info(&grant_id, &repaired);
+        }
 
         if data.get("command").is_some() {
             warn!(
@@ -3908,6 +3924,32 @@ fn apply_stored_grant_policy(
     grant
 }
 
+fn repair_legacy_ssh_grant_identity(
+    grant: &mut GrantInfo,
+    active_ssh_key: Option<&SshKeyRecord>,
+) -> bool {
+    if grant.auth_method != AuthMethod::SshPublickey {
+        return false;
+    }
+    let Some(active_ssh_key) = active_ssh_key else {
+        return false;
+    };
+    let legacy_or_missing_fingerprint = grant
+        .ssh_key_fingerprint
+        .as_deref()
+        .map(|fingerprint| fingerprint.is_empty() || fingerprint == grant.caller_fingerprint)
+        .unwrap_or(true);
+    if !legacy_or_missing_fingerprint
+        || grant.ssh_key_fingerprint.as_deref() == Some(&active_ssh_key.ssh_key_fingerprint)
+    {
+        return false;
+    }
+
+    grant.ssh_key_id = Some(active_ssh_key.id.clone());
+    grant.ssh_key_fingerprint = Some(active_ssh_key.ssh_key_fingerprint.clone());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3923,6 +3965,7 @@ mod tests {
     use bifrost_storage::{RemoteShellPolicy, RemoteShellSet, RemoteShellStore};
     use ring::agreement::EphemeralPrivateKey;
     use ring::rand::SystemRandom;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn make_active_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
@@ -3963,6 +4006,109 @@ mod tests {
             os_version: None,
             arch: None,
         }
+    }
+
+    fn make_active_ssh_key() -> SshKeyRecord {
+        SshKeyRecord {
+            id: "ssh-key-current".to_string(),
+            device_code: "BF-TEST".to_string(),
+            label: "mira".to_string(),
+            public_key_pem: "pub".to_string(),
+            ssh_key_fingerprint: "real-ssh-fingerprint".to_string(),
+            grant_mode: GrantMode::Permanent,
+            status: SshKeyStatus::Active,
+            created_at: 1000,
+            last_used_at: None,
+            last_caller_info: None,
+        }
+    }
+
+    #[test]
+    fn repair_legacy_ssh_grant_identity_replaces_caller_fingerprint_with_active_key() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("legacy-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_id = Some("legacy-key".to_string());
+        grant.ssh_key_fingerprint = Some("caller-fp".to_string());
+
+        assert!(repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        assert_eq!(grant.ssh_key_id.as_deref(), Some("ssh-key-current"));
+        assert_eq!(
+            grant.ssh_key_fingerprint.as_deref(),
+            Some("real-ssh-fingerprint")
+        );
+    }
+
+    #[test]
+    fn repaired_legacy_ssh_grant_resolves_active_key_write_policy() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("legacy-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_fingerprint = Some("caller-fp".to_string());
+
+        let cfg = RawConfig {
+            grants: vec![RawGrantPolicy {
+                match_: GrantMatch {
+                    grant_id: None,
+                    caller_fingerprint: None,
+                    ssh_fingerprint: Some(active_key.ssh_key_fingerprint.clone()),
+                },
+                grant_id: None,
+                name: Some("ssh-key:mira".to_string()),
+                roots: vec![PathBuf::from("/")],
+                denies: Vec::new(),
+                write_denies: Vec::new(),
+                ops: file_policy_full_ops(),
+                max_read_bytes: None,
+                max_write_bytes: None,
+                respect_gitignore: None,
+                allow_overwrite: Some(true),
+                allow_recursive_delete: Some(false),
+            }],
+            default: None,
+        };
+        let store = crate::remote_invoke::file_policy_store::FileAccessPolicyStore::from_raw(cfg);
+
+        assert!(repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        let policy = store.resolve(
+            &grant.grant_id,
+            Some(&grant.caller_fingerprint),
+            grant.ssh_key_fingerprint.as_deref(),
+            Path::new("/Users/eden"),
+        );
+        assert!(
+            policy
+                .check(
+                    Path::new("hello.txt"),
+                    Path::new("/Users/eden"),
+                    FileOp::Write
+                )
+                .is_ok(),
+            "repaired SSH grant should inherit the active key write policy"
+        );
+    }
+
+    #[test]
+    fn repair_legacy_ssh_grant_identity_preserves_explicit_different_key() {
+        let active_key = make_active_ssh_key();
+        let mut grant = make_active_grant("other-ssh-grant", GrantMode::Permanent);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.caller_fingerprint = "caller-fp".to_string();
+        grant.ssh_key_fingerprint = Some("other-real-key".to_string());
+
+        assert!(!repair_legacy_ssh_grant_identity(
+            &mut grant,
+            Some(&active_key)
+        ));
+        assert_eq!(grant.ssh_key_fingerprint.as_deref(), Some("other-real-key"));
     }
 
     fn setup_remote_shell_store(version: u64) -> (std::sync::MutexGuard<'static, ()>, TempDir) {
