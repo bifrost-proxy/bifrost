@@ -5,7 +5,7 @@ pub const BIFROST_BADGE_ELEMENT_ID: &str = "__bifrost_badge__";
 const BADGE_STYLE: &str = concat!(
     "<style>",
     "#__bifrost_badge__{",
-    "position:fixed;left:15px;bottom:15px;z-index:2147483647;",
+    "position:fixed;left:15px;bottom:15px;z-index:2147483647!important;",
     "display:flex;align-items:center;",
     "height:30px;width:30px;border-radius:9999px;",
     "background:linear-gradient(135deg,#7BEBC0,#6CBFCF);",
@@ -31,7 +31,7 @@ const BADGE_STYLE: &str = concat!(
     "}",
     "#__bifrost_badge__:hover .__bb_txt{opacity:1}",
     "#__bb_panel__{",
-    "position:fixed;left:15px;bottom:52px;z-index:2147483646;",
+    "position:fixed;left:15px;bottom:52px;z-index:2147483647!important;",
     "min-width:280px;max-width:400px;max-height:420px;",
     "background:#fff;border-radius:12px;",
     "box-shadow:0 8px 32px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.08);",
@@ -88,12 +88,23 @@ const BADGE_STYLE: &str = concat!(
     "}",
     "#__bb_panel__ .__bb_mg .__bb_mt:hover{opacity:.8}",
     "#__bb_panel__ .__bb_mg .__bb_mc{",
-    "margin-top:8px;padding:8px;background:#f5f5f5;border-radius:6px;",
+    "padding:28px 8px 8px;background:#f5f5f5;border-radius:6px;",
     "font-size:11px;font-family:'SF Mono',Menlo,Consolas,monospace;",
     "color:#333;white-space:pre-wrap;word-break:break-all;",
-    "display:none;",
     "}",
-    "#__bb_panel__ .__bb_mg .__bb_mc.--open{display:block}",
+    "#__bb_panel__ .__bb_mg .__bb_mcw{",
+    "display:none;position:relative;margin-top:8px;",
+    "}",
+    "#__bb_panel__ .__bb_mg .__bb_mcw.--open{display:block}",
+    "#__bb_panel__ .__bb_mg .__bb_copy{",
+    "position:absolute;right:6px;top:6px;z-index:2;",
+    "border:1px solid rgba(108,191,207,0.45);border-radius:4px;",
+    "background:rgba(255,255,255,0.92);color:#2f9aae;",
+    "font-size:10px;font-weight:600;line-height:18px;height:20px;padding:0 7px;",
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
+    "cursor:pointer;",
+    "}",
+    "#__bb_panel__ .__bb_mg .__bb_copy:hover{background:#fff;border-color:#6CBFCF}",
     "@media(prefers-color-scheme:dark){",
     "#__bb_panel__{background:#1f1f1f;box-shadow:0 8px 32px rgba(0,0,0,0.4),0 2px 8px rgba(0,0,0,0.3)}",
     "#__bb_panel__ .__bb_ph{color:#7BEBC0;border-bottom-color:#333}",
@@ -107,6 +118,8 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_grp svg{fill:#666}",
     "#__bb_panel__ .__bb_mg{border-top-color:#333}",
     "#__bb_panel__ .__bb_mg .__bb_mc{background:#2a2a2a;color:#ccc}",
+    "#__bb_panel__ .__bb_mg .__bb_copy{background:rgba(31,31,31,0.92);color:#7BEBC0;border-color:rgba(123,235,192,0.35)}",
+    "#__bb_panel__ .__bb_mg .__bb_copy:hover{background:#262626;border-color:#7BEBC0}",
     "}",
     "</style>",
 );
@@ -135,6 +148,10 @@ fn badge_script(rules_json: &str) -> String {
             "function show(){{clearTimeout(hideTimer);render();P.classList.add('--visible')}}",
             "function hide(){{hideTimer=setTimeout(function(){{P.classList.remove('--visible')}},150)}}",
             "function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML}}",
+            "function setCopyState(btn,text){{btn.textContent=text;btn.setAttribute('aria-label',text==='Copy'?'Copy merged rules':text)}}",
+            "function fallbackCopy(text){{return new Promise(function(resolve,reject){{var t=document.createElement('textarea');var prev=document.activeElement;var ok=false;var copied=false;function onCopy(e){{if(e.clipboardData){{e.clipboardData.setData('text/plain',text);e.preventDefault();copied=true}}}}t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.top='0';t.style.left='0';t.style.width='1px';t.style.height='1px';t.style.opacity='0';document.body.appendChild(t);document.addEventListener('copy',onCopy,true);try{{t.focus();t.select();t.setSelectionRange(0,text.length);ok=document.execCommand('copy')}}catch(e){{ok=false}}document.removeEventListener('copy',onCopy,true);document.body.removeChild(t);try{{if(prev&&prev.focus)prev.focus()}}catch(e){{}}ok&&copied?resolve():reject(new Error('copy failed'))}})}}",
+            "function copyText(text){{if(navigator.clipboard&&window.isSecureContext&&navigator.clipboard.writeText){{return navigator.clipboard.writeText(text).catch(function(){{return fallbackCopy(text)}})}}return fallbackCopy(text)}}",
+            "function copyMerged(btn){{copyText(String(D.merged_content||'').trim()).then(function(){{setCopyState(btn,'Copied');setTimeout(function(){{setCopyState(btn,'Copy')}},1200)}}).catch(function(){{setCopyState(btn,'Failed');setTimeout(function(){{setCopyState(btn,'Copy')}},1600)}})}}",
             "function ruleRow(r){{",
             "var href='';",
             "if(base){{",
@@ -168,10 +185,11 @@ fn badge_script(rules_json: &str) -> String {
             "if(D.merged_content){{",
             "html+='<div class=\"__bb_mg\">';",
             "html+='<div class=\"__bb_mt\" onclick=\"var c=this.nextElementSibling;c.classList.toggle(\\x27--open\\x27);this.querySelector(\\x27span\\x27).textContent=c.classList.contains(\\x27--open\\x27)?\\x27\\u25B4\\x27:\\x27\\u25BE\\x27\"><span>\\u25BE</span> Merged Rules</div>';",
-            "html+='<div class=\"__bb_mc\">'+esc(D.merged_content)+'</div>';",
+            "html+='<div class=\"__bb_mcw\"><button type=\"button\" class=\"__bb_copy\" title=\"Copy merged rules\" aria-label=\"Copy merged rules\">Copy</button><div class=\"__bb_mc\">'+esc(D.merged_content)+'</div></div>';",
             "html+='</div>';",
             "}}",
             "P.innerHTML=html;",
+            "Array.prototype.forEach.call(P.querySelectorAll('.__bb_copy'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();copyMerged(btn)}}}});",
             "}}",
             "B.onmouseenter=show;",
             "B.onmouseleave=hide;",
@@ -308,6 +326,29 @@ mod tests {
         assert!(snippet.contains("--visible"));
         assert!(snippet.contains("onmouseenter"));
         assert!(snippet.contains("onmouseleave"));
+    }
+
+    #[test]
+    fn test_badge_panel_uses_top_z_index() {
+        let snippet = build_badge_snippet(EMPTY_RULES);
+        assert!(snippet.contains(
+            "#__bifrost_badge__{position:fixed;left:15px;bottom:15px;z-index:2147483647!important;"
+        ));
+        assert!(snippet.contains(
+            "#__bb_panel__{position:fixed;left:15px;bottom:52px;z-index:2147483647!important;"
+        ));
+    }
+
+    #[test]
+    fn test_badge_merged_rules_copy_button_present() {
+        let snippet = build_badge_snippet(SAMPLE_RULES);
+        assert!(snippet.contains("__bb_copy"));
+        assert!(snippet.contains("Copy merged rules"));
+        assert!(snippet.contains("navigator.clipboard"));
+        assert!(snippet.contains("document.execCommand('copy')"));
+        assert!(snippet.contains("clipboardData.setData('text/plain',text)"));
+        assert!(snippet.contains("ok&&copied?resolve()"));
+        assert!(snippet.contains("copyMerged(btn)"));
     }
 
     #[test]

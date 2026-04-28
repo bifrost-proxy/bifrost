@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
+验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径、远端工程任务开始前必须读取工程约束信息的要求，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
 
 ## 前置条件
 
@@ -167,6 +167,30 @@
 
 - help 中包含 `list`、`get`、`search`。
 - help 中不包含 `clear`。
+
+### TC-SR-08 远端工程任务先读取工程约束信息
+
+操作步骤：
+
+1. 检查安装产物要求先阅读工作目录下的 AGENTS 手册：
+   ```bash
+   rg -n '执行任何远端工程任务前|先阅读目标工程约束信息' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'AGENTS\\.md|agents\\.md' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+2. 检查安装产物要求读取 `.agents/skills/` 下所有 skill 元信息：
+   ```bash
+   rg -n '\\.agents/skills/.*所有 skill 的元信息|\\.agents/skills/\\*/SKILL\\.md.*元信息' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+3. 检查安装产物要求 skill 详细内容按需加载：
+   ```bash
+   rg -n 'skill 详细.*按需加载|详细正文.*按需加载' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+
+预期结果：
+
+- 文档明确执行任何远端工程任务前必须先读取工作目录下的 `AGENTS.md` / `agents.md`。
+- 文档明确必须读取 `.agents/skills/` 下所有 skill 元信息。
+- 文档明确 skill 详细正文只在任务命中或实际需要流程时按需加载。
 
 ## 清理步骤
 

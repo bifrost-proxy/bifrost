@@ -284,6 +284,34 @@ impl SyncManager {
         Ok(())
     }
 
+    pub async fn save_login_session(&self, token: String, remote_base_url: String) -> Result<()> {
+        let token = token.trim().to_string();
+        let remote_base_url = remote_base_url.trim().trim_end_matches('/').to_string();
+        if token.is_empty() {
+            return Err(BifrostError::Config("token is required".to_string()));
+        }
+        if remote_base_url.is_empty() {
+            return Err(BifrostError::Config(
+                "remote_base_url is required".to_string(),
+            ));
+        }
+        if !(remote_base_url.starts_with("http://") || remote_base_url.starts_with("https://")) {
+            return Err(BifrostError::Config(
+                "remote_base_url must start with http:// or https://".to_string(),
+            ));
+        }
+
+        self.config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                auto_sync: Some(true),
+                remote_base_url: Some(remote_base_url),
+                ..Default::default()
+            })
+            .await?;
+        self.save_token(token).await
+    }
+
     pub async fn remote_sample(&self, limit: usize) -> Result<Vec<RemoteEnv>> {
         let config = self.config_manager.config().await;
         let token = self
@@ -1236,5 +1264,53 @@ mod tests {
         assert!(config.sync.auto_sync);
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("login-token"));
+    }
+
+    #[tokio::test]
+    async fn save_login_session_updates_remote_url_and_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                auto_sync: Some(false),
+                remote_base_url: Some("https://old.example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
+
+        manager
+            .save_login_session(
+                "  ci-token  ".to_string(),
+                "https://bifrost.bytedance.net/".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let config = config_manager.config().await;
+        let status = manager.status().await;
+        assert!(config.sync.auto_sync);
+        assert!(config.sync.enabled);
+        assert_eq!(config.sync.remote_base_url, "https://bifrost.bytedance.net");
+        assert!(status.has_session);
+        assert_eq!(manager.state.lock().token.as_deref(), Some("ci-token"));
+    }
+
+    #[tokio::test]
+    async fn save_login_session_rejects_empty_or_invalid_input() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        assert!(manager
+            .save_login_session("   ".to_string(), "https://relay.test".to_string())
+            .await
+            .is_err());
+        assert!(manager
+            .save_login_session("token".to_string(), "relay.test".to_string())
+            .await
+            .is_err());
     }
 }

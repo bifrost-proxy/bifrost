@@ -10,7 +10,7 @@ pub fn handle_sync_command(
 
     match action {
         SyncCommands::Status => show_status(&client),
-        SyncCommands::Login => sync_login(&client),
+        SyncCommands::Login { token, url } => sync_login(&client, token, url),
         SyncCommands::Logout => sync_logout(&client),
         SyncCommands::Run => sync_run(&client),
         SyncCommands::Config {
@@ -58,10 +58,28 @@ fn show_status(client: &ConfigApiClient) -> bifrost_core::Result<()> {
     Ok(())
 }
 
-fn sync_login(client: &ConfigApiClient) -> bifrost_core::Result<()> {
-    println!("Initiating sync login...");
+fn sync_login(
+    client: &ConfigApiClient,
+    token: Option<String>,
+    url: Option<String>,
+) -> bifrost_core::Result<()> {
+    match (&token, &url) {
+        (Some(token), Some(url)) if token.trim().is_empty() || url.trim().is_empty() => {
+            return Err(bifrost_core::BifrostError::Config(
+                "--token and --url must not be empty".to_string(),
+            ));
+        }
+        (Some(_), Some(_)) => println!("Saving sync login token..."),
+        (None, None) => println!("Initiating sync login..."),
+        _ => {
+            return Err(bifrost_core::BifrostError::Config(
+                "--token and --url must be provided together".to_string(),
+            ));
+        }
+    }
+
     let status = client
-        .sync_login()
+        .sync_login(token.as_deref(), url.as_deref())
         .map_err(bifrost_core::BifrostError::Config)?;
 
     if status.has_session && status.authorized {
@@ -69,6 +87,10 @@ fn sync_login(client: &ConfigApiClient) -> bifrost_core::Result<()> {
         if let Some(ref user) = status.user {
             println!("Logged in as: {} ({})", user.nickname, user.email);
         }
+    } else if token.is_some() {
+        println!("Login token saved.");
+        println!("Remote URL: {}", status.remote_base_url);
+        println!("Status: {}", status.reason);
     } else {
         println!("Login initiated. Please complete authentication in the browser.");
         println!("Status: {}", status.reason);

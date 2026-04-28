@@ -33,7 +33,7 @@
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 45 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤、右键菜单、WebSocket/SSE、搜索 |
-| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 38 | 规则列表、创建/编辑/删除、语法高亮、自动补全、树形视图、Dynamic Island、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
+| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 39 | 规则列表、创建/编辑/删除、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 21 | 脚本创建（Req/Res/Dec）、编辑、保存、测试运行、日志查看、名称校验、树形目录、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
@@ -53,7 +53,7 @@
 |------|---------|-----------|------|
 | [remote-invoke.md](./remote-invoke.md) | Remote Invoke 远程调用 | 177 | 发现模式与一次性授权码、人工授权、授权复用（30m/1h/1d/永久）、授权模式升降级、多客户端管理、有效期调整、移除授权、SSE/HTTP relay、大结果/大输入分片传输、主动取消、续流恢复、断线恢复、白名单命令全覆盖、端到端加密验证、客户端重启稳定性与 SSH route 三态同步、审计历史与过滤、第一阶段 relay v2 协议升级（`command_encrypted` / `exit_encrypted` / route-only metadata / query grant 拒绝 shell.exec / 本地与远端 relay 复测 / caller-client 双端加密 roundtrip / 真实 CLI 加密黑盒闭环 / grant crypto 持久化后 client 重启继续复用 / 同一远端重复 pair-code connect 后 caller 仍绑定最后一次 grant）、回归验证（含 SSE 事件去重 + 多实例 frame/exit 竞态 + 超时 pairing 自动清理 + 超时 pairing 不再占用 pair_slot_occupied 且审批不再报 500 + 过期 grant 自动清理 + 客户端侧 DELETE grant + relay_token 鉴权安全加固 + calls 路由迁移 + approve_pairing fingerprint 修复 + delete_grant best-effort 修复 + call_open grant 验证安全加固 + client 注册 token/challenge/签名校验 + caller 免 token 边界 + call detail 所有权隔离 + pairing decision 所有权隔离 + call frame/exit 所有权隔离 + remote traffic get sequence 映射 + remote traffic list 全量过滤参数透传 + remote traffic search `query/max_results/max_scan` 执行端透传 + remote search 流式输出 + remote search `max_results/max_scan` 执行端透传 + stderr 透传 + remote connect overload-protect 重试与提示 + grant_created/call_open 协议职责分离 + SSE 推送失败轮询容错 + pair_slot_occupied 自动清理 + pending-pairings API + relay URL 四级回退优先级 + caller identity 持久化 + SSH key 管理 API/导出/重置/撤销 + SSH 授权永久有效直到 key revoke + relay challenge/connect 最小闭环 + SSH grant relay 复用/openCall 能力验收 + revoke 后 route 收敛删除验证 + 线上 relay 的 SSH reusable/openCall 存储链路回归 + Remote Invoke 状态区合并布局回归 + Create SSH key 弹窗提示合并回归 + Shell Access 编辑器中 Policy/Profile ID 只读回归 + caller 主动取消后所有命令统一收敛为 cancelled + 本地 relay 粗粒度限流不再打断 cancel/events/exit 收尾 + 线上 relay 下 target client 取消终态稳定写入 + 共享出口 IP 下已认证 remote invoke 不再互相限流 + 远端 relay 不引入 pod-local authenticated remote limiter，`client/stream` 直接从认证结果补齐 `user_id` + relay 返回 `grant_not_found` 时 disconnect 仍删除本地连接，避免幽灵状态 + CLI `remote connect --ssh-key` 落盘与后续复用回归 + server-v4 SSH connect 挂起态持久化 caller_info，确保 SSH grant 展示调用方信息 + SSH key reset 后 worker 显式进入 reconnecting，避免 post-reset connect 命中假性离线窗口 + `call_cancel` 即使遇到本地句柄竞态也能把 Recent Calls 收敛到 `cancelled` + shell E2E 夹具与当前加密协议保持一致 + Recent Calls 参数预览/Tooltip 从本地解密 `args_json` 回退恢复 + client 本地 grant crypto 丢失后重连主动清理幽灵授权，并同步清空 caller stale connection；后续 disconnect 回归需基于 fresh reconnect 继续验证 + shell E2E 在 `--skip-build` 且缺失 sync-server dist 时自动回退源码入口 + caller `open_call` 直接携带参数摘要，且 remote invoke shell E2E 仅在 release 过期时自动重建二进制 + pair-code connect 后 Client grants 列表在短时间内稳定可见 + Recent Calls 参数预览回归脚本改为本地 mock 流量，避免公网依赖 + Recent Calls 重启后从本地落盘恢复 + 清理全部记录 + Recent Calls 命令相关文本 200 字符截断与点击详情弹窗 + Grants 首次连接/最近命令时间字段展示 + Remote Status 移除 Active Calls 重复计数 + Remote Status 未登录暗色主题 + Grants 连接方式展示 + Remote Status 未登录 Sync 暗色主题提示）、补充覆盖（多调用方并发隔离/配对码轮换/并发冲突/traffic.clear 拒绝/once consumed/grant 上限）、全局授权弹窗（自动弹出/Dismiss/Dismiss All/Authorize 下拉/Reject）、远端部署（HTTPS/SSO/多用户并发/跨公网稳定性/大结果传输/断线恢复）、交互式客户端选择（多客户端未指定 --client-id 时弹出选择菜单/模糊前缀匹配多客户端/非交互环境回退报错） |
 | [remote-invoke-sshkey.md](./remote-invoke-sshkey.md) | Remote Invoke SSH Key Caller Identity | 1 | 同一 SSH key 在多个 caller 沙箱中连接同一 target 时生成不同随机 caller ID，grant 以 caller ID 隔离且 SSH key fingerprint 仅作为密钥属性保留 |
-| [skill-remote.md](./skill-remote.md) | Bifrost Remote Skill | 7 | install-skill 同时安装 `bifrost` 与 `bifrost-remote`，remote skill description 表达远程设备控制能力，目标端正式启动默认使用 `bifrost start` / 9900 / 系统代理，明确查询、shell、文件三类 scope 前置准备，当前 relay-backed 子命令边界正确指向 `remote exec` 操作目标设备，不包含历史版本迁移文案，且不提供 `remote traffic clear` 写操作命令 |
+| [skill-remote.md](./skill-remote.md) | Bifrost Remote Skill | 8 | install-skill 同时安装 `bifrost` 与 `bifrost-remote`，remote skill description 表达远程设备控制能力，目标端正式启动默认使用 `bifrost start` / 9900 / 系统代理，明确查询、shell、文件三类 scope 前置准备，当前 relay-backed 子命令边界正确指向 `remote exec` 操作目标设备，要求远端工程任务先读取 `AGENTS.md` / `.agents/skills` 元信息，不包含历史版本迁移文案，且不提供 `remote traffic clear` 写操作命令 |
 | [remote-command-isomorphic.md](./remote-command-isomorphic.md) | Remote Command 同构化回归 | 29 | 本地与远端 `search/traffic` 命令矩阵回归：覆盖 search/traffic list/get/clear、remote search/traffic list/get 的子命令、参数、默认值、格式输出、流式输出、remote traffic clear 不暴露边界，以及 filter-only query / 机器可读输出回归 |
 | [remote-traffic-cli-enum-size.md](./remote-traffic-cli-enum-size.md) | Remote Traffic CLI 枚举体瘦身 | 3 | `RemoteTrafficCommands` large enum variant 回归：验证 `remote traffic list` 全量过滤参数解析、`remote traffic search` 参数透传，以及 clippy 不再报 `large_enum_variant` |
 | [remote-shell-exec.md](./remote-shell-exec.md) | Remote Shell Exec | 26 | `bifrost remote command exec` 主链路回归：caller 不再传 `policy_id`、target 基于 grant binding 与本地 Shell Access 自动选择唯一策略、query/shell scope 隔离、策略未命中与歧义匹配拒绝、policy version 失效、`Full Access` / `Default Sandbox` 真实语义、grant 的 WebUI / CLI 编辑、target 本地 grant policy overlay 持久化、relay 仅保留最小 `grant_scope` 不存储具体策略绑定，reconnect 覆盖旧 grant / disconnect 清理残留 reusable grants 的验证；Windows shell_text Unix 路径 fallback（`/bin/bash` → `cmd`）与 UTF-8 编码处理（`chcp 65001` / PowerShell OutputEncoding）、`policy update` 命令原地更新策略元数据不破坏 grant 有效性、CLI 对裸 argv 输入的显式拒绝回归、长时间命令 stdout 流式输出回归、Windows 流式 shell 输出 E2E 回归，以及对应 shell E2E 自动化脚本回归 |
@@ -81,7 +81,7 @@
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
-| [api-sync.md](./api-sync.md) | Sync API | 30 | 同步状态/配置/登录/登出/运行/Session，Env/Room/User 代理转发端点 |
+| [api-sync.md](./api-sync.md) | Sync API | 32 | 同步状态/配置/登录/登出/运行/Session，Env/Room/User 代理转发端点，CI/沙箱 token+URL 直登 |
 | [api-misc.md](./api-misc.md) | Misc API | 32 | Syntax 语法信息、App Icon、WebSocket 连接、Audit 审计日志、Bifrost File 导入导出 |
 
 ### 代理核心功能测试
@@ -110,7 +110,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 7 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠、规则行跳转编辑页、暗色模式、缓存性能、禁用验证 |
+| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 9 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证 |
 
 ### 性能与内存优化测试
 
@@ -128,7 +128,7 @@
 
 ---
 
-**总计：67 个测试文件，1284 个测试用例**
+**总计：67 个测试文件，1285 个测试用例**
 
 ## 工作流程
 

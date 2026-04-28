@@ -1,8 +1,16 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { theme, Badge, Tooltip } from "antd";
-import { ThunderboltOutlined, TeamOutlined, WarningOutlined, CodeOutlined } from "@ant-design/icons";
+import { theme, Badge, Tooltip, Button, message } from "antd";
+import {
+  ThunderboltOutlined,
+  TeamOutlined,
+  WarningOutlined,
+  CodeOutlined,
+  CopyOutlined,
+  CheckOutlined,
+} from "@ant-design/icons";
 import { getActiveSummary, type ActiveRuleItem, type VariableConflict } from "../../api/rules";
 import { useRulesStore } from "../../stores/useRulesStore";
+import { copyToClipboard } from "../../utils/clipboard";
 
 interface Props {
   onNavigateRule: (name: string, groupId: string | null) => void;
@@ -21,7 +29,9 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   const [variableConflicts, setVariableConflicts] = useState<VariableConflict[]>([]);
   const [mergedContent, setMergedContent] = useState("");
   const [showMerged, setShowMerged] = useState(false);
+  const [mergedCopied, setMergedCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
   const dragRef = useRef({
     startX: 0,
     startY: 0,
@@ -55,6 +65,18 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   useEffect(() => {
     refreshActiveRules();
   }, [rules, refreshActiveRules]);
+
+  useEffect(() => {
+    setMergedCopied(false);
+  }, [mergedContent]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!expanded) return;
@@ -147,6 +169,26 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     [initPosition],
   );
 
+  const handleCopyMergedRules = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const text = mergedContent.trim();
+    if (!text) return;
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setMergedCopied(true);
+      message.success("Merged rules copied");
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => {
+        setMergedCopied(false);
+        copiedTimerRef.current = null;
+      }, 1600);
+    } else {
+      message.error("Failed to copy merged rules");
+    }
+  }, [mergedContent]);
+
   const positionStyle: React.CSSProperties =
     position !== null
       ? { left: position.x, top: position.y }
@@ -180,6 +222,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
       }}
     >
       <div
+        data-testid="rules-dynamic-island-trigger"
         onMouseDown={handleMouseDown}
         style={{
           display: "inline-flex",
@@ -388,6 +431,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
           {mergedContent.trim() && (
             <div style={{ margin: "4px 12px 8px" }}>
               <div
+                data-testid="rules-dynamic-island-merged-toggle"
                 onClick={(e) => {
                   e.stopPropagation();
                   setShowMerged((v) => !v);
@@ -409,23 +453,50 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
                 {showMerged ? "Hide" : "Show"} Merged Rules
               </div>
               {showMerged && (
-                <pre
+                <div
+                  data-testid="rules-dynamic-island-merged-panel"
                   style={{
-                    margin: 0,
-                    padding: "8px 10px",
-                    borderRadius: 8,
-                    backgroundColor: token.colorFillQuaternary,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    fontSize: 11,
-                    lineHeight: 1.5,
-                    fontFamily: "monospace",
-                    color: token.colorText,
-                    whiteSpace: "pre",
-                    overflowX: "auto",
+                    position: "relative",
                   }}
                 >
-                  {mergedContent.trim()}
-                </pre>
+                  <Tooltip title={mergedCopied ? "Copied" : "Copy merged rules"}>
+                    <Button
+                      aria-label="Copy merged rules"
+                      data-testid="rules-dynamic-island-copy-merged"
+                      type="text"
+                      size="small"
+                      icon={mergedCopied ? <CheckOutlined /> : <CopyOutlined />}
+                      onClick={handleCopyMergedRules}
+                      style={{
+                        position: "absolute",
+                        top: 6,
+                        right: 6,
+                        zIndex: 1,
+                        color: mergedCopied ? token.colorSuccess : token.colorTextSecondary,
+                        backgroundColor: token.colorBgContainer,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                      }}
+                    />
+                  </Tooltip>
+                  <pre
+                    data-testid="rules-dynamic-island-merged-content"
+                    style={{
+                      margin: 0,
+                      padding: "8px 42px 8px 10px",
+                      borderRadius: 8,
+                      backgroundColor: token.colorFillQuaternary,
+                      border: `1px solid ${token.colorBorderSecondary}`,
+                      fontSize: 11,
+                      lineHeight: 1.5,
+                      fontFamily: "monospace",
+                      color: token.colorText,
+                      whiteSpace: "pre",
+                      overflowX: "auto",
+                    }}
+                  >
+                    {mergedContent.trim()}
+                  </pre>
+                </div>
               )}
             </div>
           )}

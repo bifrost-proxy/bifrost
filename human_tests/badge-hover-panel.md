@@ -78,7 +78,41 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-05：暗色模式适配
+### TC-BHP-05：Merged Rules 一键复制
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`
+2. 创建并启用一条包含多行规则内容的规则
+3. 通过代理在浏览器中打开测试 HTML 页面
+4. 鼠标悬浮到左下角 Badge 圆点上
+5. 点击 "▾ Merged Rules" 标题展开代码框
+6. 点击代码框右上角的 "Copy" 按钮
+7. 读取系统剪贴板内容，或粘贴到可编辑输入框中检查内容，禁止只看按钮状态
+
+**预期结果**：
+- Merged Rules 代码框右上角显示复制按钮
+- 点击复制后按钮短暂显示 "Copied"
+- 剪贴板内容等于当前展开的合并规则文本，包含规则换行与缩进
+- 如果浏览器拒绝写入剪贴板，按钮显示 "Failed"，不能在剪贴板为空时显示 "Copied"
+
+---
+
+### TC-BHP-06：Badge 弹窗层级高于页面高 z-index 浮层
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`
+2. 通过代理打开一个包含 `z-index: 2147483646` 固定定位覆盖层的测试 HTML 页面
+3. 鼠标悬浮到左下角 Badge 圆点上
+4. 观察 Badge 和展开后的面板是否被覆盖层遮挡
+
+**预期结果**：
+- Badge 圆点显示在页面覆盖层上方
+- Hover 后面板显示在页面覆盖层上方
+- 面板中的规则列表和 Merged Rules 区域可正常点击
+
+---
+
+### TC-BHP-07：暗色模式适配
 
 **操作步骤**：
 1. 系统切换到暗色模式
@@ -91,7 +125,7 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-06：高性能缓存验证
+### TC-BHP-08：高性能缓存验证
 
 **操作步骤**：
 1. 查看启动日志确认初始缓存加载
@@ -103,7 +137,7 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s
 
 ---
 
-### TC-BHP-07：禁用 badge 后面板不注入
+### TC-BHP-09：禁用 badge 后面板不注入
 
 **操作步骤**：
 ```bash

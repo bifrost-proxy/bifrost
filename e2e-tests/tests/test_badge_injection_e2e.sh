@@ -151,8 +151,16 @@ assert_badge_injection() {
 
   if [[ "$expected" == "present" ]]; then
     assert_body_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should be injected"
+    assert_body_contains "__bb_copy" "$HTTP_BODY" "Merged rules copy button should be injected"
+    assert_body_contains "Copy merged rules" "$HTTP_BODY" "Copy button should expose accessible label"
+    assert_body_contains "navigator.clipboard" "$HTTP_BODY" "Copy button should use Clipboard API when available"
+    assert_body_contains "document.execCommand('copy')" "$HTTP_BODY" "Copy button should include execCommand fallback"
+    assert_body_contains "clipboardData.setData('text/plain',text)" "$HTTP_BODY" "Fallback copy should write text via copy event clipboardData"
+    assert_body_contains "ok&&copied?resolve()" "$HTTP_BODY" "Fallback copy should only report success after copy event writes data"
+    assert_body_contains "z-index:2147483647!important" "$HTTP_BODY" "Badge panel should use top z-index"
   else
     assert_body_not_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should not be injected"
+    assert_body_not_contains "__bb_copy" "$HTTP_BODY" "Merged rules copy button should not be injected"
   fi
 }
 

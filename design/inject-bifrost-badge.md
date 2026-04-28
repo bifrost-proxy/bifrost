@@ -14,6 +14,8 @@
   - 全局配置项：`traffic.inject_bifrost_badge`，默认 `true`，持久化到 `config.toml`。
   - Web UI：Settings -> Proxy 页提供开关，文案：**“注入 Bifrost 小圆点”**。
   - CLI：启动命令提供 flag（例如 `--disable-badge-injection`）用于覆盖并持久化该配置。
+- Badge hover 弹窗的 `Merged Rules` 展开区域右上角提供复制按钮，一键复制当前合并规则文本。
+- Badge 与 hover 弹窗使用浏览器允许的最高 `z-index`，并加 `!important`，降低被业务页面高层级浮层遮挡的概率。
 
 ## 实现设计
 
@@ -39,7 +41,9 @@
 ### 3. Badge 片段
 
 - 以一个 `div` + 内联样式注入，不依赖外部资源。
-- 样式目标：左下角、固定定位、小圆点、不抢占点击（`pointer-events: none`），`z-index` 极高。
+- 样式目标：左下角、固定定位、小圆点，`z-index: 2147483647 !important`。
+- Hover 弹窗同样固定定位，显示在 Badge 上方；面板、标题与 Merged Rules 内容均由内联脚本渲染。
+- Merged Rules 展开后，代码框右上角显示 `Copy` 按钮。点击后优先使用安全上下文下的 `navigator.clipboard.writeText`，失败或不可用时回退到隐藏 `textarea` + `copy` 事件 `clipboardData.setData('text/plain', text)` + `document.execCommand('copy')`；只有 fallback 真实触发 copy 事件并写入数据后才显示 `Copied`，否则显示 `Failed`，避免假阳性成功提示。
 
 ### 4. Web UI / Admin API
 
@@ -54,6 +58,9 @@
   - `test_inject_badge_before_body_end`：HTML 含 `</body>` 时插入位置正确。
   - `test_inject_badge_append_when_no_body_end`：无 `</body>` 时回退到末尾追加。
   - `test_inject_badge_gzip_roundtrip`：gzip body 解压->注入->再压缩后，解压结果包含 badge。
+  - `test_badge_panel_uses_top_z_index`：Badge 与 hover 弹窗都使用最高 z-index。
+  - `test_badge_merged_rules_copy_button_present`：注入片段包含 Merged Rules 复制按钮、剪贴板 API 与 fallback。
+  - `test_badge_merged_rules_copy_button_present` 同时断言 fallback 使用 `clipboardData.setData` 且必须有 copy 事件写入标记才成功。
 
 ### E2E 测试
 
@@ -61,12 +68,15 @@
   - 启动本地 http server 返回 `Content-Type: text/html` 的页面。
   - 通过 Bifrost 代理请求该页面。
   - 断言响应 body 包含注入标识（例如 `__bifrost_badge__`）。
+  - 断言响应 body 包含 `__bb_copy`、`Copy merged rules`、`navigator.clipboard` 与 `z-index:2147483647!important`。
 
 ### 真实场景测试
 
 - 按临时数据目录启动：
-  - `BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl`
-- 浏览器设置系统代理后访问任意网页，打开 DevTools 查看页面 HTML，确认出现 `__bifrost_badge__` 节点，且页面未被破坏。
+  - `BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy --enable-badge-injection`
+- 通过代理访问测试 HTML，打开页面后 hover Badge，展开 Merged Rules，确认代码框右上角有复制按钮。
+- 点击复制按钮后，将系统剪贴板内容粘贴到可编辑区域、或读取系统剪贴板/浏览器剪贴板，确认等于当前合并规则文本；不能只看按钮是否显示 `Copied`。
+- 在页面中放置高 z-index 覆盖层，确认 Badge 弹窗仍可显示在其上方。
 
 ## 校验要求
 
