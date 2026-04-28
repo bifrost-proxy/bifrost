@@ -23,6 +23,7 @@ bifrost-sync = { path = "../bifrost-sync" }
 bifrost-tls = { path = "../bifrost-tls" }
 bifrost-storage = { path = "../bifrost-storage" }
 bifrost-script = { path = "../bifrost-script" }
+bifrost-power = { path = "../bifrost-power" }
 parking_lot.workspace = true
 tracing.workspace = true
 tokio.workspace = true

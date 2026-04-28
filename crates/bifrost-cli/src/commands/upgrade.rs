@@ -106,12 +106,30 @@ fn get_target_triple() -> Option<&'static str> {
     }
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64"),
-    not(target_env = "musl")
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(target_env = "musl")
+    )
 ))]
-const MIN_GLIBC_VERSION: (u32, u32) = (2, 29);
+const MIN_GLIBC_VERSION: (u32, u32) = (2, 39);
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(target_env = "musl")
+    )
+))]
+fn glibc_requires_musl_fallback(version: Option<(u32, u32)>) -> bool {
+    match version {
+        Some(version) => version < MIN_GLIBC_VERSION,
+        None => true,
+    }
+}
 
 #[cfg(all(
     target_os = "linux",
@@ -119,10 +137,7 @@ const MIN_GLIBC_VERSION: (u32, u32) = (2, 29);
     not(target_env = "musl")
 ))]
 fn should_use_musl_fallback() -> bool {
-    if let Some((major, minor)) = detect_glibc_version() {
-        return (major, minor) < MIN_GLIBC_VERSION;
-    }
-    true
+    glibc_requires_musl_fallback(detect_glibc_version())
 }
 
 #[cfg(all(
@@ -884,6 +899,21 @@ mod tests {
             }
             _ => panic!("Expected Upgrade command"),
         }
+    }
+
+    #[test]
+    fn test_glibc_2_38_requires_musl_for_upgrade() {
+        assert!(glibc_requires_musl_fallback(Some((2, 38))));
+    }
+
+    #[test]
+    fn test_glibc_2_39_keeps_gnu_for_upgrade() {
+        assert!(!glibc_requires_musl_fallback(Some((2, 39))));
+    }
+
+    #[test]
+    fn test_unknown_glibc_requires_musl_for_upgrade() {
+        assert!(glibc_requires_musl_fallback(None));
     }
 
     #[test]

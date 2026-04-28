@@ -25,18 +25,23 @@ import {
   Tooltip,
   Typography,
   message,
+  theme,
 } from "antd";
 import {
   ApiOutlined,
+  CloudOutlined,
   CodeOutlined,
   CopyOutlined,
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
+  ExportOutlined,
   EyeOutlined,
   FileOutlined,
   HistoryOutlined,
   KeyOutlined,
+  LockOutlined,
+  LoginOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyOutlined,
@@ -99,7 +104,16 @@ import { isConnectionIssueError, isNotFoundError } from "../../../api/client";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { usePairingRequestStore } from "../../../stores/usePairingRequestStore";
 import PairingRequestModal from "../../../components/PairingRequestModal";
+import type { SyncStatus } from "../../../api/sync";
 import type { PairingRequest } from "../../../api/remoteInvoke";
+import {
+  getPowerStatus,
+  setPowerOn,
+  setPowerOff,
+  setPowerMode,
+  type KeepAwakeStatus,
+  type KeepAwakeMode,
+} from "../../../api/power";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -692,6 +706,29 @@ function describeGrantMode(mode: string): string {
   }
 }
 
+function describeGrantAuthMethod(grant: Grant): { label: string; color: string; tooltip: string } {
+  const method = grant.auth_method;
+  if (method === "ssh_publickey" || grant.ssh_key_fingerprint || grant.ssh_key_id) {
+    return {
+      label: "SSH key",
+      color: "purple",
+      tooltip: "Connected with SSH key",
+    };
+  }
+  if (method === "pair_code" || method == null || method === "") {
+    return {
+      label: "Pair code",
+      color: "cyan",
+      tooltip: "Connected with pair code",
+    };
+  }
+  return {
+    label: method,
+    color: "default",
+    tooltip: `auth_method: ${method}`,
+  };
+}
+
 /**
  * Humanize an exec_mode value (argv_exec / shell_text) for display.
  */
@@ -790,7 +827,31 @@ function renderStateTag(state: string) {
   }
 }
 
-export default function RemoteInvokeTab() {
+export interface RemoteInvokeTabProps {
+  syncStatus?: SyncStatus | null;
+  onGoToSyncTab?: () => void;
+  onSyncSignIn?: () => void;
+}
+
+export default function RemoteInvokeTab({
+  syncStatus = null,
+  onGoToSyncTab,
+  onSyncSignIn,
+}: RemoteInvokeTabProps = {}) {
+  const { token } = theme.useToken();
+  const syncReady = !!syncStatus?.has_session;
+  const lockedColStyle = syncReady
+    ? undefined
+    : {
+        pointerEvents: "none" as const,
+        opacity: 0.45,
+        filter: "grayscale(0.2)",
+      };
+  const syncAccountLabel =
+    syncStatus?.user?.email ||
+    syncStatus?.user?.nickname ||
+    syncStatus?.user?.user_id ||
+    "Signed in";
   const [status, setStatus] = useState<RemoteInvokeStatus | null>(null);
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
   const [sshKey, setSshKey] = useState<RemoteInvokeSshKeyRecord | null>(null);
@@ -826,6 +887,16 @@ export default function RemoteInvokeTab() {
   const [shellEditorTestLoading, setShellEditorTestLoading] = useState<Record<string, boolean>>({});
   const [cliPreviewOpen, setCliPreviewOpen] = useState<boolean>(false);
   const [cliPreviewText, setCliPreviewText] = useState<string>("");
+  const [powerStatus, setPowerStatus] = useState<KeepAwakeStatus | null>(null);
+  const [powerLoading, setPowerLoading] = useState(false);
+  const refreshPowerStatus = useCallback(async () => {
+    try {
+      const s = await getPowerStatus();
+      setPowerStatus(s);
+    } catch {
+      // silent: unsupported OS returns error; ignore
+    }
+  }, []);
 
   const runShellPolicyTest = async (policyId: string) => {
     const command = (shellEditorTestInput[policyId] ?? "").trim();
@@ -1143,6 +1214,14 @@ export default function RemoteInvokeTab() {
     void refreshShellConfig();
     void refreshFileAccessConfig();
   }, [refresh, refreshGrants, refreshCalls, refreshSshKey, refreshShellConfig, refreshFileAccessConfig]);
+
+  useEffect(() => {
+    void refreshPowerStatus();
+    const id = window.setInterval(() => {
+      void refreshPowerStatus();
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [refreshPowerStatus]);
 
   useEffect(() => {
     pollRef.current = window.setInterval(() => {
@@ -1785,6 +1864,75 @@ export default function RemoteInvokeTab() {
               gap: 16,
             }}
           >
+            {!syncReady ? (
+              <div
+                data-testid="settings-remote-invoke-sync-signin-prompt"
+                style={{
+                  padding: "20px 16px",
+                  background: token.colorWarningBg,
+                  border: `1px solid ${token.colorWarningBorder}`,
+                  borderRadius: 6,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                }}
+              >
+                <Space align="start" size={12}>
+                  <LockOutlined
+                    style={{ fontSize: 22, color: token.colorWarning, marginTop: 2 }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <Text
+                      strong
+                      style={{
+                        color: token.colorWarningText,
+                        display: "block",
+                        fontSize: 14,
+                      }}
+                    >
+                      Sign in to Sync to enable Remote Invoke
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Remote Invoke relies on your Sync session for relay
+                      authorization. Sign in first, then return here to pair
+                      devices, manage SSH keys and shell policies.
+                    </Text>
+                  </div>
+                </Space>
+                {syncStatus?.remote_base_url ? (
+                  <Descriptions size="small" column={1}>
+                    <Descriptions.Item label="Sync Server">
+                      <Text code style={{ fontSize: 11 }}>
+                        {syncStatus.remote_base_url}
+                      </Text>
+                    </Descriptions.Item>
+                  </Descriptions>
+                ) : null}
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    icon={<LoginOutlined />}
+                    onClick={() => {
+                      onSyncSignIn?.();
+                    }}
+                    disabled={!onSyncSignIn}
+                    data-testid="settings-remote-invoke-sync-signin-btn"
+                  >
+                    Sign in
+                  </Button>
+                  <Button
+                    icon={<ExportOutlined />}
+                    onClick={() => {
+                      onGoToSyncTab?.();
+                    }}
+                    disabled={!onGoToSyncTab}
+                    data-testid="settings-remote-invoke-sync-goto-btn"
+                  >
+                    Open Sync Settings
+                  </Button>
+                </Space>
+              </div>
+            ) : (
             <div
               data-testid="settings-remote-invoke-connection-section"
               style={{
@@ -1807,21 +1955,124 @@ export default function RemoteInvokeTab() {
                 <Descriptions.Item label="Device">
                   {identity?.device_name ?? "-"} ({identity?.platform ?? "-"})
                 </Descriptions.Item>
-                <Descriptions.Item label="Active Calls">
-                  <Badge
-                    count={status?.active_call_ids?.length ?? 0}
-                    showZero
-                    style={{
-                      backgroundColor:
-                        (status?.active_call_ids?.length ?? 0) > 0
-                          ? "#52c41a"
-                          : "#d9d9d9",
-                    }}
-                  />
+                <Descriptions.Item label="Sync Account">
+                  <Space size={4}>
+                    <CloudOutlined style={{ color: "#52c41a" }} />
+                    <Text style={{ fontSize: 12 }}>{syncAccountLabel}</Text>
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<ExportOutlined />}
+                      onClick={() => {
+                        onGoToSyncTab?.();
+                      }}
+                      disabled={!onGoToSyncTab}
+                      data-testid="settings-remote-invoke-sync-account-link"
+                      style={{ padding: 0 }}
+                    />
+                  </Space>
                 </Descriptions.Item>
               </Descriptions>
             </div>
+            )}
 
+            {syncReady && (
+              <div
+                data-testid="settings-remote-invoke-keepawake-section"
+                style={{
+                  paddingBottom: 16,
+                  borderBottom: "1px solid #f0f0f0",
+                }}
+              >
+                <Space
+                  align="center"
+                  style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}
+                >
+                  <Text strong>
+                    <ThunderboltOutlined style={{ marginRight: 6 }} />Keep Awake
+                  </Text>
+                  <Switch
+                    data-testid="settings-remote-invoke-keepawake-switch"
+                    checked={!!powerStatus?.active}
+                    loading={powerLoading}
+                    disabled={!powerStatus || !powerStatus.supported}
+                    onChange={async (checked) => {
+                      setPowerLoading(true);
+                      try {
+                        if (checked) {
+                          await setPowerOn();
+                        } else {
+                          await setPowerOff();
+                        }
+                        await refreshPowerStatus();
+                      } catch (e) {
+                        message.error(
+                          e instanceof Error ? e.message : "Failed to toggle Keep Awake",
+                        );
+                      } finally {
+                        setPowerLoading(false);
+                      }
+                    }}
+                  />
+                </Space>
+                {powerStatus && !powerStatus.supported ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="Keep Awake is only supported on macOS in this version."
+                    style={{ marginTop: 4 }}
+                  />
+                ) : (
+                  <>
+                    <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                      Prevent this Mac from sleeping (including lid-close) while remote invoke calls are in flight. Uses IOKit IOPMAssertion, no sudo required.
+                    </Text>
+                    <Radio.Group
+                      data-testid="settings-remote-invoke-keepawake-mode"
+                      size="small"
+                      value={powerStatus?.mode ?? "auto"}
+                      disabled={powerLoading || !powerStatus}
+                      onChange={async (e) => {
+                        const next = e.target.value as KeepAwakeMode;
+                        setPowerLoading(true);
+                        try {
+                          await setPowerMode(next);
+                          await refreshPowerStatus();
+                        } catch (err) {
+                          message.error(
+                            err instanceof Error ? err.message : "Failed to set mode",
+                          );
+                        } finally {
+                          setPowerLoading(false);
+                        }
+                      }}
+                    >
+                      <Radio.Button value="off">Off</Radio.Button>
+                      <Radio.Button value="auto">Auto</Radio.Button>
+                      <Radio.Button value="force_on">Force On</Radio.Button>
+                    </Radio.Group>
+                    {powerStatus ? (
+                      <Descriptions size="small" column={1} style={{ marginTop: 8 }}>
+                        <Descriptions.Item label="Active">
+                          {powerStatus.active ? (
+                            <Tag color="green">Holding assertion</Tag>
+                          ) : (
+                            <Tag>Idle</Tag>
+                          )}
+                        </Descriptions.Item>
+                        {powerStatus.battery_warning ? (
+                          <Descriptions.Item label="Battery">
+                            <Text type="warning" style={{ fontSize: 12 }}>{powerStatus.battery_warning}</Text>
+                          </Descriptions.Item>
+                        ) : null}
+                      </Descriptions>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            )}
+
+            {syncReady && (
             <div
               data-testid="settings-remote-invoke-discovery-section"
               style={{
@@ -1927,10 +2178,11 @@ export default function RemoteInvokeTab() {
                 </Space>
               )}
             </div>
+          )}
           </Card>
         </Col>
 
-        <Col xs={24} md={12} style={{ display: "flex" }}>
+        <Col xs={24} md={12} style={{ display: "flex", ...(lockedColStyle || {}) }}>
           <Card
             data-testid="settings-remote-invoke-ssh-card"
             title={
@@ -2111,7 +2363,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             data-testid="settings-remote-invoke-shell-card"
             title={
@@ -2308,7 +2560,7 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             title={
               <Space>
@@ -2387,8 +2639,9 @@ export default function RemoteInvokeTab() {
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
+            data-testid="settings-remote-invoke-grants-card"
             title={
               <Space>
                 <SafetyOutlined />
@@ -2417,113 +2670,119 @@ export default function RemoteInvokeTab() {
                 dataSource={grants}
                 size="small"
                 pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
-                renderItem={(g) => (
-                  <List.Item
-                    actions={g.status === "removed" ? [] : [
-                      <Button
-                        key="file-access"
-                        size="small"
-                        icon={<FileOutlined />}
-                        onClick={() => openFileAccessEditor(g)}
-                        loading={fileAccessLoading}
-                      >
-                        File Access
-                      </Button>,
-                      <Button
-                        key="edit"
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={() => openGrantEditor(g)}
-                      >
-                        Edit Access
-                      </Button>,
-                      <Popconfirm
-                        key="revoke"
-                        title="Revoke this grant?"
-                        description="The caller will need to pair again."
-                        onConfirm={() => void handleRevokeGrant(g.grant_id)}
-                        okText="Revoke"
-                        cancelText="Cancel"
-                      >
+                renderItem={(g) => {
+                  const authMethod = describeGrantAuthMethod(g);
+                  return (
+                    <List.Item
+                      actions={g.status === "removed" ? [] : [
                         <Button
-                          danger
+                          key="file-access"
                           size="small"
-                          icon={<DeleteOutlined />}
+                          icon={<FileOutlined />}
+                          onClick={() => openFileAccessEditor(g)}
+                          loading={fileAccessLoading}
                         >
-                          Revoke
-                        </Button>
-                      </Popconfirm>,
-                    ]}
-                  >
-                    <List.Item.Meta
-                      title={
-                        <Space>
-                          <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
-                          <Tag color={g.status === "active" ? "green" : "default"}>
-                            {g.status}
-                          </Tag>
-                          <Tooltip title={`grant_mode: ${g.grant_mode}`}>
-                            <Tag>{describeGrantMode(g.grant_mode)}</Tag>
-                          </Tooltip>
-                          <Tooltip title={`grant_scope: ${g.grant_scope}`}>
-                            <Tag color={describeGrantScope(g.grant_scope).color}>
-                              {describeGrantScope(g.grant_scope).label}
+                          File Access
+                        </Button>,
+                        <Button
+                          key="edit"
+                          size="small"
+                          icon={<EditOutlined />}
+                          onClick={() => openGrantEditor(g)}
+                        >
+                          Edit Access
+                        </Button>,
+                        <Popconfirm
+                          key="revoke"
+                          title="Revoke this grant?"
+                          description="The caller will need to pair again."
+                          onConfirm={() => void handleRevokeGrant(g.grant_id)}
+                          okText="Revoke"
+                          cancelText="Cancel"
+                        >
+                          <Button
+                            danger
+                            size="small"
+                            icon={<DeleteOutlined />}
+                          >
+                            Revoke
+                          </Button>
+                        </Popconfirm>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={
+                          <Space>
+                            <Text>{g.caller_display_name || formatFingerprint(g.caller_fingerprint)}</Text>
+                            <Tag color={g.status === "active" ? "green" : "default"}>
+                              {g.status}
                             </Tag>
-                          </Tooltip>
-                          {g.file_access && g.file_access !== "none" && (
-                            <Tag color="blue">
-                              {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
-                            </Tag>
-                          )}
-                          {g.shell_policy_set_version_snapshot != null && (
-                            <Tag color="blue">
-                              shell set v{g.shell_policy_set_version_snapshot}
-                            </Tag>
-                          )}
-                        </Space>
-                      }
-                      description={
-                        <Space size={4} wrap>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Used {g.use_count ?? 0}x
-                          </Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
-                          </Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            · last command {formatTimestamp(g.last_command_at)}
-                          </Text>
-                          {g.expires_at != null && (
+                            <Tooltip title={authMethod.tooltip}>
+                              <Tag color={authMethod.color}>{authMethod.label}</Tag>
+                            </Tooltip>
+                            <Tooltip title={`grant_mode: ${g.grant_mode}`}>
+                              <Tag>{describeGrantMode(g.grant_mode)}</Tag>
+                            </Tooltip>
+                            <Tooltip title={`grant_scope: ${g.grant_scope}`}>
+                              <Tag color={describeGrantScope(g.grant_scope).color}>
+                                {describeGrantScope(g.grant_scope).label}
+                              </Tag>
+                            </Tooltip>
+                            {g.file_access && g.file_access !== "none" && (
+                              <Tag color="blue">
+                                {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
+                              </Tag>
+                            )}
+                            {g.shell_policy_set_version_snapshot != null && (
+                              <Tag color="blue">
+                                shell set v{g.shell_policy_set_version_snapshot}
+                              </Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space size={4} wrap>
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · expires {new Date(g.expires_at).toLocaleDateString()}
+                              Used {g.use_count ?? 0}x
                             </Text>
-                          )}
-                          <Tooltip title={g.caller_fingerprint}>
-                            <Text type="secondary" style={{ fontSize: 10, fontFamily: "monospace" }}>
-                              {formatFingerprint(g.caller_fingerprint)}
-                            </Text>
-                          </Tooltip>
-                          {g.stdin_allowed != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · stdin {g.stdin_allowed ? "on" : "off"}
+                              · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
                             </Text>
-                          )}
-                          {g.interactive_allowed != null && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · interactive {g.interactive_allowed ? "on" : "off"}
+                              · last command {formatTimestamp(g.last_command_at)}
                             </Text>
-                          )}
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                )}
+                            {g.expires_at != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · expires {new Date(g.expires_at).toLocaleDateString()}
+                              </Text>
+                            )}
+                            <Tooltip title={g.caller_fingerprint}>
+                              <Text type="secondary" style={{ fontSize: 10, fontFamily: "monospace" }}>
+                                {formatFingerprint(g.caller_fingerprint)}
+                              </Text>
+                            </Tooltip>
+                            {g.stdin_allowed != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · stdin {g.stdin_allowed ? "on" : "off"}
+                              </Text>
+                            )}
+                            {g.interactive_allowed != null && (
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                · interactive {g.interactive_allowed ? "on" : "off"}
+                              </Text>
+                            )}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  );
+                }}
               />
             )}
           </Card>
         </Col>
 
-        <Col xs={24}>
+        <Col xs={24} style={lockedColStyle}>
           <Card
             title={
               <Space>

@@ -718,6 +718,7 @@ export default function Settings() {
         void fetchPerformanceConfig();
         break;
       case "sync":
+      case "remote-invoke":
         void fetchSyncStatusData();
         break;
       default:
@@ -1196,7 +1197,13 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           <ApiOutlined /> Remote Invoke
         </span>
       ),
-      children: <RemoteInvokeTab />,
+      children: (
+        <RemoteInvokeTab
+          syncStatus={syncStatus}
+          onGoToSyncTab={() => handleTabChange("sync")}
+          onSyncSignIn={handleSyncSignIn}
+        />
+      ),
     },
   ];
 

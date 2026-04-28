@@ -749,6 +749,14 @@ pub enum Commands {
         )]
         client_id: Option<String>,
     },
+    #[command(
+        about = "Manage macOS keep-awake (prevent sleep while Bifrost is running)",
+        long_about = "Manage macOS keep-awake.\n\n            Prevents display sleep, idle sleep, AND lid-close sleep while the Bifrost process is alive.\n            Uses macOS IOKit IOPMAssertion (user-space, no sudo). Non-macOS platforms return an error."
+    )]
+    KeepAwake {
+        #[command(subcommand)]
+        action: crate::commands::keepawake::KeepAwakeAction,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -1431,6 +1439,11 @@ pub enum RemoteCommands {
         long_about = "Execute a shell command on the remote host.\n\n            ⚠  This is the highest-privilege remote command: it can run arbitrary code on the target machine, subject only to the Shell Access policy bound to the active grant. For policy-gated structured writes, prefer `bifrost remote file write/edit/patch`."
     )]
     Exec(Box<RemoteCommandExecArgs>),
+    #[command(about = "Manage remote macOS keep-awake (requires remote_power_mgmt grant)")]
+    KeepAwake {
+        #[command(subcommand)]
+        action: crate::commands::keepawake::KeepAwakeAction,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]

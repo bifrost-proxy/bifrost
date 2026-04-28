@@ -37,3 +37,4 @@ npm/bifrost/README.md
 
 # Local sibling project accidentally placed in the worktree
 bifrost-server-v4/
+bifrost-remote.zip

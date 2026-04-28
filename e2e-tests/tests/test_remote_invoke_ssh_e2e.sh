@@ -48,7 +48,7 @@ cleanup() {
         kill "$MOCK_PID" 2>/dev/null || true
         wait "$MOCK_PID" 2>/dev/null || true
     fi
-    rm -rf "$RELAY_DATA_DIR" "$TMPDIR" "$BIFROST_DATA_DIR" "${CALLER_DATA_DIR:-}" "$MOCK_DIR" >/dev/null 2>&1 || true
+    rm -rf "$RELAY_DATA_DIR" "$TMPDIR" "$BIFROST_DATA_DIR" "${CALLER_DATA_DIR:-}" "${CALLER_DATA_DIR_2:-}" "$MOCK_DIR" >/dev/null 2>&1 || true
     rm -f "$RELAY_LOG" "$MOCK_LOG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -244,10 +244,12 @@ assert obj["connections"], "caller 应写入 remote-connections.json"
 conn = obj["connections"][0]
 assert conn["client_instance_id"] == "'"$CLIENT_INSTANCE_ID"'"
 assert conn["grant_mode"] == "permanent"
-assert conn["caller_fingerprint"] == "'"$FINGERPRINT"'"
+assert conn["caller_fingerprint"].startswith("caller-")
+assert conn["caller_fingerprint"] != "'"$FINGERPRINT"'"
 assert conn["device_code"] == "'"$DEVICE_CODE"'"
 assert conn["auth_method"] == "ssh_publickey"
 '
+CALLER_FINGERPRINT_1="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON")"
 
 log "Wait for ssh_publickey grant created by CLI"
 MATCH_GRANT=""
@@ -275,10 +277,61 @@ for grant in obj.get("grants", []):
     if grant.get("grant_id") == "'"$MATCH_GRANT"'":
         assert grant.get("grant_mode") == "permanent"
         assert grant.get("expires_at") in (None, "")
+        assert grant.get("caller_fingerprint") == "'"$CALLER_FINGERPRINT_1"'"
+        assert grant.get("ssh_key_fingerprint") == "'"$FINGERPRINT"'"
         break
 else:
     raise AssertionError("grant not found")
 '
+
+log "Use same SSH key from another caller sandbox and verify caller identity isolation"
+CALLER_DATA_DIR_2="$(mktemp -d)"
+CLI_CONNECT_OUTPUT_2="$TMPDIR/cli_connect_2.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR_2" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
+    >"$CLI_CONNECT_OUTPUT_2" 2>&1
+grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT_2"
+CALLER_CONNECTIONS_JSON_2="$CALLER_DATA_DIR_2/remote-connections.json"
+CALLER_FINGERPRINT_2="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON_2")"
+assert_not_empty "$CALLER_FINGERPRINT_2" "第二个 caller fingerprint 不应为空"
+if [[ "$CALLER_FINGERPRINT_1" == "$CALLER_FINGERPRINT_2" ]]; then
+    echo "two caller sandboxes reused the same caller_fingerprint" >&2
+    exit 1
+fi
+
+for _ in $(seq 1 60); do
+    GRANTS_JSON="$TMPDIR/grants_two_callers.json"
+    curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >"$GRANTS_JSON"
+    if python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+ssh_fp, caller_a, caller_b = sys.argv[2:5]
+matches = [
+    grant for grant in obj.get("grants", [])
+    if grant.get("auth_method") == "ssh_publickey"
+    and grant.get("ssh_key_fingerprint") == ssh_fp
+    and grant.get("caller_fingerprint") in {caller_a, caller_b}
+]
+assert {g.get("caller_fingerprint") for g in matches} == {caller_a, caller_b}
+PY
+    then
+        break
+    fi
+    sleep 0.5
+done
+python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+ssh_fp, caller_a, caller_b = sys.argv[2:5]
+matches = [
+    grant for grant in obj.get("grants", [])
+    if grant.get("auth_method") == "ssh_publickey"
+    and grant.get("ssh_key_fingerprint") == ssh_fp
+    and grant.get("caller_fingerprint") in {caller_a, caller_b}
+]
+assert {g.get("caller_fingerprint") for g in matches} == {caller_a, caller_b}
+PY
 
 KEY_AFTER_USE_JSON="$TMPDIR/key_after_use.json"
 curl -s "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" >"$KEY_AFTER_USE_JSON"
@@ -338,11 +391,13 @@ assert_not_empty "$TRAFFIC_ID" "应生成可供 remote traffic get 查询的流�
 
 log "Verify reusable SSH grant exists on relay"
 REUSABLE_JSON="$TMPDIR/reusable.json"
-curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${FINGERPRINT}" >"$REUSABLE_JSON"
+curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >"$REUSABLE_JSON"
 assert_python "$REUSABLE_JSON" '
 assert obj["data"]["grant_id"] == "'"$MATCH_GRANT"'"
 assert obj["data"]["grant_mode"] == "permanent"
 assert obj["data"]["expires_at"] in (None, "")
+assert obj["data"]["caller_fingerprint"] == "'"$CALLER_FINGERPRINT_1"'"
+assert obj["data"]["ssh_key_fingerprint"] == "'"$FINGERPRINT"'"
 '
 
 log "Execute search.get via SSH grant"

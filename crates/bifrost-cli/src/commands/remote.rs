@@ -42,6 +42,7 @@ const CANCEL_SETTLE_TOTAL_TIMEOUT_SECS: u64 = 15;
 const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
 const CONNECTIONS_FILE: &str = "remote-connections.json";
 const CONNECTIONS_KEY_FILE: &str = "remote-connections.key";
+const CALLER_IDENTITY_FILE: &str = "remote-caller-identity.json";
 const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 const CANCEL_SETTLE_RETRY_DELAYS_MS: [u64; 4] = [200, 500, 1000, 2000];
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -255,6 +256,76 @@ fn connections_path() -> PathBuf {
 
 fn connections_key_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONNECTIONS_KEY_FILE)
+}
+
+fn caller_identity_path() -> PathBuf {
+    bifrost_storage::data_dir().join(CALLER_IDENTITY_FILE)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallerIdentityFile {
+    version: u32,
+    caller_fingerprint: String,
+}
+
+fn load_or_create_caller_fingerprint() -> bifrost_core::Result<String> {
+    load_or_create_caller_fingerprint_at(&caller_identity_path())
+}
+
+fn load_or_create_caller_fingerprint_at(path: &Path) -> bifrost_core::Result<String> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "read {}: {e}",
+                path.display()
+            )))
+        })?;
+        let file: CallerIdentityFile = serde_json::from_str(&content)
+            .map_err(|e| BifrostError::Config(format!("parse {}: {e}", path.display())))?;
+        if is_valid_caller_fingerprint(&file.caller_fingerprint) {
+            return Ok(file.caller_fingerprint);
+        }
+        warn!(
+            path = %path.display(),
+            "remote caller identity file contained an invalid caller_fingerprint; rotating it"
+        );
+    }
+
+    let caller_fingerprint = generate_random_caller_fingerprint()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "mkdir {}: {e}",
+                parent.display()
+            )))
+        })?;
+    }
+    let content = serde_json::to_string_pretty(&CallerIdentityFile {
+        version: 1,
+        caller_fingerprint: caller_fingerprint.clone(),
+    })
+    .map_err(|e| BifrostError::Config(format!("serialize caller identity: {e}")))?;
+    std::fs::write(path, content).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "write {}: {e}",
+            path.display()
+        )))
+    })?;
+    Ok(caller_fingerprint)
+}
+
+fn generate_random_caller_fingerprint() -> bifrost_core::Result<String> {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    rng.fill(&mut bytes)
+        .map_err(|_| BifrostError::Config("generate remote caller identity failed".to_string()))?;
+    Ok(format!("caller-{}", hex_lower(&bytes)))
+}
+
+fn is_valid_caller_fingerprint(value: &str) -> bool {
+    value
+        .strip_prefix("caller-")
+        .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn load_connections() -> bifrost_core::Result<Vec<LocalConnection>> {
@@ -478,6 +549,8 @@ enum CommandKind {
     ShellExec,
     #[serde(rename = "file")]
     File,
+    #[serde(rename = "power.mgmt")]
+    PowerMgmt,
 }
 
 impl CommandKind {
@@ -486,6 +559,7 @@ impl CommandKind {
             Self::QueryReadonly => "query.readonly",
             Self::ShellExec => "shell.exec",
             Self::File => "file",
+            Self::PowerMgmt => "power.mgmt",
         }
     }
 }
@@ -1083,7 +1157,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let caller = CallerRelayClient::new(&opts.relay_url);
     let hostname = get_hostname();
     let username = get_username();
-    let caller_fingerprint = generate_caller_fingerprint(&username, &hostname);
+    let caller_fingerprint = load_or_create_caller_fingerprint()?;
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
         display_name: Some(hostname.clone()),
@@ -1657,7 +1731,7 @@ async fn handle_connect_with_ssh(
             let grant_mode = result.grant_mode.unwrap_or_else(|| "permanent".to_string());
             let caller_fingerprint = result
                 .caller_fingerprint
-                .unwrap_or_else(|| loaded_key.ssh_key_fingerprint.clone());
+                .unwrap_or_else(|| caller_info.fingerprint.clone());
             let client_ephemeral_pub = result.client_ephemeral_pub.as_deref().ok_or_else(|| {
                 BifrostError::Config(
                     "ssh connect succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
@@ -1950,6 +2024,19 @@ fn build_remote_command_checked(
         }),
         RemoteCommands::Exec(exec_args) => Ok(build_remote_shell_exec_command(exec_args)),
         RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
+        RemoteCommands::KeepAwake { action } => {
+            let (op, args) = crate::commands::keepawake::build_remote_args(action);
+            Ok(BuiltRemoteCommand {
+                kind: CommandKind::PowerMgmt,
+                label: format!("keepawake.{op}"),
+                command: Some(op),
+                args_json: Some(args.to_string()),
+                query: None,
+                shell_exec: None,
+                render: RemoteRenderMode::Raw,
+                streaming_prefs: None,
+            })
+        }
         RemoteCommands::Traffic {
             action: RemoteTrafficCommands::Search(search_args),
         } => {
@@ -3015,23 +3102,6 @@ async fn wait_for_remote_call_cancel_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-}
-
-fn generate_caller_fingerprint(user: &str, machine_id: &str) -> String {
-    let raw = format!("bifrost-cli:{}:{}", user, machine_id);
-    format!("{:x}", simple_hash(raw.as_bytes()))
-}
-
-fn simple_hash(data: &[u8]) -> u128 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    let h1 = hasher.finish();
-    let mut hasher2 = DefaultHasher::new();
-    h1.hash(&mut hasher2);
-    let h2 = hasher2.finish();
-    (h1 as u128) << 64 | (h2 as u128)
 }
 
 fn classify_delete_grant_failure(
@@ -4397,6 +4467,14 @@ fn sha256_hex(data: &[u8]) -> String {
     out
 }
 
+fn hex_lower(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn warn_if_ssh_key_permissions_are_too_open(path: &Path) {
     #[cfg(unix)]
     {
@@ -4617,6 +4695,43 @@ mod tests {
         static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
         let dir = TEST_DATA_DIR.get_or_init(|| tempfile::tempdir().expect("create temp dir"));
         bifrost_storage::set_data_dir(dir.path().to_path_buf());
+    }
+
+    #[test]
+    fn test_random_caller_fingerprint_has_expected_shape() {
+        let fingerprint = generate_random_caller_fingerprint().expect("generate caller id");
+
+        assert!(is_valid_caller_fingerprint(&fingerprint));
+        assert_eq!(fingerprint.len(), "caller-".len() + 32);
+    }
+
+    #[test]
+    fn test_load_or_create_caller_fingerprint_persists_per_data_dir() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join(CALLER_IDENTITY_FILE);
+
+        let first = load_or_create_caller_fingerprint_at(&path).expect("create caller id");
+        let second = load_or_create_caller_fingerprint_at(&path).expect("reload caller id");
+
+        assert_eq!(first, second);
+        assert!(is_valid_caller_fingerprint(&first));
+    }
+
+    #[test]
+    fn test_load_or_create_caller_fingerprint_differs_across_data_dirs() {
+        let first_dir = tempfile::tempdir().expect("first tempdir");
+        let second_dir = tempfile::tempdir().expect("second tempdir");
+
+        let first =
+            load_or_create_caller_fingerprint_at(&first_dir.path().join(CALLER_IDENTITY_FILE))
+                .expect("create first caller id");
+        let second =
+            load_or_create_caller_fingerprint_at(&second_dir.path().join(CALLER_IDENTITY_FILE))
+                .expect("create second caller id");
+
+        assert_ne!(first, second);
+        assert!(is_valid_caller_fingerprint(&first));
+        assert!(is_valid_caller_fingerprint(&second));
     }
 
     fn decrypt_remote_command_for_test(

@@ -277,6 +277,7 @@ export interface SshConnectResultRequest {
   expires_at?: number | string | null;
   reason?: string;
   caller_fingerprint?: string;
+  ssh_key_fingerprint?: string;
   grant_mode?: GrantMode;
   grant_scope?: RemoteInvokeGrantScope;
   file_access?: FileAccessScope;

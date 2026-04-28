@@ -10,6 +10,7 @@ pub mod group;
 pub mod group_rules;
 pub mod metrics;
 pub mod notification;
+pub mod power;
 pub mod proxy;
 pub mod remote_invoke;
 pub mod replay;

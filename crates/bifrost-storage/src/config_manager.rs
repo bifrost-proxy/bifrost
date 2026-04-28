@@ -678,6 +678,7 @@ impl ConfigManager {
             sandbox: SandboxConfig::default(),
             paths: PathsConfig::for_data_dir(data_dir),
             ui: UiConfig::default(),
+            keepawake: KeepAwakeConfig::default(),
         }
     }
 

@@ -224,8 +224,11 @@ fn main() {
             handle_system_proxy_command(&cli, action.clone())
         }
         Some(Commands::Value { action }) => handle_value_command(action),
-        Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Admin { action }) => handle_admin_command(action),
+        Some(Commands::KeepAwake { action }) => {
+            commands::keepawake::handle_local(action, get_effective_port(cli.port))
+        }
+        Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes, restart }) => handle_upgrade(yes, restart),
         Some(Commands::InstallSkill {
             tool,
