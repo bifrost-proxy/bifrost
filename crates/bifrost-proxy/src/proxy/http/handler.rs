@@ -433,6 +433,43 @@ pub fn needs_response_override(rules: &ResolvedRules) -> bool {
     rules.res_body.is_some() || rules.status_code.is_some() || rules.replace_status.is_some()
 }
 
+async fn apply_immediate_response_body_rules(
+    response: Response<BoxBody>,
+    rules: &ResolvedRules,
+    method: &str,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+) -> Result<(Response<BoxBody>, Bytes)> {
+    let (mut parts, body) = response.into_parts();
+    let content_type = parts
+        .headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|e| BifrostError::Network(format!("Failed to read immediate response: {}", e)))?
+        .to_bytes();
+    let body_processed = apply_body_rules(
+        body_bytes,
+        rules,
+        Phase::Response,
+        Some(&content_type),
+        verbose_logging,
+        ctx,
+    );
+    let final_body =
+        apply_content_injection(body_processed, &content_type, rules, verbose_logging, ctx);
+    normalize_res_headers(&mut parts, BodyMode::Known(final_body.len()), method);
+
+    Ok((
+        Response::from_parts(parts, full_body(final_body.clone())),
+        final_body,
+    ))
+}
+
 enum BodyMode {
     Known(usize),
     Stream,
@@ -732,9 +769,24 @@ pub async fn handle_http_request(
         }
     }
 
-    if let Some(mock_response) =
+    if let Some(mut mock_response) =
         generate_mock_response(&resolved_rules, &uri, verbose_logging, ctx).await
     {
+        let transformed_mock_body = if needs_body_processing(&resolved_rules) {
+            let (response, body) = apply_immediate_response_body_rules(
+                mock_response,
+                &resolved_rules,
+                &method,
+                verbose_logging,
+                ctx,
+            )
+            .await?;
+            mock_response = response;
+            Some(body)
+        } else {
+            None
+        };
+
         if verbose_logging {
             info!("[{}] [MOCK] returning mock response", ctx.id_str());
         }
@@ -745,14 +797,17 @@ pub async fn handle_http_request(
             let req_headers_pairs = headers_to_pairs(req.headers());
             let mock_status = mock_response.status().as_u16();
             let mock_res_headers = headers_to_pairs(mock_response.headers());
-            let mock_res_body = resolved_rules.res_body.clone().unwrap_or_else(|| {
-                Bytes::from(
-                    hyper::StatusCode::from_u16(mock_status)
-                        .ok()
-                        .and_then(|s| s.canonical_reason())
-                        .unwrap_or(""),
-                )
-            });
+            let mock_res_body = transformed_mock_body
+                .clone()
+                .or_else(|| resolved_rules.res_body.clone())
+                .unwrap_or_else(|| {
+                    Bytes::from(
+                        hyper::StatusCode::from_u16(mock_status)
+                            .ok()
+                            .and_then(|s| s.canonical_reason())
+                            .unwrap_or(""),
+                    )
+                });
             let mock_body_len = mock_res_body.len();
 
             let traffic_type = get_traffic_type_from_url(&record_url);

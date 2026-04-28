@@ -267,6 +267,51 @@ pub fn apply_content_injection(
 }
 
 const HTML_DOCTYPE: &str = "<!DOCTYPE html>";
+const HTML_CLOSE_TAG: &str = "</html>";
+const BODY_OPEN_TAG: &str = "<body";
+const BODY_CLOSE_TAG: &str = "</body>";
+
+fn insert_before_html_close(html: &mut String, content: &str) -> bool {
+    let lower = html.to_lowercase();
+    if let Some(index) = lower.rfind(HTML_CLOSE_TAG) {
+        html.insert_str(index, content);
+        return true;
+    }
+
+    false
+}
+
+fn insert_after_html_open(html: &mut String, content: &str) -> bool {
+    let lower = html.to_lowercase();
+    let Some(html_open_start) = lower.find("<html") else {
+        return false;
+    };
+    let Some(html_open_end_offset) = lower[html_open_start..].find('>') else {
+        return false;
+    };
+    let html_inner_start = html_open_start + html_open_end_offset + 1;
+    html.insert_str(html_inner_start, content);
+    true
+}
+
+fn replace_html_body_inner(html: &mut String, content: &str) -> bool {
+    let lower = html.to_lowercase();
+    let Some(body_open_start) = lower.find(BODY_OPEN_TAG) else {
+        return false;
+    };
+    let Some(body_open_end_offset) = lower[body_open_start..].find('>') else {
+        return false;
+    };
+    let body_inner_start = body_open_start + body_open_end_offset + 1;
+
+    let Some(body_close) = lower[body_inner_start..].rfind(BODY_CLOSE_TAG) else {
+        return false;
+    };
+    let body_inner_end = body_inner_start + body_close;
+
+    html.replace_range(body_inner_start..body_inner_end, content);
+    true
+}
 
 fn apply_html_injection(
     body: Bytes,
@@ -281,24 +326,41 @@ fn apply_html_injection(
         return body;
     }
 
+    let mut html = String::from_utf8_lossy(&body).into_owned();
+
     if let Some(replace_body) = body_replace {
+        if replace_html_body_inner(&mut html, replace_body) {
+            if verbose_logging {
+                debug!("[{}] [HTML_BODY] replaced body inner HTML", ctx.id_str());
+            }
+            return html.into_bytes().into();
+        }
         if verbose_logging {
-            debug!("[{}] [HTML_BODY] replaced entire HTML", ctx.id_str());
+            debug!(
+                "[{}] [HTML_BODY] replaced entire HTML because no body element was found",
+                ctx.id_str()
+            );
         }
         return replace_body.clone().into_bytes().into();
     }
 
-    let mut html = String::from_utf8_lossy(&body).into_owned();
-
     if let Some(prepend_content) = prepend {
-        let has_doctype = html.trim_start().to_lowercase().starts_with("<!doctype");
-        if has_doctype {
-            html = format!("{}{}", prepend_content, html);
-        } else {
-            html = format!("{}\n{}{}", HTML_DOCTYPE, prepend_content, html);
-            if verbose_logging {
+        if !insert_after_html_open(&mut html, prepend_content) {
+            let has_doctype = html.trim_start().to_lowercase().starts_with("<!doctype");
+            if has_doctype {
+                html = format!("{}{}", prepend_content, html);
+            } else {
+                html = format!("{}\n{}{}", HTML_DOCTYPE, prepend_content, html);
+            }
+            if verbose_logging && !has_doctype {
                 debug!(
                     "[{}] [HTML_PREPEND] added DOCTYPE automatically",
+                    ctx.id_str()
+                );
+            }
+            if has_doctype && verbose_logging {
+                debug!(
+                    "[{}] [HTML_PREPEND] no html element found; prepended before document",
                     ctx.id_str()
                 );
             }
@@ -313,7 +375,9 @@ fn apply_html_injection(
     }
 
     if let Some(append_content) = append {
-        html = format!("{}{}", html, append_content);
+        if !insert_before_html_close(&mut html, append_content) {
+            html = format!("{}{}", html, append_content);
+        }
         if verbose_logging {
             debug!(
                 "[{}] [HTML_APPEND] appended {} chars",
@@ -529,7 +593,104 @@ mod tests {
         };
 
         let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
-        assert!(String::from_utf8_lossy(&result).ends_with("<script>alert(1)</script>"));
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<html><body>Hello</body><script>alert(1)</script></html>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_append_uses_last_html_close_case_insensitive() {
+        let body = Bytes::from("<html><body>outer</body><template></html></template></HTML>");
+        let rules = ResolvedRules {
+            html_append: Some("<script>new VConsole();</script>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<html><body>outer</body><template></html></template><script>new VConsole();</script></HTML>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_append_falls_back_to_document_end_without_html_close() {
+        let body = Bytes::from("<section>Hello</section>");
+        let rules = ResolvedRules {
+            html_append: Some("<script>alert(1)</script>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<section>Hello</section><script>alert(1)</script>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_prepend_inserts_after_html_open() {
+        let body = Bytes::from(
+            r#"<!doctype html><html lang="en"><head><title>Original</title></head><body>Hello</body></html>"#,
+        );
+        let rules = ResolvedRules {
+            html_prepend: Some("<!--HTML_PREPEND-->".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            r#"<!doctype html><html lang="en"><!--HTML_PREPEND--><head><title>Original</title></head><body>Hello</body></html>"#
+        );
+    }
+
+    #[test]
+    fn test_html_injection_prepend_uses_html_open_case_insensitive() {
+        let body = Bytes::from("<!doctype html><HTML><body>Hello</body></HTML>");
+        let rules = ResolvedRules {
+            html_prepend: Some("<!--HTML_PREPEND-->".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<!doctype html><HTML><!--HTML_PREPEND--><body>Hello</body></HTML>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_body_replaces_body_inner_html() {
+        let body = Bytes::from(
+            r#"<!doctype html><html><head><title>Original</title></head><body class="app">HTML_ORIGINAL</body></html>"#,
+        );
+        let rules = ResolvedRules {
+            html_body: Some("<main>HTML_REPLACED</main>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            r#"<!doctype html><html><head><title>Original</title></head><body class="app"><main>HTML_REPLACED</main></body></html>"#
+        );
+    }
+
+    #[test]
+    fn test_html_injection_body_falls_back_to_entire_replace_without_body_element() {
+        let body = Bytes::from("<section>HTML_ORIGINAL</section>");
+        let rules = ResolvedRules {
+            html_body: Some("<main>HTML_REPLACED</main>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection(body, "text/html", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "<main>HTML_REPLACED</main>"
+        );
     }
 
     #[test]
@@ -555,6 +716,116 @@ mod tests {
 
         let result = apply_content_injection(body, "text/css", &rules, false, &mock_ctx());
         assert_eq!(String::from_utf8_lossy(&result), "body { color: red; }");
+    }
+
+    #[test]
+    fn test_js_injection_append_prepend_and_body_replace() {
+        let body = Bytes::from("window.app = 1;");
+        let append_rules = ResolvedRules {
+            js_append: Some("window.loaded = true;".to_string()),
+            ..Default::default()
+        };
+        let prepend_rules = ResolvedRules {
+            js_prepend: Some("window.before = true;".to_string()),
+            ..Default::default()
+        };
+        let body_rules = ResolvedRules {
+            js_body: Some("window.replaced = true;".to_string()),
+            ..Default::default()
+        };
+
+        let appended = apply_content_injection(
+            body.clone(),
+            "application/javascript",
+            &append_rules,
+            false,
+            &mock_ctx(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&appended),
+            "window.app = 1;window.loaded = true;"
+        );
+
+        let prepended = apply_content_injection(
+            body.clone(),
+            "text/javascript",
+            &prepend_rules,
+            false,
+            &mock_ctx(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&prepended),
+            "window.before = true;window.app = 1;"
+        );
+
+        let replaced = apply_content_injection(
+            body,
+            "application/x-javascript",
+            &body_rules,
+            false,
+            &mock_ctx(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&replaced),
+            "window.replaced = true;"
+        );
+    }
+
+    #[test]
+    fn test_css_injection_append_prepend_and_body_replace() {
+        let body = Bytes::from(".app{color:black;}");
+        let append_rules = ResolvedRules {
+            css_append: Some(".loaded{display:block;}".to_string()),
+            ..Default::default()
+        };
+        let prepend_rules = ResolvedRules {
+            css_prepend: Some(":root{--ok:1;}".to_string()),
+            ..Default::default()
+        };
+        let body_rules = ResolvedRules {
+            css_body: Some(".replaced{color:red;}".to_string()),
+            ..Default::default()
+        };
+
+        let appended =
+            apply_content_injection(body.clone(), "text/css", &append_rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&appended),
+            ".app{color:black;}.loaded{display:block;}"
+        );
+
+        let prepended = apply_content_injection(
+            body.clone(),
+            "text/css; charset=utf-8",
+            &prepend_rules,
+            false,
+            &mock_ctx(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&prepended),
+            ":root{--ok:1;}.app{color:black;}"
+        );
+
+        let replaced = apply_content_injection(body, "text/css", &body_rules, false, &mock_ctx());
+        assert_eq!(String::from_utf8_lossy(&replaced), ".replaced{color:red;}");
+    }
+
+    #[test]
+    fn test_content_injection_ignores_protocols_when_response_type_differs() {
+        let body = Bytes::from("window.app = 1;");
+        let rules = ResolvedRules {
+            html_append: Some("<script>html</script>".to_string()),
+            css_append: Some(".bad{display:none;}".to_string()),
+            js_append: Some("window.loaded = true;".to_string()),
+            ..Default::default()
+        };
+
+        let result =
+            apply_content_injection(body, "application/javascript", &rules, false, &mock_ctx());
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "window.app = 1;window.loaded = true;"
+        );
     }
 
     #[test]

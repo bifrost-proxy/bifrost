@@ -133,6 +133,7 @@ const BADGE_HTML: &str = concat!(
 );
 
 fn badge_script(rules_json: &str) -> String {
+    let rules_json = inline_script_safe_json(rules_json);
     format!(
         concat!(
             "<script>",
@@ -201,6 +202,31 @@ fn badge_script(rules_json: &str) -> String {
         ),
         rules_json = rules_json,
     )
+}
+
+fn inline_script_safe_json(rules_json: &str) -> String {
+    let value = serde_json::from_str::<serde_json::Value>(rules_json).unwrap_or_else(|_| {
+        serde_json::json!({
+            "rules": [],
+            "merged_content": "",
+            "admin_port": 0,
+        })
+    });
+    let json = serde_json::to_string(&value)
+        .unwrap_or_else(|_| r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string());
+
+    let mut escaped = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '<' => escaped.push_str("\\u003C"),
+            '>' => escaped.push_str("\\u003E"),
+            '&' => escaped.push_str("\\u0026"),
+            '\u{2028}' => escaped.push_str("\\u2028"),
+            '\u{2029}' => escaped.push_str("\\u2029"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 fn build_badge_snippet(rules_json: &str) -> String {
@@ -317,6 +343,42 @@ mod tests {
         assert!(snippet.contains("merged_content"));
         assert!(snippet.contains("admin_port"));
         assert!(!snippet.contains("fetch("));
+    }
+
+    #[test]
+    fn test_badge_inline_rules_data_escapes_script_close_tag() {
+        let rules = r#"{"rules":[{"name":"debug","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}\n``` vconsole-inject\n<script src=\"https://unpkg.com/vconsole/dist/vconsole.min.js\"></script>\n<script>new VConsole();</script>\n```","admin_port":8800}"#;
+        let snippet = build_badge_snippet(rules);
+
+        assert!(snippet.contains(r#"\u003C/script\u003E"#));
+        assert!(snippet.contains(r#"\u003Cscript\u003Enew VConsole();\u003C/script\u003E"#));
+        assert!(!snippet.contains("<script src="));
+        assert!(!snippet.contains(r#"</script>\n<script>new VConsole();</script>"#));
+        assert_eq!(snippet.matches("</script>").count(), 1);
+    }
+
+    #[test]
+    fn test_badge_inline_rules_data_escapes_html_tag_syntax_generally() {
+        let rules = r#"{"rules":[{"name":"<img src=x onerror=alert(1)>","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"<!-- <svg onload=alert(1)> & </textarea><iframe srcdoc=\"<script>alert(1)</script>\"></iframe>","admin_port":8800}"#;
+        let snippet = build_badge_snippet(rules);
+
+        assert!(snippet.contains(r#"\u003Cimg src=x onerror=alert(1)\u003E"#));
+        assert!(snippet
+            .contains(r#"\u003C!-- \u003Csvg onload=alert(1)\u003E \u0026 \u003C/textarea\u003E"#));
+        assert!(!snippet.contains("<!--"));
+        assert!(!snippet.contains("<svg onload"));
+        assert!(!snippet.contains("</textarea>"));
+        assert!(!snippet.contains("<iframe"));
+        assert_eq!(snippet.matches("</script>").count(), 1);
+    }
+
+    #[test]
+    fn test_badge_inline_rules_data_falls_back_for_invalid_json() {
+        let snippet = build_badge_snippet(r#"{"rules":["#);
+
+        assert!(snippet.contains(r#""rules":[]"#));
+        assert!(snippet.contains(r#""admin_port":0"#));
+        assert_eq!(snippet.matches("</script>").count(), 1);
     }
 
     #[test]

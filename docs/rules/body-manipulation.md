@@ -501,7 +501,7 @@ www.example.com resAppend://{tracking} includeFilter://resH:content-type=text/ht
 
 ### htmlAppend
 
-在 HTML 类型响应内容末尾追加内容。
+在 HTML 类型响应的 `<html>` 元素内部后部追加内容，优先插入最后一个 `</html>` 前。
 
 #### 语法
 
@@ -514,7 +514,7 @@ pattern htmlAppend:///path/to/file.html
 #### 示例
 
 ```bash
-# 在 HTML 末尾注入调试脚本
+# 在 HTML 元素内部后部注入调试脚本
 www.example.com htmlAppend://(<script>console.log('debug')</script>)
 
 # 使用块变量注入复杂内容
@@ -536,7 +536,7 @@ www.example.com htmlAppend://{debug-script}
 
 ### htmlPrepend
 
-在 HTML 类型响应内容开头插入内容。
+在 HTML 类型响应的 `<html>` 元素内部前部插入内容，优先插入 `<html>` 开始标签之后。
 
 #### 语法
 
@@ -549,7 +549,7 @@ pattern htmlPrepend:///path/to/file.html
 #### 示例
 
 ```bash
-# 在 HTML 开头注入样式
+# 在 HTML 元素内部前部注入样式
 www.example.com htmlPrepend://(<style>body{border:2px solid red;}</style>)
 ```
 
@@ -719,8 +719,8 @@ www.example.com/old.css cssBody://{new-styles}
 
 | 测试场景   | 规则                                       | 预期                            |
 | ---------- | ------------------------------------------ | ------------------------------- |
-| HTML 追加  | `test.com htmlAppend://(<div>test</div>)`  | HTML 末尾添加 `<div>test</div>` |
-| HTML 前置  | `test.com htmlPrepend://(<meta>)`          | HTML 开头添加 `<meta>`          |
+| HTML 追加  | `test.com htmlAppend://(<div>test</div>)`  | `</html>` 前添加 `<div>test</div>` |
+| HTML 前置  | `test.com htmlPrepend://(<meta>)`          | `<html>` 开始标签后添加 `<meta>` |
 | JS 追加    | `test.com/app.js jsAppend://(;alert(1);)`  | JS 末尾追加 `;alert(1);`        |
 | JS 前置    | `test.com/app.js jsPrepend://(var x=1;)`   | JS 开头添加 `var x=1;`          |
 | CSS 追加   | `test.com/style.css cssAppend://(body{})`  | CSS 末尾追加 `body{}`           |

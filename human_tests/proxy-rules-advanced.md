@@ -8,7 +8,7 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 未被占用
 3. 部分测试需要通过 API 创建规则，API 地址为 `http://127.0.0.1:8800/_bifrost/api/rules`
@@ -605,62 +605,135 @@
 
 ### 三、内容注入协议
 
-### TC-PRA-25：htmlAppend 协议（在 HTML </body> 前注入内容）
+### TC-PRA-25：htmlAppend 协议（在 HTML </html> 前注入内容）
 
 **操作步骤**：
-1. 通过 API 创建规则：
+1. 在单独终端启动本地 HTML 上游服务，并保持该终端运行：
    ```bash
-   curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
-     -H "Content-Type: application/json" \
-     -d '{"name": "test-htmlappend", "content": "httpbin.org/html htmlAppend://<div id=\"injected\">BIFROST_INJECTED</div>", "enabled": true}'
+   TMP_DIR="$(mktemp -d)"
+   echo "$TMP_DIR" >/tmp/bifrost-htmlappend-upstream-dir
+   cat > "$TMP_DIR/index.html" <<'HTML'
+   <!doctype html><html><head><title>htmlAppend</title></head><body><main id="app">ORIGINAL_BODY</main></body></html>
+   HTML
+   cd "$TMP_DIR" && python3 -m http.server 18081
    ```
-2. 执行命令：
+2. 通过 API 创建规则（使用 vConsole 风格的双 script 片段回归真实规则）：
    ```bash
-   curl -x http://127.0.0.1:8800 http://httpbin.org/html
+   python3 - <<'PY'
+   import json
+   import textwrap
+   import urllib.request
+
+   content = textwrap.dedent("""\
+   ``` vconsole-inject
+   <script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>
+   <script>new VConsole();</script>
    ```
-3. 清理：
+
+   test-htmlappend.local host://127.0.0.1:18081
+   test-htmlappend.local htmlAppend://{vconsole-inject}
+   """)
+   payload = json.dumps({
+       "name": "test-htmlappend-body",
+       "content": content,
+       "enabled": True,
+   }).encode()
+   req = urllib.request.Request(
+       "http://127.0.0.1:8800/_bifrost/api/rules",
+       data=payload,
+       headers={"Content-Type": "application/json"},
+       method="POST",
+   )
+   print(urllib.request.urlopen(req).read().decode())
+   PY
+   ```
+3. 执行命令并保存响应：
    ```bash
-   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-htmlappend
+   curl -sS -x http://127.0.0.1:8800 http://test-htmlappend.local/index.html -o /tmp/bifrost-htmlappend-body.html
+   python3 - <<'PY'
+   from pathlib import Path
+   html = Path("/tmp/bifrost-htmlappend-body.html").read_text()
+   inject_start = '<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>'
+   inject_end = '<script>new VConsole();</script>'
+   assert "ORIGINAL_BODY" in html, html
+   assert inject_start in html, html
+   assert inject_end in html, html
+   assert html.rindex(inject_start) < html.rindex(inject_end) < html.lower().rindex("</html>"), html
+   assert not html.rstrip().endswith("</html>" + inject_start), html
+   assert not html.rstrip().endswith("</html>" + inject_end), html
+   PY
+   ```
+4. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-htmlappend-body
+   # 在运行 http.server 的终端按 Ctrl+C 停止上游服务
+   rm -f /tmp/bifrost-htmlappend-body.html
+   rm -rf "$(cat /tmp/bifrost-htmlappend-upstream-dir)"
+   rm -f /tmp/bifrost-htmlappend-upstream-dir
    ```
 
 **预期结果**：
-- 响应体 HTML 中 `</body>` 标签之前包含 `<div id="injected">BIFROST_INJECTED</div>`
+- 响应体 HTML 中 `</html>` 标签之前包含 vConsole 注入片段
+- vConsole 注入片段不会出现在 `</html>` 之后
 - 原始 HTML 内容保持不变
 
 ---
 
-### TC-PRA-26：htmlPrepend 协议（在 HTML <head> 后注入内容）
+### TC-PRA-26：htmlPrepend 协议（在 HTML <html> 开始标签后注入内容）
 
 **操作步骤**：
-1. 通过 API 创建规则：
+1. 在单独终端启动本地 HTML 上游服务，并保持该终端运行：
+   ```bash
+   TMP_DIR="$(mktemp -d)"
+   echo "$TMP_DIR" >/tmp/bifrost-htmlprepend-upstream-dir
+   cat > "$TMP_DIR/index.html" <<'HTML'
+   <!doctype html><html><head><title>htmlPrepend</title></head><body><main id="app">ORIGINAL_BODY</main></body></html>
+   HTML
+   cd "$TMP_DIR" && python3 -m http.server 18083
+   ```
+2. 通过 API 创建规则：
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-htmlprepend", "content": "httpbin.org/html htmlPrepend://<meta name=\"injected\" content=\"true\">", "enabled": true}'
+     -d '{"name": "test-htmlprepend", "content": "test-htmlprepend.local host://127.0.0.1:18083\ntest-htmlprepend.local htmlPrepend://(<bifrost-prepend-marker>)", "enabled": true}'
    ```
-2. 执行命令：
+3. 执行命令并断言插入位置：
    ```bash
-   curl -x http://127.0.0.1:8800 http://httpbin.org/html
+   curl -sS -x http://127.0.0.1:8800 http://test-htmlprepend.local/index.html -o /tmp/bifrost-htmlprepend.html
+   python3 - <<'PY'
+   from pathlib import Path
+   html = Path("/tmp/bifrost-htmlprepend.html").read_text()
+   marker = "<bifrost-prepend-marker>"
+   lower = html.lower()
+   assert marker in html, html
+   assert lower.index("<html") < html.index(marker) < lower.rindex("</html>"), html
+   assert not html.lstrip().startswith(marker), html
+   assert "ORIGINAL_BODY" in html, html
+   PY
    ```
-3. 清理：
+4. 清理：
    ```bash
    curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-htmlprepend
+   rm -f /tmp/bifrost-htmlprepend.html
+   rm -rf "$(cat /tmp/bifrost-htmlprepend-upstream-dir)"
+   rm -f /tmp/bifrost-htmlprepend-upstream-dir
    ```
 
 **预期结果**：
-- 响应体 HTML 的 `<head>` 标签之后包含 `<meta name="injected" content="true">`
+- 响应体 HTML 的 `<html>` 开始标签之后、`</html>` 之前包含 `<bifrost-prepend-marker>`
+- 注入内容不会出现在 `<!doctype>` 或 `<html>` 之前
 - 原始 HTML 内容保持不变
 
 ---
 
-### TC-PRA-27：htmlBody 协议（替换整个 HTML 内容）
+### TC-PRA-27：htmlBody 协议（替换 `<body>` 标签内部内容）
 
 **操作步骤**：
 1. 通过 API 创建规则：
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-htmlbody", "content": "httpbin.org/html htmlBody://<html><body><h1>Replaced by Bifrost</h1></body></html>", "enabled": true}'
+     -d '{"name": "test-htmlbody", "content": "httpbin.org/html htmlBody://<h1>Replaced by Bifrost</h1>", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -672,8 +745,9 @@
    ```
 
 **预期结果**：
-- 响应体为 `<html><body><h1>Replaced by Bifrost</h1></body></html>`
-- 原始 HTML 内容被完全替换
+- 响应体保留原始 HTML 文档结构和 `<body>` 标签
+- `<body>` 与 `</body>` 之间的原始内容被替换为 `<h1>Replaced by Bifrost</h1>`
+- 原始 body 内部内容不再出现
 
 ---
 
@@ -722,6 +796,277 @@
 **预期结果**：
 - 响应体包含 `body{color:black;}`
 - 响应体末尾包含 `body{background:red;}`
+
+---
+
+### TC-PRA-29A：html/js/css 内容注入协议按响应类型执行追加、前置、替换
+
+**操作步骤**：
+1. 在单独终端启动本地内容类型上游服务，并保持该终端运行：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           if self.path.endswith(".html"):
+               content_type = "text/html"
+               body = "<!doctype html><html><head><title>original</title></head><body>HTML_ORIGINAL</body></html>"
+           elif self.path.endswith(".js"):
+               content_type = "application/javascript"
+               body = "window.original=1;"
+           elif self.path.endswith(".css"):
+               content_type = "text/css"
+               body = ".original{color:black;}"
+           else:
+               self.send_response(404)
+               self.end_headers()
+               return
+           data = body.encode()
+           self.send_response(200)
+           self.send_header("Content-Type", content_type)
+           self.send_header("Content-Length", str(len(data)))
+           self.end_headers()
+           self.wfile.write(data)
+
+   ThreadingHTTPServer(("127.0.0.1", 18082), Handler).serve_forever()
+   PY
+   ```
+2. 通过 API 创建一组矩阵规则：
+   ```bash
+   python3 - <<'PY'
+   import json
+   import textwrap
+   import urllib.request
+
+   content = textwrap.dedent("""\
+   matrix-html-append.local host://127.0.0.1:18082
+   matrix-html-append.local htmlAppend://(<script>htmlAppend()</script>)
+   matrix-html-prepend.local host://127.0.0.1:18082
+   matrix-html-prepend.local htmlPrepend://(<!--HTML_PREPEND-->)
+   matrix-html-body.local host://127.0.0.1:18082
+   matrix-html-body.local htmlBody://(<main>HTML_REPLACED</main>)
+   matrix-js-append.local host://127.0.0.1:18082
+   matrix-js-append.local jsAppend://(window.appended=1;)
+   matrix-js-prepend.local host://127.0.0.1:18082
+   matrix-js-prepend.local jsPrepend://(window.prepended=1;)
+   matrix-js-body.local host://127.0.0.1:18082
+   matrix-js-body.local jsBody://(window.replaced=1;)
+   matrix-css-append.local host://127.0.0.1:18082
+   matrix-css-append.local cssAppend://(.appended{color:red;})
+   matrix-css-prepend.local host://127.0.0.1:18082
+   matrix-css-prepend.local cssPrepend://(:root{--prepended:1;})
+   matrix-css-body.local host://127.0.0.1:18082
+   matrix-css-body.local cssBody://(.replaced{color:red;})
+   """)
+   payload = json.dumps({
+       "name": "test-content-injection-matrix",
+       "content": content,
+       "enabled": True,
+   }).encode()
+   req = urllib.request.Request(
+       "http://127.0.0.1:8800/_bifrost/api/rules",
+       data=payload,
+       headers={"Content-Type": "application/json"},
+       method="POST",
+   )
+   print(urllib.request.urlopen(req).read().decode())
+   PY
+   ```
+3. 执行矩阵断言：
+   ```bash
+   python3 - <<'PY'
+   import subprocess
+
+   def body(host):
+       return subprocess.check_output([
+           "curl",
+           "-sS",
+           "-x",
+           "http://127.0.0.1:8800",
+           f"http://{host}/{host.split('-')[1]}.{host.split('-')[1]}",
+       ]).decode()
+
+   html_append = body("matrix-html-append.local")
+   assert "<script>htmlAppend()</script>" in html_append, html_append
+   assert html_append.rindex("<script>htmlAppend()</script>") < html_append.lower().rindex("</html>"), html_append
+   html_prepend = body("matrix-html-prepend.local")
+   assert html_prepend.startswith("<!doctype html><html><!--HTML_PREPEND-->"), html_prepend
+   assert html_prepend.index("<!--HTML_PREPEND-->") > html_prepend.lower().index("<html>"), html_prepend
+   assert html_prepend.index("<!--HTML_PREPEND-->") < html_prepend.lower().rindex("</html>"), html_prepend
+   html_body = body("matrix-html-body.local")
+   assert "<head><title>original</title></head>" in html_body, html_body
+   assert html_body.index("<body><main>HTML_REPLACED</main>") < html_body.lower().rindex("</body>"), html_body
+   assert "HTML_ORIGINAL" not in html_body, html_body
+
+   assert body("matrix-js-append.local") == "window.original=1;window.appended=1;"
+   assert body("matrix-js-prepend.local") == "window.prepended=1;window.original=1;"
+   assert body("matrix-js-body.local") == "window.replaced=1;"
+   assert body("matrix-css-append.local") == ".original{color:black;}.appended{color:red;}"
+   assert body("matrix-css-prepend.local") == ":root{--prepended:1;}.original{color:black;}"
+   assert body("matrix-css-body.local") == ".replaced{color:red;}"
+   PY
+   ```
+4. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-content-injection-matrix
+   # 在运行本地内容类型上游服务的终端按 Ctrl+C 停止服务
+   ```
+
+**预期结果**：
+- `htmlAppend/htmlPrepend/htmlBody` 只在 `text/html` 响应上生效，分别完成 `</html>` 前追加、`<html>` 开始标签后前置、`<body>` 标签内部替换
+- `jsAppend/jsPrepend/jsBody` 只在 JavaScript 响应上生效，分别完成末尾追加、开头前置、整段替换
+- `cssAppend/cssPrepend/cssBody` 只在 CSS 响应上生效，分别完成末尾追加、开头前置、整段替换
+
+---
+
+### TC-PRA-29B：回归 - HTTPS 页面转发到 HTTP 上游后 htmlAppend 仍生效
+
+**背景**：
+- 已知失败请求：`REQ-69f08a65-002153` / sequence `1016158`
+- 请求：`GET https://nextoncall.bytedance.net/assistant`
+- 命中规则：`HtmlAppend` + `Http`
+- 实际上游：`http://localhost:5173/assistant`
+- 修复前现象：Traffic 记录显示命中 `HtmlAppend`，但响应体仍为原始 HTML，未插入 vConsole 脚本。
+
+**操作步骤**：
+1. 启动本地 HTML 上游服务，模拟 `localhost:5173`：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           body = """<!doctype html>
+   <html lang="en">
+     <head><title>Orca</title></head>
+     <body>
+       <div id="root"></div>
+       <script type="module" src="/assistant/src/main.tsx"></script>
+     </body>
+   </html>"""
+           data = body.encode()
+           self.send_response(200)
+           self.send_header("Content-Type", "text/html")
+           self.send_header("Content-Length", str(len(data)))
+           self.end_headers()
+           self.wfile.write(data)
+
+   ThreadingHTTPServer(("127.0.0.1", 18084), Handler).serve_forever()
+   PY
+   ```
+2. 启动临时 Bifrost（独立数据目录、非 9900 端口、禁用系统代理）：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-human-https-htmlappend.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy --skip-cert-check -y
+   ```
+3. 创建回归规则：
+   ```bash
+   curl -X POST http://127.0.0.1:18884/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name":"test-https-htmlappend-forwarded-http","content":"https://html-tunnel.local/ http://127.0.0.1:18084\nhttps://html-tunnel.local/ htmlAppend://(<script>httpsHtmlAppend()</script>)","enabled":true}'
+   ```
+4. 通过 HTTPS URL 访问代理：
+   ```bash
+   curl -k -sS -x http://127.0.0.1:18884 https://html-tunnel.local/assistant -o /tmp/htmlappend-tunnel.html
+   python3 - <<'PY'
+   body = open("/tmp/htmlappend-tunnel.html").read()
+   marker = "<script>httpsHtmlAppend()</script>"
+   assert marker in body, body
+   assert body.rindex(marker) < body.lower().rindex("</html>"), body
+   assert "<div id=\"root\"></div>" in body, body
+   print("TC-PRA-29B passed")
+   PY
+   ```
+5. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:18884/_bifrost/api/rules/test-https-htmlappend-forwarded-http
+   # 停止临时 Bifrost 与本地 HTML 上游服务
+   ```
+
+**预期结果**：
+- HTTPS 请求命中 `HtmlAppend` 和 `Http` 规则后，响应 HTML 中包含 `<script>httpsHtmlAppend()</script>`
+- 注入脚本位于最后一个 `</html>` 之前
+- 原始 HTML 主体仍存在
+
+---
+
+### TC-PRA-29C：回归 - mock/file/template 生成资源也执行 HTML/JS/CSS 内容注入
+
+**背景**：
+- `file://`、`rawfile://`、`tpl://`、`statusCode` 等规则会在代理 handler 中直接生成响应并提前返回。
+- 修复前这些立即响应不会经过普通上游响应的 `apply_content_injection`，因此可能出现 Traffic 显示命中 `htmlAppend/jsAppend/cssAppend`，但生成的资源体没有变化。
+
+**操作步骤**：
+1. 启动临时 Bifrost（独立数据目录、非 9900 端口、禁用系统代理）：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-human-mock-injection.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18885 --unsafe-ssl --no-system-proxy --skip-cert-check -y
+   ```
+2. 准备 mock 文件资源并创建注入规则：
+   ```bash
+   MOCK_DIR="$(mktemp -d /tmp/bifrost-human-mock-files.XXXXXX)"
+   printf '<html><body>mock</body></html>' > "$MOCK_DIR/mock.html"
+   printf 'window.mock=1;' > "$MOCK_DIR/mock.js"
+   printf '.mock{color:black;}' > "$MOCK_DIR/mock.css"
+
+   python3 - <<'PY' > /tmp/bifrost-mock-content-injection-rule.json
+   import json, os
+   mock_dir = os.environ["MOCK_DIR"]
+   content = "\n".join([
+       f"mock-html.local file://{mock_dir}/mock.html",
+       "mock-html.local htmlAppend://(<script>mockHtml()</script>)",
+       f"mock-js.local file://{mock_dir}/mock.js",
+       "mock-js.local jsAppend://(window.mockAppend=1;)",
+       f"mock-css.local file://{mock_dir}/mock.css",
+       "mock-css.local cssAppend://(.mockAppend{color:red;})",
+   ])
+   print(json.dumps({
+       "name": "test-mock-content-injection",
+       "content": content,
+       "enabled": True,
+   }))
+   PY
+
+   curl -X POST http://127.0.0.1:18885/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     --data-binary @/tmp/bifrost-mock-content-injection-rule.json
+   ```
+3. 通过代理请求三类 mock 资源并断言：
+   ```bash
+   python3 - <<'PY'
+   import subprocess
+
+   proxy = "http://127.0.0.1:18885"
+
+   def body(url):
+       return subprocess.check_output(["curl", "-sS", "-x", proxy, url]).decode()
+
+   html = body("http://mock-html.local/index.html")
+   marker = "<script>mockHtml()</script>"
+   assert marker in html, html
+   assert html.rindex(marker) < html.lower().rindex("</html>"), html
+
+   js = body("http://mock-js.local/app.js")
+   assert js == "window.mock=1;window.mockAppend=1;", js
+
+   css = body("http://mock-css.local/style.css")
+   assert css == ".mock{color:black;}.mockAppend{color:red;}", css
+
+   print("TC-PRA-29C passed")
+   PY
+   ```
+4. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:18885/_bifrost/api/rules/test-mock-content-injection
+   rm -rf "$MOCK_DIR" /tmp/bifrost-mock-content-injection-rule.json
+   # 停止临时 Bifrost
+   ```
+
+**预期结果**：
+- `file://` 生成的 HTML 响应会执行 `htmlAppend`，且注入位于 `</html>` 前
+- `file://` 生成的 JavaScript 响应会执行 `jsAppend`
+- `file://` 生成的 CSS 响应会执行 `cssAppend`
 
 ---
 

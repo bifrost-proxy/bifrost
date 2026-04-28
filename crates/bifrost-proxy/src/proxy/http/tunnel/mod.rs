@@ -59,7 +59,7 @@ use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
 use crate::transform::decompress::get_content_encoding;
 use crate::transform::merge_cookie_header_values;
-use crate::transform::{apply_body_rules, Phase};
+use crate::transform::{apply_body_rules, apply_content_injection, Phase};
 use crate::transform::{compress_body, maybe_inject_bifrost_badge_html};
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -3081,11 +3081,18 @@ async fn handle_intercepted_request_with_protocol(
         .headers
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    let final_body = apply_body_rules(
+    let body_processed = apply_body_rules(
         Bytes::from(res_body_bytes.clone()),
         &resolved_rules,
         Phase::Response,
         res_content_type,
+        verbose_logging,
+        &ctx,
+    );
+    let final_body = apply_content_injection(
+        body_processed,
+        res_content_type.unwrap_or(""),
+        &resolved_rules,
         verbose_logging,
         &ctx,
     );
