@@ -12,6 +12,7 @@ use crate::handlers::{
     cert::{handle_cert, handle_cert_public, handle_proxy_public},
     config::handle_config,
     cors_preflight,
+    devtools::handle_devtools,
     env::handle_env,
     error_response, frames,
     group::handle_group,
@@ -106,6 +107,8 @@ impl AdminRouter {
 
         if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
+        } else if path.starts_with("/api/devtools") {
+            handle_devtools(req, state, path).await
         } else if path.starts_with("/api/traffic") {
             handle_traffic(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/metrics") {

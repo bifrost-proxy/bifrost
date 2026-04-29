@@ -996,7 +996,7 @@
 **背景**：
 - 已知失败请求：sequence `278778` / traffic id `REQ-69f0dc94-000857`
 - 请求：`GET https://nextoncall.bytedance.net/?appType=all&page=1`
-- 命中规则：`HtmlAppend` 内容注入规则
+- 命中规则：`HtmlAppend` + `DevTools`
 - 原始响应头：`Content-Encoding: gzip`、`Content-Type: text/html; charset=utf-8`
 - 修复前现象：Traffic 缓存体表现为 gzip/二进制内容后直接拼接明文 vConsole 脚本，`gzip -t` 无法校验，浏览器也无法把响应作为正常 HTML 解析。
 

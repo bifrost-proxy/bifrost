@@ -8,6 +8,7 @@ pub mod client_trust_tracker;
 pub mod connection_monitor;
 pub mod connection_registry;
 pub mod cors;
+pub mod devtools;
 mod frame_store;
 mod handlers;
 pub mod ip_tls_pending;

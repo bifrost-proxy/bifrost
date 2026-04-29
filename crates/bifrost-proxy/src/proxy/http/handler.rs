@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use base64::Engine;
 use bifrost_admin::{
+    devtools::{DevtoolsMode as AdminDevtoolsMode, MatchedDevtoolsRule, RegisterPageInput},
     AdminRouter, AdminState, RequestTiming, SharedPushManager, TrafficRecord, TrafficType,
     ADMIN_PATH_PREFIX,
 };
@@ -37,7 +38,8 @@ use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
 };
 use crate::server::{
-    full_body, with_trailers, BoxBody, ResolvedRules, RulesResolver, ADMIN_VIRTUAL_HOST,
+    full_body, with_trailers, BoxBody, DevtoolsInjectMode, DevtoolsMode, DevtoolsRule,
+    ResolvedRules, RulesResolver, ADMIN_VIRTUAL_HOST,
 };
 use crate::transform::apply_req_rules;
 use crate::transform::apply_res_rules;
@@ -428,6 +430,611 @@ pub fn needs_body_processing(rules: &ResolvedRules) -> bool {
         || rules.css_prepend.is_some()
         || rules.css_body.is_some()
         || !rules.res_scripts.is_empty()
+}
+
+pub(super) fn devtools_bridge_requested(rules: &ResolvedRules) -> bool {
+    effective_devtools_rule(rules)
+        .as_ref()
+        .map(|rule| {
+            !rule.deny
+                && matches!(
+                    rule.inject,
+                    DevtoolsInjectMode::Auto | DevtoolsInjectMode::Bridge
+                )
+        })
+        .unwrap_or(false)
+}
+
+fn effective_devtools_rule(rules: &ResolvedRules) -> Option<DevtoolsRule> {
+    if let Some(rule) = rules.devtools.clone() {
+        return Some(rule);
+    }
+    let matched = rules
+        .rules
+        .iter()
+        .rev()
+        .find(|rule| rule.protocol == Protocol::DevTools)?;
+    Some(parse_devtools_rule_value(&matched.value))
+}
+
+fn parse_devtools_rule_value(value: &str) -> DevtoolsRule {
+    let mut rule = DevtoolsRule {
+        raw_value: value.to_string(),
+        ..Default::default()
+    };
+
+    for part in value.split([',', '&']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (key, raw_value) = part.split_once('=').unwrap_or((part, "true"));
+        let key = key.trim();
+        let raw_value = raw_value.trim();
+        match key {
+            "mode" if raw_value.eq_ignore_ascii_case("control") => {
+                rule.mode = DevtoolsMode::Control;
+            }
+            "mode" if raw_value.eq_ignore_ascii_case("read") => {
+                rule.mode = DevtoolsMode::Read;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("bridge") => {
+                rule.inject = DevtoolsInjectMode::Bridge;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("off") => {
+                rule.inject = DevtoolsInjectMode::Off;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("auto") => {
+                rule.inject = DevtoolsInjectMode::Auto;
+            }
+            "deny" => {
+                rule.deny = matches!(
+                    raw_value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    rule
+}
+
+fn admin_devtools_mode(rule: &crate::server::DevtoolsRule) -> AdminDevtoolsMode {
+    match rule.mode {
+        crate::server::DevtoolsMode::Read => AdminDevtoolsMode::Read,
+        crate::server::DevtoolsMode::Control => AdminDevtoolsMode::Control,
+    }
+}
+
+fn devtools_matched_rule(rules: &ResolvedRules) -> Option<MatchedDevtoolsRule> {
+    rules
+        .rules
+        .iter()
+        .rev()
+        .find(|rule| rule.protocol == Protocol::DevTools)
+        .map(|rule| MatchedDevtoolsRule {
+            pattern: rule.pattern.clone(),
+            raw: rule.raw.clone(),
+            line: rule.line,
+        })
+}
+
+fn origin_from_url(url: &str) -> String {
+    Url::parse(url)
+        .map(|parsed| {
+            let scheme = parsed.scheme();
+            let host = parsed.host_str().unwrap_or_default();
+            if let Some(port) = parsed.port() {
+                format!("{scheme}://{host}:{port}")
+            } else {
+                format!("{scheme}://{host}")
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn insert_devtools_bridge_script(html: &str, script: &str) -> String {
+    let mut html = html.to_string();
+    let lower = html.to_lowercase();
+
+    if let Some(head_start) = lower.find("<head") {
+        if let Some(head_end_offset) = lower[head_start..].find('>') {
+            let insert_at = head_start + head_end_offset + 1;
+            html.insert_str(insert_at, script);
+            return html;
+        }
+    }
+
+    if let Some(html_start) = lower.find("<html") {
+        if let Some(html_end_offset) = lower[html_start..].find('>') {
+            let insert_at = html_start + html_end_offset + 1;
+            html.insert_str(insert_at, script);
+            return html;
+        }
+    }
+
+    format!("{script}{html}")
+}
+
+fn devtools_bridge_script(page_id: &str, token: &str) -> String {
+    let endpoint = format!("/_bifrost/api/devtools/bridge/{page_id}");
+    let endpoint_json = serde_json::to_string(&endpoint).unwrap_or_else(|_| "\"\"".to_string());
+    let page_id_json = serde_json::to_string(page_id).unwrap_or_else(|_| "\"\"".to_string());
+    let token_json = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r##"<script id="__bifrost_devtools_bridge__">
+(function() {{
+  if (window.__BIFROST_DEVTOOLS_BRIDGE__) return;
+  const endpoint = {endpoint_json};
+  const token = {token_json};
+  const pageId = {page_id_json};
+  const rawFetch = window.fetch ? window.fetch.bind(window) : null;
+  const tabWindowNamePrefix = "__bifrost_devtools_tab_id__:";
+  const tabStorageKey = "__bifrost_devtools_tab_id__";
+  let tabId = "";
+  try {{
+    if (window.name && window.name.indexOf(tabWindowNamePrefix) === 0) {{
+      tabId = window.name.slice(tabWindowNamePrefix.length);
+    }}
+    if (!tabId) {{
+      tabId = "tab_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      window.name = tabWindowNamePrefix + tabId;
+      window.sessionStorage.setItem(tabStorageKey, tabId);
+    }}
+  }} catch (_) {{
+    tabId = "tab_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try {{ window.name = tabWindowNamePrefix + tabId; }} catch (_) {{}}
+  }}
+  const post = function(path, payload) {{
+    try {{
+      if (!rawFetch) return;
+      rawFetch(endpoint + path, {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(Object.assign({{token: token}}, payload || {{}}))
+      }}).catch(function() {{}});
+    }} catch (_) {{}}
+  }};
+  const bridge = {{
+    page_id: pageId,
+    tab_id: tabId,
+    state: "connecting",
+    post: post
+  }};
+  window.__BIFROST_DEVTOOLS_BRIDGE__ = bridge;
+  let nextNodeId = 1;
+  let nodeMap = Object.create(null);
+  let domRefreshTimer = 0;
+  let lastDomSignature = "";
+  let lastStorageSnapshot = "";
+  let highlightedNode = null;
+  let highlightOverlay = null;
+  const observedResources = Object.create(null);
+  const internalNodeIds = {{
+    "__bifrost_devtools_bridge__": true,
+    "__bifrost_devtools_highlight__": true
+  }};
+  const isBridgeInternalNode = function(node) {{
+    if (!node) return false;
+    if (node.nodeType !== Node.ELEMENT_NODE) node = node.parentElement;
+    if (!node) return false;
+    if (internalNodeIds[node.id]) return true;
+    try {{
+      return !!(node.closest && node.closest("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__"));
+    }} catch (_) {{
+      return false;
+    }}
+  }};
+  const externalChildNodes = function(node) {{
+    return Array.prototype.slice.call(node.childNodes || []).filter(function(child) {{
+      return !isBridgeInternalNode(child);
+    }});
+  }};
+  const sanitizedOuterHTML = function() {{
+    try {{
+      if (!document.documentElement) return "";
+      const clone = document.documentElement.cloneNode(true);
+      Array.prototype.slice.call(clone.querySelectorAll("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__")).forEach(function(node) {{
+        if (node.parentNode) node.parentNode.removeChild(node);
+      }});
+      return clone.outerHTML.slice(0, 1048576);
+    }} catch (_) {{
+      return document.documentElement ? document.documentElement.outerHTML.slice(0, 1048576) : "";
+    }}
+  }};
+  const attrList = function(node) {{
+    const attrs = [];
+    if (!node || !node.attributes) return attrs;
+    for (let i = 0; i < node.attributes.length; i++) {{
+      attrs.push(node.attributes[i].name, node.attributes[i].value);
+    }}
+    return attrs;
+  }};
+  const serializeNode = function(node) {{
+    const id = nextNodeId++;
+    nodeMap[id] = node;
+    const children = externalChildNodes(node);
+    if (node.nodeType === Node.DOCUMENT_NODE) {{
+      return {{
+        nodeId: id,
+        backendNodeId: id,
+        nodeType: 9,
+        nodeName: "#document",
+        localName: "",
+        nodeValue: "",
+        documentURL: location.href,
+        baseURL: document.baseURI || location.href,
+        xmlVersion: "",
+        compatibilityMode: document.compatMode === "BackCompat" ? "QuirksMode" : "NoQuirksMode",
+        children: children.map(serializeNode)
+      }};
+    }}
+    if (node.nodeType === Node.TEXT_NODE) {{
+      return {{
+        nodeId: id,
+        backendNodeId: id,
+        nodeType: 3,
+        nodeName: "#text",
+        localName: "",
+        nodeValue: (node.nodeValue || "").slice(0, 4096)
+      }};
+    }}
+    if (node.nodeType === Node.COMMENT_NODE) {{
+      return {{
+        nodeId: id,
+        backendNodeId: id,
+        nodeType: 8,
+        nodeName: "#comment",
+        localName: "",
+        nodeValue: (node.nodeValue || "").slice(0, 4096)
+      }};
+    }}
+    return {{
+      nodeId: id,
+      backendNodeId: id,
+      nodeType: node.nodeType,
+      nodeName: node.nodeName || "",
+      localName: node.localName || "",
+      nodeValue: node.nodeValue || "",
+      attributes: attrList(node),
+      childNodeCount: children.length,
+      children: children.slice(0, 2500).map(serializeNode)
+    }};
+  }};
+  const storageSnapshot = function() {{
+    const collect = function(storage) {{
+      const entries = [];
+      try {{
+        for (let i = 0; i < storage.length; i++) {{
+          const key = storage.key(i);
+          entries.push([key, storage.getItem(key)]);
+        }}
+      }} catch (_) {{}}
+      return entries;
+    }};
+    const cookies = [];
+    try {{
+      if (document.cookie) {{
+        document.cookie.split(";").forEach(function(part) {{
+          const idx = part.indexOf("=");
+          if (idx > -1) cookies.push([part.slice(0, idx).trim(), part.slice(idx + 1)]);
+        }});
+      }}
+    }} catch (_) {{}}
+    return {{
+      local_storage: collect(window.localStorage),
+      session_storage: collect(window.sessionStorage),
+      cookies: cookies
+    }};
+  }};
+  const performanceNetwork = function() {{
+    try {{
+      return performance.getEntriesByType("resource").filter(function(entry) {{
+        return entry.name && entry.name.indexOf("/_bifrost/api/devtools/bridge/") === -1;
+      }}).slice(-100).filter(function(entry) {{
+        const key = entry.name + "::" + entry.startTime;
+        if (observedResources[key]) return false;
+        observedResources[key] = true;
+        return true;
+      }}).map(function(entry) {{
+        return {{
+          url: entry.name,
+          method: "GET",
+          status: 0,
+          type: entry.initiatorType || "Other"
+        }};
+      }});
+    }} catch (_) {{
+      return [];
+    }}
+  }};
+  const hello = function(includeDom, networkEvents) {{
+    if (includeDom) {{
+      nextNodeId = 1;
+      nodeMap = Object.create(null);
+    }}
+    bridge.state = "connected";
+    const payload = {{
+      tab_id: tabId,
+      title: document.title || null,
+      url: location.href,
+      user_agent: navigator.userAgent,
+      storage: storageSnapshot(),
+      network: networkEvents || []
+    }};
+    if (includeDom) {{
+      const domTree = serializeNode(document);
+      const domSignature = JSON.stringify(domTree);
+      if (domSignature !== lastDomSignature) {{
+        lastDomSignature = domSignature;
+        payload.dom_snapshot = sanitizedOuterHTML();
+        payload.dom_tree = domTree;
+      }}
+    }}
+    post("/hello", payload);
+  }};
+  const sendStorageIfChanged = function() {{
+    try {{
+      const snapshot = storageSnapshot();
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === lastStorageSnapshot) return;
+      lastStorageSnapshot = serialized;
+      hello(false, []);
+    }} catch (_) {{}}
+  }};
+  const scheduleDomRefresh = function(delay) {{
+    if (domRefreshTimer) return;
+    domRefreshTimer = window.setTimeout(function() {{
+      domRefreshTimer = 0;
+      hello(true, performanceNetwork());
+    }}, delay || 250);
+  }};
+  const isExternalStructuralMutation = function(mutation) {{
+    if (!mutation || mutation.type !== "childList") return false;
+    if (isBridgeInternalNode(mutation.target)) return false;
+    const added = Array.prototype.slice.call(mutation.addedNodes || []);
+    const removed = Array.prototype.slice.call(mutation.removedNodes || []);
+    return added.concat(removed).some(function(node) {{
+      return !isBridgeInternalNode(node);
+    }});
+  }};
+  const ensureHighlightOverlay = function() {{
+    if (highlightOverlay && document.documentElement.contains(highlightOverlay)) return highlightOverlay;
+    highlightOverlay = document.createElement("div");
+    highlightOverlay.id = "__bifrost_devtools_highlight__";
+    highlightOverlay.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "pointer-events:none",
+      "border:2px solid #1677ff",
+      "box-shadow:0 0 0 99999px rgba(22,119,255,0.08),0 0 0 1px rgba(255,255,255,0.85) inset",
+      "border-radius:2px",
+      "box-sizing:border-box",
+      "display:none"
+    ].join(";");
+    (document.documentElement || document.body).appendChild(highlightOverlay);
+    return highlightOverlay;
+  }};
+  const updateHighlightOverlay = function() {{
+    if (!highlightedNode || !highlightedNode.getBoundingClientRect) return;
+    const rect = highlightedNode.getBoundingClientRect();
+    const overlay = ensureHighlightOverlay();
+    if (rect.width <= 0 && rect.height <= 0) {{
+      overlay.style.display = "none";
+      return;
+    }}
+    overlay.style.display = "block";
+    overlay.style.left = Math.max(0, rect.left) + "px";
+    overlay.style.top = Math.max(0, rect.top) + "px";
+    overlay.style.width = Math.max(1, rect.width) + "px";
+    overlay.style.height = Math.max(1, rect.height) + "px";
+  }};
+  const highlightNode = function(nodeId) {{
+    const node = nodeMap[nodeId];
+    highlightedNode = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    updateHighlightOverlay();
+  }};
+  const hideHighlight = function() {{
+    highlightedNode = null;
+    if (highlightOverlay) highlightOverlay.style.display = "none";
+  }};
+  const pollOverlay = function() {{
+    try {{
+      if (!rawFetch) return;
+      rawFetch(endpoint + "/overlay-next", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{token: token}})
+      }}).then(function(response) {{
+        return response.ok ? response.json() : null;
+      }}).then(function(payload) {{
+        const command = payload && payload.command;
+        if (!command) return;
+        if (command.type === "highlight_node") highlightNode(command.node_id);
+        if (command.type === "hide_highlight") hideHighlight();
+      }}).catch(function() {{}});
+    }} catch (_) {{}}
+  }};
+  const stringifyArgs = function(args) {{
+    return Array.prototype.slice.call(args).map(function(value) {{
+      try {{
+        return typeof value === "string" ? value : JSON.stringify(value);
+      }} catch (_) {{
+        return String(value);
+      }}
+    }}).join(" ");
+  }};
+  ["log", "info", "warn", "error", "debug"].forEach(function(level) {{
+    const original = console[level];
+    console[level] = function() {{
+      try {{
+        post("/console", {{level: level, text: stringifyArgs(arguments)}});
+      }} catch (_) {{}}
+      return original.apply(console, arguments);
+    }};
+  }});
+  const recordNetwork = function(event) {{
+    if (!event || !event.url || event.url.indexOf("/_bifrost/api/devtools/bridge/") !== -1) return;
+    post("/network", {{event: event}});
+  }};
+  try {{
+    if (window.PerformanceObserver) {{
+      const resourceObserver = new PerformanceObserver(function(list) {{
+        list.getEntries().forEach(function(entry) {{
+          if (!entry || !entry.name || entry.name.indexOf("/_bifrost/api/devtools/bridge/") !== -1) return;
+          const key = entry.name + "::" + entry.startTime;
+          if (observedResources[key]) return;
+          observedResources[key] = true;
+          recordNetwork({{url: entry.name, method: "GET", status: 0, type: entry.initiatorType || "Other"}});
+        }});
+      }});
+      resourceObserver.observe({{type: "resource", buffered: true}});
+    }}
+  }} catch (_) {{}}
+  try {{
+    if (window.Storage && window.Storage.prototype) {{
+      ["setItem", "removeItem", "clear"].forEach(function(method) {{
+        const original = window.Storage.prototype[method];
+        if (typeof original !== "function") return;
+        window.Storage.prototype[method] = function() {{
+          const result = original.apply(this, arguments);
+          sendStorageIfChanged();
+          return result;
+        }};
+      }});
+    }}
+  }} catch (_) {{}}
+  window.addEventListener("storage", sendStorageIfChanged, true);
+  const remoteObject = function(value) {{
+    if (value === undefined) return {{type: "undefined", description: "undefined"}};
+    if (value === null) return {{type: "object", subtype: "null", value: null, description: "null"}};
+    const valueType = typeof value;
+    if (valueType === "string" || valueType === "boolean" || valueType === "number") {{
+      return {{type: valueType, value: value, description: String(value)}};
+    }}
+    if (valueType === "bigint") {{
+      return {{type: "bigint", unserializableValue: String(value) + "n", description: String(value) + "n"}};
+    }}
+    if (valueType === "function") {{
+      return {{type: "function", description: String(value).slice(0, 4096)}};
+    }}
+    let description = "";
+    try {{ description = JSON.stringify(value); }} catch (_) {{ description = String(value); }}
+    return {{type: "object", description: (description || String(value)).slice(0, 4096)}};
+  }};
+  const pollEval = function() {{
+    try {{
+      if (!rawFetch) return;
+      rawFetch(endpoint + "/eval-next", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{token: token}})
+      }}).then(function(response) {{
+        return response.ok ? response.json() : null;
+      }}).then(function(payload) {{
+        const command = payload && payload.command;
+        if (!command) return;
+        try {{
+          const value = (0, eval)(command.expression);
+          Promise.resolve(value).then(function(resolved) {{
+            post("/eval-result", {{eval_id: command.eval_id, result: remoteObject(resolved)}});
+          }}, function(error) {{
+            post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
+          }});
+        }} catch (error) {{
+          post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
+        }}
+      }}).catch(function() {{}});
+    }} catch (_) {{}}
+  }};
+  const originalFetch = window.fetch;
+  if (originalFetch) {{
+    window.fetch = function(input, init) {{
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const method = (init && init.method) || (input && input.method) || "GET";
+      return originalFetch.apply(this, arguments).then(function(response) {{
+        try {{ recordNetwork({{url: response.url || url, method: method, status: response.status, type: "Fetch"}}); }} catch (_) {{}}
+        return response;
+      }});
+    }};
+  }}
+  const OriginalXHR = window.XMLHttpRequest;
+  if (OriginalXHR) {{
+    window.XMLHttpRequest = function() {{
+      const xhr = new OriginalXHR();
+      let url = "";
+      let method = "GET";
+      const open = xhr.open;
+      xhr.open = function(m, u) {{
+        method = m || "GET";
+        url = u || "";
+        return open.apply(xhr, arguments);
+      }};
+      xhr.addEventListener("loadend", function() {{
+        try {{ recordNetwork({{url: xhr.responseURL || url, method: method, status: xhr.status, type: "XHR"}}); }} catch (_) {{}}
+      }});
+      return xhr;
+    }};
+  }}
+  try {{
+    const observer = new MutationObserver(function(mutations) {{
+      if (mutations.some(isExternalStructuralMutation)) scheduleDomRefresh(250);
+    }});
+    observer.observe(document.documentElement || document, {{
+      childList: true,
+      subtree: true
+    }});
+  }} catch (_) {{}}
+  window.addEventListener("resize", updateHighlightOverlay, true);
+  window.addEventListener("scroll", updateHighlightOverlay, true);
+  window.setInterval(pollEval, 250);
+  window.setInterval(pollOverlay, 100);
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", function() {{
+      lastStorageSnapshot = JSON.stringify(storageSnapshot());
+      hello(true, performanceNetwork());
+    }}, {{once: true}});
+  }} else {{
+    lastStorageSnapshot = JSON.stringify(storageSnapshot());
+    hello(true, performanceNetwork());
+  }}
+}})();
+</script>"##
+    )
+}
+
+pub(super) fn maybe_inject_devtools_bridge_html(
+    body: Bytes,
+    content_type: &str,
+    rules: &ResolvedRules,
+    state: Option<&AdminState>,
+    record_url: &str,
+    traffic_id: &str,
+) -> Bytes {
+    if !content_type.to_ascii_lowercase().starts_with("text/html")
+        || !devtools_bridge_requested(rules)
+    {
+        return body;
+    }
+    let Some(state) = state else {
+        return body;
+    };
+    let Some(devtools_rule) = effective_devtools_rule(rules) else {
+        return body;
+    };
+
+    let input = RegisterPageInput {
+        url: record_url.to_string(),
+        origin: origin_from_url(record_url),
+        traffic_id: traffic_id.to_string(),
+        mode: admin_devtools_mode(&devtools_rule),
+        matched_rule: devtools_matched_rule(rules),
+    };
+    let (page_id, token) = state.devtools_broker.register_page_candidate(input);
+    let script = devtools_bridge_script(&page_id, &token);
+    let html = String::from_utf8_lossy(&body);
+    Bytes::from(insert_devtools_bridge_script(&html, &script))
 }
 
 pub fn needs_response_override(rules: &ResolvedRules) -> bool {
@@ -1739,8 +2346,11 @@ pub async fn handle_http_request(
     let res_content_type = get_content_type(&res_parts);
     let force_body_processing_for_badge =
         inject_bifrost_badge && res_content_type.starts_with("text/html");
-    let needs_processing =
-        needs_body_processing(&resolved_rules) || force_body_processing_for_badge;
+    let force_body_processing_for_devtools =
+        devtools_bridge_requested(&resolved_rules) && res_content_type.starts_with("text/html");
+    let needs_processing = needs_body_processing(&resolved_rules)
+        || force_body_processing_for_badge
+        || force_body_processing_for_devtools;
     let has_res_body_override = resolved_rules.res_body.is_some();
     let needs_res_body_read = needs_processing && !has_res_body_override;
 
@@ -1860,6 +2470,8 @@ pub async fn handle_http_request(
             .unwrap_or_else(|| format!(">{}", res_body_limit));
         let skip_detail = if force_body_processing_for_badge {
             "skipping body rules and badge injection"
+        } else if force_body_processing_for_devtools {
+            "skipping body rules and DevTools bridge injection"
         } else {
             "skipping body rules"
         };
@@ -2124,6 +2736,67 @@ pub async fn handle_http_request(
         }
         injection_result.body
     };
+
+    if content_type.to_ascii_lowercase().starts_with("text/html")
+        && devtools_bridge_requested(&resolved_rules)
+    {
+        res_parts.headers.insert(
+            hyper::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        res_parts
+            .headers
+            .insert(hyper::header::PRAGMA, HeaderValue::from_static("no-cache"));
+        let final_content_encoding = response_content_encoding(&res_parts);
+        if let Some(content_encoding) = final_content_encoding.as_deref() {
+            match try_decompress_body_with_limit(
+                final_res_body.as_ref(),
+                content_encoding,
+                max_decompress_output_bytes,
+            ) {
+                Ok(decompressed) => {
+                    let injected_body = maybe_inject_devtools_bridge_html(
+                        Bytes::from(decompressed),
+                        &content_type,
+                        &resolved_rules,
+                        admin_state.as_deref(),
+                        &record_url,
+                        ctx.id_str(),
+                    );
+                    match compress_body(injected_body.as_ref(), content_encoding) {
+                        Ok(compressed) => {
+                            final_res_body = Bytes::from(compressed);
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "[{}] [DEVTOOLS] Failed to recompress response body ({}), fallback to identity",
+                                ctx.id_str(),
+                                e
+                            );
+                            res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+                            final_res_body = injected_body;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "[{}] [DEVTOOLS] Skip bridge injection: failed to decompress response body ({}).",
+                        ctx.id_str(),
+                        e
+                    );
+                }
+            }
+        } else {
+            final_res_body = maybe_inject_devtools_bridge_html(
+                final_res_body,
+                &content_type,
+                &resolved_rules,
+                admin_state.as_deref(),
+                &record_url,
+                ctx.id_str(),
+            );
+        }
+    }
 
     let res_script_results = if has_res_scripts {
         let mut res_script_status = res_parts.status.as_u16();

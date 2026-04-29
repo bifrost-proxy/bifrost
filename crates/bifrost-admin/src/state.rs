@@ -17,6 +17,7 @@ use crate::body_store::SharedBodyStore;
 use crate::client_trust_tracker::ClientTlsTrustTracker;
 use crate::connection_monitor::{ConnectionMonitor, SharedConnectionMonitor};
 use crate::connection_registry::{ConnectionRegistry, SharedConnectionRegistry};
+use crate::devtools::{BrowserDebugBroker, SharedBrowserDebugBroker};
 use crate::frame_store::{FrameStore, SharedFrameStore};
 use crate::handlers::scripts::ScriptManager;
 use crate::ip_tls_pending::IpTlsPendingManager;
@@ -118,6 +119,7 @@ pub struct AdminState {
     pub sync_manager: Option<SharedSyncManager>,
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
+    pub devtools_broker: SharedBrowserDebugBroker,
     /// Keep-awake manager; None if not initialized (e.g. in tests).
     pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
     remote_invoke_worker:
@@ -173,6 +175,7 @@ impl AdminState {
             sync_manager: None,
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
+            devtools_broker: Arc::new(BrowserDebugBroker::new()),
             keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),

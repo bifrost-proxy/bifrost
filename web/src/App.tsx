@@ -18,6 +18,7 @@ import Scripts from "./pages/Scripts";
 import Groups from "./pages/Groups";
 import GroupDetail from "./pages/Groups/GroupDetail";
 import Notifications from "./pages/Notifications";
+import DevTools from "./pages/DevTools";
 import {
   DESKTOP_HANDOFF_COMPLETE_EVENT,
   listenDesktopEvent,
@@ -285,6 +286,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="rules" element={<Rules />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
+                <Route path="devtools" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />
                 <Route path="groups/:id" element={<GroupDetail />} />
                 <Route path="notifications" element={<Notifications />} />
@@ -317,6 +319,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="rules" element={<Rules />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
+                <Route path="devtools" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />
                 <Route path="groups/:id" element={<GroupDetail />} />
                 <Route path="notifications" element={<Notifications />} />

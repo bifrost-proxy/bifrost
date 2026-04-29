@@ -378,6 +378,29 @@ pub struct IgnoredFields {
     pub all: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DevtoolsMode {
+    #[default]
+    Read,
+    Control,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DevtoolsInjectMode {
+    #[default]
+    Auto,
+    Bridge,
+    Off,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DevtoolsRule {
+    pub mode: DevtoolsMode,
+    pub inject: DevtoolsInjectMode,
+    pub deny: bool,
+    pub raw_value: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedRules {
     pub host: Option<String>,
@@ -468,6 +491,8 @@ pub struct ResolvedRules {
     pub values: std::collections::HashMap<String, String>,
 
     pub trailers: Vec<(String, String)>,
+
+    pub devtools: Option<DevtoolsRule>,
 }
 
 #[derive(Debug, Clone)]
@@ -1415,6 +1440,25 @@ async fn handle_request(
 
     let is_proxy_request_to_other_server =
         is_proxy_request_targeting_other(&req, proxy_config.port, &proxy_config.host);
+
+    if path.starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/")) {
+        if let Some(state) = admin_state {
+            if let Ok(value) = hyper::header::HeaderValue::from_str(&peer_addr.ip().to_string()) {
+                req.headers_mut().insert(
+                    hyper::header::HeaderName::from_static("x-bifrost-peer-ip"),
+                    value,
+                );
+            }
+            debug!(
+                "Routing page bridge request from {}: {} {}",
+                peer_addr, method, path
+            );
+            return Ok(convert_admin_response(
+                AdminRouter::handle(req, state, push_manager, Some(peer_addr)).await,
+            ));
+        }
+        return Ok(error_response(503, "Admin interface not enabled"));
+    }
 
     if path.starts_with(ADMIN_PATH_PREFIX) && !is_proxy_request_to_other_server {
         if let Some(state) = admin_state {
