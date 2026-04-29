@@ -675,6 +675,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   let nextNodeId = 1;
   let nodeMap = Object.create(null);
   let domRefreshTimer = 0;
+  let storageRefreshTimer = 0;
   let lastDomSignature = "";
   let lastStorageSnapshot = "";
   let highlightedNode = null;
@@ -852,6 +853,21 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       hello(false, []);
     }} catch (_) {{}}
   }};
+  const scheduleStorageRefresh = function(delay) {{
+    if (storageRefreshTimer) return;
+    storageRefreshTimer = window.setTimeout(function() {{
+      storageRefreshTimer = 0;
+      sendStorageIfChanged();
+    }}, delay || 50);
+  }};
+  try {{
+    Object.defineProperty(window, "__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__", {{
+      value: function() {{ scheduleStorageRefresh(1); }},
+      enumerable: false,
+      configurable: false,
+      writable: false
+    }});
+  }} catch (_) {{}}
   const scheduleDomRefresh = function(delay) {{
     if (domRefreshTimer) return;
     domRefreshTimer = window.setTimeout(function() {{
@@ -968,13 +984,13 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
         if (typeof original !== "function") return;
         window.Storage.prototype[method] = function() {{
           const result = original.apply(this, arguments);
-          sendStorageIfChanged();
+          scheduleStorageRefresh(50);
           return result;
         }};
       }});
     }}
   }} catch (_) {{}}
-  window.addEventListener("storage", sendStorageIfChanged, true);
+  window.addEventListener("storage", function() {{ scheduleStorageRefresh(50); }}, true);
   const remoteObject = function(value) {{
     if (value === undefined) return {{type: "undefined", description: "undefined"}};
     if (value === null) return {{type: "object", subtype: "null", value: null, description: "null"}};

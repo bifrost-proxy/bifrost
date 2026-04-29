@@ -1,16 +1,11 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flate2::read::GzDecoder;
 use parking_lot::RwLock;
 use ring::digest;
 use serde::{Deserialize, Serialize};
-use std::process::{Child, Command};
-use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -156,39 +151,6 @@ pub struct CdpTargetInfo {
     pub title: String,
     pub url: String,
     pub web_socket_debugger_url: String,
-    pub system_chrome_frontend_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemFrontendOpenResult {
-    pub opened: bool,
-    pub url: String,
-    pub command: String,
-}
-
-pub const CHROME_DEVTOOLS_FRONTEND_VERSION: &str = "1.0.666106";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FrontendInstallState {
-    NotInstalled,
-    Installed,
-    Broken,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChromeDevToolsFrontendStatus {
-    pub state: FrontendInstallState,
-    pub version: String,
-    pub source: String,
-    pub installed: bool,
-    pub install_path: String,
-    pub inspector_path: String,
-    pub download_url: String,
-    pub total_size_bytes: Option<u64>,
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -713,6 +675,46 @@ impl BrowserDebugBroker {
         match command {
             "dom.snapshot" => self.snapshot(session_id),
             "console.messages" => self.snapshot(session_id),
+            "dom.highlight" => {
+                let page_id = self.session_page_id(session_id)?;
+                let node_id = params
+                    .get("node_id")
+                    .or_else(|| params.get("nodeId"))
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| "missing node_id".to_string())?;
+                self.queue_overlay(&page_id, BridgeOverlayCommand::HighlightNode { node_id })?;
+                Ok(serde_json::json!({"highlighted": true, "node_id": node_id}))
+            }
+            "dom.hide_highlight" => {
+                let page_id = self.session_page_id(session_id)?;
+                self.queue_overlay(&page_id, BridgeOverlayCommand::HideHighlight)?;
+                Ok(serde_json::json!({"hidden": true}))
+            }
+            "storage.set" => {
+                let page_id = self.session_control_page_id(session_id)?;
+                let area = params
+                    .get("area")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing area".to_string())?;
+                let key = params
+                    .get("key")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing key".to_string())?;
+                let value = params
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing value".to_string())?;
+                let expression = storage_set_expression(area, key, value)?;
+                let eval_id = self.queue_eval(&page_id, expression)?;
+                for _ in 0..40 {
+                    if let Some(result) = self.take_eval_result(eval_id) {
+                        result?;
+                        return Ok(serde_json::json!({"updated": true, "area": area, "key": key}));
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err("storage update timed out".to_string())
+            }
             "runtime.evaluate" => {
                 let page_id = self.session_control_page_id(session_id)?;
                 let expression = params
@@ -739,6 +741,18 @@ impl BrowserDebugBroker {
             }
             other => Err(format!("unsupported command: {other}")),
         }
+    }
+
+    fn session_page_id(&self, session_id: &str) -> Result<String, String> {
+        let sessions = self.sessions.read();
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        let pages = self.pages.read();
+        let page = pages
+            .get(&session.page_id)
+            .ok_or_else(|| "page not found".to_string())?;
+        Ok(page.page_id.clone())
     }
 
     fn session_control_page_id(&self, session_id: &str) -> Result<String, String> {
@@ -780,6 +794,23 @@ fn push_network_event(events: &mut Vec<NetworkEvent>, event: NetworkEventInput) 
     }
 }
 
+fn storage_set_expression(area: &str, key: &str, value: &str) -> Result<String, String> {
+    let key = serde_json::to_string(key).map_err(|err| err.to_string())?;
+    let value = serde_json::to_string(value).map_err(|err| err.to_string())?;
+    match area {
+        "cookie" | "cookies" => Ok(format!(
+            "document.cookie = {key} + '=' + encodeURIComponent({value}) + '; path=/'; window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); document.cookie"
+        )),
+        "local_storage" | "localStorage" => Ok(format!(
+            "localStorage.setItem({key}, {value}); window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); localStorage.getItem({key})"
+        )),
+        "session_storage" | "sessionStorage" => Ok(format!(
+            "sessionStorage.setItem({key}, {value}); window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); sessionStorage.getItem({key})"
+        )),
+        other => Err(format!("unsupported storage area: {other}")),
+    }
+}
+
 fn rule_id(rule: &MatchedDevtoolsRule) -> String {
     match rule.line {
         Some(line) => format!("{}:{line}", rule.pattern),
@@ -811,419 +842,7 @@ pub fn cdp_target_info(page: &DebugPage, host: &str) -> CdpTargetInfo {
             .unwrap_or_else(|| "(untitled)".to_string()),
         url: page.url.clone(),
         web_socket_debugger_url: format!("ws://{host}{ws_path}"),
-        system_chrome_frontend_url: format!(
-            "devtools://devtools/bundled/inspector.html?ws={host}{ws_path}"
-        ),
     }
-}
-
-pub async fn open_system_chrome_frontend(
-    page: &DebugPage,
-    host: &str,
-) -> Result<SystemFrontendOpenResult, String> {
-    let url = cdp_target_info(page, host).system_chrome_frontend_url;
-    let command = launch_system_browser(&url).await?;
-    Ok(SystemFrontendOpenResult {
-        opened: true,
-        url,
-        command,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct BrowserCandidate {
-    label: String,
-    binary: String,
-}
-
-async fn launch_system_browser(url: &str) -> Result<String, String> {
-    let candidates = resolve_system_browser_candidates();
-    if candidates.is_empty() {
-        return Err("Chrome, Edge, or Chromium was not found".to_string());
-    }
-    let requested_port = std::env::var("BIFROST_DEVTOOLS_CHROME_DEBUG_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(0);
-    let mut errors = Vec::new();
-    for candidate in candidates {
-        match launch_browser_candidate(&candidate, url, requested_port).await {
-            Ok(()) => return Ok(candidate.label),
-            Err(err) => errors.push(format!("{}: {err}", candidate.label)),
-        }
-    }
-    Err(format!(
-        "failed to launch a DevTools browser; tried {}",
-        errors.join(" | ")
-    ))
-}
-
-async fn launch_browser_candidate(
-    candidate: &BrowserCandidate,
-    url: &str,
-    requested_port: u16,
-) -> Result<(), String> {
-    let profile_dir = system_browser_profile_dir(&candidate.label);
-    fs::create_dir_all(&profile_dir)
-        .map_err(|err| format!("failed to create browser profile dir: {err}"))?;
-
-    let mut command = Command::new(&candidate.binary);
-    command
-        .arg(format!("--remote-debugging-port={requested_port}"))
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--disable-background-networking")
-        .arg("about:blank");
-    for arg in split_env_args("BIFROST_DEVTOOLS_CHROME_ARGS") {
-        command.arg(arg);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("failed to launch {}: {err}", candidate.binary))?;
-
-    let port = wait_for_chrome_debug_port(&profile_dir, requested_port, &mut child).await?;
-    open_chrome_debug_target(port, url).await
-}
-
-fn system_browser_profile_dir(label: &str) -> PathBuf {
-    if let Ok(profile) = std::env::var("BIFROST_DEVTOOLS_CHROME_PROFILE") {
-        return PathBuf::from(profile);
-    }
-    let safe_label = label
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    bifrost_storage::data_dir()
-        .join("admin/devtools-system-browser-profiles")
-        .join(format!("{}-{}", safe_label, uuid::Uuid::new_v4().simple()))
-}
-
-fn resolve_system_browser_candidates() -> Vec<BrowserCandidate> {
-    let mut candidates = Vec::new();
-    if let Ok(binary) = std::env::var("BIFROST_DEVTOOLS_CHROME") {
-        candidates.push(BrowserCandidate {
-            label: browser_label_from_path(&binary, "env-browser"),
-            binary,
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let discovered = [
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ];
-        for candidate in discovered {
-            if std::path::Path::new(candidate).exists() {
-                let binary = candidate.to_string();
-                candidates.push(BrowserCandidate {
-                    label: browser_label_from_path(&binary, "mac-browser"),
-                    binary,
-                });
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        for binary in ["msedge", "chrome"] {
-            candidates.push(BrowserCandidate {
-                label: binary.to_string(),
-                binary: binary.to_string(),
-            });
-        }
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let discovered = [
-            "microsoft-edge",
-            "microsoft-edge-stable",
-            "msedge",
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-        ];
-        for candidate in discovered {
-            if Command::new("sh")
-                .arg("-c")
-                .arg(format!("command -v {candidate}"))
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
-            {
-                candidates.push(BrowserCandidate {
-                    label: candidate.to_string(),
-                    binary: candidate.to_string(),
-                });
-            }
-        }
-    }
-    dedupe_browser_candidates(candidates)
-}
-
-fn browser_label_from_path(path: &str, fallback: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(fallback)
-        .to_string()
-}
-
-fn dedupe_browser_candidates(candidates: Vec<BrowserCandidate>) -> Vec<BrowserCandidate> {
-    let mut seen = std::collections::HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|candidate| seen.insert(candidate.binary.clone()))
-        .collect()
-}
-
-async fn wait_for_chrome_debug_port(
-    profile_dir: &Path,
-    requested_port: u16,
-    child: &mut Child,
-) -> Result<u16, String> {
-    let active_port_file = profile_dir.join("DevToolsActivePort");
-    for _ in 0..80 {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!(
-                "browser exited before remote debugging was ready: {status}"
-            ));
-        }
-        let port = if requested_port != 0 {
-            requested_port
-        } else {
-            match tokio::fs::read_to_string(&active_port_file).await {
-                Ok(content) => content
-                    .lines()
-                    .next()
-                    .and_then(|line| line.trim().parse::<u16>().ok())
-                    .unwrap_or(0),
-                Err(_) => 0,
-            }
-        };
-        if port != 0
-            && reqwest::get(format!("http://127.0.0.1:{port}/json/version"))
-                .await
-                .map(|response| response.status().is_success())
-                .unwrap_or(false)
-        {
-            return Ok(port);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    Err("Chrome remote debugging endpoint did not become ready".to_string())
-}
-
-async fn open_chrome_debug_target(port: u16, url: &str) -> Result<(), String> {
-    let encoded = urlencoding::encode(url);
-    let response = reqwest::Client::new()
-        .put(format!("http://127.0.0.1:{port}/json/new?{encoded}"))
-        .send()
-        .await
-        .map_err(|err| format!("failed to ask Chrome to open DevTools URL: {err}"))?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Chrome rejected DevTools URL open request with HTTP {}",
-            response.status()
-        ))
-    }
-}
-
-fn split_env_args(name: &str) -> Vec<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            value
-                .split_whitespace()
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub fn frontend_status() -> ChromeDevToolsFrontendStatus {
-    frontend_status_for_root(&frontend_package_root())
-}
-
-pub async fn install_frontend() -> Result<ChromeDevToolsFrontendStatus, FrontendInstallError> {
-    let version = CHROME_DEVTOOLS_FRONTEND_VERSION.to_string();
-    let download_url = frontend_download_url();
-    let data_dir = bifrost_storage::data_dir();
-    let cache_root = frontend_cache_root_in(&data_dir);
-    let package_root = frontend_package_root_in(&data_dir);
-    tokio::fs::create_dir_all(&cache_root).await?;
-
-    let response = reqwest::get(&download_url).await?;
-    if !response.status().is_success() {
-        return Err(FrontendInstallError::HttpStatus(response.status().as_u16()));
-    }
-    let bytes = response.bytes().await?;
-    let archive_path = cache_root.join(format!("chrome-devtools-frontend-{version}.tgz"));
-    tokio::fs::write(&archive_path, &bytes).await?;
-
-    let unpack_root = package_root.clone();
-    tokio::task::spawn_blocking(move || unpack_frontend_archive(&archive_path, &unpack_root))
-        .await
-        .map_err(|err| FrontendInstallError::Join(err.to_string()))??;
-
-    Ok(frontend_status_for_root(&package_root))
-}
-
-pub fn frontend_file_path(request_path: &str) -> Result<PathBuf, FrontendFileError> {
-    let root = frontend_package_root();
-    let relative = request_path
-        .strip_prefix("/api/devtools/frontend/")
-        .unwrap_or(request_path)
-        .trim_start_matches('/');
-    let relative = if relative.is_empty() {
-        "inspector.html"
-    } else {
-        relative
-    };
-    if relative
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(FrontendFileError::InvalidPath);
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in Path::new(relative).components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            _ => return Err(FrontendFileError::InvalidPath),
-        }
-    }
-    let path = root.join(normalized);
-    if !path.starts_with(&root) {
-        return Err(FrontendFileError::InvalidPath);
-    }
-    Ok(path)
-}
-
-pub fn frontend_package_root() -> PathBuf {
-    frontend_package_root_in(&bifrost_storage::data_dir())
-}
-
-fn frontend_status_for_root(package_root: &Path) -> ChromeDevToolsFrontendStatus {
-    let inspector = package_root.join("inspector.html");
-    let installed = inspector.is_file();
-    let (state, reason) = if installed {
-        (FrontendInstallState::Installed, None)
-    } else if package_root.exists() {
-        (
-            FrontendInstallState::Broken,
-            Some("cached directory exists but inspector.html is missing".to_string()),
-        )
-    } else {
-        (FrontendInstallState::NotInstalled, None)
-    };
-
-    ChromeDevToolsFrontendStatus {
-        state,
-        version: CHROME_DEVTOOLS_FRONTEND_VERSION.to_string(),
-        source: "npm_on_demand_cache".to_string(),
-        installed,
-        install_path: package_root.display().to_string(),
-        inspector_path: "/_bifrost/api/devtools/frontend/inspector.html".to_string(),
-        download_url: frontend_download_url(),
-        total_size_bytes: installed.then(|| dir_size(package_root).unwrap_or(0)),
-        reason,
-    }
-}
-
-fn frontend_cache_root_in(data_dir: &Path) -> PathBuf {
-    data_dir.join("admin").join("devtools-frontend")
-}
-
-fn frontend_package_root_in(data_dir: &Path) -> PathBuf {
-    frontend_cache_root_in(data_dir).join(format!(
-        "chrome-devtools-frontend-{}",
-        CHROME_DEVTOOLS_FRONTEND_VERSION
-    ))
-}
-
-fn frontend_download_url() -> String {
-    std::env::var("BIFROST_DEVTOOLS_FRONTEND_TARBALL_URL").unwrap_or_else(|_| {
-        format!("https://registry.npmjs.org/chrome-devtools-frontend/-/chrome-devtools-frontend-{CHROME_DEVTOOLS_FRONTEND_VERSION}.tgz")
-    })
-}
-
-fn unpack_frontend_archive(
-    archive_path: &Path,
-    package_root: &Path,
-) -> Result<(), FrontendInstallError> {
-    let tmp_root = package_root.with_extension("tmp");
-    if tmp_root.exists() {
-        fs::remove_dir_all(&tmp_root)?;
-    }
-    if package_root.exists() {
-        fs::remove_dir_all(package_root)?;
-    }
-    fs::create_dir_all(&tmp_root)?;
-
-    let file = fs::File::open(archive_path)?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(&tmp_root)?;
-
-    let npm_package_root = tmp_root.join("package");
-    let compiled_frontend_root = npm_package_root.join("front_end");
-    if !compiled_frontend_root.join("inspector.html").is_file() {
-        return Err(FrontendInstallError::InvalidArchive(
-            "chrome-devtools-frontend package did not contain inspector.html".to_string(),
-        ));
-    }
-    fs::rename(&compiled_frontend_root, package_root)?;
-    let _ = fs::remove_dir_all(&tmp_root);
-    Ok(())
-}
-
-fn dir_size(path: &Path) -> std::io::Result<u64> {
-    let mut total = 0;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            total += dir_size(&entry.path())?;
-        } else {
-            total += meta.len();
-        }
-    }
-    Ok(total)
-}
-
-#[derive(Debug, Error)]
-pub enum FrontendInstallError {
-    #[error("download failed: {0}")]
-    Download(#[from] reqwest::Error),
-    #[error("io failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("download returned HTTP {0}")]
-    HttpStatus(u16),
-    #[error("unpack task failed: {0}")]
-    Join(String),
-    #[error("invalid archive: {0}")]
-    InvalidArchive(String),
-}
-
-#[derive(Debug, Error)]
-pub enum FrontendFileError {
-    #[error("invalid frontend asset path")]
-    InvalidPath,
 }
 
 pub fn now_ms() -> u64 {

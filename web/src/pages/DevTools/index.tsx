@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Alert, Button, Empty, Input, Progress, Space, Tag, Typography, message } from "antd";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
-  getDevtoolsFrontendStatus,
-  installDevtoolsFrontend,
+  ArrowLeftOutlined,
+  BranchesOutlined,
+  CodeOutlined,
+  DatabaseOutlined,
+  GlobalOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+} from "@ant-design/icons";
+import { Alert, Button, Empty, Input, Space, Tabs, Tag, Typography, message } from "antd";
+import {
+  getDevtoolsSnapshot,
   listDevtoolsPages,
   openDevtoolsSession,
-  openSystemDevtoolsFrontend,
+  sendDevtoolsCommand,
+  type DebugDomNode,
+  type DebugNetworkEvent,
   type DebugPage,
   type DebugSession,
-  type DevtoolsFrontendStatus,
+  type DebugStorageSnapshot,
+  type DevtoolsSnapshot,
 } from "../../api/devtools";
-import { buildBackendUrl } from "../../runtime";
-import { copyToClipboard } from "../../utils/clipboard";
 
 const { Text, Title } = Typography;
 
@@ -21,24 +29,50 @@ export default function DevTools() {
   const [query, setQuery] = useState("");
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [session, setSession] = useState<DebugSession | null>(null);
+  const [snapshot, setSnapshot] = useState<DevtoolsSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  const [frontendStatus, setFrontendStatus] = useState<DevtoolsFrontendStatus | null>(null);
-  const [installingFrontend, setInstallingFrontend] = useState(false);
-  const [installProgress, setInstallProgress] = useState<number | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [consoleExpression, setConsoleExpression] = useState("document.title");
+  const [consoleResult, setConsoleResult] = useState<string>("");
+  const [consoleRunning, setConsoleRunning] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  const [storageArea, setStorageArea] = useState("local_storage");
+  const [storageKey, setStorageKey] = useState("");
+  const [storageValue, setStorageValue] = useState("");
+  const [storageSaving, setStorageSaving] = useState(false);
 
   const refreshPages = useCallback(async () => {
     const next = await listDevtoolsPages(true);
     setPages(next);
   }, []);
 
+  const refreshSnapshot = useCallback(async (sessionId: string) => {
+    setSnapshotLoading(true);
+    try {
+      setSnapshot(await getDevtoolsSnapshot(sessionId));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to refresh DevTools data");
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void refreshPages();
-    void refreshFrontendStatus();
     const timer = window.setInterval(() => {
       void refreshPages();
     }, 1500);
     return () => window.clearInterval(timer);
   }, [refreshPages]);
+
+  useEffect(() => {
+    if (!session) return;
+    void refreshSnapshot(session.session_id);
+    const timer = window.setInterval(() => {
+      void refreshSnapshot(session.session_id);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [refreshSnapshot, session]);
 
   const filteredPages = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -50,35 +84,18 @@ export default function DevTools() {
     );
   }, [pages, query]);
 
-  const selectedPage = pages.find((page) => page.page_id === selectedPageId) ?? null;
-  const cdpWebSocketUrl = selectedPage ? buildCdpWebSocketUrl(selectedPage.page_id) : null;
-  const systemChromeFrontendUrl = cdpWebSocketUrl
-    ? `devtools://devtools/bundled/inspector.html?ws=${cdpWebSocketUrl.replace(/^wss?:\/\//, "")}`
-    : null;
-  const embeddedChromeFrontendUrl =
-    selectedPage && cdpWebSocketUrl && frontendStatus?.installed
-      ? buildBackendUrl(
-          `/api/devtools/frontend/inspector.html?ws=${cdpWebSocketUrl.replace(/^wss?:\/\//, "")}`,
-        )
-      : null;
-  const canOpenBundledChromeFrontend = isChromiumBrowser();
-
-  async function refreshFrontendStatus() {
-    try {
-      setFrontendStatus(await getDevtoolsFrontendStatus());
-    } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : "Failed to load DevTools frontend status",
-      );
-    }
-  }
+  const selectedPage = pages.find((page) => page.page_id === selectedPageId) ?? snapshot?.page ?? null;
 
   const openPage = async (page: DebugPage) => {
     setSelectedPageId(page.page_id);
+    setSnapshot(null);
+    setConsoleResult("");
+    setSelectedNodeId(null);
     setLoading(true);
     try {
       const nextSession = await openDevtoolsSession(page.page_id);
       setSession(nextSession);
+      await refreshSnapshot(nextSession.session_id);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to open DevTools session");
     } finally {
@@ -86,51 +103,54 @@ export default function DevTools() {
     }
   };
 
-  const installFrontend = async () => {
-    setInstallingFrontend(true);
-    setInstallProgress(12);
-    const progressTimer = window.setInterval(() => {
-      setInstallProgress((current) => {
-        if (current == null) return 12;
-        return Math.min(current + 11, 88);
+  const runConsoleExpression = async () => {
+    if (!session) return;
+    const expression = consoleExpression.trim();
+    if (!expression) return;
+    setConsoleRunning(true);
+    setConsoleResult("");
+    try {
+      const response = await sendDevtoolsCommand(session.session_id, "runtime.evaluate", {
+        expression,
       });
-    }, 800);
-    try {
-      const status = await installDevtoolsFrontend();
-      window.clearInterval(progressTimer);
-      setInstallProgress(100);
-      setFrontendStatus(status);
-      message.success("Chrome DevTools frontend is ready");
+      setConsoleResult(formatValue(response.result));
+      await refreshSnapshot(session.session_id);
     } catch (error) {
-      window.clearInterval(progressTimer);
-      setInstallProgress(null);
-      message.error(
-        error instanceof Error ? error.message : "Failed to install Chrome DevTools frontend",
-      );
+      setConsoleResult(error instanceof Error ? error.message : String(error));
     } finally {
-      setInstallingFrontend(false);
+      setConsoleRunning(false);
     }
   };
 
-  const copyDebugUrl = async () => {
-    if (!systemChromeFrontendUrl) return;
-    const ok = await copyToClipboard(systemChromeFrontendUrl);
-    if (ok) {
-      message.success("Debug URL copied");
-    } else {
-      message.error("Copy failed");
-    }
-  };
-
-  const openInSystemChrome = async () => {
-    if (!selectedPage) return;
+  const highlightDomNode = async (nodeId: number) => {
+    if (!session) return;
     try {
-      await openSystemDevtoolsFrontend(selectedPage.page_id);
-      message.success("Chrome DevTools opened");
+      setSelectedNodeId(nodeId);
+      await sendDevtoolsCommand(session.session_id, "dom.highlight", { node_id: nodeId });
     } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : "Failed to open Chrome DevTools",
-      );
+      message.error(error instanceof Error ? error.message : "Failed to highlight element");
+    }
+  };
+
+  const updateStorageValue = async () => {
+    if (!session) return;
+    if (!storageKey.trim()) {
+      message.warning("Storage key is required");
+      return;
+    }
+    setStorageSaving(true);
+    try {
+      await sendDevtoolsCommand(session.session_id, "storage.set", {
+        area: storageArea,
+        key: storageKey,
+        value: storageValue,
+      });
+      await refreshSnapshot(session.session_id);
+      message.success("Storage updated");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to update storage");
+    } finally {
+      setStorageSaving(false);
     }
   };
 
@@ -204,7 +224,12 @@ export default function DevTools() {
             size="small"
             data-testid="devtools-back"
             icon={<ArrowLeftOutlined />}
-            onClick={() => setSelectedPageId(null)}
+            onClick={() => {
+              setSelectedPageId(null);
+              setSession(null);
+              setSnapshot(null);
+              setSelectedNodeId(null);
+            }}
           >
             Back
           </Button>
@@ -216,87 +241,384 @@ export default function DevTools() {
               {selectedPage.url}
             </Text>
           </Space>
+          <Button
+            size="small"
+            data-testid="devtools-refresh"
+            icon={<ReloadOutlined />}
+            loading={loading || snapshotLoading}
+            onClick={() => {
+              if (session) {
+                void refreshSnapshot(session.session_id);
+              } else {
+                void openPage(selectedPage);
+              }
+            }}
+          />
           <Tag>{session?.state ?? selectedPage.state}</Tag>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {embeddedChromeFrontendUrl ? (
-          <iframe
-            title="Chrome DevTools Frontend"
-            src={embeddedChromeFrontendUrl}
-            style={frontendFrameStyle}
-          />
-        ) : (
-          <Space direction="vertical" size={16} style={detailsPanelStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-              <Space direction="vertical" size={4} style={{ minWidth: 0 }}>
-                <Title level={4} style={{ margin: 0 }}>{selectedPage.title || "(untitled)"}</Title>
-                <Text type="secondary" ellipsis>{selectedPage.url}</Text>
-              </Space>
-              <Space>
-                <Tag>{session?.state ?? selectedPage.state}</Tag>
-              </Space>
-            </div>
+        {selectedPage.status_reason ? (
+          <Alert type="warning" showIcon message={selectedPage.status_reason} />
+        ) : null}
 
-            {selectedPage.status_reason ? (
-              <Alert type="warning" showIcon message={selectedPage.status_reason} />
-            ) : null}
-
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-              <Text strong>Debug URL</Text>
-              <Input.TextArea
-                readOnly
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                value={systemChromeFrontendUrl ?? ""}
-              />
-              <Text type="secondary">
-                Copy this address and open it in Chrome or Edge to use the browser's built-in DevTools frontend.
-              </Text>
-            </Space>
-
-            <Space wrap>
-              <Button onClick={() => void copyDebugUrl()} disabled={!systemChromeFrontendUrl}>
-                Copy Debug URL
-              </Button>
-              {canOpenBundledChromeFrontend && systemChromeFrontendUrl ? (
-                <Button type="primary" onClick={() => void openInSystemChrome()}>
-                  Open in Chrome DevTools
-                </Button>
-              ) : null}
-              <Button loading={loading} onClick={() => selectedPage && void openPage(selectedPage)}>
-                Refresh
-              </Button>
-            </Space>
-
-            <div style={installPanelStyle}>
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                <Text strong>Embedded Chrome DevTools</Text>
-                <Text type="secondary">
-                  Optional. Bifrost downloads the official frontend only after you click install, then shows it here.
-                </Text>
-                <Space>
-                  <Button loading={installingFrontend} onClick={() => void installFrontend()}>
-                    Install Chrome DevTools
-                  </Button>
-                  <Button onClick={() => void refreshFrontendStatus()}>Refresh Status</Button>
-                </Space>
-                {installingFrontend || installProgress !== null ? (
-                  <Progress
-                    percent={installProgress ?? 0}
-                    status={installProgress === 100 ? "success" : "active"}
-                  />
-                ) : null}
-                {frontendStatus?.state === "broken" ? (
-                  <Alert type="warning" showIcon message={frontendStatus.reason} />
-                ) : null}
-              </Space>
-            </div>
-          </Space>
-          )}
+        <div style={summaryStripStyle}>
+          <InfoItem label="Adapter" value={selectedPage.adapter} />
+          <InfoItem label="Mode" value={selectedPage.mode} />
+          <InfoItem label="Rule" value={selectedPage.matched_rule?.pattern ?? "-"} />
+          <InfoItem label="Traffic" value={(selectedPage.traffic_ids ?? []).slice(-3).join(", ") || "-"} />
         </div>
+
+        <Tabs
+          data-testid="devtools-custom-workspace"
+          style={workspaceStyle}
+          items={[
+            {
+              key: "elements",
+              label: <TabLabel icon={<BranchesOutlined />} text="Elements" />,
+              children: (
+                <section data-testid="devtools-elements-panel" style={panelStyle}>
+                  <DomTree
+                    node={snapshot?.dom_tree ?? null}
+                    html={snapshot?.dom_snapshot ?? ""}
+                    selectedNodeId={selectedNodeId}
+                    onHighlight={highlightDomNode}
+                  />
+                </section>
+              ),
+            },
+            {
+              key: "network",
+              label: <TabLabel icon={<GlobalOutlined />} text="Network" />,
+              children: (
+                <section data-testid="devtools-network-panel" style={panelStyle}>
+                  <NetworkList events={snapshot?.network ?? []} />
+                </section>
+              ),
+            },
+            {
+              key: "storage",
+              label: <TabLabel icon={<DatabaseOutlined />} text="Storage" />,
+              children: (
+                <section data-testid="devtools-storage-panel" style={panelStyle}>
+                  <StorageView
+                    mode={selectedPage.mode}
+                    storage={snapshot?.storage ?? null}
+                    area={storageArea}
+                    storageKey={storageKey}
+                    storageValue={storageValue}
+                    saving={storageSaving}
+                    onAreaChange={setStorageArea}
+                    onKeyChange={setStorageKey}
+                    onValueChange={setStorageValue}
+                    onSave={() => void updateStorageValue()}
+                  />
+                </section>
+              ),
+            },
+            {
+              key: "console",
+              label: <TabLabel icon={<CodeOutlined />} text="Console" />,
+              children: (
+                <section data-testid="devtools-console-panel" style={panelStyle}>
+                  <ConsoleView
+                    mode={selectedPage.mode}
+                    messages={snapshot?.console ?? []}
+                    expression={consoleExpression}
+                    result={consoleResult}
+                    running={consoleRunning}
+                    onExpressionChange={setConsoleExpression}
+                    onRun={() => void runConsoleExpression()}
+                  />
+                </section>
+              ),
+            },
+          ]}
+        />
       </Space>
     </div>
   );
+}
+
+function TabLabel({ icon, text }: { icon: ReactNode; text: string }) {
+  return (
+    <Space size={6}>
+      {icon}
+      <span>{text}</span>
+    </Space>
+  );
+}
+
+function InfoItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={infoItemStyle}>
+      <Text type="secondary">{label}</Text>
+      <Text ellipsis style={{ maxWidth: "100%" }}>{value}</Text>
+    </div>
+  );
+}
+
+function DomTree({
+  node,
+  html,
+  selectedNodeId,
+  onHighlight,
+}: {
+  node: DebugDomNode | null;
+  html: string;
+  selectedNodeId: number | null;
+  onHighlight: (nodeId: number) => void;
+}) {
+  if (node) {
+    return <div style={treeStyle}>{renderDomNode(node, 0, selectedNodeId, onHighlight)}</div>;
+  }
+  if (html) {
+    return <pre style={codeBlockStyle}>{html}</pre>;
+  }
+  return <Empty description="No DOM snapshot yet" />;
+}
+
+function renderDomNode(
+  node: DebugDomNode,
+  depth: number,
+  selectedNodeId: number | null,
+  onHighlight: (nodeId: number) => void,
+): React.ReactNode {
+  const children = Array.isArray(node.children) ? node.children : [];
+  const label = domNodeLabel(node);
+  const nodeId = node.nodeId;
+  const selected = nodeId != null && nodeId === selectedNodeId;
+  return (
+    <div key={`${label}-${depth}-${children.length}`} style={{ marginLeft: depth === 0 ? 0 : 14 }}>
+      <div style={domLineStyle}>
+        {nodeId != null ? (
+          <button
+            type="button"
+            data-testid="devtools-dom-node"
+            onClick={() => onHighlight(nodeId)}
+            style={{
+              ...domNodeButtonStyle,
+              background: selected ? "#e6f4ff" : "transparent",
+              borderColor: selected ? "#91caff" : "transparent",
+            }}
+          >
+            <Text code>{label}</Text>
+          </button>
+        ) : (
+          <Text code>{label}</Text>
+        )}
+      </div>
+      {children.slice(0, 250).map((child, index) => (
+        <div key={`${label}-${index}`}>
+          {renderDomNode(child, depth + 1, selectedNodeId, onHighlight)}
+        </div>
+      ))}
+      {children.length > 250 ? <Text type="secondary">... {children.length - 250} more nodes</Text> : null}
+    </div>
+  );
+}
+
+function domNodeLabel(node: DebugDomNode): string {
+  const name = String(node.nodeName ?? node["name"] ?? "node").toLowerCase();
+  const attrs = formatAttributes(node.attributes);
+  const value = typeof node.nodeValue === "string" && node.nodeValue.trim()
+    ? ` ${node.nodeValue.trim().slice(0, 80)}`
+    : "";
+  return `<${name}${attrs}>${value}`;
+}
+
+function formatAttributes(attributes: DebugDomNode["attributes"]): string {
+  if (!attributes) return "";
+  if (Array.isArray(attributes)) {
+    const pairs = [];
+    for (let index = 0; index < attributes.length; index += 2) {
+      pairs.push(`${attributes[index]}="${attributes[index + 1] ?? ""}"`);
+    }
+    return pairs.length ? ` ${pairs.slice(0, 8).join(" ")}` : "";
+  }
+  return Object.entries(attributes)
+    .slice(0, 8)
+    .map(([key, value]) => `${key}="${value}"`)
+    .join(" ")
+    .replace(/^(.+)/, " $1");
+}
+
+function NetworkList({ events }: { events: DebugNetworkEvent[] }) {
+  if (!events.length) return <Empty description="No network events yet" />;
+  return (
+    <div style={tableStyle}>
+      <div style={tableHeaderStyle}>
+        <Text strong>Method</Text>
+        <Text strong>Status</Text>
+        <Text strong>Type</Text>
+        <Text strong>URL</Text>
+      </div>
+      {events.slice().reverse().map((event, index) => (
+        <div key={`${event.url}-${event.at_ms}-${index}`} style={tableRowStyle}>
+          <Text code>{event.method || "GET"}</Text>
+          <Text>{event.status ?? "-"}</Text>
+          <Text>{event.resource_type || "resource"}</Text>
+          <Text ellipsis title={event.url}>{event.url}</Text>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StorageView({
+  mode,
+  storage,
+  area,
+  storageKey,
+  storageValue,
+  saving,
+  onAreaChange,
+  onKeyChange,
+  onValueChange,
+  onSave,
+}: {
+  mode: DebugPage["mode"];
+  storage: DebugStorageSnapshot | null;
+  area: string;
+  storageKey: string;
+  storageValue: string;
+  saving: boolean;
+  onAreaChange: (value: string) => void;
+  onKeyChange: (value: string) => void;
+  onValueChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  if (!storage) return <Empty description="No storage snapshot yet" />;
+  return (
+    <Space direction="vertical" size={14} style={{ width: "100%" }}>
+      <div style={storageEditorStyle}>
+        {mode !== "control" ? (
+          <Alert type="info" showIcon message="Storage editing requires mode=control." />
+        ) : null}
+        <Space.Compact style={{ width: "100%" }}>
+          <select
+            data-testid="devtools-storage-area"
+            value={area}
+            onChange={(event) => onAreaChange(event.target.value)}
+            style={selectStyle}
+            disabled={mode !== "control"}
+          >
+            <option value="cookie">Cookie</option>
+            <option value="local_storage">Local Storage</option>
+            <option value="session_storage">Session Storage</option>
+          </select>
+          <Input
+            data-testid="devtools-storage-key"
+            value={storageKey}
+            onChange={(event) => onKeyChange(event.target.value)}
+            placeholder="Key"
+            disabled={mode !== "control"}
+          />
+          <Input
+            data-testid="devtools-storage-value"
+            value={storageValue}
+            onChange={(event) => onValueChange(event.target.value)}
+            placeholder="Value"
+            disabled={mode !== "control"}
+          />
+          <Button
+            data-testid="devtools-storage-save"
+            type="primary"
+            loading={saving}
+            disabled={mode !== "control"}
+            onClick={onSave}
+          >
+            Save
+          </Button>
+        </Space.Compact>
+      </div>
+      <KeyValueList title="Cookies" rows={storage.cookies} />
+      <KeyValueList title="Local Storage" rows={storage.local_storage} />
+      <KeyValueList title="Session Storage" rows={storage.session_storage} />
+    </Space>
+  );
+}
+
+function KeyValueList({ title, rows }: { title: string; rows: Array<[string, string]> }) {
+  return (
+    <div>
+      <Title level={5} style={{ margin: "0 0 8px" }}>{title}</Title>
+      {rows.length ? (
+        <div style={kvTableStyle}>
+          {rows.map(([key, value]) => (
+            <div key={`${title}-${key}`} style={kvRowStyle}>
+              <Text code ellipsis title={key}>{key}</Text>
+              <Text ellipsis title={value}>{value}</Text>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Text type="secondary">Empty</Text>
+      )}
+    </div>
+  );
+}
+
+function ConsoleView({
+  mode,
+  messages,
+  expression,
+  result,
+  running,
+  onExpressionChange,
+  onRun,
+}: {
+  mode: DebugPage["mode"];
+  messages: DevtoolsSnapshot["console"];
+  expression: string;
+  result: string;
+  running: boolean;
+  onExpressionChange: (value: string) => void;
+  onRun: () => void;
+}) {
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      {mode !== "control" ? (
+        <Alert type="info" showIcon message="This page is read-only. Console evaluation requires mode=control." />
+      ) : null}
+      <Space.Compact style={{ width: "100%" }}>
+        <Input
+          data-testid="devtools-console-input"
+          value={expression}
+          onChange={(event) => onExpressionChange(event.target.value)}
+          onPressEnter={onRun}
+          placeholder="Run JavaScript in the remote page"
+        />
+        <Button
+          data-testid="devtools-console-run"
+          type="primary"
+          icon={<PlayCircleOutlined />}
+          loading={running}
+          disabled={mode !== "control"}
+          onClick={onRun}
+        >
+          Run
+        </Button>
+      </Space.Compact>
+      {result ? <pre data-testid="devtools-console-result" style={codeBlockStyle}>{result}</pre> : null}
+      <div style={consoleLogStyle}>
+        {messages.length ? (
+          messages.slice().reverse().map((entry, index) => (
+            <div key={`${entry.at_ms}-${index}`} style={consoleRowStyle}>
+              <Tag>{entry.level}</Tag>
+              <Text>{entry.text}</Text>
+            </div>
+          ))
+        ) : (
+          <Empty description="No console messages yet" />
+        )}
+      </div>
+    </Space>
+  );
+}
+
+function formatValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
 }
 
 const pageShellStyle: CSSProperties = {
@@ -361,35 +683,141 @@ const detailHeaderStyle: CSSProperties = {
   minHeight: 28,
 };
 
-const detailsPanelStyle: CSSProperties = {
-  width: "100%",
-  maxWidth: 960,
-  margin: "0 auto",
+const summaryStripStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+  gap: 10,
 };
 
-const installPanelStyle: CSSProperties = {
+const infoItemStyle: CSSProperties = {
+  minWidth: 0,
+  padding: "8px 10px",
+  border: "1px solid #d9e2ef",
+  borderRadius: 6,
+  background: "#fff",
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+};
+
+const workspaceStyle: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  background: "#fff",
+  border: "1px solid #d9e2ef",
+  borderRadius: 8,
+  padding: "0 12px 12px",
+};
+
+const panelStyle: CSSProperties = {
+  minHeight: 420,
+  maxHeight: "calc(100vh - 230px)",
+  overflow: "auto",
+};
+
+const treeStyle: CSSProperties = {
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: 12,
+  lineHeight: 1.6,
+};
+
+const domLineStyle: CSSProperties = {
+  minHeight: 22,
+  display: "flex",
+  alignItems: "center",
+};
+
+const domNodeButtonStyle: CSSProperties = {
+  appearance: "none",
+  WebkitAppearance: "none",
+  width: "100%",
+  padding: "1px 4px",
+  border: "1px solid transparent",
+  borderRadius: 4,
+  color: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+};
+
+const codeBlockStyle: CSSProperties = {
+  margin: 0,
   padding: 12,
   border: "1px solid #d9e2ef",
   borderRadius: 6,
-  background: "#fff",
+  background: "#f8fafc",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
 };
 
-const frontendFrameStyle: CSSProperties = {
-  width: "100%",
-  height: "calc(100vh - 80px)",
-  minHeight: 620,
+const tableStyle: CSSProperties = {
+  display: "grid",
+  gap: 0,
   border: "1px solid #d9e2ef",
   borderRadius: 6,
+  overflow: "hidden",
+};
+
+const tableHeaderStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "96px 80px 130px minmax(260px, 1fr)",
+  gap: 8,
+  padding: "8px 10px",
+  background: "#eef4fb",
+};
+
+const tableRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "96px 80px 130px minmax(260px, 1fr)",
+  gap: 8,
+  padding: "8px 10px",
+  borderTop: "1px solid #e7edf5",
+  minWidth: 560,
+};
+
+const kvTableStyle: CSSProperties = {
+  display: "grid",
+  border: "1px solid #d9e2ef",
+  borderRadius: 6,
+  overflow: "hidden",
+};
+
+const storageEditorStyle: CSSProperties = {
+  display: "grid",
+  gap: 8,
+  padding: 10,
+  border: "1px solid #d9e2ef",
+  borderRadius: 6,
+  background: "#f8fafc",
+};
+
+const selectStyle: CSSProperties = {
+  width: 150,
+  minWidth: 150,
+  border: "1px solid #d9d9d9",
+  borderRadius: "6px 0 0 6px",
+  padding: "0 10px",
   background: "#fff",
 };
 
-function buildCdpWebSocketUrl(pageId: string): string {
-  const url = new URL(buildBackendUrl(`/api/devtools/cdp/${pageId}`));
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
-}
+const kvRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(160px, 260px) minmax(240px, 1fr)",
+  gap: 10,
+  padding: "8px 10px",
+  borderTop: "1px solid #e7edf5",
+  minWidth: 420,
+};
 
-function isChromiumBrowser(): boolean {
-  const ua = navigator.userAgent;
-  return /(Chrome|Chromium|Edg)\//.test(ua) && !/(OPR|Opera)\//.test(ua);
-}
+const consoleLogStyle: CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const consoleRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  padding: "8px 10px",
+  border: "1px solid #e7edf5",
+  borderRadius: 6,
+};

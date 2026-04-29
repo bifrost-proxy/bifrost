@@ -46,7 +46,7 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
-| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Chrome DevTools Remote Control | 21 | 显式 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、WebUI DevTools tab 全屏卡片列表与详情页返回导航、系统 Chrome DevTools frontend 零安装入口与真实点击打开、可选 embedded frontend 按需缓存、受控 CDP endpoint、只读策略拒绝控制命令、多页面切换、移动端 Safari UA 降级路径、DevTools 入口位于 Scripts 之后、flattened CDP session 不空白、变化驱动实时刷新且禁用 screencast 图片同步、embedded frontend 完全隐藏 screencast 左侧渲染区与切换入口、Elements DOM 选择目标页面高亮线框、Elements 选中节点不被 overlay 或属性噪声刷新冲掉、CDP shim 协议矩阵逐项端到端验证、同 tab reload 去重且同 URL 独立 tab 保留、control mode Console evaluate 真实执行、rules parallel fixtures 跳过 DevTools 专用规则夹具 |
+| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 12 | 显式 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、WebUI DevTools tab 自有 Elements/Network/Storage/Console 面板、control mode Console evaluate 真实执行、多页面切换、移动 Safari UA 降级路径、只读策略拒绝控制命令，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
 
 ### 远程调用测试
 
@@ -129,7 +129,7 @@
 
 ---
 
-**总计：68 个测试文件，1316 个测试用例**
+**总计：68 个测试文件，1307 个测试用例**
 
 ## 工作流程
 

@@ -13,6 +13,14 @@ export interface DebugPage {
   last_seen_at_ms: number;
   capabilities: Record<string, string>;
   status_reason?: string | null;
+  matched_rule?: {
+    pattern: string;
+    raw?: string | null;
+    line?: number | null;
+    evaluate_allowlist?: string[];
+  } | null;
+  traffic_ids?: string[];
+  evaluate_allowlist?: string[];
 }
 
 export interface DebugSession {
@@ -25,27 +33,47 @@ export interface DebugSession {
 
 export interface DevtoolsSnapshot {
   page: DebugPage;
-  console: Array<{ level: string; text: string; at_ms: number }>;
+  console: DebugConsoleMessage[];
   dom_snapshot?: string | null;
-  network: unknown[];
+  dom_tree?: DebugDomNode | null;
+  network: DebugNetworkEvent[];
+  storage?: DebugStorageSnapshot | null;
 }
 
-export interface DevtoolsFrontendStatus {
-  state: 'not_installed' | 'installed' | 'broken';
-  version: string;
-  source: 'npm_on_demand_cache';
-  installed: boolean;
-  installPath: string;
-  inspectorPath: string;
-  downloadUrl: string;
-  totalSizeBytes?: number | null;
-  reason?: string | null;
+export interface DebugConsoleMessage {
+  level: string;
+  text: string;
+  at_ms: number;
 }
 
-export interface SystemDevtoolsOpenResult {
-  opened: boolean;
+export interface DebugNetworkEvent {
   url: string;
-  command: string;
+  method: string;
+  status?: number | null;
+  resource_type: string;
+  at_ms: number;
+}
+
+export interface DebugStorageSnapshot {
+  local_storage: Array<[string, string]>;
+  session_storage: Array<[string, string]>;
+  cookies: Array<[string, string]>;
+}
+
+export interface DebugDomNode {
+  nodeId?: number;
+  backendNodeId?: number;
+  nodeName?: string;
+  nodeType?: number;
+  nodeValue?: string;
+  attributes?: Record<string, string> | string[] | null;
+  children?: DebugDomNode[];
+  [key: string]: unknown;
+}
+
+export interface DevtoolsCommandResponse<T = unknown> {
+  ok: boolean;
+  result: T;
 }
 
 export async function listDevtoolsPages(online = true): Promise<DebugPage[]> {
@@ -65,20 +93,6 @@ export async function sendDevtoolsCommand(
   sessionId: string,
   command: string,
   params: unknown = {},
-): Promise<unknown> {
-  return post(`/devtools/sessions/${sessionId}/commands`, { command, params });
-}
-
-export async function getDevtoolsFrontendStatus(): Promise<DevtoolsFrontendStatus> {
-  return get<DevtoolsFrontendStatus>('/devtools/frontend/status');
-}
-
-export async function installDevtoolsFrontend(): Promise<DevtoolsFrontendStatus> {
-  return post<DevtoolsFrontendStatus>('/devtools/frontend/install');
-}
-
-export async function openSystemDevtoolsFrontend(
-  pageId: string,
-): Promise<SystemDevtoolsOpenResult> {
-  return post<SystemDevtoolsOpenResult>(`/devtools/cdp/open/${pageId}`);
+): Promise<DevtoolsCommandResponse> {
+  return post<DevtoolsCommandResponse>(`/devtools/sessions/${sessionId}/commands`, { command, params });
 }

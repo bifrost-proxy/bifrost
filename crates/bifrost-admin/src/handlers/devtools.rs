@@ -1,5 +1,4 @@
 use base64::Engine;
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
@@ -10,7 +9,6 @@ use tokio_tungstenite::WebSocketStream;
 use tracing::{error, warn};
 
 use crate::devtools::{
-    frontend_file_path, frontend_status, install_frontend, open_system_chrome_frontend,
     BridgeClosePayload, BridgeConsolePayload, BridgeEvalPollPayload, BridgeEvalResultPayload,
     BridgeHelloPayload, BridgeNetworkPayload, BridgeOverlayCommand, DebugAdapterKind, DebugPage,
     DevtoolsMode, SharedBrowserDebugBroker,
@@ -50,33 +48,6 @@ pub async fn handle_devtools(
         .unwrap_or("127.0.0.1")
         .to_string();
 
-    if path == "/api/devtools/frontend/status" {
-        return match method {
-            Method::GET => json_response(&frontend_status()),
-            _ => method_not_allowed(),
-        };
-    }
-
-    if path == "/api/devtools/frontend/install" {
-        return match method {
-            Method::POST => match install_frontend().await {
-                Ok(status) => json_response(&status),
-                Err(err) => error_response(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("failed to install Chrome DevTools frontend: {err}"),
-                ),
-            },
-            _ => method_not_allowed(),
-        };
-    }
-
-    if path == "/api/devtools/frontend" || path.starts_with("/api/devtools/frontend/") {
-        return match method {
-            Method::GET => serve_frontend_asset(path).await,
-            _ => method_not_allowed(),
-        };
-    }
-
     if path == "/api/devtools/cdp/json/version" {
         return match method {
             Method::GET => json_response(&serde_json::json!({
@@ -109,21 +80,6 @@ pub async fn handle_devtools(
                     .get("since")
                     .and_then(|value| value.parse::<u64>().ok());
                 json_response(&state.devtools_broker.list_evaluate_audit(limit, since))
-            }
-            _ => method_not_allowed(),
-        };
-    }
-
-    if let Some(page_id) = path.strip_prefix("/api/devtools/cdp/open/") {
-        return match method {
-            Method::POST => {
-                let Some(page) = state.devtools_broker.get_page(page_id) else {
-                    return error_response(StatusCode::NOT_FOUND, "DevTools page not found");
-                };
-                match open_system_chrome_frontend(&page, &host).await {
-                    Ok(result) => json_response(&result),
-                    Err(err) => error_response(StatusCode::BAD_GATEWAY, &err),
-                }
             }
             _ => method_not_allowed(),
         };
@@ -501,61 +457,6 @@ async fn handle_cdp_connection<S>(
             }
         }
     }
-}
-
-async fn serve_frontend_asset(path: &str) -> Response<BoxBody> {
-    let file_path = match frontend_file_path(path) {
-        Ok(path) => path,
-        Err(err) => return error_response(StatusCode::BAD_REQUEST, &err.to_string()),
-    };
-    let mut bytes = match tokio::fs::read(&file_path).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "Chrome DevTools frontend is not installed; call POST /api/devtools/frontend/install first",
-            )
-        }
-        Err(err) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to read frontend asset: {err}"),
-            )
-        }
-    };
-    maybe_disable_frontend_screencast(path, &mut bytes);
-    let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", mime.as_ref())
-        .header("Cache-Control", "no-store")
-        .body(full_body(Bytes::from(bytes)))
-        .unwrap()
-}
-
-fn maybe_disable_frontend_screencast(path: &str, bytes: &mut Vec<u8>) -> bool {
-    if !path.ends_with("/screencast/ScreencastApp.js")
-        && !path.ends_with("/front_end/screencast/ScreencastApp.js")
-    {
-        return false;
-    }
-    let Ok(mut source) = String::from_utf8(std::mem::take(bytes)) else {
-        return false;
-    };
-    source = source.replace(
-        "this._enabledSetting = Common.settings.createSetting('screencastEnabled', true);",
-        "this._enabledSetting = Common.settings.createSetting('screencastEnabled', false);\n    this._enabledSetting.set(false);",
-    );
-    source = source.replace(
-        "this._toggleButton = new UI.ToolbarToggle(Common.UIString('Toggle screencast'), 'largeicon-phone');",
-        "this._toggleButton = new UI.ToolbarToggle(Common.UIString('Toggle screencast'), 'largeicon-phone');\n    if (this._toggleButton.element) {\n      this._toggleButton.element.style.display = 'none';\n    }",
-    );
-    source = source.replace(
-        "this._toggleButton.setEnabled(true);\n    this._screencastView = new Screencast.ScreencastView(screenCaptureModel);",
-        "this._toggleButton.setEnabled(false);\n    return;\n    this._screencastView = new Screencast.ScreencastView(screenCaptureModel);",
-    );
-    *bytes = source.into_bytes();
-    true
 }
 
 async fn cdp_response(
