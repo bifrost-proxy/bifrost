@@ -11,7 +11,7 @@
 - Elements：展示目标页 DOM tree / DOM snapshot，支持选择节点并在目标页高亮，手动刷新后可看到 DOM 结构变化。
 - Network：展示 bridge 捕获到的资源、fetch、XHR 等网络事件，包含 method、status、type、URL。
 - Cookies / LocalStorage / SessionStorage：三个独立一级 tab 展示对应存储区域；默认支持新增、编辑、复制、删除，并验证运行中数据变更同步。
-- Console：展示完整页面 console 日志级别；默认支持多行输入和表达式执行。
+- Console：展示完整页面 console 日志级别；默认支持多行输入和表达式执行；对象、数组、DOM 节点、Error 等参数以结构化值传输，默认展示 Chrome-like 摘要，点击后按层级展开并支持复制原始内容。
 
 ## 非目标
 
@@ -102,7 +102,7 @@ WebUI `DevTools` 一级 tab 分为两层：
 - 手动刷新按钮必须重新读取 session snapshot，用于用户主动确认 DOM / Network / Cookies / LocalStorage / SessionStorage / Console 最新状态。
 - WebUI 不做高频全局轮询。页面列表只在未进入详情时低频刷新或由用户点击 refresh；详情页通过 session WS 接收增量推送，tab 切换时只请求当前模块 scoped snapshot；隐藏 tab 销毁组件，不做后台渲染。
 - Cookies / LocalStorage / SessionStorage 参考 vConsole Storage 插件，但直接作为一级 tab 与 Network / Console 平级展示。每个 tab 使用 key/value 表格展示当前区域数据，并在行内支持新增、编辑、复制、删除。保存必须走 `storage.set` semantic command，删除必须走 `storage.delete` semantic command，经由 page bridge 在目标页执行实际写入。Storage 编辑默认可用，不受 `mode=read/control` 限制。
-- Console 执行按钮默认可用。日志区域在上方滚动，底部轻量多行输入框固定在面板底部，不因日志增长滚出屏幕。每条 Console 行展示低对比度、小字号、精确到毫秒的输出或执行时间。输入框右侧提供全屏编辑入口，弹窗内使用 JavaScript Monaco editor，适合编写多行脚本；弹窗运行后关闭并把脚本写入 input 行。执行时将输入代码作为 `input` 行写入 console 列表，并将执行结果作为 `result` 行写入；页面日志按 log/info/warn/error/debug 分级显示。目标页 JavaScript 抛错时，semantic command 必须以成功 HTTP 响应返回远端异常详情，由 WebUI 在 Console 中展示真实 JS error，不能退化成 `Request failed with status code 400`。如果用户显式配置 evaluate allowlist，表达式不在 allowlist 中时返回明确错误。
+- Console 执行按钮默认可用。日志区域在上方滚动，底部轻量多行输入框固定在面板底部，不因日志增长滚出屏幕。每条 Console 行展示低对比度、小字号、精确到毫秒的输出或执行时间。页面日志按 log/info/warn/error/debug 分级显示，并保留每个 console 参数的结构化序列化结果：字符串、数字、布尔值直接分色展示；Object / Array 默认只展示摘要；点击展开后按属性或索引分级渲染子节点，并提供一键复制原始内容。输入框右侧提供全屏编辑入口，弹窗内使用 JavaScript Monaco editor，适合编写多行脚本；弹窗运行后关闭并把脚本写入 input 行。执行时将输入代码作为 `input` 行写入 console 列表，并将执行结果作为 `result` 行写入；目标页 JavaScript 抛错时，semantic command 必须以成功 HTTP 响应返回远端异常详情，由 WebUI 在 Console 中展示真实 JS error，不能退化成 `Request failed with status code 400`。如果用户显式配置 evaluate allowlist，表达式不在 allowlist 中时返回明确错误。
 - WebUI 实现按功能拆分组件：页面容器负责 session/snapshot/command 状态；Elements、Network、Storage、Console、shared search/highlight helper 分别维护独立组件文件，避免单文件继续膨胀。
 
 ## 安全与权限
@@ -145,6 +145,7 @@ E2E 测试：
 - 验证 WebUI Cookies / LocalStorage / SessionStorage 能分别展示对应数据；行内新增/编辑后目标页真实读到新值，刷新后的对应面板也显示新值；复制写入真实 clipboard；删除后目标页和 WebUI 均不再显示该 key。
 - 验证 Cookies / LocalStorage / SessionStorage 搜索过滤当前区域数据并高亮匹配内容。
 - 验证运行中新增 console info/error/debug 日志后 Console 面板完整同步并按级别区分。
+- 验证 console 输出 Object / Array 时，WebUI 默认展示摘要，点击后能按层级展开属性和索引，并能复制原始序列化内容。
 - 验证 Console 每行展示 `HH:mm:ss.SSS` 格式时间信息，低对比度、小字号、不抢占主要日志内容。
 - 验证 Console 底部多行输入固定在面板底部，执行代码作为 input 行、执行结果作为 result 行展示。
 - 验证 Console 全屏 JavaScript 编辑器可打开、可输入多行脚本，并可直接运行得到 result。

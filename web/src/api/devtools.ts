@@ -51,6 +51,18 @@ export interface DebugConsoleMessage {
   level: string;
   text: string;
   at_ms: number;
+  args?: DebugConsoleValue[];
+  raw?: string | null;
+}
+
+export interface DebugConsoleValue {
+  type: string;
+  subtype?: string;
+  preview?: string;
+  raw?: string;
+  value?: unknown;
+  properties?: Array<{ name: string; value: DebugConsoleValue }>;
+  overflow?: number;
 }
 
 export interface DebugNetworkEvent {

@@ -1,9 +1,9 @@
 import type { CSSProperties } from "react";
 import { useState } from "react";
-import { ArrowsAltOutlined, PlayCircleOutlined } from "@ant-design/icons";
+import { ArrowsAltOutlined, CopyOutlined, PlayCircleOutlined, RightOutlined } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
-import { Button, Empty, Input, Modal, Space, Tag } from "antd";
-import type { DevtoolsSnapshot } from "../../../api/devtools";
+import { Button, Empty, Input, message, Modal, Space, Tag, Tooltip } from "antd";
+import type { DebugConsoleValue, DevtoolsSnapshot } from "../../../api/devtools";
 import { HighlightedText, filterBySearch } from "./shared";
 
 const { TextArea } = Input;
@@ -29,7 +29,7 @@ export function ConsoleView({
   const rows = filterBySearch([
     ...messages.map((entry) => ({ kind: "page" as const, ...entry })),
     ...entries,
-  ], searchQuery, (entry) => `${entry.kind} ${entry.level} ${entry.text} ${formatConsoleTime(entry.at_ms)}`).sort((left, right) => left.at_ms - right.at_ms);
+  ], searchQuery, (entry) => `${entry.kind} ${entry.level} ${entry.text} ${entry.raw ?? ""} ${entry.args?.map((arg) => arg.raw ?? arg.preview ?? "").join(" ") ?? ""} ${formatConsoleTime(entry.at_ms)}`).sort((left, right) => left.at_ms - right.at_ms);
 
   return (
     <div style={consoleShellStyle}>
@@ -128,6 +128,8 @@ export type ConsoleUiEntry = {
   level: string;
   text: string;
   at_ms: number;
+  args?: DebugConsoleValue[];
+  raw?: string | null;
 };
 
 type ConsoleDisplayEntry = ConsoleUiEntry | (DevtoolsSnapshot["console"][number] & { kind: "page" });
@@ -135,13 +137,95 @@ type ConsoleDisplayEntry = ConsoleUiEntry | (DevtoolsSnapshot["console"][number]
 function ConsoleRow({ entry, searchQuery }: { entry: ConsoleDisplayEntry; searchQuery: string }) {
   const level = entry.kind === "input" ? "input" : entry.level || "log";
   const style = consoleRowStyleForLevel(level, entry.kind);
+  const args = entry.args?.length ? entry.args : null;
+  const raw = entry.raw || args?.map((arg) => arg.raw || arg.preview || "").join(" ") || entry.text;
   return (
     <div data-testid={`devtools-console-row-${level}`} style={style}>
       <span style={consolePromptStyle}>{entry.kind === "input" ? ">" : ""}</span>
       <Tag style={consoleLevelTagStyle} color={consoleLevelColor(level)}>{level}</Tag>
       <span data-testid="devtools-console-row-time" style={consoleTimeStyle}>{formatConsoleTime(entry.at_ms)}</span>
-      <pre style={consoleMessageStyle}><HighlightedText text={entry.text} query={searchQuery} /></pre>
+      <div style={consoleMessageCellStyle}>
+        <div style={consoleMessageStyle}>
+          {args ? (
+            args.map((arg, index) => (
+              <ConsoleValueView
+                key={`${index}-${arg.type}-${arg.preview}`}
+                value={arg}
+                searchQuery={searchQuery}
+                depth={0}
+              />
+            ))
+          ) : (
+            <HighlightedText text={entry.text} query={searchQuery} />
+          )}
+        </div>
+        <Tooltip title="Copy raw console content">
+          <Button
+            data-testid="devtools-console-copy-raw"
+            aria-label="Copy raw console content"
+            size="small"
+            type="text"
+            icon={<CopyOutlined />}
+            style={consoleCopyButtonStyle}
+            onClick={() => copyConsoleRaw(raw)}
+          />
+        </Tooltip>
+      </div>
     </div>
+  );
+}
+
+function ConsoleValueView({
+  value,
+  searchQuery,
+  depth,
+  label,
+}: {
+  value: DebugConsoleValue;
+  searchQuery: string;
+  depth: number;
+  label?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const children = value.properties ?? [];
+  const expandable = children.length > 0;
+  const type = value.subtype || value.type || "unknown";
+  const primitive = !expandable && (type === "string" || type === "number" || type === "boolean" || type === "null" || type === "undefined" || type === "bigint");
+  const preview = valuePreview(value);
+  return (
+    <span style={valueShellStyle(depth)}>
+      {expandable ? (
+        <button
+          type="button"
+          data-testid="devtools-console-expand-value"
+          aria-label={expanded ? "Collapse console value" : "Expand console value"}
+          style={valueToggleStyle}
+          onClick={() => setExpanded((next) => !next)}
+        >
+          <RightOutlined style={{ fontSize: 10, transform: expanded ? "rotate(90deg)" : undefined }} />
+        </button>
+      ) : (
+        <span style={valueTogglePlaceholderStyle} />
+      )}
+      {label ? <span style={propertyNameStyle}>{label}: </span> : null}
+      <span style={primitive ? primitiveValueStyle(type) : objectPreviewStyle(type)}>
+        <HighlightedText text={preview} query={searchQuery} />
+      </span>
+      {expanded ? (
+        <span style={childrenWrapStyle}>
+          {children.map((child) => (
+            <ConsoleValueView
+              key={`${child.name}-${child.value.type}-${child.value.preview}`}
+              value={child.value}
+              searchQuery={searchQuery}
+              depth={depth + 1}
+              label={child.name}
+            />
+          ))}
+          {value.overflow ? <span style={overflowStyle}>... {value.overflow} more</span> : null}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -182,6 +266,52 @@ function consoleLevelColor(level: string): string {
 export function formatValue(value: unknown): string {
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
+}
+
+export function consoleValueFromRuntimeResult(value: unknown): DebugConsoleValue {
+  if (!value || typeof value !== "object") {
+    return consoleValueFromPlain(value);
+  }
+  const payload = value as { result?: unknown; type?: string; subtype?: string; value?: unknown; description?: string };
+  const object = payload.result && typeof payload.result === "object"
+    ? payload.result as { type?: string; subtype?: string; value?: unknown; description?: string }
+    : payload;
+  if ("value" in object) return consoleValueFromPlain(object.value);
+  return {
+    type: object.type || "object",
+    subtype: object.subtype,
+    preview: object.description || formatValue(value),
+    raw: object.description || formatValue(value),
+  };
+}
+
+function consoleValueFromPlain(value: unknown): DebugConsoleValue {
+  if (value === null) return { type: "null", value, preview: "null", raw: "null" };
+  if (value === undefined) return { type: "undefined", preview: "undefined", raw: "undefined" };
+  const type = typeof value;
+  if (type === "string") return { type, value, preview: JSON.stringify(value), raw: value as string };
+  if (type === "number" || type === "boolean") return { type, value, preview: String(value), raw: String(value) };
+  try {
+    return { type: "object", preview: JSON.stringify(value), raw: JSON.stringify(value, null, 2) };
+  } catch {
+    return { type: "object", preview: String(value), raw: String(value) };
+  }
+}
+
+function valuePreview(value: DebugConsoleValue): string {
+  if (value.preview) return value.preview;
+  if (typeof value.value === "string") return JSON.stringify(value.value);
+  if (value.value !== undefined) return String(value.value);
+  return value.type || "unknown";
+}
+
+async function copyConsoleRaw(raw: string) {
+  try {
+    await navigator.clipboard.writeText(raw);
+    message.success("Copied");
+  } catch {
+    message.error("Copy failed");
+  }
 }
 
 
@@ -266,9 +396,86 @@ const consoleTimeStyle: CSSProperties = {
   userSelect: "text",
 };
 
+const consoleMessageCellStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gap: 8,
+  minWidth: 0,
+};
+
 const consoleMessageStyle: CSSProperties = {
-  margin: 0,
-  whiteSpace: "pre-wrap",
-  overflowWrap: "anywhere",
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "baseline",
+  gap: "3px 8px",
+  minWidth: 0,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 };
+
+const consoleCopyButtonStyle: CSSProperties = {
+  opacity: 0.68,
+};
+
+function valueShellStyle(depth: number): CSSProperties {
+  return {
+    display: depth === 0 ? "inline-flex" : "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    minWidth: 0,
+    marginLeft: depth === 0 ? 0 : 14,
+    lineHeight: "22px",
+  };
+}
+
+const valueToggleStyle: CSSProperties = {
+  border: 0,
+  background: "transparent",
+  color: "#6b7280",
+  padding: 0,
+  width: 14,
+  height: 18,
+  lineHeight: "18px",
+  cursor: "pointer",
+};
+
+const valueTogglePlaceholderStyle: CSSProperties = {
+  display: "inline-block",
+  width: 14,
+};
+
+const childrenWrapStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  width: "100%",
+  marginTop: 2,
+};
+
+const propertyNameStyle: CSSProperties = {
+  color: "#7c3aed",
+};
+
+const overflowStyle: CSSProperties = {
+  color: "#9ca3af",
+  marginLeft: 28,
+};
+
+function objectPreviewStyle(type: string): CSSProperties {
+  return {
+    color: type === "array" ? "#1f4fbf" : "#111827",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+  };
+}
+
+function primitiveValueStyle(type: string): CSSProperties {
+  const color =
+    type === "string" ? "#c41d1d"
+      : type === "number" || type === "bigint" ? "#1d4ed8"
+        : type === "boolean" ? "#7c3aed"
+          : "#6b7280";
+  return {
+    color,
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+  };
+}

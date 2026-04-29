@@ -47,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Basic</title><script>document.cookie="bifrost-cookie-key=cookie-ready; path=/"; localStorage.setItem("bifrost-storage-key","storage-ready"); sessionStorage.setItem("bifrost-session-key","session-ready"); console.log("bifrost-devtools-basic-ready"); console.warn("bifrost-devtools-warning-ready");</script></head><body><div id="debug-fixture" data-case="basic" style="color: rgb(11, 22, 33); display: block;">ready</div><script>fetch("/devtools/api/ping?case=basic").catch(function(){})</script></body></html>' > "$SITE_DIR/basic.html"
+printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Basic</title><script>document.cookie="bifrost-cookie-key=cookie-ready; path=/"; localStorage.setItem("bifrost-storage-key","storage-ready"); sessionStorage.setItem("bifrost-session-key","session-ready"); console.log("bifrost-devtools-basic-ready"); console.warn("bifrost-devtools-warning-ready"); console.log("bifrost-console-object-ready", {pageId:"basic", nested:{answer:42}, items:["alpha","beta"]});</script></head><body><div id="debug-fixture" data-case="basic" style="color: rgb(11, 22, 33); display: block;">ready</div><script>fetch("/devtools/api/ping?case=basic").catch(function(){})</script></body></html>' > "$SITE_DIR/basic.html"
 printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Secondary</title><script>console.log("bifrost-devtools-secondary-ready")</script></head><body><main id="debug-fixture-secondary" data-case="secondary">secondary</main></body></html>' > "$SITE_DIR/secondary.html"
 
 python3 -m http.server "$SITE_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >"$TEST_ROOT/site.log" 2>&1 &
@@ -892,6 +892,10 @@ if (!snapshot.console.some((entry) => entry.text.includes('bifrost-devtools-basi
 if (!snapshot.console.some((entry) => entry.level === 'warn' && entry.text.includes('bifrost-devtools-warning-ready'))) {
   throw new Error('AV-CDP-11 failed: warn console message missing');
 }
+const objectConsole = snapshot.console.find((entry) => entry.text.includes('bifrost-console-object-ready'));
+if (!objectConsole?.args?.some((arg) => arg.subtype === 'array' || JSON.stringify(arg).includes('"nested"'))) {
+  throw new Error(`AV-CDP-32 failed: structured console object args missing ${JSON.stringify(objectConsole)}`);
+}
 if (!snapshot.network.some((entry) => entry.url.includes('/devtools/api/ping'))) {
   throw new Error('AV-CDP-11 failed: network event missing');
 }
@@ -1232,6 +1236,17 @@ await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost
 await adminPage.getByRole('tab', { name: /Console/ }).click();
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-object-ready').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).waitFor({ timeout: 8000 });
+const objectRow = adminPage.getByTestId('devtools-console-row-log').filter({ hasText: 'bifrost-console-object-ready' }).first();
+await objectRow.getByTestId('devtools-console-expand-value').last().click();
+await objectRow.getByText('nested:', { exact: true }).waitFor({ timeout: 8000 });
+await objectRow.getByText('items:', { exact: true }).waitFor({ timeout: 8000 });
+await objectRow.getByLabel('Copy raw console content').click();
+const copiedConsoleRaw = await adminPage.evaluate(() => navigator.clipboard.readText());
+if (!copiedConsoleRaw.includes('bifrost-console-object-ready') || !copiedConsoleRaw.includes('"nested"')) {
+  throw new Error(`AV-CDP-32 failed: copy raw console object content mismatch ${JSON.stringify(copiedConsoleRaw)}`);
+}
 await page.evaluate(() => {
   console.info('bifrost-console-info-live');
   console.debug('bifrost-console-debug-live');
@@ -1314,5 +1329,5 @@ await adminPage.getByTestId('devtools-traffic-link').click();
 await adminPage.waitForURL(/\/traffic/, { timeout: 8000 });
 
 await browser.close();
-console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
+console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
 NODE

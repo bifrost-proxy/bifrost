@@ -112,6 +112,10 @@ pub struct ConsoleMessage {
     pub level: String,
     pub text: String,
     pub at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +208,12 @@ pub struct BridgeConsolePayload {
     pub token: String,
     pub level: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub at_ms: Option<u64>,
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub raw: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,7 +437,9 @@ impl BrowserDebugBroker {
         let message = ConsoleMessage {
             level: payload.level.unwrap_or_else(|| "log".to_string()),
             text: payload.text,
-            at_ms: now_ms(),
+            at_ms: payload.at_ms.unwrap_or_else(now_ms),
+            args: payload.args,
+            raw: payload.raw,
         };
         page.last_seen_at_ms = now_ms();
         drop(pages);

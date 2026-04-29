@@ -25,7 +25,7 @@ import {
   type DevtoolsSnapshot,
 } from "../../api/devtools";
 import { useTrafficStore } from "../../stores/useTrafficStore";
-import { ConsoleView, formatValue, type ConsoleUiEntry } from "./components/ConsolePanel";
+import { ConsoleView, consoleValueFromRuntimeResult, type ConsoleUiEntry } from "./components/ConsolePanel";
 import { DomTree, collectDefaultExpandedDomKeys, findFirstDomSearchMatch } from "./components/ElementsPanel";
 import { NetworkList } from "./components/NetworkPanel";
 import { StorageView } from "./components/StoragePanel";
@@ -232,7 +232,8 @@ export default function DevTools() {
         expression,
       });
       const exceptionText = runtimeExceptionText(response.result);
-      const resultText = exceptionText ?? formatValue(response.result);
+      const resultValue = exceptionText ? undefined : consoleValueFromRuntimeResult(response.result);
+      const resultText = exceptionText ?? resultValue?.raw ?? resultValue?.preview ?? "";
       setConsoleExpression("");
       setConsoleEntries((entries) => [
         ...entries,
@@ -240,6 +241,8 @@ export default function DevTools() {
           kind: "result",
           level: exceptionText ? "error" : "result",
           text: resultText,
+          args: resultValue ? [resultValue] : undefined,
+          raw: resultValue?.raw ?? resultText,
           at_ms: Date.now(),
         },
       ]);
@@ -891,7 +894,6 @@ const panelStyle: CSSProperties = {
   minWidth: 0,
   overflow: "auto",
 };
-
 
 
 

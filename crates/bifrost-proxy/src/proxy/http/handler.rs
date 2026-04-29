@@ -1022,23 +1022,120 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (command.type === "highlight_node") highlightNode(command.node_id);
     if (command.type === "hide_highlight") hideHighlight();
   }};
+  const truncateText = function(value, limit) {{
+    value = String(value);
+    limit = limit || 160;
+    return value.length > limit ? value.slice(0, limit - 1) + "..." : value;
+  }};
+  const rawConsoleArg = function(value) {{
+    try {{
+      if (typeof value === "string") return value;
+      if (value === undefined) return "undefined";
+      if (typeof value === "function") return String(value);
+      const seen = new WeakSet();
+      return JSON.stringify(value, function(_, item) {{
+        if (typeof item === "bigint") return String(item) + "n";
+        if (typeof item === "function") return String(item);
+        if (typeof item === "object" && item !== null) {{
+          if (seen.has(item)) return "[Circular]";
+          seen.add(item);
+        }}
+        return item;
+      }});
+    }} catch (_) {{
+      try {{ return String(value); }} catch (_) {{ return "[Unserializable]"; }}
+    }}
+  }};
+  const consolePreview = function(value) {{
+    try {{
+      if (value === null) return "null";
+      if (value === undefined) return "undefined";
+      if (typeof value === "string") return JSON.stringify(truncateText(value, 120));
+      if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+      if (typeof value === "function") return truncateText(String(value), 120);
+      if (Array.isArray(value)) {{
+        return "Array(" + value.length + ") [" + value.slice(0, 3).map(consolePreview).join(", ") + (value.length > 3 ? ", ..." : "") + "]";
+      }}
+      if (value instanceof Error) return value.name + ": " + value.message;
+      if (value instanceof Date) return "Date " + value.toISOString();
+      if (value && value.nodeType === 1) return "<" + String(value.tagName || "element").toLowerCase() + (value.id ? "#" + value.id : "") + ">";
+      const keys = Object.keys(value || {{}});
+      return "Object {{" + keys.slice(0, 4).map(function(key) {{
+        return key + ": " + consolePreview(value[key]);
+      }}).join(", ") + (keys.length > 4 ? ", ..." : "") + "}}";
+    }} catch (_) {{
+      return "[Preview unavailable]";
+    }}
+  }};
+  const serializeConsoleArg = function(value, depth, seen) {{
+    depth = depth || 0;
+    seen = seen || new WeakSet();
+    const valueType = value === null ? "null" : typeof value;
+    const result = {{
+      type: valueType,
+      preview: consolePreview(value),
+      raw: rawConsoleArg(value)
+    }};
+    if (value === null || value === undefined || valueType === "string" || valueType === "number" || valueType === "boolean") {{
+      result.value = value;
+      return result;
+    }}
+    if (valueType === "bigint") {{
+      result.value = String(value) + "n";
+      return result;
+    }}
+    if (valueType === "function") {{
+      result.subtype = "function";
+      result.value = truncateText(String(value), 4096);
+      return result;
+    }}
+    if (value instanceof Date) result.subtype = "date";
+    if (value instanceof Error) result.subtype = "error";
+    if (Array.isArray(value)) result.subtype = "array";
+    if (value && value.nodeType) result.subtype = "node";
+    if (depth >= 3 || !value || valueType !== "object") return result;
+    if (seen.has(value)) {{
+      result.subtype = "circular";
+      result.preview = "[Circular]";
+      return result;
+    }}
+    seen.add(value);
+    try {{
+      const names = Array.isArray(value)
+        ? value.map(function(_, index) {{ return String(index); }})
+        : Object.keys(value);
+      result.properties = names.slice(0, 80).map(function(name) {{
+        let child;
+        try {{ child = value[name]; }} catch (error) {{ child = String(error); }}
+        return {{name: name, value: serializeConsoleArg(child, depth + 1, seen)}};
+      }});
+      if (Array.isArray(value)) {{
+        result.properties.push({{name: "length", value: {{type: "number", value: value.length, preview: String(value.length), raw: String(value.length)}}}});
+      }}
+      if (names.length > 80) result.overflow = names.length - 80;
+    }} catch (_) {{}}
+    return result;
+  }};
+  const serializeConsoleArgs = function(args) {{
+    return Array.prototype.slice.call(args).map(function(value) {{
+      return serializeConsoleArg(value, 0, new WeakSet());
+    }});
+  }};
   const stringifyArgs = function(args) {{
     return Array.prototype.slice.call(args).map(function(value) {{
-      try {{
-        return typeof value === "string" ? value : JSON.stringify(value);
-      }} catch (_) {{
-        return String(value);
-      }}
+      return consolePreview(value);
     }}).join(" ");
   }};
   ["log", "info", "warn", "error", "debug"].forEach(function(level) {{
     const original = console[level];
     console[level] = function() {{
       try {{
-        const message = {{level: level, text: stringifyArgs(arguments), at_ms: Date.now()}};
+        const serializedArgs = serializeConsoleArgs(arguments);
+        const raw = serializedArgs.map(function(arg) {{ return arg.raw || arg.preview || ""; }}).join(" ");
+        const message = {{level: level, text: stringifyArgs(arguments), at_ms: Date.now(), args: serializedArgs, raw: raw}};
         consoleBuffer.push(message);
         if (consoleBuffer.length > 500) consoleBuffer = consoleBuffer.slice(-500);
-        post("/console", {{level: level, text: message.text}});
+        post("/console", {{level: level, text: message.text, at_ms: message.at_ms, args: message.args, raw: message.raw}});
       }} catch (_) {{}}
       return original.apply(console, arguments);
     }};

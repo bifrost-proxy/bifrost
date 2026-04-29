@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 Bifrost 在用户显式配置裸 `devtools://` 规则后，可以对经过代理的页面建立 `page_bridge` 调试通道，并在 WebUI DevTools tab 中使用 Bifrost 自有面板完成 Elements、Network、Cookies、LocalStorage、SessionStorage、Console 调试。Elements 必须可操作，Network / Storage / Console 必须覆盖运行中增量同步，Storage 必须支持修改，Console 必须默认支持多行输入脚本执行、全屏 JavaScript 编辑和真实 JS 异常展示；每条 Console 行必须展示低对比度、小字号、精确到毫秒的输出或执行时间。各面板必须支持右侧搜索，Elements 自动展开并选中匹配节点，列表类面板过滤并高亮匹配内容。规则编辑器智能提示不应提示 `devtools://value` 或其它必填参数。
+验证 Bifrost 在用户显式配置裸 `devtools://` 规则后，可以对经过代理的页面建立 `page_bridge` 调试通道，并在 WebUI DevTools tab 中使用 Bifrost 自有面板完成 Elements、Network、Cookies、LocalStorage、SessionStorage、Console 调试。Elements 必须可操作，Network / Storage / Console 必须覆盖运行中增量同步，Storage 必须支持修改，Console 必须默认支持多行输入脚本执行、全屏 JavaScript 编辑和真实 JS 异常展示；每条 Console 行必须展示低对比度、小字号、精确到毫秒的输出或执行时间；Console 对象/数组输出必须按结构化值展示摘要、支持层级展开和复制原始内容。各面板必须支持右侧搜索，Elements 自动展开并选中匹配节点，列表类面板过滤并高亮匹配内容。规则编辑器智能提示不应提示 `devtools://value` 或其它必填参数。
 
 页面 bridge 与 Bifrost Admin 的主通信通道必须使用 WebSocket 双向通信。页面不得通过独立 HTTP 请求上报 hello / network / console / eval_result，也不得通过 `eval-next` / `overlay-next` 轮询拉取命令；采集事件需要先进入内存队列，再按短延迟批量异步 flush 到 WS，避免阻塞原页面或造成请求风暴。WebUI 详情页也必须通过 session WebSocket 接收目标页推送；Bifrost Admin 只负责轻量路由、短期状态和有限 ring buffer，不做完整历史数据缓存。WebUI 连接建立或切换 tab 时从目标页重新拉取当前模块数据；任一端断开时另一端必须感知断开状态。
 
@@ -183,7 +183,7 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 
 1. 使用裸 `devtools://` 规则访问目标页。
 2. 在 WebUI DevTools 详情页打开 `Console` tab。
-3. 目标页运行时输出 `console.info('bifrost-console-info-live')` 和 `console.error('bifrost-console-error-live')`。
+3. 目标页运行时输出 `console.info('bifrost-console-info-live')`、`console.error('bifrost-console-error-live')` 和 `console.log('bifrost-console-object-ready', { pageId: 'basic', nested: { answer: 42 }, items: ['alpha', 'beta'] })`。
 4. 点击 WebUI 详情页 refresh 按钮。
 5. 在底部固定输入框填入脚本 `document.title`。
 6. 点击 `Run`。
@@ -200,6 +200,9 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 刷新后 Console 日志包含 `bifrost-console-debug-live`。
 - 刷新后 Console 日志包含 `bifrost-console-error-live`。
 - Console 按 log/info/warn/error/debug 区分不同等级。
+- Console 对象日志默认展示 `Object { ... }` 摘要，而不是把对象拍平成不可读的长字符串。
+- 点击对象摘要后，Console 行内按层级展开，能看到 `nested`、`items` 等属性，以及数组索引。
+- 点击复制按钮后，剪贴板包含原始 console 内容，例如 `bifrost-console-object-ready` 和 `"nested"`。
 - 每条 Console 行展示 `HH:mm:ss.SSS` 格式时间信息，文字低对比度、小字号，不干扰主要日志内容。
 - 输入框始终固定在 Console 面板底部，不因日志滚动离开面板。
 - 执行后 Console 列表展示一条 input 行，内容为输入的代码。
@@ -345,3 +348,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-29：通过。按产品调整删除 Elements 右侧 selected node 侧边栏，保留 DOM tree 选中和目标页 highlight。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22/23/24 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, clean Elements tree rendering, removed Elements sidebar, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。按产品调整移除 Storage 的 `mode=control` 限制，验证 read-mode session 也可以通过 `storage.set` 写入目标页 localStorage。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22/23/24/25 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, read-mode storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, clean Elements tree rendering, removed Elements sidebar, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。按 WebSocket-only 与轻量服务端缓存要求复测，验证 bridge 无 HTTP 上报风暴、WebUI session WS 建链后按 `scope=full` 从目标页重新拉取 DOM / Network / Storage / Console，目标页刷新后旧 sender 不覆盖新 sender，静默但 WS 仍连接的 secondary 页面仍可从在线列表切换调试，Back 后晚到 snapshot 不会把详情页复活。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。按 Console 结构化对象展示要求复测，验证 page bridge 上报 console `args/raw`，WebUI 默认展示 Object 摘要，点击后展开 `nested` / `items`，复制按钮可复制原始序列化内容。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
