@@ -1,4 +1,5 @@
 import { get, post } from './client';
+import { buildWsUrl } from '../runtime';
 
 export interface DebugPage {
   page_id: string;
@@ -40,6 +41,12 @@ export interface DevtoolsSnapshot {
   storage?: DebugStorageSnapshot | null;
 }
 
+export type DevtoolsLiveMessage =
+  | { type: 'snapshot'; snapshot: DevtoolsSnapshot }
+  | { type: 'console'; message: DebugConsoleMessage }
+  | { type: 'network'; event: DebugNetworkEvent }
+  | { type: 'disconnected'; page_id?: string; reason: string };
+
 export interface DebugConsoleMessage {
   level: string;
   text: string;
@@ -52,6 +59,8 @@ export interface DebugNetworkEvent {
   status?: number | null;
   resource_type: string;
   at_ms: number;
+  client_req_id?: string | null;
+  traffic_id?: string | null;
 }
 
 export interface DebugStorageSnapshot {
@@ -87,6 +96,21 @@ export async function openDevtoolsSession(pageId: string): Promise<DebugSession>
 
 export async function getDevtoolsSnapshot(sessionId: string): Promise<DevtoolsSnapshot> {
   return get<DevtoolsSnapshot>(`/devtools/sessions/${sessionId}/snapshot`);
+}
+
+export async function requestDevtoolsSnapshotRefresh(sessionId: string, scope = 'full'): Promise<void> {
+  await post<{ ok: boolean }>(`/devtools/sessions/${sessionId}/refresh`, { scope });
+}
+
+export function buildDevtoolsSessionWsUrl(sessionId: string): string {
+  return buildWsUrl(`/api/devtools/sessions/${encodeURIComponent(sessionId)}/ws`);
+}
+
+export async function findTrafficForDevtoolsRequest(clientReqId: string): Promise<string> {
+  const res = await get<{ ok: boolean; traffic_id: string }>(
+    `/devtools/network/traffic/${encodeURIComponent(clientReqId)}`,
+  );
+  return res.traffic_id;
 }
 
 export async function sendDevtoolsCommand(

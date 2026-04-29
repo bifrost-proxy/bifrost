@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use ring::digest;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -57,14 +58,11 @@ pub struct CapabilityMatrix {
 }
 
 impl CapabilityMatrix {
-    fn page_bridge(mode: &DevtoolsMode) -> Self {
+    fn page_bridge(_mode: &DevtoolsMode) -> Self {
         Self {
             console_subscribe: "supported".to_string(),
             dom_snapshot: "supported".to_string(),
-            runtime_evaluate: match mode {
-                DevtoolsMode::Read => "requires_control".to_string(),
-                DevtoolsMode::Control => "supported".to_string(),
-            },
+            runtime_evaluate: "supported".to_string(),
             network_observe: "partial".to_string(),
             debugger_breakpoints: "unsupported".to_string(),
             page_screenshot: "unsupported".to_string(),
@@ -123,6 +121,10 @@ pub struct NetworkEvent {
     pub status: Option<u16>,
     pub resource_type: String,
     pub at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_req_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -178,6 +180,8 @@ pub struct EvaluateAuditRecord {
 #[derive(Debug, Deserialize)]
 pub struct BridgeHelloPayload {
     pub token: String,
+    #[serde(default)]
+    pub scope: Option<String>,
     pub tab_id: Option<String>,
     pub title: Option<String>,
     pub url: Option<String>,
@@ -189,6 +193,8 @@ pub struct BridgeHelloPayload {
     pub dom_tree: Option<serde_json::Value>,
     #[serde(default)]
     pub storage: Option<StorageSnapshot>,
+    #[serde(default)]
+    pub console: Vec<ConsoleMessage>,
     #[serde(default)]
     pub network: Vec<NetworkEventInput>,
 }
@@ -212,6 +218,8 @@ pub struct NetworkEventInput {
     pub status: Option<u16>,
     #[serde(rename = "type")]
     pub resource_type: Option<String>,
+    #[serde(default)]
+    pub client_req_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +239,23 @@ pub struct BridgeEvalCommand {
 pub enum BridgeOverlayCommand {
     HighlightNode { node_id: u64 },
     HideHighlight,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BridgeServerMessage {
+    Eval { command: BridgeEvalCommand },
+    Overlay { command: BridgeOverlayCommand },
+    SnapshotRequest { scope: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DevtoolsLiveMessage {
+    Snapshot { snapshot: serde_json::Value },
+    Console { message: ConsoleMessage },
+    Network { event: NetworkEvent },
+    Disconnected { page_id: String, reason: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +278,9 @@ pub struct BrowserDebugBroker {
     eval_pending: RwLock<HashMap<String, Vec<BridgeEvalCommand>>>,
     eval_results: RwLock<HashMap<u64, Result<serde_json::Value, String>>>,
     overlay_pending: RwLock<HashMap<String, Vec<BridgeOverlayCommand>>>,
+    bridge_senders: RwLock<HashMap<String, mpsc::UnboundedSender<BridgeServerMessage>>>,
+    session_senders: RwLock<HashMap<String, mpsc::UnboundedSender<DevtoolsLiveMessage>>>,
+    client_req_traffic: RwLock<HashMap<String, String>>,
     evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
     evaluate_audit_capacity: usize,
 }
@@ -268,6 +296,9 @@ impl BrowserDebugBroker {
             eval_pending: RwLock::new(HashMap::new()),
             eval_results: RwLock::new(HashMap::new()),
             overlay_pending: RwLock::new(HashMap::new()),
+            bridge_senders: RwLock::new(HashMap::new()),
+            session_senders: RwLock::new(HashMap::new()),
+            client_req_traffic: RwLock::new(HashMap::new()),
             evaluate_audit: RwLock::new(VecDeque::new()),
             evaluate_audit_capacity: std::env::var("BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY")
                 .ok()
@@ -324,7 +355,10 @@ impl BrowserDebugBroker {
         if expected_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        let tab_id = payload.tab_id.filter(|value| !value.trim().is_empty());
+        let tab_id = payload
+            .tab_id
+            .clone()
+            .filter(|value| !value.trim().is_empty());
         let replaced_page_ids: Vec<String> = tab_id
             .as_ref()
             .map(|tab_id| {
@@ -359,30 +393,22 @@ impl BrowserDebugBroker {
             .get_mut(page_id)
             .ok_or_else(|| "page not found".to_string())?;
         page.bridge_tab_id = tab_id;
-        if let Some(title) = payload.title {
+        if let Some(title) = payload.title.clone() {
             if !title.trim().is_empty() {
                 page.title = Some(title);
             }
         }
-        if let Some(url) = payload.url {
+        if let Some(url) = payload.url.clone() {
             page.url = url;
         }
         if payload.user_agent.is_some() {
-            page.user_agent = payload.user_agent;
-        }
-        if payload.dom_snapshot.is_some() || payload.dom_tree.is_some() {
-            page.dom_snapshot = payload.dom_snapshot;
-            page.dom_tree = payload.dom_tree;
-            page.dom_updated_at_ms = now_ms();
-        }
-        if payload.storage.is_some() {
-            page.storage_snapshot = payload.storage;
-        }
-        for event in payload.network {
-            push_network_event(&mut page.network_events, event);
+            page.user_agent = payload.user_agent.clone();
         }
         page.state = DebugPageState::Discoverable;
         page.last_seen_at_ms = now_ms();
+        let snapshot = snapshot_from_bridge_payload(page, payload, &self.client_req_traffic);
+        drop(pages);
+        self.push_live_to_page(page_id, DevtoolsLiveMessage::Snapshot { snapshot });
         Ok(())
     }
 
@@ -398,16 +424,14 @@ impl BrowserDebugBroker {
         if page.bridge_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        page.console_messages.push(ConsoleMessage {
+        let message = ConsoleMessage {
             level: payload.level.unwrap_or_else(|| "log".to_string()),
             text: payload.text,
             at_ms: now_ms(),
-        });
-        if page.console_messages.len() > 200 {
-            let extra = page.console_messages.len() - 200;
-            page.console_messages.drain(0..extra);
-        }
+        };
         page.last_seen_at_ms = now_ms();
+        drop(pages);
+        self.push_live_to_page(page_id, DevtoolsLiveMessage::Console { message });
         Ok(())
     }
 
@@ -423,6 +447,18 @@ impl BrowserDebugBroker {
         page.status_reason =
             Some("page bridge disconnected; waiting for reload reconnect".to_string());
         page.last_seen_at_ms = now_ms();
+        let reason = page
+            .status_reason
+            .clone()
+            .unwrap_or_else(|| "page bridge disconnected".to_string());
+        drop(pages);
+        self.push_live_to_page(
+            page_id,
+            DevtoolsLiveMessage::Disconnected {
+                page_id: page_id.to_string(),
+                reason,
+            },
+        );
         Ok(())
     }
 
@@ -437,8 +473,9 @@ impl BrowserDebugBroker {
             .or_default()
             .push(BridgeEvalCommand {
                 eval_id,
-                expression,
+                expression: expression.clone(),
             });
+        self.send_eval_if_connected(page_id);
         Ok(eval_id)
     }
 
@@ -489,6 +526,56 @@ impl BrowserDebugBroker {
         Ok(())
     }
 
+    pub fn bridge_ws_attach(
+        &self,
+        page_id: &str,
+        token: &str,
+        sender: mpsc::UnboundedSender<BridgeServerMessage>,
+    ) -> Result<(), String> {
+        let pages = self.pages.read();
+        let page = pages
+            .get(page_id)
+            .ok_or_else(|| "page not found".to_string())?;
+        if page.bridge_token != token {
+            return Err("bridge token mismatch".to_string());
+        }
+        drop(pages);
+        self.bridge_senders
+            .write()
+            .insert(page_id.to_string(), sender);
+        self.send_eval_if_connected(page_id);
+        self.send_overlay_if_connected(page_id);
+        Ok(())
+    }
+
+    pub fn bridge_ws_detach(&self, page_id: &str) {
+        self.bridge_senders.write().remove(page_id);
+        self.push_live_to_page(
+            page_id,
+            DevtoolsLiveMessage::Disconnected {
+                page_id: page_id.to_string(),
+                reason: "page bridge websocket disconnected".to_string(),
+            },
+        );
+    }
+
+    pub fn session_ws_attach(
+        &self,
+        session_id: &str,
+        sender: mpsc::UnboundedSender<DevtoolsLiveMessage>,
+    ) -> Result<(), String> {
+        let snapshot = self.snapshot(session_id)?;
+        self.session_senders
+            .write()
+            .insert(session_id.to_string(), sender.clone());
+        let _ = sender.send(DevtoolsLiveMessage::Snapshot { snapshot });
+        Ok(())
+    }
+
+    pub fn session_ws_detach(&self, session_id: &str) {
+        self.session_senders.write().remove(session_id);
+    }
+
     pub fn queue_overlay(
         &self,
         page_id: &str,
@@ -502,6 +589,7 @@ impl BrowserDebugBroker {
             .entry(page_id.to_string())
             .or_default()
             .push(command);
+        self.send_overlay_if_connected(page_id);
         Ok(())
     }
 
@@ -531,6 +619,59 @@ impl BrowserDebugBroker {
 
     pub fn take_eval_result(&self, eval_id: u64) -> Option<Result<serde_json::Value, String>> {
         self.eval_results.write().remove(&eval_id)
+    }
+
+    fn send_eval_if_connected(&self, page_id: &str) {
+        let Some(sender) = self.bridge_senders.read().get(page_id).cloned() else {
+            return;
+        };
+        let command = {
+            let mut pending = self.eval_pending.write();
+            pending
+                .get_mut(page_id)
+                .and_then(|commands| (!commands.is_empty()).then(|| commands.remove(0)))
+        };
+        if let Some(command) = command {
+            if sender.send(BridgeServerMessage::Eval { command }).is_err() {
+                self.bridge_senders.write().remove(page_id);
+            }
+        }
+    }
+
+    fn send_overlay_if_connected(&self, page_id: &str) {
+        let Some(sender) = self.bridge_senders.read().get(page_id).cloned() else {
+            return;
+        };
+        let command = {
+            let mut pending = self.overlay_pending.write();
+            pending
+                .get_mut(page_id)
+                .and_then(|commands| (!commands.is_empty()).then(|| commands.remove(0)))
+        };
+        if let Some(command) = command {
+            if sender
+                .send(BridgeServerMessage::Overlay { command })
+                .is_err()
+            {
+                self.bridge_senders.write().remove(page_id);
+            }
+        }
+    }
+
+    fn push_live_to_page(&self, page_id: &str, message: DevtoolsLiveMessage) {
+        let session_ids: Vec<String> = self
+            .sessions
+            .read()
+            .values()
+            .filter(|session| session.page_id == page_id)
+            .map(|session| session.session_id.clone())
+            .collect();
+        let senders = self.session_senders.read();
+        for session_id in session_ids {
+            if let Some(sender) = senders.get(&session_id) {
+                let _ = sender.send(message.clone());
+            }
+        }
     }
 
     pub fn record_evaluate_audit(
@@ -619,19 +760,46 @@ impl BrowserDebugBroker {
         if page.bridge_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        push_network_event(&mut page.network_events, payload.event);
+        let event = network_event_from_input(&self.client_req_traffic, payload.event);
         page.last_seen_at_ms = now_ms();
+        drop(pages);
+        if let Some(event) = event {
+            self.push_live_to_page(page_id, DevtoolsLiveMessage::Network { event });
+        }
         Ok(())
+    }
+
+    pub fn bind_client_req_traffic(&self, client_req_id: &str, traffic_id: &str) {
+        let client_req_id = client_req_id.trim();
+        if client_req_id.is_empty() || traffic_id.trim().is_empty() {
+            return;
+        }
+        self.client_req_traffic
+            .write()
+            .insert(client_req_id.to_string(), traffic_id.to_string());
+    }
+
+    pub fn traffic_id_for_client_req(&self, client_req_id: &str) -> Option<String> {
+        self.client_req_traffic
+            .read()
+            .get(client_req_id.trim())
+            .cloned()
     }
 
     pub fn list_pages(&self, online_only: bool) -> Vec<DebugPage> {
         self.prune_inactive_pages();
         let cutoff = now_ms().saturating_sub(Duration::from_secs(60).as_millis() as u64);
+        let connected_page_ids: HashSet<String> =
+            self.bridge_senders.read().keys().cloned().collect();
         let mut pages: Vec<DebugPage> = self
             .pages
             .read()
             .values()
-            .filter(|page| !online_only || page.last_seen_at_ms >= cutoff)
+            .filter(|page| {
+                !online_only
+                    || page.last_seen_at_ms >= cutoff
+                    || connected_page_ids.contains(&page.page_id)
+            })
             .cloned()
             .collect();
         pages.sort_by_key(|page| std::cmp::Reverse(page.last_seen_at_ms));
@@ -639,6 +807,7 @@ impl BrowserDebugBroker {
     }
 
     pub fn list_debuggable_pages(&self, online_only: bool) -> Vec<DebugPage> {
+        let mut seen = HashSet::new();
         self.list_pages(online_only)
             .into_iter()
             .filter(|page| {
@@ -646,6 +815,14 @@ impl BrowserDebugBroker {
                     page.state,
                     DebugPageState::Candidate | DebugPageState::Stale | DebugPageState::Denied
                 )
+            })
+            .filter(|page| {
+                let key = page
+                    .bridge_tab_id
+                    .as_ref()
+                    .map(|tab_id| format!("tab:{tab_id}"))
+                    .unwrap_or_else(|| format!("url:{}", page.url));
+                seen.insert(key)
             })
             .collect()
     }
@@ -696,14 +873,21 @@ impl BrowserDebugBroker {
         let page = pages
             .get(&session.page_id)
             .ok_or_else(|| "page not found".to_string())?;
-        Ok(serde_json::json!({
-            "page": page,
-            "console": page.console_messages,
-            "dom_snapshot": page.dom_snapshot,
-            "dom_tree": page.dom_tree,
-            "network": page.network_events,
-            "storage": page.storage_snapshot,
-        }))
+        Ok(snapshot_for_page(page))
+    }
+
+    pub fn request_snapshot_refresh(
+        &self,
+        session_id: &str,
+        scope: Option<String>,
+    ) -> Result<(), String> {
+        let page_id = self.session_page_id(session_id)?;
+        let Some(sender) = self.bridge_senders.read().get(&page_id).cloned() else {
+            return Err("page bridge websocket is not connected".to_string());
+        };
+        sender
+            .send(BridgeServerMessage::SnapshotRequest { scope })
+            .map_err(|_| "page bridge websocket is not connected".to_string())
     }
 
     pub async fn command(
@@ -713,8 +897,10 @@ impl BrowserDebugBroker {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         match command {
-            "dom.snapshot" => self.snapshot(session_id),
-            "console.messages" => self.snapshot(session_id),
+            "dom.snapshot" | "console.messages" => {
+                self.request_snapshot_refresh(session_id, Some(command.to_string()))?;
+                self.snapshot(session_id)
+            }
             "dom.highlight" => {
                 let page_id = self.session_page_id(session_id)?;
                 let node_id = params
@@ -731,7 +917,7 @@ impl BrowserDebugBroker {
                 Ok(serde_json::json!({"hidden": true}))
             }
             "storage.set" => {
-                let page_id = self.session_control_page_id(session_id)?;
+                let page_id = self.session_page_id(session_id)?;
                 let area = params
                     .get("area")
                     .and_then(|value| value.as_str())
@@ -755,8 +941,29 @@ impl BrowserDebugBroker {
                 }
                 Err("storage update timed out".to_string())
             }
+            "storage.delete" | "storage.remove" => {
+                let page_id = self.session_page_id(session_id)?;
+                let area = params
+                    .get("area")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing area".to_string())?;
+                let key = params
+                    .get("key")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "missing key".to_string())?;
+                let expression = storage_delete_expression(area, key)?;
+                let eval_id = self.queue_eval(&page_id, expression)?;
+                for _ in 0..40 {
+                    if let Some(result) = self.take_eval_result(eval_id) {
+                        result?;
+                        return Ok(serde_json::json!({"deleted": true, "area": area, "key": key}));
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err("storage delete timed out".to_string())
+            }
             "runtime.evaluate" => {
-                let page_id = self.session_control_page_id(session_id)?;
+                let page_id = self.session_page_id(session_id)?;
                 let expression = params
                     .get("expression")
                     .and_then(|value| value.as_str())
@@ -773,7 +980,22 @@ impl BrowserDebugBroker {
                 let eval_id = self.queue_eval(&page_id, expression)?;
                 for _ in 0..40 {
                     if let Some(result) = self.take_eval_result(eval_id) {
-                        return result;
+                        return Ok(match result {
+                            Ok(result) => result,
+                            Err(exception) => serde_json::json!({
+                                "type": "undefined",
+                                "description": "undefined",
+                                "exception": exception,
+                                "exceptionDetails": {
+                                    "text": exception,
+                                    "exception": {
+                                        "type": "string",
+                                        "value": exception,
+                                        "description": exception
+                                    }
+                                }
+                            }),
+                        });
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -795,21 +1017,6 @@ impl BrowserDebugBroker {
         Ok(page.page_id.clone())
     }
 
-    fn session_control_page_id(&self, session_id: &str) -> Result<String, String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| "session not found".to_string())?;
-        let pages = self.pages.read();
-        let page = pages
-            .get(&session.page_id)
-            .ok_or_else(|| "page not found".to_string())?;
-        if page.mode != DevtoolsMode::Control {
-            return Err("requires_control".to_string());
-        }
-        Ok(page.page_id.clone())
-    }
-
     fn migrate_page_references(&self, old_page_id: &str, new_page_id: &str) {
         if old_page_id == new_page_id {
             return;
@@ -821,6 +1028,12 @@ impl BrowserDebugBroker {
         }
         move_pending_commands(&mut self.eval_pending.write(), old_page_id, new_page_id);
         move_pending_commands(&mut self.overlay_pending.write(), old_page_id, new_page_id);
+        let mut bridge_senders = self.bridge_senders.write();
+        if let Some(sender) = bridge_senders.remove(old_page_id) {
+            bridge_senders
+                .entry(new_page_id.to_string())
+                .or_insert(sender);
+        }
     }
 
     fn prune_inactive_pages(&self) {
@@ -841,21 +1054,84 @@ impl Default for BrowserDebugBroker {
     }
 }
 
-fn push_network_event(events: &mut Vec<NetworkEvent>, event: NetworkEventInput) {
+fn network_event_from_input(
+    client_req_traffic: &RwLock<HashMap<String, String>>,
+    event: NetworkEventInput,
+) -> Option<NetworkEvent> {
     if event.url.trim().is_empty() {
-        return;
+        return None;
     }
-    events.push(NetworkEvent {
+    let client_req_id = event
+        .client_req_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let traffic_id = client_req_id
+        .as_deref()
+        .and_then(|id| client_req_traffic.read().get(id).cloned());
+    Some(NetworkEvent {
         url: event.url,
         method: event.method.unwrap_or_else(|| "GET".to_string()),
         status: event.status,
         resource_type: event.resource_type.unwrap_or_else(|| "Other".to_string()),
         at_ms: now_ms(),
-    });
-    if events.len() > 500 {
-        let extra = events.len() - 500;
-        events.drain(0..extra);
+        client_req_id,
+        traffic_id,
+    })
+}
+
+fn snapshot_for_page(page: &DebugPage) -> serde_json::Value {
+    serde_json::json!({
+        "page": page,
+        "console": [],
+        "dom_snapshot": null,
+        "dom_tree": null,
+        "network": [],
+        "storage": null,
+    })
+}
+
+fn snapshot_from_bridge_payload(
+    page: &DebugPage,
+    payload: BridgeHelloPayload,
+    client_req_traffic: &RwLock<HashMap<String, String>>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({ "page": page });
+    if let serde_json::Value::Object(ref mut object) = value {
+        if payload.dom_snapshot.is_some() || payload.dom_tree.is_some() {
+            object.insert(
+                "dom_snapshot".to_string(),
+                serde_json::to_value(payload.dom_snapshot).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "dom_tree".to_string(),
+                serde_json::to_value(payload.dom_tree).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(storage) = payload.storage {
+            object.insert(
+                "storage".to_string(),
+                serde_json::to_value(storage).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if !payload.console.is_empty() {
+            object.insert(
+                "console".to_string(),
+                serde_json::to_value(payload.console).unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
+        if !payload.network.is_empty() {
+            let events: Vec<NetworkEvent> = payload
+                .network
+                .into_iter()
+                .filter_map(|event| network_event_from_input(client_req_traffic, event))
+                .collect();
+            object.insert(
+                "network".to_string(),
+                serde_json::to_value(events).unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
     }
+    value
 }
 
 fn move_pending_commands<T>(
@@ -884,6 +1160,22 @@ fn storage_set_expression(area: &str, key: &str, value: &str) -> Result<String, 
         )),
         "session_storage" | "sessionStorage" => Ok(format!(
             "sessionStorage.setItem({key}, {value}); window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); sessionStorage.getItem({key})"
+        )),
+        other => Err(format!("unsupported storage area: {other}")),
+    }
+}
+
+fn storage_delete_expression(area: &str, key: &str) -> Result<String, String> {
+    let key = serde_json::to_string(key).map_err(|err| err.to_string())?;
+    match area {
+        "cookie" | "cookies" => Ok(format!(
+            "document.cookie = {key} + '=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'; window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); document.cookie"
+        )),
+        "local_storage" | "localStorage" => Ok(format!(
+            "localStorage.removeItem({key}); window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); null"
+        )),
+        "session_storage" | "sessionStorage" => Ok(format!(
+            "sessionStorage.removeItem({key}); window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__ && window.__BIFROST_DEVTOOLS_BRIDGE_SYNC_STORAGE__(); null"
         )),
         other => Err(format!("unsupported storage area: {other}")),
     }
@@ -978,6 +1270,7 @@ mod tests {
                 &page_id,
                 BridgeHelloPayload {
                     token,
+                    scope: None,
                     tab_id: Some("tab-a".to_string()),
                     title: Some("Fixture".to_string()),
                     url: None,
@@ -985,6 +1278,7 @@ mod tests {
                     dom_snapshot: Some("<html></html>".to_string()),
                     dom_tree: None,
                     storage: None,
+                    console: Vec::new(),
                     network: Vec::new(),
                 },
             )
@@ -1006,6 +1300,7 @@ mod tests {
                 &page_id,
                 BridgeHelloPayload {
                     token: token.clone(),
+                    scope: None,
                     tab_id: Some("tab-a".to_string()),
                     title: Some("Fixture".to_string()),
                     url: None,
@@ -1013,6 +1308,7 @@ mod tests {
                     dom_snapshot: None,
                     dom_tree: None,
                     storage: None,
+                    console: Vec::new(),
                     network: Vec::new(),
                 },
             )
@@ -1040,6 +1336,7 @@ mod tests {
                 &old_page_id,
                 BridgeHelloPayload {
                     token: old_token.clone(),
+                    scope: None,
                     tab_id: Some("tab-a".to_string()),
                     title: Some("Before".to_string()),
                     url: None,
@@ -1047,6 +1344,7 @@ mod tests {
                     dom_snapshot: Some("<html><body>before</body></html>".to_string()),
                     dom_tree: None,
                     storage: None,
+                    console: Vec::new(),
                     network: Vec::new(),
                 },
             )
@@ -1063,6 +1361,7 @@ mod tests {
                 &new_page_id,
                 BridgeHelloPayload {
                     token: new_token,
+                    scope: None,
                     tab_id: Some("tab-a".to_string()),
                     title: Some("After".to_string()),
                     url: Some("http://example.test/devtools/basic.html?after=1".to_string()),
@@ -1070,6 +1369,7 @@ mod tests {
                     dom_snapshot: Some("<html><body>after</body></html>".to_string()),
                     dom_tree: None,
                     storage: None,
+                    console: Vec::new(),
                     network: Vec::new(),
                 },
             )
@@ -1092,6 +1392,7 @@ mod tests {
             &page_id,
             BridgeHelloPayload {
                 token: "wrong".to_string(),
+                scope: None,
                 tab_id: Some("tab-a".to_string()),
                 title: Some("Fixture".to_string()),
                 url: None,
@@ -1099,6 +1400,7 @@ mod tests {
                 dom_snapshot: None,
                 dom_tree: None,
                 storage: None,
+                console: Vec::new(),
                 network: Vec::new(),
             },
         );
@@ -1108,7 +1410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_evaluate_requires_control_scope() {
+    async fn test_runtime_evaluate_allowed_for_default_session_scope() {
         let broker = BrowserDebugBroker::new();
         let (page_id, token) =
             broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
@@ -1117,6 +1419,7 @@ mod tests {
                 &page_id,
                 BridgeHelloPayload {
                     token,
+                    scope: None,
                     tab_id: Some("tab-a".to_string()),
                     title: Some("Fixture".to_string()),
                     url: None,
@@ -1124,6 +1427,7 @@ mod tests {
                     dom_snapshot: None,
                     dom_tree: None,
                     storage: None,
+                    console: Vec::new(),
                     network: Vec::new(),
                 },
             )
@@ -1138,6 +1442,9 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result.unwrap_err(), "requires_control");
+        assert!(
+            result.unwrap_err().contains("timed out"),
+            "runtime.evaluate should be queued even for legacy read-mode pages"
+        );
     }
 }

@@ -180,7 +180,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::Dns => "dns_server",
         Protocol::TlsOptions => "tls_options",
         Protocol::SniCallback => "callback_spec",
-        Protocol::DevTools => "devtools_options",
+        Protocol::DevTools => "empty",
         Protocol::Delete
         | Protocol::Skip
         | Protocol::ReqCors
@@ -277,9 +277,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "tlsPassthrough://",
         Protocol::TlsOptions => "tlsOptions://minVersion=TLSv1.2&maxVersion=TLSv1.3",
         Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
-        Protocol::DevTools => {
-            "devtools://mode=control,inject=bridge,evaluate_allowlist=[\"^document\\\\.title$\"]"
-        }
+        Protocol::DevTools => "devtools://",
         Protocol::Passthrough => "passthrough://",
         Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }
@@ -1053,6 +1051,14 @@ mod tests {
         assert!(!info.template_variables.is_empty());
         assert!(!info.patterns.is_empty());
         assert!(!info.protocol_aliases.is_empty());
+
+        let devtools = info
+            .protocols
+            .iter()
+            .find(|protocol| protocol.name == "devtools")
+            .expect("devtools protocol should be listed");
+        assert_eq!(devtools.value_type, "empty");
+        assert_eq!(devtools.example, "devtools://");
     }
 
     #[test]

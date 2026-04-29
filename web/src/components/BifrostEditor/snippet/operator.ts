@@ -77,6 +77,10 @@ function getSnippetsForProtocol(
   const name = protocol.name;
   const valueType = protocol.value_type;
 
+  if (name.toLowerCase() === 'devtools') {
+    return [`${name}://`];
+  }
+
   switch (valueType) {
     case 'headers':
       return genSnippet(name);
@@ -391,6 +395,10 @@ function getProtocolValueSuggestions(protocol: string, range: IRange): languages
   };
 
   const protocolLower = protocol.toLowerCase();
+
+  if (protocolLower === 'devtools') {
+    return suggestions;
+  }
 
   switch (protocolLower) {
     case 'statuscode':

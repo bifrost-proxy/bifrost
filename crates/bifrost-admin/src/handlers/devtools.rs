@@ -4,14 +4,15 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{error, warn};
 
 use crate::devtools::{
     BridgeClosePayload, BridgeConsolePayload, BridgeEvalPollPayload, BridgeEvalResultPayload,
-    BridgeHelloPayload, BridgeNetworkPayload, BridgeOverlayCommand, DebugAdapterKind, DebugPage,
-    DevtoolsMode, SharedBrowserDebugBroker,
+    BridgeHelloPayload, BridgeNetworkPayload, BridgeOverlayCommand, BridgeServerMessage,
+    DebugAdapterKind, DebugPage, DevtoolsMode, SharedBrowserDebugBroker,
 };
 use crate::state::SharedAdminState;
 use crate::{is_remote_access_enabled, validate_admin_jwt};
@@ -85,6 +86,22 @@ pub async fn handle_devtools(
         };
     }
 
+    if let Some(client_req_id) = path.strip_prefix("/api/devtools/network/traffic/") {
+        return match method {
+            Method::GET => match state.devtools_broker.traffic_id_for_client_req(client_req_id) {
+                Some(traffic_id) => json_response(&serde_json::json!({
+                    "ok": true,
+                    "traffic_id": traffic_id
+                })),
+                None => error_response(
+                    StatusCode::NOT_FOUND,
+                    "traffic record not found for this DevTools request; it may have been deleted or only captured as a CONNECT tunnel",
+                ),
+            },
+            _ => method_not_allowed(),
+        };
+    }
+
     if let Some(page_id) = path.strip_prefix("/api/devtools/cdp/") {
         return match method {
             Method::GET => handle_cdp_websocket(req, state, page_id.to_string()).await,
@@ -138,6 +155,26 @@ pub async fn handle_devtools(
                 Ok(snapshot) => json_response(&snapshot),
                 Err(err) => error_response(StatusCode::NOT_FOUND, &err),
             },
+            (Method::POST, "refresh") => {
+                let scope = read_json::<serde_json::Value>(req)
+                    .await
+                    .ok()
+                    .and_then(|body| {
+                        body.get("scope")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    });
+                match state
+                    .devtools_broker
+                    .request_snapshot_refresh(session_id, scope)
+                {
+                    Ok(()) => json_response(&serde_json::json!({"ok": true})),
+                    Err(err) => error_response(StatusCode::BAD_REQUEST, &err),
+                }
+            }
+            (Method::GET, "ws") => {
+                handle_session_websocket(req, state, session_id.to_string()).await
+            }
             (Method::POST, "commands") => {
                 let body = match read_json::<CommandRequest>(req).await {
                     Ok(body) => body,
@@ -165,6 +202,7 @@ pub async fn handle_devtools(
         };
         let action = parts.next().unwrap_or_default();
         return match (method, action) {
+            (Method::GET, "ws") => handle_bridge_websocket(req, state, page_id.to_string()).await,
             (Method::POST, "hello") => {
                 let payload = match read_json::<BridgeHelloPayload>(req).await {
                     Ok(body) => body,
@@ -240,6 +278,238 @@ pub async fn handle_devtools(
     }
 
     error_response(StatusCode::NOT_FOUND, "DevTools endpoint not found")
+}
+
+async fn handle_bridge_websocket(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    page_id: String,
+) -> Response<BoxBody> {
+    let upgrade_header = req
+        .headers()
+        .get("Upgrade")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !upgrade_header.eq_ignore_ascii_case("websocket") {
+        return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
+    }
+    let ws_key = match req.headers().get("Sec-WebSocket-Key") {
+        Some(key) => key.to_str().unwrap_or("").to_string(),
+        None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
+    };
+    let accept_key = generate_accept_key(&ws_key);
+    tokio::spawn(async move {
+        let upgraded = match hyper::upgrade::on(req).await {
+            Ok(upgraded) => upgraded,
+            Err(err) => {
+                error!(error = %err, "DevTools bridge WebSocket upgrade failed");
+                return;
+            }
+        };
+        let ws_stream = WebSocketStream::from_raw_socket(
+            hyper_util::rt::TokioIo::new(upgraded),
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        handle_bridge_connection(ws_stream, state.devtools_broker.clone(), page_id).await;
+    });
+
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Accept", accept_key)
+        .body(BoxBody::default())
+        .unwrap()
+}
+
+async fn handle_session_websocket(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    session_id: String,
+) -> Response<BoxBody> {
+    let upgrade_header = req
+        .headers()
+        .get("Upgrade")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !upgrade_header.eq_ignore_ascii_case("websocket") {
+        return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
+    }
+    let ws_key = match req.headers().get("Sec-WebSocket-Key") {
+        Some(key) => key.to_str().unwrap_or("").to_string(),
+        None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
+    };
+    let accept_key = generate_accept_key(&ws_key);
+    tokio::spawn(async move {
+        let upgraded = match hyper::upgrade::on(req).await {
+            Ok(upgraded) => upgraded,
+            Err(err) => {
+                error!(error = %err, "DevTools session WebSocket upgrade failed");
+                return;
+            }
+        };
+        let ws_stream = WebSocketStream::from_raw_socket(
+            hyper_util::rt::TokioIo::new(upgraded),
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        handle_session_connection(ws_stream, state.devtools_broker.clone(), session_id).await;
+    });
+
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Accept", accept_key)
+        .body(BoxBody::default())
+        .unwrap()
+}
+
+async fn handle_session_connection<S>(
+    ws_stream: WebSocketStream<S>,
+    broker: SharedBrowserDebugBroker,
+    session_id: String,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut sink, mut stream) = ws_stream.split();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    if broker.session_ws_attach(&session_id, tx).is_err() {
+        let _ = sink
+            .send(Message::Text(
+                r#"{"type":"disconnected","reason":"session not found"}"#.into(),
+            ))
+            .await;
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            maybe_msg = stream.next() => {
+                let Some(Ok(msg)) = maybe_msg else {
+                    break;
+                };
+                if msg.is_close() {
+                    break;
+                }
+            }
+            maybe_outbound = rx.recv() => {
+                let Some(outbound) = maybe_outbound else {
+                    break;
+                };
+                let Ok(text) = serde_json::to_string(&outbound) else {
+                    continue;
+                };
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    broker.session_ws_detach(&session_id);
+}
+
+async fn handle_bridge_connection<S>(
+    ws_stream: WebSocketStream<S>,
+    broker: SharedBrowserDebugBroker,
+    page_id: String,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut sink, mut stream) = ws_stream.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<BridgeServerMessage>();
+    let mut attached = false;
+
+    loop {
+        tokio::select! {
+            maybe_msg = stream.next() => {
+                let Some(Ok(msg)) = maybe_msg else {
+                    break;
+                };
+                if msg.is_close() {
+                    break;
+                }
+                let Ok(text) = msg.to_text() else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+                    continue;
+                };
+                let message_type = value.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+                let message_seq = value.get("seq").and_then(|value| value.as_u64());
+                match message_type {
+                    "hello" => {
+                        let Ok(payload) = serde_json::from_value::<BridgeHelloPayload>(value.clone()) else {
+                            continue;
+                        };
+                        if broker.bridge_hello(&page_id, payload).is_ok() {
+                            let token = value.get("token").and_then(|value| value.as_str()).unwrap_or_default();
+                            if broker.bridge_ws_attach(&page_id, token, tx.clone()).is_ok() {
+                                attached = true;
+                                ack_bridge_message(&mut sink, message_seq).await;
+                                let _ = sink.send(Message::Text(r#"{"type":"ready"}"#.into())).await;
+                            }
+                        }
+                    }
+                    "console" => {
+                        if let Ok(payload) = serde_json::from_value::<BridgeConsolePayload>(value.clone()) {
+                            let _ = broker.bridge_console(&page_id, payload);
+                            ack_bridge_message(&mut sink, message_seq).await;
+                        }
+                    }
+                    "network" => {
+                        if let Ok(payload) = serde_json::from_value::<BridgeNetworkPayload>(value.clone()) {
+                            let _ = broker.bridge_network(&page_id, payload);
+                            ack_bridge_message(&mut sink, message_seq).await;
+                        }
+                    }
+                    "eval_result" => {
+                        if let Ok(payload) = serde_json::from_value::<BridgeEvalResultPayload>(value.clone()) {
+                            let _ = broker.bridge_eval_result(&page_id, payload);
+                            ack_bridge_message(&mut sink, message_seq).await;
+                        }
+                    }
+                    "close" => {
+                        if let Ok(payload) = serde_json::from_value::<BridgeClosePayload>(value.clone()) {
+                            let _ = broker.bridge_close(&page_id, payload);
+                            ack_bridge_message(&mut sink, message_seq).await;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            maybe_outbound = rx.recv(), if attached => {
+                let Some(outbound) = maybe_outbound else {
+                    break;
+                };
+                let Ok(text) = serde_json::to_string(&outbound) else {
+                    continue;
+                };
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    broker.bridge_ws_detach(&page_id);
+}
+
+async fn ack_bridge_message<S>(
+    sink: &mut futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    seq: Option<u64>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if let Some(seq) = seq {
+        let text = serde_json::json!({"type": "ack", "seq": seq}).to_string();
+        let _ = sink.send(Message::Text(text.into())).await;
+    }
 }
 
 async fn handle_cdp_websocket(

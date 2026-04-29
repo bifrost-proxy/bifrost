@@ -15,7 +15,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderName, HeaderValue};
 use hyper::http::response::Parts as ResponseParts;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
@@ -23,6 +23,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+pub(crate) const DEVTOOLS_CLIENT_REQ_ID_HEADER: &str = "x-bifrost-client-req-id";
 
 use crate::dns::DnsResolver;
 #[cfg(feature = "http3")]
@@ -171,6 +173,12 @@ pub(crate) fn headers_to_pairs(headers: &hyper::HeaderMap) -> Vec<(String, Strin
     let mut cookie_insert_pos: Option<usize> = None;
 
     for (key, value) in headers {
+        if key
+            .as_str()
+            .eq_ignore_ascii_case(DEVTOOLS_CLIENT_REQ_ID_HEADER)
+        {
+            continue;
+        }
         if key == hyper::header::COOKIE {
             if cookie_insert_pos.is_none() {
                 cookie_insert_pos = Some(pairs.len());
@@ -187,6 +195,29 @@ pub(crate) fn headers_to_pairs(headers: &hyper::HeaderMap) -> Vec<(String, Strin
     }
 
     pairs
+}
+
+pub(crate) fn take_devtools_client_req_id(headers: &mut hyper::HeaderMap) -> Option<String> {
+    let name = HeaderName::from_static(DEVTOOLS_CLIENT_REQ_ID_HEADER);
+    let value = headers
+        .get(&name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    headers.remove(&name);
+    value
+}
+
+pub(crate) fn bind_devtools_client_req_traffic(
+    admin_state: &Option<Arc<AdminState>>,
+    client_req_id: &Option<String>,
+    traffic_id: &str,
+) {
+    if let (Some(state), Some(client_req_id)) = (admin_state.as_ref(), client_req_id.as_ref()) {
+        state
+            .devtools_broker
+            .bind_client_req_traffic(client_req_id, traffic_id);
+    }
 }
 
 fn build_proxy_rule_url(proxy_rule: &str) -> Result<Url> {
@@ -605,7 +636,16 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   const endpoint = {endpoint_json};
   const token = {token_json};
   const pageId = {page_id_json};
-  const rawFetch = window.fetch ? window.fetch.bind(window) : null;
+  const bridgeHost = "bifrost.local";
+  const clientReqHeader = "x-bifrost-client-req-id";
+  let bridgeSocket = null;
+  let bridgeSocketReady = false;
+  let bridgeSocketReconnectTimer = 0;
+  let bridgeOutbox = [];
+  let bridgeInflight = Object.create(null);
+  let bridgeFlushTimer = 0;
+  let bridgeSeq = 0;
+  let lastHelloArgs = null;
   let bridgeState = "connecting";
   const tabWindowNamePrefix = "__bifrost_devtools_tab_id__:";
   const tabStorageKey = "__bifrost_devtools_tab_id__";
@@ -615,34 +655,59 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       tabId = window.name.slice(tabWindowNamePrefix.length);
     }}
     if (!tabId) {{
+      tabId = window.sessionStorage.getItem(tabStorageKey) || "";
+    }}
+    if (!tabId) {{
       tabId = "tab_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-      window.name = tabWindowNamePrefix + tabId;
       window.sessionStorage.setItem(tabStorageKey, tabId);
     }}
+    window.name = tabWindowNamePrefix + tabId;
   }} catch (_) {{
     tabId = "tab_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
     try {{ window.name = tabWindowNamePrefix + tabId; }} catch (_) {{}}
   }}
   const post = function(path, payload) {{
     try {{
-      if (!rawFetch) return;
-      rawFetch(endpoint + path, {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify(Object.assign({{token: token}}, payload || {{}}))
-      }}).catch(function() {{}});
+      const messageType = path.replace(/^\//, "").replace(/-([a-z])/g, function(_, ch) {{ return "_" + ch; }});
+      const message = Object.assign({{type: messageType, token: token}}, payload || {{}});
+      message.seq = ++bridgeSeq;
+      bridgeOutbox.push(message);
+      if (bridgeOutbox.length > 1000) bridgeOutbox = bridgeOutbox.slice(-1000);
+      scheduleBridgeFlush(25);
     }} catch (_) {{}}
+  }};
+  const flushBridgeOutbox = function() {{
+    bridgeFlushTimer = 0;
+    try {{
+      if (!bridgeSocketReady || !bridgeSocket || bridgeSocket.readyState !== 1) {{
+        connectBridgeSocket();
+        return;
+      }}
+      const batch = bridgeOutbox.splice(0, 50);
+      batch.forEach(function(message) {{
+        try {{
+          bridgeInflight[message.seq] = message;
+          bridgeSocket.send(JSON.stringify(message));
+        }} catch (_) {{
+          delete bridgeInflight[message.seq];
+          bridgeOutbox.unshift(message);
+        }}
+      }});
+      if (bridgeOutbox.length) scheduleBridgeFlush(16);
+    }} catch (_) {{}}
+  }};
+  const scheduleBridgeFlush = function(delay) {{
+    if (bridgeFlushTimer) return;
+    bridgeFlushTimer = window.setTimeout(flushBridgeOutbox, delay || 25);
   }};
   const closeBridge = function() {{
     try {{
-      const body = JSON.stringify({{token: token}});
-      if (navigator.sendBeacon) {{
-        const blob = new Blob([body], {{type: "application/json"}});
-        navigator.sendBeacon(endpoint + "/close", blob);
-        return;
+      const message = JSON.stringify({{type: "close", token: token}});
+      if (bridgeSocket && bridgeSocket.readyState === 1) {{
+        bridgeSocket.send(message);
+        bridgeSocket.close();
       }}
     }} catch (_) {{}}
-    post("/close", {{}});
   }};
   const shim = Object.freeze({{
     page_id: pageId,
@@ -681,6 +746,8 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   let highlightedNode = null;
   let highlightOverlay = null;
   const observedResources = Object.create(null);
+  let consoleBuffer = [];
+  let networkBuffer = [];
   const internalNodeIds = {{
     "__bifrost_devtools_bridge__": true,
     "__bifrost_devtools_highlight__": true
@@ -798,6 +865,19 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       cookies: cookies
     }};
   }};
+  const rememberNetwork = function(event) {{
+    if (!event || !event.url || event.url.indexOf("/_bifrost/api/devtools/bridge/") !== -1) return null;
+    const normalized = {{
+      url: event.url,
+      method: event.method || "GET",
+      status: event.status,
+      type: event.type || "Other",
+      client_req_id: event.client_req_id || null
+    }};
+    networkBuffer.push(normalized);
+    if (networkBuffer.length > 1000) networkBuffer = networkBuffer.slice(-1000);
+    return normalized;
+  }};
   const performanceNetwork = function() {{
     try {{
       return performance.getEntriesByType("resource").filter(function(entry) {{
@@ -808,40 +888,53 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
         observedResources[key] = true;
         return true;
       }}).map(function(entry) {{
-        return {{
+        return rememberNetwork({{
           url: entry.name,
           method: "GET",
           status: 0,
           type: entry.initiatorType || "Other"
-        }};
-      }});
+        }});
+      }}).filter(Boolean);
     }} catch (_) {{
       return [];
     }}
   }};
-  const hello = function(includeDom, networkEvents) {{
+  const normalizeSnapshotScope = function(scope) {{
+    if (scope === "dom.snapshot") return "elements";
+    if (scope === "console.messages") return "console";
+    if (scope === "cookie" || scope === "local_storage" || scope === "session_storage") return "storage";
+    return scope || "full";
+  }};
+  const hello = function(scope, networkEvents) {{
+    scope = normalizeSnapshotScope(scope);
+    lastHelloArgs = {{scope: scope, networkEvents: networkEvents || []}};
+    const includeDom = scope === "full" || scope === "elements";
+    const includeStorage = scope === "full" || scope === "storage";
+    const includeConsole = scope === "full" || scope === "console";
+    const includeNetwork = scope === "full" || scope === "network";
     if (includeDom) {{
       nextNodeId = 1;
       nodeMap = Object.create(null);
     }}
-    bridgeState = "connected";
     const payload = {{
+      scope: scope,
       tab_id: tabId,
       title: document.title || null,
       url: location.href,
-      user_agent: navigator.userAgent,
-      storage: storageSnapshot(),
-      network: networkEvents || []
+      user_agent: navigator.userAgent
     }};
+    (networkEvents || []).forEach(rememberNetwork);
+    performanceNetwork();
     if (includeDom) {{
       const domTree = serializeNode(document);
       const domSignature = JSON.stringify(domTree);
-      if (domSignature !== lastDomSignature) {{
-        lastDomSignature = domSignature;
-        payload.dom_snapshot = sanitizedOuterHTML();
-        payload.dom_tree = domTree;
-      }}
+      lastDomSignature = domSignature;
+      payload.dom_snapshot = sanitizedOuterHTML();
+      payload.dom_tree = domTree;
     }}
+    if (includeStorage) payload.storage = storageSnapshot();
+    if (includeConsole) payload.console = consoleBuffer.slice(-500);
+    if (includeNetwork) payload.network = networkBuffer.slice(-1000);
     post("/hello", payload);
   }};
   const sendStorageIfChanged = function() {{
@@ -850,7 +943,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastStorageSnapshot) return;
       lastStorageSnapshot = serialized;
-      hello(false, []);
+      hello("storage", []);
     }} catch (_) {{}}
   }};
   const scheduleStorageRefresh = function(delay) {{
@@ -872,7 +965,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (domRefreshTimer) return;
     domRefreshTimer = window.setTimeout(function() {{
       domRefreshTimer = 0;
-      hello(true, performanceNetwork());
+      hello("elements", performanceNetwork());
     }}, delay || 250);
   }};
   const isExternalStructuralMutation = function(mutation) {{
@@ -924,22 +1017,10 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     highlightedNode = null;
     if (highlightOverlay) highlightOverlay.style.display = "none";
   }};
-  const pollOverlay = function() {{
-    try {{
-      if (!rawFetch) return;
-      rawFetch(endpoint + "/overlay-next", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify({{token: token}})
-      }}).then(function(response) {{
-        return response.ok ? response.json() : null;
-      }}).then(function(payload) {{
-        const command = payload && payload.command;
-        if (!command) return;
-        if (command.type === "highlight_node") highlightNode(command.node_id);
-        if (command.type === "hide_highlight") hideHighlight();
-      }}).catch(function() {{}});
-    }} catch (_) {{}}
+  const handleOverlayCommand = function(command) {{
+    if (!command) return;
+    if (command.type === "highlight_node") highlightNode(command.node_id);
+    if (command.type === "hide_highlight") hideHighlight();
   }};
   const stringifyArgs = function(args) {{
     return Array.prototype.slice.call(args).map(function(value) {{
@@ -954,14 +1035,29 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     const original = console[level];
     console[level] = function() {{
       try {{
-        post("/console", {{level: level, text: stringifyArgs(arguments)}});
+        const message = {{level: level, text: stringifyArgs(arguments), at_ms: Date.now()}};
+        consoleBuffer.push(message);
+        if (consoleBuffer.length > 500) consoleBuffer = consoleBuffer.slice(-500);
+        post("/console", {{level: level, text: message.text}});
       }} catch (_) {{}}
       return original.apply(console, arguments);
     }};
   }});
   const recordNetwork = function(event) {{
-    if (!event || !event.url || event.url.indexOf("/_bifrost/api/devtools/bridge/") !== -1) return;
-    post("/network", {{event: event}});
+    const normalized = rememberNetwork(event);
+    if (!normalized) return;
+    post("/network", {{event: normalized}});
+  }};
+  const nextClientReqId = function() {{
+    return pageId + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }};
+  const canAttachClientReqHeader = function(url) {{
+    try {{
+      const parsed = new URL(url, location.href);
+      return parsed.origin === location.origin;
+    }} catch (_) {{
+      return false;
+    }}
   }};
   try {{
     if (window.PerformanceObserver) {{
@@ -1008,38 +1104,92 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     try {{ description = JSON.stringify(value); }} catch (_) {{ description = String(value); }}
     return {{type: "object", description: (description || String(value)).slice(0, 4096)}};
   }};
-  const pollEval = function() {{
+  const handleEvalCommand = function(command) {{
+    if (!command) return;
     try {{
-      if (!rawFetch) return;
-      rawFetch(endpoint + "/eval-next", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify({{token: token}})
-      }}).then(function(response) {{
-        return response.ok ? response.json() : null;
-      }}).then(function(payload) {{
-        const command = payload && payload.command;
-        if (!command) return;
+      const value = (0, eval)(command.expression);
+      Promise.resolve(value).then(function(resolved) {{
+        post("/eval-result", {{eval_id: command.eval_id, result: remoteObject(resolved)}});
+      }}, function(error) {{
+        post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
+      }});
+    }} catch (error) {{
+      post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
+    }}
+  }};
+  const connectBridgeSocket = function() {{
+    try {{
+      if (!window.WebSocket || bridgeSocketReconnectTimer || bridgeSocketReady) return;
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      bridgeSocket = new WebSocket(protocol + "//" + bridgeHost + endpoint + "/ws");
+      bridgeSocket.onopen = function() {{
+        bridgeSocketReady = true;
+        bridgeState = "connected";
+        if (bridgeOutbox.length === 0 && lastHelloArgs) hello(lastHelloArgs.scope, lastHelloArgs.networkEvents);
+        scheduleBridgeFlush(1);
+      }};
+      bridgeSocket.onmessage = function(event) {{
         try {{
-          const value = (0, eval)(command.expression);
-          Promise.resolve(value).then(function(resolved) {{
-            post("/eval-result", {{eval_id: command.eval_id, result: remoteObject(resolved)}});
-          }}, function(error) {{
-            post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
-          }});
-        }} catch (error) {{
-          post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
-        }}
-      }}).catch(function() {{}});
-    }} catch (_) {{}}
+          const message = JSON.parse(event.data || "{{}}");
+          if (message.type === "ack" && message.seq) delete bridgeInflight[message.seq];
+          if (message.type === "eval") handleEvalCommand(message.command);
+          if (message.type === "overlay") handleOverlayCommand(message.command);
+          if (message.type === "snapshot_request") {{
+            hello(message.scope || "full", performanceNetwork());
+          }}
+        }} catch (_) {{}}
+      }};
+      bridgeSocket.onclose = function() {{
+        bridgeSocketReady = false;
+        bridgeSocket = null;
+        bridgeState = "connecting";
+        const retry = Object.keys(bridgeInflight).map(function(key) {{ return bridgeInflight[key]; }});
+        bridgeInflight = Object.create(null);
+        if (retry.length) bridgeOutbox = retry.concat(bridgeOutbox).slice(-1000);
+        bridgeSocketReconnectTimer = window.setTimeout(function() {{
+          bridgeSocketReconnectTimer = 0;
+          connectBridgeSocket();
+        }}, 2000);
+      }};
+      bridgeSocket.onerror = function() {{
+        try {{ bridgeSocket.close(); }} catch (_) {{}}
+      }};
+    }} catch (_) {{
+      bridgeSocketReconnectTimer = window.setTimeout(function() {{
+        bridgeSocketReconnectTimer = 0;
+        connectBridgeSocket();
+      }}, 2000);
+    }}
   }};
   const originalFetch = window.fetch;
   if (originalFetch) {{
     window.fetch = function(input, init) {{
       const url = typeof input === "string" ? input : (input && input.url) || "";
       const method = (init && init.method) || (input && input.method) || "GET";
-      return originalFetch.apply(this, arguments).then(function(response) {{
-        try {{ recordNetwork({{url: response.url || url, method: method, status: response.status, type: "Fetch"}}); }} catch (_) {{}}
+      let clientReqId = null;
+      let nextInput = input;
+      let nextInit = init;
+      try {{
+        if (canAttachClientReqHeader(url)) {{
+          clientReqId = nextClientReqId();
+          if (typeof Request !== "undefined" && input instanceof Request) {{
+            const headers = new Headers(init && init.headers ? init.headers : input.headers);
+            headers.set(clientReqHeader, clientReqId);
+            nextInput = new Request(input, Object.assign({{}}, init || {{}}, {{headers: headers}}));
+            nextInit = undefined;
+          }} else {{
+            const headers = new Headers(init && init.headers ? init.headers : undefined);
+            headers.set(clientReqHeader, clientReqId);
+            nextInit = Object.assign({{}}, init || {{}}, {{headers: headers}});
+          }}
+        }}
+      }} catch (_) {{
+        clientReqId = null;
+        nextInput = input;
+        nextInit = init;
+      }}
+      return originalFetch.call(this, nextInput, nextInit).then(function(response) {{
+        try {{ recordNetwork({{url: response.url || url, method: method, status: response.status, type: "Fetch", client_req_id: clientReqId}}); }} catch (_) {{}}
         return response;
       }});
     }};
@@ -1050,14 +1200,27 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       const xhr = new OriginalXHR();
       let url = "";
       let method = "GET";
+      let clientReqId = null;
       const open = xhr.open;
       xhr.open = function(m, u) {{
         method = m || "GET";
         url = u || "";
         return open.apply(xhr, arguments);
       }};
+      const send = xhr.send;
+      xhr.send = function() {{
+        try {{
+          if (canAttachClientReqHeader(url)) {{
+            clientReqId = nextClientReqId();
+            xhr.setRequestHeader(clientReqHeader, clientReqId);
+          }}
+        }} catch (_) {{
+          clientReqId = null;
+        }}
+        return send.apply(xhr, arguments);
+      }};
       xhr.addEventListener("loadend", function() {{
-        try {{ recordNetwork({{url: xhr.responseURL || url, method: method, status: xhr.status, type: "XHR"}}); }} catch (_) {{}}
+        try {{ recordNetwork({{url: xhr.responseURL || url, method: method, status: xhr.status, type: "XHR", client_req_id: clientReqId}}); }} catch (_) {{}}
       }});
       return xhr;
     }};
@@ -1073,16 +1236,16 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   }} catch (_) {{}}
   window.addEventListener("resize", updateHighlightOverlay, true);
   window.addEventListener("scroll", updateHighlightOverlay, true);
-  window.setInterval(pollEval, 250);
-  window.setInterval(pollOverlay, 100);
   if (document.readyState === "loading") {{
     document.addEventListener("DOMContentLoaded", function() {{
       lastStorageSnapshot = JSON.stringify(storageSnapshot());
-      hello(true, performanceNetwork());
+      connectBridgeSocket();
+      hello("full", performanceNetwork());
     }}, {{once: true}});
   }} else {{
     lastStorageSnapshot = JSON.stringify(storageSnapshot());
-    hello(true, performanceNetwork());
+    connectBridgeSocket();
+    hello("full", performanceNetwork());
   }}
 }})();
 </script>"##
@@ -1668,6 +1831,8 @@ pub async fn handle_http_request(
     }
 
     let (mut parts, body) = req.into_parts();
+    let devtools_client_req_id = take_devtools_client_req_id(&mut parts.headers);
+    bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, ctx.id_str());
 
     let request_origin = parts
         .headers
@@ -3544,6 +3709,16 @@ async fn handle_http_websocket(
         .or(host_port_from_header)
         .unwrap_or(if is_wss { 443 } else { 80 });
 
+    if uri
+        .path()
+        .starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/"))
+    {
+        if let Some(state) = admin_state.clone() {
+            let peer_addr = peer_addr_from_client_ip(&ctx.client_ip);
+            return Ok(AdminRouter::handle(req, state, push_manager.clone(), peer_addr).await);
+        }
+    }
+
     if should_route_websocket_to_local_admin(&host, port, uri.path(), ctx.port) {
         if let (Some(state), Some(push_manager)) = (admin_state.clone(), push_manager.clone()) {
             let req = rewrite_local_admin_websocket_request(req, &host);
@@ -4059,6 +4234,14 @@ mod tests {
     use hyper::Method;
     use hyper::Uri;
     use hyper::Version;
+
+    #[test]
+    fn test_bare_devtools_rule_defaults_to_control_bridge() {
+        let rule = parse_devtools_rule_value("");
+        assert_eq!(rule.mode, DevtoolsMode::Control);
+        assert_eq!(rule.inject, DevtoolsInjectMode::Auto);
+        assert!(!rule.deny);
+    }
 
     #[test]
     fn test_extract_host_port_from_uri() {

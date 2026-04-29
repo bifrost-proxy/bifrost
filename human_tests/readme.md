@@ -46,7 +46,7 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
-| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 14 | 显式 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、WebUI DevTools tab 自有 Elements/Network/Storage/Console 面板、vConsole/Chrome DevTools 风格 Elements 树与 Storage 行编辑、control mode Console evaluate 真实执行、多页面切换、HTML candidate 幽灵页隐藏、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径、只读策略拒绝控制命令，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
+| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 15 | 显式裸 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、bridge WebSocket 双向通信且页面侧无独立 HTTP 上报/轮询、WebUI session WebSocket 推送、服务端轻量路由且不保存完整调试历史、目标页有界 buffer、事件队列短延迟批量异步发送、WebUI DevTools tab 自有 Elements/Network/Cookies/LocalStorage/SessionStorage/Console 面板、紧凑详情页头、Traffic 跳转入口、URL hover 复制、content 区域填满剩余高度、右侧模块搜索、规则编辑器无参数智能提示、vConsole/Chrome DevTools 风格 Elements 树、超长值 120 字符预览与详情弹窗完整复制、存储行内新增/编辑/复制/删除、Chrome 风格 Console 底部多行输入、毫秒级低对比度时间戳、全屏 JavaScript 编辑器与 input/result/error 行、默认 Console evaluate 真实执行并展示远端 JS 异常、多页面切换、HTML candidate 幽灵页隐藏、静默但 WS 连接页面仍在线、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
 
 ### 远程调用测试
 

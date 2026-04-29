@@ -380,8 +380,8 @@ pub struct IgnoredFields {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DevtoolsMode {
-    #[default]
     Read,
+    #[default]
     Control,
 }
 

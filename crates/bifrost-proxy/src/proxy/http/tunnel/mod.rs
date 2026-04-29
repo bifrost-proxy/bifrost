@@ -664,7 +664,13 @@ pub async fn handle_connect(
         );
     }
 
-    let (target_host, target_port) = if let Some(ref host_rule) = resolved_rules.host {
+    let (target_host, target_port) = if host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
+        debug!(
+            "[{}] CONNECT admin virtual host routed to local admin listener",
+            ctx.id_str()
+        );
+        ("127.0.0.1".to_string(), proxy_config.port)
+    } else if let Some(ref host_rule) = resolved_rules.host {
         let (h, parsed_port) = match parse_host_rule(host_rule) {
             Some((h, p, _path)) => (h, p),
             None => (host_rule.trim_end_matches('/').to_string(), None),
@@ -1988,7 +1994,9 @@ async fn handle_intercepted_request_with_protocol(
         return Ok(response);
     }
 
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    let devtools_client_req_id = super::take_devtools_client_req_id(&mut parts.headers);
+    super::bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, req_id);
 
     let actual_method = if let Some(ref method_override) = resolved_rules.method {
         if verbose_logging {

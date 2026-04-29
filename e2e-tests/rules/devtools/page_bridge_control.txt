@@ -1,4 +1,4 @@
-# 验证 devtools:// control mode 规则。
+# 验证裸 devtools:// 默认启用完整调试能力。
 # 端口由测试脚本动态替换。
 
-http://devtools-fixture.test:__SITE_PORT__/* devtools://mode=control,inject=bridge host://127.0.0.1:__SITE_PORT__
+http://devtools-fixture.test:__SITE_PORT__/* devtools:// host://127.0.0.1:__SITE_PORT__

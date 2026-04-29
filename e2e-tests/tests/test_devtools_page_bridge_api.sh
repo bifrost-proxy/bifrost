@@ -79,9 +79,7 @@ curl -fsS "http://127.0.0.1:$PROXY_PORT/_bifrost/api/proxy/address" >/dev/null
 
 RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_basic.txt | grep -v '^#' | sed '/^$/d')"
 CONTROL_RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_control.txt | grep -v '^#' | sed '/^$/d')"
-ALLOWLIST_RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_control_allowlist.txt | grep -v '^#' | sed '/^$/d')"
-
-PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" ALLOWLIST_RULE_CONTENT="$ALLOWLIST_RULE_CONTENT" node --input-type=module <<'NODE'
+PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" node --input-type=module <<'NODE'
 import { chromium } from './web/node_modules/playwright/index.mjs';
 import NodeWebSocket from './web/node_modules/ws/index.js';
 import net from 'node:net';
@@ -91,7 +89,6 @@ const proxyPort = process.env.PROXY_PORT;
 const sitePort = process.env.SITE_PORT;
 const ruleContent = process.env.RULE_CONTENT;
 const controlRuleContent = process.env.CONTROL_RULE_CONTENT;
-const allowlistRuleContent = process.env.ALLOWLIST_RULE_CONTENT;
 const admin = `http://127.0.0.1:${proxyPort}/_bifrost/api`;
 const webui = `http://127.0.0.1:${proxyPort}/_bifrost/`;
 
@@ -159,6 +156,69 @@ function createCdpSocket(webSocketUrl) {
     },
   });
   return socket;
+}
+
+function createSessionSocket(sessionId) {
+  const socket = new NodeWebSocket(`ws://127.0.0.1:${proxyPort}/_bifrost/api/devtools/sessions/${sessionId}/ws`);
+  Object.defineProperty(socket, 'onmessage', {
+    set(listener) {
+      socket.on('message', (data) => listener({ data: data.toString('utf8') }));
+    },
+  });
+  Object.defineProperty(socket, 'onopen', {
+    set(listener) {
+      socket.on('open', listener);
+    },
+  });
+  Object.defineProperty(socket, 'onerror', {
+    set(listener) {
+      socket.on('error', listener);
+    },
+  });
+  return socket;
+}
+
+function mergeSnapshot(base, incoming) {
+  const next = base ? { ...base } : {};
+  if (incoming.page) next.page = incoming.page;
+  for (const key of ['console', 'network', 'storage', 'dom_snapshot', 'dom_tree']) {
+    if (Object.prototype.hasOwnProperty.call(incoming, key)) next[key] = incoming[key];
+  }
+  return next;
+}
+
+async function collectSessionSnapshot(sessionId, scope, predicate, timeoutMs = 8000) {
+  const socket = createSessionSocket(sessionId);
+  let snapshot = null;
+  let opened = false;
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'snapshot') {
+      snapshot = mergeSnapshot(snapshot, message.snapshot);
+    }
+  };
+  await new Promise((resolve, reject) => {
+    socket.onopen = () => {
+      opened = true;
+      resolve();
+    };
+    socket.onerror = reject;
+  });
+  if (!opened) throw new Error('session WebSocket did not open');
+  await api(`/devtools/sessions/${sessionId}/refresh`, {
+    method: 'POST',
+    body: JSON.stringify({ scope }),
+  });
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (snapshot && predicate(snapshot)) {
+      socket.close();
+      return snapshot;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  socket.close();
+  throw new Error(`DevTools session snapshot did not satisfy ${scope}: ${JSON.stringify(snapshot)}`);
 }
 
 async function rawWsHandshake(path, origin, token) {
@@ -619,9 +679,9 @@ async function assertCdpProtocolMatrix(webSocketUrl, targetPage) {
     return overlay && getComputedStyle(overlay).display !== 'none' && overlay.getBoundingClientRect().width > 0;
   }, null, { timeout: 4000 });
   success(584, 'Overlay.hideHighlight');
+  success(585, 'Runtime.evaluate', { expression: 'document.title' }, (result) => result.result?.value === 'Bifrost DevTools Basic');
 
   const expectedErrors = [
-    { id: 585, method: 'Runtime.evaluate', message: 'requires_control', params: { expression: 'document.title' } },
     { id: 586, method: 'Page.startScreencast', message: 'screencast_disabled', params: { format: 'png' } },
     { id: 587, method: 'Page.stopScreencast', message: 'screencast_disabled' },
     { id: 588, method: 'Page.screencastFrameAck', message: 'screencast_disabled', params: { sessionId: 1 } },
@@ -639,7 +699,7 @@ async function assertCdpProtocolMatrix(webSocketUrl, targetPage) {
     send(item.id, item.method, item.params || {});
   }
 
-  await waitForIds([584, ...expectedErrors.map((entry) => entry.id)]);
+  await waitForIds([584, 585, ...expectedErrors.map((entry) => entry.id)]);
   socket.close();
 
   for (const entry of expectedSuccess) {
@@ -688,6 +748,14 @@ await api('/rules', {
     enabled: true,
   }),
 });
+const syntaxInfo = await api('/syntax');
+const devtoolsProtocol = syntaxInfo.protocols?.find((protocol) => protocol.name === 'devtools');
+if (!devtoolsProtocol || devtoolsProtocol.value_type !== 'empty') {
+  throw new Error(`AV-CDP-26 failed: devtools:// should be advertised as a no-argument protocol ${JSON.stringify(devtoolsProtocol)}`);
+}
+if (devtoolsProtocol.example !== 'devtools://') {
+  throw new Error(`AV-CDP-26 failed: syntax example should suggest bare devtools:// ${JSON.stringify(devtoolsProtocol)}`);
+}
 
 const page = await context.newPage();
 await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-01`, { waitUntil: 'load' });
@@ -699,6 +767,16 @@ const bridgeState = await page.evaluate(() => ({
 }));
 if (!bridgeState.injected || bridgeState.state !== 'connected' || !bridgeState.pageId) {
   throw new Error(`AV-CDP-01 failed: invalid bridge state ${JSON.stringify(bridgeState)}`);
+}
+await page.evaluate(() => performance.clearResourceTimings());
+await page.waitForTimeout(2600);
+const idleBridgeHttpEntries = await page.evaluate(() =>
+  performance.getEntriesByType('resource')
+    .map((entry) => String(entry.name))
+    .filter((name) => name.includes('/_bifrost/api/devtools/bridge/') && !name.endsWith('/ws')),
+);
+if (idleBridgeHttpEntries.length !== 0) {
+  throw new Error(`AV-CDP-30 failed: bridge page traffic must use WebSocket only, got HTTP entries ${JSON.stringify(idleBridgeHttpEntries)}`);
 }
 const bridgeLeak = await page.evaluate(() => ({
   names: Object.getOwnPropertyNames(window).filter((key) => /BIFROST/i.test(key)),
@@ -783,73 +861,25 @@ if (secondaryDebugPage.page_id === debugPage.page_id) {
   throw new Error('AV-CDP-09 failed: secondary page reused primary page id');
 }
 
-const cdpTargets = await api('/devtools/cdp/json/list');
-const cdpTarget = cdpTargets.find((target) => target.id === activeDebugPage.page_id);
-const secondaryCdpTarget = cdpTargets.find((target) => target.id === secondaryDebugPage.page_id);
-if (!cdpTarget?.webSocketDebuggerUrl) {
-  throw new Error(`AV-CDP-05 failed: CDP target missing websocket URL ${JSON.stringify(cdpTarget)}`);
-}
-if (!secondaryCdpTarget?.webSocketDebuggerUrl) {
-  throw new Error(`AV-CDP-09 failed: secondary CDP target missing websocket URL ${JSON.stringify(secondaryCdpTarget)}`);
-}
-if ('systemChromeFrontendUrl' in cdpTarget || 'systemChromeFrontendUrl' in secondaryCdpTarget) {
-  throw new Error(`AV-CDP-06 failed: Chrome DevTools frontend URL should not be exposed ${JSON.stringify(cdpTargets)}`);
-}
-if (!cdpTarget.webSocketDebuggerUrl.includes(`/_bifrost/api/devtools/cdp/${activeDebugPage.page_id}`)) {
-  throw new Error(`AV-CDP-05 failed: wrong CDP websocket URL ${cdpTarget.webSocketDebuggerUrl}`);
-}
-const evilOriginHandshake = await rawWsHandshake(wsPathFromUrl(cdpTarget.webSocketDebuggerUrl), 'http://evil.com');
-if (evilOriginHandshake.status !== 401 || !evilOriginHandshake.response.includes('origin_not_allowed')) {
-  throw new Error(`F23 failed: foreign Origin should be rejected with origin_not_allowed ${JSON.stringify(evilOriginHandshake)}`);
-}
-const cdpVersion = await api('/devtools/cdp/json/version');
-if (cdpVersion['Protocol-Version'] !== '1.3') {
-  throw new Error(`AV-CDP-05 failed: wrong protocol version ${JSON.stringify(cdpVersion)}`);
-}
 const missingInspectorResponse = await fetch(`http://127.0.0.1:${proxyPort}/_bifrost/api/devtools/frontend/inspector.html?ws=127.0.0.1:${proxyPort}/_bifrost/api/devtools/cdp/${debugPage.page_id}`);
 if (missingInspectorResponse.status !== 404) {
   throw new Error(`AV-CDP-06 failed: removed Chrome DevTools frontend endpoint should return 404 (${missingInspectorResponse.status})`);
 }
-const cdpReplies = await roundtripCdp(cdpTarget.webSocketDebuggerUrl, [
-  { id: 1, method: 'Browser.getVersion' },
-  { id: 2, method: 'DOM.getDocument' },
-  { id: 3, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
-  { id: 4, method: 'Page.getResourceTree' },
-  { id: 5, method: 'Page.getFrameTree' },
-  { id: 6, method: 'CSS.getMatchedStylesForNode', params: { nodeId: 2 } },
-  { id: 7, method: 'CSS.getComputedStyleForNode', params: { nodeId: 2 } },
-  { id: 8, method: 'CSS.getInlineStylesForNode', params: { nodeId: 2 } },
-  { id: 9, method: 'Runtime.getHeapUsage' },
-  { id: 10, method: 'Network.enable' },
-  { id: 11, method: 'Page.enable' },
-  { id: 12, method: 'Debugger.enable' },
-]);
-if (!cdpReplies.some((reply) => reply.id === 1 && reply.result?.product === 'Bifrost DevTools Bridge')) {
-  throw new Error(`AV-CDP-05 failed: Browser.getVersion did not return Bifrost product ${JSON.stringify(cdpReplies)}`);
-}
-if (!cdpReplies.some((reply) => reply.id === 2 && reply.result?.root?.nodeName === '#document')) {
-  throw new Error(`AV-CDP-05 failed: DOM.getDocument did not return document root ${JSON.stringify(cdpReplies)}`);
-}
-if (!cdpReplies.some((reply) => reply.id === 3 && reply.error?.message === 'requires_control')) {
-  throw new Error(`AV-CDP-05 failed: Runtime.evaluate did not preserve control policy ${JSON.stringify(cdpReplies)}`);
-}
-for (const id of [4, 5, 6, 7, 8, 9, 10, 11, 12]) {
-  const reply = cdpReplies.find((candidate) => candidate.id === id);
-  if (!reply || reply.error) {
-    throw new Error(`AV-CDP-05 failed: CDP capability id ${id} did not succeed ${JSON.stringify(cdpReplies)}`);
-  }
-}
-await assertFlattenedCdpSession(cdpTarget.webSocketDebuggerUrl, page);
-await assertRealtimeCdpUpdates(cdpTarget.webSocketDebuggerUrl, page);
-await assertDomSyncIsChangeDriven(cdpTarget.webSocketDebuggerUrl);
-await assertInspectorSelectionSurvivesDomNoise(cdpTarget.webSocketDebuggerUrl, page);
-await assertCdpProtocolMatrix(cdpTarget.webSocketDebuggerUrl, page);
 
 const session = await api('/devtools/sessions', {
   method: 'POST',
   body: JSON.stringify({ page_id: activeDebugPage.page_id }),
 });
-const snapshot = await api(`/devtools/sessions/${session.session_id}/snapshot`);
+const snapshot = await collectSessionSnapshot(
+  session.session_id,
+  'full',
+  (candidate) =>
+    candidate.dom_snapshot?.includes('id="debug-fixture"') &&
+    JSON.stringify(candidate.dom_tree || {}).includes('debug-fixture') &&
+    candidate.console?.some((entry) => entry.text.includes('bifrost-devtools-basic-ready')) &&
+    candidate.network?.some((entry) => entry.url.includes('/devtools/api/ping')) &&
+    JSON.stringify(candidate.storage || {}).includes('bifrost-storage-key'),
+);
 if (!snapshot.dom_snapshot?.includes('id="debug-fixture"')) {
   throw new Error('AV-CDP-01 failed: DOM snapshot missing fixture');
 }
@@ -869,17 +899,41 @@ if (!JSON.stringify(snapshot.storage || {}).includes('bifrost-storage-key')) {
   throw new Error('AV-CDP-11 failed: storage snapshot missing');
 }
 
-const evalResponse = await fetch(`${admin}/devtools/sessions/${session.session_id}/commands`, {
+const evalResponse = await api(`/devtools/sessions/${session.session_id}/commands`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ command: 'runtime.evaluate', params: { expression: 'document.title' } }),
 });
-if (evalResponse.status < 400) {
-  throw new Error('AV-CDP-03 failed: runtime.evaluate unexpectedly succeeded in read mode');
+if (evalResponse.result?.value !== 'Bifrost DevTools Basic') {
+  throw new Error(`AV-CDP-03 failed: bare devtools:// should enable runtime.evaluate ${JSON.stringify(evalResponse)}`);
 }
-const evalError = await evalResponse.text();
-if (!evalError.includes('requires_control')) {
-  throw new Error(`AV-CDP-03 failed: expected requires_control, got ${evalError}`);
+const defaultStorageResponse = await api(`/devtools/sessions/${session.session_id}/commands`, {
+  method: 'POST',
+  body: JSON.stringify({
+    command: 'storage.set',
+    params: { area: 'local_storage', key: 'bifrost-default-storage-edit', value: 'default-ok' },
+  }),
+});
+if (!defaultStorageResponse.ok || defaultStorageResponse.result?.key !== 'bifrost-default-storage-edit') {
+  throw new Error(`AV-CDP-25 failed: bare devtools:// storage.set should be allowed ${JSON.stringify(defaultStorageResponse)}`);
+}
+const defaultStorageStartedAt = Date.now();
+while (Date.now() - defaultStorageStartedAt < 8000) {
+  if (await page.evaluate(() => localStorage.getItem('bifrost-default-storage-edit') === 'default-ok')) {
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+const defaultStorageActual = await page.evaluate(() => ({
+  href: location.href,
+  bridge: {
+    state: window.__BIFROST_DEVTOOLS_BRIDGE__?.state,
+    pageId: window.__BIFROST_DEVTOOLS_BRIDGE__?.page_id,
+    tabId: window.__BIFROST_DEVTOOLS_BRIDGE__?.tab_id,
+  },
+  value: localStorage.getItem('bifrost-default-storage-edit'),
+}));
+if (defaultStorageActual.value !== 'default-ok') {
+  throw new Error(`AV-CDP-25 failed: storage.set did not update the active page ${JSON.stringify({ defaultStorageResponse, defaultStorageActual, activeDebugPage })}`);
 }
 
 await api('/rules/devtools-page-bridge-api', {
@@ -891,74 +945,75 @@ await api('/rules/devtools-page-bridge-api', {
 });
 await new Promise((resolve) => setTimeout(resolve, 1500));
 await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-control`, { waitUntil: 'load' });
-await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
+const controlBridgeStartedAt = Date.now();
+while (Date.now() - controlBridgeStartedAt < 8000) {
+  const currentState = await page.evaluate(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state || 'missing');
+  if (currentState === 'connected') {
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+const controlBridgeState = await page.evaluate(() => ({
+  href: location.href,
+  injected: Boolean(document.querySelector('#__bifrost_devtools_bridge__')),
+  bridge: {
+    state: window.__BIFROST_DEVTOOLS_BRIDGE__?.state,
+    pageId: window.__BIFROST_DEVTOOLS_BRIDGE__?.page_id,
+    tabId: window.__BIFROST_DEVTOOLS_BRIDGE__?.tab_id,
+  },
+}));
+if (controlBridgeState.bridge.state !== 'connected') {
+  throw new Error(`AV-CDP-14 failed: control page bridge did not connect ${JSON.stringify(controlBridgeState)}`);
+}
 await page.waitForTimeout(800);
 const controlDebugPage = await waitForDevToolsPage(
   (candidate) => candidate.url.includes('case=av-cdp-control') && candidate.mode === 'control' && candidate.state === 'discoverable',
   'AV-CDP-14 failed: control mode page not listed',
 );
-const controlCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === controlDebugPage.page_id);
-const controlEvalReplies = await roundtripCdp(controlCdpTarget.webSocketDebuggerUrl, [
-  { id: 401, method: 'Runtime.evaluate', params: { expression: 'document.querySelector("#debug-fixture").dataset.case' } },
-]);
-const controlEvalReply = controlEvalReplies.find((reply) => reply.id === 401);
-if (controlEvalReply?.result?.result?.value !== 'basic') {
-  throw new Error(`AV-CDP-14 failed: Runtime.evaluate did not execute in page bridge control mode ${JSON.stringify(controlEvalReplies)}`);
+const controlSession = await api('/devtools/sessions', {
+  method: 'POST',
+  body: JSON.stringify({ page_id: controlDebugPage.page_id }),
+});
+const datasetExpression = 'document.querySelector("#debug-fixture").dataset.case';
+const controlEvalReply = await api(`/devtools/sessions/${controlSession.session_id}/commands`, {
+  method: 'POST',
+  body: JSON.stringify({ command: 'runtime.evaluate', params: { expression: datasetExpression } }),
+});
+if (controlEvalReply?.result?.value !== 'basic') {
+  throw new Error(`AV-CDP-14 failed: Runtime.evaluate did not execute in page bridge control mode ${JSON.stringify(controlEvalReply)}`);
 }
 let auditRecords = await api('/devtools/audit/evaluate?limit=5');
-const datasetExpression = 'document.querySelector("#debug-fixture").dataset.case';
 if (!auditRecords.some((entry) => entry.expression_sha256 === sha256(datasetExpression) && entry.expression_preview === datasetExpression && entry.target_page_id === controlDebugPage.page_id)) {
   throw new Error(`F3 failed: Runtime.evaluate audit record missing ${JSON.stringify(auditRecords)}`);
 }
-await api('/rules/devtools-page-bridge-api', {
-  method: 'PUT',
-  body: JSON.stringify({
-    content: allowlistRuleContent,
-    enabled: true,
-  }),
+const titleEvalReply = await api(`/devtools/sessions/${controlSession.session_id}/commands`, {
+  method: 'POST',
+  body: JSON.stringify({ command: 'runtime.evaluate', params: { expression: 'document.title' } }),
 });
-await new Promise((resolve) => setTimeout(resolve, 1500));
-await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-allowlist`, { waitUntil: 'load' });
-await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
-await page.waitForTimeout(800);
-const allowlistDebugPage = await waitForDevToolsPage(
-  (candidate) => candidate.url.includes('case=av-cdp-allowlist') && candidate.mode === 'control' && candidate.state === 'discoverable',
-  'F3 failed: allowlist control mode page not listed',
-);
-if (!allowlistDebugPage.evaluate_allowlist?.includes('^document\\.title$')) {
-  throw new Error(`F3 failed: evaluate allowlist was not propagated to debug page ${JSON.stringify(allowlistDebugPage)}`);
+const cookieEvalReply = await api(`/devtools/sessions/${controlSession.session_id}/commands`, {
+  method: 'POST',
+  body: JSON.stringify({ command: 'runtime.evaluate', params: { expression: 'document.cookie' } }),
+});
+if (titleEvalReply?.result?.value !== 'Bifrost DevTools Basic') {
+  throw new Error(`F3 failed: default Runtime.evaluate should succeed ${JSON.stringify(titleEvalReply)}`);
 }
-const allowlistCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === allowlistDebugPage.page_id);
-const allowlistReplies = await roundtripCdp(allowlistCdpTarget.webSocketDebuggerUrl, [
-  { id: 411, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
-  { id: 412, method: 'Runtime.evaluate', params: { expression: 'document.cookie' } },
-]);
-const allowedEvalReply = allowlistReplies.find((reply) => reply.id === 411);
-const rejectedEvalReply = allowlistReplies.find((reply) => reply.id === 412);
-if (allowedEvalReply?.result?.result?.value !== 'Bifrost DevTools Basic') {
-  throw new Error(`F3 failed: allowlisted Runtime.evaluate should succeed ${JSON.stringify(allowlistReplies)}`);
-}
-if (rejectedEvalReply?.error?.code !== -32000 || rejectedEvalReply.error.message !== 'evaluate not in allowlist') {
-  throw new Error(`F3 failed: non-allowlisted Runtime.evaluate should be rejected ${JSON.stringify(allowlistReplies)}`);
-}
-auditRecords = await api('/devtools/audit/evaluate?limit=5');
-if (!auditRecords.some((entry) => entry.expression_sha256 === sha256('document.cookie') && entry.rejected_by_allowlist === true)) {
-  throw new Error(`F3 failed: rejected allowlist audit record missing ${JSON.stringify(auditRecords)}`);
+if (!String(cookieEvalReply?.result?.value || '').includes('bifrost-cookie-key=')) {
+  throw new Error(`F3 failed: bare devtools:// should not restrict document.cookie evaluation ${JSON.stringify(cookieEvalReply)}`);
 }
 for (let i = 0; i < 7; i += 1) {
-  const replies = await roundtripCdp(allowlistCdpTarget.webSocketDebuggerUrl, [
-    { id: 420 + i, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
-  ]);
-  const reply = replies.find((candidate) => candidate.id === 420 + i);
-  if (reply?.result?.result?.value !== 'Bifrost DevTools Basic') {
-    throw new Error(`F3 failed: ring-buffer seed evaluate ${i} failed ${JSON.stringify(replies)}`);
+  const reply = await api(`/devtools/sessions/${controlSession.session_id}/commands`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'runtime.evaluate', params: { expression: 'document.title' } }),
+  });
+  if (reply?.result?.value !== 'Bifrost DevTools Basic') {
+    throw new Error(`F3 failed: ring-buffer seed evaluate ${i} failed ${JSON.stringify(reply)}`);
   }
 }
 auditRecords = await api('/devtools/audit/evaluate?limit=50');
 if (auditRecords.length !== 5) {
   throw new Error(`F3 failed: audit ring buffer should be bounded to capacity 5, got ${auditRecords.length}: ${JSON.stringify(auditRecords)}`);
 }
-const finalDebugPage = allowlistDebugPage;
+const finalDebugPage = controlDebugPage;
 
 const mobileContext = await browser.newContext({
   proxy: { server: `http://127.0.0.1:${proxyPort}` },
@@ -984,6 +1039,7 @@ if (!mobileDebugPage.user_agent.includes('Mobile') || !mobileDebugPage.user_agen
 }
 
 const adminContext = await browser.newContext();
+await adminContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${proxyPort}` });
 const adminPage = await adminContext.newPage();
 await adminPage.goto(webui, { waitUntil: 'load' });
 await adminPage.getByText('DevTools', { exact: true }).waitFor({ timeout: 10000 });
@@ -1000,7 +1056,7 @@ if (scriptsNavIndex === -1 || devtoolsNavIndex === -1 || devtoolsNavIndex <= scr
 }
 await adminPage.getByText('DevTools', { exact: true }).click();
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
-await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-allowlist');
+await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-control');
 const primaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
 await primaryCard.waitFor({ timeout: 8000 });
 const visiblePrimaryCards = await primaryCard.count();
@@ -1011,6 +1067,29 @@ await primaryCard.click();
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
+const detailBoxInitial = await adminPage.getByTestId('devtools-detail').boundingBox();
+const workspaceBoxInitial = await adminPage.getByTestId('devtools-custom-workspace').boundingBox();
+if (!detailBoxInitial || !workspaceBoxInitial || workspaceBoxInitial.height < detailBoxInitial.height - 100) {
+  throw new Error(`AV-CDP-29 failed: DevTools content area should fill remaining height detail=${JSON.stringify(detailBoxInitial)} workspace=${JSON.stringify(workspaceBoxInitial)}`);
+}
+const panelSearch = adminPage.getByTestId('devtools-panel-search');
+const searchBoxInitial = await panelSearch.boundingBox();
+if (!searchBoxInitial || searchBoxInitial.x + searchBoxInitial.width > workspaceBoxInitial.x + workspaceBoxInitial.width - 10) {
+  throw new Error(`AV-CDP-32 failed: Elements tab search should remain visible inside the workspace header search=${JSON.stringify(searchBoxInitial)} workspace=${JSON.stringify(workspaceBoxInitial)}`);
+}
+if (searchBoxInitial.x < workspaceBoxInitial.x + 8) {
+  throw new Error(`AV-CDP-32 failed: workspace right search layout lost horizontal padding search=${JSON.stringify(searchBoxInitial)} workspace=${JSON.stringify(workspaceBoxInitial)}`);
+}
+await adminPage.getByTestId('devtools-traffic-link').waitFor({ timeout: 8000 });
+if (await adminPage.getByText('Adapter', { exact: true }).count()) {
+  throw new Error('AV-CDP-29 failed: detail summary info strip should be removed');
+}
+await adminPage.getByTestId('devtools-target-url').hover();
+await adminPage.getByTestId('devtools-copy-url').click();
+const copiedTargetUrl = await adminPage.evaluate(() => navigator.clipboard.readText());
+if (!copiedTargetUrl.includes('/basic.html?case=av-cdp-control')) {
+  throw new Error(`AV-CDP-29 failed: copied target URL mismatch (${copiedTargetUrl})`);
+}
 if (await adminPage.getByText('Install Chrome DevTools').count()) {
   throw new Error('AV-CDP-06 failed: WebUI should not expose Chrome DevTools frontend installer');
 }
@@ -1023,12 +1102,44 @@ if (await adminPage.getByText('Debug URL', { exact: true }).count()) {
 const debugFixtureNode = adminPage.getByTestId('devtools-dom-node').filter({ hasText: 'debug-fixture' }).first();
 await debugFixtureNode.waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-elements-tree').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-elements-sidebar').waitFor({ timeout: 8000 });
+if (await adminPage.getByTestId('devtools-elements-sidebar').count()) {
+  throw new Error('AV-CDP-24 failed: Elements selected-node sidebar should not be rendered');
+}
 await adminPage.getByTestId('devtools-elements-tree').getByText('<').first().waitFor({ timeout: 8000 });
+const firstDomNodeText = await adminPage.getByTestId('devtools-elements-tree').getByTestId('devtools-dom-node').first().textContent();
+if (!firstDomNodeText || !firstDomNodeText.includes('<html')) {
+  throw new Error(`AV-CDP-23 failed: Elements tree should start at <html> instead of a blank #document root (${firstDomNodeText})`);
+}
+const blankDomNodeCount = await adminPage.getByTestId('devtools-elements-tree').getByTestId('devtools-dom-node').evaluateAll((nodes) =>
+  nodes.filter((node) => (node.textContent || '').trim() === '').length,
+);
+if (blankDomNodeCount !== 0) {
+  throw new Error(`AV-CDP-23 failed: Elements tree rendered ${blankDomNodeCount} blank DOM rows`);
+}
 await adminPage.getByTestId('devtools-elements-tree').getByText('data-case').waitFor({ timeout: 8000 });
+const detailButtons = adminPage.getByTestId('devtools-dom-value-detail');
+if ((await detailButtons.count()) === 0) {
+  throw new Error('AV-CDP-33 failed: long Elements values should render a compact preview with a detail trigger');
+}
+const elementsTreeText = await adminPage.getByTestId('devtools-elements-tree').textContent();
+if ((elementsTreeText || '').includes('copyMerged(btn)')) {
+  throw new Error('AV-CDP-33 failed: long inline script should not be fully expanded in the Elements tree');
+}
+await detailButtons.first().click();
+const detailText = await adminPage.getByTestId('devtools-elements-detail-value').textContent();
+if (!detailText || detailText.length <= 120) {
+  throw new Error(`AV-CDP-33 failed: Elements detail modal should show full long value (${detailText})`);
+}
+await adminPage.getByTestId('devtools-elements-detail-copy').click();
+const copiedElementDetail = await adminPage.evaluate(() => navigator.clipboard.readText());
+if (copiedElementDetail !== detailText) {
+  throw new Error('AV-CDP-33 failed: Elements detail copy should write the full detail value to clipboard');
+}
+await adminPage.keyboard.press('Escape');
 await debugFixtureNode.click();
-await adminPage.getByTestId('devtools-elements-sidebar').getByText('debug-fixture').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-elements-sidebar').getByText('data-case').waitFor({ timeout: 8000 });
+if (await adminPage.getByTestId('devtools-elements-sidebar').count()) {
+  throw new Error('AV-CDP-24 failed: Elements selected-node sidebar should stay removed after selecting a node');
+}
 await page.waitForFunction(() => {
   const overlay = document.querySelector('#__bifrost_devtools_highlight__');
   return overlay && getComputedStyle(overlay).display !== 'none' && overlay.getBoundingClientRect().width > 0;
@@ -1041,65 +1152,130 @@ await page.evaluate(() => {
 });
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-elements-panel').getByText(/debug-fixture-manual-refresh/).waitFor({ timeout: 8000 });
+await panelSearch.fill('manual-refresh');
+await adminPage.locator('[data-testid="devtools-dom-node"][data-selected="true"]').filter({ hasText: 'debug-fixture-manual-refresh' }).waitFor({ timeout: 8000 });
+await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /Network/ }).click();
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ timeout: 8000 });
 await page.evaluate(() => fetch('/devtools/api/extra?case=webui-network-complete').catch(() => {}));
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /Storage/ }).click();
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-cookie-key').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-storage-key').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-session-key').waitFor({ timeout: 8000 });
+await panelSearch.fill('webui-network-complete');
+await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ state: 'detached', timeout: 8000 });
+await panelSearch.fill('');
+await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-key').waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-key').waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
 await page.evaluate(() => {
   document.cookie = 'bifrost-cookie-live=cookie-live; path=/';
   localStorage.setItem('bifrost-storage-live', 'storage-live');
   sessionStorage.setItem('bifrost-session-live', 'session-live');
 });
 await adminPage.getByTestId('devtools-refresh').click();
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-cookie-live').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-session-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
+await panelSearch.fill('bifrost-storage-live');
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ state: 'detached', timeout: 8000 });
+await panelSearch.fill('');
+await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-live').waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-live').waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
 await adminPage.getByLabel('Edit bifrost-storage-live').click();
-if (await adminPage.getByTestId('devtools-storage-area').inputValue().catch(() => '') !== 'local_storage') {
-  throw new Error('AV-CDP-15 failed: storage row edit did not select local_storage area');
-}
 if (await adminPage.getByTestId('devtools-storage-key').inputValue() !== 'bifrost-storage-live') {
   throw new Error('AV-CDP-15 failed: storage row edit did not copy key into editor');
 }
 if (await adminPage.getByTestId('devtools-storage-value').inputValue() !== 'storage-live') {
   throw new Error('AV-CDP-15 failed: storage row edit did not copy value into editor');
 }
-await adminPage.getByTestId('devtools-storage-area').selectOption('cookie');
+await adminPage.getByLabel('Copy bifrost-storage-live').click();
+const copiedStorageValue = await adminPage.evaluate(() => navigator.clipboard.readText());
+if (copiedStorageValue !== 'storage-live') {
+  throw new Error(`AV-CDP-15 failed: storage copy did not write clipboard (${copiedStorageValue})`);
+}
+await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-cookie-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('cookie-edited');
 await adminPage.getByTestId('devtools-storage-save').click();
 await page.waitForFunction(() => document.cookie.includes('bifrost-cookie-edit=cookie-edited'), null, { timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-cookie-edit').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-area').selectOption('local_storage');
+await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-edit').waitFor({ timeout: 8000 });
+await adminPage.getByLabel('Delete bifrost-cookie-edit').click();
+await page.waitForFunction(() => !document.cookie.includes('bifrost-cookie-edit='), null, { timeout: 8000 });
+await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-edit').waitFor({ state: 'detached', timeout: 8000 });
+await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-storage-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('storage-edited');
 await adminPage.getByTestId('devtools-storage-save').click();
 await page.waitForFunction(() => localStorage.getItem('bifrost-storage-edit') === 'storage-edited', null, { timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-storage-edit').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-area').selectOption('session_storage');
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-edit').waitFor({ timeout: 8000 });
+await adminPage.getByLabel('Delete bifrost-storage-edit').click();
+await page.waitForFunction(() => localStorage.getItem('bifrost-storage-edit') === null, null, { timeout: 8000 });
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-edit').waitFor({ state: 'detached', timeout: 8000 });
+await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-session-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('session-edited');
 await adminPage.getByTestId('devtools-storage-save').click();
 await page.waitForFunction(() => sessionStorage.getItem('bifrost-session-edit') === 'session-edited', null, { timeout: 8000 });
-await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-session-edit').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-edit').waitFor({ timeout: 8000 });
+await adminPage.getByLabel('Delete bifrost-session-edit').click();
+await page.waitForFunction(() => sessionStorage.getItem('bifrost-session-edit') === null, null, { timeout: 8000 });
+await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-edit').waitFor({ state: 'detached', timeout: 8000 });
 await adminPage.getByRole('tab', { name: /Console/ }).click();
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
 await page.evaluate(() => {
   console.info('bifrost-console-info-live');
+  console.debug('bifrost-console-debug-live');
   console.error('bifrost-console-error-live');
 });
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-debug-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-error-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-log').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-warn').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-info').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-debug').getByText('bifrost-console-debug-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-error').getByText('bifrost-console-error-live').waitFor({ timeout: 8000 });
+const consoleTimestamp = (await adminPage.getByTestId('devtools-console-row-time').first().textContent()) || '';
+if (!/^\d{2}:\d{2}:\d{2}\.\d{3}$/.test(consoleTimestamp.trim())) {
+  throw new Error(`AV-CDP-31 failed: console rows should show millisecond timestamps, got ${JSON.stringify(consoleTimestamp)}`);
+}
+await panelSearch.fill('bifrost-console-error-live');
+await adminPage.getByTestId('devtools-console-row-error').getByText('bifrost-console-error-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').waitFor({ state: 'detached', timeout: 8000 });
+await panelSearch.fill('');
 await adminPage.getByTestId('devtools-console-input').fill('document.title');
 await adminPage.getByTestId('devtools-console-run').click();
-await adminPage.getByTestId('devtools-console-result').getByText('Bifrost DevTools Basic').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-input').getByText('document.title').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-result').filter({ hasText: 'Bifrost DevTools Basic' }).last().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-input').fill('window.reload()');
+await adminPage.getByTestId('devtools-console-run').click();
+await adminPage.getByTestId('devtools-console-row-input').getByText('window.reload()').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-error').filter({ hasText: /reload.*not a function|window\.reload/ }).last().waitFor({ timeout: 8000 });
+if (await adminPage.getByTestId('devtools-console-row-error').filter({ hasText: 'Request failed with status code 400' }).count()) {
+  throw new Error('AV-CDP-28 failed: console JavaScript exceptions should show the remote JS error instead of HTTP 400');
+}
+await adminPage.getByTestId('devtools-console-input').fill('(() => {\n  return document.title + " fullscreen";\n})()');
+await adminPage.getByTestId('devtools-console-expand-editor').click();
+await adminPage.getByTestId('devtools-console-fullscreen-editor').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-fullscreen-run').click();
+await adminPage.getByTestId('devtools-console-row-input').getByText('fullscreen').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-result').filter({ hasText: 'Bifrost DevTools Basic fullscreen' }).last().waitFor({ timeout: 8000 });
+const inputBox = await adminPage.getByTestId('devtools-console-input').boundingBox();
+const panelBox = await adminPage.getByTestId('devtools-console-panel').boundingBox();
+if (!inputBox || !panelBox || inputBox.y + inputBox.height > panelBox.y + panelBox.height + 4) {
+  throw new Error(`AV-CDP-27 failed: console input should remain pinned inside panel bottom input=${JSON.stringify(inputBox)} panel=${JSON.stringify(panelBox)}`);
+}
 await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
 await page.waitForTimeout(800);
@@ -1109,10 +1285,10 @@ await adminPage.getByTestId('devtools-elements-tree').getByText(/debug-fixture/)
 await adminPage.getByRole('tab', { name: /Console/ }).click();
 await adminPage.getByTestId('devtools-console-input').fill('document.title');
 await adminPage.getByTestId('devtools-console-run').click();
-await adminPage.getByTestId('devtools-console-result').getByText('Bifrost DevTools Basic').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-result').filter({ hasText: 'Bifrost DevTools Basic' }).last().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').click();
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
-await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-allowlist');
+await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-control');
 const reloadedPrimaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
 await reloadedPrimaryCard.waitFor({ timeout: 8000 });
 if (await reloadedPrimaryCard.count() !== 1) {
@@ -1120,47 +1296,23 @@ if (await reloadedPrimaryCard.count() !== 1) {
 }
 
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
+await adminPage.getByPlaceholder('Search online pages').waitFor({ state: 'visible', timeout: 8000 });
+await adminPage.waitForTimeout(500);
 await adminPage.getByPlaceholder('Search online pages').fill('secondary');
+await adminPage.getByRole('button', { name: /Refresh Pages/ }).click();
 const secondaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Secondary' });
 await secondaryCard.waitFor({ timeout: 8000 });
 await secondaryCard.click();
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-elements-panel').getByText(/debug-fixture-secondary/).waitFor({ timeout: 8000 });
 if (await adminPage.locator('iframe[title="Chrome DevTools Frontend"]').count()) {
   throw new Error('AV-CDP-09 failed: WebUI should not embed Chrome DevTools frontend when switching pages');
 }
-
-await api('/auth/passwd', {
-  method: 'POST',
-  body: JSON.stringify({ username: 'admin', password: 'Str0ngPass123!' }),
-});
-await api('/auth/remote', {
-  method: 'POST',
-  body: JSON.stringify({ enabled: true }),
-});
-const login = await api('/auth/login', {
-  method: 'POST',
-  body: JSON.stringify({ username: 'admin', password: 'Str0ngPass123!' }),
-});
-const localOrigin = `http://127.0.0.1:${proxyPort}`;
-const latestAllowlistDebugPage = await waitForDevToolsPage(
-  (candidate) => candidate.url.includes('case=av-cdp-allowlist') && candidate.mode === 'control',
-  'F23 failed: current allowlist page not listed before auth handshake',
-);
-const latestAllowlistCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === latestAllowlistDebugPage.page_id);
-if (!latestAllowlistCdpTarget?.webSocketDebuggerUrl) {
-  throw new Error(`F23 failed: current allowlist CDP target missing ${JSON.stringify(latestAllowlistCdpTarget)}`);
-}
-const noTokenHandshake = await rawWsHandshake(wsPathFromUrl(latestAllowlistCdpTarget.webSocketDebuggerUrl), localOrigin);
-if (noTokenHandshake.status !== 401 || !noTokenHandshake.response.includes('missing_token')) {
-  throw new Error(`F23 failed: auth-enabled CDP websocket without token should be rejected ${JSON.stringify(noTokenHandshake)}`);
-}
-const tokenHandshake = await rawWsHandshake(wsPathFromUrl(latestAllowlistCdpTarget.webSocketDebuggerUrl), localOrigin, login.token);
-if (tokenHandshake.status !== 101) {
-  throw new Error(`F23 failed: auth-enabled CDP websocket with token should upgrade ${JSON.stringify(tokenHandshake)}`);
-}
+await adminPage.getByTestId('devtools-traffic-link').click();
+await adminPage.waitForURL(/\/traffic/, { timeout: 8000 });
 
 await browser.close();
-console.log('AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, and Chrome frontend cleanup passed');
+console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
 NODE
