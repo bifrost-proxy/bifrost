@@ -63,7 +63,7 @@ use crate::utils::tee::{
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::url::{
     apply_url_rules, extract_target_path_from_host_rule, find_host_rule_source_path,
-    rewrite_path_with_prefix,
+    host_rule_uses_exact_target_path, rewrite_path_with_prefix,
 };
 
 mod content_type;
@@ -2137,16 +2137,25 @@ pub async fn handle_http_request(
             if let Some(target_path) =
                 crate::utils::url::extract_target_path_from_host_rule(host_rule)
             {
-                let source_path = crate::utils::url::find_host_rule_source_path(
+                let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+                if crate::utils::url::host_rule_uses_exact_target_path(
                     &resolved_rules.rules,
-                    resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                    host_protocol,
                     host_rule,
-                );
-                crate::utils::url::rewrite_path_with_prefix(
-                    original_path,
-                    source_path.as_deref(),
-                    &target_path,
-                )
+                ) {
+                    target_path
+                } else {
+                    let source_path = crate::utils::url::find_host_rule_source_path(
+                        &resolved_rules.rules,
+                        host_protocol,
+                        host_rule,
+                    );
+                    crate::utils::url::rewrite_path_with_prefix(
+                        original_path,
+                        source_path.as_deref(),
+                        &target_path,
+                    )
+                }
             } else {
                 original_path.to_string()
             }
@@ -3232,29 +3241,16 @@ pub async fn handle_http_request(
                 record.original_request_headers = Some(orig.clone());
             }
         }
-        if host != original_host || port != original_port {
+        let original_path_and_query = processed_uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        if host != original_host || port != original_port || path != original_path_and_query {
             let actual_scheme = if use_tls { "https" } else { "http" };
             let actual_url = if (use_tls && port == 443) || (!use_tls && port == 80) {
-                format!(
-                    "{}://{}{}",
-                    actual_scheme,
-                    host,
-                    processed_uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                )
+                format!("{}://{}{}", actual_scheme, host, path)
             } else {
-                format!(
-                    "{}://{}:{}{}",
-                    actual_scheme,
-                    host,
-                    port,
-                    processed_uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                )
+                format!("{}://{}:{}{}", actual_scheme, host, port, path)
             };
             record.actual_url = Some(actual_url);
             record.actual_host = Some(host.clone());
@@ -3588,19 +3584,21 @@ async fn handle_http_websocket(
         let h = parts[0].to_string();
         let p = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(port);
         let path = if let Some(target_path) = extract_target_path_from_host_rule(host_rule) {
-            let source_path = find_host_rule_source_path(
-                &resolved_rules.rules,
-                resolved_rules.host_protocol.unwrap_or(Protocol::Host),
-                host_rule,
-            );
-            rewrite_path_with_prefix(
-                req.uri()
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/"),
-                source_path.as_deref(),
-                &target_path,
-            )
+            let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+            if host_rule_uses_exact_target_path(&resolved_rules.rules, host_protocol, host_rule) {
+                target_path
+            } else {
+                let source_path =
+                    find_host_rule_source_path(&resolved_rules.rules, host_protocol, host_rule);
+                rewrite_path_with_prefix(
+                    req.uri()
+                        .path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/"),
+                    source_path.as_deref(),
+                    &target_path,
+                )
+            }
         } else {
             req.uri()
                 .path_and_query()

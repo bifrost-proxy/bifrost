@@ -1806,12 +1806,25 @@ async fn handle_intercepted_request_with_protocol(
                 _ => false,
             };
             let target_path = if let Some(ref rule_path) = parsed_path {
-                let source_path = crate::utils::url::find_host_rule_source_path(
+                let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+                if crate::utils::url::host_rule_uses_exact_target_path(
                     &resolved_rules.rules,
-                    resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                    host_protocol,
                     host_rule,
-                );
-                crate::utils::url::rewrite_path_with_prefix(path, source_path.as_deref(), rule_path)
+                ) {
+                    rule_path.clone()
+                } else {
+                    let source_path = crate::utils::url::find_host_rule_source_path(
+                        &resolved_rules.rules,
+                        host_protocol,
+                        host_rule,
+                    );
+                    crate::utils::url::rewrite_path_with_prefix(
+                        path,
+                        source_path.as_deref(),
+                        rule_path,
+                    )
+                }
             } else {
                 path.to_string()
             };
@@ -3136,16 +3149,25 @@ async fn handle_intercepted_request_with_protocol(
                 ) {
                     record.original_request_headers = Some(original_req_headers.clone());
                 }
-                if actual_target_host != original_host || actual_target_port != original_port {
+                if actual_target_host != original_host
+                    || actual_target_port != original_port
+                    || actual_target_path != path
+                {
                     let actual_scheme = if actual_use_http { "http" } else { "https" };
                     let actual_url = if (actual_use_http && actual_target_port == 80)
                         || (!actual_use_http && actual_target_port == 443)
                     {
-                        format!("{}://{}{}", actual_scheme, actual_target_host, path)
+                        format!(
+                            "{}://{}{}",
+                            actual_scheme, actual_target_host, actual_target_path
+                        )
                     } else {
                         format!(
                             "{}://{}:{}{}",
-                            actual_scheme, actual_target_host, actual_target_port, path
+                            actual_scheme,
+                            actual_target_host,
+                            actual_target_port,
+                            actual_target_path
                         )
                     };
                     record.actual_url = Some(actual_url);
@@ -3330,16 +3352,22 @@ async fn handle_intercepted_request_with_protocol(
         if !super::headers_pairs_equal_ignore_order(&original_req_headers, &final_req_headers) {
             record.original_request_headers = Some(original_req_headers.clone());
         }
-        if actual_target_host != original_host || actual_target_port != original_port {
+        if actual_target_host != original_host
+            || actual_target_port != original_port
+            || actual_target_path != path
+        {
             let actual_scheme = if actual_use_http { "http" } else { "https" };
             let actual_url = if (actual_use_http && actual_target_port == 80)
                 || (!actual_use_http && actual_target_port == 443)
             {
-                format!("{}://{}{}", actual_scheme, actual_target_host, path)
+                format!(
+                    "{}://{}{}",
+                    actual_scheme, actual_target_host, actual_target_path
+                )
             } else {
                 format!(
                     "{}://{}:{}{}",
-                    actual_scheme, actual_target_host, actual_target_port, path
+                    actual_scheme, actual_target_host, actual_target_port, actual_target_path
                 )
             };
             record.actual_url = Some(actual_url);
@@ -3719,12 +3747,21 @@ async fn handle_intercepted_websocket(
             _ => false,
         };
         let target_path = if let Some(ref rule_path) = parsed_path {
-            let source_path = crate::utils::url::find_host_rule_source_path(
+            let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+            if crate::utils::url::host_rule_uses_exact_target_path(
                 &resolved_rules.rules,
-                resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                host_protocol,
                 host_rule,
-            );
-            crate::utils::url::rewrite_path_with_prefix(path, source_path.as_deref(), rule_path)
+            ) {
+                rule_path.clone()
+            } else {
+                let source_path = crate::utils::url::find_host_rule_source_path(
+                    &resolved_rules.rules,
+                    host_protocol,
+                    host_rule,
+                );
+                crate::utils::url::rewrite_path_with_prefix(path, source_path.as_deref(), rule_path)
+            }
         } else {
             path.to_string()
         };

@@ -8,7 +8,7 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 未被占用
 3. 部分测试需要通过 API 创建规则，API 地址为 `http://127.0.0.1:8800/_bifrost/api/rules`
@@ -592,9 +592,62 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PHT-26：旧版 `^https://` path wildcard 规则兼容回归
+
+**前置条件**：
+1. 启动本地 approvals mock 服务：
+   ```bash
+   python3 -c 'from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(("mock approvals " + self.path).encode())
+HTTPServer(("127.0.0.1", 8999), H).serve_forever()'
+   ```
+2. 启动 Bifrost，使用临时数据目录、非 `9900` 端口、禁止系统代理，并仅拦截目标 CDN 域名：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test-path-wildcard cargo run --bin bifrost -- start -p 8891 --unsafe-ssl --no-system-proxy --intercept-include cdn-tos-cn.bytedance.net
+   ```
+3. 创建包含旧版 `^https://` path wildcard 的规则：
+   ```bash
+   curl -X POST http://127.0.0.1:8891/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name":"test-legacy-https-path-wildcard","content":"^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html http://127.0.0.1:8999/approvals","enabled":true}'
+   ```
+
+**操作步骤**：
+1. 执行旧规则对应的真实 HTTPS URL：
+   ```bash
+   curl -k -x http://127.0.0.1:8891 "https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html"
+   ```
+2. 查看最新 traffic 详情，确认请求命中规则：
+   ```bash
+   bifrost traffic search "approvals-web/1.0.0.3505/index.html" --limit 5
+   bifrost traffic get <SEQ>
+   ```
+3. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:8891/_bifrost/api/rules/test-legacy-https-path-wildcard
+   rm -rf ./.bifrost-test-path-wildcard
+   ```
+
+**预期结果**：
+- curl 返回 `mock approvals /approvals`
+- traffic 详情中 `actual_url` 为 `http://127.0.0.1:8999/approvals`
+- traffic 详情中 `has_rule_hit` 为 `true`
+- `matched_rules` 包含原始规则：
+  ```text
+  ^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html http://127.0.0.1:8999/approvals
+  ```
+- 旧版 `^https://` path wildcard 规则无需改写即可命中 HTTPS URL
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
 ```bash
-rm -rf .bifrost-test
+rm -rf .bifrost-test .bifrost-test-path-wildcard
 ```

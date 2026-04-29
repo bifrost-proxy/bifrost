@@ -89,7 +89,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 25 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归 |
+| [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 26 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、旧版 `^https://` path wildcard 兼容回归 |
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 3 | SOCKS5 基本代理、DNS 解析、HTTPS 透传 |
 | [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 7 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 65 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏和上游 HTTP/2 body 断流 fallback 真实回归 |
