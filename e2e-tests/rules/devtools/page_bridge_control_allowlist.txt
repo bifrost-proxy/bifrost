@@ -1,0 +1,4 @@
+# 验证 devtools:// control mode evaluate allowlist。
+# 端口由测试脚本动态替换。
+
+http://devtools-fixture.test:__SITE_PORT__/* devtools://mode=control,inject=bridge,evaluate_allowlist=["^document\\.title$"] host://127.0.0.1:__SITE_PORT__

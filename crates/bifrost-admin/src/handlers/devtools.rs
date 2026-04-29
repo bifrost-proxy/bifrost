@@ -2,7 +2,7 @@ use base64::Engine;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -16,8 +16,12 @@ use crate::devtools::{
     DevtoolsMode, SharedBrowserDebugBroker,
 };
 use crate::state::SharedAdminState;
+use crate::{is_remote_access_enabled, validate_admin_jwt};
 
-use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
+use super::{
+    auth::extract_bearer_token, error_response, full_body, json_response, method_not_allowed,
+    BoxBody,
+};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -90,6 +94,22 @@ pub async fn handle_devtools(
     if path == "/api/devtools/cdp/json/list" || path == "/api/devtools/cdp/json" {
         return match method {
             Method::GET => json_response(&state.devtools_broker.cdp_targets(true, &host)),
+            _ => method_not_allowed(),
+        };
+    }
+
+    if path == "/api/devtools/audit/evaluate" {
+        return match method {
+            Method::GET => {
+                let query = parse_query(req.uri().query().unwrap_or_default());
+                let limit = query
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok());
+                let since = query
+                    .get("since")
+                    .and_then(|value| value.parse::<u64>().ok());
+                json_response(&state.devtools_broker.list_evaluate_audit(limit, since))
+            }
             _ => method_not_allowed(),
         };
     }
@@ -280,6 +300,59 @@ async fn handle_cdp_websocket(
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
     }
 
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let remote_addr = req
+        .headers()
+        .get("x-bifrost-peer-ip")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    if !origin
+        .as_deref()
+        .map(is_allowed_cdp_origin)
+        .unwrap_or(false)
+    {
+        warn!(
+            remote_addr = %remote_addr,
+            origin = origin.as_deref().unwrap_or(""),
+            reason = "origin_not_allowed",
+            "CDP WebSocket rejected"
+        );
+        return cdp_unauthorized("origin_not_allowed");
+    }
+
+    let caller_client_id = if is_remote_access_enabled(&state) {
+        let token = extract_bearer_token(&req).or_else(|| query_token(req.uri().query()));
+        let Some(token) = token else {
+            warn!(
+                remote_addr = %remote_addr,
+                origin = origin.as_deref().unwrap_or(""),
+                reason = "missing_token",
+                "CDP WebSocket rejected"
+            );
+            return cdp_unauthorized("missing_token");
+        };
+        match validate_admin_jwt(&state, &token) {
+            Ok(claims) => Some(claims.sub),
+            Err(err) => {
+                warn!(
+                    remote_addr = %remote_addr,
+                    origin = origin.as_deref().unwrap_or(""),
+                    reason = "invalid_token",
+                    error = %err,
+                    "CDP WebSocket rejected"
+                );
+                return cdp_unauthorized("invalid_token");
+            }
+        }
+    } else {
+        None
+    };
+
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
         None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
@@ -307,7 +380,13 @@ async fn handle_cdp_websocket(
             None,
         )
         .await;
-        handle_cdp_connection(ws_stream, state.devtools_broker.clone(), page).await;
+        handle_cdp_connection(
+            ws_stream,
+            state.devtools_broker.clone(),
+            page,
+            caller_client_id,
+        )
+        .await;
     });
 
     Response::builder()
@@ -323,6 +402,7 @@ async fn handle_cdp_connection<S>(
     mut ws_stream: WebSocketStream<S>,
     broker: SharedBrowserDebugBroker,
     page: DebugPage,
+    caller_client_id: Option<String>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -368,7 +448,15 @@ async fn handle_cdp_connection<S>(
             active_session_id = session_id.clone();
         }
         let response = with_cdp_session_id(
-            cdp_response(id, method, &request, &broker, &latest_page).await,
+            cdp_response(
+                id,
+                method,
+                &request,
+                &broker,
+                &latest_page,
+                caller_client_id.as_deref(),
+            )
+            .await,
             session_id.as_ref(),
         );
         if ws_stream
@@ -476,6 +564,7 @@ async fn cdp_response(
     request: &serde_json::Value,
     broker: &SharedBrowserDebugBroker,
     page: &DebugPage,
+    caller_client_id: Option<&str>,
 ) -> serde_json::Value {
     match method {
         "Browser.getVersion" => serde_json::json!({
@@ -665,7 +754,9 @@ async fn cdp_response(
                 "totalSize": 0
             }
         }),
-        "Runtime.evaluate" => runtime_evaluate_response(id, request, broker, page).await,
+        "Runtime.evaluate" => {
+            runtime_evaluate_response(id, request, broker, page, caller_client_id).await
+        }
         "Page.getNavigationHistory" => serde_json::json!({
             "id": id,
             "result": {
@@ -762,11 +853,49 @@ fn request_dom_storage_is_local(request: &serde_json::Value) -> bool {
         .unwrap_or(true)
 }
 
+fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
+    serde_urlencoded::from_str(query).unwrap_or_default()
+}
+
+fn query_token(query: Option<&str>) -> Option<String> {
+    query
+        .and_then(|query| parse_query(query).remove("token"))
+        .filter(|token| !token.trim().is_empty())
+}
+
+fn is_allowed_cdp_origin(origin: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+        || std::env::var("BIFROST_DEVTOOLS_ALLOWED_ORIGINS")
+            .ok()
+            .map(|allowed| {
+                allowed
+                    .split(',')
+                    .map(str::trim)
+                    .any(|candidate| candidate == origin)
+            })
+            .unwrap_or(false)
+}
+
+fn cdp_unauthorized(code: &str) -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("Content-Type", "application/json")
+        .body(full_body(format!(r#"{{"code":"{code}"}}"#)))
+        .unwrap()
+}
+
 async fn runtime_evaluate_response(
     id: serde_json::Value,
     request: &serde_json::Value,
     broker: &SharedBrowserDebugBroker,
     page: &DebugPage,
+    caller_client_id: Option<&str>,
 ) -> serde_json::Value {
     if page.mode != DevtoolsMode::Control {
         return serde_json::json!({
@@ -783,6 +912,11 @@ async fn runtime_evaluate_response(
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
+    let world = request
+        .get("params")
+        .and_then(|params| params.get("world"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("main");
     if expression.trim().is_empty() {
         return serde_json::json!({
             "id": id,
@@ -791,6 +925,29 @@ async fn runtime_evaluate_response(
             }
         });
     }
+    if !crate::devtools::BrowserDebugBroker::expression_allowed_by_page(page, &expression) {
+        broker.record_evaluate_audit(
+            page,
+            &expression,
+            world,
+            caller_client_id.map(ToString::to_string),
+            true,
+        );
+        return serde_json::json!({
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": "evaluate not in allowlist"
+            }
+        });
+    }
+    broker.record_evaluate_audit(
+        page,
+        &expression,
+        world,
+        caller_client_id.map(ToString::to_string),
+        false,
+    );
     let eval_id = match broker.queue_eval(&page.page_id, expression) {
         Ok(eval_id) => eval_id,
         Err(err) => {

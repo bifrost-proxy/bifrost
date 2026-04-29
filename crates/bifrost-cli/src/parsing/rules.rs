@@ -172,6 +172,21 @@ fn parse_devtools_rule(value: &str) -> DevtoolsRule {
     rule
 }
 
+#[cfg(test)]
+fn parse_devtools_evaluate_allowlist(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split('|')
+        .map(|item| item.trim().trim_matches('"').trim_matches('\''))
+        .filter(|item| !item.is_empty())
+        .map(|item| item.replace("\\\\", "\\"))
+        .collect()
+}
+
 pub fn parse_cli_rules(
     rules: &[String],
     rules_file: &Option<PathBuf>,
@@ -2089,6 +2104,54 @@ x-use-ppe: 1
             &HashMap::new(),
         );
         assert_eq!(resolved.sni_callback.as_deref(), Some("custom_sni_handler"));
+    }
+
+    #[test]
+    fn test_devtools_evaluate_allowlist_parses_regex() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                r#"example.com devtools://mode=control,evaluate_allowlist=["^document\\.title$"]"#,
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            resolved.devtools.expect("devtools rule").mode,
+            DevtoolsMode::Control
+        );
+        assert_eq!(
+            parse_devtools_evaluate_allowlist(r#"["^document\\.title$"]"#),
+            vec![r#"^document\.title$"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_devtools_evaluate_allowlist_omitted_allows_any_expression() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com devtools://mode=control")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(!resolved
+            .devtools
+            .expect("devtools rule")
+            .raw_value
+            .is_empty());
+        assert!(parse_devtools_evaluate_allowlist("").is_empty());
     }
 
     #[test]

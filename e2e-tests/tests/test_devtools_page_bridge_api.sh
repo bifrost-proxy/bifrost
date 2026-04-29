@@ -74,7 +74,7 @@ fi
 export BIFROST_DEVTOOLS_CHROME="${BIFROST_DEVTOOLS_CHROME:-$SYSTEM_CHROME_BIN}"
 export BIFROST_DEVTOOLS_CHROME_DEBUG_PORT="$CHROME_DEBUG_PORT"
 mkdir -p "$BIFROST_DATA_DIR"
-"${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}/debug/bifrost" start -p "$PROXY_PORT" --unsafe-ssl --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
+BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY=5 "${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}/debug/bifrost" start -p "$PROXY_PORT" --unsafe-ssl --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
 BIFROST_PID=$!
 
 for _ in $(seq 1 120); do
@@ -87,15 +87,20 @@ curl -fsS "http://127.0.0.1:$PROXY_PORT/_bifrost/api/proxy/address" >/dev/null
 
 RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_basic.txt | grep -v '^#' | sed '/^$/d')"
 CONTROL_RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_control.txt | grep -v '^#' | sed '/^$/d')"
+ALLOWLIST_RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_control_allowlist.txt | grep -v '^#' | sed '/^$/d')"
 
-PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" CHROME_DEBUG_PORT="$CHROME_DEBUG_PORT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" node --input-type=module <<'NODE'
+PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" CHROME_DEBUG_PORT="$CHROME_DEBUG_PORT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" ALLOWLIST_RULE_CONTENT="$ALLOWLIST_RULE_CONTENT" node --input-type=module <<'NODE'
 import { chromium } from './web/node_modules/playwright/index.mjs';
+import NodeWebSocket from './web/node_modules/ws/index.js';
+import net from 'node:net';
+import { createHash, randomBytes } from 'node:crypto';
 
 const proxyPort = process.env.PROXY_PORT;
 const sitePort = process.env.SITE_PORT;
 const chromeDebugPort = process.env.CHROME_DEBUG_PORT;
 const ruleContent = process.env.RULE_CONTENT;
 const controlRuleContent = process.env.CONTROL_RULE_CONTENT;
+const allowlistRuleContent = process.env.ALLOWLIST_RULE_CONTENT;
 const admin = `http://127.0.0.1:${proxyPort}/_bifrost/api`;
 const webui = `http://127.0.0.1:${proxyPort}/_bifrost/`;
 
@@ -136,7 +141,7 @@ async function waitForChromeTarget(predicate, timeoutMs = 40000) {
 }
 
 async function roundtripCdp(webSocketUrl, messages) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -149,6 +154,74 @@ async function roundtripCdp(webSocketUrl, messages) {
   await new Promise((resolve) => setTimeout(resolve, 700));
   socket.close();
   return replies;
+}
+
+function createCdpSocket(webSocketUrl) {
+  const parsed = new URL(webSocketUrl);
+  const options = parsed.port === String(proxyPort)
+    ? { headers: { Origin: `http://127.0.0.1:${proxyPort}` } }
+    : {};
+  const socket = new NodeWebSocket(webSocketUrl, options);
+  Object.defineProperty(socket, 'onmessage', {
+    set(listener) {
+      socket.on('message', (data) => listener({ data: data.toString('utf8') }));
+    },
+  });
+  Object.defineProperty(socket, 'onopen', {
+    set(listener) {
+      socket.on('open', listener);
+    },
+  });
+  Object.defineProperty(socket, 'onerror', {
+    set(listener) {
+      socket.on('error', listener);
+    },
+  });
+  return socket;
+}
+
+async function rawWsHandshake(path, origin, token) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port: Number(proxyPort) });
+    const key = randomBytes(16).toString('base64');
+    let response = '';
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      reject(new Error('WebSocket handshake timed out'));
+    });
+    socket.on('connect', () => {
+      const lines = [
+        `GET ${path} HTTP/1.1`,
+        `Host: 127.0.0.1:${proxyPort}`,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${key}`,
+        'Sec-WebSocket-Version: 13',
+        `Origin: ${origin}`,
+      ];
+      if (token) lines.push(`Authorization: Bearer ${token}`);
+      lines.push('', '');
+      socket.write(lines.join('\r\n'));
+    });
+    socket.on('data', (chunk) => {
+      response += chunk.toString('utf8');
+      if (response.includes('\r\n\r\n')) {
+        socket.end();
+        const status = Number(response.match(/^HTTP\/1\.1\s+(\d+)/)?.[1] || 0);
+        resolve({ status, response });
+      }
+    });
+    socket.on('error', reject);
+  });
+}
+
+function wsPathFromUrl(webSocketUrl) {
+  const parsed = new URL(webSocketUrl);
+  return `${parsed.pathname}${parsed.search}`;
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 async function chromeTargetEvaluate(webSocketUrl, expression) {
@@ -187,7 +260,7 @@ async function chromeTargetScreenshot(webSocketUrl) {
 }
 
 async function assertFlattenedCdpSession(webSocketUrl, targetPage) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -286,7 +359,7 @@ function findDomNode(node, predicate) {
 }
 
 async function assertRealtimeCdpUpdates(webSocketUrl, targetPage) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -348,7 +421,7 @@ async function assertRealtimeCdpUpdates(webSocketUrl, targetPage) {
 }
 
 async function assertDomSyncIsChangeDriven(webSocketUrl) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -374,7 +447,7 @@ async function assertDomSyncIsChangeDriven(webSocketUrl) {
 }
 
 async function assertInspectorSelectionSurvivesDomNoise(webSocketUrl, targetPage) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -452,7 +525,7 @@ async function assertInspectorSelectionSurvivesDomNoise(webSocketUrl, targetPage
 }
 
 async function assertCdpProtocolMatrix(webSocketUrl, targetPage) {
-  const socket = new WebSocket(webSocketUrl);
+  const socket = createCdpSocket(webSocketUrl);
   const replies = [];
   socket.onmessage = (event) => replies.push(JSON.parse(event.data));
   await new Promise((resolve, reject) => {
@@ -681,6 +754,21 @@ const bridgeState = await page.evaluate(() => ({
 if (!bridgeState.injected || bridgeState.state !== 'connected' || !bridgeState.pageId) {
   throw new Error(`AV-CDP-01 failed: invalid bridge state ${JSON.stringify(bridgeState)}`);
 }
+const bridgeLeak = await page.evaluate(() => ({
+  names: Object.getOwnPropertyNames(window).filter((key) => /BIFROST/i.test(key)),
+  descriptor: Object.getOwnPropertyDescriptor(window, '__BIFROST_DEVTOOLS_BRIDGE__'),
+  json: JSON.stringify(window.__BIFROST_DEVTOOLS_BRIDGE__),
+  keys: Object.keys(window.__BIFROST_DEVTOOLS_BRIDGE__ || {}),
+}));
+if (!bridgeLeak.names.includes('__BIFROST_DEVTOOLS_BRIDGE__')) {
+  throw new Error(`F1 failed: bridge shim missing from page names ${JSON.stringify(bridgeLeak)}`);
+}
+if (bridgeLeak.descriptor?.enumerable || bridgeLeak.descriptor?.configurable || bridgeLeak.descriptor?.writable) {
+  throw new Error(`F1 failed: bridge shim descriptor is not hardened ${JSON.stringify(bridgeLeak.descriptor)}`);
+}
+if (/token|bdt_|fetch|eval-next|eval-result/i.test(`${bridgeLeak.json} ${bridgeLeak.keys.join(',')}`)) {
+  throw new Error(`F1 failed: bridge token or transport leaked to page ${JSON.stringify(bridgeLeak)}`);
+}
 
 await page.waitForTimeout(800);
 pages = (await api('/devtools/pages?online=true')).pages;
@@ -693,6 +781,15 @@ if (debugPage.adapter !== 'page_bridge' || debugPage.fidelity !== 'fallback' || 
 }
 if (debugPage.title !== 'Bifrost DevTools Basic') {
   throw new Error(`AV-CDP-01 failed: title not reported (${debugPage.title})`);
+}
+await page.evaluate(() => {
+  window.postMessage({ type: 'hello', token: 'guess' }, '*');
+  window.postMessage({ __bifrost_devtools_bridge__: true, type: 'hello', token: 'guess' }, '*');
+});
+await page.waitForTimeout(500);
+const pagesAfterForgedPostMessage = (await api('/devtools/pages?online=true')).pages.filter((candidate) => candidate.url.includes('case=av-cdp-01'));
+if (pagesAfterForgedPostMessage.length !== 1 || pagesAfterForgedPostMessage[0].page_id !== debugPage.page_id) {
+  throw new Error(`F1 failed: forged postMessage changed admin-side page state ${JSON.stringify(pagesAfterForgedPostMessage)}`);
 }
 await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
@@ -712,7 +809,6 @@ const independentSameUrlPages = pages.filter((candidate) => candidate.url.includ
 if (independentSameUrlPages.length !== 2) {
   throw new Error(`AV-CDP-13 failed: independent tabs with the same URL should stay distinct, got ${independentSameUrlPages.length}: ${JSON.stringify(independentSameUrlPages)}`);
 }
-await sameUrlPage.evaluate(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.post('/close'));
 await sameUrlPage.close();
 
 const secondaryPage = await context.newPage();
@@ -742,6 +838,10 @@ if (!secondaryCdpTarget?.webSocketDebuggerUrl || !secondaryCdpTarget.systemChrom
 }
 if (!cdpTarget.webSocketDebuggerUrl.includes(`/_bifrost/api/devtools/cdp/${activeDebugPage.page_id}`)) {
   throw new Error(`AV-CDP-05 failed: wrong CDP websocket URL ${cdpTarget.webSocketDebuggerUrl}`);
+}
+const evilOriginHandshake = await rawWsHandshake(wsPathFromUrl(cdpTarget.webSocketDebuggerUrl), 'http://evil.com');
+if (evilOriginHandshake.status !== 401 || !evilOriginHandshake.response.includes('origin_not_allowed')) {
+  throw new Error(`F23 failed: foreign Origin should be rejected with origin_not_allowed ${JSON.stringify(evilOriginHandshake)}`);
 }
 const cdpVersion = await api('/devtools/cdp/json/version');
 if (cdpVersion['Protocol-Version'] !== '1.3') {
@@ -907,7 +1007,54 @@ const controlEvalReply = controlEvalReplies.find((reply) => reply.id === 401);
 if (controlEvalReply?.result?.result?.value !== 'basic') {
   throw new Error(`AV-CDP-14 failed: Runtime.evaluate did not execute in page bridge control mode ${JSON.stringify(controlEvalReplies)}`);
 }
-const finalDebugPage = controlDebugPage;
+let auditRecords = await api('/devtools/audit/evaluate?limit=5');
+const datasetExpression = 'document.querySelector("#debug-fixture").dataset.case';
+if (!auditRecords.some((entry) => entry.expression_sha256 === sha256(datasetExpression) && entry.expression_preview === datasetExpression && entry.target_page_id === controlDebugPage.page_id)) {
+  throw new Error(`F3 failed: Runtime.evaluate audit record missing ${JSON.stringify(auditRecords)}`);
+}
+await api('/rules/devtools-page-bridge-api', {
+  method: 'PUT',
+  body: JSON.stringify({
+    content: allowlistRuleContent,
+    enabled: true,
+  }),
+});
+await page.reload({ waitUntil: 'load' });
+await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
+await page.waitForTimeout(800);
+pages = (await api('/devtools/pages?online=true')).pages;
+const allowlistDebugPage = pages.find((candidate) => candidate.url.includes('case=av-cdp-01'));
+const allowlistCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === allowlistDebugPage.page_id);
+const allowlistReplies = await roundtripCdp(allowlistCdpTarget.webSocketDebuggerUrl, [
+  { id: 411, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
+  { id: 412, method: 'Runtime.evaluate', params: { expression: 'document.cookie' } },
+]);
+const allowedEvalReply = allowlistReplies.find((reply) => reply.id === 411);
+const rejectedEvalReply = allowlistReplies.find((reply) => reply.id === 412);
+if (allowedEvalReply?.result?.result?.value !== 'Bifrost DevTools Basic') {
+  throw new Error(`F3 failed: allowlisted Runtime.evaluate should succeed ${JSON.stringify(allowlistReplies)}`);
+}
+if (rejectedEvalReply?.error?.code !== -32000 || rejectedEvalReply.error.message !== 'evaluate not in allowlist') {
+  throw new Error(`F3 failed: non-allowlisted Runtime.evaluate should be rejected ${JSON.stringify(allowlistReplies)}`);
+}
+auditRecords = await api('/devtools/audit/evaluate?limit=5');
+if (!auditRecords.some((entry) => entry.expression_sha256 === sha256('document.cookie') && entry.rejected_by_allowlist === true)) {
+  throw new Error(`F3 failed: rejected allowlist audit record missing ${JSON.stringify(auditRecords)}`);
+}
+for (let i = 0; i < 7; i += 1) {
+  const replies = await roundtripCdp(allowlistCdpTarget.webSocketDebuggerUrl, [
+    { id: 420 + i, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
+  ]);
+  const reply = replies.find((candidate) => candidate.id === 420 + i);
+  if (reply?.result?.result?.value !== 'Bifrost DevTools Basic') {
+    throw new Error(`F3 failed: ring-buffer seed evaluate ${i} failed ${JSON.stringify(replies)}`);
+  }
+}
+auditRecords = await api('/devtools/audit/evaluate?limit=50');
+if (auditRecords.length !== 5) {
+  throw new Error(`F3 failed: audit ring buffer should be bounded to capacity 5, got ${auditRecords.length}: ${JSON.stringify(auditRecords)}`);
+}
+const finalDebugPage = allowlistDebugPage;
 
 const mobileContext = await browser.newContext({
   proxy: { server: `http://127.0.0.1:${proxyPort}` },
@@ -1100,6 +1247,28 @@ if (process.env.BIFROST_TEST_INSTALL_EMBEDDED_DEVTOOLS === '1') {
   );
   await chromeTargetScreenshot(chromeTarget.webSocketDebuggerUrl);
   await adminPage.getByRole('button', { name: 'Install Chrome DevTools' }).waitFor({ timeout: 8000 });
+}
+
+await api('/auth/passwd', {
+  method: 'POST',
+  body: JSON.stringify({ username: 'admin', password: 'Str0ngPass123!' }),
+});
+await api('/auth/remote', {
+  method: 'POST',
+  body: JSON.stringify({ enabled: true }),
+});
+const login = await api('/auth/login', {
+  method: 'POST',
+  body: JSON.stringify({ username: 'admin', password: 'Str0ngPass123!' }),
+});
+const localOrigin = `http://127.0.0.1:${proxyPort}`;
+const noTokenHandshake = await rawWsHandshake(wsPathFromUrl(allowlistCdpTarget.webSocketDebuggerUrl), localOrigin);
+if (noTokenHandshake.status !== 401 || !noTokenHandshake.response.includes('missing_token')) {
+  throw new Error(`F23 failed: auth-enabled CDP websocket without token should be rejected ${JSON.stringify(noTokenHandshake)}`);
+}
+const tokenHandshake = await rawWsHandshake(wsPathFromUrl(allowlistCdpTarget.webSocketDebuggerUrl), localOrigin, login.token);
+if (tokenHandshake.status !== 101) {
+  throw new Error(`F23 failed: auth-enabled CDP websocket with token should upgrade ${JSON.stringify(tokenHandshake)}`);
 }
 
 await browser.close();
