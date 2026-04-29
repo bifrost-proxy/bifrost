@@ -11,10 +11,14 @@ use common::{add_test_rule, create_proxy_client, start_test_proxy, start_test_pr
 use common::{start_test_proxy_with_tls_support, MockH2TlsServer, MockHttpServer};
 use futures_util::StreamExt;
 use http_body_util::{Empty, Full};
+use hyper::body::{Body, Frame};
 use hyper::{Method, Request, Version};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -85,6 +89,138 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
             SignatureScheme::ED25519,
             SignatureScheme::ED448,
         ]
+    }
+}
+
+struct FailAfterFirstChunkBody {
+    sent_chunk: bool,
+}
+
+impl Body for FailAfterFirstChunkBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if !self.sent_chunk {
+            self.sent_chunk = true;
+            return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"partial")))));
+        }
+        Poll::Ready(Some(Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "intentional h2 body reset",
+        ))))
+    }
+}
+
+struct FlakyH2FallbackTlsServer {
+    port: u16,
+    h2_requests: Arc<Mutex<usize>>,
+    h1_requests: Arc<Mutex<usize>>,
+}
+
+async fn start_flaky_h2_fallback_tls_server(
+    body: Bytes,
+    content_type: &'static str,
+) -> FlakyH2FallbackTlsServer {
+    use tokio_rustls::rustls;
+    use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::TlsAcceptor;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "intercepted.example.com".to_string(),
+    ])
+    .unwrap();
+    let key_der = signing_key.serialize_der();
+    let certs = vec![cert.der().clone()];
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    let h2_requests = Arc::new(Mutex::new(0usize));
+    let h1_requests = Arc::new(Mutex::new(0usize));
+    let h2_requests_for_task = Arc::clone(&h2_requests);
+    let h1_requests_for_task = Arc::clone(&h1_requests);
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let acceptor = acceptor.clone();
+            let body = body.clone();
+            let h2_requests = Arc::clone(&h2_requests_for_task);
+            let h1_requests = Arc::clone(&h1_requests_for_task);
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(stream).await {
+                    Ok(stream) => stream,
+                    Err(_) => return,
+                };
+                let negotiated = tls_stream.get_ref().1.alpn_protocol().map(|v| v.to_vec());
+
+                if negotiated.as_deref() == Some(b"h2".as_slice()) {
+                    *h2_requests.lock() += 1;
+                    let body_len = body.len();
+                    let service = hyper::service::service_fn(move |_req| async move {
+                        let response = hyper::Response::builder()
+                            .status(200)
+                            .header(hyper::header::CONTENT_TYPE, content_type)
+                            .header(hyper::header::CONTENT_LENGTH, body_len.to_string())
+                            .body(FailAfterFirstChunkBody { sent_chunk: false })
+                            .unwrap();
+                        Ok::<_, hyper::Error>(response)
+                    });
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls_stream), service)
+                        .await;
+                    return;
+                }
+
+                if negotiated.as_deref() == Some(b"http/1.1".as_slice()) || negotiated.is_none() {
+                    *h1_requests.lock() += 1;
+                    let mut stream = tls_stream;
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0u8; 1024];
+                        let n = match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        request.extend_from_slice(&chunk[..n]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        content_type,
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                }
+            });
+        }
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    FlakyH2FallbackTlsServer {
+        port,
+        h2_requests,
+        h1_requests,
     }
 }
 
@@ -455,6 +591,111 @@ async fn test_https_interception_upstream_h2_host_header_removed() {
     assert!(
         !host_seen,
         "upstream h2 request should not include Host header"
+    );
+}
+
+#[tokio::test]
+async fn test_https_interception_retries_h2_body_failure_with_http1() {
+    init_crypto_provider();
+
+    let expected_body = Bytes::from(vec![0x89; 256 * 1024]);
+    let upstream = start_flaky_h2_fallback_tls_server(expected_body.clone(), "image/png").await;
+    let config = ProxyConfig {
+        enable_tls_interception: true,
+        unsafe_ssl: true,
+        verbose_logging: true,
+        ..Default::default()
+    };
+    let proxy = start_test_proxy_with_config(config).await;
+
+    add_test_rule(
+        &proxy,
+        "intercepted.example.com",
+        Protocol::Host,
+        &format!("127.0.0.1:{}", upstream.port),
+    );
+
+    let client = create_proxy_client(&proxy);
+    let response = tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        client
+            .get("https://intercepted.example.com/asset.png")
+            .send(),
+    )
+    .await
+    .expect("request timeout")
+    .expect("request failed");
+
+    let status = response.status();
+    let body = response.bytes().await.unwrap();
+    assert_eq!(
+        status,
+        200,
+        "unexpected body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(body, expected_body);
+    assert_eq!(
+        *upstream.h2_requests.lock(),
+        1,
+        "first upstream attempt should use h2"
+    );
+    assert_eq!(
+        *upstream.h1_requests.lock(),
+        1,
+        "failed h2 body should be retried over http/1.1"
+    );
+}
+
+#[tokio::test]
+async fn test_http_handler_retries_h2_body_failure_with_http1() {
+    init_crypto_provider();
+
+    let expected_body = Bytes::from(vec![0x42; 128 * 1024]);
+    let upstream = start_flaky_h2_fallback_tls_server(expected_body.clone(), "image/png").await;
+    let config = ProxyConfig {
+        unsafe_ssl: true,
+        verbose_logging: true,
+        ..Default::default()
+    };
+    let proxy = start_test_proxy_with_config(config).await;
+
+    add_test_rule(
+        &proxy,
+        "intercepted.example.com",
+        Protocol::Https,
+        &format!("https://127.0.0.1:{}", upstream.port),
+    );
+
+    let client = create_proxy_client(&proxy);
+    let response = tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        client
+            .get("http://intercepted.example.com/asset.png")
+            .send(),
+    )
+    .await
+    .expect("request timeout")
+    .expect("request failed");
+
+    let status = response.status();
+    let body = response.bytes().await.unwrap();
+    assert_eq!(
+        status,
+        200,
+        "unexpected body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(body, expected_body);
+    assert_eq!(
+        *upstream.h2_requests.lock(),
+        1,
+        "first upstream attempt should use h2"
+    );
+    assert_eq!(
+        *upstream.h1_requests.lock(),
+        1,
+        "failed h2 body should be retried over http/1.1"
     );
 }
 

@@ -262,6 +262,76 @@ pub(super) async fn send_pooled_request_http1_only(
     client::send_pooled_request_http1_only(request, unsafe_ssl, dns_servers, pool_partition).await
 }
 
+#[derive(Clone)]
+struct RetryableRequestBlueprint {
+    method: hyper::Method,
+    uri: hyper::Uri,
+    headers: hyper::HeaderMap<HeaderValue>,
+    body: Bytes,
+}
+
+impl RetryableRequestBlueprint {
+    fn build(&self) -> Result<Request<BoxBody>> {
+        let mut builder = Request::builder()
+            .method(self.method.clone())
+            .uri(self.uri.clone())
+            .version(hyper::Version::HTTP_11);
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        builder.body(full_body(self.body.clone())).map_err(|e| {
+            BifrostError::Network(format!(
+                "Failed to rebuild request for HTTP/1.1 retry: {}",
+                e
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H2BodyRecoveryAction {
+    Probe,
+    RetryHttp1,
+    Stream,
+}
+
+fn h2_body_recovery_action(
+    response_version: hyper::Version,
+    status: hyper::StatusCode,
+    method: &str,
+    content_type: &str,
+    content_length: Option<usize>,
+    max_body_buffer_size: usize,
+    retryable: bool,
+) -> H2BodyRecoveryAction {
+    if !retryable
+        || response_version != hyper::Version::HTTP_2
+        || status.is_informational()
+        || status == hyper::StatusCode::NO_CONTENT
+        || status == hyper::StatusCode::NOT_MODIFIED
+        || method.eq_ignore_ascii_case("HEAD")
+        || content_type
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    {
+        return H2BodyRecoveryAction::Stream;
+    }
+
+    if let Some(len) = content_length {
+        if len <= max_body_buffer_size {
+            H2BodyRecoveryAction::Probe
+        } else if !is_likely_text_content_type(content_type) {
+            H2BodyRecoveryAction::RetryHttp1
+        } else {
+            H2BodyRecoveryAction::Stream
+        }
+    } else if is_likely_text_content_type(content_type) {
+        H2BodyRecoveryAction::Probe
+    } else {
+        H2BodyRecoveryAction::RetryHttp1
+    }
+}
+
 fn build_upstream_pool_partition(
     original_host: &str,
     target_host: &str,
@@ -2434,6 +2504,19 @@ async fn handle_intercepted_request_with_protocol(
         None
     };
 
+    let retry_blueprint = if !actual_use_http
+        && matches!(method_str.as_str(), "GET" | "HEAD")
+        && !request_body_is_streaming
+    {
+        Some(RetryableRequestBlueprint {
+            method: upstream_parts.method.clone(),
+            uri: upstream_parts.uri.clone(),
+            headers: upstream_parts.headers.clone(),
+            body: Bytes::from(body_bytes.clone()),
+        })
+    } else {
+        None
+    };
     let upstream_req = Request::from_parts(upstream_parts, upstream_body);
 
     let pool_partition = build_upstream_pool_partition(
@@ -2459,19 +2542,70 @@ async fn handle_intercepted_request_with_protocol(
         {
             Ok(r) => r,
             Err(e) => {
-                let classified = classify_request_error(&e);
-                error!(
-                    "[{}] {} ({})",
-                    req_id, classified.error_message, classified.error_type
-                );
-                for source in &classified.source_chain {
-                    error!("[{}] Request failure source: {}", req_id, source);
+                let retryable_upstream_h2 = !actual_use_http
+                    && retry_blueprint.is_some()
+                    && (!e.is_connect() || is_retryable_http2_error(&e));
+
+                if retryable_upstream_h2 {
+                    warn!(
+                        "[{}] Upstream HTTP/2 request failed; retrying with HTTP/1.1 fallback",
+                        req_id
+                    );
+                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    let retry_request = match retry_blueprint
+                        .as_ref()
+                        .expect("retry blueprint exists for retryable request")
+                        .build()
+                    {
+                        Ok(request) => request,
+                        Err(err) => {
+                            return Ok(build_conn_error_record_and_response(
+                                "REQUEST_BUILD_FAILED",
+                                err.to_string(),
+                                None,
+                            ));
+                        }
+                    };
+                    match send_pooled_request_http1_only(
+                        retry_request,
+                        unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(retry_err) => {
+                            let classified = classify_request_error(&retry_err);
+                            error!(
+                                "[{}] {} ({})",
+                                req_id, classified.error_message, classified.error_type
+                            );
+                            for source in &classified.source_chain {
+                                error!("[{}] Request failure source: {}", req_id, source);
+                            }
+                            return Ok(build_conn_error_record_and_response(
+                                classified.error_type,
+                                classified.error_message,
+                                None,
+                            ));
+                        }
+                    }
+                } else {
+                    let classified = classify_request_error(&e);
+                    error!(
+                        "[{}] {} ({})",
+                        req_id, classified.error_message, classified.error_type
+                    );
+                    for source in &classified.source_chain {
+                        error!("[{}] Request failure source: {}", req_id, source);
+                    }
+                    return Ok(build_conn_error_record_and_response(
+                        classified.error_type,
+                        classified.error_message,
+                        None,
+                    ));
                 }
-                return Ok(build_conn_error_record_and_response(
-                    classified.error_type,
-                    classified.error_message,
-                    None,
-                ));
             }
         };
         let wait_ms = send_start.elapsed().as_millis() as u64;
@@ -2492,19 +2626,70 @@ async fn handle_intercepted_request_with_protocol(
         {
             Ok(r) => r,
             Err(e) => {
-                let classified = classify_request_error(&e);
-                error!(
-                    "[{}] {} ({})",
-                    req_id, classified.error_message, classified.error_type
-                );
-                for source in &classified.source_chain {
-                    error!("[{}] Request failure source: {}", req_id, source);
+                let retryable_upstream_h2 = !actual_use_http
+                    && retry_blueprint.is_some()
+                    && (!e.is_connect() || is_retryable_http2_error(&e));
+
+                if retryable_upstream_h2 {
+                    warn!(
+                        "[{}] Upstream HTTP/2 request failed; retrying with HTTP/1.1 fallback",
+                        req_id
+                    );
+                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    let retry_request = match retry_blueprint
+                        .as_ref()
+                        .expect("retry blueprint exists for retryable request")
+                        .build()
+                    {
+                        Ok(request) => request,
+                        Err(err) => {
+                            return Ok(build_conn_error_record_and_response(
+                                "REQUEST_BUILD_FAILED",
+                                err.to_string(),
+                                None,
+                            ));
+                        }
+                    };
+                    match send_pooled_request_http1_only(
+                        retry_request,
+                        unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(retry_err) => {
+                            let classified = classify_request_error(&retry_err);
+                            error!(
+                                "[{}] {} ({})",
+                                req_id, classified.error_message, classified.error_type
+                            );
+                            for source in &classified.source_chain {
+                                error!("[{}] Request failure source: {}", req_id, source);
+                            }
+                            return Ok(build_conn_error_record_and_response(
+                                classified.error_type,
+                                classified.error_message,
+                                None,
+                            ));
+                        }
+                    }
+                } else {
+                    let classified = classify_request_error(&e);
+                    error!(
+                        "[{}] {} ({})",
+                        req_id, classified.error_message, classified.error_type
+                    );
+                    for source in &classified.source_chain {
+                        error!("[{}] Request failure source: {}", req_id, source);
+                    }
+                    return Ok(build_conn_error_record_and_response(
+                        classified.error_type,
+                        classified.error_message,
+                        None,
+                    ));
                 }
-                return Ok(build_conn_error_record_and_response(
-                    classified.error_type,
-                    classified.error_message,
-                    None,
-                ));
             }
         };
         let wait_ms = send_start.elapsed().as_millis() as u64;
@@ -2512,7 +2697,155 @@ async fn handle_intercepted_request_with_protocol(
         (parts, Some(body), None, wait_ms, None)
     };
 
-    let (mut res_parts, res_body, tls_ms, wait_ms, h3_buffered_body) = upstream_result;
+    let (mut res_parts, mut res_body, tls_ms, mut wait_ms, mut h3_buffered_body) = upstream_result;
+
+    if h3_buffered_body.is_none() {
+        let early_content_type = res_parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let early_content_length = res_parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+        let recovery_action = h2_body_recovery_action(
+            res_parts.version,
+            res_parts.status,
+            &method_str,
+            &early_content_type,
+            early_content_length,
+            max_body_buffer_size,
+            retry_blueprint.is_some(),
+        );
+
+        if matches!(recovery_action, H2BodyRecoveryAction::Probe) {
+            let body = res_body
+                .take()
+                .expect("upstream response body should exist");
+            match read_body_bounded(body, max_body_buffer_size).await {
+                Ok(BoundedBody::Complete(bytes)) => {
+                    h3_buffered_body = Some(bytes);
+                }
+                Ok(BoundedBody::Exceeded(replay_body)) => {
+                    res_body = Some(replay_body.boxed());
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] Upstream HTTP/2 response body failed while probing response; retrying with HTTP/1.1 fallback: {}",
+                        req_id, e
+                    );
+                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    let retry_request = match retry_blueprint
+                        .as_ref()
+                        .expect("retry blueprint exists for H2 body fallback")
+                        .build()
+                    {
+                        Ok(request) => request,
+                        Err(err) => {
+                            return Ok(build_conn_error_record_and_response(
+                                "REQUEST_BUILD_FAILED",
+                                err.to_string(),
+                                None,
+                            ));
+                        }
+                    };
+                    let retry_start = Instant::now();
+                    match send_pooled_request_http1_only(
+                        retry_request,
+                        unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            info!(
+                                "[{}] Upstream response body recovered via HTTP/1.1 fallback",
+                                req_id
+                            );
+                            wait_ms = retry_start.elapsed().as_millis() as u64;
+                            let (parts, body) = response.into_parts();
+                            res_parts = parts;
+                            res_body = Some(body);
+                        }
+                        Err(err) => {
+                            let classified = classify_request_error(&err);
+                            error!(
+                                "[{}] {} ({})",
+                                req_id, classified.error_message, classified.error_type
+                            );
+                            for source in &classified.source_chain {
+                                error!("[{}] Request failure source: {}", req_id, source);
+                            }
+                            return Ok(build_conn_error_record_and_response(
+                                classified.error_type,
+                                classified.error_message,
+                                None,
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if matches!(recovery_action, H2BodyRecoveryAction::RetryHttp1) {
+            warn!(
+                "[{}] Upstream HTTP/2 response is a large or unknown-size binary body; retrying with HTTP/1.1 fallback before streaming",
+                req_id
+            );
+            mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+            let retry_request = match retry_blueprint
+                .as_ref()
+                .expect("retry blueprint exists for H2 body fallback")
+                .build()
+            {
+                Ok(request) => request,
+                Err(err) => {
+                    return Ok(build_conn_error_record_and_response(
+                        "REQUEST_BUILD_FAILED",
+                        err.to_string(),
+                        None,
+                    ));
+                }
+            };
+            let retry_start = Instant::now();
+            match send_pooled_request_http1_only(
+                retry_request,
+                unsafe_ssl,
+                &resolved_rules.dns_servers,
+                &pool_partition,
+            )
+            .await
+            {
+                Ok(response) => {
+                    info!(
+                        "[{}] Upstream response switched to HTTP/1.1 fallback before streaming",
+                        req_id
+                    );
+                    wait_ms = retry_start.elapsed().as_millis() as u64;
+                    let (parts, body) = response.into_parts();
+                    res_parts = parts;
+                    res_body = Some(body);
+                }
+                Err(err) => {
+                    let classified = classify_request_error(&err);
+                    error!(
+                        "[{}] {} ({})",
+                        req_id, classified.error_message, classified.error_type
+                    );
+                    for source in &classified.source_chain {
+                        error!("[{}] Request failure source: {}", req_id, source);
+                    }
+                    return Ok(build_conn_error_record_and_response(
+                        classified.error_type,
+                        classified.error_message,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
 
     let target_status = resolved_rules.replace_status.or(resolved_rules.status_code);
     if let Some(status_code) = target_status {
@@ -4235,6 +4568,90 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_h2_body_recovery_policy_probes_bounded_responses() {
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "GET",
+                "image/png",
+                Some(1024),
+                2048,
+                true,
+            ),
+            H2BodyRecoveryAction::Probe
+        );
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "GET",
+                "text/html",
+                None,
+                2048,
+                true,
+            ),
+            H2BodyRecoveryAction::Probe
+        );
+    }
+
+    #[test]
+    fn test_h2_body_recovery_policy_retries_large_or_unknown_binary() {
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "GET",
+                "image/png",
+                Some(4096),
+                2048,
+                true,
+            ),
+            H2BodyRecoveryAction::RetryHttp1
+        );
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "GET",
+                "application/octet-stream",
+                None,
+                2048,
+                true,
+            ),
+            H2BodyRecoveryAction::RetryHttp1
+        );
+    }
+
+    #[test]
+    fn test_h2_body_recovery_policy_skips_non_retryable_or_streaming() {
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "POST",
+                "image/png",
+                Some(1024),
+                2048,
+                false,
+            ),
+            H2BodyRecoveryAction::Stream
+        );
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                hyper::StatusCode::OK,
+                "GET",
+                "text/event-stream",
+                None,
+                2048,
+                true,
+            ),
+            H2BodyRecoveryAction::Stream
+        );
     }
 
     #[test]
