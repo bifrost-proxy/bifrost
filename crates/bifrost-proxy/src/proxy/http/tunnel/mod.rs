@@ -43,8 +43,9 @@ use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::handler::{
     build_connection_error_response, build_error_body, build_overridden_error_response,
-    needs_body_processing, needs_request_body_processing, needs_response_override,
-    parse_and_record_sse_events, ConnectionErrorInfo,
+    devtools_bridge_requested, maybe_inject_devtools_bridge_html, needs_body_processing,
+    needs_request_body_processing, needs_response_override, parse_and_record_sse_events,
+    ConnectionErrorInfo,
 };
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
@@ -1684,6 +1685,17 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
+    if req
+        .uri()
+        .path()
+        .starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/"))
+    {
+        if let Some(state) = admin_state.clone() {
+            let resp = AdminRouter::handle(req, state, push_manager.clone(), None).await;
+            return Ok(convert_intercepted_admin_response(resp));
+        }
+    }
+
     if is_websocket_upgrade_request(&req) {
         return handle_intercepted_websocket(
             req,
@@ -2911,7 +2923,10 @@ async fn handle_intercepted_request_with_protocol(
         .to_lowercase();
     let force_body_processing_for_badge =
         inject_bifrost_badge && res_content_type_str.starts_with("text/html");
-    let needs_processing = needs_processing || force_body_processing_for_badge;
+    let force_body_processing_for_devtools =
+        devtools_bridge_requested(&resolved_rules) && res_content_type_str.starts_with("text/html");
+    let needs_processing =
+        needs_processing || force_body_processing_for_badge || force_body_processing_for_devtools;
     let has_res_body_override = resolved_rules.res_body.is_some();
     let needs_res_body_read = needs_processing && !has_res_body_override;
 
@@ -3048,6 +3063,8 @@ async fn handle_intercepted_request_with_protocol(
             .unwrap_or_else(|| format!(">{}", res_body_limit));
         let skip_detail = if force_body_processing_for_badge {
             "skipping body rules and badge injection"
+        } else if force_body_processing_for_devtools {
+            "skipping body rules and DevTools bridge injection"
         } else {
             "skipping body rules"
         };
@@ -3447,6 +3464,55 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
     let final_body = injection_result.body;
+
+    let final_body = if devtools_bridge_requested(&resolved_rules)
+        && res_content_type
+            .to_ascii_lowercase()
+            .starts_with("text/html")
+    {
+        let final_res_headers: Vec<(String, String)> = res_parts
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        if let Some(content_encoding) = get_content_encoding(&final_res_headers) {
+            match crate::transform::try_decompress_body_with_limit(
+                final_body.as_ref(),
+                &content_encoding,
+                10 * 1024 * 1024,
+            ) {
+                Ok(decompressed) => {
+                    let injected_body = maybe_inject_devtools_bridge_html(
+                        Bytes::from(decompressed),
+                        &res_content_type,
+                        &resolved_rules,
+                        admin_state.as_deref(),
+                        &original_uri,
+                        req_id,
+                    );
+                    match compress_body(injected_body.as_ref(), &content_encoding) {
+                        Ok(compressed) => Bytes::from(compressed),
+                        Err(_) => {
+                            res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+                            injected_body
+                        }
+                    }
+                }
+                Err(_) => final_body,
+            }
+        } else {
+            maybe_inject_devtools_bridge_html(
+                final_body,
+                &res_content_type,
+                &resolved_rules,
+                admin_state.as_deref(),
+                &original_uri,
+                req_id,
+            )
+        }
+    } else {
+        final_body
+    };
 
     let final_body = if inject_bifrost_badge {
         let badge_rules_json = super::handler::build_badge_rules_json(admin_state.as_deref());

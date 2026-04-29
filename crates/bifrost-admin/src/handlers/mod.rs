@@ -4,6 +4,7 @@ pub mod auth;
 pub mod bifrost_file;
 pub mod cert;
 pub mod config;
+pub mod devtools;
 pub mod env;
 pub mod frames;
 pub mod group;

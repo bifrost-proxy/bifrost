@@ -1,0 +1,4 @@
+# 验证更具体 devtools://deny=true 可关闭页面调试发现。
+# 端口由测试脚本动态替换。
+
+http://devtools-fixture.test:__SITE_PORT__/denied/* devtools://deny=true

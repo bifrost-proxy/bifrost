@@ -139,6 +139,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "Disable TLS interception",
         Protocol::TlsOptions => "Configure CONNECT upstream TLS options",
         Protocol::SniCallback => "Configure SNI callback metadata for CONNECT requests",
+        Protocol::DevTools => "Enable Bifrost DevTools discovery for matched pages",
         Protocol::Passthrough => "Pass through without modification",
         Protocol::Tunnel => "Redirect CONNECT tunnel target",
     }
@@ -179,6 +180,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::Dns => "dns_server",
         Protocol::TlsOptions => "tls_options",
         Protocol::SniCallback => "callback_spec",
+        Protocol::DevTools => "devtools_options",
         Protocol::Delete
         | Protocol::Skip
         | Protocol::ReqCors
@@ -275,6 +277,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "tlsPassthrough://",
         Protocol::TlsOptions => "tlsOptions://minVersion=TLSv1.2&maxVersion=TLSv1.3",
         Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
+        Protocol::DevTools => "devtools://mode=read,inject=bridge",
         Protocol::Passthrough => "passthrough://",
         Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }
@@ -357,6 +360,7 @@ pub fn get_all_protocols() -> Vec<ProtocolInfo> {
         Protocol::TlsPassthrough,
         Protocol::TlsOptions,
         Protocol::SniCallback,
+        Protocol::DevTools,
         Protocol::Tunnel,
         Protocol::Passthrough,
     ];
