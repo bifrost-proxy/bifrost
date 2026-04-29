@@ -394,6 +394,22 @@ bash e2e-tests/tests/test_devtools_page_bridge_api.sh
 - screencast 三个 method 都明确返回 `screencast_disabled`，并且没有任何截图/画面同步事件。
 - 未实现或敏感 method 都返回稳定 `unsupported CDP method` 错误，不能静默成功。
 
+### TC-CDP-21：rules parallel fixtures 跳过 DevTools 专用规则夹具
+
+**操作步骤**
+
+1. 执行 `bash -n e2e-tests/run_all_tests_parallel.sh && bash -n e2e-tests/test_rules.sh`。
+2. 执行 `bash e2e-tests/run_all_tests_parallel.sh -c devtools --no-build`。
+3. 执行 `bash e2e-tests/run_all_tests_parallel.sh --no-build`。
+4. 检查收集阶段和最终测试结果。
+
+**预期结果**
+
+- `devtools/page_bridge_basic.txt`、`devtools/page_bridge_control.txt`、`devtools/page_bridge_control_allowlist.txt`、`devtools/page_bridge_deny.txt` 不进入通用 rules parallel fixture 执行队列。
+- `-c devtools` 输出 `没有找到测试文件` 并以 0 退出，表示该目录下夹具均由专用 DevTools E2E 覆盖。
+- 全量 rules parallel fixture 不再因为 DevTools 专用夹具中的 `devtools://` 或动态 `__SITE_PORT__` 占位符失败。
+- DevTools page_bridge 能力仍由 `test_devtools_page_bridge_api.sh` 逐项验证。
+
 ## 清理步骤
 
 - `test_devtools_page_bridge_api.sh` 退出时会自动终止 Bifrost 进程和本地 HTTP server。
@@ -407,4 +423,10 @@ bash e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 实际结果 1：通过。脚本输出 `AV-CDP-01/02/03/04/05/06/07/09/10/11/12/13/14/15/16/17/19/20 plus WebUI card navigation, protocol matrix, and system Chrome open passed`；覆盖 TC-CDP-11 的 flattened CDP session response/event 路由、DOM/CSS/console/network/storage 真实页面数据映射、TC-CDP-12 实时刷新、TC-CDP-13 页面身份语义、TC-CDP-14 control mode evaluate、TC-CDP-15 卡片列表到全屏详情的导航、TC-CDP-16 DOM 变化驱动同步、TC-CDP-17 目标页面 DOM 高亮、TC-CDP-19 内部 overlay 与属性噪声不触发整页 DOM 刷新，以及 TC-CDP-20 CDP shim 协议矩阵逐项端到端验证；脚本实际点击 `Open in Chrome DevTools` 并通过系统 Chrome remote debugging 验证 `devtools://` target URL 与截图。
 - 执行命令 2：`BIFROST_TEST_INSTALL_EMBEDDED_DEVTOOLS=1 bash e2e-tests/tests/test_devtools_page_bridge_api.sh`
 - 实际结果 2：通过。脚本输出 `AV-CDP-01/02/03/04/05/06/08/09/10/11/12/13/14/15/16/17/18/19/20 plus embedded Chrome DevTools install, iframe, protocol matrix, card navigation, page switching, no screencast pane, and stable Elements selection passed`；官方 Chrome DevTools frontend iframe 抓包中，携带 `sessionId` 的 request 均匹配到同 `sessionId` response，且无缺失 response id、无 `unsupported CDP method`、无 DevTools frontend 控制台 error；脚本真实点击 `Back` 返回卡片列表，再选择 secondary 卡片并验证 iframe 切换到 secondary page；iframe 内看不到 screencast 画面、手机切换按钮或左侧空白渲染区；内部 overlay 与属性噪声不会触发 Elements 整树刷新；协议矩阵逐项验证通过，敏感或未实现方法均返回稳定 CDP error。
-- 用例结论：TC-CDP-01、TC-CDP-02、TC-CDP-03、TC-CDP-04、TC-CDP-05、TC-CDP-06、TC-CDP-07、TC-CDP-08、TC-CDP-09、TC-CDP-10、TC-CDP-11、TC-CDP-12、TC-CDP-13、TC-CDP-14、TC-CDP-15、TC-CDP-16、TC-CDP-17、TC-CDP-18、TC-CDP-19、TC-CDP-20 均通过。
+- 执行命令 3：`bash -n e2e-tests/run_all_tests_parallel.sh && bash -n e2e-tests/test_rules.sh`
+- 实际结果 3：通过。两个 shell 脚本语法检查均通过。
+- 执行命令 4：`bash e2e-tests/run_all_tests_parallel.sh -c devtools --no-build`
+- 实际结果 4：通过。输出 `没有找到测试文件` 并以 0 退出，确认 devtools 目录下规则夹具已从通用 rules parallel fixture 收集队列排除，交由专用 DevTools E2E 验证。
+- 执行命令 5：`bash e2e-tests/run_all_tests_parallel.sh --no-build`
+- 实际结果 5：通过。最终结果为 65 个测试套件通过、0 个失败；未再执行 `devtools/page_bridge_basic.txt`、`devtools/page_bridge_control.txt`、`devtools/page_bridge_control_allowlist.txt`、`devtools/page_bridge_deny.txt`。
+- 用例结论：TC-CDP-01、TC-CDP-02、TC-CDP-03、TC-CDP-04、TC-CDP-05、TC-CDP-06、TC-CDP-07、TC-CDP-08、TC-CDP-09、TC-CDP-10、TC-CDP-11、TC-CDP-12、TC-CDP-13、TC-CDP-14、TC-CDP-15、TC-CDP-16、TC-CDP-17、TC-CDP-18、TC-CDP-19、TC-CDP-20、TC-CDP-21 均通过。
