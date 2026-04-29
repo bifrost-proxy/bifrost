@@ -9,7 +9,7 @@
 首版 WebUI 能力范围：
 
 - Elements：展示目标页 DOM tree / DOM snapshot，支持选择节点并在目标页高亮，手动刷新后可看到 DOM 结构变化。
-- Network：展示 bridge 捕获到的资源、fetch、XHR 等网络事件，包含 method、status、type、URL。
+- Network：复用 Traffic 页面虚拟列表风格展示 bridge 捕获到的资源、fetch、XHR 等网络事件，包含序号、状态点、protocol、method、status、host、path、type、size、time 等列。
 - Cookies / LocalStorage / SessionStorage：三个独立一级 tab 展示对应存储区域；默认支持新增、编辑、复制、删除，并验证运行中数据变更同步。
 - Console：展示完整页面 console 日志级别；默认支持多行输入和表达式执行；对象、数组、DOM 节点、Error 等参数以结构化值传输，默认展示 Chrome-like 摘要，点击后按层级展开并支持复制原始内容。
 
@@ -141,6 +141,7 @@ E2E 测试：
 - 验证 Elements 搜索自动展开并选中第一个匹配节点。
 - 验证运行中新发起 fetch 后 Network 面板可见新增记录。
 - 验证 Network 搜索过滤列表并高亮匹配内容。
+- 验证 Network 列表使用 Traffic 页面同款虚拟列表结构和视觉风格，至少包含 `traffic-table` 结构以及 Protocol / Method / Status / Host / Path 等列。
 - 验证运行中新增 cookie/localStorage/sessionStorage 后三个存储一级 tab 完整同步。
 - 验证 WebUI Cookies / LocalStorage / SessionStorage 能分别展示对应数据；行内新增/编辑后目标页真实读到新值，刷新后的对应面板也显示新值；复制写入真实 clipboard；删除后目标页和 WebUI 均不再显示该 key。
 - 验证 Cookies / LocalStorage / SessionStorage 搜索过滤当前区域数据并高亮匹配内容。

@@ -135,7 +135,8 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 
 预期结果：
 
-- 面板展示 method、status、type、URL。
+- 面板复用 Traffic 页面列表风格，展示序号、状态点、Protocol、Method、Status、Host、Path、Type、Size、Time 等列。
+- 面板 DOM 中存在 `traffic-table` 虚拟列表结构。
 - 内容包含 `/devtools/api/ping`。
 - 刷新后内容包含 `webui-network-complete`。
 - 搜索后 Network 列表只展示匹配记录，并高亮匹配内容。
@@ -349,3 +350,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-29：通过。按产品调整移除 Storage 的 `mode=control` 限制，验证 read-mode session 也可以通过 `storage.set` 写入目标页 localStorage。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22/23/24/25 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, read-mode storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, clean Elements tree rendering, removed Elements sidebar, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。按 WebSocket-only 与轻量服务端缓存要求复测，验证 bridge 无 HTTP 上报风暴、WebUI session WS 建链后按 `scope=full` 从目标页重新拉取 DOM / Network / Storage / Console，目标页刷新后旧 sender 不覆盖新 sender，静默但 WS 仍连接的 secondary 页面仍可从在线列表切换调试，Back 后晚到 snapshot 不会把详情页复活。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。按 Console 结构化对象展示要求复测，验证 page bridge 上报 console `args/raw`，WebUI 默认展示 Object 摘要，点击后展开 `nested` / `items`，复制按钮可复制原始序列化内容。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。按 Network 列表与 Traffic 页面体验一致要求复测，验证 DevTools Network 复用 `traffic-table` 虚拟列表结构，展示 Protocol / Method / Status / Host / Path 等列，搜索过滤和新增网络记录仍可用。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。

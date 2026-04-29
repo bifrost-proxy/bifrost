@@ -1160,6 +1160,10 @@ await panelSearch.fill('manual-refresh');
 await adminPage.locator('[data-testid="devtools-dom-node"][data-selected="true"]').filter({ hasText: 'debug-fixture-manual-refresh' }).waitFor({ timeout: 8000 });
 await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /Network/ }).click();
+await adminPage.getByTestId('devtools-network-traffic-table').getByTestId('traffic-table').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText('Protocol').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText('Host').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText('Path').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ timeout: 8000 });
 await page.evaluate(() => fetch('/devtools/api/extra?case=webui-network-complete').catch(() => {}));
 await adminPage.getByTestId('devtools-refresh').click();
@@ -1329,5 +1333,5 @@ await adminPage.getByTestId('devtools-traffic-link').click();
 await adminPage.waitForURL(/\/traffic/, { timeout: 8000 });
 
 await browser.close();
-console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
+console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
 NODE

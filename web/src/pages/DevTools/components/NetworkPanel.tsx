@@ -1,9 +1,20 @@
-import type { CSSProperties } from "react";
-import { Empty, Typography } from "antd";
+import { useMemo, useState } from "react";
+import { Empty } from "antd";
+import VirtualTrafficTable from "../../../components/TrafficTable/VirtualTrafficTable";
 import type { DebugNetworkEvent } from "../../../api/devtools";
-import { HighlightedText, filterBySearch } from "./shared";
+import type { TrafficSummary } from "../../../types";
+import { filterBySearch } from "./shared";
 
-const { Text } = Typography;
+const METHOD_COLORS: Record<string, string> = {
+  GET: "green",
+  POST: "blue",
+  PUT: "orange",
+  DELETE: "red",
+  PATCH: "purple",
+  OPTIONS: "default",
+  HEAD: "cyan",
+  CONNECT: "magenta",
+};
 
 export function NetworkList({
   events,
@@ -14,72 +25,121 @@ export function NetworkList({
   searchQuery: string;
   onOpenTraffic?: (event: DebugNetworkEvent) => void;
 }) {
-  if (!events.length) return <Empty description="No network events yet" />;
-  const filtered = filterBySearch(events, searchQuery, (event) =>
-    [event.method, event.status, event.resource_type, event.url].join(" "),
+  const [selectedId, setSelectedId] = useState<string | undefined>();
+  const filteredEvents = useMemo(
+    () =>
+      filterBySearch(events, searchQuery, (event) =>
+        [event.method, event.status, event.resource_type, event.url, event.traffic_id, event.client_req_id].join(" "),
+      ).slice().reverse(),
+    [events, searchQuery],
   );
+  const rows = useMemo(
+    () => filteredEvents.map((event, index) => networkEventToTrafficSummary(event, index, filteredEvents.length)),
+    [filteredEvents],
+  );
+  const eventByRowId = useMemo(() => {
+    const map = new Map<string, DebugNetworkEvent>();
+    rows.forEach((row, index) => {
+      const event = filteredEvents[index];
+      if (event) map.set(row.id, event);
+    });
+    return map;
+  }, [filteredEvents, rows]);
+
+  if (!events.length) return <Empty description="No network events yet" />;
+
   return (
-    <div style={tableStyle}>
-      <div style={tableHeaderStyle}>
-        <Text strong>Method</Text>
-        <Text strong>Status</Text>
-        <Text strong>Type</Text>
-        <Text strong>URL</Text>
-      </div>
-      {filtered.slice().reverse().map((event, index) => (
-        <button
-          key={`${event.url}-${event.at_ms}-${index}`}
-          type="button"
-          style={tableRowStyle}
-          onClick={() => onOpenTraffic?.(event)}
-          title={
-            event.traffic_id || event.client_req_id
-              ? "Open matching Traffic record"
-              : "This browser resource has no DevTools request id"
-          }
-        >
-          <Text code><HighlightedText text={event.method || "GET"} query={searchQuery} /></Text>
-          <Text><HighlightedText text={String(event.status ?? "-")} query={searchQuery} /></Text>
-          <Text><HighlightedText text={event.resource_type || "resource"} query={searchQuery} /></Text>
-          <Text ellipsis title={event.url}><HighlightedText text={event.url} query={searchQuery} /></Text>
-        </button>
-      ))}
+    <div data-testid="devtools-network-traffic-table" style={{ height: "100%", minHeight: 0 }}>
+      <VirtualTrafficTable
+        data={rows}
+        selectedId={selectedId}
+        autoScroll={false}
+        onSelect={(record) => {
+          setSelectedId(record.id);
+          const event = eventByRowId.get(record.id);
+          if (event) onOpenTraffic?.(event);
+        }}
+      />
     </div>
   );
 }
 
+function networkEventToTrafficSummary(event: DebugNetworkEvent, index: number, total: number): TrafficSummary {
+  const parsed = parseUrl(event.url);
+  const status = event.status ?? 0;
+  const method = (event.method || "GET").toUpperCase();
+  const id = event.traffic_id || event.client_req_id || `devtools-network-${event.at_ms}-${index}`;
+  const startDate = new Date(event.at_ms || Date.now());
 
+  return {
+    id,
+    sequence: total - index,
+    timestamp: event.at_ms || Date.now(),
+    method,
+    url: event.url,
+    status,
+    content_type: event.resource_type || null,
+    request_size: 0,
+    response_size: 0,
+    duration_ms: 0,
+    host: parsed.host,
+    path: parsed.path,
+    protocol: parsed.protocol,
+    client_ip: "page",
+    has_rule_hit: Boolean(event.traffic_id),
+    matched_rule_count: event.traffic_id ? 1 : 0,
+    matched_protocols: event.traffic_id ? ["traffic"] : [],
+    start_time: formatNetworkTime(startDate),
+    end_time: null,
+    _displayProtocol: parsed.protocol.toUpperCase(),
+    _methodColor: METHOD_COLORS[method] || "default",
+    _statusColor: getStatusColor(status),
+    _statusDotColor: getStatusDotColor(status),
+    _displaySize: "-",
+    _contentTypeShort: event.resource_type || "-",
+    _clientDisplay: "page",
+    _clientTooltip: event.client_req_id
+      ? `DevTools client request id: ${event.client_req_id}`
+      : "Captured from target page bridge",
+  };
+}
 
-const tableStyle: CSSProperties = {
-  display: "grid",
-  alignContent: "start",
-  gap: 0,
-  minHeight: "100%",
-  border: "1px solid #d9e2ef",
-  borderRadius: 6,
-  overflow: "hidden",
-};
+function parseUrl(url: string): { host: string; path: string; protocol: string } {
+  try {
+    const parsed = new URL(url);
+    return {
+      host: parsed.host || "-",
+      path: `${parsed.pathname || "/"}${parsed.search || ""}`,
+      protocol: parsed.protocol.replace(":", "") || "http",
+    };
+  } catch {
+    return {
+      host: "-",
+      path: url || "-",
+      protocol: "http",
+    };
+  }
+}
 
-const tableHeaderStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "96px 80px 130px minmax(260px, 1fr)",
-  gap: 8,
-  padding: "8px 10px",
-  background: "#eef4fb",
-};
+function formatNetworkTime(date: Date): string {
+  const pad = (value: number, size = 2) => String(value).padStart(size, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
 
-const tableRowStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "96px 80px 130px minmax(260px, 1fr)",
-  gap: 8,
-  padding: "8px 10px",
-  borderTop: "1px solid #e7edf5",
-  minWidth: 560,
-  width: "100%",
-  borderRight: 0,
-  borderBottom: 0,
-  borderLeft: 0,
-  background: "transparent",
-  textAlign: "left",
-  cursor: "pointer",
-};
+function getStatusColor(status: number): string {
+  if (status >= 500) return "error";
+  if (status >= 400) return "warning";
+  if (status >= 300) return "processing";
+  if (status >= 200) return "success";
+  return "default";
+}
+
+function getStatusDotColor(status: number): string {
+  if (status === 0) return "#d9d9d9";
+  if (status >= 100 && status < 200) return "#73d13d";
+  if (status >= 200 && status < 300) return "#52c41a";
+  if (status >= 300 && status < 400) return "#faad14";
+  if (status >= 400 && status < 500) return "#fa8c16";
+  if (status >= 500) return "#f5222d";
+  return "#d9d9d9";
+}
