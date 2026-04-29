@@ -277,7 +277,9 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "tlsPassthrough://",
         Protocol::TlsOptions => "tlsOptions://minVersion=TLSv1.2&maxVersion=TLSv1.3",
         Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
-        Protocol::DevTools => "devtools://mode=read,inject=bridge",
+        Protocol::DevTools => {
+            "devtools://mode=control,inject=bridge,evaluate_allowlist=[\"^document\\\\.title$\"]"
+        }
         Protocol::Passthrough => "passthrough://",
         Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use parking_lot::RwLock;
+use ring::digest;
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Command};
 use thiserror::Error;
@@ -45,6 +46,8 @@ pub struct MatchedDevtoolsRule {
     pub pattern: String,
     pub raw: Option<String>,
     pub line: Option<usize>,
+    #[serde(default)]
+    pub evaluate_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -107,6 +110,8 @@ pub struct DebugPage {
     pub network_events: Vec<NetworkEvent>,
     #[serde(skip_serializing)]
     pub storage_snapshot: Option<StorageSnapshot>,
+    #[serde(default)]
+    pub evaluate_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +200,19 @@ pub struct RegisterPageInput {
     pub matched_rule: Option<MatchedDevtoolsRule>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluateAuditRecord {
+    pub ts_unix_ms: u64,
+    pub rule_id: Option<String>,
+    pub target_url: String,
+    pub target_page_id: String,
+    pub caller_client_id: Option<String>,
+    pub expression_sha256: String,
+    pub expression_preview: String,
+    pub world: String,
+    pub rejected_by_allowlist: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BridgeHelloPayload {
     pub token: String,
@@ -266,7 +284,6 @@ pub struct BridgeEvalResultPayload {
     pub exception: Option<String>,
 }
 
-#[derive(Default)]
 pub struct BrowserDebugBroker {
     pages: RwLock<HashMap<String, DebugPage>>,
     sessions: RwLock<HashMap<String, DebugSession>>,
@@ -274,19 +291,39 @@ pub struct BrowserDebugBroker {
     eval_pending: RwLock<HashMap<String, Vec<BridgeEvalCommand>>>,
     eval_results: RwLock<HashMap<u64, Result<serde_json::Value, String>>>,
     overlay_pending: RwLock<HashMap<String, Vec<BridgeOverlayCommand>>>,
+    evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
+    evaluate_audit_capacity: usize,
 }
 
 pub type SharedBrowserDebugBroker = Arc<BrowserDebugBroker>;
 
 impl BrowserDebugBroker {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pages: RwLock::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            eval_next_id: AtomicU64::new(0),
+            eval_pending: RwLock::new(HashMap::new()),
+            eval_results: RwLock::new(HashMap::new()),
+            overlay_pending: RwLock::new(HashMap::new()),
+            evaluate_audit: RwLock::new(VecDeque::new()),
+            evaluate_audit_capacity: std::env::var("BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1000),
+        }
     }
 
     pub fn register_page_candidate(&self, input: RegisterPageInput) -> (String, String) {
         let page_id = format!("pg_{}", uuid::Uuid::new_v4().simple());
         let bridge_token = format!("bdt_{}", uuid::Uuid::new_v4().simple());
         let capabilities = CapabilityMatrix::page_bridge(&input.mode);
+        let evaluate_allowlist = input
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.evaluate_allowlist.clone())
+            .unwrap_or_default();
         let page = DebugPage {
             page_id: page_id.clone(),
             title: None,
@@ -310,6 +347,7 @@ impl BrowserDebugBroker {
             console_messages: Vec::new(),
             network_events: Vec::new(),
             storage_snapshot: None,
+            evaluate_allowlist,
         };
         self.pages.write().insert(page_id.clone(), page);
         (page_id, bridge_token)
@@ -507,6 +545,80 @@ impl BrowserDebugBroker {
         self.eval_results.write().remove(&eval_id)
     }
 
+    pub fn record_evaluate_audit(
+        &self,
+        page: &DebugPage,
+        expression: &str,
+        world: &str,
+        caller_client_id: Option<String>,
+        rejected_by_allowlist: bool,
+    ) -> EvaluateAuditRecord {
+        let record = EvaluateAuditRecord {
+            ts_unix_ms: now_ms(),
+            rule_id: page.matched_rule.as_ref().map(rule_id),
+            target_url: page.url.clone(),
+            target_page_id: page.page_id.clone(),
+            caller_client_id,
+            expression_sha256: sha256_hex(expression),
+            expression_preview: preview(expression, 200),
+            world: world.to_string(),
+            rejected_by_allowlist,
+        };
+        tracing::info!(
+            target: "bifrost_admin::devtools::audit",
+            ts_unix_ms = record.ts_unix_ms,
+            rule_id = record.rule_id.as_deref().unwrap_or(""),
+            target_url = %record.target_url,
+            target_page_id = %record.target_page_id,
+            caller_client_id = record.caller_client_id.as_deref().unwrap_or(""),
+            expression_sha256 = %record.expression_sha256,
+            expression_preview = %record.expression_preview,
+            world = %record.world,
+            rejected_by_allowlist = record.rejected_by_allowlist,
+            "DevTools Runtime.evaluate audit"
+        );
+        let mut audit = self.evaluate_audit.write();
+        audit.push_back(record.clone());
+        while audit.len() > self.evaluate_audit_capacity {
+            audit.pop_front();
+        }
+        record
+    }
+
+    pub fn list_evaluate_audit(
+        &self,
+        limit: Option<usize>,
+        since: Option<u64>,
+    ) -> Vec<EvaluateAuditRecord> {
+        let limit = limit
+            .unwrap_or(self.evaluate_audit_capacity)
+            .min(self.evaluate_audit_capacity);
+        let since = since.unwrap_or(0);
+        let audit = self.evaluate_audit.read();
+        let mut records: Vec<EvaluateAuditRecord> = audit
+            .iter()
+            .rev()
+            .filter(|record| record.ts_unix_ms >= since)
+            .take(limit)
+            .cloned()
+            .collect();
+        records.reverse();
+        records
+    }
+
+    pub fn evaluate_audit_capacity(&self) -> usize {
+        self.evaluate_audit_capacity
+    }
+
+    pub fn expression_allowed_by_page(page: &DebugPage, expression: &str) -> bool {
+        page.evaluate_allowlist.is_empty()
+            || page.evaluate_allowlist.iter().any(|pattern| {
+                regex::Regex::new(pattern)
+                    .map(|regex| regex.is_match(expression))
+                    .unwrap_or(false)
+            })
+    }
+
     pub fn bridge_network(
         &self,
         page_id: &str,
@@ -608,6 +720,14 @@ impl BrowserDebugBroker {
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_string();
+                let page = self
+                    .get_page(&page_id)
+                    .ok_or_else(|| "page not found".to_string())?;
+                if !Self::expression_allowed_by_page(&page, &expression) {
+                    self.record_evaluate_audit(&page, &expression, "main", None, true);
+                    return Err("evaluate not in allowlist".to_string());
+                }
+                self.record_evaluate_audit(&page, &expression, "main", None, false);
                 let eval_id = self.queue_eval(&page_id, expression)?;
                 for _ in 0..40 {
                     if let Some(result) = self.take_eval_result(eval_id) {
@@ -637,6 +757,12 @@ impl BrowserDebugBroker {
     }
 }
 
+impl Default for BrowserDebugBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn push_network_event(events: &mut Vec<NetworkEvent>, event: NetworkEventInput) {
     if event.url.trim().is_empty() {
         return;
@@ -652,6 +778,26 @@ fn push_network_event(events: &mut Vec<NetworkEvent>, event: NetworkEventInput) 
         let extra = events.len() - 500;
         events.drain(0..extra);
     }
+}
+
+fn rule_id(rule: &MatchedDevtoolsRule) -> String {
+    match rule.line {
+        Some(line) => format!("{}:{line}", rule.pattern),
+        None => rule.pattern.clone(),
+    }
+}
+
+fn sha256_hex(value: &str) -> String {
+    let digest = digest::digest(&digest::SHA256, value.as_bytes());
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn preview(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 pub fn cdp_target_info(page: &DebugPage, host: &str) -> CdpTargetInfo {
@@ -1101,6 +1247,7 @@ mod tests {
                 pattern: "example.test".to_string(),
                 raw: Some("example.test devtools://mode=read".to_string()),
                 line: Some(1),
+                evaluate_allowlist: Vec::new(),
             }),
         }
     }

@@ -500,6 +500,20 @@ fn parse_devtools_rule_value(value: &str) -> DevtoolsRule {
     rule
 }
 
+fn parse_devtools_evaluate_allowlist(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split('|')
+        .map(|item| item.trim().trim_matches('"').trim_matches('\''))
+        .filter(|item| !item.is_empty())
+        .map(|item| item.replace("\\\\", "\\"))
+        .collect()
+}
+
 fn admin_devtools_mode(rule: &crate::server::DevtoolsRule) -> AdminDevtoolsMode {
     match rule.mode {
         crate::server::DevtoolsMode::Read => AdminDevtoolsMode::Read,
@@ -517,7 +531,19 @@ fn devtools_matched_rule(rules: &ResolvedRules) -> Option<MatchedDevtoolsRule> {
             pattern: rule.pattern.clone(),
             raw: rule.raw.clone(),
             line: rule.line,
+            evaluate_allowlist: parse_devtools_evaluate_allowlist_from_value(&rule.value),
         })
+}
+
+fn parse_devtools_evaluate_allowlist_from_value(value: &str) -> Vec<String> {
+    value
+        .split([',', '&'])
+        .find_map(|part| {
+            let (key, raw_value) = part.trim().split_once('=')?;
+            (key.trim() == "evaluate_allowlist")
+                .then(|| parse_devtools_evaluate_allowlist(raw_value))
+        })
+        .unwrap_or_default()
 }
 
 fn origin_from_url(url: &str) -> String {
@@ -565,11 +591,12 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     format!(
         r##"<script id="__bifrost_devtools_bridge__">
 (function() {{
-  if (window.__BIFROST_DEVTOOLS_BRIDGE__) return;
+  if (Object.prototype.hasOwnProperty.call(window, "__BIFROST_DEVTOOLS_BRIDGE__")) return;
   const endpoint = {endpoint_json};
   const token = {token_json};
   const pageId = {page_id_json};
   const rawFetch = window.fetch ? window.fetch.bind(window) : null;
+  let bridgeState = "connecting";
   const tabWindowNamePrefix = "__bifrost_devtools_tab_id__:";
   const tabStorageKey = "__bifrost_devtools_tab_id__";
   let tabId = "";
@@ -596,13 +623,45 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       }}).catch(function() {{}});
     }} catch (_) {{}}
   }};
-  const bridge = {{
+  const closeBridge = function() {{
+    try {{
+      const body = JSON.stringify({{token: token}});
+      if (navigator.sendBeacon) {{
+        const blob = new Blob([body], {{type: "application/json"}});
+        navigator.sendBeacon(endpoint + "/close", blob);
+        return;
+      }}
+    }} catch (_) {{}}
+    post("/close", {{}});
+  }};
+  const shim = Object.freeze({{
     page_id: pageId,
     tab_id: tabId,
-    state: "connecting",
-    post: post
-  }};
-  window.__BIFROST_DEVTOOLS_BRIDGE__ = bridge;
+    get state() {{ return bridgeState; }},
+    send: function(msgId, payload) {{
+      if (msgId !== "ping") {{
+        console.warn("[Bifrost DevTools] dropped page bridge shim send", msgId);
+        return false;
+      }}
+      return true;
+    }}
+  }});
+  Object.defineProperty(window, "__BIFROST_DEVTOOLS_BRIDGE__", {{
+    value: shim,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  }});
+  window.addEventListener("message", function(event) {{
+    if (event.source !== window || event.origin !== window.location.origin) {{
+      console.warn("[Bifrost DevTools] dropped postMessage from invalid source or origin", event.origin);
+      return;
+    }}
+    const data = event.data || {{}};
+    if (!data || data.__bifrost_devtools_bridge__ !== true) return;
+    console.warn("[Bifrost DevTools] dropped unsupported postMessage", data.type || "");
+  }}, false);
+  window.addEventListener("pagehide", closeBridge, false);
   let nextNodeId = 1;
   let nodeMap = Object.create(null);
   let domRefreshTimer = 0;
@@ -754,7 +813,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       nextNodeId = 1;
       nodeMap = Object.create(null);
     }}
-    bridge.state = "connected";
+    bridgeState = "connected";
     const payload = {{
       tab_id: tabId,
       title: document.title || null,
