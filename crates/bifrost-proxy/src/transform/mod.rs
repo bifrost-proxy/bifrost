@@ -6,7 +6,10 @@ mod request;
 mod response;
 
 pub use badge::{maybe_inject_bifrost_badge_html, BIFROST_BADGE_ELEMENT_ID};
-pub use body::{apply_body_rules, apply_content_injection, Phase};
+pub use body::{
+    apply_body_rules, apply_content_injection, apply_content_injection_preserving_encoding,
+    ContentInjectionEncoding, ContentInjectionResult, Phase,
+};
 pub use compress::compress_body;
 pub use decompress::{
     decompress_body, decompress_body_with_limit, get_content_encoding,

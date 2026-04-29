@@ -106,6 +106,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_htmlappend_script,
         ),
         TestCase::standalone(
+            "body_htmlAppend_gzip_response",
+            "htmlAppend 规则处理 gzip HTML 响应后仍保持有效 gzip",
+            "body",
+            test_htmlappend_gzip_response,
+        ),
+        TestCase::standalone(
+            "body_htmlAppend_gzip_response_delete_encoding",
+            "htmlAppend 规则处理 gzip HTML 响应且删除 Content-Encoding 后返回明文",
+            "body",
+            test_htmlappend_gzip_response_delete_encoding,
+        ),
+        TestCase::standalone(
             "body_jsAppend_code",
             "jsAppend 规则在 JS 末尾追加代码",
             "body",
@@ -596,6 +608,134 @@ async fn test_htmlappend_script() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+async fn test_htmlappend_gzip_response() -> Result<(), String> {
+    let upstream_port = start_gzip_html_server(
+        "<!doctype html><html><head><title>gzip</title></head><body>page</body></html>",
+    )
+    .await?;
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "gzip-html.local host://127.0.0.1:{} htmlAppend://(<script>gzipHtmlAppend()</script>)",
+            upstream_port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://gzip-html.local/page.html",
+    )
+    .compressed()
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header("content-encoding", "gzip")?;
+    let script = "<script>gzipHtmlAppend()</script>";
+    let script_index = result
+        .body
+        .rfind(script)
+        .ok_or_else(|| format!("missing injected script in gzip response: {}", result.body))?;
+    let html_close_index = result
+        .body
+        .to_lowercase()
+        .rfind("</html>")
+        .ok_or_else(|| format!("missing </html> in gzip response: {}", result.body))?;
+
+    if script_index >= html_close_index {
+        return Err(format!(
+            "gzip htmlAppend should inject before </html>: {}",
+            result.body
+        ));
+    }
+
+    Ok(())
+}
+
+async fn test_htmlappend_gzip_response_delete_encoding() -> Result<(), String> {
+    let upstream_port = start_gzip_html_server(
+        "<!doctype html><html><head><title>gzip</title></head><body>page</body></html>",
+    )
+    .await?;
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "gzip-html.local host://127.0.0.1:{} htmlAppend://(<script>gzipHtmlAppend()</script>) delete://resHeaders.Content-Encoding",
+            upstream_port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://gzip-html.local/page.html",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header_missing("content-encoding")?;
+    result.assert_body_contains("<body>page")?;
+    result.assert_body_contains("<script>gzipHtmlAppend()</script>")?;
+
+    Ok(())
+}
+
+async fn start_gzip_html_server(html: &'static str) -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("failed to bind gzip html server: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read gzip html server addr: {}", e))?
+        .port();
+    let encoded = bifrost_proxy::transform::compress_body(html.as_bytes(), "gzip")
+        .map_err(|e| format!("failed to gzip html fixture: {}", e))?;
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let io = TokioIo::new(stream);
+            let encoded = encoded.clone();
+
+            tokio::spawn(async move {
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| {
+                    let encoded = encoded.clone();
+                    async move {
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "text/html; charset=utf-8")
+                                .header("content-encoding", "gzip")
+                                .body(Full::new(Bytes::from(encoded)))
+                                .unwrap(),
+                        )
+                    }
+                });
+
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    Ok(port)
 }
 
 async fn test_jsappend_code() -> Result<(), String> {

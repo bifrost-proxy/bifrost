@@ -2,6 +2,8 @@ use bytes::Bytes;
 use serde_json::Value;
 use tracing::debug;
 
+use super::compress::compress_body;
+use super::decompress::try_decompress_body_with_limit;
 use crate::server::{RegexReplace, ResolvedRules};
 use crate::utils::logging::RequestContext;
 
@@ -264,6 +266,119 @@ pub fn apply_content_injection(
     }
 
     body
+}
+
+pub struct ContentInjectionResult {
+    pub body: Bytes,
+    pub content_encoding: Option<String>,
+}
+
+pub struct ContentInjectionEncoding<'a> {
+    pub source: Option<&'a str>,
+    pub output: Option<&'a str>,
+    pub max_decompress_output_bytes: usize,
+}
+
+pub fn apply_content_injection_preserving_encoding(
+    body: Bytes,
+    content_type: &str,
+    encoding: ContentInjectionEncoding<'_>,
+    rules: &ResolvedRules,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+) -> ContentInjectionResult {
+    let source_content_encoding = encoding
+        .source
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    let output_content_encoding = encoding
+        .output
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+
+    let Some(source_content_encoding) = source_content_encoding else {
+        let injected_body =
+            apply_content_injection(body, content_type, rules, verbose_logging, ctx);
+        return match output_content_encoding {
+            Some(output_content_encoding) => {
+                match compress_body(injected_body.as_ref(), output_content_encoding) {
+                    Ok(compressed) => ContentInjectionResult {
+                        body: Bytes::from(compressed),
+                        content_encoding: Some(output_content_encoding.to_string()),
+                    },
+                    Err(e) => {
+                        debug!(
+                        "[{}] [CONTENT_INJECTION] Failed to compress {} response body ({}), fallback to identity",
+                        ctx.id_str(),
+                        output_content_encoding,
+                        e
+                    );
+                        ContentInjectionResult {
+                            body: injected_body,
+                            content_encoding: None,
+                        }
+                    }
+                }
+            }
+            None => ContentInjectionResult {
+                body: injected_body,
+                content_encoding: None,
+            },
+        };
+    };
+
+    match try_decompress_body_with_limit(
+        body.as_ref(),
+        source_content_encoding,
+        encoding.max_decompress_output_bytes,
+    ) {
+        Ok(decompressed) => {
+            let injected_body = apply_content_injection(
+                Bytes::from(decompressed),
+                content_type,
+                rules,
+                verbose_logging,
+                ctx,
+            );
+
+            match output_content_encoding {
+                Some(output_content_encoding) => {
+                    match compress_body(injected_body.as_ref(), output_content_encoding) {
+                        Ok(compressed) => ContentInjectionResult {
+                            body: Bytes::from(compressed),
+                            content_encoding: Some(output_content_encoding.to_string()),
+                        },
+                        Err(e) => {
+                            debug!(
+                                "[{}] [CONTENT_INJECTION] Failed to recompress {} response body ({}), fallback to identity",
+                                ctx.id_str(),
+                                output_content_encoding,
+                                e
+                            );
+                            ContentInjectionResult {
+                                body: injected_body,
+                                content_encoding: None,
+                            }
+                        }
+                    }
+                }
+                None => ContentInjectionResult {
+                    body: injected_body,
+                    content_encoding: None,
+                },
+            }
+        }
+        Err(e) => {
+            debug!(
+                "[{}] [CONTENT_INJECTION] Skip encoded content injection: failed to decompress {} response body ({}).",
+                ctx.id_str(),
+                source_content_encoding,
+                e
+            );
+            ContentInjectionResult {
+                body,
+                content_encoding: Some(source_content_encoding.to_string()),
+            }
+        }
+    }
 }
 
 const HTML_DOCTYPE: &str = "<!DOCTYPE html>";
@@ -596,6 +711,94 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&result),
             "<html><body>Hello</body><script>alert(1)</script></html>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_gzip_preserves_encoding() {
+        let body = Bytes::from("<html><body>Hello</body></html>");
+        let encoded = compress_body(body.as_ref(), "gzip").unwrap();
+        let rules = ResolvedRules {
+            html_append: Some("<script>new VConsole();</script>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection_preserving_encoding(
+            Bytes::from(encoded),
+            "text/html; charset=utf-8",
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("gzip"),
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+        let decoded = try_decompress_body_with_limit(result.body.as_ref(), "gzip", 1024).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&decoded),
+            "<html><body>Hello</body><script>new VConsole();</script></html>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_gzip_respects_removed_encoding_header() {
+        let body = Bytes::from("<html><body>Hello</body></html>");
+        let encoded = compress_body(body.as_ref(), "gzip").unwrap();
+        let rules = ResolvedRules {
+            html_append: Some("<script>new VConsole();</script>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection_preserving_encoding(
+            Bytes::from(encoded),
+            "text/html; charset=utf-8",
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding, None);
+        assert_eq!(
+            String::from_utf8_lossy(&result.body),
+            "<html><body>Hello</body><script>new VConsole();</script></html>"
+        );
+    }
+
+    #[test]
+    fn test_html_injection_identity_source_respects_encoded_output_header() {
+        let body = Bytes::from("<html><body>Hello</body></html>");
+        let rules = ResolvedRules {
+            html_append: Some("<script>new VConsole();</script>".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_content_injection_preserving_encoding(
+            body,
+            "text/html; charset=utf-8",
+            ContentInjectionEncoding {
+                source: Some("identity"),
+                output: Some("gzip"),
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+        let decoded = try_decompress_body_with_limit(result.body.as_ref(), "gzip", 1024).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&decoded),
+            "<html><body>Hello</body><script>new VConsole();</script></html>"
         );
     }
 
