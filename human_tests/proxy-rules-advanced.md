@@ -1166,6 +1166,103 @@
 
 ---
 
+### TC-PRA-29E：回归 - 通配域名根路径 htmlAppend 匹配根路径和子路径
+
+**背景**：
+- 真实规则 `*.qq.com/ htmlAppend://{vconsole_inject}` 预期匹配单级 qq 子域名的根路径和所有子路径。
+- 修复前 `WildcardMatcher` 会把尾部 `/` 和自动追加的 `(/.*)?` 叠加，导致 `https://news.qq.com/rain/a/20260428A07D9U00` 这类子路径没有命中；`https://www.qq.com` 这类无显式尾斜杠 URL 也可能漏匹配。
+
+**操作步骤**：
+1. 启动临时 HTML 上游服务：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+   HTML = b'<!doctype html><html><head><title>qq</title></head><body>QQ_ORIGINAL</body></html>'
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           self.send_response(200)
+           self.send_header("Content-Type", "text/html; charset=utf-8")
+           self.send_header("Content-Length", str(len(HTML)))
+           self.end_headers()
+           self.wfile.write(HTML)
+
+   ThreadingHTTPServer(("127.0.0.1", 18087), Handler).serve_forever()
+   PY
+   ```
+2. 启动临时 Bifrost（独立数据目录、非 9900 端口、禁用系统代理）：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-human-wildcard-htmlappend.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18887 --unsafe-ssl --no-system-proxy --skip-cert-check -y
+   ```
+3. 创建通配域名根路径 HTML 注入规则：
+   ```bash
+   python3 - <<'PY'
+   import json
+   import textwrap
+   import urllib.request
+
+   content = textwrap.dedent("""\
+   ```vconsole_inject
+   <script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>
+   <script>new VConsole();</script>
+   ```
+
+   *.qq.com/ host://127.0.0.1:18087
+   *.qq.com/ htmlAppend://{vconsole_inject}
+   """)
+   payload = json.dumps({
+       "name": "test-wildcard-root-htmlappend",
+       "content": content,
+       "enabled": True,
+   }).encode()
+   req = urllib.request.Request(
+       "http://127.0.0.1:18887/_bifrost/api/rules",
+       data=payload,
+       headers={"Content-Type": "application/json"},
+       method="POST",
+   )
+   print(urllib.request.urlopen(req).read().decode())
+   PY
+   ```
+4. 请求根路径和子路径并断言都已注入：
+   ```bash
+   python3 - <<'PY'
+   import subprocess
+
+   proxy = "http://127.0.0.1:18887"
+   urls = [
+       "http://www.qq.com",
+       "http://www.qq.com/",
+       "http://news.qq.com/rain/a/20260428A07D9U00",
+   ]
+   inject_start = '<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script>'
+   inject_end = '<script>new VConsole();</script>'
+
+   for url in urls:
+       html = subprocess.check_output(["curl", "-sS", "-x", proxy, url]).decode()
+       assert "QQ_ORIGINAL" in html, (url, html)
+       assert inject_start in html, (url, html)
+       assert inject_end in html, (url, html)
+       assert html.rindex(inject_start) < html.rindex(inject_end) < html.lower().rindex("</html>"), (url, html)
+
+   print("TC-PRA-29E passed")
+   PY
+   ```
+5. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:18887/_bifrost/api/rules/test-wildcard-root-htmlappend
+   # 停止临时 Bifrost 与 HTML 上游服务
+   ```
+
+**预期结果**：
+- `http://www.qq.com`、`http://www.qq.com/`、`http://news.qq.com/rain/a/20260428A07D9U00` 均返回 HTML。
+- 三个响应都包含 vConsole 双 script 片段。
+- 注入片段位于最后一个 `</html>` 之前，原始 `QQ_ORIGINAL` 内容仍存在。
+
+---
+
 ### 四、控制协议
 
 ### TC-PRA-30：delete 协议（丢弃请求）

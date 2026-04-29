@@ -25,8 +25,12 @@ impl WildcardMatcher {
         let (negated, clean_pattern) = Self::parse_negation(pattern);
         let (has_protocol, pattern_without_protocol) = Self::strip_protocol(clean_pattern);
         let wildcard_type = Self::detect_type(pattern_without_protocol);
-        let (regex_pattern, capture_groups) =
-            Self::to_regex(clean_pattern, &wildcard_type, has_protocol);
+        let (regex_pattern, capture_groups) = Self::to_regex(
+            clean_pattern,
+            pattern_without_protocol,
+            &wildcard_type,
+            has_protocol,
+        );
         let compiled = Regex::new(&regex_pattern)?;
 
         Ok(Self {
@@ -89,29 +93,45 @@ impl WildcardMatcher {
 
     fn to_regex(
         pattern: &str,
+        pattern_without_protocol: &str,
         wildcard_type: &WildcardType,
         has_protocol: bool,
     ) -> (String, usize) {
         let (escaped, capture_groups) = Self::pattern_to_regex(pattern, wildcard_type);
+        let has_explicit_path = pattern_without_protocol.contains('/');
+        let is_root_path = pattern_without_protocol
+            .split_once('/')
+            .is_some_and(|(_, path)| path.is_empty());
+
+        let host_wildcard_regex = |escaped: &str| {
+            if is_root_path {
+                let host = escaped.trim_end_matches('/');
+                if has_protocol {
+                    format!("^{}(?:/.*)?$", host)
+                } else {
+                    format!("^https?://{}(?:/.*)?$", host)
+                }
+            } else if has_explicit_path && escaped.ends_with('/') {
+                if has_protocol {
+                    format!("^{}.*$", escaped)
+                } else {
+                    format!("^https?://{}.*$", escaped)
+                }
+            } else if has_protocol {
+                format!("^{}(/.*)?$", escaped)
+            } else {
+                format!("^https?://{}(/.*)?$", escaped)
+            }
+        };
 
         let regex = match wildcard_type {
             WildcardType::DomainWildcard => {
                 let domain_pattern = escaped.replace("__DOLLAR__", "");
                 format!("^https?://{}(/.*)?$", domain_pattern)
             }
-            WildcardType::Prefix => {
-                if has_protocol {
-                    format!("^{}(/.*)?$", escaped)
-                } else {
-                    format!("^https?://{}(/.*)?$", escaped)
-                }
-            }
+            WildcardType::Prefix => host_wildcard_regex(&escaped),
             WildcardType::Suffix | WildcardType::Contains | WildcardType::Mixed => {
-                if has_protocol {
-                    format!("^{}(/.*)?$", escaped)
-                } else {
-                    format!("^https?://{}(/.*)?$", escaped)
-                }
+                host_wildcard_regex(&escaped)
             }
             WildcardType::PathWildcard => {
                 if has_protocol {
@@ -262,6 +282,31 @@ mod tests {
         assert!(result.matched);
 
         let result = matcher.matches("http://test.example.com", "test.example.com", "/");
+        assert!(!result.matched);
+    }
+
+    #[test]
+    fn test_prefix_wildcard_with_root_path_matches_subpaths() {
+        let matcher = WildcardMatcher::new("*.qq.com/").unwrap();
+        assert_eq!(matcher.wildcard_type(), &WildcardType::Prefix);
+
+        let result = matcher.matches("https://www.qq.com", "www.qq.com", "/");
+        assert!(result.matched);
+
+        let result = matcher.matches("https://www.qq.com/", "www.qq.com", "/");
+        assert!(result.matched);
+
+        let result = matcher.matches(
+            "https://news.qq.com/rain/a/20260428A07D9U00",
+            "news.qq.com",
+            "/rain/a/20260428A07D9U00",
+        );
+        assert!(result.matched);
+
+        let result = matcher.matches("https://a.b.qq.com/rain", "a.b.qq.com", "/rain");
+        assert!(!result.matched);
+
+        let result = matcher.matches("https://news.example.com/rain", "news.example.com", "/rain");
         assert!(!result.matched);
     }
 
