@@ -46,7 +46,7 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
-| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 12 | 显式 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、WebUI DevTools tab 自有 Elements/Network/Storage/Console 面板、control mode Console evaluate 真实执行、多页面切换、移动 Safari UA 降级路径、只读策略拒绝控制命令，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
+| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 12 | 显式 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、WebUI DevTools tab 自有 Elements/Network/Storage/Console 面板、vConsole/Chrome DevTools 风格 Elements 树与 Storage 行编辑、control mode Console evaluate 真实执行、多页面切换、移动 Safari UA 降级路径、只读策略拒绝控制命令，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
 
 ### 远程调用测试
 

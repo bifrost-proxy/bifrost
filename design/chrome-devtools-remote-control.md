@@ -84,9 +84,10 @@ WebUI `DevTools` 一级 tab 分为两层：
 - 页面详情不显示 `devtools://` 调试地址。
 - 页面详情不显示“Open in Chrome DevTools”按钮。
 - 多页面切换必须重新打开对应 page session，并刷新 snapshot，不能复用上一个页面的 DOM / storage / console。
-- Elements 节点点击必须调用 `dom.highlight` semantic command，在目标页显示 Bifrost overlay；该操作不要求 control mode。
+- Elements 面板交互参考 vConsole 的 Element 插件和 Chrome DevTools 的 Elements 面板：左侧是可展开/折叠的 DOM tree，标签名、属性名、属性值分色；右侧是当前选中节点的属性/文本详情。DOM tree 保留 Chrome DevTools 式闭合标签、空标签单行、选中行高亮。
+- Elements 节点点击必须调用 `dom.highlight` semantic command，在目标页显示 Bifrost overlay；该操作不要求 control mode，同时 WebUI 侧需要更新右侧 selected node inspector。
 - 手动刷新按钮必须重新读取 session snapshot，用于用户主动确认 DOM / Network / Storage / Console 最新状态。
-- Storage 编辑必须走 `storage.set` semantic command，经由 page bridge 在目标页执行实际写入。`mode=read` 下编辑控件禁用。
+- Storage 参考 vConsole Storage 插件，列表行提供编辑入口，将当前 key/value 带入编辑器；保存必须走 `storage.set` semantic command，经由 page bridge 在目标页执行实际写入。`mode=read` 下编辑控件禁用。
 - Console 执行按钮在 `mode=read` 下禁用，并提示需要 control mode。
 - Console 执行必须通过 Admin broker 审计，表达式不在 allowlist 中时返回明确错误。
 

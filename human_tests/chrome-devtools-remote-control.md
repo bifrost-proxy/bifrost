@@ -95,9 +95,11 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 
 预期结果：
 
-- 面板展示 DOM tree 或 DOM snapshot。
+- 面板展示 Chrome DevTools 风格的左右分栏：左侧为可展开/折叠 DOM tree，右侧为选中节点详情。
+- DOM tree 中标签名、属性名、属性值有区分渲染，闭合标签和空标签展示符合 HTML tree 习惯。
 - 内容包含 `debug-fixture`。
 - 点击 DOM 节点后，目标页出现 `#__bifrost_devtools_highlight__` overlay。
+- 点击 DOM 节点后，右侧 selected node inspector 展示 `debug-fixture` 和 `data-case`。
 - 手动刷新后，Elements 面板包含 `debug-fixture-manual-refresh`。
 - 不出现官方 Chrome DevTools iframe。
 
@@ -122,11 +124,12 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 1. 在 WebUI DevTools 详情页打开 `Storage` tab。
 2. 目标页运行时设置 `bifrost-cookie-live`、`bifrost-storage-live`、`bifrost-session-live`。
 3. 点击 WebUI 详情页 refresh 按钮。
-4. 在 WebUI Storage 编辑器选择 Cookie，写入 `bifrost-cookie-edit=cookie-edited`。
-5. 在 WebUI Storage 编辑器选择 Local Storage，写入 `bifrost-storage-edit=storage-edited`。
-6. 在 WebUI Storage 编辑器选择 Session Storage，写入 `bifrost-session-edit=session-edited`。
-7. 在目标页读取 cookie/localStorage/sessionStorage。
-8. 点击 WebUI 详情页 refresh 按钮。
+4. 点击 `bifrost-storage-live` 行的编辑按钮，确认编辑器自动填入 Local Storage、key、value。
+5. 在 WebUI Storage 编辑器选择 Cookie，写入 `bifrost-cookie-edit=cookie-edited`。
+6. 在 WebUI Storage 编辑器选择 Local Storage，写入 `bifrost-storage-edit=storage-edited`。
+7. 在 WebUI Storage 编辑器选择 Session Storage，写入 `bifrost-session-edit=session-edited`。
+8. 在目标页读取 cookie/localStorage/sessionStorage。
+9. 点击 WebUI 详情页 refresh 按钮。
 
 预期结果：
 
@@ -136,6 +139,7 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 刷新后 Cookies 区域包含 `bifrost-cookie-live`。
 - 刷新后 Local Storage 区域包含 `bifrost-storage-live`。
 - 刷新后 Session Storage 区域包含 `bifrost-session-live`。
+- 行内编辑入口会把 `bifrost-storage-live=storage-live` 自动带入编辑器。
 - 目标页真实读到 `bifrost-cookie-edit=cookie-edited`。
 - 目标页真实读到 `localStorage.getItem('bifrost-storage-edit') === 'storage-edited'`。
 - 目标页真实读到 `sessionStorage.getItem('bifrost-session-edit') === 'session-edited'`。
@@ -233,3 +237,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-29：上一轮基础版本通过。执行命令：`source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh`。脚本真实启动临时 Bifrost 代理和 fixture 站点，使用 Playwright 浏览器访问目标页，进入 WebUI DevTools，验证 Elements / Network / Storage / Console 自有面板、多页面切换、control mode `document.title` 执行，以及 Chrome DevTools frontend 安装/托管/打开入口清理。
 - 2026-04-29：通过。按“完备端到端测试”要求补充并执行 Elements 节点高亮操作、DOM 手动刷新、Network 新增记录、Storage 运行中 cookie/localStorage/sessionStorage 同步、Storage 受控修改、Console info/error 日志同步与输入脚本执行。执行命令：`source ~/.zshrc && cargo fmt --all -- --check && e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。重建 release 二进制后复测同一真实场景，确认发布产物不再暴露 `systemChromeFrontendUrl`，并且 Storage 修改能力在 release 产物中可用。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。
+- 2026-04-29：通过。参考 vConsole Element/Storage 插件后，验证 Elements 左右分栏、DOM tree 标签/属性展示、selected node inspector、Storage 行编辑入口。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。

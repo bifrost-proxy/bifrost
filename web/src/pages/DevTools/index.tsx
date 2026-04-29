@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import {
   ArrowLeftOutlined,
   BranchesOutlined,
+  CaretDownOutlined,
+  CaretRightOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  EditOutlined,
   GlobalOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
@@ -36,6 +39,7 @@ export default function DevTools() {
   const [consoleResult, setConsoleResult] = useState<string>("");
   const [consoleRunning, setConsoleRunning] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  const [expandedDomKeys, setExpandedDomKeys] = useState<Set<string>>(new Set());
   const [storageArea, setStorageArea] = useState("local_storage");
   const [storageKey, setStorageKey] = useState("");
   const [storageValue, setStorageValue] = useState("");
@@ -85,12 +89,27 @@ export default function DevTools() {
   }, [pages, query]);
 
   const selectedPage = pages.find((page) => page.page_id === selectedPageId) ?? snapshot?.page ?? null;
+  const selectedNode = useMemo(() => {
+    const tree = snapshot?.dom_tree ?? null;
+    if (!tree || selectedNodeId == null) return null;
+    return findDomNode(tree, selectedNodeId);
+  }, [selectedNodeId, snapshot?.dom_tree]);
+
+  useEffect(() => {
+    const tree = snapshot?.dom_tree ?? null;
+    if (!tree) return;
+    setExpandedDomKeys((previous) => {
+      if (previous.size) return previous;
+      return collectDefaultExpandedDomKeys(tree);
+    });
+  }, [snapshot?.dom_tree]);
 
   const openPage = async (page: DebugPage) => {
     setSelectedPageId(page.page_id);
     setSnapshot(null);
     setConsoleResult("");
     setSelectedNodeId(null);
+    setExpandedDomKeys(new Set());
     setLoading(true);
     try {
       const nextSession = await openDevtoolsSession(page.page_id);
@@ -229,6 +248,7 @@ export default function DevTools() {
               setSession(null);
               setSnapshot(null);
               setSelectedNodeId(null);
+              setExpandedDomKeys(new Set());
             }}
           >
             Back
@@ -281,7 +301,20 @@ export default function DevTools() {
                     node={snapshot?.dom_tree ?? null}
                     html={snapshot?.dom_snapshot ?? ""}
                     selectedNodeId={selectedNodeId}
+                    selectedNode={selectedNode}
+                    expandedKeys={expandedDomKeys}
                     onHighlight={highlightDomNode}
+                    onToggle={(key) => {
+                      setExpandedDomKeys((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(key)) {
+                          next.delete(key);
+                        } else {
+                          next.add(key);
+                        }
+                        return next;
+                      });
+                    }}
                   />
                 </section>
               ),
@@ -310,6 +343,11 @@ export default function DevTools() {
                     onAreaChange={setStorageArea}
                     onKeyChange={setStorageKey}
                     onValueChange={setStorageValue}
+                    onStartEdit={(nextArea, key, value) => {
+                      setStorageArea(nextArea);
+                      setStorageKey(key);
+                      setStorageValue(value);
+                    }}
                     onSave={() => void updateStorageValue()}
                   />
                 </section>
@@ -361,15 +399,28 @@ function DomTree({
   node,
   html,
   selectedNodeId,
+  selectedNode,
+  expandedKeys,
   onHighlight,
+  onToggle,
 }: {
   node: DebugDomNode | null;
   html: string;
   selectedNodeId: number | null;
+  selectedNode: DebugDomNode | null;
+  expandedKeys: Set<string>;
   onHighlight: (nodeId: number) => void;
+  onToggle: (key: string) => void;
 }) {
   if (node) {
-    return <div style={treeStyle}>{renderDomNode(node, 0, selectedNodeId, onHighlight)}</div>;
+    return (
+      <div style={elementsSplitStyle}>
+        <div data-testid="devtools-elements-tree" style={treePaneStyle}>
+          {renderDomNode(node, "0", selectedNodeId, expandedKeys, onHighlight, onToggle)}
+        </div>
+        <ElementInspector node={selectedNode} />
+      </div>
+    );
   }
   if (html) {
     return <pre style={codeBlockStyle}>{html}</pre>;
@@ -379,67 +430,221 @@ function DomTree({
 
 function renderDomNode(
   node: DebugDomNode,
-  depth: number,
+  path: string,
   selectedNodeId: number | null,
+  expandedKeys: Set<string>,
   onHighlight: (nodeId: number) => void,
+  onToggle: (key: string) => void,
 ): React.ReactNode {
   const children = Array.isArray(node.children) ? node.children : [];
-  const label = domNodeLabel(node);
+  const key = domNodeKey(node, path);
   const nodeId = node.nodeId;
   const selected = nodeId != null && nodeId === selectedNodeId;
+  const hasChildren = children.length > 0 && !isVoidDomNode(node);
+  const expanded = !hasChildren || expandedKeys.has(key);
+  const isElement = node.nodeType === 1;
+  const isText = node.nodeType === 3;
   return (
-    <div key={`${label}-${depth}-${children.length}`} style={{ marginLeft: depth === 0 ? 0 : 14 }}>
-      <div style={domLineStyle}>
+    <div key={key} style={domBranchStyle}>
+      <div
+        style={{
+          ...domLineStyle,
+          background: selected ? "#dbeafe" : "transparent",
+        }}
+      >
+        <button
+          type="button"
+          data-testid="devtools-dom-disclosure"
+          aria-label={expanded ? "Collapse node" : "Expand node"}
+          disabled={!hasChildren}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (hasChildren) onToggle(key);
+          }}
+          style={{
+            ...domDisclosureStyle,
+            visibility: hasChildren ? "visible" : "hidden",
+          }}
+        >
+          {expanded ? <CaretDownOutlined /> : <CaretRightOutlined />}
+        </button>
         {nodeId != null ? (
           <button
             type="button"
             data-testid="devtools-dom-node"
-            onClick={() => onHighlight(nodeId)}
+            onClick={() => {
+              if (hasChildren) onToggle(key);
+              onHighlight(nodeId);
+            }}
             style={{
               ...domNodeButtonStyle,
-              background: selected ? "#e6f4ff" : "transparent",
-              borderColor: selected ? "#91caff" : "transparent",
+              borderColor: selected ? "#60a5fa" : "transparent",
             }}
           >
-            <Text code>{label}</Text>
+            <DomNodePreview node={node} expanded={expanded} />
           </button>
         ) : (
-          <Text code>{label}</Text>
+          <span style={domNodeStaticStyle}>
+            {isElement ? <DomNodePreview node={node} expanded={expanded} /> : null}
+            {isText ? <span style={domTextNodeStyle}>{formatTextNode(node.nodeValue)}</span> : null}
+            {!isElement && !isText ? <span style={domTextNodeStyle}>{domNodeDisplayName(node)}</span> : null}
+          </span>
         )}
       </div>
-      {children.slice(0, 250).map((child, index) => (
-        <div key={`${label}-${index}`}>
-          {renderDomNode(child, depth + 1, selectedNodeId, onHighlight)}
+      {hasChildren && expanded ? (
+        <div style={domChildrenStyle}>
+          {children.slice(0, 250).map((child, index) =>
+            renderDomNode(child, `${path}.${index}`, selectedNodeId, expandedKeys, onHighlight, onToggle),
+          )}
+          {children.length > 250 ? <Text type="secondary">... {children.length - 250} more nodes</Text> : null}
+          {isElement ? (
+            <div style={domClosingTagStyle}>
+              <span>&lt;/</span>
+              <span style={domTagStyle}>{domNodeDisplayName(node)}</span>
+              <span>&gt;</span>
+            </div>
+          ) : null}
         </div>
-      ))}
-      {children.length > 250 ? <Text type="secondary">... {children.length - 250} more nodes</Text> : null}
+      ) : null}
     </div>
   );
 }
 
-function domNodeLabel(node: DebugDomNode): string {
-  const name = String(node.nodeName ?? node["name"] ?? "node").toLowerCase();
-  const attrs = formatAttributes(node.attributes);
-  const value = typeof node.nodeValue === "string" && node.nodeValue.trim()
-    ? ` ${node.nodeValue.trim().slice(0, 80)}`
-    : "";
-  return `<${name}${attrs}>${value}`;
+function DomNodePreview({ node, expanded }: { node: DebugDomNode; expanded: boolean }) {
+  const name = domNodeDisplayName(node);
+  const attrs = domAttributes(node.attributes);
+  const children = Array.isArray(node.children) ? node.children : [];
+  const showEllipsis = children.length > 0 && !expanded && !isVoidDomNode(node);
+  if (node.nodeType !== 1) {
+    return <span style={domTextNodeStyle}>{formatTextNode(node.nodeValue)}</span>;
+  }
+  return (
+    <span style={domPreviewStyle}>
+      <span>&lt;</span>
+      <span style={domTagStyle}>{name}</span>
+      {attrs.slice(0, 8).map(([key, value]) => (
+        <span key={`${key}-${value}`}>
+          {" "}
+          <span style={domAttrNameStyle}>{key}</span>
+          {value !== "" ? (
+            <>
+              <span>=&quot;</span>
+              <span style={domAttrValueStyle}>{value}</span>
+              <span>&quot;</span>
+            </>
+          ) : null}
+        </span>
+      ))}
+      {attrs.length > 8 ? <span style={domMutedStyle}> ...</span> : null}
+      <span>{isVoidDomNode(node) ? " /" : ""}&gt;</span>
+      {showEllipsis ? <span style={domMutedStyle}>...</span> : null}
+      {!expanded && !isVoidDomNode(node) && children.length === 0 ? (
+        <>
+          <span>&lt;/</span>
+          <span style={domTagStyle}>{name}</span>
+          <span>&gt;</span>
+        </>
+      ) : null}
+    </span>
+  );
 }
 
-function formatAttributes(attributes: DebugDomNode["attributes"]): string {
-  if (!attributes) return "";
+function ElementInspector({ node }: { node: DebugDomNode | null }) {
+  if (!node) {
+    return (
+      <aside data-testid="devtools-elements-sidebar" style={inspectorPaneStyle}>
+        <Empty description="Select an element" />
+      </aside>
+    );
+  }
+  const attrs = domAttributes(node.attributes);
+  return (
+    <aside data-testid="devtools-elements-sidebar" style={inspectorPaneStyle}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div>
+          <Text type="secondary">Selected</Text>
+          <div style={inspectorNodeTitleStyle}>
+            <span style={domTagStyle}>{domNodeDisplayName(node)}</span>
+            {node.nodeId != null ? <Text type="secondary">#{node.nodeId}</Text> : null}
+          </div>
+        </div>
+        <div>
+          <Text strong>Attributes</Text>
+          {attrs.length ? (
+            <div style={attributeGridStyle}>
+              {attrs.map(([key, value]) => (
+                <div key={key} style={attributeRowStyle}>
+                  <Text code ellipsis title={key}>{key}</Text>
+                  <Text ellipsis title={value}>{value || "true"}</Text>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Text type="secondary" style={{ display: "block", marginTop: 8 }}>No attributes</Text>
+          )}
+        </div>
+        {typeof node.nodeValue === "string" && node.nodeValue.trim() ? (
+          <div>
+            <Text strong>Text</Text>
+            <pre style={{ ...codeBlockStyle, marginTop: 8 }}>{node.nodeValue.trim()}</pre>
+          </div>
+        ) : null}
+      </Space>
+    </aside>
+  );
+}
+
+function domAttributes(attributes: DebugDomNode["attributes"]): Array<[string, string]> {
+  if (!attributes) return [];
   if (Array.isArray(attributes)) {
     const pairs = [];
     for (let index = 0; index < attributes.length; index += 2) {
-      pairs.push(`${attributes[index]}="${attributes[index + 1] ?? ""}"`);
+      pairs.push([String(attributes[index]), String(attributes[index + 1] ?? "")] as [string, string]);
     }
-    return pairs.length ? ` ${pairs.slice(0, 8).join(" ")}` : "";
+    return pairs;
   }
   return Object.entries(attributes)
-    .slice(0, 8)
-    .map(([key, value]) => `${key}="${value}"`)
-    .join(" ")
-    .replace(/^(.+)/, " $1");
+    .map(([key, value]) => [key, String(value)] as [string, string]);
+}
+
+function domNodeDisplayName(node: DebugDomNode): string {
+  return String(node.nodeName ?? node["name"] ?? "node").toLowerCase();
+}
+
+function domNodeKey(node: DebugDomNode, path: string): string {
+  return node.nodeId != null ? `node:${node.nodeId}` : `path:${path}`;
+}
+
+function isVoidDomNode(node: DebugDomNode): boolean {
+  return ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"].includes(domNodeDisplayName(node));
+}
+
+function formatTextNode(value: unknown): string {
+  const text = typeof value === "string" ? value : "";
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  return trimmed ? `"${trimmed.slice(0, 160)}"` : "";
+}
+
+function findDomNode(node: DebugDomNode, nodeId: number): DebugDomNode | null {
+  if (node.nodeId === nodeId) return node;
+  for (const child of node.children ?? []) {
+    const found = findDomNode(child, nodeId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function collectDefaultExpandedDomKeys(root: DebugDomNode): Set<string> {
+  const keys = new Set<string>();
+  const walk = (node: DebugDomNode, path: string, depth: number) => {
+    if (depth > 2) return;
+    if ((node.children ?? []).length > 0 && !isVoidDomNode(node)) {
+      keys.add(domNodeKey(node, path));
+    }
+    (node.children ?? []).slice(0, 12).forEach((child, index) => walk(child, `${path}.${index}`, depth + 1));
+  };
+  walk(root, "0", 0);
+  return keys;
 }
 
 function NetworkList({ events }: { events: DebugNetworkEvent[] }) {
@@ -474,6 +679,7 @@ function StorageView({
   onAreaChange,
   onKeyChange,
   onValueChange,
+  onStartEdit,
   onSave,
 }: {
   mode: DebugPage["mode"];
@@ -485,6 +691,7 @@ function StorageView({
   onAreaChange: (value: string) => void;
   onKeyChange: (value: string) => void;
   onValueChange: (value: string) => void;
+  onStartEdit: (area: string, key: string, value: string) => void;
   onSave: () => void;
 }) {
   if (!storage) return <Empty description="No storage snapshot yet" />;
@@ -531,14 +738,24 @@ function StorageView({
           </Button>
         </Space.Compact>
       </div>
-      <KeyValueList title="Cookies" rows={storage.cookies} />
-      <KeyValueList title="Local Storage" rows={storage.local_storage} />
-      <KeyValueList title="Session Storage" rows={storage.session_storage} />
+      <KeyValueList title="Cookies" area="cookie" rows={storage.cookies} onStartEdit={onStartEdit} />
+      <KeyValueList title="Local Storage" area="local_storage" rows={storage.local_storage} onStartEdit={onStartEdit} />
+      <KeyValueList title="Session Storage" area="session_storage" rows={storage.session_storage} onStartEdit={onStartEdit} />
     </Space>
   );
 }
 
-function KeyValueList({ title, rows }: { title: string; rows: Array<[string, string]> }) {
+function KeyValueList({
+  title,
+  area,
+  rows,
+  onStartEdit,
+}: {
+  title: string;
+  area: string;
+  rows: Array<[string, string]>;
+  onStartEdit: (area: string, key: string, value: string) => void;
+}) {
   return (
     <div>
       <Title level={5} style={{ margin: "0 0 8px" }}>{title}</Title>
@@ -548,6 +765,13 @@ function KeyValueList({ title, rows }: { title: string; rows: Array<[string, str
             <div key={`${title}-${key}`} style={kvRowStyle}>
               <Text code ellipsis title={key}>{key}</Text>
               <Text ellipsis title={value}>{value}</Text>
+              <Button
+                size="small"
+                type="text"
+                icon={<EditOutlined />}
+                aria-label={`Edit ${key}`}
+                onClick={() => onStartEdit(area, key, value)}
+              />
             </div>
           ))}
         </div>
@@ -715,28 +939,144 @@ const panelStyle: CSSProperties = {
   overflow: "auto",
 };
 
-const treeStyle: CSSProperties = {
+const elementsSplitStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(460px, 1fr) minmax(240px, 340px)",
+  minWidth: 760,
+  minHeight: 420,
+  border: "1px solid #d9e2ef",
+  borderRadius: 6,
+  overflow: "hidden",
+};
+
+const treePaneStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "auto",
+  padding: "8px 0 8px 8px",
+  background: "#fff",
+  borderRight: "1px solid #e7edf5",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   fontSize: 12,
-  lineHeight: 1.6,
+  lineHeight: 1.55,
 };
 
 const domLineStyle: CSSProperties = {
-  minHeight: 22,
+  minHeight: 21,
   display: "flex",
   alignItems: "center",
+  minWidth: "max-content",
+  paddingRight: 8,
+};
+
+const domBranchStyle: CSSProperties = {
+  minWidth: "max-content",
+};
+
+const domChildrenStyle: CSSProperties = {
+  marginLeft: 14,
+};
+
+const domDisclosureStyle: CSSProperties = {
+  appearance: "none",
+  WebkitAppearance: "none",
+  width: 16,
+  minWidth: 16,
+  height: 18,
+  padding: 0,
+  border: 0,
+  background: "transparent",
+  color: "#6b7280",
+  cursor: "pointer",
+  fontSize: 10,
 };
 
 const domNodeButtonStyle: CSSProperties = {
   appearance: "none",
   WebkitAppearance: "none",
-  width: "100%",
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 20,
   padding: "1px 4px",
   border: "1px solid transparent",
-  borderRadius: 4,
+  borderRadius: 3,
+  background: "transparent",
   color: "inherit",
   textAlign: "left",
   cursor: "pointer",
+};
+
+const domNodeStaticStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 20,
+  padding: "1px 4px",
+};
+
+const domPreviewStyle: CSSProperties = {
+  whiteSpace: "nowrap",
+};
+
+const domTagStyle: CSSProperties = {
+  color: "#881280",
+};
+
+const domAttrNameStyle: CSSProperties = {
+  color: "#994500",
+};
+
+const domAttrValueStyle: CSSProperties = {
+  color: "#1a1aa6",
+};
+
+const domTextNodeStyle: CSSProperties = {
+  color: "#111827",
+  whiteSpace: "nowrap",
+};
+
+const domMutedStyle: CSSProperties = {
+  color: "#6b7280",
+};
+
+const domClosingTagStyle: CSSProperties = {
+  minHeight: 21,
+  paddingLeft: 20,
+  color: "#111827",
+  whiteSpace: "nowrap",
+};
+
+const inspectorPaneStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "auto",
+  padding: 12,
+  background: "#f8fafc",
+};
+
+const inspectorNodeTitleStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  minWidth: 0,
+  marginTop: 4,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: 13,
+};
+
+const attributeGridStyle: CSSProperties = {
+  display: "grid",
+  marginTop: 8,
+  border: "1px solid #d9e2ef",
+  borderRadius: 6,
+  overflow: "hidden",
+  background: "#fff",
+};
+
+const attributeRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(90px, 120px) minmax(120px, 1fr)",
+  gap: 8,
+  minWidth: 0,
+  padding: "7px 8px",
+  borderTop: "1px solid #e7edf5",
 };
 
 const codeBlockStyle: CSSProperties = {
@@ -801,7 +1141,8 @@ const selectStyle: CSSProperties = {
 
 const kvRowStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(160px, 260px) minmax(240px, 1fr)",
+  gridTemplateColumns: "minmax(160px, 260px) minmax(240px, 1fr) 40px",
+  alignItems: "center",
   gap: 10,
   padding: "8px 10px",
   borderTop: "1px solid #e7edf5",

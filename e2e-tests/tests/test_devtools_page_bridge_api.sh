@@ -1012,7 +1012,13 @@ if (await adminPage.getByText('Debug URL', { exact: true }).count()) {
 }
 const debugFixtureNode = adminPage.getByTestId('devtools-dom-node').filter({ hasText: 'debug-fixture' }).first();
 await debugFixtureNode.waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-tree').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-sidebar').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-tree').getByText('<').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-tree').getByText('data-case').waitFor({ timeout: 8000 });
 await debugFixtureNode.click();
+await adminPage.getByTestId('devtools-elements-sidebar').getByText('debug-fixture').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-sidebar').getByText('data-case').waitFor({ timeout: 8000 });
 await page.waitForFunction(() => {
   const overlay = document.querySelector('#__bifrost_devtools_highlight__');
   return overlay && getComputedStyle(overlay).display !== 'none' && overlay.getBoundingClientRect().width > 0;
@@ -1043,6 +1049,16 @@ await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-cookie-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-storage-panel').getByText('bifrost-session-live').waitFor({ timeout: 8000 });
+await adminPage.getByLabel('Edit bifrost-storage-live').click();
+if (await adminPage.getByTestId('devtools-storage-area').inputValue().catch(() => '') !== 'local_storage') {
+  throw new Error('AV-CDP-15 failed: storage row edit did not select local_storage area');
+}
+if (await adminPage.getByTestId('devtools-storage-key').inputValue() !== 'bifrost-storage-live') {
+  throw new Error('AV-CDP-15 failed: storage row edit did not copy key into editor');
+}
+if (await adminPage.getByTestId('devtools-storage-value').inputValue() !== 'storage-live') {
+  throw new Error('AV-CDP-15 failed: storage row edit did not copy value into editor');
+}
 await adminPage.getByTestId('devtools-storage-area').selectOption('cookie');
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-cookie-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('cookie-edited');
