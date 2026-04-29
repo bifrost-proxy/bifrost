@@ -48,9 +48,9 @@ sequenceDiagram
   Browser-->>Admin: eval result
 ```
 
-Bridge 与 Admin 的主通信通道必须使用 WebSocket，页面通过同一条连接上报 hello / console / network / eval_result，Admin 通过同一条连接下发 eval / overlay / snapshot_request 命令。页面侧不得再通过 HTTP `POST /bridge/*` 上报 hello / network / console / eval_result，也不得对 `eval-next` / `overlay-next` 发起轮询。事件必须先进入页面内存队列，再按短延迟批量异步 flush 到 WS；WS 未连接时限量缓存并重连，发送失败不能阻塞原页面主流程，避免命中 `devtools://` 的业务页面出现请求风暴和系统卡顿。
+Bridge 与 Admin 的主通信通道必须使用 WebSocket，页面通过同一条连接上报 hello / console / network / eval_result，Admin 通过同一条连接下发 eval / overlay / snapshot_request 命令。页面侧不得再通过 HTTP `POST /bridge/*` 上报 hello / network / console / eval_result，也不得对 `eval-next` / `overlay-next` 发起轮询。事件必须先进入页面内存队列，再按短延迟批量异步 flush 到 WS；WS 未连接时限量缓存并重连，发送失败不能阻塞原页面主流程，避免命中 `devtools://` 的业务页面出现请求风暴和系统卡顿。页面上报消息必须携带递增 `seq`，Admin 对 console / network / eval_result / close 记录每个 page 最近一段 `seq` 并去重，确保 WS reconnect 重放 inflight 消息时不会产生重复日志、重复网络记录或重复终态。
 
-WebUI 与 Admin 也建立 session WebSocket。WebUI 打开详情或切换 tab 时，由 Admin 通过目标页 bridge WS 发起 scoped `snapshot_request`，目标页立即重新读取被请求模块并推送给 WebUI：DOM 与 Storage 现场读取，Console 与 Network 来自目标页内的有界 buffer。Bifrost Admin 只保留页面发现、session 路由、短期状态和必要的小型映射（例如 client request id 到 traffic id），不保存完整 DOM / Network / Storage / Console 历史数据；完整可恢复数据以目标页面内存为主。WebUI 断开 session WS 时 Admin 删除对应 session sender；目标页 bridge WS 断开时 Admin 立刻向已连接 WebUI session 推送 `disconnected`，双方都能感知断开状态。在线列表不能只依赖最近数据时间，bridge WS 仍连接的页面必须继续视为在线。
+WebUI 与 Admin 也建立 session WebSocket。WebUI 打开详情或切换 tab 时，由 Admin 通过目标页 bridge WS 发起 scoped `snapshot_request`，目标页立即重新读取被请求模块并推送给 WebUI：DOM 与 Storage 现场读取，Console 与 Network 来自目标页内的有界 buffer。Bifrost Admin 只保留页面发现、session 路由、短期状态和必要的小型映射（例如 client request id 到 traffic id），不保存完整 DOM / Network / Storage / Console 历史数据；完整可恢复数据以目标页面内存为主。Admin 到目标页、Admin 到 WebUI 的 live channel 必须使用有界队列，慢消费者或断连时移除 stale sender，避免管理端进程无限积压内存。WebUI 断开 session WS 时 Admin 删除对应 session sender；目标页 bridge WS 断开时 Admin 立刻向已连接 WebUI session 推送 `disconnected`，双方都能感知断开状态。在线列表不能只依赖最近数据时间，bridge WS 仍连接的页面必须继续视为在线。
 
 ## 后端接口
 

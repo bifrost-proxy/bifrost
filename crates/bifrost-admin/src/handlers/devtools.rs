@@ -10,9 +10,10 @@ use tokio_tungstenite::WebSocketStream;
 use tracing::{error, warn};
 
 use crate::devtools::{
-    BridgeClosePayload, BridgeConsolePayload, BridgeEvalPollPayload, BridgeEvalResultPayload,
-    BridgeHelloPayload, BridgeNetworkPayload, BridgeOverlayCommand, BridgeServerMessage,
-    DebugAdapterKind, DebugPage, DevtoolsMode, SharedBrowserDebugBroker,
+    bridge_command_queue_capacity, session_live_queue_capacity, BridgeClosePayload,
+    BridgeConsolePayload, BridgeEvalPollPayload, BridgeEvalResultPayload, BridgeHelloPayload,
+    BridgeNetworkPayload, BridgeOverlayCommand, BridgeServerMessage, DebugAdapterKind, DebugPage,
+    DevtoolsMode, SharedBrowserDebugBroker,
 };
 use crate::state::SharedAdminState;
 use crate::{is_remote_access_enabled, validate_admin_jwt};
@@ -376,7 +377,7 @@ async fn handle_session_connection<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut sink, mut stream) = ws_stream.split();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(session_live_queue_capacity());
     if broker.session_ws_attach(&session_id, tx).is_err() {
         let _ = sink
             .send(Message::Text(
@@ -421,7 +422,7 @@ async fn handle_bridge_connection<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut sink, mut stream) = ws_stream.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<BridgeServerMessage>();
+    let (tx, mut rx) = mpsc::channel::<BridgeServerMessage>(bridge_command_queue_capacity());
     let mut attached = false;
 
     loop {
@@ -457,24 +458,48 @@ async fn handle_bridge_connection<S>(
                     }
                     "console" => {
                         if let Ok(payload) = serde_json::from_value::<BridgeConsolePayload>(value.clone()) {
+                            if let Some(seq) = message_seq {
+                                if !broker.remember_bridge_seq(&page_id, seq) {
+                                    ack_bridge_message(&mut sink, message_seq).await;
+                                    continue;
+                                }
+                            }
                             let _ = broker.bridge_console(&page_id, payload);
                             ack_bridge_message(&mut sink, message_seq).await;
                         }
                     }
                     "network" => {
                         if let Ok(payload) = serde_json::from_value::<BridgeNetworkPayload>(value.clone()) {
+                            if let Some(seq) = message_seq {
+                                if !broker.remember_bridge_seq(&page_id, seq) {
+                                    ack_bridge_message(&mut sink, message_seq).await;
+                                    continue;
+                                }
+                            }
                             let _ = broker.bridge_network(&page_id, payload);
                             ack_bridge_message(&mut sink, message_seq).await;
                         }
                     }
                     "eval_result" => {
                         if let Ok(payload) = serde_json::from_value::<BridgeEvalResultPayload>(value.clone()) {
+                            if let Some(seq) = message_seq {
+                                if !broker.remember_bridge_seq(&page_id, seq) {
+                                    ack_bridge_message(&mut sink, message_seq).await;
+                                    continue;
+                                }
+                            }
                             let _ = broker.bridge_eval_result(&page_id, payload);
                             ack_bridge_message(&mut sink, message_seq).await;
                         }
                     }
                     "close" => {
                         if let Ok(payload) = serde_json::from_value::<BridgeClosePayload>(value.clone()) {
+                            if let Some(seq) = message_seq {
+                                if !broker.remember_bridge_seq(&page_id, seq) {
+                                    ack_bridge_message(&mut sink, message_seq).await;
+                                    break;
+                                }
+                            }
                             let _ = broker.bridge_close(&page_id, payload);
                             ack_bridge_message(&mut sink, message_seq).await;
                         }

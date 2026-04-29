@@ -8,6 +8,10 @@ use ring::digest;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+const BRIDGE_COMMAND_QUEUE_CAPACITY: usize = 128;
+const SESSION_LIVE_QUEUE_CAPACITY: usize = 512;
+const BRIDGE_SEEN_SEQ_CAPACITY: usize = 2048;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugAdapterKind {
@@ -288,8 +292,9 @@ pub struct BrowserDebugBroker {
     eval_pending: RwLock<HashMap<String, Vec<BridgeEvalCommand>>>,
     eval_results: RwLock<HashMap<u64, Result<serde_json::Value, String>>>,
     overlay_pending: RwLock<HashMap<String, Vec<BridgeOverlayCommand>>>,
-    bridge_senders: RwLock<HashMap<String, mpsc::UnboundedSender<BridgeServerMessage>>>,
-    session_senders: RwLock<HashMap<String, mpsc::UnboundedSender<DevtoolsLiveMessage>>>,
+    bridge_senders: RwLock<HashMap<String, mpsc::Sender<BridgeServerMessage>>>,
+    session_senders: RwLock<HashMap<String, mpsc::Sender<DevtoolsLiveMessage>>>,
+    bridge_seen_seqs: RwLock<HashMap<String, VecDeque<u64>>>,
     client_req_traffic: RwLock<HashMap<String, String>>,
     evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
     evaluate_audit_capacity: usize,
@@ -308,6 +313,7 @@ impl BrowserDebugBroker {
             overlay_pending: RwLock::new(HashMap::new()),
             bridge_senders: RwLock::new(HashMap::new()),
             session_senders: RwLock::new(HashMap::new()),
+            bridge_seen_seqs: RwLock::new(HashMap::new()),
             client_req_traffic: RwLock::new(HashMap::new()),
             evaluate_audit: RwLock::new(VecDeque::new()),
             evaluate_audit_capacity: std::env::var("BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY")
@@ -542,7 +548,7 @@ impl BrowserDebugBroker {
         &self,
         page_id: &str,
         token: &str,
-        sender: mpsc::UnboundedSender<BridgeServerMessage>,
+        sender: mpsc::Sender<BridgeServerMessage>,
     ) -> Result<(), String> {
         let pages = self.pages.read();
         let page = pages
@@ -560,6 +566,19 @@ impl BrowserDebugBroker {
         Ok(())
     }
 
+    pub fn remember_bridge_seq(&self, page_id: &str, seq: u64) -> bool {
+        let mut seen_by_page = self.bridge_seen_seqs.write();
+        let seen = seen_by_page.entry(page_id.to_string()).or_default();
+        if seen.contains(&seq) {
+            return false;
+        }
+        seen.push_back(seq);
+        while seen.len() > BRIDGE_SEEN_SEQ_CAPACITY {
+            seen.pop_front();
+        }
+        true
+    }
+
     pub fn bridge_ws_detach(&self, page_id: &str) {
         self.bridge_senders.write().remove(page_id);
         self.push_live_to_page(
@@ -574,13 +593,13 @@ impl BrowserDebugBroker {
     pub fn session_ws_attach(
         &self,
         session_id: &str,
-        sender: mpsc::UnboundedSender<DevtoolsLiveMessage>,
+        sender: mpsc::Sender<DevtoolsLiveMessage>,
     ) -> Result<(), String> {
         let snapshot = self.snapshot(session_id)?;
         self.session_senders
             .write()
             .insert(session_id.to_string(), sender.clone());
-        let _ = sender.send(DevtoolsLiveMessage::Snapshot { snapshot });
+        let _ = sender.try_send(DevtoolsLiveMessage::Snapshot { snapshot });
         Ok(())
     }
 
@@ -644,7 +663,10 @@ impl BrowserDebugBroker {
                 .and_then(|commands| (!commands.is_empty()).then(|| commands.remove(0)))
         };
         if let Some(command) = command {
-            if sender.send(BridgeServerMessage::Eval { command }).is_err() {
+            if sender
+                .try_send(BridgeServerMessage::Eval { command })
+                .is_err()
+            {
                 self.bridge_senders.write().remove(page_id);
             }
         }
@@ -662,7 +684,7 @@ impl BrowserDebugBroker {
         };
         if let Some(command) = command {
             if sender
-                .send(BridgeServerMessage::Overlay { command })
+                .try_send(BridgeServerMessage::Overlay { command })
                 .is_err()
             {
                 self.bridge_senders.write().remove(page_id);
@@ -679,9 +701,19 @@ impl BrowserDebugBroker {
             .map(|session| session.session_id.clone())
             .collect();
         let senders = self.session_senders.read();
+        let mut stale_session_ids = Vec::new();
         for session_id in session_ids {
             if let Some(sender) = senders.get(&session_id) {
-                let _ = sender.send(message.clone());
+                if sender.try_send(message.clone()).is_err() {
+                    stale_session_ids.push(session_id);
+                }
+            }
+        }
+        drop(senders);
+        if !stale_session_ids.is_empty() {
+            let mut senders = self.session_senders.write();
+            for session_id in stale_session_ids {
+                senders.remove(&session_id);
             }
         }
     }
@@ -898,7 +930,7 @@ impl BrowserDebugBroker {
             return Err("page bridge websocket is not connected".to_string());
         };
         sender
-            .send(BridgeServerMessage::SnapshotRequest { scope })
+            .try_send(BridgeServerMessage::SnapshotRequest { scope })
             .map_err(|_| "page bridge websocket is not connected".to_string())
     }
 
@@ -1046,18 +1078,40 @@ impl BrowserDebugBroker {
                 .entry(new_page_id.to_string())
                 .or_insert(sender);
         }
+        let mut seen_seqs = self.bridge_seen_seqs.write();
+        if let Some(seqs) = seen_seqs.remove(old_page_id) {
+            seen_seqs.entry(new_page_id.to_string()).or_insert(seqs);
+        }
     }
 
     fn prune_inactive_pages(&self) {
         let cutoff = now_ms().saturating_sub(Duration::from_secs(60).as_millis() as u64);
-        self.pages.write().retain(|_, page| {
-            page.last_seen_at_ms >= cutoff
+        let mut stale_page_ids = Vec::new();
+        self.pages.write().retain(|page_id, page| {
+            let keep = page.last_seen_at_ms >= cutoff
                 || !matches!(
                     page.state,
                     DebugPageState::Candidate | DebugPageState::Stale
-                )
+                );
+            if !keep {
+                stale_page_ids.push(page_id.clone());
+            }
+            keep
         });
+        if !stale_page_ids.is_empty() {
+            self.bridge_seen_seqs
+                .write()
+                .retain(|page_id, _| !stale_page_ids.contains(page_id));
+        }
     }
+}
+
+pub fn bridge_command_queue_capacity() -> usize {
+    BRIDGE_COMMAND_QUEUE_CAPACITY
+}
+
+pub fn session_live_queue_capacity() -> usize {
+    SESSION_LIVE_QUEUE_CAPACITY
 }
 
 impl Default for BrowserDebugBroker {
@@ -1419,6 +1473,30 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(broker.list_pages(true)[0].state, DebugPageState::Candidate);
+    }
+
+    #[test]
+    fn test_page_bridge_seq_dedupes_replayed_messages() {
+        let broker = BrowserDebugBroker::new();
+        let (page_id, _token) =
+            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
+
+        assert!(broker.remember_bridge_seq(&page_id, 42));
+        assert!(
+            !broker.remember_bridge_seq(&page_id, 42),
+            "replayed bridge messages with the same seq must not be processed twice"
+        );
+        assert!(broker.remember_bridge_seq(&page_id, 43));
+    }
+
+    #[test]
+    fn test_page_bridge_live_queues_are_bounded() {
+        assert!(bridge_command_queue_capacity() > 0);
+        assert!(session_live_queue_capacity() > 0);
+        assert!(
+            session_live_queue_capacity() <= 1024,
+            "WebUI live queues must remain bounded to protect the admin process from slow consumers"
+        );
     }
 
     #[tokio::test]

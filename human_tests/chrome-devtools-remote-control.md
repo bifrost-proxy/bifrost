@@ -331,6 +331,24 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - WebUI 管理端刷新后，重新进入详情页会由目标页重新推送 DOM / Network / Storage / Console 数据；目标页保存有界 console/network buffer 并实时读取 DOM/storage，Bifrost 服务端不保存完整历史缓存。
 - 目标页关闭后 WebUI 收到 disconnected 状态；页面不再作为在线可调试页面展示。
 
+### TC-CDP-16：页面桥接消息重放去重与有界队列稳定性
+
+操作步骤：
+
+1. 打开匹配裸 `devtools://` 规则的目标页，等待目标页 bridge WS 进入 `connected`。
+2. 打开 WebUI DevTools 详情页，确认 session WS 建立并展示 Elements / Network / Storage / Console 数据。
+3. 触发目标页输出 console、发起 fetch/XHR，并执行一次 WebUI Console 表达式。
+4. 断开或刷新目标页，使 page bridge WS 重连并重放未确认 inflight 消息。
+5. 观察 WebUI Console / Network 列表，并继续切换 tab 触发 scoped refresh。
+6. 使用单元测试验证服务端桥接消息 seq 去重和 WebUI/目标页 live channel 有界容量。
+
+预期结果：
+
+- page bridge WS 重连后，同一 `seq` 的 console/network/eval-result/close 消息不会在服务端重复处理。
+- 重放消息仍会收到 ack，避免目标页 outbox 卡住或继续风暴式重试。
+- WebUI session live 通道和目标页 bridge command 通道均为有界队列；慢消费者不会导致 Bifrost admin 进程无限堆积内存。
+- 队列满或连接断开时，服务端会移除 stale sender，后续刷新依赖目标页重新推送当前模块数据。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -351,3 +369,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-29：通过。按 WebSocket-only 与轻量服务端缓存要求复测，验证 bridge 无 HTTP 上报风暴、WebUI session WS 建链后按 `scope=full` 从目标页重新拉取 DOM / Network / Storage / Console，目标页刷新后旧 sender 不覆盖新 sender，静默但 WS 仍连接的 secondary 页面仍可从在线列表切换调试，Back 后晚到 snapshot 不会把详情页复活。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。按 Console 结构化对象展示要求复测，验证 page bridge 上报 console `args/raw`，WebUI 默认展示 Object 摘要，点击后展开 `nested` / `items`，复制按钮可复制原始序列化内容。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。按 Network 列表与 Traffic 页面体验一致要求复测，验证 DevTools Network 复用 `traffic-table` 虚拟列表结构，展示 Protocol / Method / Status / Host / Path 等列，搜索过滤和新增网络记录仍可用。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。按稳定性 review 结果补充 TC-CDP-16，验证服务端 page bridge seq 去重与 live channel 有界队列保护，并用重建后的 release 二进制复测真实 DevTools 端到端流程。执行命令：`source ~/.zshrc && cargo test -p bifrost-admin devtools::tests::test_page_bridge --all-features`，输出 `6 passed; 0 failed`，包含 `test_page_bridge_seq_dedupes_replayed_messages` 与 `test_page_bridge_live_queues_are_bounded`；随后执行 `source ~/.zshrc && cargo build --release --bin bifrost` 和 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`，输出 `DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
