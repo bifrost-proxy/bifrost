@@ -57,7 +57,16 @@ printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Secondary</tit
 python3 -m http.server "$SITE_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >"$TEST_ROOT/site.log" 2>&1 &
 SITE_PID=$!
 
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}" cargo build --bin bifrost
+BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+if [ ! -x "$BIFROST_BIN" ] && [ -f "${BIFROST_BIN}.exe" ]; then
+  BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
+if [ "${SKIP_BUILD:-false}" = "true" ] && [ -x "$BIFROST_BIN" ]; then
+  echo "[devtools-page-bridge-e2e] Skipping build (SKIP_BUILD=true), using $BIFROST_BIN"
+else
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}" cargo build --bin bifrost
+  BIFROST_BIN="${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}/debug/bifrost"
+fi
 
 export BIFROST_DATA_DIR="$TEST_ROOT/data"
 if [ -x "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" ]; then
@@ -74,7 +83,7 @@ fi
 export BIFROST_DEVTOOLS_CHROME="${BIFROST_DEVTOOLS_CHROME:-$SYSTEM_CHROME_BIN}"
 export BIFROST_DEVTOOLS_CHROME_DEBUG_PORT="$CHROME_DEBUG_PORT"
 mkdir -p "$BIFROST_DATA_DIR"
-BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY=5 "${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-devtools-target}/debug/bifrost" start -p "$PROXY_PORT" --unsafe-ssl --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
+BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY=5 "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
 BIFROST_PID=$!
 
 for _ in $(seq 1 120); do
@@ -116,6 +125,18 @@ async function api(path, options = {}) {
     throw new Error(`${options.method || 'GET'} ${path} failed: ${response.status} ${await response.text()}`);
   }
   return response.json();
+}
+
+async function waitForDevToolsPage(predicate, description, timeoutMs = 10000) {
+  const startedAt = Date.now();
+  let lastPages = [];
+  while (Date.now() - startedAt < timeoutMs) {
+    lastPages = (await api('/devtools/pages?online=true')).pages;
+    const page = lastPages.find(predicate);
+    if (page) return page;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`${description}: ${JSON.stringify(lastPages)}`);
 }
 
 async function waitForChromeTarget(predicate, timeoutMs = 40000) {
@@ -991,14 +1012,14 @@ await api('/rules/devtools-page-bridge-api', {
     enabled: true,
   }),
 });
-await page.reload({ waitUntil: 'load' });
+await new Promise((resolve) => setTimeout(resolve, 1500));
+await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-control`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
 await page.waitForTimeout(800);
-pages = (await api('/devtools/pages?online=true')).pages;
-const controlDebugPage = pages.find((candidate) => candidate.url.includes('case=av-cdp-01'));
-if (!controlDebugPage || controlDebugPage.mode !== 'control') {
-  throw new Error(`AV-CDP-14 failed: control mode page not listed ${JSON.stringify(pages)}`);
-}
+const controlDebugPage = await waitForDevToolsPage(
+  (candidate) => candidate.url.includes('case=av-cdp-control') && candidate.mode === 'control' && candidate.state === 'discoverable',
+  'AV-CDP-14 failed: control mode page not listed',
+);
 const controlCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === controlDebugPage.page_id);
 const controlEvalReplies = await roundtripCdp(controlCdpTarget.webSocketDebuggerUrl, [
   { id: 401, method: 'Runtime.evaluate', params: { expression: 'document.querySelector("#debug-fixture").dataset.case' } },
@@ -1019,11 +1040,17 @@ await api('/rules/devtools-page-bridge-api', {
     enabled: true,
   }),
 });
-await page.reload({ waitUntil: 'load' });
+await new Promise((resolve) => setTimeout(resolve, 1500));
+await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-allowlist`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
 await page.waitForTimeout(800);
-pages = (await api('/devtools/pages?online=true')).pages;
-const allowlistDebugPage = pages.find((candidate) => candidate.url.includes('case=av-cdp-01'));
+const allowlistDebugPage = await waitForDevToolsPage(
+  (candidate) => candidate.url.includes('case=av-cdp-allowlist') && candidate.mode === 'control' && candidate.state === 'discoverable',
+  'F3 failed: allowlist control mode page not listed',
+);
+if (!allowlistDebugPage.evaluate_allowlist?.includes('^document\\.title$')) {
+  throw new Error(`F3 failed: evaluate allowlist was not propagated to debug page ${JSON.stringify(allowlistDebugPage)}`);
+}
 const allowlistCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === allowlistDebugPage.page_id);
 const allowlistReplies = await roundtripCdp(allowlistCdpTarget.webSocketDebuggerUrl, [
   { id: 411, method: 'Runtime.evaluate', params: { expression: 'document.title' } },
@@ -1118,7 +1145,7 @@ if (scriptsNavIndex === -1 || devtoolsNavIndex === -1 || devtoolsNavIndex <= scr
 }
 await adminPage.getByText('DevTools', { exact: true }).click();
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
-await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-01');
+await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-allowlist');
 const primaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
 await primaryCard.waitFor({ timeout: 8000 });
 const visiblePrimaryCards = await primaryCard.count();

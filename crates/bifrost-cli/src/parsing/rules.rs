@@ -165,6 +165,9 @@ fn parse_devtools_rule(value: &str) -> DevtoolsRule {
                     "1" | "true" | "yes" | "on"
                 );
             }
+            "evaluate_allowlist" => {
+                rule.evaluate_allowlist = parse_devtools_evaluate_allowlist(raw_value);
+            }
             _ => {}
         }
     }
@@ -172,7 +175,6 @@ fn parse_devtools_rule(value: &str) -> DevtoolsRule {
     rule
 }
 
-#[cfg(test)]
 fn parse_devtools_evaluate_allowlist(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     let inner = trimmed
@@ -2122,9 +2124,11 @@ x-use-ppe: 1
             &HashMap::new(),
             &HashMap::new(),
         );
+        let devtools = resolved.devtools.expect("devtools rule");
+        assert_eq!(devtools.mode, DevtoolsMode::Control);
         assert_eq!(
-            resolved.devtools.expect("devtools rule").mode,
-            DevtoolsMode::Control
+            devtools.evaluate_allowlist,
+            vec![r#"^document\.title$"#.to_string()]
         );
         assert_eq!(
             parse_devtools_evaluate_allowlist(r#"["^document\\.title$"]"#),

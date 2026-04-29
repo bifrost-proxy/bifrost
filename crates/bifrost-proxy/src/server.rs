@@ -398,6 +398,7 @@ pub struct DevtoolsRule {
     pub mode: DevtoolsMode,
     pub inject: DevtoolsInjectMode,
     pub deny: bool,
+    pub evaluate_allowlist: Vec<String>,
     pub raw_value: String,
 }
 

@@ -493,6 +493,9 @@ fn parse_devtools_rule_value(value: &str) -> DevtoolsRule {
                     "1" | "true" | "yes" | "on"
                 );
             }
+            "evaluate_allowlist" => {
+                rule.evaluate_allowlist = parse_devtools_evaluate_allowlist(raw_value);
+            }
             _ => {}
         }
     }
@@ -522,6 +525,9 @@ fn admin_devtools_mode(rule: &crate::server::DevtoolsRule) -> AdminDevtoolsMode 
 }
 
 fn devtools_matched_rule(rules: &ResolvedRules) -> Option<MatchedDevtoolsRule> {
+    let effective_allowlist = effective_devtools_rule(rules)
+        .map(|rule| rule.evaluate_allowlist)
+        .unwrap_or_default();
     rules
         .rules
         .iter()
@@ -531,7 +537,11 @@ fn devtools_matched_rule(rules: &ResolvedRules) -> Option<MatchedDevtoolsRule> {
             pattern: rule.pattern.clone(),
             raw: rule.raw.clone(),
             line: rule.line,
-            evaluate_allowlist: parse_devtools_evaluate_allowlist_from_value(&rule.value),
+            evaluate_allowlist: if effective_allowlist.is_empty() {
+                parse_devtools_evaluate_allowlist_from_value(&rule.value)
+            } else {
+                effective_allowlist
+            },
         })
 }
 

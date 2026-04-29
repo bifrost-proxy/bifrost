@@ -275,13 +275,16 @@ bash e2e-tests/tests/test_devtools_page_bridge_api.sh
 
 1. 执行 `bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。
 2. 脚本先验证 `mode=read` 下 `Runtime.evaluate` 返回 `requires_control`。
-3. 脚本把规则更新为 `devtools://mode=control,inject=bridge` 并 reload 页面。
+3. 脚本把规则更新为 `devtools://mode=control,inject=bridge`，等待规则热加载稳定后，再访问带唯一 query 的基础页面，避免浏览器 reload 复用旧 read bridge 或主文档请求抢在新规则生效前发出。
 4. 脚本通过 CDP `Runtime.evaluate` 执行 `document.querySelector("#debug-fixture").dataset.case`。
+5. 脚本再把规则更新为 `devtools://mode=control,inject=bridge,evaluate_allowlist=["^document\\.title$"]`，访问带唯一 query 的基础页面。
+6. 脚本分别执行 `document.title` 与 `document.cookie`，验证 allowlist 只放行标题表达式。
 
 **预期结果**
 
 - `mode=read` 不允许执行脚本，返回明确 `requires_control`。
-- `mode=control` 下 `Runtime.evaluate` 由 page_bridge 投递到真实页面执行，返回 `basic`。
+- `mode=control` 下新页面必须以 `discoverable` 状态出现在在线列表，`Runtime.evaluate` 由 page_bridge 投递到真实页面执行并返回 `basic`。
+- `evaluate_allowlist` 必须进入 page_bridge 调试页配置，`document.title` 成功返回标题，`document.cookie` 返回 `evaluate not in allowlist`。
 - WebUI 打开的系统 Chrome DevTools target URL 指向当前 control target，截图可采集，说明不是只生成了 URL。
 
 ### TC-CDP-15：WebUI DevTools 详情页可返回列表并切换页面
@@ -419,8 +422,8 @@ bash e2e-tests/tests/test_devtools_page_bridge_api.sh
 ## 本轮执行记录
 
 - 执行时间：2026-04-29
-- 执行命令 1：`bash e2e-tests/tests/test_devtools_page_bridge_api.sh`
-- 实际结果 1：通过。脚本输出 `AV-CDP-01/02/03/04/05/06/07/09/10/11/12/13/14/15/16/17/19/20 plus WebUI card navigation, protocol matrix, and system Chrome open passed`；覆盖 TC-CDP-11 的 flattened CDP session response/event 路由、DOM/CSS/console/network/storage 真实页面数据映射、TC-CDP-12 实时刷新、TC-CDP-13 页面身份语义、TC-CDP-14 control mode evaluate、TC-CDP-15 卡片列表到全屏详情的导航、TC-CDP-16 DOM 变化驱动同步、TC-CDP-17 目标页面 DOM 高亮、TC-CDP-19 内部 overlay 与属性噪声不触发整页 DOM 刷新，以及 TC-CDP-20 CDP shim 协议矩阵逐项端到端验证；脚本实际点击 `Open in Chrome DevTools` 并通过系统 Chrome remote debugging 验证 `devtools://` target URL 与截图。
+- 执行命令 1：`cargo build --release --bin bifrost && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`
+- 实际结果 1：通过。脚本输出 `AV-CDP-01/02/03/04/05/06/07/09/10/11/12/13/14/15/16/17/19/20 plus WebUI card navigation, protocol matrix, and system Chrome open passed`；覆盖 TC-CDP-11 的 flattened CDP session response/event 路由、DOM/CSS/console/network/storage 真实页面数据映射、TC-CDP-12 实时刷新、TC-CDP-13 页面身份语义、TC-CDP-14 control mode evaluate 与 evaluate allowlist 拒绝、TC-CDP-15 卡片列表到全屏详情的导航、TC-CDP-16 DOM 变化驱动同步、TC-CDP-17 目标页面 DOM 高亮、TC-CDP-19 内部 overlay 与属性噪声不触发整页 DOM 刷新，以及 TC-CDP-20 CDP shim 协议矩阵逐项端到端验证；脚本实际点击 `Open in Chrome DevTools` 并通过系统 Chrome remote debugging 验证 `devtools://` target URL 与截图。该命令使用预构建 release binary，覆盖 CI `--skip-build` 路径。
 - 执行命令 2：`BIFROST_TEST_INSTALL_EMBEDDED_DEVTOOLS=1 bash e2e-tests/tests/test_devtools_page_bridge_api.sh`
 - 实际结果 2：通过。脚本输出 `AV-CDP-01/02/03/04/05/06/08/09/10/11/12/13/14/15/16/17/18/19/20 plus embedded Chrome DevTools install, iframe, protocol matrix, card navigation, page switching, no screencast pane, and stable Elements selection passed`；官方 Chrome DevTools frontend iframe 抓包中，携带 `sessionId` 的 request 均匹配到同 `sessionId` response，且无缺失 response id、无 `unsupported CDP method`、无 DevTools frontend 控制台 error；脚本真实点击 `Back` 返回卡片列表，再选择 secondary 卡片并验证 iframe 切换到 secondary page；iframe 内看不到 screencast 画面、手机切换按钮或左侧空白渲染区；内部 overlay 与属性噪声不会触发 Elements 整树刷新；协议矩阵逐项验证通过，敏感或未实现方法均返回稳定 CDP error。
 - 执行命令 3：`bash -n e2e-tests/run_all_tests_parallel.sh && bash -n e2e-tests/test_rules.sh`
