@@ -482,7 +482,6 @@ enum BodyMode {
 struct RetryableRequestBlueprint {
     method: hyper::Method,
     uri: Uri,
-    version: hyper::Version,
     headers: hyper::HeaderMap<HeaderValue>,
     body: Bytes,
 }
@@ -492,7 +491,7 @@ impl RetryableRequestBlueprint {
         let mut builder = Request::builder()
             .method(self.method.clone())
             .uri(self.uri.clone())
-            .version(self.version);
+            .version(hyper::Version::HTTP_11);
         for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
@@ -507,6 +506,47 @@ fn is_no_body_response(status: StatusCode, method: &str) -> bool {
         || status == StatusCode::NO_CONTENT
         || status == StatusCode::NOT_MODIFIED
         || method.eq_ignore_ascii_case("HEAD")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H2BodyRecoveryAction {
+    Probe,
+    RetryHttp1,
+    Stream,
+}
+
+fn h2_body_recovery_action(
+    response_version: hyper::Version,
+    status: StatusCode,
+    method: &str,
+    content_type: &str,
+    content_length: Option<usize>,
+    max_body_buffer_size: usize,
+    retryable: bool,
+) -> H2BodyRecoveryAction {
+    if !retryable
+        || response_version != hyper::Version::HTTP_2
+        || is_no_body_response(status, method)
+        || content_type
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    {
+        return H2BodyRecoveryAction::Stream;
+    }
+
+    if let Some(len) = content_length {
+        if len <= max_body_buffer_size {
+            H2BodyRecoveryAction::Probe
+        } else if !is_likely_text_content_type(content_type) {
+            H2BodyRecoveryAction::RetryHttp1
+        } else {
+            H2BodyRecoveryAction::Stream
+        }
+    } else if is_likely_text_content_type(content_type) {
+        H2BodyRecoveryAction::Probe
+    } else {
+        H2BodyRecoveryAction::RetryHttp1
+    }
 }
 
 fn should_use_metrics_only_forwarding_mode(
@@ -1264,19 +1304,6 @@ pub async fn handle_http_request(
             _ => is_https,
         }
     };
-    let retry_blueprint =
-        if use_tls && matches!(method.as_str(), "GET" | "HEAD") && !request_body_is_streaming {
-            Some(RetryableRequestBlueprint {
-                method: parts.method.clone(),
-                uri: parts.uri.clone(),
-                version: parts.version,
-                headers: parts.headers.clone(),
-                body: final_body.clone(),
-            })
-        } else {
-            None
-        };
-
     let build_conn_error_and_record =
         |error_type: &'static str, error_msg: String, err_tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
@@ -1453,6 +1480,17 @@ pub async fn handle_http_request(
     parts.uri = upstream_uri.clone();
     sanitize_upstream_headers(&mut parts.headers);
     parts.headers.remove(hyper::header::HOST);
+    let retry_blueprint =
+        if use_tls && matches!(method.as_str(), "GET" | "HEAD") && !request_body_is_streaming {
+            Some(RetryableRequestBlueprint {
+                method: parts.method.clone(),
+                uri: parts.uri.clone(),
+                headers: parts.headers.clone(),
+                body: final_body.clone(),
+            })
+        } else {
+            None
+        };
 
     #[cfg(feature = "http3")]
     let req_headers_for_h3: Vec<(String, String)> = headers_to_pairs(&parts.headers);
@@ -1719,8 +1757,147 @@ pub async fn handle_http_request(
             (parts, Some(body), None, None, wait_ms)
         };
 
-    let (mut res_parts, mut res_body_incoming, mut res_body_stream, mut pre_read_res, wait_ms) =
+    let (mut res_parts, mut res_body_incoming, mut res_body_stream, mut pre_read_res, mut wait_ms) =
         upstream_result;
+
+    if res_body_stream.is_none() {
+        let early_content_type = get_content_type(&res_parts);
+        let early_content_length = res_parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+        let recovery_action = h2_body_recovery_action(
+            res_parts.version,
+            res_parts.status,
+            &method,
+            &early_content_type,
+            early_content_length,
+            max_body_buffer_size,
+            retry_blueprint.is_some(),
+        );
+
+        if matches!(recovery_action, H2BodyRecoveryAction::Probe) {
+            let receive_start = Instant::now();
+            let body = res_body_incoming
+                .take()
+                .expect("upstream response body should exist");
+            match read_body_bounded(body, max_body_buffer_size).await {
+                Ok(BoundedBody::Complete(bytes)) => {
+                    let receive_ms = receive_start.elapsed().as_millis() as u64;
+                    pre_read_res = Some((bytes.clone(), receive_ms));
+                    res_body_stream = Some(full_body(bytes));
+                }
+                Ok(BoundedBody::Exceeded(replay_body)) => {
+                    res_body_stream = Some(replay_body.boxed());
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] Upstream HTTP/2 response body failed while probing response; retrying with HTTP/1.1 fallback: {}",
+                        ctx.id_str(),
+                        e
+                    );
+                    mark_http1_upstream_fallback(
+                        unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    );
+                    let retry_request = retry_blueprint
+                        .as_ref()
+                        .expect("retry blueprint exists for H2 body fallback")
+                        .build()?;
+                    let retry_start = Instant::now();
+                    match send_pooled_request_http1_only(
+                        retry_request,
+                        unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            info!(
+                                "[{}] Upstream response body recovered via HTTP/1.1 fallback",
+                                ctx.id_str()
+                            );
+                            wait_ms = retry_start.elapsed().as_millis() as u64;
+                            let (parts, body) = response.into_parts();
+                            res_parts = parts;
+                            res_body_incoming = Some(body);
+                            res_body_stream = None;
+                            pre_read_res = None;
+                        }
+                        Err(retry_err) => {
+                            let classified = classify_request_error(&retry_err);
+                            error!(
+                                "[{}] {} ({})",
+                                ctx.id_str(),
+                                classified.error_message,
+                                classified.error_type
+                            );
+                            for source in &classified.source_chain {
+                                error!("[{}] Request failure source: {}", ctx.id_str(), source);
+                            }
+                            return Ok(build_conn_error_and_record(
+                                classified.error_type,
+                                classified.error_message,
+                                None,
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if matches!(recovery_action, H2BodyRecoveryAction::RetryHttp1) {
+            warn!(
+                "[{}] Upstream HTTP/2 response is a large or unknown-size binary body; retrying with HTTP/1.1 fallback before streaming",
+                ctx.id_str()
+            );
+            mark_http1_upstream_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+            let retry_request = retry_blueprint
+                .as_ref()
+                .expect("retry blueprint exists for H2 body fallback")
+                .build()?;
+            let retry_start = Instant::now();
+            match send_pooled_request_http1_only(
+                retry_request,
+                unsafe_ssl,
+                &resolved_rules.dns_servers,
+                &pool_partition,
+            )
+            .await
+            {
+                Ok(response) => {
+                    info!(
+                        "[{}] Upstream response switched to HTTP/1.1 fallback before streaming",
+                        ctx.id_str()
+                    );
+                    wait_ms = retry_start.elapsed().as_millis() as u64;
+                    let (parts, body) = response.into_parts();
+                    res_parts = parts;
+                    res_body_incoming = Some(body);
+                    res_body_stream = None;
+                    pre_read_res = None;
+                }
+                Err(retry_err) => {
+                    let classified = classify_request_error(&retry_err);
+                    error!(
+                        "[{}] {} ({})",
+                        ctx.id_str(),
+                        classified.error_message,
+                        classified.error_type
+                    );
+                    for source in &classified.source_chain {
+                        error!("[{}] Request failure source: {}", ctx.id_str(), source);
+                    }
+                    return Ok(build_conn_error_and_record(
+                        classified.error_type,
+                        classified.error_message,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
 
     let original_res_headers = admin_state
         .as_ref()
@@ -1780,7 +1957,12 @@ pub async fn handle_http_request(
     if !is_sse && res_body_stream.is_none() {
         res_body_stream = Some(res_body_incoming.take().unwrap().boxed());
     }
-    if needs_res_body_read && needs_processing && !is_sse && !skip_binary_recording {
+    if needs_res_body_read
+        && needs_processing
+        && !is_sse
+        && !skip_binary_recording
+        && pre_read_res.is_none()
+    {
         if let Some(len) = res_content_length {
             if len > max_body_buffer_size {
                 res_body_too_large = true;

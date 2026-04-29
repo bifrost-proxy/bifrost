@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-admin"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "base64",
  "bcrypt",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-cli"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "base64",
  "bcrypt",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-command"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "serde",
  "serde_json",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-e2e"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "base64",
  "bifrost-admin",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-power"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "bifrost-core",
  "core-foundation 0.10.1",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-proxy"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "async-compression",
  "base64",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-script"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-sync"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tests"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "async-trait",
  "bifrost-admin",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.63"
+version = "0.0.65"
 dependencies = [
  "bifrost-core",
  "chrono",

@@ -1934,6 +1934,147 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-59：回归 - culture.shtml 经 HTTPS MITM 后背景图不再白屏
+
+**背景**：
+- 原始页面：`https://h5.news.qq.com/static/culture.shtml`
+- 页面首屏视觉内容来自背景图：`https://mat1.gtimg.com/www/pics/hv1/62/63/2304/202309061523.png`
+- 修复前现象：主文档加载完成，但背景 PNG 经 HTTPS MITM tunnel 传输约 180KB 后断流，curl 报 `HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR` 或 `transfer closed with ... bytes remaining to read`，浏览器报 `net::ERR_HTTP2_PROTOCOL_ERROR`，页面视觉为空白。
+
+**前置条件**：
+- 使用临时 `BIFROST_DATA_DIR`，端口不得使用 9900。
+- 启动 Bifrost 时必须带 `--no-system-proxy`。
+- 不安装测试 CA 到系统证书；浏览器/CLI 通过忽略证书错误完成验证。
+- 需要本机可访问 `h5.news.qq.com`、`mat1.gtimg.com`、`vm.gtimg.cn`。
+
+**操作步骤**：
+1. 启动隔离代理：
+   ```bash
+   TEST_DIR="$(mktemp -d /tmp/bifrost-human-culture.XXXXXX)"
+   BIFROST_DATA_DIR="$TEST_DIR" \
+   cargo run --bin bifrost -- start \
+     -p 18892 \
+     --host 127.0.0.1 \
+     --unsafe-ssl \
+     --no-system-proxy \
+     --intercept-include 'h5.news.qq.com,mat1.gtimg.com,vm.gtimg.cn'
+   ```
+2. 如出现 CA 安装交互，选择 `No, skip (HTTPS interception may not work properly)`。
+3. 使用 curl 通过代理下载背景 PNG：
+   ```bash
+   HTTPS_PROXY=http://127.0.0.1:18892 \
+   HTTP_PROXY=http://127.0.0.1:18892 \
+   curl -k -L -sS --http2 \
+     -D /tmp/culture-image.headers \
+     'https://mat1.gtimg.com/www/pics/hv1/62/63/2304/202309061523.png' \
+     -o /tmp/culture-image.png
+   wc -c /tmp/culture-image.png
+   file /tmp/culture-image.png
+   ```
+4. 使用真实浏览器自动化通过代理打开页面，并记录背景图加载结果：
+   ```bash
+   NODE_PATH=/Users/eden/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+   /Users/eden/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node <<'NODE'
+   const { chromium } = require('playwright');
+   (async () => {
+     const browser = await chromium.launch({
+       headless: true,
+       proxy: { server: 'http://127.0.0.1:18892' },
+     });
+     const context = await browser.newContext({
+       ignoreHTTPSErrors: true,
+       viewport: { width: 1280, height: 900 },
+     });
+     const page = await context.newPage();
+     const failed = [];
+     page.on('requestfailed', request => {
+       failed.push({
+         url: request.url(),
+         error: request.failure()?.errorText,
+       });
+     });
+     await page.goto('https://h5.news.qq.com/static/culture.shtml', {
+       waitUntil: 'load',
+       timeout: 45000,
+     });
+     await page.waitForTimeout(3000);
+     const info = await page.evaluate(async () => {
+       const box = document.querySelector('.box');
+       const bg = box ? getComputedStyle(box).backgroundImage : '';
+       const imageUrl = bg.match(/url\(["']?(.*?)["']?\)/)?.[1];
+       const image = await new Promise(resolve => {
+         const img = new Image();
+         img.onload = () => resolve({
+           ok: true,
+           width: img.naturalWidth,
+           height: img.naturalHeight,
+         });
+         img.onerror = () => resolve({
+           ok: false,
+           width: img.naturalWidth,
+           height: img.naturalHeight,
+         });
+         img.src = imageUrl;
+         setTimeout(() => resolve({
+           ok: false,
+           timeout: true,
+           width: img.naturalWidth,
+           height: img.naturalHeight,
+         }), 5000);
+       });
+       return { title: document.title, bg, image };
+     });
+     await page.screenshot({ path: '/tmp/culture-proxy.png', fullPage: false });
+     await browser.close();
+     console.log(JSON.stringify({ info, failed }, null, 2));
+     if (!info.image.ok || info.image.width !== 1800 || info.image.height !== 2544) {
+       process.exit(1);
+     }
+     if (failed.some(item => item.url.includes('202309061523.png'))) {
+       process.exit(1);
+     }
+   })();
+   NODE
+   ```
+
+**预期结果**：
+- curl 返回码为 0。
+- `/tmp/culture-image.png` 大小为 `3457877` 字节，`file` 识别为 `PNG image data, 1800 x 2544`。
+- 浏览器脚本输出 `image.ok=true`、`width=1800`、`height=2544`。
+- `failed` 列表中不包含背景 PNG，不能出现 `net::ERR_HTTP2_PROTOCOL_ERROR`。
+- 截图 `/tmp/culture-proxy.png` 不是空白白屏。
+
+---
+
+### TC-PRA-60：回归 - 上游 HTTP/2 响应体中途失败时不转发半截 body
+
+**背景**：
+- `TC-PRA-59` 暴露的是真实站点的大 PNG 在 HTTPS MITM tunnel 中经上游 HTTP/2 中途断流。
+- 同类风险还包括普通 HTTP handler 通过规则转发到 HTTPS upstream 时，上游 HTTP/2 响应体已经开始发送但随后 reset；如果代理已经开始向客户端流式转发，就会出现资源不完整、浏览器渲染异常、curl 报传输错误或最终 502。
+
+**前置条件**：
+- 不使用 9900 端口，不修改系统代理。
+- 使用测试内置的临时端口和自签名 TLS 上游，测试上游会在 HTTP/2 响应体发送 `partial` 后主动失败，并在 HTTP/1.1 重试时返回完整 body。
+
+**操作步骤**：
+1. 执行策略单元测试，确认 HTTP/2 响应体恢复策略覆盖小响应探测、大二进制/未知长度二进制 fallback、SSE/POST 跳过：
+   ```bash
+   cargo test -p bifrost-proxy h2_body_recovery_policy -- --nocapture
+   ```
+2. 执行集成回归，覆盖 HTTPS MITM tunnel 与普通 HTTP handler 转 HTTPS upstream 两条入口：
+   ```bash
+   cargo test -p bifrost-tests --test https_proxy_test retries_h2_body_failure -- --nocapture
+   ```
+3. 确认输出中包含：
+   - `test_https_interception_retries_h2_body_failure_with_http1 ... ok`
+   - `test_http_handler_retries_h2_body_failure_with_http1 ... ok`
+
+**预期结果**：
+- 策略单元测试 3 个用例全部通过。
+- 集成回归 2 个用例全部通过。
+- 两条集成回归都先命中一次 HTTP/2 upstream，再命中一次 HTTP/1.1 upstream fallback。
+- 客户端最终收到完整 body，状态码为 200，不出现 502、`http2 error`、`connection error` 或半截 body。
+
 ---
 
 ## 清理
