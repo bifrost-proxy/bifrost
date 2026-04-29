@@ -106,6 +106,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_htmlappend_script,
         ),
         TestCase::standalone(
+            "matcher_wildcard_root_path_html_append",
+            "通配域名根路径规则匹配子路径并执行 htmlAppend",
+            "body",
+            test_wildcard_root_path_html_append,
+        ),
+        TestCase::standalone(
             "body_htmlAppend_gzip_response",
             "htmlAppend 规则处理 gzip HTML 响应后仍保持有效 gzip",
             "body",
@@ -607,6 +613,62 @@ async fn test_htmlappend_script() -> Result<(), String> {
             result.body
         ));
     }
+    Ok(())
+}
+
+async fn test_wildcard_root_path_html_append() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    let mut headers = HashMap::new();
+    headers.insert("Content-Type".to_string(), "text/html".to_string());
+    mock.set_response_with_headers(
+        200,
+        "<!doctype html><html><body>qq page</body></html>",
+        headers,
+    );
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "*.qq.com/ host://127.0.0.1:{} htmlAppend://(<script>wildcardRootPath()</script>)",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    for url in [
+        "http://www.qq.com",
+        "http://www.qq.com/",
+        "http://news.qq.com/rain/a/20260428A07D9U00",
+    ] {
+        let result = CurlCommand::with_proxy(&format!("http://127.0.0.1:{}", port), url)
+            .execute()
+            .await
+            .map_err(|e| format!("curl failed for {url}: {}", e))?;
+
+        result.assert_success()?;
+        let marker = "<script>wildcardRootPath()</script>";
+        let marker_index = result
+            .body
+            .rfind(marker)
+            .ok_or_else(|| format!("missing wildcard htmlAppend for {url}: {}", result.body))?;
+        let html_close_index = result
+            .body
+            .to_lowercase()
+            .rfind("</html>")
+            .ok_or_else(|| format!("missing </html> for {url}: {}", result.body))?;
+
+        if marker_index >= html_close_index {
+            return Err(format!(
+                "wildcard htmlAppend should inject before </html> for {url}: {}",
+                result.body
+            ));
+        }
+    }
+
     Ok(())
 }
 

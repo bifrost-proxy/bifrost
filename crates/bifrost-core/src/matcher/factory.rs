@@ -324,6 +324,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_wildcard_root_path_pattern() {
+        assert_eq!(detect_pattern_type("*.qq.com/"), PatternType::Wildcard);
+
+        let matcher = parse_pattern("*.qq.com/").unwrap();
+
+        let result = matcher.matches("https://www.qq.com", "www.qq.com", "/");
+        assert!(result.matched);
+
+        let result = matcher.matches(
+            "https://news.qq.com/rain/a/20260428A07D9U00",
+            "news.qq.com",
+            "/rain/a/20260428A07D9U00",
+        );
+        assert!(result.matched);
+
+        let result = matcher.matches("https://a.b.qq.com/rain", "a.b.qq.com", "/rain");
+        assert!(!result.matched);
+    }
+
+    #[test]
     fn test_parse_path_wildcard_pattern() {
         let matcher = parse_pattern("^example.com/api/*").unwrap();
         assert_eq!(matcher.priority(), 70);
