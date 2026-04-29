@@ -53,7 +53,16 @@ export default function DevTools() {
   const refreshSnapshot = useCallback(async (sessionId: string) => {
     setSnapshotLoading(true);
     try {
-      setSnapshot(await getDevtoolsSnapshot(sessionId));
+      const nextSnapshot = await getDevtoolsSnapshot(sessionId);
+      setSnapshot(nextSnapshot);
+      if (nextSnapshot.page?.page_id) {
+        setSelectedPageId(nextSnapshot.page.page_id);
+        setSession((current) =>
+          current && current.session_id === sessionId && current.page_id !== nextSnapshot.page.page_id
+            ? { ...current, page_id: nextSnapshot.page.page_id }
+            : current,
+        );
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to refresh DevTools data");
     } finally {

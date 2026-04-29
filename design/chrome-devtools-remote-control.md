@@ -84,6 +84,8 @@ WebUI `DevTools` 一级 tab 分为两层：
 - 页面详情不显示 `devtools://` 调试地址。
 - 页面详情不显示“Open in Chrome DevTools”按钮。
 - 多页面切换必须重新打开对应 page session，并刷新 snapshot，不能复用上一个页面的 DOM / storage / console。
+- 页面列表和 `/json/list` 只展示已经完成 bridge `hello` 的可调试页面；`Candidate` 表示 HTML 响应已注入但脚本尚未运行，不能作为在线页面展示，避免 SPA 路由切换、fetch HTML、prefetch HTML 产生幽灵目标。
+- 同一浏览器 tab 刷新或主文档导航时，page bridge 会产生新的注入 page id；Broker 必须通过稳定 `tab_id` 把旧 session 迁移到新 page id，并把旧 page 标记为 `stale` 后隐藏，WebUI snapshot 返回新 page id 时同步当前选择，不能让用户退出详情页后重新进入。
 - Elements 面板交互参考 vConsole 的 Element 插件和 Chrome DevTools 的 Elements 面板：左侧是可展开/折叠的 DOM tree，标签名、属性名、属性值分色；右侧是当前选中节点的属性/文本详情。DOM tree 保留 Chrome DevTools 式闭合标签、空标签单行、选中行高亮。
 - Elements 节点点击必须调用 `dom.highlight` semantic command，在目标页显示 Bifrost overlay；该操作不要求 control mode，同时 WebUI 侧需要更新右侧 selected node inspector。
 - 手动刷新按钮必须重新读取 session snapshot，用于用户主动确认 DOM / Network / Storage / Console 最新状态。
@@ -105,6 +107,8 @@ WebUI `DevTools` 一级 tab 分为两层：
 单元测试：
 
 - `BrowserDebugBroker::cdp_targets` 不再序列化 `systemChromeFrontendUrl`。
+- `BrowserDebugBroker::list_debuggable_pages` 隐藏 `Candidate` / `Stale` 页面。
+- `BrowserDebugBroker::bridge_hello` 使用 `tab_id` 将刷新后的新 page id 迁移到已有 session。
 - `BrowserDebugBroker::command("runtime.evaluate")` 继续验证 read/control 与 allowlist。
 
 E2E 测试：
@@ -122,8 +126,10 @@ E2E 测试：
 - 验证 WebUI Storage 编辑 cookie/localStorage/sessionStorage 后，目标页真实读到新值，刷新后的 Storage 面板也显示新值。
 - 验证运行中新增 console info/error 日志后 Console 面板完整同步。
 - 验证 Console 在 control allowlist 下真实执行 `document.title`。
-  - 验证页面切换后显示 secondary page 的 DOM。
-  - 验证 Chrome DevTools frontend 安装、托管、系统打开相关入口均不存在或返回 404。
+- 验证页面切换后显示 secondary page 的 DOM。
+- 验证 fetch/prefetch 到的 HTML 响应即使触发候选注册，也不会出现在 WebUI 页面列表或 CDP target 列表。
+- 验证目标页刷新后，WebUI 详情页无需退出重进即可继续 refresh、Elements 展示和 Console 执行。
+- 验证 Chrome DevTools frontend 安装、托管、系统打开相关入口均不存在或返回 404。
 
 真实场景测试：
 

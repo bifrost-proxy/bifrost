@@ -101,7 +101,7 @@ pub async fn handle_devtools(
                     .map(|q| q.contains("online=true"))
                     .unwrap_or(false);
                 json_response(&serde_json::json!({
-                    "pages": state.devtools_broker.list_pages(online_only)
+                    "pages": state.devtools_broker.list_debuggable_pages(online_only)
                 }))
             }
             _ => method_not_allowed(),

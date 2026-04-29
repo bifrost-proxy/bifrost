@@ -207,7 +207,43 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - `fidelity=fallback`。
 - `user_agent` 保留 Mobile Safari 特征。
 
-### TC-CDP-12：Chrome DevTools frontend 相关能力已清理
+### TC-CDP-12：SPA 路由切换或 HTML 预取不会展示幽灵页面
+
+操作步骤：
+
+1. 打开命中 `devtools://` 规则的 primary 页面。
+2. 在目标页内发起不会执行脚本的 HTML 请求，例如 `fetch('/secondary.html?case=ghost-fetch').then(r => r.text())`。
+3. 调用 `GET /_bifrost/api/devtools/pages?online=true`。
+4. 调用 `GET /_bifrost/api/devtools/cdp/json/list`。
+5. 在 WebUI DevTools 页面列表搜索当前业务页关键字。
+
+预期结果：
+
+- pages API 不包含 `case=ghost-fetch` 这类只完成 HTML 注入但未执行 bridge hello 的候选页。
+- CDP target 列表不包含 `case=ghost-fetch`。
+- WebUI 页面列表只展示真实在线页面，不展示 `(untitled)` 的 candidate/read 幽灵卡片。
+- 真实独立 tab 打开同 URL 时仍保留为独立目标，不被错误去重。
+
+### TC-CDP-13：目标页刷新后 WebUI 详情页自动恢复监听
+
+操作步骤：
+
+1. WebUI DevTools 选择一个 `mode=control` 的在线页面，进入详情页。
+2. 打开 `Console` tab 并执行 `document.title`，确认执行成功。
+3. 刷新目标页面本身，等待目标页 bridge 状态重新变为 `connected`。
+4. 不退出 WebUI 详情页，点击 WebUI refresh。
+5. 打开 `Elements` tab，确认 DOM 内容仍可读取。
+6. 再次打开 `Console` tab 并执行 `document.title`。
+7. 返回页面列表，搜索当前页面。
+
+预期结果：
+
+- WebUI 不出现 `400` / `page not found` 这类必须退出重进才能恢复的错误。
+- WebUI refresh 后 Elements 面板仍包含目标页 DOM。
+- Console 再次执行 `document.title` 仍返回目标页标题。
+- 页面列表只保留刷新后的一个真实在线页面卡片。
+
+### TC-CDP-14：Chrome DevTools frontend 相关能力已清理
 
 操作步骤：
 
@@ -238,3 +274,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-29：通过。按“完备端到端测试”要求补充并执行 Elements 节点高亮操作、DOM 手动刷新、Network 新增记录、Storage 运行中 cookie/localStorage/sessionStorage 同步、Storage 受控修改、Console info/error 日志同步与输入脚本执行。执行命令：`source ~/.zshrc && cargo fmt --all -- --check && e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。重建 release 二进制后复测同一真实场景，确认发布产物不再暴露 `systemChromeFrontendUrl`，并且 Storage 修改能力在 release 产物中可用。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。
 - 2026-04-29：通过。参考 vConsole Element/Storage 插件后，验证 Elements 左右分栏、DOM tree 标签/属性展示、selected node inspector、Storage 行编辑入口。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed`。
+- 2026-04-29：通过。针对线上反馈的路由切换幽灵页和目标页刷新后 WebUI 详情页 400 问题，补充并执行 TC-CDP-12 / TC-CDP-13。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。验证 HTML fetch 产生的未执行 candidate 不进入 pages API / CDP target / WebUI 列表；验证目标页刷新后不退出 WebUI 详情页即可 refresh Elements，并再次执行 Console `document.title`。输出：`AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, and Chrome frontend cleanup passed`。

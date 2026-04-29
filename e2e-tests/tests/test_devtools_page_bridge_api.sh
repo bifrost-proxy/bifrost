@@ -746,6 +746,16 @@ if (duplicatePrimaryPages.length !== 1) {
   throw new Error(`AV-CDP-13 failed: reloaded page should have one online DevTools target, got ${duplicatePrimaryPages.length}: ${JSON.stringify(duplicatePrimaryPages)}`);
 }
 const activeDebugPage = duplicatePrimaryPages[0];
+await page.evaluate(() => fetch('/secondary.html?case=ghost-fetch').then((response) => response.text()).catch(() => ''));
+await page.waitForTimeout(800);
+pages = (await api('/devtools/pages?online=true')).pages;
+if (pages.some((candidate) => candidate.url.includes('case=ghost-fetch'))) {
+  throw new Error(`AV-CDP-21 failed: fetched HTML candidate should not be listed as an online debug page ${JSON.stringify(pages)}`);
+}
+const targetsAfterGhostFetch = await api('/devtools/cdp/json/list');
+if (targetsAfterGhostFetch.some((target) => target.url.includes('case=ghost-fetch'))) {
+  throw new Error(`AV-CDP-21 failed: fetched HTML candidate should not be exposed as a CDP target ${JSON.stringify(targetsAfterGhostFetch)}`);
+}
 const sameUrlPage = await context.newPage();
 await sameUrlPage.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-01`, { waitUntil: 'load' });
 await sameUrlPage.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
@@ -1090,8 +1100,25 @@ await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console
 await adminPage.getByTestId('devtools-console-input').fill('document.title');
 await adminPage.getByTestId('devtools-console-run').click();
 await adminPage.getByTestId('devtools-console-result').getByText('Bifrost DevTools Basic').waitFor({ timeout: 8000 });
-
+await page.reload({ waitUntil: 'load' });
+await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
+await page.waitForTimeout(800);
+await adminPage.getByRole('tab', { name: /Elements/ }).click();
+await adminPage.getByTestId('devtools-refresh').click();
+await adminPage.getByTestId('devtools-elements-tree').getByText(/debug-fixture/).first().waitFor({ timeout: 8000 });
+await adminPage.getByRole('tab', { name: /Console/ }).click();
+await adminPage.getByTestId('devtools-console-input').fill('document.title');
+await adminPage.getByTestId('devtools-console-run').click();
+await adminPage.getByTestId('devtools-console-result').getByText('Bifrost DevTools Basic').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').click();
+await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
+await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-allowlist');
+const reloadedPrimaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
+await reloadedPrimaryCard.waitFor({ timeout: 8000 });
+if (await reloadedPrimaryCard.count() !== 1) {
+  throw new Error(`AV-CDP-22 failed: target reload should leave exactly one WebUI card, got ${await reloadedPrimaryCard.count()}`);
+}
+
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
 await adminPage.getByPlaceholder('Search online pages').fill('secondary');
 const secondaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Secondary' });
@@ -1117,15 +1144,23 @@ const login = await api('/auth/login', {
   body: JSON.stringify({ username: 'admin', password: 'Str0ngPass123!' }),
 });
 const localOrigin = `http://127.0.0.1:${proxyPort}`;
-const noTokenHandshake = await rawWsHandshake(wsPathFromUrl(allowlistCdpTarget.webSocketDebuggerUrl), localOrigin);
+const latestAllowlistDebugPage = await waitForDevToolsPage(
+  (candidate) => candidate.url.includes('case=av-cdp-allowlist') && candidate.mode === 'control',
+  'F23 failed: current allowlist page not listed before auth handshake',
+);
+const latestAllowlistCdpTarget = (await api('/devtools/cdp/json/list')).find((target) => target.id === latestAllowlistDebugPage.page_id);
+if (!latestAllowlistCdpTarget?.webSocketDebuggerUrl) {
+  throw new Error(`F23 failed: current allowlist CDP target missing ${JSON.stringify(latestAllowlistCdpTarget)}`);
+}
+const noTokenHandshake = await rawWsHandshake(wsPathFromUrl(latestAllowlistCdpTarget.webSocketDebuggerUrl), localOrigin);
 if (noTokenHandshake.status !== 401 || !noTokenHandshake.response.includes('missing_token')) {
   throw new Error(`F23 failed: auth-enabled CDP websocket without token should be rejected ${JSON.stringify(noTokenHandshake)}`);
 }
-const tokenHandshake = await rawWsHandshake(wsPathFromUrl(allowlistCdpTarget.webSocketDebuggerUrl), localOrigin, login.token);
+const tokenHandshake = await rawWsHandshake(wsPathFromUrl(latestAllowlistCdpTarget.webSocketDebuggerUrl), localOrigin, login.token);
 if (tokenHandshake.status !== 101) {
   throw new Error(`F23 failed: auth-enabled CDP websocket with token should upgrade ${JSON.stringify(tokenHandshake)}`);
 }
 
 await browser.close();
-console.log('AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, and Chrome frontend cleanup passed');
+console.log('AV-CDP-01/02/03/04/05/06/09/10/11/12/13/14/15/16/17/19/20/21/22 plus custom WebUI elements highlight/manual refresh, complete network/storage sync and storage edit, console sync/evaluate, page switching, ghost candidate hiding, reload recovery, and Chrome frontend cleanup passed');
 NODE

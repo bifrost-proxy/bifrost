@@ -325,6 +325,24 @@ impl BrowserDebugBroker {
             return Err("bridge token mismatch".to_string());
         }
         let tab_id = payload.tab_id.filter(|value| !value.trim().is_empty());
+        let replaced_page_ids: Vec<String> = tab_id
+            .as_ref()
+            .map(|tab_id| {
+                pages
+                    .iter()
+                    .filter_map(|(id, existing)| {
+                        if id != page_id
+                            && existing.bridge_tab_id.as_deref() == Some(tab_id.as_str())
+                            && matches!(existing.adapter, DebugAdapterKind::PageBridge)
+                        {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(tab_id) = &tab_id {
             pages.retain(|id, existing| {
                 id == page_id
@@ -332,6 +350,11 @@ impl BrowserDebugBroker {
                     || !matches!(existing.adapter, DebugAdapterKind::PageBridge)
             });
         }
+        drop(pages);
+        for replaced_page_id in replaced_page_ids {
+            self.migrate_page_references(&replaced_page_id, page_id);
+        }
+        let mut pages = self.pages.write();
         let page = pages
             .get_mut(page_id)
             .ok_or_else(|| "page not found".to_string())?;
@@ -391,12 +414,15 @@ impl BrowserDebugBroker {
     pub fn bridge_close(&self, page_id: &str, payload: BridgeClosePayload) -> Result<(), String> {
         let mut pages = self.pages.write();
         let page = pages
-            .get(page_id)
+            .get_mut(page_id)
             .ok_or_else(|| "page not found".to_string())?;
         if page.bridge_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        pages.remove(page_id);
+        page.state = DebugPageState::Stale;
+        page.status_reason =
+            Some("page bridge disconnected; waiting for reload reconnect".to_string());
+        page.last_seen_at_ms = now_ms();
         Ok(())
     }
 
@@ -599,6 +625,7 @@ impl BrowserDebugBroker {
     }
 
     pub fn list_pages(&self, online_only: bool) -> Vec<DebugPage> {
+        self.prune_inactive_pages();
         let cutoff = now_ms().saturating_sub(Duration::from_secs(60).as_millis() as u64);
         let mut pages: Vec<DebugPage> = self
             .pages
@@ -611,12 +638,25 @@ impl BrowserDebugBroker {
         pages
     }
 
+    pub fn list_debuggable_pages(&self, online_only: bool) -> Vec<DebugPage> {
+        self.list_pages(online_only)
+            .into_iter()
+            .filter(|page| {
+                !matches!(
+                    page.state,
+                    DebugPageState::Candidate | DebugPageState::Stale | DebugPageState::Denied
+                )
+            })
+            .collect()
+    }
+
     pub fn get_page(&self, page_id: &str) -> Option<DebugPage> {
+        self.prune_inactive_pages();
         self.pages.read().get(page_id).cloned()
     }
 
     pub fn cdp_targets(&self, online_only: bool, host: &str) -> Vec<CdpTargetInfo> {
-        self.list_pages(online_only)
+        self.list_debuggable_pages(online_only)
             .into_iter()
             .map(|page| cdp_target_info(&page, host))
             .collect()
@@ -769,6 +809,30 @@ impl BrowserDebugBroker {
         }
         Ok(page.page_id.clone())
     }
+
+    fn migrate_page_references(&self, old_page_id: &str, new_page_id: &str) {
+        if old_page_id == new_page_id {
+            return;
+        }
+        for session in self.sessions.write().values_mut() {
+            if session.page_id == old_page_id {
+                session.page_id = new_page_id.to_string();
+            }
+        }
+        move_pending_commands(&mut self.eval_pending.write(), old_page_id, new_page_id);
+        move_pending_commands(&mut self.overlay_pending.write(), old_page_id, new_page_id);
+    }
+
+    fn prune_inactive_pages(&self) {
+        let cutoff = now_ms().saturating_sub(Duration::from_secs(60).as_millis() as u64);
+        self.pages.write().retain(|_, page| {
+            page.last_seen_at_ms >= cutoff
+                || !matches!(
+                    page.state,
+                    DebugPageState::Candidate | DebugPageState::Stale
+                )
+        });
+    }
 }
 
 impl Default for BrowserDebugBroker {
@@ -792,6 +856,20 @@ fn push_network_event(events: &mut Vec<NetworkEvent>, event: NetworkEventInput) 
         let extra = events.len() - 500;
         events.drain(0..extra);
     }
+}
+
+fn move_pending_commands<T>(
+    pending: &mut HashMap<String, Vec<T>>,
+    old_page_id: &str,
+    new_page_id: &str,
+) {
+    let Some(mut old_commands) = pending.remove(old_page_id) else {
+        return;
+    };
+    pending
+        .entry(new_page_id.to_string())
+        .or_default()
+        .append(&mut old_commands);
 }
 
 fn storage_set_expression(area: &str, key: &str, value: &str) -> Result<String, String> {
@@ -883,6 +961,10 @@ mod tests {
         assert_eq!(pages[0].state, DebugPageState::Candidate);
         assert_eq!(pages[0].traffic_ids, vec!["101".to_string()]);
         assert!(!token.is_empty());
+        assert!(
+            broker.list_debuggable_pages(true).is_empty(),
+            "unconnected candidates must not be shown as selectable DevTools pages"
+        );
     }
 
     #[test]
@@ -912,6 +994,92 @@ mod tests {
         assert_eq!(page.title.as_deref(), Some("Fixture"));
         assert_eq!(page.state, DebugPageState::Discoverable);
         assert_eq!(page.user_agent.as_deref(), Some("Mobile Safari"));
+    }
+
+    #[test]
+    fn test_page_bridge_close_hides_stale_page_from_debuggable_list() {
+        let broker = BrowserDebugBroker::new();
+        let (page_id, token) =
+            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
+        broker
+            .bridge_hello(
+                &page_id,
+                BridgeHelloPayload {
+                    token: token.clone(),
+                    tab_id: Some("tab-a".to_string()),
+                    title: Some("Fixture".to_string()),
+                    url: None,
+                    user_agent: None,
+                    dom_snapshot: None,
+                    dom_tree: None,
+                    storage: None,
+                    network: Vec::new(),
+                },
+            )
+            .expect("bridge hello");
+
+        broker
+            .bridge_close(&page_id, BridgeClosePayload { token })
+            .expect("bridge close");
+
+        let stale_page = broker.list_pages(true).remove(0);
+        assert_eq!(stale_page.state, DebugPageState::Stale);
+        assert!(
+            broker.list_debuggable_pages(true).is_empty(),
+            "stale pages must not remain selectable"
+        );
+    }
+
+    #[test]
+    fn test_page_bridge_reload_migrates_open_session_to_new_page_id() {
+        let broker = BrowserDebugBroker::new();
+        let (old_page_id, old_token) =
+            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
+        broker
+            .bridge_hello(
+                &old_page_id,
+                BridgeHelloPayload {
+                    token: old_token.clone(),
+                    tab_id: Some("tab-a".to_string()),
+                    title: Some("Before".to_string()),
+                    url: None,
+                    user_agent: None,
+                    dom_snapshot: Some("<html><body>before</body></html>".to_string()),
+                    dom_tree: None,
+                    storage: None,
+                    network: Vec::new(),
+                },
+            )
+            .expect("old bridge hello");
+        let session = broker.open_session(&old_page_id).expect("session");
+        broker
+            .bridge_close(&old_page_id, BridgeClosePayload { token: old_token })
+            .expect("old bridge close");
+
+        let (new_page_id, new_token) =
+            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
+        broker
+            .bridge_hello(
+                &new_page_id,
+                BridgeHelloPayload {
+                    token: new_token,
+                    tab_id: Some("tab-a".to_string()),
+                    title: Some("After".to_string()),
+                    url: Some("http://example.test/devtools/basic.html?after=1".to_string()),
+                    user_agent: None,
+                    dom_snapshot: Some("<html><body>after</body></html>".to_string()),
+                    dom_tree: None,
+                    storage: None,
+                    network: Vec::new(),
+                },
+            )
+            .expect("new bridge hello");
+
+        let snapshot = broker.snapshot(&session.session_id).expect("snapshot");
+        assert_eq!(snapshot["page"]["page_id"], new_page_id);
+        assert_eq!(snapshot["page"]["title"], "After");
+        assert_eq!(broker.list_debuggable_pages(true).len(), 1);
+        assert!(broker.get_page(&old_page_id).is_none());
     }
 
     #[test]
