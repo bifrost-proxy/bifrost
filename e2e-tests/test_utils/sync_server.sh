@@ -11,10 +11,24 @@ sync_server_has_dist_entry() {
     [[ -f "$dir/dist/cli.js" ]]
 }
 
+sync_server_has_fresh_dist_entry() {
+    local dir="${1:-$(sync_server_dir)}"
+    local entry="$dir/dist/cli.js"
+
+    [[ -f "$entry" ]] || return 1
+
+    if find "$dir/src" "$dir/package.json" "$dir/tsconfig.json" \
+        -type f -newer "$entry" -print -quit 2>/dev/null | grep -q .; then
+        return 1
+    fi
+
+    return 0
+}
+
 sync_server_exec() {
     local dir="${1:-$(sync_server_dir)}"
 
-    if sync_server_has_dist_entry "$dir"; then
+    if sync_server_has_fresh_dist_entry "$dir"; then
         local candidate
         for candidate in \
             "${NODE_BIN:-}" \

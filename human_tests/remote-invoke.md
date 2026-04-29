@@ -4710,6 +4710,49 @@ PY
 
 ---
 
+### TC-RI-回归-142：Shell E2E 不再优先运行陈旧 sync-server dist
+
+**背景**：完整 shell E2E 在本地工作区存在陈旧 `packages/bifrost-sync-server/dist/cli.js` 时，会优先运行旧 relay 构建，导致 `remote file` open_call 缺少 `command_kind`、grant update 路由返回 404、SSH grant 字段缺失等假失败。本用例验证测试 helper 只有在 dist 新于源码时才使用 dist，否则回退到源码入口，确保 E2E 运行的是当前 checkout 的 relay 逻辑。
+
+**前置条件**：
+- 工作区可执行 `pnpm --dir packages/bifrost-sync-server run build`
+- 测试端口由脚本动态分配，禁止使用 `9900`
+- Bifrost 启动参数必须包含 `--no-system-proxy`
+- 使用隔离 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server run build
+   ```
+2. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_file_relay_e2e.sh
+   ```
+3. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+4. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+5. 检查三条脚本输出中的 relay、target admin、caller CLI 均使用随机端口和隔离临时目录。
+
+**预期结果**：
+- `remote_file_relay_e2e` 全部断言通过，不再出现 `command_kind_required`
+- `remote_invoke_ssh_e2e` 全部断言通过，relay reusable grant 返回 `ssh_key_fingerprint`
+- `remote_shell_exec_streaming_e2e` 全部断言通过，grant update 不再返回 `remote invoke endpoint not found`
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-142 执行结果（2026-04-30，sync-server dist 新鲜度）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-142 | ✅ PASS | 2026-04-30 在当前 checkout 先执行 `pnpm --dir packages/bifrost-sync-server run build` 刷新 relay 构建，再依次执行 `SKIP_BUILD=true e2e-tests/tests/test_remote_file_relay_e2e.sh`、`SKIP_BUILD=true e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`、`SKIP_BUILD=true e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`。其中 remote file relay 输出 `Total: 79 / Passed: 79 / Failed: 0`；SSH E2E 完成 `All SSH remote invoke E2E checks passed`；shell streaming 输出 `Total: 33 / Passed: 33 / Failed: 0`。三条链路均使用随机端口与隔离临时目录，未使用 `9900`，未修改系统代理。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：
