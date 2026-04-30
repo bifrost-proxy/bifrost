@@ -276,10 +276,12 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证页面切换后显示对应 DOM；目标页刷新后无需退出重进
 - 验证 fetch/prefetch HTML 不产生幽灵目标
 - 验证 syntax API 将 `devtools://` 暴露为无参数协议
+- HTTP fixture 必须使用支持 `/devtools/api/*` 动态路由的 Node.js HTTP server，与 HTTPS fixture 保持同构：API 路径返回 `200` JSON `{ok:true,url}`，其它路径回退读取 `SITE_DIR` 静态文件。禁止使用纯 `python3 -m http.server` 承载会触发 fetch/XHR 的 fixture 页面，避免业务请求 404 导致 DevTools Network / locator 等待路径假失败。
 
 ### 真实场景测试
 
 - 更新并执行 `human_tests/chrome-devtools-remote-control.md`
+- 回归执行 `TC-CDP-21`：确认 HTTP fixture 下 `/devtools/api/ping`、`/devtools/api/static-resource`、`/devtools/api/meta` 均为 200，且 DevTools 页面不因 HTTP fixture 404 卡在等待状态
 - 同步更新 `human_tests/readme.md` 索引
 
 ## 校验要求

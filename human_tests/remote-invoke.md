@@ -4295,16 +4295,23 @@ PY
    ```bash
    BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
    ```
+6. 检查 caller 数据目录中的 `remote-connections.json`：
+   ```bash
+   find <caller_dir> -name remote-connections.json -print -quit | xargs jq '.connections | length'
+   ```
+7. 重新生成 pair code 并执行 fresh `remote connect`，确认后续连接流程仍可用。
 
 **预期结果**：
 - 第 3 步重连后，target client 不会继续保留这条缺少本地加密材料的 grant
 - 第 4 步 grants 列表为空，不再展示幽灵授权
-- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect
+- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect；即使 relay 短暂返回 reusable grant、`open_call` 才收到 `403 grant_not_active`，CLI 也必须归一化为 `expired` / `revoked` / `connect` 语义
 - 第 5 步不再出现 `missing grant shared secret for encrypted remote command`
+- 第 6 步 caller 本地连接数为 `0`，stale connection 已从 `remote-connections.json` 移除
+- 第 7 步新的 pairing / connect 流程可以重新建立 fresh grant，不受 stale connection 清理影响
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-131 | ✅ PASS | 2026-04-24 代码修复后执行：worker.rs `new()` 与 `update_relay_url()` 启动时检测 grant_info 中有条目但 grant_crypto 为空的孤儿 grant，立即从 local_grants 与 grant_info_store 中移除；caller 侧 remote.rs 新增 `is_stale_grant_crypto_error()` 检测，在 call_exit 携带 `missing grant shared secret` 时按"授权失效"路径清理本地连接。`SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh` 全套 72 条断言全部通过，其中 TC-RI-07A 三条（grants 列表为 0、caller 提示重新 connect 而非 missing shared secret、caller 本地连接已清空）均 ✅。 |
+| TC-RI-回归-131 | ✅ PASS | 2026-04-30 本轮执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，全套 `total=73 passed=73 failed=0`。TC-RI-07A 验证 client 丢失 grant crypto 后 grants 列表为 0、caller 输出重新 connect 语义且不含 `missing grant shared secret`、caller 本地 `remote-connections.json` 连接数清空；TC-RI-07B 随后重新建立 fresh grant 并继续通过 disconnect 回归。 |
 
 ---
 

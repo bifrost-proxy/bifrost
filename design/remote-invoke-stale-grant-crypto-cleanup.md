@@ -19,8 +19,9 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
    - 立即调用 relay `delete_grant`
    - 清理本地残留的 `grant_crypto`
 
-这样 caller 下一次执行 `remote status` 时，会在授权发现阶段直接看到 grant 已失效并提示重新 `remote connect`，而不会把请求发到远端后才报 `missing grant shared secret`。
-同时，caller 本地这条 stale `remote-connections.json` 记录也会被同步移除，避免后续流程继续拿着已经被 relay 回收的 grant 去做 `disconnect` 或其他命令。
+这样 caller 下一次执行 `remote status` 时，会优先在授权发现阶段直接看到 grant 已失效并提示重新 `remote connect`，而不会把请求发到远端后才报 `missing grant shared secret`。
+如果 relay 仍短暂返回 reusable grant，但后续 `open_call` 返回 `403 grant_not_active`、`grant_revoked`、`grant_missing_shared_secret` 等 stale 授权信号，caller 也必须将该错误归一化为“授权已过期/撤销，请重新连接”的用户文案，并同步移除本地 `remote-connections.json` 中对应记录。
+同时，caller 本地这条 stale 记录被同步移除后，后续 `disconnect` 或新的 pairing/connect 流程不会继续复用已经失效的 grant。
 
 ## 测试方案
 
@@ -30,6 +31,9 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
   - grant 没有本地 crypto 时返回 false
   - grant 与本地 crypto 匹配时返回 true
   - grant 与本地 crypto 的 ephemeral pub 不匹配时返回 false
+- `test_is_stale_remote_grant_error_detects_open_call_403`
+  - `open_call failed with status 403` 且 body 包含 `grant_not_active` / `grant_revoked` / `grant_missing_shared_secret` 时返回 true
+  - unrelated 403（例如 `grant_scope_mismatch`）不被归类为 stale grant
 
 ### E2E 测试
 
@@ -40,6 +44,7 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
 - 重启 target client 触发 SSE 重连和 active grant 同步
 - 断言旧 grant 被清理，caller 再次执行 `remote status` 时提示授权已失效/需要重新连接，而不是远端返回 `missing grant shared secret`
 - 断言 caller 本地 stale connection 也被清空；如果后续还要验证 `disconnect`，必须先重新建立一条 fresh grant，再制造 relay `grant_not_found` 场景
+- 紧接着重新建立 fresh grant，验证 `TC-RI-07B` 后续连接流程仍可正常发起，避免 stale 清理把 caller identity 或新 pairing 流程破坏
 
 ### 真实场景测试（human_tests）
 
@@ -47,6 +52,7 @@ Config error: missing grant shared secret for encrypted remote command; reconnec
 
 - `TC-RI-回归-131`：client 本地 grant crypto 丢失后，旧授权会在重连时自动收敛删除
 - 同一用例补充验证 caller 本地 stale connection 会被删除，`disconnect` 回归需基于 fresh reconnect 继续执行
+- 用例必须覆盖 `open_call` 阶段收到 `grant_not_active` 时的 fallback：CLI 输出包含 `expired` / `revoked` / `connect` 语义，不包含 `missing grant shared secret`
 
 同步更新 `human_tests/readme.md`。
 

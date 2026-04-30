@@ -86,7 +86,7 @@ choose_port() {
 wait_for_site() {
   for _ in $(seq 1 50); do
     if ! kill -0 "$SITE_PID" >/dev/null 2>&1; then
-      echo "Fixture http.server exited before becoming ready" >&2
+      echo "Fixture HTTP server exited before becoming ready" >&2
       sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
       return 1
     fi
@@ -96,7 +96,7 @@ wait_for_site() {
     sleep 0.2
   done
 
-  echo "Fixture http.server did not become ready on port $SITE_PORT" >&2
+  echo "Fixture HTTP server did not become ready on port $SITE_PORT" >&2
   sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
   return 1
 }
@@ -187,7 +187,7 @@ cleanup() {
   fi
   stop_owned_pid "bifrost" "${BIFROST_PID:-}" "${BIFROST_BIN:-bifrost}" "start" "-p $PROXY_PORT"
   stop_owned_pid "https fixture" "${HTTPS_SITE_PID:-}" "node" "https_fixture.mjs"
-  stop_owned_pid "http.server" "${SITE_PID:-}" "http.server" "$SITE_PORT" "$SITE_DIR"
+  stop_owned_pid "http fixture" "${SITE_PID:-}" "node" "http_fixture.mjs"
   if [ $rc -ne 0 ]; then
     echo "Preserving failed test root: $TEST_ROOT" >&2
     return
@@ -300,7 +300,74 @@ cat > "$SITE_DIR/sw-dynamic.js" <<'JS'
 window.__bifrostSwDynamicUrl = document.currentScript && document.currentScript.src;
 JS
 
-python3 -m http.server "$SITE_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >"$TEST_ROOT/site.log" 2>&1 &
+cat > "$TEST_ROOT/http_fixture.mjs" <<'NODEHTTP'
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const port = Number(process.env.HTTP_SITE_PORT);
+const siteDir = process.env.SITE_DIR;
+const requestLog = path.join(process.env.TEST_ROOT, 'http_requests.ndjson');
+
+function contentType(filePath) {
+  if (filePath.endsWith('.html')) return 'text/html; charset=utf-8';
+  if (filePath.endsWith('.js')) return 'application/javascript; charset=utf-8';
+  if (filePath.endsWith('.json')) return 'application/json; charset=utf-8';
+  if (filePath.endsWith('.css')) return 'text/css; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function resolveStaticPath(url) {
+  const parsed = new URL(url || '/', `http://127.0.0.1:${port}`);
+  const pathname = decodeURIComponent(parsed.pathname === '/' ? '/basic.html' : parsed.pathname);
+  const relative = pathname.replace(/^\/+/, '');
+  const resolved = path.resolve(siteDir, relative);
+  const siteRoot = path.resolve(siteDir);
+  if (resolved !== siteRoot && !resolved.startsWith(`${siteRoot}${path.sep}`)) {
+    return null;
+  }
+  return resolved;
+}
+
+const server = http.createServer((req, res) => {
+  fs.appendFileSync(requestLog, JSON.stringify({
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+  }) + '\n');
+
+  if (req.url?.startsWith('/devtools/api/')) {
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'x-bifrost-fixture-response': 'http-ok',
+    });
+    res.end(JSON.stringify({ ok: true, url: req.url }));
+    return;
+  }
+
+  const filePath = resolveStaticPath(req.url);
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    res.writeHead(404, {
+      'content-type': 'text/plain; charset=utf-8',
+      'x-bifrost-fixture-response': 'http-not-found',
+    });
+    res.end('not found');
+    return;
+  }
+
+  res.writeHead(200, {
+    'content-type': contentType(filePath),
+    'x-bifrost-fixture-response': 'http-static',
+  });
+  res.end(fs.readFileSync(filePath));
+});
+
+server.listen(port, '127.0.0.1', () => {
+  console.log(`http fixture listening on ${port}`);
+});
+NODEHTTP
+HTTP_SITE_PORT="$SITE_PORT" SITE_DIR="$SITE_DIR" TEST_ROOT="$TEST_ROOT" \
+  node "$TEST_ROOT/http_fixture.mjs" >"$TEST_ROOT/site.log" 2>&1 &
 SITE_PID=$!
 wait_for_site
 
@@ -1468,7 +1535,7 @@ const metaNetworkEvent = snapshot.network.find((entry) => entry.url.includes('/d
 if (!metaNetworkEvent) {
   throw new Error('AV-CDP-42 failed: browser-side Network metadata event missing');
 }
-if (metaNetworkEvent.status !== 404) {
+if (metaNetworkEvent.status !== 200) {
   throw new Error(`AV-CDP-42 failed: browser-side Network event should preserve status, got ${JSON.stringify(metaNetworkEvent)}`);
 }
 if (!metaNetworkEvent.query_params?.some(([key, value]) => key === 'foo' && value === 'bar')) {

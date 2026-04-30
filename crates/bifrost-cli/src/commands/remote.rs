@@ -860,11 +860,60 @@ fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
             && msg.contains("grant_scope_mismatch"))
 }
 
+fn is_stale_remote_grant_error(err: &BifrostError) -> bool {
+    let BifrostError::Network(msg) = err else {
+        return false;
+    };
+    if !(msg.contains("open_call failed with status 403")
+        || msg.contains("open_call error code")
+        || msg.contains("find_reusable_grant error code"))
+    {
+        return false;
+    }
+    msg.contains("grant_not_active")
+        || msg.contains("grant_revoked")
+        || msg.contains("grant_missing_shared_secret")
+        || msg.contains("grant_not_found")
+}
+
 fn is_stale_grant_crypto_error(result: &CallResult) -> bool {
     if let Some(ref stderr) = result.stderr {
         return stderr.contains("missing grant shared secret");
     }
     false
+}
+
+fn remove_matching_local_connection(
+    connections: &mut Vec<LocalConnection>,
+    stale: &LocalConnection,
+) -> bool {
+    let before = connections.len();
+    connections.retain(|c| {
+        !(c.client_instance_id == stale.client_instance_id && c.relay_url == stale.relay_url)
+    });
+    connections.len() != before
+}
+
+fn remove_stale_local_connection(
+    connections: &mut Vec<LocalConnection>,
+    stale: &LocalConnection,
+) -> bifrost_core::Result<bool> {
+    let removed = remove_matching_local_connection(connections, stale);
+    if removed {
+        save_connections(connections)?;
+    }
+    Ok(removed)
+}
+
+fn stale_remote_grant_error(conn: &LocalConnection) -> BifrostError {
+    let conn_label = if conn.device_name.is_empty() {
+        &conn.client_instance_id
+    } else {
+        &conn.device_name
+    };
+    BifrostError::Config(format!(
+        "authorization for '{conn_label}' expired or was revoked; local stale connection removed. Run `bifrost remote conn up <pair-code>` to re-connect."
+    ))
 }
 
 fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
@@ -1438,6 +1487,17 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             if command.kind == CommandKind::ShellExec && is_grant_scope_mismatch_error(&err) =>
         {
             return Err(shell_scope_upgrade_error(&conn));
+        }
+        Err(err) if is_stale_remote_grant_error(&err) => {
+            match remove_stale_local_connection(&mut connections, &conn) {
+                Ok(true) => eprintln!(
+                    "  {} Stale connection removed from local cache.",
+                    "→".bright_yellow()
+                ),
+                Ok(false) => {}
+                Err(error) => warn!(error = %error, "failed to remove stale connection"),
+            }
+            return Err(stale_remote_grant_error(&conn));
         }
         Err(err) => return Err(err),
     };
@@ -4753,6 +4813,27 @@ mod tests {
         bifrost_storage::set_data_dir(dir.path().to_path_buf());
     }
 
+    fn sample_local_connection(client_id: &str, relay_url: &str) -> LocalConnection {
+        LocalConnection {
+            client_instance_id: client_id.to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            relay_url: relay_url.to_string(),
+            grant_id: format!("grant-{client_id}"),
+            grant_mode: "permanent".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            connected_at: 1,
+            auth_method: Some("pair_code".to_string()),
+            ssh_key_fingerprint: None,
+            ssh_key_source: None,
+            device_code: None,
+            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+            caller_ephemeral_pub: Some("caller-epk".to_string()),
+            client_ephemeral_pub: Some("client-epk".to_string()),
+            shared_secret_encrypted: Some("secret".to_string()),
+        }
+    }
+
     #[test]
     fn test_random_caller_fingerprint_has_expected_shape() {
         let fingerprint = generate_random_caller_fingerprint().expect("generate caller id");
@@ -5853,6 +5934,66 @@ mod tests {
         );
 
         assert!(is_grant_scope_mismatch_error(&err));
+    }
+
+    #[test]
+    fn test_is_stale_remote_grant_error_detects_open_call_403() {
+        let stale_messages = [
+            "grant_not_active",
+            "grant_revoked",
+            "grant_missing_shared_secret",
+            "grant_not_found",
+        ];
+
+        for message in stale_messages {
+            let err = BifrostError::Network(format!(
+                "open_call failed with status 403 Forbidden: {{\"code\":-1,\"message\":\"{message}\"}}"
+            ));
+            assert!(
+                is_stale_remote_grant_error(&err),
+                "expected stale grant classification for {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_stale_remote_grant_error_rejects_scope_mismatch() {
+        let err = BifrostError::Network(
+            "open_call failed with status 403 Forbidden: {\"code\":403,\"message\":\"grant_scope_mismatch\",\"data\":null}".to_string(),
+        );
+
+        assert!(!is_stale_remote_grant_error(&err));
+    }
+
+    #[test]
+    fn test_remove_matching_local_connection_removes_only_same_client_and_relay() {
+        let stale = sample_local_connection("client-1", "https://relay-a");
+        let mut connections = vec![
+            stale.clone(),
+            sample_local_connection("client-1", "https://relay-b"),
+            sample_local_connection("client-2", "https://relay-a"),
+        ];
+
+        assert!(remove_matching_local_connection(&mut connections, &stale));
+
+        assert_eq!(connections.len(), 2);
+        assert!(connections.iter().any(
+            |conn| conn.client_instance_id == "client-1" && conn.relay_url == "https://relay-b"
+        ));
+        assert!(connections.iter().any(
+            |conn| conn.client_instance_id == "client-2" && conn.relay_url == "https://relay-a"
+        ));
+    }
+
+    #[test]
+    fn test_stale_remote_grant_error_is_actionable_without_shared_secret_text() {
+        let conn = sample_local_connection("client-1", "https://relay-a");
+
+        let message = stale_remote_grant_error(&conn).to_string();
+
+        assert!(message.contains("expired") || message.contains("revoked"));
+        assert!(message.contains("re-connect"));
+        assert!(!message.contains("missing grant shared secret"));
     }
 
     #[test]

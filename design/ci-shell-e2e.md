@@ -15,6 +15,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - `--list-shell-tests` 只打印当前 mode/shard 下会被收集的 shell 脚本并退出，用于验证调度结果，不会构建、启动 Bifrost 或修改系统代理配置。
 - GitHub Actions E2E 日志路径使用隐藏目录 `.e2e-reports/` 与 `.bifrost-e2e-ci/`；上传失败日志 artifact 时必须设置 `include-hidden-files: true`，否则 action 会跳过这些路径并导致失败后无 artifact 可查。
 - `scripts/run_all_e2e.sh` 的失败原因提取优先匹配真实断言、Playwright/JS 错误和 panic；cleanup 尾巴（例如 `Preserving failed test root`）只作为日志上下文，不能作为最终失败原因。
+- `test_cli_offline_commands_e2e.sh` 的 help 文案断言必须使用扩展正则（`grep -E`）或多个 `-e` 模式表达 alternation；禁止在默认 BRE 模式下使用 `\|`，否则 Linux shard 可能把实际存在的 `rename` / `NEW_NAME` 文案误判为缺失。
 
 ## 依赖项
 
@@ -34,11 +35,12 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - 运行 `bash scripts/run_all_e2e.sh --full-shell --list-shell-tests`，断言本地 full-shell 仍可收集 `test_system_proxy_e2e.sh`。
 - 运行 `BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 bash scripts/ci/run-e2e-shell.sh`，覆盖 shard 3 并行 shell 包装与 DevTools page bridge 用例。
 - 静态检查 `.github/workflows/ci.yml` 中所有上传 `.e2e-reports/` / `.bifrost-e2e-ci/` 的 E2E artifact 步骤均包含 `include-hidden-files: true`。
+- 运行 `bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，断言 `rule rename --help`、`rule reorder --help`、`script rename --help` 与其它 help 关键字匹配全部通过，最终汇总为 `105/105` PASS。
 
 ### 真实场景测试
 
-- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取和 shard 3 shell 包装回归。
-- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖。
+- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归，以及 CLI offline help alternation 回归。
+- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判。
 
 ## 校验要求
 
