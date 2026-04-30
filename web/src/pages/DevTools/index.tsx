@@ -8,9 +8,10 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Empty, Input, Space, Tabs, Tag, Tooltip, Typography, message } from "antd";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Button, Empty, Input, Space, Tabs, Tag, Tooltip, Typography, message, theme } from "antd";
+import { useNavigate, useParams } from "react-router-dom";
+import { getRequestBody, getResponseBody, getTrafficDetail } from "../../api/traffic";
 import {
   buildDevtoolsSessionWsUrl,
   findTrafficForDevtoolsRequest,
@@ -24,7 +25,9 @@ import {
   type DebugSession,
   type DevtoolsSnapshot,
 } from "../../api/devtools";
+import type { TrafficRecord } from "../../types";
 import { useTrafficStore } from "../../stores/useTrafficStore";
+import TrafficDetail from "../../components/TrafficDetail";
 import { ConsoleView, consoleValueFromRuntimeResult, type ConsoleUiEntry } from "./components/ConsolePanel";
 import { DomTree, collectDefaultExpandedDomKeys, findFirstDomSearchMatch } from "./components/ElementsPanel";
 import { NetworkList } from "./components/NetworkPanel";
@@ -36,6 +39,8 @@ const { Text, Title } = Typography;
 
 export default function DevTools() {
   const navigate = useNavigate();
+  const { pageId: routePageId } = useParams<{ pageId?: string }>();
+  const { token } = theme.useToken();
   const setTrafficSelectedId = useTrafficStore((state) => state.setSelectedId);
   const [pages, setPages] = useState<DebugPage[]>([]);
   const [query, setQuery] = useState("");
@@ -57,6 +62,43 @@ export default function DevTools() {
   const [activeToolTab, setActiveToolTab] = useState("elements");
   const [panelSearch, setPanelSearch] = useState("");
   const [urlCopyVisible, setUrlCopyVisible] = useState(false);
+  const [networkTrafficId, setNetworkTrafficId] = useState<string | null>(null);
+  const [networkRecord, setNetworkRecord] = useState<TrafficRecord | null>(null);
+  const [networkRequestBody, setNetworkRequestBody] = useState<string | null>(null);
+  const [networkResponseBody, setNetworkResponseBody] = useState<string | null>(null);
+  const [networkDetailLoading, setNetworkDetailLoading] = useState(false);
+  const [networkDetailError, setNetworkDetailError] = useState<string | null>(null);
+  const [networkDetailEvent, setNetworkDetailEvent] = useState<DebugNetworkEvent | null>(null);
+  const networkDetailRequestRef = useRef(0);
+  const devtoolsThemeVars = useMemo(
+    () => ({
+      "--devtools-bg": token.colorBgLayout,
+      "--devtools-surface": token.colorBgContainer,
+      "--devtools-surface-alt": token.colorFillQuaternary,
+      "--devtools-surface-elevated": token.colorBgElevated,
+      "--devtools-border": token.colorBorderSecondary,
+      "--devtools-border-strong": token.colorBorder,
+      "--devtools-text": token.colorText,
+      "--devtools-text-secondary": token.colorTextSecondary,
+      "--devtools-text-tertiary": token.colorTextTertiary,
+      "--devtools-selected-bg": token.colorPrimaryBg,
+      "--devtools-selected-border": token.colorPrimaryBorder,
+      "--devtools-search-bg": token.colorWarningBg,
+      "--devtools-search-border": token.colorWarningBorder,
+      "--devtools-code-tag": token.colorPrimaryText,
+      "--devtools-code-attr": token.colorWarningText,
+      "--devtools-code-string": token.colorErrorText,
+      "--devtools-code-number": token.colorInfoText,
+      "--devtools-code-boolean": token.colorPrimaryText,
+      "--devtools-console-input-bg": token.colorFillQuaternary,
+      "--devtools-console-error-bg": token.colorErrorBg,
+      "--devtools-console-warning-bg": token.colorWarningBg,
+      "--devtools-console-debug-bg": token.colorPrimaryBg,
+      "--devtools-console-result-bg": token.colorSuccessBg,
+      "--devtools-shadow": token.boxShadowTertiary,
+    }) as CSSProperties,
+    [token],
+  );
 
   const refreshPages = useCallback(async () => {
     const next = await listDevtoolsPages(true);
@@ -108,6 +150,9 @@ export default function DevTools() {
         if (liveMessage.type === "snapshot") {
           setSnapshot((previous) => mergeSnapshot(previous, liveMessage.snapshot));
           if (liveMessage.snapshot.page?.page_id) {
+            if (routePageId && routePageId !== liveMessage.snapshot.page.page_id) {
+              navigate(`/devtools/${encodeURIComponent(liveMessage.snapshot.page.page_id)}`, { replace: true });
+            }
             setSelectedPageId((current) => (current === null ? current : liveMessage.snapshot.page.page_id));
             setSession((current) =>
               current && current.session_id === sessionId && current.page_id !== liveMessage.snapshot.page.page_id
@@ -150,7 +195,7 @@ export default function DevTools() {
       );
     };
     return () => socket.close();
-  }, [requestCurrentTabRefresh, session?.session_id]);
+  }, [navigate, requestCurrentTabRefresh, routePageId, session?.session_id]);
 
   useEffect(() => {
     if (!session) return;
@@ -195,12 +240,25 @@ export default function DevTools() {
     });
   }, [activeToolTab, panelSearch, snapshot?.dom_tree]);
 
-  const openPage = async (page: DebugPage) => {
+  const resetDetailState = () => {
+    setSelectedPageId(null);
+    setSession(null);
+    setSnapshot(null);
+    setSelectedNodeId(null);
+    setExpandedDomKeys(new Set());
+    clearNetworkDetail();
+  };
+
+  const openPage = async (page: DebugPage, options: { replaceRoute?: boolean; updateRoute?: boolean } = {}) => {
+    if (options.updateRoute !== false) {
+      navigate(`/devtools/${encodeURIComponent(page.page_id)}`, { replace: Boolean(options.replaceRoute) });
+    }
     setSelectedPageId(page.page_id);
     setSnapshot(null);
     setConsoleEntries([]);
     setSelectedNodeId(null);
     setExpandedDomKeys(new Set());
+    clearNetworkDetail();
     setActiveToolTab("elements");
     setPanelSearch("");
     setLoading(true);
@@ -214,6 +272,18 @@ export default function DevTools() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!routePageId) {
+      if (selectedPageId) resetDetailState();
+      return;
+    }
+    if (selectedPageId === routePageId || loading) return;
+    const page = pages.find((item) => item.page_id === routePageId);
+    if (page) {
+      void openPage(page, { replaceRoute: true, updateRoute: false });
+    }
+  }, [loading, pages, routePageId, selectedPageId]);
 
   const runConsoleExpression = async () => {
     if (!session) return;
@@ -332,26 +402,90 @@ export default function DevTools() {
     }
   };
 
+  const clearNetworkDetail = () => {
+    networkDetailRequestRef.current += 1;
+    setNetworkTrafficId(null);
+    setNetworkRecord(null);
+    setNetworkRequestBody(null);
+    setNetworkResponseBody(null);
+    setNetworkDetailError(null);
+    setNetworkDetailEvent(null);
+    setNetworkDetailLoading(false);
+  };
+
   const openTrafficRecord = () => {
     if (!selectedTrafficId) return;
     setTrafficSelectedId(selectedTrafficId);
     navigate("/traffic");
   };
 
+  const openNetworkTrafficById = async (trafficId: string) => {
+    const requestId = networkDetailRequestRef.current + 1;
+    networkDetailRequestRef.current = requestId;
+    setNetworkTrafficId(trafficId);
+    setNetworkRecord(null);
+    setNetworkRequestBody(null);
+    setNetworkResponseBody(null);
+    setNetworkDetailError(null);
+    setNetworkDetailLoading(true);
+    try {
+      const record = await getTrafficDetail(trafficId);
+      if (networkDetailRequestRef.current !== requestId) return;
+      setNetworkRecord(record);
+      const [requestResult, responseResult] = await Promise.allSettled([
+        getRequestBody(trafficId),
+        getResponseBody(trafficId),
+      ]);
+      if (networkDetailRequestRef.current !== requestId) return;
+      setNetworkRequestBody(requestResult.status === "fulfilled" ? requestResult.value : null);
+      setNetworkResponseBody(responseResult.status === "fulfilled" ? responseResult.value : null);
+    } catch (error) {
+      if (networkDetailRequestRef.current !== requestId) return;
+      const errorText =
+        error instanceof Error
+          ? error.message
+          : "Traffic detail not found. It may have been deleted or captured only as a CONNECT tunnel.";
+      setNetworkDetailError(errorText);
+      message.warning(errorText);
+    } finally {
+      if (networkDetailRequestRef.current === requestId) {
+        setNetworkDetailLoading(false);
+      }
+    }
+  };
+
   const openNetworkTrafficRecord = async (event: DebugNetworkEvent) => {
-    const trafficId =
-      event.traffic_id || (event.client_req_id ? await findTrafficForDevtoolsRequest(event.client_req_id) : null);
-    if (!trafficId) {
-      message.warning("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+    setNetworkDetailEvent(event);
+    let trafficId: string | null = null;
+    try {
+      trafficId =
+        event.traffic_id || (event.client_req_id ? await findTrafficForDevtoolsRequest(event.client_req_id) : null);
+    } catch (error) {
+      setNetworkTrafficId(null);
+      setNetworkRecord(null);
+      setNetworkRequestBody(null);
+      setNetworkResponseBody(null);
+      setNetworkDetailError(
+        error instanceof Error
+          ? error.message
+          : "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
+      );
       return;
     }
-    setTrafficSelectedId(trafficId);
-    navigate("/traffic");
+    if (!trafficId) {
+      setNetworkTrafficId(null);
+      setNetworkRecord(null);
+      setNetworkRequestBody(null);
+      setNetworkResponseBody(null);
+      setNetworkDetailError("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+      return;
+    }
+    await openNetworkTrafficById(trafficId);
   };
 
   if (!selectedPage) {
     return (
-      <div style={pageShellStyle}>
+      <div style={{ ...pageShellStyle, ...devtoolsThemeVars }}>
         <Space direction="vertical" size={16} style={{ width: "100%", minHeight: 0 }}>
           <div style={listHeaderStyle}>
             <Space direction="vertical" size={4} style={{ minWidth: 0 }}>
@@ -412,7 +546,7 @@ export default function DevTools() {
   }
 
   return (
-    <div data-testid="devtools-detail" style={detailShellStyle}>
+    <div data-testid="devtools-detail" style={{ ...detailShellStyle, ...devtoolsThemeVars }}>
       <div
         style={{
           ...detailContentStyle,
@@ -427,11 +561,8 @@ export default function DevTools() {
             data-testid="devtools-back"
             icon={<ArrowLeftOutlined />}
             onClick={() => {
-              setSelectedPageId(null);
-              setSession(null);
-              setSnapshot(null);
-              setSelectedNodeId(null);
-              setExpandedDomKeys(new Set());
+              resetDetailState();
+              navigate("/devtools");
             }}
           >
             Back
@@ -555,7 +686,10 @@ export default function DevTools() {
               key: "network",
               label: <TabLabel icon={<GlobalOutlined />} text="Network" />,
               children: (
-                <section data-testid="devtools-network-panel" style={panelStyle}>
+                <section
+                  data-testid="devtools-network-panel"
+                  style={networkDetailEvent || networkTrafficId || networkDetailLoading || networkDetailError ? networkPanelStyle : panelStyle}
+                >
                   <NetworkList
                     events={snapshot?.network ?? []}
                     searchQuery={panelSearch}
@@ -569,6 +703,24 @@ export default function DevTools() {
                       });
                     }}
                   />
+                  {networkDetailEvent || networkTrafficId || networkDetailLoading || networkDetailError ? (
+                    <div data-testid="devtools-network-detail" style={networkDetailStyle}>
+                      {networkRecord || networkDetailLoading ? (
+                        <TrafficDetail
+                          record={networkRecord}
+                          requestBody={networkRequestBody}
+                          responseBody={networkResponseBody}
+                          loading={networkDetailLoading}
+                          error={networkDetailError}
+                          onSelectById={(id) => {
+                            void openNetworkTrafficById(id);
+                          }}
+                        />
+                      ) : (
+                        <NetworkEventDetail event={networkDetailEvent} warning={networkDetailError} />
+                      )}
+                    </div>
+                  ) : null}
                 </section>
               ),
             },
@@ -722,6 +874,100 @@ function TabLabel({ icon, text }: { icon: ReactNode; text: string }) {
   );
 }
 
+function NetworkEventDetail({
+  event,
+  warning,
+}: {
+  event: DebugNetworkEvent | null;
+  warning?: string | null;
+}) {
+  if (!event) {
+    return (
+      <div style={networkEventDetailEmptyStyle}>
+        <Empty description="Select a network request" />
+      </div>
+    );
+  }
+  const parsed = parseNetworkEventUrl(event.url);
+  const rows: Array<[string, string]> = [
+    ["URL", event.url || "-"],
+    ["Method", event.method || "-"],
+    ["Status", event.status == null ? "-" : String(event.status)],
+    ["Type", event.resource_type || "-"],
+    ["From Cache", event.from_cache == null ? "-" : event.from_cache ? "yes" : "no"],
+    ["Host", parsed.host],
+    ["Path", parsed.path],
+    ["Protocol", parsed.protocol],
+    ["Client Request ID", event.client_req_id || "-"],
+    ["Traffic ID", event.traffic_id || "-"],
+    ["Traffic Match", warning || "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel."],
+    ["Time", formatNetworkEventTime(event.at_ms)],
+  ];
+  return (
+    <div style={networkEventDetailShellStyle}>
+      <div style={networkEventDetailHeaderStyle}>
+        <Text strong>Network Detail</Text>
+        <Tag>{event.method || "GET"}</Tag>
+      </div>
+      {warning ? <Alert type="warning" showIcon message={warning} style={{ marginBottom: 10 }} /> : null}
+      <div data-testid="devtools-network-fallback-detail" style={networkEventDetailGridStyle}>
+        {rows.map(([label, value]) => (
+          <div key={label} style={networkEventDetailRowStyle}>
+            <Text type="secondary" style={networkEventDetailLabelStyle}>{label}</Text>
+            <Text copyable={label === "URL" || label === "Client Request ID"} style={networkEventDetailValueStyle}>
+              {value}
+            </Text>
+          </div>
+        ))}
+      </div>
+      <NetworkPairSection title="Query" pairs={event.query_params} />
+      <NetworkPairSection title="Request Headers" pairs={event.request_headers} />
+      <NetworkPairSection title="Response Headers" pairs={event.response_headers} />
+    </div>
+  );
+}
+
+function NetworkPairSection({ title, pairs }: { title: string; pairs?: Array<[string, string]> }) {
+  const visiblePairs = pairs?.filter(([key]) => key) ?? [];
+  return (
+    <div data-testid={`devtools-network-${title.toLowerCase().replace(/\s+/g, "-")}`} style={networkPairSectionStyle}>
+      <Text strong>{title}</Text>
+      {visiblePairs.length ? (
+        <div style={networkPairGridStyle}>
+          {visiblePairs.map(([key, value], index) => (
+            <div key={`${key}-${index}`} style={networkPairRowStyle}>
+              <Text code style={networkPairNameStyle}>{key}</Text>
+              <Text copyable style={networkPairValueStyle}>{value}</Text>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Text type="secondary">No captured {title.toLowerCase()}</Text>
+      )}
+    </div>
+  );
+}
+
+function parseNetworkEventUrl(url: string): { host: string; path: string; protocol: string } {
+  try {
+    const parsed = new URL(url);
+    return {
+      host: parsed.host || "-",
+      path: `${parsed.pathname || "/"}${parsed.search || ""}`,
+      protocol: parsed.protocol.replace(":", "") || "-",
+    };
+  } catch {
+    return { host: "-", path: url || "-", protocol: "-" };
+  }
+}
+
+function formatNetworkEventTime(atMs: number): string {
+  if (!Number.isFinite(atMs) || atMs <= 0) return "-";
+  const date = new Date(atMs);
+  const pad = (value: number, size = 2) => String(value).padStart(size, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
+
 function runtimeExceptionText(result: unknown): string | null {
   if (!result || typeof result !== "object") return null;
   const payload = result as {
@@ -782,7 +1028,8 @@ const pageShellStyle: CSSProperties = {
   minHeight: 0,
   padding: 20,
   overflow: "auto",
-  background: "#f7f9fc",
+  background: "var(--devtools-bg)",
+  color: "var(--devtools-text)",
 };
 
 const detailShellStyle: CSSProperties = {
@@ -790,7 +1037,8 @@ const detailShellStyle: CSSProperties = {
   minHeight: 0,
   padding: "10px 20px 12px",
   overflow: "hidden",
-  background: "#f7f9fc",
+  background: "var(--devtools-bg)",
+  color: "var(--devtools-text)",
 };
 
 const detailContentStyle: CSSProperties = {
@@ -821,13 +1069,13 @@ const pageCardStyle: CSSProperties = {
   width: "100%",
   minHeight: 136,
   padding: 16,
-  border: "1px solid #d9e2ef",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 8,
-  background: "#fff",
-  color: "inherit",
+  background: "var(--devtools-surface)",
+  color: "var(--devtools-text)",
   textAlign: "left",
   cursor: "pointer",
-  boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
+  boxShadow: "var(--devtools-shadow)",
 };
 
 const emptyListStyle: CSSProperties = {
@@ -876,8 +1124,8 @@ const workspaceStyle: CSSProperties = {
   height: "100%",
   minHeight: 0,
   minWidth: 0,
-  background: "#fff",
-  border: "1px solid #d9e2ef",
+  background: "var(--devtools-surface)",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 8,
   padding: "0 12px 12px",
 };
@@ -895,9 +1143,107 @@ const panelStyle: CSSProperties = {
   overflow: "auto",
 };
 
+const networkPanelStyle: CSSProperties = {
+  height: "100%",
+  minHeight: 0,
+  minWidth: 0,
+  display: "grid",
+  gridTemplateColumns: "minmax(360px, 1fr) minmax(380px, 44%)",
+  gap: 10,
+};
 
+const networkDetailStyle: CSSProperties = {
+  minHeight: 0,
+  minWidth: 0,
+  overflow: "hidden",
+  border: "1px solid var(--devtools-border)",
+  borderRadius: 8,
+  background: "var(--devtools-surface)",
+};
 
+const networkEventDetailEmptyStyle: CSSProperties = {
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
 
+const networkEventDetailShellStyle: CSSProperties = {
+  height: "100%",
+  minHeight: 0,
+  overflow: "auto",
+  padding: 12,
+};
 
+const networkEventDetailHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  marginBottom: 10,
+};
 
+const networkEventDetailGridStyle: CSSProperties = {
+  display: "grid",
+  gap: 0,
+  border: "1px solid var(--devtools-border)",
+  borderRadius: 6,
+  overflow: "hidden",
+};
 
+const networkEventDetailRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "132px minmax(0, 1fr)",
+  gap: 10,
+  padding: "8px 10px",
+  borderBottom: "1px solid var(--devtools-border)",
+  minWidth: 0,
+};
+
+const networkEventDetailLabelStyle: CSSProperties = {
+  fontSize: 12,
+};
+
+const networkEventDetailValueStyle: CSSProperties = {
+  minWidth: 0,
+  fontSize: 12,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  wordBreak: "break-all",
+};
+
+const networkPairSectionStyle: CSSProperties = {
+  marginTop: 12,
+  display: "grid",
+  gap: 8,
+};
+
+const networkPairGridStyle: CSSProperties = {
+  display: "grid",
+  border: "1px solid var(--devtools-border)",
+  borderRadius: 6,
+  overflow: "hidden",
+};
+
+const networkPairRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(120px, 34%) minmax(0, 1fr)",
+  gap: 10,
+  padding: "7px 10px",
+  borderBottom: "1px solid var(--devtools-border)",
+  minWidth: 0,
+};
+
+const networkPairNameStyle: CSSProperties = {
+  minWidth: 0,
+  fontSize: 12,
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+};
+
+const networkPairValueStyle: CSSProperties = {
+  minWidth: 0,
+  fontSize: 12,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+};

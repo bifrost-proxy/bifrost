@@ -93,7 +93,7 @@ function renderDomNode(
       <div
         style={{
           ...domLineStyle,
-          background: selected ? "#dbeafe" : matched ? "#fff7d6" : "transparent",
+          background: selected ? "var(--devtools-selected-bg)" : matched ? "var(--devtools-search-bg)" : "transparent",
         }}
       >
         <button
@@ -131,7 +131,7 @@ function renderDomNode(
             }}
             style={{
               ...domNodeButtonStyle,
-              borderColor: selected ? "#60a5fa" : "transparent",
+              borderColor: selected ? "var(--devtools-selected-border)" : "transparent",
             }}
           >
             <DomNodePreview node={node} expanded={expanded} searchQuery={searchQuery} onShowDetail={onShowDetail} />
@@ -374,8 +374,9 @@ const treePaneStyle: CSSProperties = {
   minHeight: 0,
   overflow: "auto",
   padding: 8,
-  background: "#fff",
-  border: "1px solid #d9e2ef",
+  background: "var(--devtools-surface)",
+  border: "1px solid var(--devtools-border)",
+  color: "var(--devtools-text)",
   borderRadius: 6,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   fontSize: 12,
@@ -411,7 +412,7 @@ const domDisclosureStyle: CSSProperties = {
   padding: 0,
   border: 0,
   background: "transparent",
-  color: "#6b7280",
+  color: "var(--devtools-text-secondary)",
   cursor: "pointer",
   fontSize: 10,
 };
@@ -451,32 +452,32 @@ const domPreviewStyle: CSSProperties = {
 };
 
 const domTagStyle: CSSProperties = {
-  color: "#881280",
+  color: "var(--devtools-code-tag)",
 };
 
 const domAttrNameStyle: CSSProperties = {
-  color: "#994500",
+  color: "var(--devtools-code-attr)",
 };
 
 const domAttrValueStyle: CSSProperties = {
-  color: "#1a1aa6",
+  color: "var(--devtools-code-number)",
 };
 
 const domTextNodeStyle: CSSProperties = {
-  color: "#111827",
+  color: "var(--devtools-text)",
   whiteSpace: "normal",
   overflowWrap: "anywhere",
   wordBreak: "break-word",
 };
 
 const domMutedStyle: CSSProperties = {
-  color: "#6b7280",
+  color: "var(--devtools-text-secondary)",
 };
 
 const domClosingTagStyle: CSSProperties = {
   minHeight: 21,
   paddingLeft: 20,
-  color: "#111827",
+  color: "var(--devtools-text)",
   whiteSpace: "normal",
   overflowWrap: "anywhere",
 };
@@ -484,9 +485,10 @@ const domClosingTagStyle: CSSProperties = {
 const codeBlockStyle: CSSProperties = {
   margin: 0,
   padding: 12,
-  border: "1px solid #d9e2ef",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 6,
-  background: "#f8fafc",
+  background: "var(--devtools-surface-alt)",
+  color: "var(--devtools-text)",
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
 };
@@ -496,10 +498,10 @@ const detailTriggerStyle: CSSProperties = {
   WebkitAppearance: "none",
   marginLeft: 6,
   padding: "0 4px",
-  border: "1px solid #cbd5e1",
+  border: "1px solid var(--devtools-border-strong)",
   borderRadius: 3,
-  background: "#f8fafc",
-  color: "#64748b",
+  background: "var(--devtools-surface-alt)",
+  color: "var(--devtools-text-secondary)",
   fontSize: 10,
   lineHeight: "16px",
   cursor: "pointer",
@@ -510,9 +512,10 @@ const detailValueStyle: CSSProperties = {
   margin: 0,
   padding: 12,
   overflow: "auto",
-  border: "1px solid #d9e2ef",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 6,
-  background: "#f8fafc",
+  background: "var(--devtools-surface-alt)",
+  color: "var(--devtools-text)",
   whiteSpace: "pre-wrap",
   overflowWrap: "anywhere",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",

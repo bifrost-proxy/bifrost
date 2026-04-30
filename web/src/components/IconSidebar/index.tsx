@@ -122,6 +122,7 @@ export default function IconSidebar() {
       })}
       <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"} placement="right">
         <div
+          data-testid="theme-toggle"
           style={{
             marginTop: "auto",
             marginBottom: 8,

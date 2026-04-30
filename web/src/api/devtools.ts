@@ -73,6 +73,10 @@ export interface DebugNetworkEvent {
   at_ms: number;
   client_req_id?: string | null;
   traffic_id?: string | null;
+  query_params?: Array<[string, string]>;
+  request_headers?: Array<[string, string]>;
+  response_headers?: Array<[string, string]>;
+  from_cache?: boolean | null;
 }
 
 export interface DebugStorageSnapshot {

@@ -129,6 +129,14 @@ pub struct NetworkEvent {
     pub status: Option<u16>,
     pub resource_type: String,
     pub at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub query_params: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_headers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_headers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_cache: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_req_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +242,14 @@ pub struct NetworkEventInput {
     pub resource_type: Option<String>,
     #[serde(default)]
     pub client_req_id: Option<String>,
+    #[serde(default)]
+    pub query_params: Vec<(String, String)>,
+    #[serde(default)]
+    pub request_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub response_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub from_cache: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1140,6 +1156,10 @@ fn network_event_from_input(
         status: event.status,
         resource_type: event.resource_type.unwrap_or_else(|| "Other".to_string()),
         at_ms: now_ms(),
+        query_params: event.query_params,
+        request_headers: event.request_headers,
+        response_headers: event.response_headers,
+        from_cache: event.from_cache,
         client_req_id,
         traffic_id,
     })

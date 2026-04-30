@@ -29,7 +29,18 @@ export function NetworkList({
   const filteredEvents = useMemo(
     () =>
       filterBySearch(events, searchQuery, (event) =>
-        [event.method, event.status, event.resource_type, event.url, event.traffic_id, event.client_req_id].join(" "),
+        [
+          event.method,
+          event.status,
+          event.resource_type,
+          event.url,
+          event.traffic_id,
+          event.client_req_id,
+          event.from_cache ? "from cache" : "",
+          ...(event.query_params ?? []).flat(),
+          ...(event.request_headers ?? []).flat(),
+          ...(event.response_headers ?? []).flat(),
+        ].join(" "),
       ).slice().reverse(),
     [events, searchQuery],
   );

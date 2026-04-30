@@ -332,6 +332,7 @@ export default function AppLayout() {
             );
           })}
           <div
+            data-testid="theme-toggle"
             style={{
               marginTop: "auto",
               marginBottom: 8,

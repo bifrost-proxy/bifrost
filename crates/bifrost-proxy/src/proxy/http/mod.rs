@@ -1,3 +1,4 @@
+mod devtools;
 pub mod handler;
 mod tunnel;
 mod websocket;

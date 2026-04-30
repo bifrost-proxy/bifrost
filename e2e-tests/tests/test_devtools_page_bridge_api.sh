@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${BIFROST_DEVTOOLS_E2E_DEBUG:-false}" = "true" ]; then
+  PS4='+ [${BASH_SOURCE[0]##*/}:${LINENO}] '
+  set -x
+fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -14,44 +18,175 @@ s.close()
 PY
 }
 
-TEST_ROOT="$(mktemp -d -t bifrost-devtools-e2e.XXXXXX)"
+is_port_available() {
+  local port="$1"
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sys.exit(1)
+PY
+}
+
+choose_port() {
+  local name="$1"
+  local requested="${2:-}"
+
+  if [ -n "$requested" ]; then
+    if ! [[ "$requested" =~ ^[0-9]+$ ]]; then
+      echo "$name must be numeric, got: $requested" >&2
+      exit 1
+    fi
+    if [ "$requested" = "9900" ]; then
+      echo "Refusing to use reserved port 9900 for $name" >&2
+      exit 1
+    fi
+    if ! is_port_available "$requested"; then
+      echo "$name=$requested is already in use" >&2
+      exit 1
+    fi
+    printf '%s\n' "$requested"
+    return
+  fi
+
+  local candidate
+  for _ in $(seq 1 50); do
+    candidate="$(pick_port)"
+    if [ "$candidate" != "9900" ] && is_port_available "$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  echo "Failed to allocate a free non-9900 port for $name" >&2
+  exit 1
+}
+
+wait_for_site() {
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$SITE_PID" >/dev/null 2>&1; then
+      echo "Fixture http.server exited before becoming ready" >&2
+      sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
+      return 1
+    fi
+    if curl --noproxy "*" -fsS "http://127.0.0.1:$SITE_PORT/basic.html" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "Fixture http.server did not become ready on port $SITE_PORT" >&2
+  sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
+  return 1
+}
+
+pid_command_contains() {
+  local pid="$1"
+  shift
+  local command
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [ -n "$command" ] || return 1
+  local needle
+  for needle in "$@"; do
+    case "$command" in
+      *"$needle"*) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+stop_owned_pid() {
+  local name="$1"
+  local pid="$2"
+  shift 2
+
+  [ -n "$pid" ] || return 0
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! pid_command_contains "$pid" "$@"; then
+    echo "Refusing to stop $name pid $pid because it no longer matches the expected command" >&2
+    ps -p "$pid" -o pid,ppid,pgid,stat,command >&2 || true
+    return 0
+  fi
+
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+}
+
+TEST_ROOT="${TEST_ROOT:-}"
+if [ -z "$TEST_ROOT" ]; then
+  TEST_ROOT="$(mktemp -d -t bifrost-devtools-e2e.XXXXXX)"
+fi
 SITE_DIR="$TEST_ROOT/site"
 mkdir -p "$SITE_DIR"
 
-PROXY_PORT="$(pick_port)"
-SITE_PORT="$(pick_port)"
-if [ "$PROXY_PORT" = "9900" ] || [ "$SITE_PORT" = "9900" ]; then
-  echo "Refusing to use reserved port 9900" >&2
+PROXY_PORT="$(choose_port PROXY_PORT "${PROXY_PORT:-}")"
+SITE_PORT="$(choose_port SITE_PORT "${SITE_PORT:-}")"
+if [ "$PROXY_PORT" = "$SITE_PORT" ]; then
+  echo "PROXY_PORT and SITE_PORT must be different, got $PROXY_PORT" >&2
   exit 1
 fi
 
 cleanup() {
   local rc=$?
+  if [ "${BIFROST_DEVTOOLS_E2E_DEBUG:-false}" = "true" ]; then
+    echo "[devtools-page-bridge-e2e] cleanup rc=$rc line=${BASH_LINENO[0]:-unknown} bifrost_pid=${BIFROST_PID:-} site_pid=${SITE_PID:-}" >&2
+    if [ -n "${SITE_PID:-}" ]; then
+      ps -p "$SITE_PID" -o pid,ppid,pgid,stat,command >&2 || true
+    fi
+  fi
   if [ $rc -ne 0 ]; then
     echo "--- bifrost.log ---" >&2
     sed -n '1,260p' "$TEST_ROOT/bifrost.log" >&2 || true
     echo "--- site.log ---" >&2
     sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
   fi
-  if [ -n "${BIFROST_PID:-}" ]; then
-    kill "$BIFROST_PID" >/dev/null 2>&1 || true
+  stop_owned_pid "bifrost" "${BIFROST_PID:-}" "${BIFROST_BIN:-bifrost}" "start" "-p $PROXY_PORT"
+  stop_owned_pid "http.server" "${SITE_PID:-}" "http.server" "$SITE_PORT" "$SITE_DIR"
+  if [ $rc -ne 0 ]; then
+    echo "Preserving failed test root: $TEST_ROOT" >&2
+    return
   fi
-  if [ -n "${SITE_PID:-}" ]; then
-    kill "$SITE_PID" >/dev/null 2>&1 || true
-  fi
-  sleep 0.5
   rm -rf "$TEST_ROOT" 2>/dev/null || {
     sleep 1
     rm -rf "$TEST_ROOT" 2>/dev/null || true
   }
 }
+handle_signal() {
+  local signal="$1"
+  local rc="$2"
+  echo "[devtools-page-bridge-e2e] received $signal, exiting with $rc" >&2
+  exit "$rc"
+}
 trap cleanup EXIT
+trap 'handle_signal TERM 143' TERM
+trap 'handle_signal INT 130' INT
+if [ "${BIFROST_DEVTOOLS_E2E_DEBUG:-false}" = "true" ]; then
+  trap 'echo "[devtools-page-bridge-e2e] ERR line=$LINENO status=$?" >&2' ERR
+fi
 
 printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Basic</title><script>document.cookie="bifrost-cookie-key=cookie-ready; path=/"; localStorage.setItem("bifrost-storage-key","storage-ready"); sessionStorage.setItem("bifrost-session-key","session-ready"); console.log("bifrost-devtools-basic-ready"); console.warn("bifrost-devtools-warning-ready"); console.log("bifrost-console-object-ready", {pageId:"basic", nested:{answer:42}, items:["alpha","beta"]});</script></head><body><div id="debug-fixture" data-case="basic" style="color: rgb(11, 22, 33); display: block;">ready</div><script>fetch("/devtools/api/ping?case=basic").catch(function(){})</script></body></html>' > "$SITE_DIR/basic.html"
 printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Secondary</title><script>console.log("bifrost-devtools-secondary-ready")</script></head><body><main id="debug-fixture-secondary" data-case="secondary">secondary</main></body></html>' > "$SITE_DIR/secondary.html"
 
 python3 -m http.server "$SITE_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >"$TEST_ROOT/site.log" 2>&1 &
 SITE_PID=$!
+wait_for_site
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 if [ ! -x "$BIFROST_BIN" ] && [ -f "${BIFROST_BIN}.exe" ]; then
@@ -870,6 +1005,9 @@ const session = await api('/devtools/sessions', {
   method: 'POST',
   body: JSON.stringify({ page_id: activeDebugPage.page_id }),
 });
+await page.evaluate(() => fetch('/devtools/api/meta?case=network-meta&foo=bar', {
+  headers: { 'x-bifrost-fixture-header': 'fixture-request' },
+}).catch(() => {}));
 const snapshot = await collectSessionSnapshot(
   session.session_id,
   'full',
@@ -878,6 +1016,7 @@ const snapshot = await collectSessionSnapshot(
     JSON.stringify(candidate.dom_tree || {}).includes('debug-fixture') &&
     candidate.console?.some((entry) => entry.text.includes('bifrost-devtools-basic-ready')) &&
     candidate.network?.some((entry) => entry.url.includes('/devtools/api/ping')) &&
+    candidate.network?.some((entry) => entry.url.includes('/devtools/api/meta?case=network-meta')) &&
     JSON.stringify(candidate.storage || {}).includes('bifrost-storage-key'),
 );
 if (!snapshot.dom_snapshot?.includes('id="debug-fixture"')) {
@@ -898,6 +1037,40 @@ if (!objectConsole?.args?.some((arg) => arg.subtype === 'array' || JSON.stringif
 }
 if (!snapshot.network.some((entry) => entry.url.includes('/devtools/api/ping'))) {
   throw new Error('AV-CDP-11 failed: network event missing');
+}
+const pingNetworkEvents = snapshot.network.filter((entry) => entry.url.includes('/devtools/api/ping?case=basic'));
+if (pingNetworkEvents.length !== 1) {
+  throw new Error(`AV-CDP-39 failed: Network list must use frontend bridge events as source of truth and not duplicate performance/Traffic events (${pingNetworkEvents.length}) ${JSON.stringify(pingNetworkEvents)}`);
+}
+if (!pingNetworkEvents[0].client_req_id) {
+  throw new Error(`AV-CDP-39 failed: frontend-captured Network event must include x-bifrost-client-request-id mapping id ${JSON.stringify(pingNetworkEvents[0])}`);
+}
+const mappedPingTraffic = await api(`/devtools/network/traffic/${encodeURIComponent(pingNetworkEvents[0].client_req_id)}`);
+if (!mappedPingTraffic.traffic_id) {
+  throw new Error(`AV-CDP-39 failed: client request id did not map to a Traffic record ${JSON.stringify(mappedPingTraffic)}`);
+}
+const mappedPingTrafficRecord = await api(`/traffic/${encodeURIComponent(mappedPingTraffic.traffic_id)}`);
+const leakedDevtoolsHeader = (mappedPingTrafficRecord.request_headers || []).find(([key]) =>
+  key.toLowerCase() === 'x-bifrost-client-request-id'
+);
+if (leakedDevtoolsHeader) {
+  throw new Error(`AV-CDP-39 failed: internal DevTools client request header must be stripped before upstream capture ${JSON.stringify(leakedDevtoolsHeader)}`);
+}
+const metaNetworkEvent = snapshot.network.find((entry) => entry.url.includes('/devtools/api/meta?case=network-meta'));
+if (!metaNetworkEvent) {
+  throw new Error('AV-CDP-42 failed: browser-side Network metadata event missing');
+}
+if (metaNetworkEvent.status !== 404) {
+  throw new Error(`AV-CDP-42 failed: browser-side Network event should preserve status, got ${JSON.stringify(metaNetworkEvent)}`);
+}
+if (!metaNetworkEvent.query_params?.some(([key, value]) => key === 'foo' && value === 'bar')) {
+  throw new Error(`AV-CDP-42 failed: browser-side Network event should preserve query params ${JSON.stringify(metaNetworkEvent)}`);
+}
+if (!metaNetworkEvent.request_headers?.some(([key, value]) => key.toLowerCase() === 'x-bifrost-fixture-header' && value === 'fixture-request')) {
+  throw new Error(`AV-CDP-42 failed: browser-side Network event should preserve request headers ${JSON.stringify(metaNetworkEvent)}`);
+}
+if (!metaNetworkEvent.response_headers?.length) {
+  throw new Error(`AV-CDP-42 failed: browser-side Network event should preserve response headers ${JSON.stringify(metaNetworkEvent)}`);
 }
 if (!JSON.stringify(snapshot.storage || {}).includes('bifrost-storage-key')) {
   throw new Error('AV-CDP-11 failed: storage snapshot missing');
@@ -1071,6 +1244,35 @@ await primaryCard.click();
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
+if (!/\/devtools\/pg_[A-Za-z0-9_%-]+/.test(adminPage.url())) {
+  throw new Error(`AV-CDP-38 failed: DevTools detail should update the route with page id, got ${adminPage.url()}`);
+}
+await adminPage.reload({ waitUntil: 'load' });
+await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 12000 });
+await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 12000 });
+if (!/\/devtools\/pg_[A-Za-z0-9_%-]+/.test(adminPage.url())) {
+  throw new Error(`AV-CDP-38 failed: DevTools detail route should survive WebUI reload, got ${adminPage.url()}`);
+}
+await adminPage.getByTestId('devtools-elements-tree').waitFor({ timeout: 8000 });
+if ((await adminPage.locator('html').getAttribute('data-theme')) !== 'dark') {
+  await adminPage.getByTestId('theme-toggle').click();
+}
+await adminPage.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark', null, { timeout: 8000 });
+const darkSurfaceColors = await adminPage.evaluate(() => {
+  const detail = document.querySelector('[data-testid="devtools-detail"]');
+  const workspace = document.querySelector('[data-testid="devtools-custom-workspace"]');
+  const elements = document.querySelector('[data-testid="devtools-elements-tree"]');
+  return {
+    detail: detail ? getComputedStyle(detail).backgroundColor : '',
+    workspace: workspace ? getComputedStyle(workspace).backgroundColor : '',
+    elements: elements ? getComputedStyle(elements).backgroundColor : '',
+  };
+});
+for (const [name, color] of Object.entries(darkSurfaceColors)) {
+  if (!color || color === 'rgb(255, 255, 255)' || color === 'rgb(247, 249, 252)') {
+    throw new Error(`AV-CDP-37 failed: DevTools ${name} surface should follow dark theme, got ${color}`);
+  }
+}
 const detailBoxInitial = await adminPage.getByTestId('devtools-detail').boundingBox();
 const workspaceBoxInitial = await adminPage.getByTestId('devtools-custom-workspace').boundingBox();
 if (!detailBoxInitial || !workspaceBoxInitial || workspaceBoxInitial.height < detailBoxInitial.height - 100) {
@@ -1171,6 +1373,49 @@ await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-c
 await panelSearch.fill('webui-network-complete');
 await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ state: 'detached', timeout: 8000 });
+const devtoolsUrlBeforeNetworkDetail = adminPage.url();
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click();
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
+const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
+const networkTableBox = await adminPage.getByTestId('devtools-network-traffic-table').boundingBox();
+const networkDetailBox = await adminPage.getByTestId('devtools-network-detail').boundingBox();
+if (!networkPanelBox || !networkTableBox || !networkDetailBox || networkDetailBox.x <= networkTableBox.x + networkTableBox.width - 20) {
+  throw new Error(`AV-CDP-35 failed: Network detail should render as a right-side panel, panel=${JSON.stringify(networkPanelBox)}, table=${JSON.stringify(networkTableBox)}, detail=${JSON.stringify(networkDetailBox)}`);
+}
+if (!adminPage.url().includes('/devtools') || adminPage.url().includes('/traffic')) {
+  throw new Error(`AV-CDP-35 failed: Network detail should stay inside DevTools, before=${devtoolsUrlBeforeNetworkDetail}, after=${adminPage.url()}`);
+}
+await adminPage.route('**/_bifrost/api/devtools/network/traffic/**', async (route) => {
+  await route.fulfill({
+    status: 404,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'missing test traffic' }),
+  });
+});
+await adminPage.route('**/_bifrost/api/traffic/**', async (route) => {
+  if (route.request().method() === 'GET') {
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'missing test traffic detail' }),
+    });
+    return;
+  }
+  await route.fallback();
+});
+await page.evaluate(() => fetch('/devtools/api/missing?case=bridge-only-detail').catch(() => {}));
+await adminPage.getByTestId('devtools-refresh').click();
+await panelSearch.fill('bridge-only-detail');
+await adminPage.getByTestId('devtools-network-panel').getByText(/bridge-only-detail/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click();
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByText(/Traffic Match|No matching Traffic record|missing test traffic|Request failed/).first().waitFor({ timeout: 8000 });
+if (!adminPage.url().includes('/devtools') || adminPage.url().includes('/traffic')) {
+  throw new Error(`AV-CDP-35 failed: fallback Network detail should stay inside DevTools, after=${adminPage.url()}`);
+}
+await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
+await adminPage.unroute('**/_bifrost/api/traffic/**');
 await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ timeout: 8000 });
@@ -1194,7 +1439,32 @@ await adminPage.getByRole('tab', { name: /Cookies/ }).click();
 await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-live').waitFor({ timeout: 8000 });
 await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-live').waitFor({ timeout: 8000 });
+await page.evaluate(() => {
+  for (let i = 0; i < 420; i += 1) {
+    localStorage.setItem(`bifrost-virtual-local-${i}`, `local-${i}`);
+    sessionStorage.setItem(`bifrost-virtual-session-${i}`, `session-${i}`);
+  }
+});
+await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await adminPage.getByText(/42\d \/ 42\d items/).waitFor({ timeout: 8000 });
+const localStorageRenderedRows = await adminPage.getByTestId('devtools-local-storage-panel').getByTestId('devtools-storage-row').count();
+if (localStorageRenderedRows > 80) {
+  throw new Error(`AV-CDP-40 failed: LocalStorage should virtualize large storage lists, rendered rows=${localStorageRenderedRows}`);
+}
+const storageSwitchStartedAt = Date.now();
+await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await adminPage.getByText(/42\d \/ 42\d items/).waitFor({ timeout: 2500 });
+if (Date.now() - storageSwitchStartedAt > 2500) {
+  throw new Error(`AV-CDP-40 failed: switching to SessionStorage should not block for seconds, elapsed=${Date.now() - storageSwitchStartedAt}ms`);
+}
+const sessionStorageRenderedRows = await adminPage.getByTestId('devtools-session-storage-panel').getByTestId('devtools-storage-row').count();
+if (sessionStorageRenderedRows > 80) {
+  throw new Error(`AV-CDP-40 failed: SessionStorage should virtualize large storage lists, rendered rows=${sessionStorageRenderedRows}`);
+}
+await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await panelSearch.fill('bifrost-storage-live');
+await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
 await adminPage.getByLabel('Edit bifrost-storage-live').click();
 if (await adminPage.getByTestId('devtools-storage-key').inputValue() !== 'bifrost-storage-live') {
   throw new Error('AV-CDP-15 failed: storage row edit did not copy key into editor');
@@ -1207,6 +1477,7 @@ const copiedStorageValue = await adminPage.evaluate(() => navigator.clipboard.re
 if (copiedStorageValue !== 'storage-live') {
   throw new Error(`AV-CDP-15 failed: storage copy did not write clipboard (${copiedStorageValue})`);
 }
+await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /Cookies/ }).click();
 await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-cookie-edit');
@@ -1223,29 +1494,44 @@ await adminPage.getByTestId('devtools-storage-key').fill('bifrost-storage-edit')
 await adminPage.getByTestId('devtools-storage-value').fill('storage-edited');
 await adminPage.getByTestId('devtools-storage-save').click();
 await page.waitForFunction(() => localStorage.getItem('bifrost-storage-edit') === 'storage-edited', null, { timeout: 8000 });
+await panelSearch.fill('bifrost-storage-edit');
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-edit').waitFor({ timeout: 8000 });
 await adminPage.getByLabel('Delete bifrost-storage-edit').click();
 await page.waitForFunction(() => localStorage.getItem('bifrost-storage-edit') === null, null, { timeout: 8000 });
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-edit').waitFor({ state: 'detached', timeout: 8000 });
+await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
 await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-session-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('session-edited');
 await adminPage.getByTestId('devtools-storage-save').click();
 await page.waitForFunction(() => sessionStorage.getItem('bifrost-session-edit') === 'session-edited', null, { timeout: 8000 });
+await panelSearch.fill('bifrost-session-edit');
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-edit').waitFor({ timeout: 8000 });
 await adminPage.getByLabel('Delete bifrost-session-edit').click();
 await page.waitForFunction(() => sessionStorage.getItem('bifrost-session-edit') === null, null, { timeout: 8000 });
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-edit').waitFor({ state: 'detached', timeout: 8000 });
+await panelSearch.fill('');
 await adminPage.getByRole('tab', { name: /Console/ }).click();
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-object-ready').waitFor({ timeout: 8000 });
+const plainLogValue = adminPage.getByTestId('devtools-console-row-log').getByTestId('devtools-console-value-string').filter({ hasText: 'bifrost-devtools-basic-ready' }).first();
+await plainLogValue.waitFor({ timeout: 8000 });
+const plainLogColor = await plainLogValue.evaluate((node) => getComputedStyle(node).color);
+if (plainLogColor === 'rgb(196, 29, 29)' || plainLogColor === 'rgb(255, 0, 0)') {
+  throw new Error(`AV-CDP-36 failed: plain console.log string should not render as red object string value (${plainLogColor})`);
+}
 await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).waitFor({ timeout: 8000 });
 const objectRow = adminPage.getByTestId('devtools-console-row-log').filter({ hasText: 'bifrost-console-object-ready' }).first();
 await objectRow.getByTestId('devtools-console-expand-value').last().click();
 await objectRow.getByText('nested:', { exact: true }).waitFor({ timeout: 8000 });
 await objectRow.getByText('items:', { exact: true }).waitFor({ timeout: 8000 });
+const objectPreviewBox = await objectRow.getByText(/Object \{.*pageId/).boundingBox();
+const nestedBox = await objectRow.getByText('nested:', { exact: true }).boundingBox();
+if (!objectPreviewBox || !nestedBox || nestedBox.x < objectPreviewBox.x + 10) {
+  throw new Error(`AV-CDP-36 failed: expanded console object tree should align beneath the object preview, object=${JSON.stringify(objectPreviewBox)}, nested=${JSON.stringify(nestedBox)}`);
+}
 await objectRow.getByLabel('Copy raw console content').click();
 const copiedConsoleRaw = await adminPage.evaluate(() => navigator.clipboard.readText());
 if (!copiedConsoleRaw.includes('bifrost-console-object-ready') || !copiedConsoleRaw.includes('"nested"')) {
@@ -1255,11 +1541,24 @@ await page.evaluate(() => {
   console.info('bifrost-console-info-live');
   console.debug('bifrost-console-debug-live');
   console.error('bifrost-console-error-live');
+  console.log('%cbifrost-console-css-live', 'color: rgb(255, 0, 0); font-weight: 700');
 });
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-debug-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-error-live').waitFor({ timeout: 8000 });
+const cssConsoleText = adminPage.getByTestId('devtools-console-row-log').getByTestId('devtools-console-formatted-text').filter({ hasText: 'bifrost-console-css-live' }).first();
+await cssConsoleText.waitFor({ timeout: 8000 });
+const cssConsoleStyle = await cssConsoleText.evaluate((node) => {
+  const style = getComputedStyle(node);
+  return { color: style.color, fontWeight: style.fontWeight, text: node.textContent || '' };
+});
+if (cssConsoleStyle.text.includes('%c') || cssConsoleStyle.text.includes('color:')) {
+  throw new Error(`AV-CDP-41 failed: formatted console text should hide %c/style args ${JSON.stringify(cssConsoleStyle)}`);
+}
+if (cssConsoleStyle.color !== 'rgb(255, 0, 0)' || Number(cssConsoleStyle.fontWeight) < 700) {
+  throw new Error(`AV-CDP-41 failed: formatted console text should apply CSS style ${JSON.stringify(cssConsoleStyle)}`);
+}
 await adminPage.getByTestId('devtools-console-row-log').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-row-warn').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-row-info').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
@@ -1333,5 +1632,5 @@ await adminPage.getByTestId('devtools-traffic-link').click();
 await adminPage.waitForURL(/\/traffic/, { timeout: 8000 });
 
 await browser.close();
-console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
+console.log('DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed');
 NODE

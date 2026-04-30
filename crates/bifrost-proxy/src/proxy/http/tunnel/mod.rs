@@ -41,11 +41,14 @@ pub use self::cert::SingleCertResolver;
 use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
+use super::devtools::{
+    bind_devtools_client_req_traffic, devtools_bridge_requested, maybe_inject_devtools_bridge_html,
+    take_devtools_client_req_id,
+};
 use super::handler::{
     build_connection_error_response, build_error_body, build_overridden_error_response,
-    devtools_bridge_requested, maybe_inject_devtools_bridge_html, needs_body_processing,
-    needs_request_body_processing, needs_response_override, parse_and_record_sse_events,
-    ConnectionErrorInfo,
+    needs_body_processing, needs_request_body_processing, needs_response_override,
+    parse_and_record_sse_events, ConnectionErrorInfo,
 };
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
@@ -1995,8 +1998,8 @@ async fn handle_intercepted_request_with_protocol(
     }
 
     let (mut parts, body) = req.into_parts();
-    let devtools_client_req_id = super::take_devtools_client_req_id(&mut parts.headers);
-    super::bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, req_id);
+    let devtools_client_req_id = take_devtools_client_req_id(&mut parts.headers);
+    bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, req_id);
 
     let actual_method = if let Some(ref method_override) = resolved_rules.method {
         if verbose_logging {

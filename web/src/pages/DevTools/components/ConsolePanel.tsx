@@ -1,9 +1,10 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useState } from "react";
 import { ArrowsAltOutlined, CopyOutlined, PlayCircleOutlined, RightOutlined } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { Button, Empty, Input, message, Modal, Space, Tag, Tooltip } from "antd";
 import type { DebugConsoleValue, DevtoolsSnapshot } from "../../../api/devtools";
+import { useThemeStore } from "../../../stores/useThemeStore";
 import { HighlightedText, filterBySearch } from "./shared";
 
 const { TextArea } = Input;
@@ -26,6 +27,7 @@ export function ConsoleView({
   onRun: () => void;
 }) {
   const [editorOpen, setEditorOpen] = useState(false);
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const rows = filterBySearch([
     ...messages.map((entry) => ({ kind: "page" as const, ...entry })),
     ...entries,
@@ -103,7 +105,7 @@ export function ConsoleView({
           <Editor
             height="100%"
             language="javascript"
-            theme="light"
+            theme={resolvedTheme === "dark" ? "vs-dark" : "light"}
             value={expression}
             onChange={(value) => onExpressionChange(value ?? "")}
             options={{
@@ -139,22 +141,27 @@ function ConsoleRow({ entry, searchQuery }: { entry: ConsoleDisplayEntry; search
   const style = consoleRowStyleForLevel(level, entry.kind);
   const args = entry.args?.length ? entry.args : null;
   const raw = entry.raw || args?.map((arg) => arg.raw || arg.preview || "").join(" ") || entry.text;
+  const formattedParts = args ? formatConsoleMessageArgs(args) : null;
   return (
     <div data-testid={`devtools-console-row-${level}`} style={style}>
       <span style={consolePromptStyle}>{entry.kind === "input" ? ">" : ""}</span>
       <Tag style={consoleLevelTagStyle} color={consoleLevelColor(level)}>{level}</Tag>
       <span data-testid="devtools-console-row-time" style={consoleTimeStyle}>{formatConsoleTime(entry.at_ms)}</span>
       <div style={consoleMessageCellStyle}>
-        <div style={consoleMessageStyle}>
+        <div style={consoleMessageStyleForLevel(level)}>
           {args ? (
-            args.map((arg, index) => (
-              <ConsoleValueView
-                key={`${index}-${arg.type}-${arg.preview}`}
-                value={arg}
-                searchQuery={searchQuery}
-                depth={0}
-              />
-            ))
+            formattedParts
+              ? formattedParts.map((part, index) => renderFormattedConsolePart(part, index, searchQuery))
+              : args.map((arg, index) => (
+                <ConsoleValueView
+                  key={`${index}-${arg.type}-${arg.preview}`}
+                  value={arg}
+                  searchQuery={searchQuery}
+                  depth={0}
+                  topLevel
+                  level={level}
+                />
+              ))
           ) : (
             <HighlightedText text={entry.text} query={searchQuery} />
           )}
@@ -175,41 +182,160 @@ function ConsoleRow({ entry, searchQuery }: { entry: ConsoleDisplayEntry; search
   );
 }
 
+type ConsoleFormattedPart =
+  | { kind: "text"; text: string; style?: CSSProperties }
+  | { kind: "value"; value: DebugConsoleValue };
+
+function formatConsoleMessageArgs(args: DebugConsoleValue[]): ConsoleFormattedPart[] | null {
+  if (!args.length || args[0].type !== "string") return null;
+  const template = consolePlainString(args[0]);
+  if (!template.includes("%")) return null;
+  const parts: ConsoleFormattedPart[] = [];
+  let argIndex = 1;
+  let textBuffer = "";
+  let currentStyle: CSSProperties | undefined;
+  const flushText = () => {
+    if (!textBuffer) return;
+    parts.push({ kind: "text", text: textBuffer, style: currentStyle });
+    textBuffer = "";
+  };
+  for (let index = 0; index < template.length; index += 1) {
+    const char = template[index];
+    if (char !== "%" || index === template.length - 1) {
+      textBuffer += char;
+      continue;
+    }
+    const token = template[index + 1];
+    index += 1;
+    if (token === "%") {
+      textBuffer += "%";
+      continue;
+    }
+    if (token === "c") {
+      flushText();
+      currentStyle = parseConsoleCss(consolePlainString(args[argIndex]));
+      argIndex += 1;
+      continue;
+    }
+    if (token === "s" || token === "d" || token === "i" || token === "f") {
+      const value = args[argIndex];
+      argIndex += 1;
+      textBuffer += value ? consoleSubstitutionText(value, token) : `%${token}`;
+      continue;
+    }
+    if (token === "o" || token === "O") {
+      flushText();
+      const value = args[argIndex];
+      argIndex += 1;
+      if (value) parts.push({ kind: "value", value });
+      else textBuffer += `%${token}`;
+      continue;
+    }
+    textBuffer += `%${token}`;
+  }
+  flushText();
+  for (; argIndex < args.length; argIndex += 1) {
+    parts.push({ kind: "value", value: args[argIndex] });
+  }
+  return parts.length ? parts : null;
+}
+
+function renderFormattedConsolePart(part: ConsoleFormattedPart, index: number, searchQuery: string): ReactNode {
+  if (part.kind === "value") {
+    return (
+      <ConsoleValueView
+        key={`value-${index}-${part.value.type}-${part.value.preview}`}
+        value={part.value}
+        searchQuery={searchQuery}
+        depth={0}
+        topLevel
+      />
+    );
+  }
+  return (
+    <span key={`text-${index}`} data-testid="devtools-console-formatted-text" style={{ ...formattedTextStyle, ...part.style }}>
+      <HighlightedText text={part.text} query={searchQuery} />
+    </span>
+  );
+}
+
+function consolePlainString(value: DebugConsoleValue | undefined): string {
+  if (!value) return "";
+  if (typeof value.value === "string") return value.value;
+  if (value.raw) return value.raw;
+  if (value.preview) return unquotePreviewString(value.preview);
+  return "";
+}
+
+function consoleSubstitutionText(value: DebugConsoleValue, token: string): string {
+  const plain = consolePlainString(value);
+  if (token === "s") return plain || valuePreview(value, true);
+  const numeric = Number(plain || value.value);
+  if (Number.isFinite(numeric)) return token === "f" ? String(numeric) : String(Math.trunc(numeric));
+  return valuePreview(value, true);
+}
+
+function parseConsoleCss(cssText: string): CSSProperties {
+  const style: CSSProperties = {};
+  for (const declaration of cssText.split(";")) {
+    const [rawName, ...rawValueParts] = declaration.split(":");
+    const name = rawName?.trim().toLowerCase();
+    const value = rawValueParts.join(":").trim();
+    if (!name || !value) continue;
+    if (name === "color") style.color = value;
+    if (name === "background" || name === "background-color") style.backgroundColor = value;
+    if (name === "font-weight") style.fontWeight = value;
+    if (name === "font-style") style.fontStyle = value;
+    if (name === "text-decoration") style.textDecoration = value;
+    if (name === "font-size") style.fontSize = value;
+  }
+  return style;
+}
+
 function ConsoleValueView({
   value,
   searchQuery,
   depth,
   label,
+  topLevel,
+  level,
 }: {
   value: DebugConsoleValue;
   searchQuery: string;
   depth: number;
   label?: string;
+  topLevel?: boolean;
+  level?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const children = value.properties ?? [];
   const expandable = children.length > 0;
   const type = value.subtype || value.type || "unknown";
   const primitive = !expandable && (type === "string" || type === "number" || type === "boolean" || type === "null" || type === "undefined" || type === "bigint");
-  const preview = valuePreview(value);
+  const preview = valuePreview(value, Boolean(topLevel));
   return (
     <span style={valueShellStyle(depth)}>
-      {expandable ? (
-        <button
-          type="button"
-          data-testid="devtools-console-expand-value"
-          aria-label={expanded ? "Collapse console value" : "Expand console value"}
-          style={valueToggleStyle}
-          onClick={() => setExpanded((next) => !next)}
+      <span style={valueLineStyle}>
+        {expandable ? (
+          <button
+            type="button"
+            data-testid="devtools-console-expand-value"
+            aria-label={expanded ? "Collapse console value" : "Expand console value"}
+            style={valueToggleStyle}
+            onClick={() => setExpanded((next) => !next)}
+          >
+            <RightOutlined style={{ fontSize: 10, transform: expanded ? "rotate(90deg)" : undefined }} />
+          </button>
+        ) : (
+          <span style={valueTogglePlaceholderStyle} />
+        )}
+        {label ? <span style={propertyNameStyle}>{label}: </span> : null}
+        <span
+          data-testid={`devtools-console-value-${type}`}
+          style={primitive ? primitiveValueStyle(type, Boolean(topLevel), level) : objectPreviewStyle(type)}
         >
-          <RightOutlined style={{ fontSize: 10, transform: expanded ? "rotate(90deg)" : undefined }} />
-        </button>
-      ) : (
-        <span style={valueTogglePlaceholderStyle} />
-      )}
-      {label ? <span style={propertyNameStyle}>{label}: </span> : null}
-      <span style={primitive ? primitiveValueStyle(type) : objectPreviewStyle(type)}>
-        <HighlightedText text={preview} query={searchQuery} />
+          <HighlightedText text={preview} query={searchQuery} />
+        </span>
       </span>
       {expanded ? (
         <span style={childrenWrapStyle}>
@@ -220,6 +346,7 @@ function ConsoleValueView({
               searchQuery={searchQuery}
               depth={depth + 1}
               label={child.name}
+              level={level}
             />
           ))}
           {value.overflow ? <span style={overflowStyle}>... {value.overflow} more</span> : null}
@@ -239,15 +366,16 @@ function formatConsoleTime(atMs: number): string {
 function consoleRowStyleForLevel(level: string, kind: ConsoleDisplayEntry["kind"]): CSSProperties {
   const normalized = level.toLowerCase();
   const color =
-    kind === "input" ? "#f8fafc"
-      : normalized === "error" ? "#fff1f0"
-        : normalized === "warn" || normalized === "warning" ? "#fffbe6"
-          : normalized === "debug" ? "#f5f3ff"
-            : normalized === "result" ? "#f0fdf4"
-              : "#fff";
+    kind === "input" ? "var(--devtools-surface-alt)"
+      : normalized === "error" ? "var(--devtools-console-error-bg)"
+        : normalized === "warn" || normalized === "warning" ? "var(--devtools-console-warning-bg)"
+          : normalized === "debug" ? "var(--devtools-console-debug-bg)"
+            : normalized === "result" ? "var(--devtools-console-result-bg)"
+              : "var(--devtools-surface)";
+  const inputColor = kind === "input" ? "var(--devtools-surface-alt)" : color;
   return {
     ...consoleRowStyle,
-    background: color,
+    background: inputColor,
   };
 }
 
@@ -298,11 +426,27 @@ function consoleValueFromPlain(value: unknown): DebugConsoleValue {
   }
 }
 
-function valuePreview(value: DebugConsoleValue): string {
+function valuePreview(value: DebugConsoleValue, topLevel = false): string {
+  if (topLevel && value.type === "string") {
+    if (typeof value.value === "string") return value.value;
+    if (value.raw) return value.raw;
+    if (value.preview) return unquotePreviewString(value.preview);
+  }
   if (value.preview) return value.preview;
   if (typeof value.value === "string") return JSON.stringify(value.value);
   if (value.value !== undefined) return String(value.value);
   return value.type || "unknown";
+}
+
+function unquotePreviewString(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
 }
 
 async function copyConsoleRaw(raw: string) {
@@ -321,10 +465,11 @@ const consoleShellStyle: CSSProperties = {
   gridTemplateRows: "minmax(260px, 1fr) auto",
   height: "100%",
   minHeight: 0,
-  border: "1px solid #d9e2ef",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 6,
   overflow: "hidden",
-  background: "#fff",
+  background: "var(--devtools-surface)",
+  color: "var(--devtools-text)",
 };
 
 const consoleLogStyle: CSSProperties = {
@@ -340,7 +485,7 @@ const consoleRowStyle: CSSProperties = {
   alignItems: "flex-start",
   gap: 6,
   padding: "7px 10px",
-  borderBottom: "1px solid #edf2f7",
+  borderBottom: "1px solid var(--devtools-border)",
   minWidth: 520,
 };
 
@@ -350,8 +495,8 @@ const consoleInputBarStyle: CSSProperties = {
   alignItems: "end",
   gap: 8,
   padding: 8,
-  borderTop: "1px solid #d9e2ef",
-  background: "#fbfdff",
+  borderTop: "1px solid var(--devtools-border)",
+  background: "var(--devtools-surface-alt)",
 };
 
 const consoleInputWrapStyle: CSSProperties = {
@@ -372,12 +517,12 @@ const fullEditorBodyStyle: CSSProperties = {
 const fullEditorShellStyle: CSSProperties = {
   height: "min(70vh, 680px)",
   minHeight: 420,
-  borderTop: "1px solid #e5edf7",
-  borderBottom: "1px solid #e5edf7",
+  borderTop: "1px solid var(--devtools-border)",
+  borderBottom: "1px solid var(--devtools-border)",
 };
 
 const consolePromptStyle: CSSProperties = {
-  color: "#6b7280",
+  color: "var(--devtools-text-secondary)",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 };
 
@@ -388,7 +533,7 @@ const consoleLevelTagStyle: CSSProperties = {
 };
 
 const consoleTimeStyle: CSSProperties = {
-  color: "#9ca3af",
+  color: "var(--devtools-text-tertiary)",
   fontSize: 10,
   lineHeight: "22px",
   fontVariantNumeric: "tabular-nums",
@@ -403,34 +548,59 @@ const consoleMessageCellStyle: CSSProperties = {
   minWidth: 0,
 };
 
-const consoleMessageStyle: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  alignItems: "baseline",
-  gap: "3px 8px",
-  minWidth: 0,
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-};
+function consoleMessageStyleForLevel(level: string): CSSProperties {
+  return {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "flex-start",
+    gap: "2px 10px",
+    minWidth: 0,
+    color: consoleTextColor(level),
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  };
+}
+
+function consoleTextColor(level: string | undefined): string {
+  const normalized = (level || "log").toLowerCase();
+  if (normalized === "error") return "var(--devtools-code-string)";
+  if (normalized === "warn" || normalized === "warning") return "var(--devtools-code-attr)";
+  if (normalized === "debug") return "var(--devtools-code-boolean)";
+  if (normalized === "result") return "var(--devtools-code-tag)";
+  return "var(--devtools-text)";
+}
 
 const consoleCopyButtonStyle: CSSProperties = {
   opacity: 0.68,
 };
 
+const formattedTextStyle: CSSProperties = {
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+};
+
 function valueShellStyle(depth: number): CSSProperties {
   return {
-    display: depth === 0 ? "inline-flex" : "flex",
+    display: depth === 0 ? "inline-block" : "block",
     flexDirection: "column",
     alignItems: "flex-start",
     minWidth: 0,
-    marginLeft: depth === 0 ? 0 : 14,
+    marginLeft: depth === 0 ? 0 : 16,
     lineHeight: "22px",
+    verticalAlign: "top",
   };
 }
+
+const valueLineStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "baseline",
+  minWidth: 0,
+  maxWidth: "100%",
+};
 
 const valueToggleStyle: CSSProperties = {
   border: 0,
   background: "transparent",
-  color: "#6b7280",
+  color: "var(--devtools-text-secondary)",
   padding: 0,
   width: 14,
   height: 18,
@@ -446,33 +616,35 @@ const valueTogglePlaceholderStyle: CSSProperties = {
 const childrenWrapStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  width: "100%",
-  marginTop: 2,
+  minWidth: 0,
+  marginTop: 1,
+  paddingLeft: 14,
 };
 
 const propertyNameStyle: CSSProperties = {
-  color: "#7c3aed",
+  color: "var(--devtools-code-boolean)",
 };
 
 const overflowStyle: CSSProperties = {
-  color: "#9ca3af",
+  color: "var(--devtools-text-tertiary)",
   marginLeft: 28,
 };
 
 function objectPreviewStyle(type: string): CSSProperties {
   return {
-    color: type === "array" ? "#1f4fbf" : "#111827",
+    color: type === "array" ? "var(--devtools-code-number)" : "var(--devtools-text)",
     whiteSpace: "pre-wrap",
     overflowWrap: "anywhere",
   };
 }
 
-function primitiveValueStyle(type: string): CSSProperties {
+function primitiveValueStyle(type: string, topLevel = false, level?: string): CSSProperties {
   const color =
-    type === "string" ? "#c41d1d"
-      : type === "number" || type === "bigint" ? "#1d4ed8"
-        : type === "boolean" ? "#7c3aed"
-          : "#6b7280";
+    topLevel && type === "string" ? consoleTextColor(level)
+      : type === "string" ? "var(--devtools-code-string)"
+      : type === "number" || type === "bigint" ? "var(--devtools-code-number)"
+        : type === "boolean" ? "var(--devtools-code-boolean)"
+          : "var(--devtools-text-secondary)";
   return {
     color,
     whiteSpace: "pre-wrap",

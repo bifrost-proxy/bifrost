@@ -349,6 +349,159 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - WebUI session live 通道和目标页 bridge command 通道均为有界队列；慢消费者不会导致 Bifrost admin 进程无限堆积内存。
 - 队列满或连接断开时，服务端会移除 stale sender，后续刷新依赖目标页重新推送当前模块数据。
 
+### TC-CDP-17：shell E2E fixture HTTP server 生命周期稳定性
+
+操作步骤：
+
+1. 在仓库根目录创建独立临时目录，例如 `TEST_ROOT="$(mktemp -d /tmp/bifrost-devtools-human.XXXXXX)"`。
+2. 选择非 9900 的随机 fixture 端口，例如 `SITE_PORT=$((10000 + RANDOM % 5000))`。
+3. 执行 `source ~/.zshrc && TEST_ROOT="$TEST_ROOT" SITE_PORT="$SITE_PORT" SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+4. 观察脚本输出和 `/tmp` 下保存的执行日志。
+5. 重复执行至少 3 次，每次使用不同 `TEST_ROOT` 和 `SITE_PORT`。
+
+预期结果：
+
+- 脚本尊重外部传入的 `TEST_ROOT` 与 `SITE_PORT`，并拒绝 9900 或已被占用的端口。
+- fixture `http.server` 启动后先通过 `basic.html` 探活，再进入 Bifrost / Playwright 验证。
+- 成功路径只在脚本结尾由 cleanup 对本脚本启动的 `http.server` PID 发送 `TERM`，随后 `wait` 回收，不出现未收敛的 `Terminated: 15` 后台作业噪声。
+- 失败路径保留 `TEST_ROOT` 现场，并打印 `bifrost.log` / `site.log`，便于定位真正失败命令。
+- `bifrost-admin remote_invoke worker` 的 `requires a sync session token` 日志不影响本用例结论；该日志是 CI 未登录 sync session 的已知噪声。
+
+### TC-CDP-18：Network 行详情在 DevTools 右侧内嵌展示
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面，触发至少一条 `fetch('/devtools/api/extra?case=webui-network-complete')` 网络请求。
+3. 打开 Bifrost WebUI 的 DevTools 页面，选择该在线页面。
+4. 切换到 `Network` tab，搜索 `webui-network-complete`。
+5. 点击匹配的 Network 行。
+
+预期结果：
+
+- WebUI URL 仍停留在 `/devtools`，不会跳转到 `/traffic`。
+- Network tab 右侧直接展示复用的 TrafficDetail 详情组件，列表仍保留在左侧。
+- 详情组件中可以看到对应请求 URL / query marker，Request / Response 面板可正常展开和搜索。
+- 找不到对应 Traffic 记录时，右侧详情面板展示 page bridge 已上报的 URL、Method、Status、Type、Host、Path、Client Request ID 等信息，并给出匹配失败提示；不发生路由跳转。
+
+### TC-CDP-19：Console 纯文本颜色与对象展开对齐
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面，页面执行 `console.log('bifrost-devtools-basic-ready')` 与 `console.log('bifrost-console-object-ready', { nested: { answer: 42 } })`。
+3. 打开 WebUI DevTools，选择该页面并切换到 `Console` tab。
+4. 展开包含 `bifrost-console-object-ready` 的对象输出。
+
+预期结果：
+
+- 普通 `console.log('text')` 的纯文本按 log/info 等级展示为普通深色文本，不使用对象字符串的红色样式。
+- warn/error/debug 仍按日志等级使用对应背景和文字强调。
+- 对象输出的摘要与展开树在同一条 console row 内对齐；展开后的属性树缩进在对象摘要下方，不会挤到前一个文本参数下面。
+- 对象属性内部的字符串、数字、布尔等 primitive 仍保留类似 Chrome Console 的语法色。
+
+### TC-CDP-20：DevTools 明暗主题切换回归
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面。
+3. 打开 WebUI DevTools，选择该在线页面进入详情页。
+4. 点击 WebUI 侧边栏主题切换按钮切换到 dark theme。
+5. 依次观察 Elements、Network、Cookies、LocalStorage、SessionStorage、Console 面板。
+6. 打开 Console 全屏 JavaScript 编辑器。
+
+预期结果：
+
+- DevTools 页面外层、workspace、卡片、表格、DOM tree、Storage 表格、Console row 和 fallback network detail 都跟随 dark theme，不出现整块白底。
+- 搜索高亮、选中 DOM 行、错误/警告/结果 Console 行在暗色主题下仍可读。
+- Console 全屏 JavaScript 编辑器使用暗色 Monaco 主题。
+- 切回 light theme 后 DevTools 所有面板恢复浅色主题，功能状态不丢失。
+
+### TC-CDP-21：DevTools 详情路由刷新恢复
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面。
+3. 打开 WebUI DevTools 页面列表，点击该在线页面卡片。
+4. 观察 WebUI 地址栏。
+5. 刷新 WebUI 管理端页面。
+
+预期结果：
+
+- 点击在线页面后 WebUI 地址从 `/devtools` 更新为 `/devtools/:page_id`。
+- 刷新 WebUI 管理端后自动回到同一个 DevTools 详情页，不回退到在线页面列表。
+- 详情页恢复后 Elements tree、tab 搜索框、refresh 按钮和 Console 执行能力仍可用。
+- 点击 Back 后地址回到 `/devtools`，并展示在线页面列表。
+
+### TC-CDP-22：Network 前端采集去重与 Traffic 映射
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面，页面发起同源 `fetch('/devtools/api/ping?case=basic')`。
+3. 通过 WebUI DevTools 或 session snapshot 查看 Network 列表。
+4. 使用 Network 行中的 client request id 查询 `/api/devtools/network/traffic/:client_req_id`。
+5. 打开映射到的 Traffic 详情，检查 request headers。
+
+预期结果：
+
+- Network 列表以 page bridge 前端采集事件为准，同一 fetch/XHR 只展示一条记录，不同时展示 performance 兜底记录或 Traffic 派生记录。
+- 该记录携带与 `x-bifrost-client-request-id` 对应的 client request id。
+- client request id 可以映射到对应 Traffic id，Network 行点击后可展示完整 TrafficDetail。
+- `x-bifrost-client-request-id` 不会出现在 Traffic request headers 中，也不会转发给目标服务端。
+
+### TC-CDP-23：Storage 大数据量切换性能
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面。
+3. 在目标页 localStorage 与 sessionStorage 中分别写入 400 个以上 key/value。
+4. 打开 WebUI DevTools 详情页，切换 LocalStorage、SessionStorage、Cookies tab。
+5. 观察 tab 切换响应时间和 DOM 渲染行数。
+
+预期结果：
+
+- 点击 Storage 相关 tab 后 UI 立即切换，不出现数秒卡顿。
+- LocalStorage / SessionStorage 只渲染视口附近的可见行，不一次性渲染所有几百上千条数据。
+- 搜索、行内编辑、复制、删除仍可用。
+- 切换 tab 触发的 storage snapshot 刷新是异步的，不阻塞 tab 激活状态更新。
+
+### TC-CDP-24：Console 标准 `%c` 样式格式化
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面。
+3. 在目标页执行 `console.log('%cbifrost-console-css-live', 'color: rgb(255, 0, 0); font-weight: 700')`。
+4. 打开 WebUI DevTools，选择该页面并切换到 `Console` tab。
+
+预期结果：
+
+- Console 列表只展示 `bifrost-console-css-live` 文本，不把 `%c` 占位符或 `color: ...` 样式参数当普通文本展示。
+- 文本应用 `color: rgb(255, 0, 0)` 和加粗样式。
+- 同一条 console row 仍可被搜索过滤，复制原始内容按钮仍可用。
+
+### TC-CDP-25：Network 浏览器侧 metadata 采集
+
+操作步骤：
+
+1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
+2. 使用浏览器通过该代理打开测试页面。
+3. 在目标页执行 `fetch('/devtools/api/meta?case=network-meta&foo=bar', { headers: { 'x-bifrost-fixture-header': 'fixture-request' } })`。
+4. 打开 WebUI DevTools，选择该页面并切换到 `Network` tab。
+5. 点击对应 Network 行查看右侧详情。
+
+预期结果：
+
+- Network 行展示明确 status，能区分请求已发出、失败、成功或可能来自缓存，不因缺少 status 误判。
+- 右侧详情展示 URL query 参数，例如 `foo=bar`。
+- 右侧详情展示浏览器侧采集的 request headers，例如 `x-bifrost-fixture-header: fixture-request`，但不展示内部 `x-bifrost-client-request-id`。
+- 右侧详情展示浏览器可读的 response headers。
+- 默认不采集 request body 或 response body。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -370,3 +523,8 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-30：通过。按 Console 结构化对象展示要求复测，验证 page bridge 上报 console `args/raw`，WebUI 默认展示 Object 摘要，点击后展开 `nested` / `items`，复制按钮可复制原始序列化内容。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。按 Network 列表与 Traffic 页面体验一致要求复测，验证 DevTools Network 复用 `traffic-table` 虚拟列表结构，展示 Protocol / Method / Status / Host / Path 等列，搜索过滤和新增网络记录仍可用。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。按稳定性 review 结果补充 TC-CDP-16，验证服务端 page bridge seq 去重与 live channel 有界队列保护，并用重建后的 release 二进制复测真实 DevTools 端到端流程。执行命令：`source ~/.zshrc && cargo test -p bifrost-admin devtools::tests::test_page_bridge --all-features`，输出 `6 passed; 0 failed`，包含 `test_page_bridge_seq_dedupes_replayed_messages` 与 `test_page_bridge_live_queues_are_bounded`；随后执行 `source ~/.zshrc && cargo build --release --bin bifrost` 和 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`，输出 `DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。针对 CI shell E2E part3 中 fixture `http.server` 被 SIGTERM 后未收敛的问题，补充并执行 TC-CDP-17。执行命令：`source ~/.zshrc && TEST_ROOT="$(mktemp -d /tmp/codex-devtools-human.XXXXXX)" SITE_PORT=$((10000 + RANDOM % 5000)) SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`，重复 3 次并保存日志到 `/tmp/codex-fix-e2e/gate-1.log`、`/tmp/codex-fix-e2e/gate-2.log`、`/tmp/codex-fix-e2e/gate-3.log`。预期输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`，且 cleanup 只在脚本结尾停止自有 `http.server` PID。
+- 2026-04-30：通过。补充并执行 TC-CDP-18，验证 DevTools Network 行点击后不会跳转 `/traffic`，而是在当前 DevTools Network tab 右侧内嵌展示复用的 TrafficDetail 详情组件；找不到 Traffic 记录时，右侧 fallback 详情展示 page bridge 已上报的 URL 等信息。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。补充并执行 TC-CDP-19，验证顶层纯文本 console.log 不再渲染为红色对象字符串，对象展开树缩进对齐在对象摘要下方。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出包含 `Traffic-style network table with inline detail`，并通过 AV-CDP-36 颜色与布局断言。
+- 2026-04-30：通过。补充并执行 TC-CDP-20 / TC-CDP-21 / TC-CDP-22 / TC-CDP-23，验证 DevTools 页面、workspace、Elements、Network、Storage、Console 与全屏 JavaScript 编辑器跟随 WebUI dark theme；选择在线页面后 URL 包含 page id，刷新 WebUI 后自动恢复详情页；Network 列表以前端采集为准并通过 `x-bifrost-client-request-id` 映射 Traffic 详情，`x-bifrost-client-request-id` 不出现在 Traffic request headers；Storage 在 400+ localStorage/sessionStorage 数据下使用虚拟列表，tab 切换在 2500ms 内完成，搜索后行内编辑、复制、删除仍可用。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。补充并执行 TC-CDP-24 / TC-CDP-25，验证 Console 支持浏览器标准 `%c` 样式格式化，不显示 `%c` 和样式参数文本，并应用白名单内联样式；验证 Network 浏览器侧采集 status、query、request headers、response headers 和 cache hint，默认不采集 body，并在 DevTools 右侧详情展示。执行命令：`source ~/.zshrc && cargo build --release --bin bifrost`，随后执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。

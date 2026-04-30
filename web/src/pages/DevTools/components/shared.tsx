@@ -39,7 +39,7 @@ export function HighlightedText({ text, query }: { text: string; query: string }
 
 
 const markStyle: CSSProperties = {
-  background: "#fde68a",
+  background: "var(--devtools-search-bg)",
   color: "inherit",
   padding: "0 1px",
   borderRadius: 2,

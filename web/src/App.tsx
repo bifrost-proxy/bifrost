@@ -287,6 +287,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
                 <Route path="devtools" element={<DevTools />} />
+                <Route path="devtools/:pageId" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />
                 <Route path="groups/:id" element={<GroupDetail />} />
                 <Route path="notifications" element={<Notifications />} />
@@ -320,6 +321,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
                 <Route path="devtools" element={<DevTools />} />
+                <Route path="devtools/:pageId" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />
                 <Route path="groups/:id" element={<GroupDetail />} />
                 <Route path="notifications" element={<Notifications />} />

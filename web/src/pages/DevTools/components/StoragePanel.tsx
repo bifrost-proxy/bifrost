@@ -1,5 +1,6 @@
-import type { CSSProperties } from "react";
+import { useMemo, useRef, type CSSProperties } from "react";
 import { CheckOutlined, CloseOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button, Empty, Input, Space, Typography } from "antd";
 import type { DebugStorageSnapshot } from "../../../api/devtools";
 import { HighlightedText, filterBySearch } from "./shared";
@@ -39,9 +40,20 @@ export function StorageView({
   onDelete: (area: string, key: string) => void;
   onSave: () => void;
 }) {
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const activeRows = useMemo(() => (storage ? storageRowsForArea(storage, area) : []), [area, storage]);
+  const filteredRows = useMemo(
+    () => filterBySearch(activeRows, searchQuery, ([key, value]) => `${key} ${value}`),
+    [activeRows, searchQuery],
+  );
+  const rowVirtualizer = useVirtualizer({
+    count: filteredRows.length,
+    getScrollElement: () => scrollerRef.current,
+    estimateSize: () => 36,
+    overscan: 12,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
   if (!storage) return <Empty description="No storage snapshot yet" />;
-  const activeRows = storageRowsForArea(storage, area);
-  const filteredRows = filterBySearch(activeRows, searchQuery, ([key, value]) => `${key} ${value}`);
   return (
     <div style={storageShellStyle}>
       <div style={storageToolbarStyle}>
@@ -55,7 +67,7 @@ export function StorageView({
           Add
         </Button>
       </div>
-      <div style={storageTableStyle}>
+      <div ref={scrollerRef} style={storageTableStyle}>
         <div style={storageHeaderRowStyle}>
           <Text strong>Key</Text>
           <Text strong>Value</Text>
@@ -75,31 +87,45 @@ export function StorageView({
           />
         ) : null}
         {filteredRows.length ? (
-          filteredRows.map(([key, value]) =>
-            editingKey === key ? (
-              <StorageEditRow
-                key={`${area}-${key}-edit`}
-                storageKey={storageKey}
-                storageValue={storageValue}
-                saving={saving}
-                onKeyChange={onKeyChange}
-                onValueChange={onValueChange}
-                onSave={onSave}
-                onCancel={onCancelEdit}
-                onCopy={onCopy}
-              />
-            ) : (
-              <div key={`${area}-${key}`} data-testid="devtools-storage-row" style={storageRowStyle}>
-                <Text code ellipsis title={key}><HighlightedText text={key} query={searchQuery} /></Text>
-                <Text ellipsis title={value}><HighlightedText text={value} query={searchQuery} /></Text>
-                <Space size={4}>
-                  <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Delete ${key}`} onClick={() => onDelete(area, key)} />
-                  <Button size="small" type="text" icon={<CopyOutlined />} aria-label={`Copy ${key}`} onClick={() => onCopy(value)} />
-                  <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${key}`} onClick={() => onStartEdit(area, key, value)} />
-                </Space>
-              </div>
-            ),
-          )
+          <div style={{ ...storageVirtualSpaceStyle, height: rowVirtualizer.getTotalSize() }}>
+            {virtualRows.map((virtualRow) => {
+              const [key, value] = filteredRows[virtualRow.index];
+              return (
+                <div
+                  key={`${area}-${key}`}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{
+                    ...storageVirtualRowStyle,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  {editingKey === key ? (
+                    <StorageEditRow
+                      storageKey={storageKey}
+                      storageValue={storageValue}
+                      saving={saving}
+                      onKeyChange={onKeyChange}
+                      onValueChange={onValueChange}
+                      onSave={onSave}
+                      onCancel={onCancelEdit}
+                      onCopy={onCopy}
+                    />
+                  ) : (
+                    <div data-testid="devtools-storage-row" style={storageRowStyle}>
+                      <Text code ellipsis title={key}><HighlightedText text={key} query={searchQuery} /></Text>
+                      <Text ellipsis title={value}><HighlightedText text={value} query={searchQuery} /></Text>
+                      <Space size={4}>
+                        <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Delete ${key}`} onClick={() => onDelete(area, key)} />
+                        <Button size="small" type="text" icon={<CopyOutlined />} aria-label={`Copy ${key}`} onClick={() => onCopy(value)} />
+                        <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${key}`} onClick={() => onStartEdit(area, key, value)} />
+                      </Space>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         ) : editingKey === "" ? null : (
           <div style={storageEmptyStyle}><Empty description="Empty" /></div>
         )}
@@ -163,10 +189,11 @@ const storageShellStyle: CSSProperties = {
   gap: 0,
   height: "100%",
   minHeight: 0,
-  border: "1px solid #d9e2ef",
+  border: "1px solid var(--devtools-border)",
   borderRadius: 6,
   overflow: "hidden",
-  background: "#fff",
+  background: "var(--devtools-surface)",
+  color: "var(--devtools-text)",
 };
 
 const storageToolbarStyle: CSSProperties = {
@@ -175,14 +202,13 @@ const storageToolbarStyle: CSSProperties = {
   justifyContent: "space-between",
   gap: 8,
   padding: "8px 10px",
-  borderBottom: "1px solid #e7edf5",
+  borderBottom: "1px solid var(--devtools-border)",
 };
 
 const storageTableStyle: CSSProperties = {
-  display: "grid",
-  alignContent: "start",
   minHeight: 0,
   overflow: "auto",
+  position: "relative",
 };
 
 const storageHeaderRowStyle: CSSProperties = {
@@ -192,8 +218,8 @@ const storageHeaderRowStyle: CSSProperties = {
   gap: 10,
   minWidth: 620,
   padding: "7px 10px",
-  background: "#f8fafc",
-  borderBottom: "1px solid #e7edf5",
+  background: "var(--devtools-surface-alt)",
+  borderBottom: "1px solid var(--devtools-border)",
 };
 
 const storageRowStyle: CSSProperties = {
@@ -202,7 +228,21 @@ const storageRowStyle: CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "7px 10px",
-  borderTop: "1px solid #e7edf5",
+  borderTop: "1px solid var(--devtools-border)",
+  minWidth: 620,
+  minHeight: 36,
+};
+
+const storageVirtualSpaceStyle: CSSProperties = {
+  position: "relative",
+  minWidth: 620,
+};
+
+const storageVirtualRowStyle: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: 0,
+  right: 0,
   minWidth: 620,
 };
 
