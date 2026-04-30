@@ -42,8 +42,9 @@ use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::devtools::{
-    bind_devtools_client_req_traffic, devtools_bridge_requested, maybe_inject_devtools_bridge_html,
-    take_devtools_client_req_id,
+    attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
+    maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
+    take_devtools_client_req_id_from_uri,
 };
 use super::handler::{
     build_connection_error_response, build_error_body, build_overridden_error_response,
@@ -466,6 +467,7 @@ pub async fn handle_connect(
     let mut resolved_rules = rules.resolve(&url, "CONNECT");
     let tunnel_rules = rules.resolve(&tunnel_url, "CONNECT");
     if tunnel_rules.host.is_some()
+        || tunnel_rules.tls_intercept.is_some()
         || tunnel_rules.tls_options.is_some()
         || tunnel_rules.sni_callback.is_some()
         || !tunnel_rules.rules.is_empty()
@@ -1659,7 +1661,7 @@ fn should_use_binary_performance_mode(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_intercepted_request_with_protocol(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     original_host: &str,
     original_port: u16,
     req_id: &str,
@@ -1724,6 +1726,9 @@ async fn handle_intercepted_request_with_protocol(
         .await;
     }
 
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let start_time = Instant::now();
     let method = req.method().clone();
     let method_str = method.to_string();
@@ -1896,6 +1901,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -1923,6 +1929,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -1962,6 +1969,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -1992,14 +2000,13 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
     }
 
-    let (mut parts, body) = req.into_parts();
-    let devtools_client_req_id = take_devtools_client_req_id(&mut parts.headers);
-    bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, req_id);
+    let (parts, body) = req.into_parts();
 
     let actual_method = if let Some(ref method_override) = resolved_rules.method {
         if verbose_logging {
@@ -2356,6 +2363,7 @@ async fn handle_intercepted_request_with_protocol(
                     method_str.clone(),
                     original_uri.clone(),
                 );
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = if needs_response_override(&resolved_rules) {
                     resolved_rules
                         .status_code
@@ -3119,6 +3127,7 @@ async fn handle_intercepted_request_with_protocol(
             if !skip_binary_recording {
                 let mut record =
                     TrafficRecord::new(record_id.clone(), method_str.clone(), original_uri.clone());
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = res_parts.status.as_u16();
                 record.content_type = res_parts
                     .headers
@@ -3325,6 +3334,7 @@ async fn handle_intercepted_request_with_protocol(
 
         let mut record =
             TrafficRecord::new(req_id.to_string(), method_str.clone(), original_uri.clone());
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = res_parts.status.as_u16();
         record.content_type = res_parts
             .headers
@@ -3664,7 +3674,7 @@ async fn handle_intercepted_request_with_protocol(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_intercepted_websocket(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     original_host: &str,
     original_port: u16,
     req_id: &str,
@@ -3690,6 +3700,9 @@ async fn handle_intercepted_websocket(
     use tokio_rustls::TlsConnector;
 
     let start_time = Instant::now();
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let is_h2_websocket_connect = req.version() == hyper::Version::HTTP_2
         && req.method() == hyper::Method::CONNECT
         && req
@@ -4018,6 +4031,7 @@ async fn handle_intercepted_websocket(
 
         let ws_url = format!("wss://{}{}", original_host, path);
         let mut record = TrafficRecord::new(req_id.to_string(), "GET".to_string(), ws_url);
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = 101;
         record.protocol = "wss".to_string();
         record.duration_ms = total_ms;
@@ -4214,6 +4228,7 @@ fn build_websocket_handshake_request(
             || n.eq_ignore_ascii_case("keep-alive")
             || n.eq_ignore_ascii_case("te")
             || n.eq_ignore_ascii_case("trailer")
+            || is_devtools_client_req_id_header(n)
         {
             continue;
         }
@@ -4503,6 +4518,7 @@ fn record_mock_traffic(
     client_app: Option<&str>,
     client_pid: Option<u32>,
     client_path: Option<&str>,
+    devtools_client_req_id: &Option<String>,
 ) {
     let total_ms = start_time.elapsed().as_millis() as u64;
     let traffic_type = TrafficType::Https;
@@ -4519,6 +4535,7 @@ fn record_mock_traffic(
     let mock_res_headers = super::headers_to_pairs(response.headers());
 
     let mut record = TrafficRecord::new(req_id.to_string(), method.to_string(), url.to_string());
+    attach_devtools_client_req_id(&mut record, devtools_client_req_id);
     record.status = mock_status;
     record.duration_ms = total_ms;
     record.host = host.to_string();

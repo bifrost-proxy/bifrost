@@ -320,6 +320,27 @@ export function findFirstDomSearchMatch(root: DebugDomNode, query: string): { no
   return null;
 }
 
+export function findDomNodePathById(root: DebugDomNode, nodeId: number): { node: DebugDomNode; expandedKeys: string[] } | null {
+  const walk = (node: DebugDomNode, path: string, ancestors: string[]): { node: DebugDomNode; expandedKeys: string[] } | null => {
+    if (node.nodeId === nodeId) {
+      return { node, expandedKeys: ancestors };
+    }
+    const children = visibleDomChildren(node);
+    const nextAncestors = children.length ? [...ancestors, domNodeKey(node, path)] : ancestors;
+    for (let index = 0; index < children.length; index += 1) {
+      const match = walk(children[index], `${path}.${index}`, nextAncestors);
+      if (match) return match;
+    }
+    return null;
+  };
+  const roots = domTreeRoots(root);
+  for (let index = 0; index < roots.length; index += 1) {
+    const match = walk(roots[index], `0.${index}`, []);
+    if (match) return match;
+  }
+  return null;
+}
+
 function domTreeRoots(node: DebugDomNode): DebugDomNode[] {
   if (node.nodeType === 9) {
     return visibleDomChildren(node);

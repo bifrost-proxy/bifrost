@@ -7,10 +7,13 @@ use parking_lot::RwLock;
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::debug;
 
 const BRIDGE_COMMAND_QUEUE_CAPACITY: usize = 128;
 const SESSION_LIVE_QUEUE_CAPACITY: usize = 512;
 const BRIDGE_SEEN_SEQ_CAPACITY: usize = 2048;
+const PAGE_CONSOLE_CACHE_CAPACITY: usize = 500;
+const PAGE_NETWORK_CACHE_CAPACITY: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -233,7 +236,7 @@ pub struct BridgeClosePayload {
     pub token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NetworkEventInput {
     pub url: String,
     pub method: Option<String>,
@@ -258,6 +261,12 @@ pub struct BridgeNetworkPayload {
     pub event: NetworkEventInput,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BridgeNodeSelectedPayload {
+    pub token: String,
+    pub node_id: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BridgeEvalCommand {
     pub eval_id: u64,
@@ -268,6 +277,7 @@ pub struct BridgeEvalCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BridgeOverlayCommand {
     HighlightNode { node_id: u64 },
+    StartInspect,
     HideHighlight,
 }
 
@@ -285,6 +295,7 @@ pub enum DevtoolsLiveMessage {
     Snapshot { snapshot: serde_json::Value },
     Console { message: ConsoleMessage },
     Network { event: NetworkEvent },
+    NodeSelected { node_id: u64 },
     Disconnected { page_id: String, reason: String },
 }
 
@@ -311,7 +322,6 @@ pub struct BrowserDebugBroker {
     bridge_senders: RwLock<HashMap<String, mpsc::Sender<BridgeServerMessage>>>,
     session_senders: RwLock<HashMap<String, mpsc::Sender<DevtoolsLiveMessage>>>,
     bridge_seen_seqs: RwLock<HashMap<String, VecDeque<u64>>>,
-    client_req_traffic: RwLock<HashMap<String, String>>,
     evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
     evaluate_audit_capacity: usize,
 }
@@ -330,7 +340,6 @@ impl BrowserDebugBroker {
             bridge_senders: RwLock::new(HashMap::new()),
             session_senders: RwLock::new(HashMap::new()),
             bridge_seen_seqs: RwLock::new(HashMap::new()),
-            client_req_traffic: RwLock::new(HashMap::new()),
             evaluate_audit: RwLock::new(VecDeque::new()),
             evaluate_audit_capacity: std::env::var("BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY")
                 .ok()
@@ -379,6 +388,8 @@ impl BrowserDebugBroker {
     }
 
     pub fn bridge_hello(&self, page_id: &str, payload: BridgeHelloPayload) -> Result<(), String> {
+        let connected_page_ids: HashSet<String> =
+            self.bridge_senders.read().keys().cloned().collect();
         let mut pages = self.pages.write();
         let expected_token = pages
             .get(page_id)
@@ -387,10 +398,21 @@ impl BrowserDebugBroker {
         if expected_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        let tab_id = payload
+        let mut tab_id = payload
             .tab_id
             .clone()
             .filter(|value| !value.trim().is_empty());
+        if let Some(original_tab_id) = tab_id.clone() {
+            let same_tab_online = pages.iter().any(|(id, existing)| {
+                id != page_id
+                    && connected_page_ids.contains(id)
+                    && existing.bridge_tab_id.as_deref() == Some(original_tab_id.as_str())
+                    && matches!(existing.adapter, DebugAdapterKind::PageBridge)
+            });
+            if same_tab_online {
+                tab_id = Some(format!("{original_tab_id}:{page_id}"));
+            }
+        }
         let replaced_page_ids: Vec<String> = tab_id
             .as_ref()
             .map(|tab_id| {
@@ -398,6 +420,7 @@ impl BrowserDebugBroker {
                     .iter()
                     .filter_map(|(id, existing)| {
                         if id != page_id
+                            && !connected_page_ids.contains(id)
                             && existing.bridge_tab_id.as_deref() == Some(tab_id.as_str())
                             && matches!(existing.adapter, DebugAdapterKind::PageBridge)
                         {
@@ -412,6 +435,7 @@ impl BrowserDebugBroker {
         if let Some(tab_id) = &tab_id {
             pages.retain(|id, existing| {
                 id == page_id
+                    || connected_page_ids.contains(id)
                     || existing.bridge_tab_id.as_deref() != Some(tab_id.as_str())
                     || !matches!(existing.adapter, DebugAdapterKind::PageBridge)
             });
@@ -438,7 +462,29 @@ impl BrowserDebugBroker {
         }
         page.state = DebugPageState::Discoverable;
         page.last_seen_at_ms = now_ms();
-        let snapshot = snapshot_from_bridge_payload(page, payload, &self.client_req_traffic);
+        if payload.dom_snapshot.is_some() || payload.dom_tree.is_some() {
+            page.dom_snapshot = payload.dom_snapshot.clone();
+            page.dom_tree = payload.dom_tree.clone();
+            page.dom_updated_at_ms = now_ms();
+        }
+        if let Some(storage) = payload.storage.clone() {
+            page.storage_snapshot = Some(storage);
+        }
+        if !payload.console.is_empty() {
+            page.console_messages.extend(payload.console.clone());
+            trim_vec_front(&mut page.console_messages, PAGE_CONSOLE_CACHE_CAPACITY);
+        }
+        if !payload.network.is_empty() {
+            let events: Vec<NetworkEvent> = payload
+                .network
+                .iter()
+                .cloned()
+                .filter_map(network_event_from_input)
+                .collect();
+            page.network_events.extend(events);
+            trim_vec_front(&mut page.network_events, PAGE_NETWORK_CACHE_CAPACITY);
+        }
+        let snapshot = snapshot_from_bridge_payload(page, payload);
         drop(pages);
         self.push_live_to_page(page_id, DevtoolsLiveMessage::Snapshot { snapshot });
         Ok(())
@@ -449,7 +495,13 @@ impl BrowserDebugBroker {
         page_id: &str,
         payload: BridgeConsolePayload,
     ) -> Result<(), String> {
-        let mut pages = self.pages.write();
+        let Some(mut pages) = self.pages.try_write() else {
+            debug!(
+                page_id = %page_id,
+                "devtools broker busy; dropping console event to avoid blocking proxy runtime"
+            );
+            return Ok(());
+        };
         let page = pages
             .get_mut(page_id)
             .ok_or_else(|| "page not found".to_string())?;
@@ -464,6 +516,8 @@ impl BrowserDebugBroker {
             raw: payload.raw,
         };
         page.last_seen_at_ms = now_ms();
+        page.console_messages.push(message.clone());
+        trim_vec_front(&mut page.console_messages, PAGE_CONSOLE_CACHE_CAPACITY);
         drop(pages);
         self.push_live_to_page(page_id, DevtoolsLiveMessage::Console { message });
         Ok(())
@@ -813,15 +867,25 @@ impl BrowserDebugBroker {
         page_id: &str,
         payload: BridgeNetworkPayload,
     ) -> Result<(), String> {
-        let mut pages = self.pages.write();
+        let Some(mut pages) = self.pages.try_write() else {
+            debug!(
+                page_id = %page_id,
+                "devtools broker busy; dropping network event to avoid blocking proxy runtime"
+            );
+            return Ok(());
+        };
         let page = pages
             .get_mut(page_id)
             .ok_or_else(|| "page not found".to_string())?;
         if page.bridge_token != payload.token {
             return Err("bridge token mismatch".to_string());
         }
-        let event = network_event_from_input(&self.client_req_traffic, payload.event);
+        let event = network_event_from_input(payload.event);
         page.last_seen_at_ms = now_ms();
+        if let Some(event) = event.clone() {
+            page.network_events.push(event);
+            trim_vec_front(&mut page.network_events, PAGE_NETWORK_CACHE_CAPACITY);
+        }
         drop(pages);
         if let Some(event) = event {
             self.push_live_to_page(page_id, DevtoolsLiveMessage::Network { event });
@@ -829,21 +893,27 @@ impl BrowserDebugBroker {
         Ok(())
     }
 
-    pub fn bind_client_req_traffic(&self, client_req_id: &str, traffic_id: &str) {
-        let client_req_id = client_req_id.trim();
-        if client_req_id.is_empty() || traffic_id.trim().is_empty() {
-            return;
+    pub fn bridge_node_selected(
+        &self,
+        page_id: &str,
+        payload: BridgeNodeSelectedPayload,
+    ) -> Result<(), String> {
+        let mut pages = self.pages.write();
+        let page = pages
+            .get_mut(page_id)
+            .ok_or_else(|| "page not found".to_string())?;
+        if page.bridge_token != payload.token {
+            return Err("bridge token mismatch".to_string());
         }
-        self.client_req_traffic
-            .write()
-            .insert(client_req_id.to_string(), traffic_id.to_string());
-    }
-
-    pub fn traffic_id_for_client_req(&self, client_req_id: &str) -> Option<String> {
-        self.client_req_traffic
-            .read()
-            .get(client_req_id.trim())
-            .cloned()
+        page.last_seen_at_ms = now_ms();
+        drop(pages);
+        self.push_live_to_page(
+            page_id,
+            DevtoolsLiveMessage::NodeSelected {
+                node_id: payload.node_id,
+            },
+        );
+        Ok(())
     }
 
     pub fn list_pages(&self, online_only: bool) -> Vec<DebugPage> {
@@ -900,24 +970,28 @@ impl BrowserDebugBroker {
     }
 
     pub fn open_session(&self, page_id: &str) -> Result<DebugSession, String> {
-        let mut pages = self.pages.write();
-        let page = pages
-            .get_mut(page_id)
-            .ok_or_else(|| "page not found".to_string())?;
-        if page.state == DebugPageState::Candidate {
-            return Err("page bridge has not connected".to_string());
-        }
-        page.state = DebugPageState::FallbackAttached;
-        page.last_seen_at_ms = now_ms();
+        // 先在 pages 作用域内完成状态更新并构造 session，释放 pages 锁后再写入 sessions，
+        // 避免 pages.write() + sessions.write() 嵌套导致与 snapshot/session_page_id 死锁。
+        let session = {
+            let mut pages = self.pages.write();
+            let page = pages
+                .get_mut(page_id)
+                .ok_or_else(|| "page not found".to_string())?;
+            if page.state == DebugPageState::Candidate {
+                return Err("page bridge has not connected".to_string());
+            }
+            page.state = DebugPageState::FallbackAttached;
+            page.last_seen_at_ms = now_ms();
 
-        let session = DebugSession {
-            session_id: format!("bdt_{}", uuid::Uuid::new_v4().simple()),
-            page_id: page_id.to_string(),
-            adapter: page.adapter.clone(),
-            mode: page.mode.clone(),
-            state: "attached".to_string(),
-            opened_at_ms: now_ms(),
-        };
+            DebugSession {
+                session_id: format!("bdt_{}", uuid::Uuid::new_v4().simple()),
+                page_id: page_id.to_string(),
+                adapter: page.adapter.clone(),
+                mode: page.mode.clone(),
+                state: "attached".to_string(),
+                opened_at_ms: now_ms(),
+            }
+        }; // pages 锁已释放
         self.sessions
             .write()
             .insert(session.session_id.clone(), session.clone());
@@ -925,13 +999,18 @@ impl BrowserDebugBroker {
     }
 
     pub fn snapshot(&self, session_id: &str) -> Result<serde_json::Value, String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| "session not found".to_string())?;
+        // 先读取 session 中的 page_id 并释放 sessions 锁，再获取 pages 锁，
+        // 避免与 open_session (pages → sessions) 形成 AB-BA 死锁。
+        let page_id = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|s| s.page_id.clone())
+                .ok_or_else(|| "session not found".to_string())?
+        };
         let pages = self.pages.read();
         let page = pages
-            .get(&session.page_id)
+            .get(&page_id)
             .ok_or_else(|| "page not found".to_string())?;
         Ok(snapshot_for_page(page))
     }
@@ -975,6 +1054,11 @@ impl BrowserDebugBroker {
                 let page_id = self.session_page_id(session_id)?;
                 self.queue_overlay(&page_id, BridgeOverlayCommand::HideHighlight)?;
                 Ok(serde_json::json!({"hidden": true}))
+            }
+            "dom.inspect" => {
+                let page_id = self.session_page_id(session_id)?;
+                self.queue_overlay(&page_id, BridgeOverlayCommand::StartInspect)?;
+                Ok(serde_json::json!({"inspecting": true}))
             }
             "storage.set" => {
                 let page_id = self.session_page_id(session_id)?;
@@ -1066,13 +1150,18 @@ impl BrowserDebugBroker {
     }
 
     fn session_page_id(&self, session_id: &str) -> Result<String, String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| "session not found".to_string())?;
+        // 先读取 session 中的 page_id 并释放 sessions 锁，再获取 pages 锁，
+        // 避免与 open_session (pages → sessions) 形成 AB-BA 死锁。
+        let page_id = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|s| s.page_id.clone())
+                .ok_or_else(|| "session not found".to_string())?
+        };
         let pages = self.pages.read();
         let page = pages
-            .get(&session.page_id)
+            .get(&page_id)
             .ok_or_else(|| "page not found".to_string())?;
         Ok(page.page_id.clone())
     }
@@ -1136,10 +1225,7 @@ impl Default for BrowserDebugBroker {
     }
 }
 
-fn network_event_from_input(
-    client_req_traffic: &RwLock<HashMap<String, String>>,
-    event: NetworkEventInput,
-) -> Option<NetworkEvent> {
+fn network_event_from_input(event: NetworkEventInput) -> Option<NetworkEvent> {
     if event.url.trim().is_empty() {
         return None;
     }
@@ -1147,9 +1233,6 @@ fn network_event_from_input(
         .client_req_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let traffic_id = client_req_id
-        .as_deref()
-        .and_then(|id| client_req_traffic.read().get(id).cloned());
     Some(NetworkEvent {
         url: event.url,
         method: event.method.unwrap_or_else(|| "GET".to_string()),
@@ -1161,28 +1244,41 @@ fn network_event_from_input(
         response_headers: event.response_headers,
         from_cache: event.from_cache,
         client_req_id,
-        traffic_id,
+        traffic_id: None,
     })
 }
 
 fn snapshot_for_page(page: &DebugPage) -> serde_json::Value {
     serde_json::json!({
         "page": page,
-        "console": [],
-        "dom_snapshot": null,
-        "dom_tree": null,
-        "network": [],
-        "storage": null,
+        "console": &page.console_messages,
+        "dom_snapshot": &page.dom_snapshot,
+        "dom_tree": &page.dom_tree,
+        "network": &page.network_events,
+        "storage": &page.storage_snapshot,
     })
+}
+
+fn trim_vec_front<T>(items: &mut Vec<T>, capacity: usize) {
+    if capacity == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() > capacity {
+        let remove_count = items.len() - capacity;
+        items.drain(0..remove_count);
+    }
 }
 
 fn snapshot_from_bridge_payload(
     page: &DebugPage,
     payload: BridgeHelloPayload,
-    client_req_traffic: &RwLock<HashMap<String, String>>,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({ "page": page });
     if let serde_json::Value::Object(ref mut object) = value {
+        if let Some(scope) = payload.scope {
+            object.insert("scope".to_string(), serde_json::Value::String(scope));
+        }
         if payload.dom_snapshot.is_some() || payload.dom_tree.is_some() {
             object.insert(
                 "dom_snapshot".to_string(),
@@ -1209,7 +1305,7 @@ fn snapshot_from_bridge_payload(
             let events: Vec<NetworkEvent> = payload
                 .network
                 .into_iter()
-                .filter_map(|event| network_event_from_input(client_req_traffic, event))
+                .filter_map(network_event_from_input)
                 .collect();
             object.insert(
                 "network".to_string(),
@@ -1466,6 +1562,61 @@ mod tests {
         assert_eq!(snapshot["page"]["title"], "After");
         assert_eq!(broker.list_debuggable_pages(true).len(), 1);
         assert!(broker.get_page(&old_page_id).is_none());
+    }
+
+    #[test]
+    fn test_page_bridge_same_tab_id_keeps_concurrent_pages_separate() {
+        let broker = BrowserDebugBroker::new();
+        let (first_page_id, first_token) =
+            broker.register_page_candidate(input("http://example.test/assistant"));
+        broker
+            .bridge_hello(
+                &first_page_id,
+                BridgeHelloPayload {
+                    token: first_token.clone(),
+                    scope: None,
+                    tab_id: Some("cloned-tab".to_string()),
+                    title: Some("Assistant A".to_string()),
+                    url: None,
+                    user_agent: None,
+                    dom_snapshot: None,
+                    dom_tree: None,
+                    storage: None,
+                    console: Vec::new(),
+                    network: Vec::new(),
+                },
+            )
+            .expect("first hello");
+        let (tx, _rx) = mpsc::channel(1);
+        broker
+            .bridge_ws_attach(&first_page_id, &first_token, tx)
+            .expect("attach");
+
+        let (second_page_id, second_token) =
+            broker.register_page_candidate(input("http://example.test/assistant"));
+        broker
+            .bridge_hello(
+                &second_page_id,
+                BridgeHelloPayload {
+                    token: second_token,
+                    scope: None,
+                    tab_id: Some("cloned-tab".to_string()),
+                    title: Some("Assistant B".to_string()),
+                    url: None,
+                    user_agent: None,
+                    dom_snapshot: None,
+                    dom_tree: None,
+                    storage: None,
+                    console: Vec::new(),
+                    network: Vec::new(),
+                },
+            )
+            .expect("second hello");
+
+        let pages = broker.list_debuggable_pages(true);
+        assert_eq!(pages.len(), 2);
+        assert!(pages.iter().any(|page| page.page_id == first_page_id));
+        assert!(pages.iter().any(|page| page.page_id == second_page_id));
     }
 
     #[test]

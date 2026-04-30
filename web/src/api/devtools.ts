@@ -34,6 +34,7 @@ export interface DebugSession {
 
 export interface DevtoolsSnapshot {
   page: DebugPage;
+  scope?: 'full' | 'elements' | 'network' | 'storage' | 'console' | string;
   console: DebugConsoleMessage[];
   dom_snapshot?: string | null;
   dom_tree?: DebugDomNode | null;
@@ -45,6 +46,7 @@ export type DevtoolsLiveMessage =
   | { type: 'snapshot'; snapshot: DevtoolsSnapshot }
   | { type: 'console'; message: DebugConsoleMessage }
   | { type: 'network'; event: DebugNetworkEvent }
+  | { type: 'node_selected'; node_id: number }
   | { type: 'disconnected'; page_id?: string; reason: string };
 
 export interface DebugConsoleMessage {

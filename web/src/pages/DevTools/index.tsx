@@ -1,5 +1,6 @@
 import {
   ArrowLeftOutlined,
+  AimOutlined,
   BranchesOutlined,
   CodeOutlined,
   CopyOutlined,
@@ -29,7 +30,7 @@ import type { TrafficRecord } from "../../types";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import TrafficDetail from "../../components/TrafficDetail";
 import { ConsoleView, consoleValueFromRuntimeResult, type ConsoleUiEntry } from "./components/ConsolePanel";
-import { DomTree, collectDefaultExpandedDomKeys, findFirstDomSearchMatch } from "./components/ElementsPanel";
+import { DomTree, collectDefaultExpandedDomKeys, findDomNodePathById, findFirstDomSearchMatch } from "./components/ElementsPanel";
 import { NetworkList } from "./components/NetworkPanel";
 import { StorageView } from "./components/StoragePanel";
 import { tabSearchLabel } from "./components/shared";
@@ -53,6 +54,8 @@ export default function DevTools() {
   const [consoleEntries, setConsoleEntries] = useState<ConsoleUiEntry[]>([]);
   const [consoleRunning, setConsoleRunning] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  const [elementInspecting, setElementInspecting] = useState(false);
+  const [sessionWsReady, setSessionWsReady] = useState(false);
   const [expandedDomKeys, setExpandedDomKeys] = useState<Set<string>>(new Set());
   const [storageArea, setStorageArea] = useState("local_storage");
   const [storageKey, setStorageKey] = useState("");
@@ -70,6 +73,9 @@ export default function DevTools() {
   const [networkDetailError, setNetworkDetailError] = useState<string | null>(null);
   const [networkDetailEvent, setNetworkDetailEvent] = useState<DebugNetworkEvent | null>(null);
   const networkDetailRequestRef = useRef(0);
+  const domTreeRef = useRef(snapshot?.dom_tree ?? null);
+  const openingPageIdRef = useRef<string | null>(null);
+  const elementInspectingRef = useRef(false);
   const devtoolsThemeVars = useMemo(
     () => ({
       "--devtools-bg": token.colorBgLayout,
@@ -141,6 +147,30 @@ export default function DevTools() {
   }, [refreshPages, selectedPageId]);
 
   useEffect(() => {
+    domTreeRef.current = snapshot?.dom_tree ?? null;
+  }, [snapshot?.dom_tree]);
+
+  useEffect(() => {
+    elementInspectingRef.current = elementInspecting;
+  }, [elementInspecting]);
+
+  const selectDomNodeFromTarget = useCallback((nodeId: number) => {
+    setSelectedNodeId(nodeId);
+    const domTree = domTreeRef.current;
+    if (domTree) {
+      const match = findDomNodePathById(domTree, nodeId);
+      if (match) {
+        setExpandedDomKeys((previous) => new Set([...previous, ...match.expandedKeys]));
+      }
+    }
+    window.setTimeout(() => {
+      document
+        .querySelector('[data-testid="devtools-dom-node"][data-selected="true"]')
+        ?.scrollIntoView({ block: "center", inline: "nearest" });
+    }, 80);
+  }, []);
+
+  useEffect(() => {
     if (!session) return;
     const sessionId = session.session_id;
     const socket = new WebSocket(buildDevtoolsSessionWsUrl(sessionId));
@@ -172,6 +202,10 @@ export default function DevTools() {
               ? { ...previous, network: [...previous.network, liveMessage.event].slice(-500) }
               : previous,
           );
+        } else if (liveMessage.type === "node_selected") {
+          elementInspectingRef.current = false;
+          setElementInspecting(false);
+          selectDomNodeFromTarget(liveMessage.node_id);
         } else if (liveMessage.type === "disconnected") {
           setSession((current) =>
             current && current.session_id === sessionId
@@ -185,9 +219,10 @@ export default function DevTools() {
       }
     };
     socket.onopen = () => {
-      void requestCurrentTabRefresh(sessionId, "elements");
+      setSessionWsReady(true);
     };
     socket.onclose = () => {
+      setSessionWsReady(false);
       setSession((current) =>
         current && current.session_id === sessionId
           ? { ...current, state: "disconnected" }
@@ -195,12 +230,12 @@ export default function DevTools() {
       );
     };
     return () => socket.close();
-  }, [navigate, requestCurrentTabRefresh, routePageId, session?.session_id]);
+  }, [navigate, requestCurrentTabRefresh, routePageId, selectDomNodeFromTarget, session?.session_id]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || !sessionWsReady) return;
     void requestCurrentTabRefresh(session.session_id, activeToolTab);
-  }, [activeToolTab, requestCurrentTabRefresh, session?.session_id]);
+  }, [activeToolTab, requestCurrentTabRefresh, session?.session_id, sessionWsReady]);
 
   const filteredPages = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -216,6 +251,7 @@ export default function DevTools() {
     ? pages.find((page) => page.page_id === selectedPageId) ?? snapshot?.page ?? null
     : null;
   const selectedTrafficId = selectedPage?.traffic_ids?.slice(-1)[0] ?? null;
+  const networkEvents = snapshot?.network ?? [];
 
   useEffect(() => {
     const tree = snapshot?.dom_tree ?? null;
@@ -243,6 +279,7 @@ export default function DevTools() {
   const resetDetailState = () => {
     setSelectedPageId(null);
     setSession(null);
+    setSessionWsReady(false);
     setSnapshot(null);
     setSelectedNodeId(null);
     setExpandedDomKeys(new Set());
@@ -250,16 +287,21 @@ export default function DevTools() {
   };
 
   const openPage = async (page: DebugPage, options: { replaceRoute?: boolean; updateRoute?: boolean } = {}) => {
+    if (openingPageIdRef.current === page.page_id) return;
+    openingPageIdRef.current = page.page_id;
     if (options.updateRoute !== false) {
       navigate(`/devtools/${encodeURIComponent(page.page_id)}`, { replace: Boolean(options.replaceRoute) });
     }
     setSelectedPageId(page.page_id);
+    setSessionWsReady(false);
     setSnapshot(null);
     setConsoleEntries([]);
     setSelectedNodeId(null);
     setExpandedDomKeys(new Set());
     clearNetworkDetail();
-    setActiveToolTab("elements");
+    if (options.updateRoute !== false) {
+      setActiveToolTab("elements");
+    }
     setPanelSearch("");
     setLoading(true);
     try {
@@ -270,6 +312,7 @@ export default function DevTools() {
       message.error(error instanceof Error ? error.message : "Failed to open DevTools session");
     } finally {
       setLoading(false);
+      openingPageIdRef.current = null;
     }
   };
 
@@ -337,6 +380,35 @@ export default function DevTools() {
       message.error(error instanceof Error ? error.message : "Failed to highlight element");
     }
   };
+
+  const startElementInspect = async () => {
+    if (!session) return;
+    setActiveToolTab("elements");
+    elementInspectingRef.current = true;
+    setElementInspecting(true);
+    try {
+      await sendDevtoolsCommand(session.session_id, "dom.inspect", {});
+      message.info("Click an element in the target page to select it");
+    } catch (error) {
+      elementInspectingRef.current = false;
+      setElementInspecting(false);
+      message.error(error instanceof Error ? error.message : "Failed to start element picker");
+    }
+  };
+
+  const handleToolTabChange = useCallback(
+    (key: string) => {
+      setActiveToolTab(key);
+      if (session) {
+        void requestCurrentTabRefresh(session.session_id, key);
+      }
+      if (key === "cookie" || key === "local_storage" || key === "session_storage") {
+        setStorageArea(key);
+        setStorageEditingKey(null);
+      }
+    },
+    [requestCurrentTabRefresh, session],
+  );
 
   const updateStorageValue = async () => {
     if (!session) return;
@@ -529,12 +601,10 @@ export default function DevTools() {
                         {page.url}
                       </Text>
                     </Space>
-                    <Space wrap size={6}>
-                      <Tag color="blue">{page.adapter}</Tag>
-                      <Tag color="gold">{page.fidelity}</Tag>
-                      <Tag>{page.state}</Tag>
-                      <Tag>{page.mode}</Tag>
-                    </Space>
+                    <Text type="secondary">
+                      {page.state === "fallback_attached" ? "Attached" : "Online"}
+                      {page.mode === "control" ? " · Control enabled" : ""}
+                    </Text>
                   </Space>
                 </button>
               ))
@@ -616,7 +686,7 @@ export default function DevTools() {
             loading={loading || snapshotLoading}
             onClick={() => {
               if (session) {
-                void refreshSnapshot(session.session_id, { full: true });
+                void refreshSnapshot(session.session_id);
               } else {
                 void openPage(selectedPage);
               }
@@ -635,23 +705,32 @@ export default function DevTools() {
           style={workspaceStyle}
           destroyOnHidden
           activeKey={activeToolTab}
-          onChange={(key) => {
-            setActiveToolTab(key);
-            if (key === "cookie" || key === "local_storage" || key === "session_storage") {
-              setStorageArea(key);
-              setStorageEditingKey(null);
-            }
-          }}
+          onChange={handleToolTabChange}
+          onTabClick={handleToolTabChange}
           tabBarExtraContent={{
             right: (
-              <Input
-                allowClear
-                data-testid="devtools-panel-search"
-                value={panelSearch}
-                onChange={(event) => setPanelSearch(event.target.value)}
-                placeholder={`Search ${tabSearchLabel(activeToolTab)}`}
-                style={panelSearchStyle}
-              />
+              <Space size={8}>
+                {activeToolTab === "elements" ? (
+                  <Tooltip title="Select an element from the target page">
+                    <Button
+                      icon={<AimOutlined />}
+                      loading={elementInspecting}
+                      data-testid="devtools-elements-inspect"
+                      onClick={() => {
+                        void startElementInspect();
+                      }}
+                    />
+                  </Tooltip>
+                ) : null}
+                <Input
+                  allowClear
+                  data-testid="devtools-panel-search"
+                  value={panelSearch}
+                  onChange={(event) => setPanelSearch(event.target.value)}
+                  placeholder={`Search ${tabSearchLabel(activeToolTab)}`}
+                  style={panelSearchStyle}
+                />
+              </Space>
             ),
           }}
           items={[
@@ -691,7 +770,7 @@ export default function DevTools() {
                   style={networkDetailEvent || networkTrafficId || networkDetailLoading || networkDetailError ? networkPanelStyle : panelStyle}
                 >
                   <NetworkList
-                    events={snapshot?.network ?? []}
+                    events={networkEvents}
                     searchQuery={panelSearch}
                     onOpenTraffic={(event) => {
                       void openNetworkTrafficRecord(event).catch((error) => {
@@ -1003,21 +1082,49 @@ function emptySnapshot(page: DebugPage): DevtoolsSnapshot {
 
 function mergeSnapshot(previous: DevtoolsSnapshot | null, incoming: Partial<DevtoolsSnapshot>): DevtoolsSnapshot {
   const base = previous ?? emptySnapshot(incoming.page as DebugPage);
+  const scope = typeof incoming.scope === "string" ? incoming.scope : null;
+  const metadataOnly =
+    previous &&
+    incoming.page &&
+    Array.isArray(incoming.console) &&
+    incoming.console.length === 0 &&
+    Array.isArray(incoming.network) &&
+    incoming.network.length === 0 &&
+    Object.prototype.hasOwnProperty.call(incoming, "dom_snapshot") &&
+    incoming.dom_snapshot == null &&
+    Object.prototype.hasOwnProperty.call(incoming, "dom_tree") &&
+    incoming.dom_tree == null &&
+    Object.prototype.hasOwnProperty.call(incoming, "storage") &&
+    incoming.storage == null;
+  if (metadataOnly) {
+    return { ...base, page: incoming.page ?? base.page };
+  }
+  const shouldReplace = (
+    field: "console" | "network" | "storage" | "dom_snapshot" | "dom_tree",
+    matchingScopes: string[],
+  ) => {
+    if (!Object.prototype.hasOwnProperty.call(incoming, field)) return false;
+    if (!previous || !scope || scope === "full" || matchingScopes.includes(scope)) return true;
+    const value = incoming[field];
+    if (Array.isArray(value)) return value.length > 0;
+    return value != null;
+  };
   return {
     page: incoming.page ?? base.page,
-    console: Object.prototype.hasOwnProperty.call(incoming, "console")
+    scope: incoming.scope ?? base.scope,
+    console: shouldReplace("console", ["console"])
       ? (incoming.console ?? [])
       : base.console,
-    network: Object.prototype.hasOwnProperty.call(incoming, "network")
+    network: shouldReplace("network", ["network"])
       ? (incoming.network ?? [])
       : base.network,
-    storage: Object.prototype.hasOwnProperty.call(incoming, "storage")
+    storage: shouldReplace("storage", ["storage"])
       ? (incoming.storage ?? null)
       : base.storage,
-    dom_snapshot: Object.prototype.hasOwnProperty.call(incoming, "dom_snapshot")
+    dom_snapshot: shouldReplace("dom_snapshot", ["elements"])
       ? (incoming.dom_snapshot ?? null)
       : base.dom_snapshot,
-    dom_tree: Object.prototype.hasOwnProperty.call(incoming, "dom_tree")
+    dom_tree: shouldReplace("dom_tree", ["elements"])
       ? (incoming.dom_tree ?? null)
       : base.dom_tree,
   };

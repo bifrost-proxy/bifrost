@@ -1,17 +1,19 @@
-use std::sync::Arc;
+use std::sync::OnceLock;
 
 use bifrost_admin::{
     devtools::{DevtoolsMode as AdminDevtoolsMode, MatchedDevtoolsRule, RegisterPageInput},
-    AdminState,
+    AdminState, TrafficRecord,
 };
 use bifrost_core::protocol::Protocol;
 use bytes::Bytes;
-use hyper::header::HeaderName;
+use hyper::{header::HeaderName, Uri};
+use regex::{Captures, Regex};
 use url::Url;
 
 use crate::server::{DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules};
 
 pub(super) const DEVTOOLS_CLIENT_REQ_ID_HEADER: &str = "x-bifrost-client-request-id";
+pub(super) const DEVTOOLS_CLIENT_REQ_ID_QUERY: &str = "__bifrost_client_req_id";
 
 pub(super) fn take_devtools_client_req_id(headers: &mut hyper::HeaderMap) -> Option<String> {
     let name = HeaderName::from_static(DEVTOOLS_CLIENT_REQ_ID_HEADER);
@@ -24,20 +26,102 @@ pub(super) fn take_devtools_client_req_id(headers: &mut hyper::HeaderMap) -> Opt
     value
 }
 
+pub(super) fn take_devtools_client_req_id_from_uri(uri: &mut Uri) -> Option<String> {
+    if !uri.to_string().contains(DEVTOOLS_CLIENT_REQ_ID_QUERY) {
+        return None;
+    }
+
+    if uri.scheme().is_some() {
+        return take_devtools_client_req_id_from_absolute_uri(uri);
+    }
+
+    take_devtools_client_req_id_from_path_query(uri)
+}
+
+pub(super) fn strip_devtools_client_req_id_from_url(url: &str) -> String {
+    if !url.contains(DEVTOOLS_CLIENT_REQ_ID_QUERY) {
+        return url.to_string();
+    }
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    let Some((_, next_query)) = strip_devtools_client_req_id_query(parsed.query()) else {
+        return url.to_string();
+    };
+    parsed.set_query(next_query.as_deref());
+    parsed.to_string()
+}
+
+fn take_devtools_client_req_id_from_absolute_uri(uri: &mut Uri) -> Option<String> {
+    let mut parsed = Url::parse(&uri.to_string()).ok()?;
+    let (client_req_id, next_query) = strip_devtools_client_req_id_query(parsed.query())?;
+    parsed.set_query(next_query.as_deref());
+    if let Ok(next_uri) = parsed.as_str().parse::<Uri>() {
+        *uri = next_uri;
+        Some(client_req_id)
+    } else {
+        None
+    }
+}
+
+fn take_devtools_client_req_id_from_path_query(uri: &mut Uri) -> Option<String> {
+    let path = uri.path().to_string();
+    let (client_req_id, next_query) = strip_devtools_client_req_id_query(uri.query())?;
+    let next_path_query = match next_query {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path,
+    };
+    if let Ok(next_uri) = next_path_query.parse::<Uri>() {
+        *uri = next_uri;
+        Some(client_req_id)
+    } else {
+        None
+    }
+}
+
+fn strip_devtools_client_req_id_query(query: Option<&str>) -> Option<(String, Option<String>)> {
+    let query = query?;
+    let mut client_req_id: Option<String> = None;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key == DEVTOOLS_CLIENT_REQ_ID_QUERY {
+            let value = value.trim().to_string();
+            if !value.is_empty() && client_req_id.is_none() {
+                client_req_id = Some(value);
+            }
+            continue;
+        }
+        pairs.push((key.into_owned(), value.into_owned()));
+    }
+    let client_req_id = client_req_id?;
+    let next_query = if pairs.is_empty() {
+        None
+    } else {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in pairs {
+            serializer.append_pair(&key, &value);
+        }
+        Some(serializer.finish())
+    };
+    Some((client_req_id, next_query))
+}
+
 pub(super) fn is_devtools_client_req_id_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(DEVTOOLS_CLIENT_REQ_ID_HEADER)
 }
 
-pub(super) fn bind_devtools_client_req_traffic(
-    admin_state: &Option<Arc<AdminState>>,
+pub(super) fn attach_devtools_client_req_id(
+    record: &mut TrafficRecord,
     client_req_id: &Option<String>,
-    traffic_id: &str,
 ) {
-    if let (Some(state), Some(client_req_id)) = (admin_state.as_ref(), client_req_id.as_ref()) {
-        state
-            .devtools_broker
-            .bind_client_req_traffic(client_req_id, traffic_id);
+    if record.is_replay {
+        return;
     }
+    record.devtools_client_req_id = client_req_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
 }
 
 pub(super) fn devtools_bridge_requested(rules: &ResolvedRules) -> bool {
@@ -183,11 +267,8 @@ fn insert_devtools_bridge_script(html: &str, script: &str) -> String {
     let lower = html.to_lowercase();
 
     if let Some(head_start) = lower.find("<head") {
-        if let Some(head_end_offset) = lower[head_start..].find('>') {
-            let insert_at = head_start + head_end_offset + 1;
-            html.insert_str(insert_at, script);
-            return html;
-        }
+        html.insert_str(head_start, script);
+        return html;
     }
 
     if let Some(html_start) = lower.find("<html") {
@@ -199,6 +280,116 @@ fn insert_devtools_bridge_script(html: &str, script: &str) -> String {
     }
 
     format!("{script}{html}")
+}
+
+fn mark_devtools_static_resource_urls(html: &str, page_id: &str, page_origin: &str) -> String {
+    static RESOURCE_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static RESOURCE_ATTR_RE: OnceLock<Regex> = OnceLock::new();
+
+    let tag_re = RESOURCE_TAG_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?is)<\s*(script|img|link|iframe|source|video|audio|track|embed|object)\b[^>]*>"#,
+        )
+        .expect("valid resource tag regex")
+    });
+    let attr_re = RESOURCE_ATTR_RE.get_or_init(|| {
+        Regex::new(r#"(?is)\b(src|href|data|poster|srcset|imagesrcset)\s*=\s*("[^"]*"|'[^']*')"#)
+            .expect("valid resource attr regex")
+    });
+
+    let mut counter = 0usize;
+    tag_re
+        .replace_all(html, |tag_caps: &Captures<'_>| {
+            let tag = tag_caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+            attr_re
+                .replace_all(tag, |attr_caps: &Captures<'_>| {
+                    let name = attr_caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let quoted = attr_caps.get(2).map(|m| m.as_str()).unwrap_or("\"\"");
+                    let quote = quoted
+                        .chars()
+                        .next()
+                        .map(|ch| ch.to_string())
+                        .unwrap_or_else(|| "\"".to_string());
+                    let value = quoted.get(1..quoted.len().saturating_sub(1)).unwrap_or("");
+                    counter = counter.saturating_add(1);
+                    let marked = if name.eq_ignore_ascii_case("srcset")
+                        || name.eq_ignore_ascii_case("imagesrcset")
+                    {
+                        mark_srcset_value(value, page_id, page_origin, counter)
+                    } else {
+                        mark_resource_url(value, page_id, page_origin, counter)
+                    };
+                    format!("{name}={quote}{marked}{quote}")
+                })
+                .into_owned()
+        })
+        .into_owned()
+}
+
+fn mark_srcset_value(value: &str, page_id: &str, page_origin: &str, counter: usize) -> String {
+    value
+        .split(',')
+        .enumerate()
+        .map(|(index, part)| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            let mut pieces = trimmed.splitn(2, char::is_whitespace);
+            let url = pieces.next().unwrap_or_default();
+            let descriptor = pieces.next().unwrap_or_default().trim();
+            let marked =
+                mark_resource_url(url, page_id, page_origin, counter.saturating_add(index));
+            if descriptor.is_empty() {
+                marked
+            } else {
+                format!("{marked} {descriptor}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mark_resource_url(value: &str, page_id: &str, page_origin: &str, counter: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("blob:")
+        || trimmed.starts_with("javascript:")
+        || trimmed.starts_with("mailto:")
+        || trimmed.contains(DEVTOOLS_CLIENT_REQ_ID_QUERY)
+    {
+        return value.to_string();
+    }
+
+    if !resource_url_matches_page_origin(trimmed, page_origin) {
+        return value.to_string();
+    }
+
+    let marker = format!("{page_id}-tag-{counter}");
+    let hash_index = value.find('#');
+    let (without_hash, hash) = match hash_index {
+        Some(index) => (&value[..index], &value[index..]),
+        None => (value, ""),
+    };
+    let separator = if without_hash.contains('?') { "&" } else { "?" };
+    format!("{without_hash}{separator}{DEVTOOLS_CLIENT_REQ_ID_QUERY}={marker}{hash}")
+}
+
+fn resource_url_matches_page_origin(value: &str, page_origin: &str) -> bool {
+    if page_origin.is_empty() {
+        return false;
+    }
+    if value.starts_with("//") {
+        return false;
+    }
+    if value.starts_with('/') || value.starts_with("./") || value.starts_with("../") {
+        return true;
+    }
+    Url::parse(value)
+        .map(|parsed| origin_from_url(parsed.as_str()) == page_origin)
+        .unwrap_or(true)
 }
 
 fn devtools_bridge_script(page_id: &str, token: &str) -> String {
@@ -215,6 +406,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   const pageId = {page_id_json};
   const bridgeHost = "bifrost.local";
   const clientReqHeader = "x-bifrost-client-request-id";
+  const clientReqQuery = "__bifrost_client_req_id";
   let bridgeSocket = null;
   let bridgeSocketReady = false;
   let bridgeSocketReconnectTimer = 0;
@@ -316,18 +508,22 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   window.addEventListener("pagehide", closeBridge, false);
   let nextNodeId = 1;
   let nodeMap = Object.create(null);
+  let nodeIdMap = new WeakMap();
   let domRefreshTimer = 0;
   let storageRefreshTimer = 0;
   let lastDomSignature = "";
   let lastStorageSnapshot = "";
   let highlightedNode = null;
   let highlightOverlay = null;
+  let inspectMode = false;
+  let inspectNode = null;
   const observedResources = Object.create(null);
   let consoleBuffer = [];
   let networkBuffer = [];
   const internalNodeIds = {{
     "__bifrost_devtools_bridge__": true,
-    "__bifrost_devtools_highlight__": true
+    "__bifrost_devtools_highlight__": true,
+    "__bifrost_devtools_highlight_info__": true
   }};
   const isBridgeInternalNode = function(node) {{
     if (!node) return false;
@@ -335,7 +531,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (!node) return false;
     if (internalNodeIds[node.id]) return true;
     try {{
-      return !!(node.closest && node.closest("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__"));
+      return !!(node.closest && node.closest("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__,#__bifrost_devtools_highlight_info__"));
     }} catch (_) {{
       return false;
     }}
@@ -345,11 +541,89 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       return !isBridgeInternalNode(child);
     }});
   }};
+  const cssBoxValues = function(style, prefix) {{
+    return [
+      style.getPropertyValue(prefix + "-top") || "0px",
+      style.getPropertyValue(prefix + "-right") || "0px",
+      style.getPropertyValue(prefix + "-bottom") || "0px",
+      style.getPropertyValue(prefix + "-left") || "0px"
+    ].join(" ");
+  }};
+  const nodeSelectorLabel = function(node) {{
+    try {{
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return "node";
+      let label = String(node.tagName || "element").toLowerCase();
+      if (node.id) label += "#" + node.id;
+      if (node.classList && node.classList.length) {{
+        label += "." + Array.prototype.slice.call(node.classList, 0, 3).join(".");
+      }}
+      return label;
+    }} catch (_) {{
+      return "node";
+    }}
+  }};
+  const nodeInfoText = function(node, rect) {{
+    try {{
+      const style = window.getComputedStyle(node);
+      return [
+        nodeSelectorLabel(node) + "  " + Math.round(rect.width) + " x " + Math.round(rect.height),
+        "Color " + (style.color || ""),
+        "Font " + (style.fontSize || "") + " " + (style.fontFamily || ""),
+        "Padding " + cssBoxValues(style, "padding"),
+        "Margin " + cssBoxValues(style, "margin")
+      ];
+    }} catch (_) {{
+      return [nodeSelectorLabel(node) + "  " + Math.round(rect.width) + " x " + Math.round(rect.height)];
+    }}
+  }};
+  const renderNodeInfo = function(info, node, rect) {{
+    const lines = nodeInfoText(node, rect);
+    info.replaceChildren();
+    const title = document.createElement("div");
+    title.style.cssText = [
+      "font-weight:600",
+      "color:#1f1f1f",
+      "margin-bottom:4px",
+      "white-space:nowrap",
+      "overflow:hidden",
+      "text-overflow:ellipsis"
+    ].join(";");
+    title.textContent = lines[0] || "";
+    info.appendChild(title);
+    lines.slice(1).forEach(function(line) {{
+      const index = String(line).indexOf(" ");
+      const key = index > 0 ? String(line).slice(0, index) : "";
+      const value = index > 0 ? String(line).slice(index + 1) : String(line);
+      const row = document.createElement("div");
+      row.style.cssText = [
+        "display:grid",
+        "grid-template-columns:56px minmax(0,1fr)",
+        "gap:8px",
+        "align-items:start",
+        "min-width:0"
+      ].join(";");
+      const label = document.createElement("span");
+      label.style.cssText = "color:#6b7280;white-space:nowrap;";
+      label.textContent = key;
+      const text = document.createElement("span");
+      text.style.cssText = [
+        "color:#202124",
+        "min-width:0",
+        "white-space:normal",
+        "overflow-wrap:break-word",
+        "word-break:normal"
+      ].join(";");
+      text.textContent = value;
+      row.appendChild(label);
+      row.appendChild(text);
+      info.appendChild(row);
+    }});
+  }};
   const sanitizedOuterHTML = function() {{
     try {{
       if (!document.documentElement) return "";
       const clone = document.documentElement.cloneNode(true);
-      Array.prototype.slice.call(clone.querySelectorAll("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__")).forEach(function(node) {{
+      Array.prototype.slice.call(clone.querySelectorAll("#__bifrost_devtools_bridge__,#__bifrost_devtools_highlight__,#__bifrost_devtools_highlight_info__")).forEach(function(node) {{
         if (node.parentNode) node.parentNode.removeChild(node);
       }});
       return clone.outerHTML.slice(0, 1048576);
@@ -368,6 +642,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   const serializeNode = function(node) {{
     const id = nextNodeId++;
     nodeMap[id] = node;
+    try {{ nodeIdMap.set(node, id); }} catch (_) {{}}
     const children = externalChildNodes(node);
     if (node.nodeType === Node.DOCUMENT_NODE) {{
       return {{
@@ -442,21 +717,42 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       cookies: cookies
     }};
   }};
+  const networkDedupeKey = function(url) {{
+    try {{
+      const parsed = new URL(url, location.href);
+      parsed.hash = "";
+      parsed.searchParams.delete(clientReqQuery);
+      return parsed.href;
+    }} catch (_) {{
+      return String(url || "").replace(/([?&])__bifrost_client_req_id=[^&#]*&?/g, "$1").replace(/[?&]$/, "");
+    }}
+  }};
   const rememberNetwork = function(event) {{
     if (!event || !event.url || event.url.indexOf("/_bifrost/api/devtools/bridge/") !== -1) return null;
     const method = event.method || "GET";
-    const performanceOnly = !event.client_req_id && (!event.status || event.status === 0);
-    if (performanceOnly) {{
+    const clientReqId = event.client_req_id || null;
+    const dedupeKey = networkDedupeKey(event.url);
+    if (!clientReqId) {{
       for (let i = networkBuffer.length - 1; i >= Math.max(0, networkBuffer.length - 80); i--) {{
         const item = networkBuffer[i];
-        if (item && item.client_req_id && item.url === event.url && item.method === method) return null;
+        if (item && item.client_req_id && item.dedupe_key === dedupeKey) return null;
       }}
-    }} else if (event.client_req_id) {{
+    }} else {{
       for (let i = networkBuffer.length - 1; i >= Math.max(0, networkBuffer.length - 80); i--) {{
         const item = networkBuffer[i];
-        if (item && !item.client_req_id && (!item.status || item.status === 0) && item.url === event.url && item.method === method) {{
+        if (item && item.client_req_id === clientReqId) {{
+          networkBuffer[i] = Object.assign({{}}, item, {{
+            status: event.status || item.status,
+            type: event.type || item.type,
+            query_params: event.query_params || item.query_params,
+            request_headers: sanitizeHeaderPairs(event.request_headers || item.request_headers || []),
+            response_headers: sanitizeHeaderPairs(event.response_headers || item.response_headers || []),
+            from_cache: typeof event.from_cache === "boolean" ? event.from_cache : item.from_cache
+          }});
+          return networkBuffer[i];
+        }}
+        if (item && !item.client_req_id && item.dedupe_key === dedupeKey) {{
           networkBuffer.splice(i, 1);
-          break;
         }}
       }}
     }}
@@ -469,7 +765,8 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
 	      request_headers: sanitizeHeaderPairs(event.request_headers || []),
 	      response_headers: sanitizeHeaderPairs(event.response_headers || []),
 	      from_cache: typeof event.from_cache === "boolean" ? event.from_cache : null,
-	      client_req_id: event.client_req_id || null
+	      client_req_id: clientReqId,
+	      dedupe_key: dedupeKey
 	    }};
     networkBuffer.push(normalized);
     if (networkBuffer.length > 1000) networkBuffer = networkBuffer.slice(-1000);
@@ -485,12 +782,14 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
         observedResources[key] = true;
         return true;
       }}).map(function(entry) {{
+	        const cleaned = takeClientReqIdFromUrl(entry.name);
 	        return rememberNetwork({{
-	          url: entry.name,
+	          url: cleaned.url,
 	          method: "GET",
-	          status: 0,
+	          status: resourceTimingStatus(entry),
 	          type: entry.initiatorType || "Other",
-	          query_params: queryPairs(entry.name),
+	          client_req_id: cleaned.id,
+	          query_params: queryPairs(cleaned.url),
 	          from_cache: entry.transferSize === 0 && entry.encodedBodySize > 0
 	        }});
       }}).filter(Boolean);
@@ -504,6 +803,14 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (scope === "cookie" || scope === "local_storage" || scope === "session_storage") return "storage";
     return scope || "full";
   }};
+  const resourceTimingStatus = function(entry) {{
+    try {{
+      const status = Number(entry && entry.responseStatus);
+      return Number.isFinite(status) && status > 0 ? status : 0;
+    }} catch (_) {{
+      return 0;
+    }}
+  }};
   const hello = function(scope, networkEvents) {{
     scope = normalizeSnapshotScope(scope);
     lastHelloArgs = {{scope: scope, networkEvents: networkEvents || []}};
@@ -514,6 +821,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (includeDom) {{
       nextNodeId = 1;
       nodeMap = Object.create(null);
+      nodeIdMap = new WeakMap();
     }}
     const payload = {{
       scope: scope,
@@ -522,8 +830,10 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       url: location.href,
       user_agent: navigator.userAgent
     }};
-    (networkEvents || []).forEach(rememberNetwork);
-    performanceNetwork();
+    if (includeNetwork) {{
+      (networkEvents || []).forEach(rememberNetwork);
+      performanceNetwork();
+    }}
     if (includeDom) {{
       const domTree = serializeNode(document);
       const domSignature = JSON.stringify(domTree);
@@ -564,7 +874,7 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     if (domRefreshTimer) return;
     domRefreshTimer = window.setTimeout(function() {{
       domRefreshTimer = 0;
-      hello("elements", performanceNetwork());
+      hello("elements", []);
     }}, delay || 250);
   }};
   const isExternalStructuralMutation = function(mutation) {{
@@ -590,6 +900,30 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       "box-sizing:border-box",
       "display:none"
     ].join(";");
+    const info = document.createElement("div");
+    info.id = "__bifrost_devtools_highlight_info__";
+    info.style.cssText = [
+      "position:absolute",
+      "left:0",
+      "top:-8px",
+      "transform:translateY(-100%)",
+      "width:min(340px,calc(100vw - 24px))",
+      "max-width:calc(100vw - 24px)",
+      "padding:8px 10px",
+      "background:rgba(255,255,255,0.96)",
+      "color:#202124",
+      "border:1px solid rgba(0,0,0,0.15)",
+      "border-radius:4px",
+      "box-shadow:0 4px 18px rgba(0,0,0,0.18)",
+      "font:12px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif",
+      "white-space:normal",
+      "overflow-wrap:normal",
+      "word-break:normal",
+      "text-align:left",
+      "box-sizing:border-box",
+      "pointer-events:none"
+    ].join(";");
+    highlightOverlay.appendChild(info);
     (document.documentElement || document.body).appendChild(highlightOverlay);
     return highlightOverlay;
   }};
@@ -606,6 +940,22 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     overlay.style.top = Math.max(0, rect.top) + "px";
     overlay.style.width = Math.max(1, rect.width) + "px";
     overlay.style.height = Math.max(1, rect.height) + "px";
+    const info = overlay.querySelector("#__bifrost_devtools_highlight_info__");
+    if (info) {{
+      const infoWidth = Math.max(220, Math.min(340, window.innerWidth - 24));
+      info.style.width = infoWidth + "px";
+      const viewportLeft = Math.min(Math.max(12, rect.left), Math.max(12, window.innerWidth - infoWidth - 12));
+      info.style.left = (viewportLeft - rect.left) + "px";
+      renderNodeInfo(info, highlightedNode, rect);
+      const tooltipTop = rect.top - 8;
+      if (tooltipTop < 12) {{
+        info.style.top = Math.max(1, rect.height + 8) + "px";
+        info.style.transform = "none";
+      }} else {{
+        info.style.top = "-8px";
+        info.style.transform = "translateY(-100%)";
+      }}
+    }}
   }};
   const highlightNode = function(nodeId) {{
     const node = nodeMap[nodeId];
@@ -616,9 +966,70 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     highlightedNode = null;
     if (highlightOverlay) highlightOverlay.style.display = "none";
   }};
+  const nodeIdForElement = function(node) {{
+    try {{
+      if (!node) return null;
+      if (node.nodeType !== Node.ELEMENT_NODE) node = node.parentElement;
+      if (!node || isBridgeInternalNode(node)) return null;
+      let id = nodeIdMap.get(node);
+      if (id) return id;
+      hello("elements", []);
+      id = nodeIdMap.get(node);
+      return id || null;
+    }} catch (_) {{
+      return null;
+    }}
+  }};
+  const inspectMouseMove = function(event) {{
+    if (!inspectMode) return;
+    const target = event.target;
+    if (!target || isBridgeInternalNode(target)) return;
+    inspectNode = target.nodeType === Node.TEXT_NODE ? target.parentElement : target;
+    highlightedNode = inspectNode;
+    updateHighlightOverlay();
+  }};
+  const stopInspectMode = function() {{
+    if (!inspectMode) return;
+    inspectMode = false;
+    document.removeEventListener("mousemove", inspectMouseMove, true);
+    document.removeEventListener("mouseover", inspectMouseMove, true);
+    document.removeEventListener("click", inspectClick, true);
+    document.removeEventListener("keydown", inspectKeyDown, true);
+    try {{ document.documentElement.removeAttribute("data-bifrost-devtools-inspecting"); }} catch (_) {{}}
+  }};
+  const inspectKeyDown = function(event) {{
+    if (!inspectMode) return;
+    if (event.key === "Escape") {{
+      event.preventDefault();
+      event.stopPropagation();
+      stopInspectMode();
+      hideHighlight();
+    }}
+  }};
+  const inspectClick = function(event) {{
+    if (!inspectMode) return;
+    const target = inspectNode || event.target;
+    const nodeId = nodeIdForElement(target);
+    if (!nodeId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    highlightedNode = target.nodeType === Node.TEXT_NODE ? target.parentElement : target;
+    updateHighlightOverlay();
+    stopInspectMode();
+    post("/node-selected", {{node_id: nodeId}});
+  }};
+  const startInspectMode = function() {{
+    inspectMode = true;
+    try {{ document.documentElement.setAttribute("data-bifrost-devtools-inspecting", "true"); }} catch (_) {{}}
+    document.addEventListener("mousemove", inspectMouseMove, true);
+    document.addEventListener("mouseover", inspectMouseMove, true);
+    document.addEventListener("click", inspectClick, true);
+    document.addEventListener("keydown", inspectKeyDown, true);
+  }};
   const handleOverlayCommand = function(command) {{
     if (!command) return;
     if (command.type === "highlight_node") highlightNode(command.node_id);
+    if (command.type === "start_inspect") startInspectMode();
     if (command.type === "hide_highlight") hideHighlight();
   }};
   const truncateText = function(value, limit) {{
@@ -747,6 +1158,93 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
   const nextClientReqId = function() {{
     return pageId + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
   }};
+  const takeClientReqIdFromUrl = function(url) {{
+    try {{
+      const parsed = new URL(url, location.href);
+      const id = parsed.searchParams.get(clientReqQuery);
+      if (!id) return {{url: url, id: null}};
+      parsed.searchParams.delete(clientReqQuery);
+      if (String(url).charAt(0) === "/") {{
+        return {{url: parsed.pathname + parsed.search + parsed.hash, id: id}};
+      }}
+      return {{url: parsed.href, id: id}};
+    }} catch (_) {{
+      return {{url: url, id: null}};
+    }}
+  }};
+  const canMarkResourceUrl = function(parsed, raw) {{
+    try {{
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) return false;
+      if (String(raw || "").indexOf("//") === 0) return false;
+      return parsed.origin === location.origin;
+    }} catch (_) {{
+      return false;
+    }}
+  }};
+  const markResourceUrl = function(url) {{
+    try {{
+      const raw = String(url || "");
+      if (!raw || raw.indexOf(clientReqQuery + "=") !== -1 || raw.charAt(0) === "#") return url;
+      if (/^(data|blob|javascript|mailto):/i.test(raw)) return url;
+      const parsed = new URL(raw, location.href);
+      if (!/^https?:$/i.test(parsed.protocol)) return url;
+      if (!canMarkResourceUrl(parsed, raw)) return url;
+      parsed.searchParams.set(clientReqQuery, pageId + "-tag-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
+      if (raw.charAt(0) === "/") return parsed.pathname + parsed.search + parsed.hash;
+      return parsed.href;
+    }} catch (_) {{
+      return url;
+    }}
+  }};
+  const markSrcsetValue = function(value) {{
+    try {{
+      return String(value || "").split(",").map(function(part) {{
+        const trimmed = part.trim();
+        if (!trimmed) return "";
+        const match = trimmed.match(/^(\S+)(\s+.+)?$/);
+        if (!match) return trimmed;
+        return markResourceUrl(match[1]) + (match[2] || "");
+      }}).join(", ");
+    }} catch (_) {{
+      return value;
+    }}
+  }};
+  try {{
+    const originalSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {{
+      const lower = String(name || "").toLowerCase();
+      if (lower === "src" || lower === "href" || lower === "poster" || lower === "data") {{
+        value = markResourceUrl(value);
+      }} else if (lower === "srcset" || lower === "imagesrcset") {{
+        value = markSrcsetValue(value);
+      }}
+      return originalSetAttribute.call(this, name, value);
+    }};
+  }} catch (_) {{}}
+  const patchUrlProperty = function(proto, prop, multi) {{
+    try {{
+      if (!proto) return;
+      const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!descriptor || typeof descriptor.set !== "function") return;
+      Object.defineProperty(proto, prop, {{
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set: function(value) {{
+          return descriptor.set.call(this, multi ? markSrcsetValue(value) : markResourceUrl(value));
+        }}
+      }});
+    }} catch (_) {{}}
+  }};
+  patchUrlProperty(window.HTMLImageElement && window.HTMLImageElement.prototype, "src", false);
+  patchUrlProperty(window.HTMLImageElement && window.HTMLImageElement.prototype, "srcset", true);
+  patchUrlProperty(window.HTMLScriptElement && window.HTMLScriptElement.prototype, "src", false);
+  patchUrlProperty(window.HTMLLinkElement && window.HTMLLinkElement.prototype, "href", false);
+  patchUrlProperty(window.HTMLIFrameElement && window.HTMLIFrameElement.prototype, "src", false);
+  patchUrlProperty(window.HTMLSourceElement && window.HTMLSourceElement.prototype, "src", false);
+  patchUrlProperty(window.HTMLSourceElement && window.HTMLSourceElement.prototype, "srcset", true);
+  patchUrlProperty(window.HTMLVideoElement && window.HTMLVideoElement.prototype, "poster", false);
+  patchUrlProperty(window.HTMLObjectElement && window.HTMLObjectElement.prototype, "data", false);
 	  const canAttachClientReqHeader = function(url) {{
 	    try {{
 	      const parsed = new URL(url, location.href);
@@ -809,7 +1307,8 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
 	          const key = entry.name + "::" + entry.startTime;
 	          if (observedResources[key]) return;
 	          observedResources[key] = true;
-	          recordNetwork({{url: entry.name, method: "GET", status: 0, type: entry.initiatorType || "Other", query_params: queryPairs(entry.name), from_cache: entry.transferSize === 0 && entry.encodedBodySize > 0}});
+	          const cleaned = takeClientReqIdFromUrl(entry.name);
+	          recordNetwork({{url: cleaned.url, method: "GET", status: resourceTimingStatus(entry), type: entry.initiatorType || "Other", client_req_id: cleaned.id, query_params: queryPairs(cleaned.url), from_cache: entry.transferSize === 0 && entry.encodedBodySize > 0}});
 	        }});
 	      }});
       resourceObserver.observe({{type: "resource", buffered: true}});
@@ -859,9 +1358,13 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
       post("/eval-result", {{eval_id: command.eval_id, exception: String(error && error.stack || error)}});
     }}
   }};
+  const networkEventsForScope = function(scope) {{
+    const normalized = normalizeSnapshotScope(scope);
+    return normalized === "full" || normalized === "network" ? performanceNetwork() : [];
+  }};
   const connectBridgeSocket = function() {{
     try {{
-      if (!window.WebSocket || bridgeSocketReconnectTimer || bridgeSocketReady) return;
+      if (!window.WebSocket || bridgeSocketReconnectTimer || bridgeSocketReady || (bridgeSocket && bridgeSocket.readyState === 0)) return;
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       bridgeSocket = new WebSocket(protocol + "//" + bridgeHost + endpoint + "/ws");
       bridgeSocket.onopen = function() {{
@@ -877,7 +1380,8 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
           if (message.type === "eval") handleEvalCommand(message.command);
           if (message.type === "overlay") handleOverlayCommand(message.command);
           if (message.type === "snapshot_request") {{
-            hello(message.scope || "full", performanceNetwork());
+            const scope = message.scope || "full";
+            hello(scope, networkEventsForScope(scope));
           }}
         }} catch (_) {{}}
       }};
@@ -994,12 +1498,12 @@ fn devtools_bridge_script(page_id: &str, token: &str) -> String {
     document.addEventListener("DOMContentLoaded", function() {{
       lastStorageSnapshot = JSON.stringify(storageSnapshot());
       connectBridgeSocket();
-      hello("full", performanceNetwork());
+      hello("full", networkEventsForScope("full"));
     }}, {{once: true}});
   }} else {{
     lastStorageSnapshot = JSON.stringify(storageSnapshot());
     connectBridgeSocket();
-    hello("full", performanceNetwork());
+    hello("full", networkEventsForScope("full"));
   }}
 }})();
 </script>"##
@@ -1036,6 +1540,7 @@ pub(super) fn maybe_inject_devtools_bridge_html(
     let (page_id, token) = state.devtools_broker.register_page_candidate(input);
     let script = devtools_bridge_script(&page_id, &token);
     let html = String::from_utf8_lossy(&body);
+    let html = mark_devtools_static_resource_urls(&html, &page_id, &origin_from_url(record_url));
     Bytes::from(insert_devtools_bridge_script(&html, &script))
 }
 
@@ -1070,5 +1575,39 @@ mod tests {
             super::super::headers_to_pairs(&headers),
             vec![("x-user-header".to_string(), "visible".to_string())]
         );
+    }
+
+    #[test]
+    fn test_devtools_client_request_id_query_is_stripped_from_uri() {
+        let mut uri: Uri = "/asset/app.js?x=1&__bifrost_client_req_id=pg_1-tag-1&y=2"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            take_devtools_client_req_id_from_uri(&mut uri),
+            Some("pg_1-tag-1".to_string())
+        );
+        assert_eq!(uri.to_string(), "/asset/app.js?x=1&y=2");
+    }
+
+    #[test]
+    fn test_static_resource_marking_stays_same_origin() {
+        let html = r#"<html><head>
+<script src="/same.js"></script>
+<script src="relative.js"></script>
+<script src="https://example.test/app.js"></script>
+<script src="https://cdn.example.test/cdn.js"></script>
+<img src="//cdn.example.test/image.png">
+</head></html>"#;
+
+        let marked = mark_devtools_static_resource_urls(html, "pg_test", "https://example.test");
+
+        assert!(marked.contains("/same.js?__bifrost_client_req_id=pg_test-tag-1"));
+        assert!(marked.contains("relative.js?__bifrost_client_req_id=pg_test-tag-2"));
+        assert!(
+            marked.contains("https://example.test/app.js?__bifrost_client_req_id=pg_test-tag-3")
+        );
+        assert!(marked.contains(r#"src="https://cdn.example.test/cdn.js""#));
+        assert!(marked.contains(r#"src="//cdn.example.test/image.png""#));
     }
 }

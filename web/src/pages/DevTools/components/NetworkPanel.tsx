@@ -26,9 +26,10 @@ export function NetworkList({
   onOpenTraffic?: (event: DebugNetworkEvent) => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  const dedupedEvents = useMemo(() => dedupeNetworkEvents(events), [events]);
   const filteredEvents = useMemo(
     () =>
-      filterBySearch(events, searchQuery, (event) =>
+      filterBySearch(dedupedEvents, searchQuery, (event) =>
         [
           event.method,
           event.status,
@@ -42,7 +43,7 @@ export function NetworkList({
           ...(event.response_headers ?? []).flat(),
         ].join(" "),
       ).slice().reverse(),
-    [events, searchQuery],
+    [dedupedEvents, searchQuery],
   );
   const rows = useMemo(
     () => filteredEvents.map((event, index) => networkEventToTrafficSummary(event, index, filteredEvents.length)),
@@ -73,6 +74,30 @@ export function NetworkList({
       />
     </div>
   );
+}
+
+function dedupeNetworkEvents(events: DebugNetworkEvent[]): DebugNetworkEvent[] {
+  return events.filter((event) => {
+    if (event.client_req_id) return true;
+    const eventKey = networkDedupeKey(event.url);
+    return !events.some(
+      (candidate) =>
+        candidate !== event &&
+        Boolean(candidate.client_req_id) &&
+        networkDedupeKey(candidate.url) === eventKey,
+    );
+  });
+}
+
+function networkDedupeKey(url: string): string {
+  try {
+    const parsed = new URL(url, window.location.href);
+    parsed.hash = "";
+    parsed.searchParams.delete("__bifrost_client_req_id");
+    return parsed.href;
+  } catch (_) {
+    return url.replace(/([?&])__bifrost_client_req_id=[^&#]*&?/g, "$1").replace(/[?&]$/, "");
+  }
 }
 
 function networkEventToTrafficSummary(event: DebugNetworkEvent, index: number, total: number): TrafficSummary {

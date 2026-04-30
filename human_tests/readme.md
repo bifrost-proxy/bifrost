@@ -46,7 +46,7 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
-| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 25 | 显式裸 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、bridge WebSocket 双向通信且页面侧无独立 HTTP 上报/轮询、WebUI session WebSocket 推送、服务端轻量路由且不保存完整调试历史、目标页有界 buffer、事件队列短延迟批量异步发送、服务端 bridge 消息重放去重、WebUI/目标页 live channel 有界队列保护、shell E2E fixture HTTP server 端口探活与 cleanup PID 精确回收、WebUI DevTools tab 自有 Elements/Network/Cookies/LocalStorage/SessionStorage/Console 面板、Network 复用 Traffic 页面虚拟列表风格并内嵌复用 TrafficDetail 展示详情、Network 前端采集去重与 `x-bifrost-client-request-id` Traffic 映射、Network 浏览器侧 status/query/request headers/response headers metadata 采集、Storage 大数据量虚拟列表与 tab 切换性能、Console 标准 `%c` 样式格式化、Console 纯文本按日志等级着色且对象展开树对齐、DevTools 明暗主题切换、详情路由刷新恢复、紧凑详情页头、Traffic 跳转入口、URL hover 复制、content 区域填满剩余高度、右侧模块搜索、规则编辑器无参数智能提示、vConsole/Chrome DevTools 风格 Elements 树、超长值 120 字符预览与详情弹窗完整复制、存储行内新增/编辑/复制/删除、Chrome 风格 Console 底部多行输入、对象/数组结构化摘要与层级展开、原始内容一键复制、毫秒级低对比度时间戳、全屏 JavaScript 编辑器与 input/result/error 行、默认 Console evaluate 真实执行并展示远端 JS 异常、多页面切换、HTML candidate 幽灵页隐藏、静默但 WS 连接页面仍在线、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
+| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 35 | 显式裸 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、bridge WebSocket 双向通信且页面侧无独立 HTTP 上报/轮询、WebUI session WebSocket 推送、服务端轻量路由且不保存完整调试历史、目标页有界 buffer、事件队列短延迟批量异步发送、服务端 bridge 消息重放去重、WebUI/目标页 live channel 有界队列保护、broker 忙碌时不阻塞代理主流程、shell E2E fixture HTTP server 端口探活与 cleanup PID 精确回收、WebUI DevTools tab 自有 Elements/Network/Cookies/LocalStorage/SessionStorage/Console 面板、Elements 目标页鼠标拾取节点、WebUI 自动展开选中对应 DOM row、目标页 overlay 展示节点名称/尺寸/Color/Font/Padding/Margin、Network 复用 Traffic 页面虚拟列表风格并内嵌复用 TrafficDetail 展示详情、Network 前端采集去重与 `x-bifrost-client-request-id` / 安全同源内部 query id 精准映射 Traffic、Service Worker / 跨域标签资源不被内部 query 污染、Network 浏览器侧 status/query/request headers/response headers metadata 采集、动态标签资源 request id 与 status 兜底展示、Traffic 匹配失败时仍展示发起端基础信息、Storage 大数据量虚拟列表与 tab 切换性能、Console 标准 `%c` 样式格式化、Console 纯文本按日志等级着色且对象展开树对齐、DevTools 明暗主题切换、详情路由刷新恢复、紧凑详情页头、Traffic 跳转入口、URL hover 复制、content 区域填满剩余高度、右侧模块搜索、规则编辑器无参数智能提示、vConsole/Chrome DevTools 风格 Elements 树、超长值 120 字符预览与详情弹窗完整复制、存储行内新增/编辑/复制/删除、Chrome 风格 Console 底部多行输入、对象/数组结构化摘要与层级展开、原始内容一键复制、毫秒级低对比度时间戳、全屏 JavaScript 编辑器与 input/result/error 行、默认 Console evaluate 真实执行并展示远端 JS 异常、多页面切换、HTML candidate 幽灵页隐藏、静默但 WS 连接页面仍在线、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
 
 ### 远程调用测试
 
@@ -129,7 +129,7 @@
 
 ---
 
-**总计：68 个测试文件，1318 个测试用例**
+**总计：68 个测试文件，1327 个测试用例**
 
 ## 工作流程
 

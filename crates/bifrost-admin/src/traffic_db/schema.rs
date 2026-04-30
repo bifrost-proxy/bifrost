@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS traffic_records (
     socket_receive_bytes INTEGER NOT NULL DEFAULT 0,
     socket_frame_count INTEGER NOT NULL DEFAULT 0,
     rule_count INTEGER NOT NULL DEFAULT 0,
-    rule_protocols TEXT NOT NULL DEFAULT '[]'
+    rule_protocols TEXT NOT NULL DEFAULT '[]',
+    devtools_client_req_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_id ON traffic_records(id);
@@ -118,6 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_client_app ON traffic_records(client_app) WHERE c
 CREATE INDEX IF NOT EXISTS idx_seq_desc ON traffic_records(sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_host_seq ON traffic_records(host, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_status_seq ON traffic_records(status, sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_devtools_client_req_id ON traffic_records(devtools_client_req_id, sequence) WHERE devtools_client_req_id IS NOT NULL;
 DROP INDEX IF EXISTS idx_flags;
 
 CREATE TABLE IF NOT EXISTS traffic_record_details (
@@ -159,7 +161,7 @@ pub fn get_insert_sql() -> &'static str {
         flags, frame_count, last_frame_id,
         socket_is_open, socket_send_count, socket_receive_count,
         socket_send_bytes, socket_receive_bytes, socket_frame_count,
-        rule_count, rule_protocols
+        rule_count, rule_protocols, devtools_client_req_id
     ) VALUES (
         ?1, ?2, ?3, ?4, ?5, ?6, ?7,
         ?8, ?9, ?10, ?11,
@@ -167,7 +169,7 @@ pub fn get_insert_sql() -> &'static str {
         ?15, ?16, ?17, ?18,
         ?19, ?20, ?21,
         ?22, ?23, ?24, ?25, ?26, ?27,
-        ?28, ?29
+        ?28, ?29, ?30
     )
     "#
 }
@@ -216,8 +218,9 @@ pub fn get_update_sql() -> &'static str {
         socket_receive_bytes = ?17,
         socket_frame_count = ?18,
         rule_count = ?19,
-        rule_protocols = ?20
-    WHERE id = ?21
+        rule_protocols = ?20,
+        devtools_client_req_id = ?21
+    WHERE id = ?22
     "#
 }
 

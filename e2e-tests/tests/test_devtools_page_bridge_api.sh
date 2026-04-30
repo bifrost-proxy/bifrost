@@ -138,8 +138,21 @@ mkdir -p "$SITE_DIR"
 
 PROXY_PORT="$(choose_port PROXY_PORT "${PROXY_PORT:-}")"
 SITE_PORT="$(choose_port SITE_PORT "${SITE_PORT:-}")"
-if [ "$PROXY_PORT" = "$SITE_PORT" ]; then
-  echo "PROXY_PORT and SITE_PORT must be different, got $PROXY_PORT" >&2
+HTTPS_SITE_PORT="$(choose_port HTTPS_SITE_PORT "${HTTPS_SITE_PORT:-}")"
+HTTPS_HOST="${HTTPS_HOST:-$(python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80))
+    print(s.getsockname()[0])
+except Exception:
+    print("127.0.0.1")
+finally:
+    s.close()
+PY
+)}"
+if [ "$PROXY_PORT" = "$SITE_PORT" ] || [ "$PROXY_PORT" = "$HTTPS_SITE_PORT" ] || [ "$SITE_PORT" = "$HTTPS_SITE_PORT" ]; then
+  echo "PROXY_PORT, SITE_PORT, and HTTPS_SITE_PORT must be different, got $PROXY_PORT/$SITE_PORT/$HTTPS_SITE_PORT" >&2
   exit 1
 fi
 
@@ -158,6 +171,7 @@ cleanup() {
     sed -n '1,120p' "$TEST_ROOT/site.log" >&2 || true
   fi
   stop_owned_pid "bifrost" "${BIFROST_PID:-}" "${BIFROST_BIN:-bifrost}" "start" "-p $PROXY_PORT"
+  stop_owned_pid "https fixture" "${HTTPS_SITE_PID:-}" "node" "https_fixture.mjs"
   stop_owned_pid "http.server" "${SITE_PID:-}" "http.server" "$SITE_PORT" "$SITE_DIR"
   if [ $rc -ne 0 ]; then
     echo "Preserving failed test root: $TEST_ROOT" >&2
@@ -181,12 +195,152 @@ if [ "${BIFROST_DEVTOOLS_E2E_DEBUG:-false}" = "true" ]; then
   trap 'echo "[devtools-page-bridge-e2e] ERR line=$LINENO status=$?" >&2' ERR
 fi
 
-printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Basic</title><script>document.cookie="bifrost-cookie-key=cookie-ready; path=/"; localStorage.setItem("bifrost-storage-key","storage-ready"); sessionStorage.setItem("bifrost-session-key","session-ready"); console.log("bifrost-devtools-basic-ready"); console.warn("bifrost-devtools-warning-ready"); console.log("bifrost-console-object-ready", {pageId:"basic", nested:{answer:42}, items:["alpha","beta"]});</script></head><body><div id="debug-fixture" data-case="basic" style="color: rgb(11, 22, 33); display: block;">ready</div><script>fetch("/devtools/api/ping?case=basic").catch(function(){})</script></body></html>' > "$SITE_DIR/basic.html"
+cat > "$SITE_DIR/basic.html" <<'HTML'
+<!doctype html>
+<html>
+<head>
+  <title>Bifrost DevTools Basic</title>
+  <script>
+    window.__bifrostLoadCount = Number(sessionStorage.getItem("bifrost-load-count") || "0") + 1;
+    sessionStorage.setItem("bifrost-load-count", String(window.__bifrostLoadCount));
+    window.__bifrostBusinessFetchCount = 0;
+    window.__bifrostBusinessFetchUrls = [];
+    (function() {
+      const originalFetch = window.fetch;
+      if (!originalFetch) return;
+      window.fetch = function(input, init) {
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        if (url && !String(url).includes("/_bifrost/api/devtools/bridge/")) {
+          window.__bifrostBusinessFetchCount += 1;
+          window.__bifrostBusinessFetchUrls.push(String(url));
+        }
+        return originalFetch.apply(this, arguments);
+      };
+    })();
+    document.cookie = "bifrost-cookie-key=cookie-ready; path=/";
+    localStorage.setItem("bifrost-storage-key", "storage-ready");
+    sessionStorage.setItem("bifrost-session-key", "session-ready");
+    console.log("bifrost-devtools-basic-ready");
+    console.warn("bifrost-devtools-warning-ready");
+    console.log("bifrost-console-object-ready", { pageId: "basic", nested: { answer: 42 }, items: ["alpha", "beta"] });
+  </script>
+</head>
+<body>
+  <div id="debug-fixture" data-case="basic" style="color: rgb(11, 22, 33); display: block;">ready</div>
+  <img id="debug-fixture-static-resource" alt="" src="/devtools/api/static-resource?case=static-img&foo=tag">
+  <script>fetch("/devtools/api/ping?case=basic").catch(function(){})</script>
+</body>
+</html>
+HTML
 printf '%s\n' '<!doctype html><html><head><title>Bifrost DevTools Secondary</title><script>console.log("bifrost-devtools-secondary-ready")</script></head><body><main id="debug-fixture-secondary" data-case="secondary">secondary</main></body></html>' > "$SITE_DIR/secondary.html"
+cat > "$SITE_DIR/sw.html" <<'HTML'
+<!doctype html>
+<html>
+<head>
+  <title>Bifrost DevTools Service Worker</title>
+  <script>
+    (async function() {
+      if (!("serviceWorker" in navigator)) {
+        window.__bifrostSwUnsupported = true;
+        return;
+      }
+      await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) {
+        location.reload();
+        return;
+      }
+      window.__bifrostSwControlled = true;
+      const script = document.createElement("script");
+      script.src = "/sw-dynamic.js?case=service-worker-safe";
+      script.onload = function() { window.__bifrostSwDynamicLoaded = true; };
+      script.onerror = function() { window.__bifrostSwDynamicError = true; };
+      document.head.appendChild(script);
+    })().catch(function(error) {
+      window.__bifrostSwError = String(error && error.message || error);
+    });
+  </script>
+</head>
+<body><main id="sw-fixture">service worker fixture</main></body>
+</html>
+HTML
+cat > "$SITE_DIR/sw.js" <<'JS'
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+});
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
+});
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  if (url.pathname.endsWith("/sw-dynamic.js") && url.searchParams.has("__bifrost_client_req_id")) {
+    event.respondWith(new Response("window.__bifrostSwDynamicQueryLeaked = true;", {
+      status: 200,
+      headers: { "content-type": "application/javascript" },
+    }));
+  }
+});
+JS
+cat > "$SITE_DIR/sw-dynamic.js" <<'JS'
+window.__bifrostSwDynamicUrl = document.currentScript && document.currentScript.src;
+JS
 
 python3 -m http.server "$SITE_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >"$TEST_ROOT/site.log" 2>&1 &
 SITE_PID=$!
 wait_for_site
+
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout "$TEST_ROOT/https.key" \
+  -out "$TEST_ROOT/https.crt" \
+  -subj "/CN=devtools-tls-fixture.test" \
+  -addext "subjectAltName=DNS:devtools-tls-fixture.test,DNS:localhost,IP:127.0.0.1,IP:$HTTPS_HOST" \
+  -days 1 >/dev/null 2>&1
+cat > "$TEST_ROOT/https_fixture.mjs" <<'NODEHTTPS'
+import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const port = Number(process.env.HTTPS_SITE_PORT);
+const siteDir = process.env.SITE_DIR;
+const requestLog = path.join(process.env.TEST_ROOT, 'https_requests.ndjson');
+const options = {
+  key: fs.readFileSync(process.env.HTTPS_KEY),
+  cert: fs.readFileSync(process.env.HTTPS_CERT),
+};
+const server = https.createServer(options, (req, res) => {
+  fs.appendFileSync(requestLog, JSON.stringify({
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+  }) + '\n');
+  if (req.url?.startsWith('/devtools/api/')) {
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'x-bifrost-fixture-response': 'tls-ok',
+    });
+    res.end(JSON.stringify({ ok: true, url: req.url }));
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'x-bifrost-fixture-response': 'tls-html',
+  });
+  res.end(fs.readFileSync(path.join(siteDir, 'basic.html')));
+});
+server.listen(port, '0.0.0.0', () => {
+  console.log(`https fixture listening on ${port}`);
+});
+NODEHTTPS
+HTTPS_SITE_PORT="$HTTPS_SITE_PORT" SITE_DIR="$SITE_DIR" TEST_ROOT="$TEST_ROOT" HTTPS_KEY="$TEST_ROOT/https.key" HTTPS_CERT="$TEST_ROOT/https.crt" \
+  node "$TEST_ROOT/https_fixture.mjs" >"$TEST_ROOT/https-site.log" 2>&1 &
+HTTPS_SITE_PID=$!
+for _ in $(seq 1 50); do
+  if curl --noproxy "*" -k -fsS "https://127.0.0.1:$HTTPS_SITE_PORT/basic.html" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+curl --noproxy "*" -k -fsS "https://127.0.0.1:$HTTPS_SITE_PORT/basic.html" >/dev/null
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 if [ ! -x "$BIFROST_BIN" ] && [ -f "${BIFROST_BIN}.exe" ]; then
@@ -214,16 +368,26 @@ curl -fsS "http://127.0.0.1:$PROXY_PORT/_bifrost/api/proxy/address" >/dev/null
 
 RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_basic.txt | grep -v '^#' | sed '/^$/d')"
 CONTROL_RULE_CONTENT="$(sed "s/__SITE_PORT__/$SITE_PORT/g" e2e-tests/rules/devtools/page_bridge_control.txt | grep -v '^#' | sed '/^$/d')"
-PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" node --input-type=module <<'NODE'
+TLS_RULE_CONTENT="$(cat <<TLSEOF
+devtools-tls-fixture.test tunnel://127.0.0.1:$HTTPS_SITE_PORT tlsIntercept://
+devtools-tls-fixture.test devtools:// https://127.0.0.1:$HTTPS_SITE_PORT
+TLSEOF
+)"
+PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" HTTPS_SITE_PORT="$HTTPS_SITE_PORT" HTTPS_HOST="$HTTPS_HOST" TEST_ROOT="$TEST_ROOT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" TLS_RULE_CONTENT="$TLS_RULE_CONTENT" node --input-type=module <<'NODE'
 import { chromium } from './web/node_modules/playwright/index.mjs';
 import NodeWebSocket from './web/node_modules/ws/index.js';
 import net from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 const proxyPort = process.env.PROXY_PORT;
 const sitePort = process.env.SITE_PORT;
+const httpsSitePort = process.env.HTTPS_SITE_PORT;
+const httpsHost = process.env.HTTPS_HOST;
+const testRoot = process.env.TEST_ROOT;
 const ruleContent = process.env.RULE_CONTENT;
 const controlRuleContent = process.env.CONTROL_RULE_CONTENT;
+const tlsRuleContent = process.env.TLS_RULE_CONTENT;
 const admin = `http://127.0.0.1:${proxyPort}/_bifrost/api`;
 const webui = `http://127.0.0.1:${proxyPort}/_bifrost/`;
 
@@ -311,6 +475,75 @@ function createSessionSocket(sessionId) {
     },
   });
   return socket;
+}
+
+async function targetRuntimeCounters(page) {
+  return page.evaluate(() => ({
+    href: location.href,
+    loadCount: Number(sessionStorage.getItem('bifrost-load-count') || '0'),
+    businessFetchCount: Number(window.__bifrostBusinessFetchCount || 0),
+    businessFetchUrls: Array.from(window.__bifrostBusinessFetchUrls || []),
+    businessResources: performance
+      .getEntriesByType('resource')
+      .map((entry) => String(entry.name))
+      .filter((name) => name.includes('/devtools/api/') && !name.includes('/_bifrost/api/devtools/bridge/')),
+  }));
+}
+
+async function assertTargetRuntimeUnchanged(page, before, label, options = {}) {
+  const after = await targetRuntimeCounters(page);
+  const allowedBusinessDelta = options.allowedBusinessDelta || 0;
+  if (after.href !== before.href) {
+    throw new Error(`${label}: target URL changed ${JSON.stringify({ before, after })}`);
+  }
+  if (after.loadCount !== before.loadCount) {
+    throw new Error(`${label}: WebUI action reloaded the target page ${JSON.stringify({ before, after })}`);
+  }
+  const businessDelta = after.businessFetchCount - before.businessFetchCount;
+  if (businessDelta > allowedBusinessDelta) {
+    throw new Error(`${label}: WebUI action triggered unexpected target fetches ${JSON.stringify({ before, after, businessDelta })}`);
+  }
+  return after;
+}
+
+async function clickDevtoolsWorkspaceTab(adminPage, name) {
+  const workspace = adminPage.getByTestId('devtools-custom-workspace');
+  await workspace.evaluate((node, tabName) => {
+    const tabs = Array.from(node.querySelectorAll('.ant-tabs-tab'));
+    const tab = tabs.find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && (candidate.textContent || '').trim() === tabName;
+    });
+    const target = tab?.querySelector('.ant-tabs-tab-btn') || tab;
+    if (!target) throw new Error(`DevTools tab not found: ${tabName}`);
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  }, name);
+  const panelByName = {
+    Elements: 'devtools-elements-panel',
+    Network: 'devtools-network-panel',
+    Cookies: 'devtools-cookies-panel',
+    LocalStorage: 'devtools-local-storage-panel',
+    SessionStorage: 'devtools-session-storage-panel',
+    Console: 'devtools-console-panel',
+  };
+  const panelTestId = panelByName[name];
+  if (panelTestId) {
+    try {
+      await adminPage.getByTestId(panelTestId).waitFor({ state: 'visible', timeout: 8000 });
+    } catch (error) {
+      const debugState = await adminPage.evaluate(() => ({
+        url: location.href,
+        detail: Boolean(document.querySelector('[data-testid="devtools-detail"]')),
+        workspace: Boolean(document.querySelector('[data-testid="devtools-custom-workspace"]')),
+        activeTab: document.querySelector('.devtools-workspace-tabs .ant-tabs-tab-active')?.textContent || '',
+        tabTexts: Array.from(document.querySelectorAll('.devtools-workspace-tabs [role="tab"]')).map((node) => node.textContent || ''),
+        bodyText: document.body.textContent?.slice(0, 500) || '',
+      }));
+      throw new Error(`Failed to switch DevTools tab to ${name}: ${JSON.stringify(debugState)} ${error.message}`);
+    }
+  }
 }
 
 function mergeSnapshot(base, incoming) {
@@ -861,7 +1094,7 @@ async function assertCdpProtocolMatrix(webSocketUrl, targetPage) {
   }
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, args: ['--proxy-bypass-list=<-loopback>'] });
 const context = await browser.newContext({ proxy: { server: `http://127.0.0.1:${proxyPort}` } });
 
 const noRulePage = await context.newPage();
@@ -891,7 +1124,6 @@ if (!devtoolsProtocol || devtoolsProtocol.value_type !== 'empty') {
 if (devtoolsProtocol.example !== 'devtools://') {
   throw new Error(`AV-CDP-26 failed: syntax example should suggest bare devtools:// ${JSON.stringify(devtoolsProtocol)}`);
 }
-
 const page = await context.newPage();
 await page.goto(`http://devtools-fixture.test:${sitePort}/basic.html?case=av-cdp-01`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
@@ -928,6 +1160,159 @@ if (bridgeLeak.descriptor?.enumerable || bridgeLeak.descriptor?.configurable || 
 if (/token|bdt_|fetch|eval-next|eval-result/i.test(`${bridgeLeak.json} ${bridgeLeak.keys.join(',')}`)) {
   throw new Error(`F1 failed: bridge token or transport leaked to page ${JSON.stringify(bridgeLeak)}`);
 }
+await api('/rules', {
+  method: 'POST',
+  body: JSON.stringify({
+    name: 'devtools-page-bridge-sw-api',
+    content: `http://sw-devtools-fixture.test:${sitePort}/* devtools:// host://127.0.0.1:${sitePort}`,
+    enabled: true,
+  }),
+});
+const swPage = await context.newPage();
+await swPage.goto(`http://sw-devtools-fixture.test:${sitePort}/sw.html?case=service-worker-safe`, { waitUntil: 'load' });
+await swPage.waitForFunction(() => window.__bifrostSwUnsupported || window.__bifrostSwControlled, null, { timeout: 12000 });
+const swUnsupported = await swPage.evaluate(() => Boolean(window.__bifrostSwUnsupported));
+if (!swUnsupported) {
+  await swPage.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
+  await swPage.waitForFunction(() => window.__bifrostSwDynamicLoaded || window.__bifrostSwDynamicError || window.__bifrostSwDynamicQueryLeaked, null, { timeout: 8000 });
+  const swState = await swPage.evaluate(() => ({
+    controlled: Boolean(window.__bifrostSwControlled),
+    loaded: Boolean(window.__bifrostSwDynamicLoaded),
+    error: Boolean(window.__bifrostSwDynamicError),
+    queryLeaked: Boolean(window.__bifrostSwDynamicQueryLeaked),
+    dynamicUrl: window.__bifrostSwDynamicUrl || '',
+    resources: performance.getEntriesByType('resource').map((entry) => String(entry.name)).filter((name) => name.includes('sw-dynamic.js')),
+    swError: window.__bifrostSwError || '',
+  }));
+  if (!swState.controlled || !swState.loaded || swState.error || swState.queryLeaked || swState.dynamicUrl.includes('__bifrost_client_req_id') || swState.resources.some((name) => name.includes('__bifrost_client_req_id'))) {
+    throw new Error(`AV-CDP-46 failed: Service Worker controlled dynamic tag resource should not be polluted by internal query ${JSON.stringify(swState)}`);
+  }
+}
+
+await api('/rules', {
+  method: 'POST',
+  body: JSON.stringify({
+    name: 'devtools-page-bridge-tls-api',
+    content: tlsRuleContent,
+    enabled: true,
+  }),
+});
+const tlsContext = await browser.newContext({
+  proxy: { server: `http://127.0.0.1:${proxyPort}` },
+  ignoreHTTPSErrors: true,
+});
+const tlsPage = await tlsContext.newPage();
+await tlsPage.goto(`https://devtools-tls-fixture.test:${httpsSitePort}/basic.html?case=tls-av-cdp-45`, { waitUntil: 'load' });
+await tlsPage.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 10000 });
+await tlsPage.evaluate(() => fetch('/devtools/api/tls?case=network-traffic-match&foo=tls', {
+  headers: { 'x-bifrost-fixture-header': 'tls-request' },
+}).catch(() => {}));
+await tlsPage.waitForFunction(() => (window.__bifrostBusinessFetchUrls || []).some((url) => String(url).includes('network-traffic-match')), null, { timeout: 8000 });
+await tlsPage.evaluate(() => new Promise((resolve) => {
+  const img = document.createElement('img');
+  img.id = 'tls-resource-image';
+  img.onload = img.onerror = resolve;
+  img.src = '/devtools/api/pixel?case=tls-img-resource&foo=img';
+  document.body.appendChild(img);
+}));
+const tlsDebugPage = await waitForDevToolsPage(
+  (candidate) => candidate.url.includes('case=tls-av-cdp-45') && candidate.url.startsWith('https://devtools-tls-fixture.test'),
+  'AV-CDP-45 failed: TLS-intercepted DevTools page not listed',
+);
+const tlsSession = await api('/devtools/sessions', {
+  method: 'POST',
+  body: JSON.stringify({ page_id: tlsDebugPage.page_id }),
+});
+const tlsSnapshot = await collectSessionSnapshot(
+  tlsSession.session_id,
+  'network',
+  (candidate) => candidate.network?.some((entry) => entry.url.includes('network-traffic-match')),
+  10000,
+);
+const tlsNetworkEvent = tlsSnapshot.network.find((entry) => entry.url.includes('network-traffic-match'));
+if (!tlsNetworkEvent) {
+  throw new Error(`AV-CDP-45 failed: TLS Network event missing ${JSON.stringify(tlsSnapshot.network)}`);
+}
+if (tlsNetworkEvent.status !== 200 || tlsNetworkEvent.method !== 'GET' || !tlsNetworkEvent.client_req_id) {
+  throw new Error(`AV-CDP-45 failed: TLS Network event missing status/method/client id ${JSON.stringify(tlsNetworkEvent)}`);
+}
+if (!tlsNetworkEvent.query_params?.some(([key, value]) => key === 'foo' && value === 'tls')) {
+  throw new Error(`AV-CDP-45 failed: TLS Network query params missing ${JSON.stringify(tlsNetworkEvent)}`);
+}
+if (!tlsNetworkEvent.request_headers?.some(([key, value]) => key.toLowerCase() === 'x-bifrost-fixture-header' && value === 'tls-request')) {
+  throw new Error(`AV-CDP-45 failed: TLS Network request headers missing ${JSON.stringify(tlsNetworkEvent)}`);
+}
+if (!tlsNetworkEvent.response_headers?.some(([key, value]) => key.toLowerCase() === 'x-bifrost-fixture-response' && value === 'tls-ok')) {
+  throw new Error(`AV-CDP-45 failed: TLS Network response headers missing ${JSON.stringify(tlsNetworkEvent)}`);
+}
+const tlsTrafficMapping = await api(`/devtools/network/traffic/${encodeURIComponent(tlsNetworkEvent.client_req_id)}`);
+const tlsTrafficRecord = await api(`/traffic/${encodeURIComponent(tlsTrafficMapping.traffic_id)}`);
+if (
+  tlsTrafficRecord.method !== tlsNetworkEvent.method ||
+  tlsTrafficRecord.status !== tlsNetworkEvent.status ||
+  !String(tlsTrafficRecord.url || '').includes('/devtools/api/tls?case=network-traffic-match&foo=tls')
+) {
+  throw new Error(`AV-CDP-45 failed: TLS Network event does not match mapped Traffic record ${JSON.stringify({ network: tlsNetworkEvent, traffic: tlsTrafficRecord })}`);
+}
+if ((tlsTrafficRecord.request_headers || []).some(([key]) => key.toLowerCase() === 'x-bifrost-client-request-id')) {
+  throw new Error(`AV-CDP-45 failed: internal client request id leaked into Traffic headers ${JSON.stringify(tlsTrafficRecord.request_headers)}`);
+}
+const tlsServerRequests = readFileSync(`${testRoot}/https_requests.ndjson`, 'utf8')
+  .trim()
+  .split(/\n+/)
+  .filter(Boolean)
+  .map((line) => JSON.parse(line));
+const tlsUpstreamRequest = tlsServerRequests.find((entry) => String(entry.url || '').includes('network-traffic-match'));
+if (!tlsUpstreamRequest) {
+  throw new Error(`AV-CDP-45 failed: TLS upstream fixture did not receive expected request ${JSON.stringify(tlsServerRequests)}`);
+}
+if (Object.keys(tlsUpstreamRequest.headers || {}).some((key) => key.toLowerCase() === 'x-bifrost-client-request-id')) {
+  throw new Error(`AV-CDP-45 failed: internal client request id leaked to real TLS upstream ${JSON.stringify(tlsUpstreamRequest)}`);
+}
+const tlsImageSnapshot = await collectSessionSnapshot(
+  tlsSession.session_id,
+  'network',
+  (candidate) => candidate.network?.some((entry) => entry.url.includes('tls-img-resource')),
+  10000,
+);
+const tlsImageEvent = tlsImageSnapshot.network.find((entry) => entry.url.includes('tls-img-resource'));
+if (!tlsImageEvent?.client_req_id) {
+  throw new Error(`AV-CDP-45 failed: dynamic parser resource Network event should carry an internal query client id ${JSON.stringify(tlsImageEvent)}`);
+}
+if (String(tlsImageEvent.url || '').includes('__bifrost_client_req_id')) {
+  throw new Error(`AV-CDP-45 failed: internal query id should be stripped from browser-side Network display ${JSON.stringify(tlsImageEvent)}`);
+}
+const tlsImageMappedTraffic = await api(`/devtools/network/traffic/${encodeURIComponent(tlsImageEvent.client_req_id)}`);
+const tlsImageExpectedTrafficId = tlsImageMappedTraffic.traffic_id || tlsImageEvent.traffic_id;
+const tlsImageTraffic = await api('/traffic/query', {
+  method: 'POST',
+  body: JSON.stringify({
+    url_contains: '/devtools/api/pixel?case=tls-img-resource&foo=img',
+    method: 'GET',
+    limit: 20,
+  }),
+});
+const tlsImageTrafficRecord = tlsImageTraffic.records?.find((record) =>
+  record.id === tlsImageExpectedTrafficId &&
+  record.p === '/devtools/api/pixel' &&
+  record.s === 200 &&
+  record.proto === 'https'
+);
+if (!tlsImageTrafficRecord) {
+  throw new Error(`AV-CDP-45 failed: TLS parser resource should have matching full Traffic data ${JSON.stringify({ event: tlsImageEvent, mapped: tlsImageMappedTraffic, traffic: tlsImageTraffic.records })}`);
+}
+if (tlsImageMappedTraffic.traffic_id && tlsImageMappedTraffic.traffic_id !== tlsImageTrafficRecord.id) {
+  throw new Error(`AV-CDP-45 failed: parser resource client id should map to exact Traffic record ${JSON.stringify({ event: tlsImageEvent, mapped: tlsImageMappedTraffic, traffic: tlsImageTrafficRecord })}`);
+}
+const tlsImageTrafficDetail = await api(`/traffic/${encodeURIComponent(tlsImageTrafficRecord.id)}`);
+if ((tlsImageTrafficDetail.request_headers || []).some(([key]) => key.toLowerCase() === 'x-bifrost-client-request-id')) {
+  throw new Error(`AV-CDP-45 failed: dynamic tag request leaked header id ${JSON.stringify(tlsImageTrafficDetail.request_headers)}`);
+}
+if (String(tlsImageTrafficDetail.url || '').includes('__bifrost_client_req_id')) {
+  throw new Error(`AV-CDP-45 failed: dynamic tag request leaked query id to Traffic URL ${JSON.stringify(tlsImageTrafficDetail.url)}`);
+}
+await tlsContext.close();
+await api('/rules/devtools-page-bridge-tls-api', { method: 'DELETE' });
 
 await page.waitForTimeout(800);
 pages = (await api('/devtools/pages?online=true')).pages;
@@ -1050,6 +1435,13 @@ if (!mappedPingTraffic.traffic_id) {
   throw new Error(`AV-CDP-39 failed: client request id did not map to a Traffic record ${JSON.stringify(mappedPingTraffic)}`);
 }
 const mappedPingTrafficRecord = await api(`/traffic/${encodeURIComponent(mappedPingTraffic.traffic_id)}`);
+if (
+  mappedPingTrafficRecord.method !== pingNetworkEvents[0].method ||
+  mappedPingTrafficRecord.status !== pingNetworkEvents[0].status ||
+  !String(mappedPingTrafficRecord.url || '').includes('/devtools/api/ping?case=basic')
+) {
+  throw new Error(`AV-CDP-39 failed: Network event does not fully match mapped Traffic record ${JSON.stringify({ network: pingNetworkEvents[0], traffic: mappedPingTrafficRecord })}`);
+}
 const leakedDevtoolsHeader = (mappedPingTrafficRecord.request_headers || []).find(([key]) =>
   key.toLowerCase() === 'x-bifrost-client-request-id'
 );
@@ -1240,16 +1632,19 @@ const visiblePrimaryCards = await primaryCard.count();
 if (visiblePrimaryCards !== 1) {
   throw new Error(`AV-CDP-13 failed: WebUI should list one target after same-tab reload, got ${visiblePrimaryCards}`);
 }
+let targetCounters = await targetRuntimeCounters(page);
 await primaryCard.click();
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
+targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: opening DevTools detail should not refresh or refetch the target page');
 if (!/\/devtools\/pg_[A-Za-z0-9_%-]+/.test(adminPage.url())) {
   throw new Error(`AV-CDP-38 failed: DevTools detail should update the route with page id, got ${adminPage.url()}`);
 }
 await adminPage.reload({ waitUntil: 'load' });
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 12000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 12000 });
+targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: reloading WebUI detail route should not refresh or refetch the target page');
 if (!/\/devtools\/pg_[A-Za-z0-9_%-]+/.test(adminPage.url())) {
   throw new Error(`AV-CDP-38 failed: DevTools detail route should survive WebUI reload, got ${adminPage.url()}`);
 }
@@ -1356,25 +1751,93 @@ await page.evaluate(() => {
   item.textContent = 'manual refresh ready';
   document.body.appendChild(item);
 });
+targetCounters = await targetRuntimeCounters(page);
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-elements-panel').getByText(/debug-fixture-manual-refresh/).waitFor({ timeout: 8000 });
+targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Elements refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('manual-refresh');
 await adminPage.locator('[data-testid="devtools-dom-node"][data-selected="true"]').filter({ hasText: 'debug-fixture-manual-refresh' }).waitFor({ timeout: 8000 });
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /Network/ }).click();
-await adminPage.getByTestId('devtools-network-traffic-table').getByTestId('traffic-table').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-elements-inspect').click();
+await page.waitForFunction(() => document.documentElement.getAttribute('data-bifrost-devtools-inspecting') === 'true', null, { timeout: 8000 });
+await page.locator('#debug-fixture').hover();
+await page.waitForFunction(() => {
+  const overlay = document.querySelector('#__bifrost_devtools_highlight__');
+  const info = document.querySelector('#__bifrost_devtools_highlight_info__');
+  return overlay &&
+    info &&
+    getComputedStyle(overlay).display !== 'none' &&
+    /debug-fixture/.test(info.textContent || '') &&
+    /Color/.test(info.textContent || '') &&
+    /Font/.test(info.textContent || '') &&
+    /Padding/.test(info.textContent || '') &&
+    /Margin/.test(info.textContent || '');
+}, null, { timeout: 8000 });
+await page.locator('#debug-fixture').click();
+await page.waitForFunction(() => document.documentElement.getAttribute('data-bifrost-devtools-inspecting') !== 'true', null, { timeout: 8000 });
+await adminPage.locator('[data-testid="devtools-dom-node"][data-selected="true"]').filter({ hasText: 'debug-fixture' }).waitFor({ timeout: 8000 });
+const inspectOverlayInfo = await page.evaluate(() => document.querySelector('#__bifrost_devtools_highlight_info__')?.textContent || '');
+if (!/div#debug-fixture/.test(inspectOverlayInfo) || !/\d+\s*x\s*\d+/.test(inspectOverlayInfo)) {
+  throw new Error(`AV-CDP-43 failed: target inspect overlay should show node label and size (${inspectOverlayInfo})`);
+}
+if (!/Color/.test(inspectOverlayInfo) || !/Font/.test(inspectOverlayInfo) || !/Padding/.test(inspectOverlayInfo) || !/Margin/.test(inspectOverlayInfo)) {
+  throw new Error(`AV-CDP-43 failed: target inspect overlay should show style summary (${inspectOverlayInfo})`);
+}
+const inspectOverlayBox = await page.evaluate(() => {
+  const info = document.querySelector('#__bifrost_devtools_highlight_info__');
+  if (!info) return null;
+  const rect = info.getBoundingClientRect();
+  return { width: rect.width, left: rect.left, right: rect.right, viewport: window.innerWidth };
+});
+if (!inspectOverlayBox || inspectOverlayBox.width < 200 || inspectOverlayBox.left < -1 || inspectOverlayBox.right > inspectOverlayBox.viewport + 1) {
+  throw new Error(`AV-CDP-43 failed: target inspect overlay info card width/position is invalid ${JSON.stringify(inspectOverlayBox)} text=${inspectOverlayInfo}`);
+}
+await clickDevtoolsWorkspaceTab(adminPage, 'Network');
+await page.evaluate(() => fetch('/devtools/api/extra?case=webui-network-complete').catch(() => {}));
+await page.waitForFunction(() => (window.__bifrostBusinessFetchUrls || []).some((url) => String(url).includes('webui-network-complete')), null, { timeout: 8000 });
+targetCounters = await targetRuntimeCounters(page);
+await adminPage.getByTestId('devtools-refresh').click();
+try {
+  await adminPage.getByTestId('devtools-network-traffic-table').getByTestId('traffic-table').waitFor({ timeout: 8000 });
+} catch (error) {
+  const debugState = await adminPage.evaluate(() => {
+    const panel = document.querySelector('[data-testid="devtools-network-panel"]');
+    const table = document.querySelector('[data-testid="devtools-network-traffic-table"]');
+    const trafficTable = document.querySelector('[data-testid="traffic-table"]');
+    const activeTab = document.querySelector('.devtools-workspace-tabs .ant-tabs-tab-active')?.textContent || '';
+    const rect = (node) => node ? node.getBoundingClientRect().toJSON?.() || {
+      x: node.getBoundingClientRect().x,
+      y: node.getBoundingClientRect().y,
+      width: node.getBoundingClientRect().width,
+      height: node.getBoundingClientRect().height,
+    } : null;
+    return {
+      activeTab,
+      panelText: panel?.textContent?.slice(0, 500) || null,
+      tableRect: rect(table),
+      trafficTableRect: rect(trafficTable),
+      tableCount: document.querySelectorAll('[data-testid="devtools-network-traffic-table"]').length,
+      trafficTableCount: document.querySelectorAll('[data-testid="traffic-table"]').length,
+    };
+  });
+  throw new Error(`AV-CDP-44 failed: Network table did not become visible ${JSON.stringify(debugState)} ${error.message}`);
+}
 await adminPage.getByTestId('devtools-network-panel').getByText('Protocol').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Host').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Path').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ timeout: 8000 });
-await page.evaluate(() => fetch('/devtools/api/extra?case=webui-network-complete').catch(() => {}));
-await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
+targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Network refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('webui-network-complete');
 await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ state: 'detached', timeout: 8000 });
+const webuiNetworkRows = await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').evaluateAll((rows) =>
+  rows.map((row) => row.textContent || '').filter((text) => text.includes('webui-network-complete'))
+);
+if (webuiNetworkRows.length !== 1) {
+  throw new Error(`AV-CDP-44 failed: Network should dedupe fetch hook and PerformanceResourceTiming rows ${JSON.stringify(webuiNetworkRows)}`);
+}
 const devtoolsUrlBeforeNetworkDetail = adminPage.url();
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click();
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
 await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
 const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
@@ -1404,40 +1867,76 @@ await adminPage.route('**/_bifrost/api/traffic/**', async (route) => {
   }
   await route.fallback();
 });
-await page.evaluate(() => fetch('/devtools/api/missing?case=bridge-only-detail').catch(() => {}));
+await page.evaluate(() => fetch('/devtools/api/missing?case=bridge-only-detail&foo=fallback', {
+  headers: { 'x-bifrost-fallback-header': 'fallback-request' },
+}).catch(() => {}));
 await adminPage.getByTestId('devtools-refresh').click();
 await panelSearch.fill('bridge-only-detail');
 await adminPage.getByTestId('devtools-network-panel').getByText(/bridge-only-detail/).waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click();
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-query').getByText('foo').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-request-headers').getByText(/x-bifrost-fallback-header/i).waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/Traffic Match|No matching Traffic record|missing test traffic|Request failed/).first().waitFor({ timeout: 8000 });
 if (!adminPage.url().includes('/devtools') || adminPage.url().includes('/traffic')) {
   throw new Error(`AV-CDP-35 failed: fallback Network detail should stay inside DevTools, after=${adminPage.url()}`);
 }
+await page.evaluate(() => new Promise((resolve) => {
+  const img = document.createElement('img');
+  img.id = 'debug-fixture-tag-fallback';
+  img.onload = img.onerror = resolve;
+  img.src = '/devtools/api/tag-missing?case=bridge-only-tag-fallback&foo=tag';
+  document.body.appendChild(img);
+}));
+await adminPage.getByTestId('devtools-refresh').click();
+await panelSearch.fill('bridge-only-tag-fallback');
+await adminPage.getByTestId('devtools-network-panel').getByText(/bridge-only-tag-fallback/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText('404').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
 await adminPage.unroute('**/_bifrost/api/traffic/**');
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await page.evaluate(() => new Promise((resolve) => {
+  const img = document.createElement('img');
+  img.id = 'debug-fixture-parser-resource';
+  img.onload = img.onerror = resolve;
+  img.src = '/devtools/api/parser-resource?case=ui-traffic-enrich&foo=img';
+  document.body.appendChild(img);
+}));
+await adminPage.getByTestId('devtools-refresh').click();
+await panelSearch.fill('ui-traffic-enrich');
+await adminPage.getByTestId('devtools-network-panel').getByText(/ui-traffic-enrich/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText('404').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
+await panelSearch.fill('');
+await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'Cookies');
 await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-key').waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'SessionStorage');
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-key').waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await page.evaluate(() => {
   document.cookie = 'bifrost-cookie-live=cookie-live; path=/';
   localStorage.setItem('bifrost-storage-live', 'storage-live');
   sessionStorage.setItem('bifrost-session-live', 'session-live');
 });
+targetCounters = await targetRuntimeCounters(page);
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
+targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Storage refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('bifrost-storage-live');
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ state: 'detached', timeout: 8000 });
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'Cookies');
 await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-live').waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'SessionStorage');
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-live').waitFor({ timeout: 8000 });
 await page.evaluate(() => {
   for (let i = 0; i < 420; i += 1) {
@@ -1446,14 +1945,14 @@ await page.evaluate(() => {
   }
 });
 await adminPage.getByTestId('devtools-refresh').click();
-await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await adminPage.getByText(/42\d \/ 42\d items/).waitFor({ timeout: 8000 });
 const localStorageRenderedRows = await adminPage.getByTestId('devtools-local-storage-panel').getByTestId('devtools-storage-row').count();
 if (localStorageRenderedRows > 80) {
   throw new Error(`AV-CDP-40 failed: LocalStorage should virtualize large storage lists, rendered rows=${localStorageRenderedRows}`);
 }
 const storageSwitchStartedAt = Date.now();
-await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'SessionStorage');
 await adminPage.getByText(/42\d \/ 42\d items/).waitFor({ timeout: 2500 });
 if (Date.now() - storageSwitchStartedAt > 2500) {
   throw new Error(`AV-CDP-40 failed: switching to SessionStorage should not block for seconds, elapsed=${Date.now() - storageSwitchStartedAt}ms`);
@@ -1462,7 +1961,7 @@ const sessionStorageRenderedRows = await adminPage.getByTestId('devtools-session
 if (sessionStorageRenderedRows > 80) {
   throw new Error(`AV-CDP-40 failed: SessionStorage should virtualize large storage lists, rendered rows=${sessionStorageRenderedRows}`);
 }
-await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await panelSearch.fill('bifrost-storage-live');
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
 await adminPage.getByLabel('Edit bifrost-storage-live').click();
@@ -1478,7 +1977,7 @@ if (copiedStorageValue !== 'storage-live') {
   throw new Error(`AV-CDP-15 failed: storage copy did not write clipboard (${copiedStorageValue})`);
 }
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /Cookies/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'Cookies');
 await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-cookie-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('cookie-edited');
@@ -1488,7 +1987,7 @@ await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-
 await adminPage.getByLabel('Delete bifrost-cookie-edit').click();
 await page.waitForFunction(() => !document.cookie.includes('bifrost-cookie-edit='), null, { timeout: 8000 });
 await adminPage.getByTestId('devtools-cookies-panel').getByText('bifrost-cookie-edit').waitFor({ state: 'detached', timeout: 8000 });
-await adminPage.getByRole('tab', { name: /LocalStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-storage-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('storage-edited');
@@ -1500,7 +1999,7 @@ await adminPage.getByLabel('Delete bifrost-storage-edit').click();
 await page.waitForFunction(() => localStorage.getItem('bifrost-storage-edit') === null, null, { timeout: 8000 });
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-edit').waitFor({ state: 'detached', timeout: 8000 });
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /SessionStorage/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'SessionStorage');
 await adminPage.getByTestId('devtools-storage-add').click();
 await adminPage.getByTestId('devtools-storage-key').fill('bifrost-session-edit');
 await adminPage.getByTestId('devtools-storage-value').fill('session-edited');
@@ -1512,17 +2011,17 @@ await adminPage.getByLabel('Delete bifrost-session-edit').click();
 await page.waitForFunction(() => sessionStorage.getItem('bifrost-session-edit') === null, null, { timeout: 8000 });
 await adminPage.getByTestId('devtools-session-storage-panel').getByText('bifrost-session-edit').waitFor({ state: 'detached', timeout: 8000 });
 await panelSearch.fill('');
-await adminPage.getByRole('tab', { name: /Console/ }).click();
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-object-ready').waitFor({ timeout: 8000 });
+await clickDevtoolsWorkspaceTab(adminPage, 'Console');
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-basic-ready').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-devtools-warning-ready').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-object-ready').first().waitFor({ timeout: 8000 });
 const plainLogValue = adminPage.getByTestId('devtools-console-row-log').getByTestId('devtools-console-value-string').filter({ hasText: 'bifrost-devtools-basic-ready' }).first();
 await plainLogValue.waitFor({ timeout: 8000 });
 const plainLogColor = await plainLogValue.evaluate((node) => getComputedStyle(node).color);
 if (plainLogColor === 'rgb(196, 29, 29)' || plainLogColor === 'rgb(255, 0, 0)') {
   throw new Error(`AV-CDP-36 failed: plain console.log string should not render as red object string value (${plainLogColor})`);
 }
-await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).first().waitFor({ timeout: 8000 });
 const objectRow = adminPage.getByTestId('devtools-console-row-log').filter({ hasText: 'bifrost-console-object-ready' }).first();
 await objectRow.getByTestId('devtools-console-expand-value').last().click();
 await objectRow.getByText('nested:', { exact: true }).waitFor({ timeout: 8000 });
@@ -1544,9 +2043,9 @@ await page.evaluate(() => {
   console.log('%cbifrost-console-css-live', 'color: rgb(255, 0, 0); font-weight: 700');
 });
 await adminPage.getByTestId('devtools-refresh').click();
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-debug-live').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-error-live').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-debug-live').first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-error-live').first().waitFor({ timeout: 8000 });
 const cssConsoleText = adminPage.getByTestId('devtools-console-row-log').getByTestId('devtools-console-formatted-text').filter({ hasText: 'bifrost-console-css-live' }).first();
 await cssConsoleText.waitFor({ timeout: 8000 });
 const cssConsoleStyle = await cssConsoleText.evaluate((node) => {
@@ -1559,7 +2058,7 @@ if (cssConsoleStyle.text.includes('%c') || cssConsoleStyle.text.includes('color:
 if (cssConsoleStyle.color !== 'rgb(255, 0, 0)' || Number(cssConsoleStyle.fontWeight) < 700) {
   throw new Error(`AV-CDP-41 failed: formatted console text should apply CSS style ${JSON.stringify(cssConsoleStyle)}`);
 }
-await adminPage.getByTestId('devtools-console-row-log').getByText('bifrost-devtools-basic-ready').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-console-row-log').getByText('bifrost-devtools-basic-ready').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-row-warn').getByText('bifrost-devtools-warning-ready').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-row-info').getByText('bifrost-console-info-live').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-row-debug').getByText('bifrost-console-debug-live').waitFor({ timeout: 8000 });
@@ -1597,10 +2096,10 @@ if (!inputBox || !panelBox || inputBox.y + inputBox.height > panelBox.y + panelB
 await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
 await page.waitForTimeout(800);
-await adminPage.getByRole('tab', { name: /Elements/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'Elements');
 await adminPage.getByTestId('devtools-refresh').click();
 await adminPage.getByTestId('devtools-elements-tree').getByText(/debug-fixture/).first().waitFor({ timeout: 8000 });
-await adminPage.getByRole('tab', { name: /Console/ }).click();
+await clickDevtoolsWorkspaceTab(adminPage, 'Console');
 await adminPage.getByTestId('devtools-console-input').fill('document.title');
 await adminPage.getByTestId('devtools-console-run').click();
 await adminPage.getByTestId('devtools-console-row-result').filter({ hasText: 'Bifrost DevTools Basic' }).last().waitFor({ timeout: 8000 });

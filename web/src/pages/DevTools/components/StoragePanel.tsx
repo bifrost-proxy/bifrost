@@ -178,9 +178,13 @@ function StorageEditRow({
 }
 
 function storageRowsForArea(storage: DebugStorageSnapshot, area: string): Array<[string, string]> {
-  if (area === "cookie") return storage.cookies;
-  if (area === "session_storage") return storage.session_storage;
-  return storage.local_storage;
+  const rows =
+    area === "cookie"
+      ? storage.cookies
+      : area === "session_storage"
+        ? storage.session_storage.filter(([key]) => key !== "__bifrost_devtools_tab_id__")
+        : storage.local_storage;
+  return rows.slice().sort(([left], [right]) => left.localeCompare(right, undefined, { sensitivity: "base" }));
 }
 
 const storageShellStyle: CSSProperties = {

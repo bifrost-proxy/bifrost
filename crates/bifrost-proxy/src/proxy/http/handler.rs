@@ -78,8 +78,9 @@ use self::decode::{
 };
 use self::scripts::{execute_request_scripts, execute_response_scripts, headers_to_hashmap};
 use super::devtools::{
-    bind_devtools_client_req_traffic, devtools_bridge_requested, is_devtools_client_req_id_header,
-    maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
+    attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
+    maybe_inject_devtools_bridge_html, strip_devtools_client_req_id_from_url,
+    take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -94,6 +95,7 @@ fn record_http_mock_traffic(
     resolved_rules: &ResolvedRules,
     response: &Response<BoxBody>,
     request: &Request<Incoming>,
+    devtools_client_req_id: &Option<String>,
 ) {
     let total_ms = start_time.elapsed().as_millis() as u64;
     let mock_host = uri.host().unwrap_or("unknown").to_string();
@@ -114,6 +116,7 @@ fn record_http_mock_traffic(
         method.to_string(),
         record_url.to_string(),
     );
+    attach_devtools_client_req_id(&mut record, devtools_client_req_id);
     record.status = mock_status;
     record.duration_ms = total_ms;
     record.host = mock_host;
@@ -736,7 +739,7 @@ pub fn needs_request_body_processing(rules: &ResolvedRules) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_http_request(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     rules: Arc<dyn RulesResolver>,
     verbose_logging: bool,
     unsafe_ssl: bool,
@@ -752,6 +755,9 @@ pub async fn handle_http_request(
         return handle_http_websocket(req, rules, ctx, admin_state, push_manager, unsafe_ssl).await;
     }
 
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let uri = req.uri().clone();
     let method = req.method().to_string();
     let url = uri.to_string();
@@ -760,6 +766,7 @@ pub async fn handle_http_request(
     } else {
         ctx.url.clone()
     };
+    let record_url = strip_devtools_client_req_id_from_url(&record_url);
     let start_time = std::time::Instant::now();
     let incoming_headers: HashMap<String, String> = req
         .headers()
@@ -868,6 +875,7 @@ pub async fn handle_http_request(
 
             let mut record =
                 TrafficRecord::new(ctx.id_str().to_string(), method.clone(), record_url.clone());
+            attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
             record.status = mock_status;
             record.duration_ms = total_ms;
             record.host = mock_host;
@@ -930,6 +938,7 @@ pub async fn handle_http_request(
                 &resolved_rules,
                 &response,
                 &req,
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -952,6 +961,7 @@ pub async fn handle_http_request(
                 &resolved_rules,
                 &response,
                 &req,
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -983,9 +993,6 @@ pub async fn handle_http_request(
     }
 
     let (mut parts, body) = req.into_parts();
-    let devtools_client_req_id = take_devtools_client_req_id(&mut parts.headers);
-    bind_devtools_client_req_traffic(&admin_state, &devtools_client_req_id, ctx.id_str());
-
     let request_origin = parts
         .headers
         .get(hyper::header::ORIGIN)
@@ -1328,6 +1335,7 @@ pub async fn handle_http_request(
                     method.clone(),
                     record_url.clone(),
                 );
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = if needs_response_override(&resolved_rules) {
                     resolved_rules
                         .status_code
@@ -2143,6 +2151,7 @@ pub async fn handle_http_request(
                     .expect("response headers captured when admin state is enabled");
                 let mut record =
                     TrafficRecord::new(record_id.to_string(), method.clone(), record_url.clone());
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = res_parts.status.as_u16();
                 record.content_type = res_parts
                     .headers
@@ -2517,6 +2526,7 @@ pub async fn handle_http_request(
 
         let mut record =
             TrafficRecord::new(ctx.id_str().to_string(), method.clone(), record_url.clone());
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = res_parts.status.as_u16();
         record.content_type = res_parts
             .headers
@@ -2805,7 +2815,7 @@ fn get_default_port(host_protocol: &Option<Protocol>, is_https: bool) -> u16 {
 }
 
 async fn handle_http_websocket(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     rules: Arc<dyn RulesResolver>,
     ctx: &RequestContext,
     admin_state: Option<Arc<AdminState>>,
@@ -2818,6 +2828,9 @@ async fn handle_http_websocket(
     use tokio_rustls::rustls::pki_types::ServerName;
 
     let start_time = Instant::now();
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let uri = req.uri().clone();
     let method = req.method().to_string();
 
@@ -3070,6 +3083,7 @@ async fn handle_http_websocket(
 
         let mut record =
             bifrost_admin::TrafficRecord::new(record_id.to_string(), method.clone(), ws_url);
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = 101;
         record.protocol = record_protocol.to_string();
         record.duration_ms = total_ms;
@@ -3275,6 +3289,7 @@ fn build_http_websocket_handshake(
             || n.eq_ignore_ascii_case("keep-alive")
             || n.eq_ignore_ascii_case("te")
             || n.eq_ignore_ascii_case("trailer")
+            || is_devtools_client_req_id_header(n)
         {
             continue;
         }

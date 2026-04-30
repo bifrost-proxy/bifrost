@@ -12,8 +12,8 @@ use tracing::{error, warn};
 use crate::devtools::{
     bridge_command_queue_capacity, session_live_queue_capacity, BridgeClosePayload,
     BridgeConsolePayload, BridgeEvalPollPayload, BridgeEvalResultPayload, BridgeHelloPayload,
-    BridgeNetworkPayload, BridgeOverlayCommand, BridgeServerMessage, DebugAdapterKind, DebugPage,
-    DevtoolsMode, SharedBrowserDebugBroker,
+    BridgeNetworkPayload, BridgeNodeSelectedPayload, BridgeOverlayCommand, BridgeServerMessage,
+    DebugAdapterKind, DebugPage, DevtoolsMode, SharedBrowserDebugBroker,
 };
 use crate::state::SharedAdminState;
 use crate::{is_remote_access_enabled, validate_admin_jwt};
@@ -24,6 +24,18 @@ use super::{
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// 将同步阻塞操作（如获取 parking_lot 锁）转移到 Tokio 的 blocking 线程池，
+/// 防止 devtools 模块的锁竞争占用 Tokio worker 线程从而影响代理流量。
+async fn blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .expect("devtools spawn_blocking task panicked")
+}
 
 #[derive(Debug, Deserialize)]
 struct OpenSessionRequest {
@@ -66,7 +78,12 @@ pub async fn handle_devtools(
 
     if path == "/api/devtools/cdp/json/list" || path == "/api/devtools/cdp/json" {
         return match method {
-            Method::GET => json_response(&state.devtools_broker.cdp_targets(true, &host)),
+            Method::GET => {
+                let broker = state.devtools_broker.clone();
+                let host = host.clone();
+                let targets = blocking(move || broker.cdp_targets(true, &host)).await;
+                json_response(&targets)
+            }
             _ => method_not_allowed(),
         };
     }
@@ -81,7 +98,9 @@ pub async fn handle_devtools(
                 let since = query
                     .get("since")
                     .and_then(|value| value.parse::<u64>().ok());
-                json_response(&state.devtools_broker.list_evaluate_audit(limit, since))
+                let broker = state.devtools_broker.clone();
+                let records = blocking(move || broker.list_evaluate_audit(limit, since)).await;
+                json_response(&records)
             }
             _ => method_not_allowed(),
         };
@@ -89,16 +108,33 @@ pub async fn handle_devtools(
 
     if let Some(client_req_id) = path.strip_prefix("/api/devtools/network/traffic/") {
         return match method {
-            Method::GET => match state.devtools_broker.traffic_id_for_client_req(client_req_id) {
-                Some(traffic_id) => json_response(&serde_json::json!({
-                    "ok": true,
-                    "traffic_id": traffic_id
-                })),
-                None => error_response(
-                    StatusCode::NOT_FOUND,
-                    "traffic record not found for this DevTools request; it may have been deleted or only captured as a CONNECT tunnel",
-                ),
-            },
+            Method::GET => {
+                let client_req_id = urlencoding::decode(client_req_id)
+                    .map(|value| value.into_owned())
+                    .unwrap_or_else(|_| client_req_id.to_string());
+                let Some(db_store) = state.traffic_db_store.clone() else {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "traffic database is not available",
+                    );
+                };
+                let traffic_id = tokio::task::spawn_blocking(move || {
+                    db_store.get_id_by_devtools_client_req_id(&client_req_id)
+                })
+                .await
+                .ok()
+                .flatten();
+                match traffic_id {
+                    Some(traffic_id) => json_response(&serde_json::json!({
+                        "ok": true,
+                        "traffic_id": traffic_id
+                    })),
+                    None => error_response(
+                        StatusCode::NOT_FOUND,
+                        "traffic record not found for this DevTools request; it may have been deleted, replayed, or only captured as a CONNECT tunnel",
+                    ),
+                }
+            }
             _ => method_not_allowed(),
         };
     }
@@ -118,9 +154,9 @@ pub async fn handle_devtools(
                     .query()
                     .map(|q| q.contains("online=true"))
                     .unwrap_or(false);
-                json_response(&serde_json::json!({
-                    "pages": state.devtools_broker.list_debuggable_pages(online_only)
-                }))
+                let broker = state.devtools_broker.clone();
+                let pages = blocking(move || broker.list_debuggable_pages(online_only)).await;
+                json_response(&serde_json::json!({ "pages": pages }))
             }
             _ => method_not_allowed(),
         };
@@ -136,7 +172,8 @@ pub async fn handle_devtools(
                 let Some(page_id) = body.page_id else {
                     return error_response(StatusCode::BAD_REQUEST, "missing page_id");
                 };
-                match state.devtools_broker.open_session(&page_id) {
+                let broker = state.devtools_broker.clone();
+                match blocking(move || broker.open_session(&page_id)).await {
                     Ok(session) => json_response(&session),
                     Err(err) => error_response(StatusCode::BAD_REQUEST, &err),
                 }
@@ -152,10 +189,14 @@ pub async fn handle_devtools(
         };
         let action = parts.next().unwrap_or_default();
         return match (method, action) {
-            (Method::GET, "snapshot") => match state.devtools_broker.snapshot(session_id) {
-                Ok(snapshot) => json_response(&snapshot),
-                Err(err) => error_response(StatusCode::NOT_FOUND, &err),
-            },
+            (Method::GET, "snapshot") => {
+                let broker = state.devtools_broker.clone();
+                let sid = session_id.to_string();
+                match blocking(move || broker.snapshot(&sid)).await {
+                    Ok(snapshot) => json_response(&snapshot),
+                    Err(err) => error_response(StatusCode::NOT_FOUND, &err),
+                }
+            }
             (Method::POST, "refresh") => {
                 let scope = read_json::<serde_json::Value>(req)
                     .await
@@ -165,10 +206,9 @@ pub async fn handle_devtools(
                             .and_then(|value| value.as_str())
                             .map(str::to_string)
                     });
-                match state
-                    .devtools_broker
-                    .request_snapshot_refresh(session_id, scope)
-                {
+                let broker = state.devtools_broker.clone();
+                let sid = session_id.to_string();
+                match blocking(move || broker.request_snapshot_refresh(&sid, scope)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::BAD_REQUEST, &err),
                 }
@@ -209,7 +249,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_hello(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_hello(&pid, payload)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -219,7 +261,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_console(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_console(&pid, payload)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -229,7 +273,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_close(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_close(&pid, payload)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -239,7 +285,21 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_network(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_network(&pid, payload)).await {
+                    Ok(()) => json_response(&serde_json::json!({"ok": true})),
+                    Err(err) => error_response(StatusCode::FORBIDDEN, &err),
+                }
+            }
+            (Method::POST, "node-selected") => {
+                let payload = match read_json::<BridgeNodeSelectedPayload>(req).await {
+                    Ok(body) => body,
+                    Err(resp) => return resp,
+                };
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_node_selected(&pid, payload)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -249,7 +309,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_eval_next(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_eval_next(&pid, payload)).await {
                     Ok(command) => json_response(&serde_json::json!({ "command": command })),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -259,7 +321,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_eval_result(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_eval_result(&pid, payload)).await {
                     Ok(()) => json_response(&serde_json::json!({"ok": true})),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -269,7 +333,9 @@ pub async fn handle_devtools(
                     Ok(body) => body,
                     Err(resp) => return resp,
                 };
-                match state.devtools_broker.bridge_overlay_next(page_id, payload) {
+                let broker = state.devtools_broker.clone();
+                let pid = page_id.to_string();
+                match blocking(move || broker.bridge_overlay_next(&pid, payload)).await {
                     Ok(command) => json_response(&serde_json::json!({ "command": command })),
                     Err(err) => error_response(StatusCode::FORBIDDEN, &err),
                 }
@@ -378,13 +444,20 @@ async fn handle_session_connection<S>(
 {
     let (mut sink, mut stream) = ws_stream.split();
     let (tx, mut rx) = mpsc::channel(session_live_queue_capacity());
-    if broker.session_ws_attach(&session_id, tx).is_err() {
-        let _ = sink
-            .send(Message::Text(
-                r#"{"type":"disconnected","reason":"session not found"}"#.into(),
-            ))
-            .await;
-        return;
+    {
+        let b = broker.clone();
+        let sid = session_id.clone();
+        if blocking(move || b.session_ws_attach(&sid, tx))
+            .await
+            .is_err()
+        {
+            let _ = sink
+                .send(Message::Text(
+                    r#"{"type":"disconnected","reason":"session not found"}"#.into(),
+                ))
+                .await;
+            return;
+        }
     }
 
     loop {
@@ -411,7 +484,9 @@ async fn handle_session_connection<S>(
         }
     }
 
-    broker.session_ws_detach(&session_id);
+    let b = broker.clone();
+    let sid = session_id.clone();
+    let _ = blocking(move || b.session_ws_detach(&sid)).await;
 }
 
 async fn handle_bridge_connection<S>(
@@ -447,9 +522,18 @@ async fn handle_bridge_connection<S>(
                         let Ok(payload) = serde_json::from_value::<BridgeHelloPayload>(value.clone()) else {
                             continue;
                         };
-                        if broker.bridge_hello(&page_id, payload).is_ok() {
+                        // bridge_hello 会获取 pages.write()，通过 spawn_blocking 保护 worker 线程
+                        let b = broker.clone();
+                        let pid = page_id.clone();
+                        let hello_ok = blocking(move || b.bridge_hello(&pid, payload)).await.is_ok();
+                        if hello_ok {
                             let token = value.get("token").and_then(|value| value.as_str()).unwrap_or_default();
-                            if broker.bridge_ws_attach(&page_id, token, tx.clone()).is_ok() {
+                            let b = broker.clone();
+                            let pid = page_id.clone();
+                            let token = token.to_string();
+                            let tx_clone = tx.clone();
+                            let attach_ok = blocking(move || b.bridge_ws_attach(&pid, &token, tx_clone)).await.is_ok();
+                            if attach_ok {
                                 attached = true;
                                 ack_bridge_message(&mut sink, message_seq).await;
                                 let _ = sink.send(Message::Text(r#"{"type":"ready"}"#.into())).await;
@@ -477,6 +561,18 @@ async fn handle_bridge_connection<S>(
                                 }
                             }
                             let _ = broker.bridge_network(&page_id, payload);
+                            ack_bridge_message(&mut sink, message_seq).await;
+                        }
+                    }
+                    "node_selected" => {
+                        if let Ok(payload) = serde_json::from_value::<BridgeNodeSelectedPayload>(value.clone()) {
+                            if let Some(seq) = message_seq {
+                                if !broker.remember_bridge_seq(&page_id, seq) {
+                                    ack_bridge_message(&mut sink, message_seq).await;
+                                    continue;
+                                }
+                            }
+                            let _ = broker.bridge_node_selected(&page_id, payload);
                             ack_bridge_message(&mut sink, message_seq).await;
                         }
                     }
@@ -522,7 +618,9 @@ async fn handle_bridge_connection<S>(
         }
     }
 
-    broker.bridge_ws_detach(&page_id);
+    let b = broker.clone();
+    let pid = page_id.clone();
+    let _ = blocking(move || b.bridge_ws_detach(&pid)).await;
 }
 
 async fn ack_bridge_message<S>(
@@ -609,7 +707,9 @@ async fn handle_cdp_websocket(
         None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
     };
 
-    let Some(page) = state.devtools_broker.get_page(&page_id) else {
+    let broker = state.devtools_broker.clone();
+    let pid = page_id.clone();
+    let Some(page) = blocking(move || broker.get_page(&pid)).await else {
         return error_response(StatusCode::NOT_FOUND, "DevTools page not found");
     };
     if page.adapter != DebugAdapterKind::PageBridge {
