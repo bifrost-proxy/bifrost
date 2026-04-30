@@ -58,6 +58,17 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 截断逻辑不添加省略号，严格保留原始前 200 个 Unicode 字符；API、Web UI、落盘文件看到同一份截断后的内容。
 - 对 `args_json` / `masked_args_json` 这类 JSON 字符串，截断发生在 JSON 内部的字符串值上，序列化后的 JSON 仍保持合法，避免参数预览因为硬截断变成不可解析文本。
 
+### 1.2 Grants 时间字段稳定性
+
+文件：`crates/bifrost-admin/src/remote_invoke/worker.rs`
+
+- `first_connected_at` 来自 `GrantInfo.first_authorized_at`，其语义是 grant 生命周期内的首次授权/连接时间，不能在后续命令执行、SSE 重连或 relay `grant_created` 补偿事件中变化。
+- `approve_pairing` 已经把本地授权成功时刻写入 `local_grants` 和持久化 grant info；若稍早到达的 `grant_created` SSE 因本地 crypto 尚未落盘而短暂等待，等待结束后必须保留 `local_grants` 中已有 grant 的运行态字段。
+- 所有会用 relay payload 重建 `GrantInfo` 的 client 侧同步路径，在发现本地已有同一 `grant_id` 时必须保留：
+  - `first_authorized_at`：严格沿用 existing，避免 1ms 级别的 relay / 本地时间差回退
+  - `last_command_at` / `last_used_at`：取更大的时间戳，保持单调
+  - `max_calls` / `remaining_calls` / `use_count` / 非 active 状态：避免重建 grant 时重置一次性授权或命令计数
+
 ### 2. Web UI 再做一层展示回退
 
 文件：`web/src/api/remoteInvoke.ts`
@@ -89,6 +100,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - `crates/bifrost-admin/src/remote_invoke/worker.rs`
   - 验证 `command_summary.masked_args_json` 缺失时，会回退到 `command.args_json`
   - 验证已有 `masked_args_json` 时不会被本地 `args_json` 覆盖
+  - 验证 `preserve_existing_grant_runtime_state` 保留已有 `first_authorized_at`，且 `last_command_at` / `last_used_at` 单调、不重置一次性授权计数
   - 验证 call history store 按 7 天保留期和 max_records 裁剪
   - 验证 clear_for_client 只清理当前 relay/client
   - 验证重启恢复时 streaming 记录收敛为 failed
@@ -105,6 +117,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - 其中包含 `query`、`max_results`、`max_scan`
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`
 - 新增断言：
+  - 执行命令前后读取 Grants API，同一 grant 的 `first_connected_at` 必须严格相等，`last_command_at` 必须在执行后出现且不早于 `first_connected_at`
   - Recent Calls 写入 `remote_invoke_call_history.json`
   - 超长搜索参数在 Recent Calls API 中只返回前 200 字符，且 `masked_args_json` 仍是合法 JSON
   - `remote_invoke_call_history.json` 不包含完整超长参数原文
@@ -120,12 +133,15 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 更新 `human_tests/remote-invoke.md`
 - 新增回归用例：加密链路下 `Recent Calls` 必须展示参数预览与 Tooltip 完整 JSON，重启后不丢失，并支持清理全部记录
 - 新增回归用例：超长命令不会撑乱 Recent Calls 布局，且 API / 详情 / 落盘文件都只保留前 200 字符
+- 新增回归用例：执行命令后 Grants API 的 `first_connected_at` 严格保持不变，`last_command_at` 单调更新
 - 同步更新 `human_tests/readme.md` 索引与用例数
 
 ## 校验要求
 
 - `pnpm --dir web test:unit -- src/api/remoteInvoke.test.ts`
+- `cargo test -p bifrost-admin preserve_existing_grant_runtime_state -- --nocapture`
 - `cargo test -p bifrost-admin build_call_command_summary -- --nocapture`
+- `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`
 - `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
 - `bash scripts/ci/local-ci.sh --e2e-only platform`
 - `cargo test --workspace --all-features`

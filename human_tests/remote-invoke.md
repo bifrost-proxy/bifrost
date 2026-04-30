@@ -4807,6 +4807,43 @@ PY
 
 ---
 
+### TC-RI-回归-144：Grant `first_connected_at` 在命令执行后严格稳定
+
+**背景**：`first_connected_at` 来自目标端 `GrantInfo.first_authorized_at`，用于表示 caller 首次连接/授权成功时间。CI 曾出现执行命令后同一 grant 的 `first_connected_at` 从 `1777557672411` 回退到 `1777557672410` 的 1ms 回归，说明命令期间的 relay `grant_created` / 重建 grant 路径覆盖了本地首次授权时间。
+
+**前置条件**：
+- 使用隔离的 relay / target admin / caller 数据目录
+- target admin 使用随机端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`、`curl`、`jq`、`cargo`、`npx`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 脚本完成 pair-code 授权后，在执行远程命令前读取 `/_bifrost/api/remote-invoke/grants`。
+3. 记录同一条 grant 的 `grant_id`、`first_connected_at`、`last_command_at`。
+4. 脚本执行真实 `remote traffic search` 命令。
+5. 脚本再次读取 `/_bifrost/api/remote-invoke/grants`，按步骤 3 的 `grant_id` 查回同一 grant。
+6. 对比执行前后的 `first_connected_at` 与 `last_command_at`。
+
+**预期结果**：
+- 执行命令前 `first_connected_at` 非空
+- 执行命令前 `last_command_at` 为空
+- 执行命令后 `first_connected_at` 与执行前严格相等，不允许 1ms 容差或回退
+- 执行命令后 `last_command_at` 非空，且不早于 `first_connected_at`
+- Recent Calls 参数预览、长参数 120 字符截断、本地落盘恢复、重启恢复与清理断言继续通过
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-144 执行结果（2026-04-30，Grant 首次连接时间稳定）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-144 | ✅ PASS | 2026-04-30 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`，脚本因 Rust 源码更新先重建 `target/release/bifrost`，随后使用随机 relay/admin/mock 端口与隔离数据目录启动 target admin，启动参数包含 `--no-system-proxy` 且未占用 `9900`。脚本在执行命令前读取 Grants API，确认 `grant_id` 与 `first_connected_at` 非空、`last_command_at` 为空；执行真实 remote search 后按同一 `grant_id` 再次读取 Grants API，`TC-RI-GRANTS-TIME-01` 通过，证明 `first_connected_at` 执行命令后严格保持不变，`last_command_at` 非空且不早于首次连接时间。后续 `TC-RI-GRANTS-TIME-02`、`TC-RI-ARGS-01` 至 `TC-RI-ARGS-05` 全部通过，包含 CLI grant list 时间展示、Recent Calls 参数预览、120 字符截断、落盘恢复、重启恢复与清理全部记录。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：
