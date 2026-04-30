@@ -203,6 +203,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 面板 tab 右侧提供当前模块搜索框。Elements 搜索自动展开并选中匹配节点；其他面板搜索直接过滤列表并高亮匹配文本。
 - 手动刷新按钮重新读取 scoped snapshot。
 - WebUI 不做高频全局轮询。页面列表低频刷新或用户点击 refresh；详情页通过 session WS 接收增量推送；隐藏 tab 销毁组件。
+- E2E 进入 WebUI DevTools 时必须优先使用侧栏导航项的稳定属性（`data-testid="app-sidebar-nav-item"` + `data-nav-label="DevTools"`）定位并点击；不能只依赖可见文本 `DevTools`，避免折叠侧栏、图标侧栏或字体渲染延迟导致 `locator.waitFor` 假超时。
 
 ## page_bridge 注入脚本
 
@@ -270,6 +271,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息
 - 验证 WebUI DevTools 详情刷新按钮仅通过 session WS 请求当前 tab snapshot，不触发目标页 reload 或重新发起业务请求
 - 验证 HTTPS/TLS 全截包浏览器代理场景下，Network 中 fetch/XHR 与标签资源请求都能匹配到完整 Traffic 记录
+- 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后
 - 验证 Storage 行内新增/编辑/删除后目标页真实读到新值
 - 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染
 - 验证 Bridge 主要经由 WebSocket 通信

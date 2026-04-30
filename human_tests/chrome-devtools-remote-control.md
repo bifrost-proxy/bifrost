@@ -688,6 +688,25 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - WebUI DevTools 的 locator 等待不因 HTTP fixture API 404 超时。
 - `bash e2e-tests/tests/test_devtools_page_bridge_api.sh` 最终通过。
 
+### TC-CDP-37：WebUI DevTools 侧栏入口稳定定位
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 完成 HTTP、Service Worker、TLS 全截包 DevTools page_bridge 场景。
+3. 脚本打开 `http://127.0.0.1:<proxy_port>/_bifrost/`。
+4. 等待侧栏中 `data-testid="app-sidebar-nav-item"` 且 `data-nav-label="DevTools"` 的导航项可见。
+5. 读取全部侧栏 `data-nav-label`，确认 `DevTools` 位于 `Scripts` 之后。
+6. 点击该稳定导航项进入 DevTools 页面列表。
+
+预期结果：
+
+- WebUI 不再只依赖可见文本 `DevTools` 完成等待和点击。
+- 侧栏入口在 CI 浏览器、折叠/图标侧栏或字体渲染延迟下仍可稳定定位。
+- 如果入口不可见，失败信息包含当前 URL、document title、侧栏 `data-nav-label` / `data-nav-key` 列表和页面文本摘要，便于定位是 WebUI 未加载、路由错误还是导航项缺失。
+- `DevTools` 入口仍位于 `Scripts` 之后。
+- 点击后 `devtools-page-list` 可见，后续 DevTools 页面列表和详情断言继续执行。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -718,3 +737,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-30：通过。补充并执行 TC-CDP-27 / TC-CDP-28 / TC-CDP-29 / TC-CDP-30 / TC-CDP-33，验证标签资源通过安全的同源内部 query id 精准映射 Traffic，TLS 全截包浏览器代理下 Network 与 Traffic 可通过 `x-bifrost-client-request-id` 精确匹配，WebUI DevTools 详情刷新不会触发目标页 reload 或业务请求，Traffic 匹配失败时仍展示发起端基础 Network 信息，且同一 fetch 不会同时展示 hook 行和 PerformanceResourceTiming fallback 行。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。补充并执行 TC-CDP-34 / TC-CDP-35，验证 Service Worker / 跨域标签资源不被内部 query 污染，以及 DevTools broker 在页面高频上报或锁竞争时不会阻塞代理主流程。执行命令：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。补充并执行 TC-CDP-36，验证 HTTP fixture 的 `/devtools/api/*` 路由返回 200 JSON，避免 `basic.html` 的业务 fetch/tag 资源请求在 Python 静态服务器下返回 404 并导致 DevTools locator 等待超时。执行命令：`bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-04-30：通过。补充并执行 TC-CDP-37，验证 WebUI DevTools 侧栏入口使用稳定 `data-testid="app-sidebar-nav-item"` + `data-nav-label="DevTools"` 定位，不再依赖可见文本等待；同时验证 DevTools 入口仍位于 Scripts 之后，点击后进入 `devtools-page-list`。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`，随后执行 `bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。

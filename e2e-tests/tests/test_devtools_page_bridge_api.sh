@@ -1694,7 +1694,22 @@ const adminContext = await browser.newContext();
 await adminContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${proxyPort}` });
 const adminPage = await adminContext.newPage();
 await adminPage.goto(webui, { waitUntil: 'load' });
-await adminPage.getByText('DevTools', { exact: true }).waitFor({ timeout: 10000 });
+const devtoolsNavItem = adminPage.locator('[data-testid="app-sidebar-nav-item"][data-nav-label="DevTools"]').first();
+try {
+  await devtoolsNavItem.waitFor({ state: 'visible', timeout: 10000 });
+} catch (error) {
+  const navDebugState = await adminPage.evaluate(() => ({
+    url: window.location.href,
+    title: document.title,
+    navItems: Array.from(document.querySelectorAll('[data-testid="app-sidebar-nav-item"]')).map((item) => ({
+      label: item.getAttribute('data-nav-label'),
+      key: item.getAttribute('data-nav-key'),
+      text: item.textContent,
+    })),
+    bodyText: document.body?.textContent?.slice(0, 500) || '',
+  }));
+  throw new Error(`AV-CDP-10 failed: DevTools sidebar entry did not become visible ${JSON.stringify(navDebugState)} ${error.message}`);
+}
 let navLabels = await adminPage
   .locator('[data-testid="app-sidebar-nav-item"]')
   .evaluateAll((items) => items.map((item) => item.getAttribute('data-nav-label')));
@@ -1706,7 +1721,7 @@ const devtoolsNavIndex = navLabels.indexOf('DevTools');
 if (scriptsNavIndex === -1 || devtoolsNavIndex === -1 || devtoolsNavIndex <= scriptsNavIndex) {
   throw new Error(`AV-CDP-10 failed: DevTools sidebar entry must appear after Scripts (${navLabels.join(' > ')})`);
 }
-await adminPage.getByText('DevTools', { exact: true }).click();
+await devtoolsNavItem.click();
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
 await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-control');
 const primaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
