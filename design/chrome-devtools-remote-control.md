@@ -171,7 +171,7 @@ pub struct DevtoolsRule {
 
 `<img>` / `<script>` / `<link>` / `<iframe>` 等浏览器解析器发起的标签资源请求不能由 JS 设置 header。为实现精准映射，Bifrost 在注入 bridge 前只改写同源 HTML 常见资源标签 URL，添加内部 query `__bifrost_client_req_id=...`；bridge 也 patch `setAttribute` 与常见 URL 属性 setter，但仅在同源且当前页面未被 Service Worker 控制时覆盖动态创建的标签资源。跨域、protocol-relative、Service Worker 控制页面的动态标签资源不得追加内部 query，避免破坏业务 SW cache/route 匹配。代理在请求处理最前面通过 `take_devtools_client_req_id_from_uri` 提取该 query 并从 URI 中删除，再继续规则匹配、Traffic 记录与上游转发。该 query 不得出现在真实上游请求、Traffic URL、Traffic request headers 或 WebUI Network 展示 URL 中。
 
-Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作为 status/header/size/duration/详情的补全来源。Traffic 详情只允许通过 `client_req_id` 精确查询，禁止使用 URL + 时间窗口猜测匹配。Traffic DB 查询同一 `client_req_id` 时以第一条非 replay 记录为准，后续重放或重复请求不得覆盖初始绑定。Performance resource timing 作为标签资源发现和兜底采集，动态 `<img>` / `<script>` / `<link>` 等无法匹配 Traffic 时，也必须展示发起端可采集的 URL、method、status、type、query、时间与 cache hint。若同一 URL/method 已有带 client request id 的事件，必须去重并优先保留带 id 的事件。
+Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作为 status/header/size/duration/详情的补全来源。Traffic 详情只允许通过 `client_req_id` 精确查询，禁止使用 URL + 时间窗口猜测匹配。Traffic DB 查询同一 `client_req_id` 时以第一条非 replay 记录为准，后续重放或重复请求不得覆盖初始绑定。Performance resource timing 作为标签资源发现和兜底采集，动态 `<img>` / `<script>` / `<link>` 等无法匹配 Traffic 时，也必须展示发起端可采集的 URL、method、status、type、query、时间与 cache hint。若同一 URL/method 已有带 client request id 的事件，必须去重并优先保留带 id 的事件。Admin broker 在处理 live `network` 事件和后续 `hello` / scoped snapshot 重放时必须使用同一套缓存合并逻辑：`client_req_id` 是强主键；没有 id 的 PerformanceResourceTiming fallback 只能作为兜底，不得在已有同 URL/method 且带 id 的 bridge 事件旁边再次展示。
 
 ## WebUI 设计
 

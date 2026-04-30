@@ -725,6 +725,26 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - `DevTools` 入口仍位于 `Scripts` 之后。
 - `test_devtools_page_bridge_api.sh` 在 CI shell shard 中可以进入 `devtools-page-list` 并继续完成后续 page_bridge 断言。
 
+### TC-CDP-39：Network snapshot 重放不重复展示同一 bridge 请求
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 脚本访问 `basic.html?case=av-cdp-01`，目标页初始化时发起 `fetch('/devtools/api/ping?case=basic')`。
+3. 建立 DevTools session WebSocket。
+4. 调用 `POST /_bifrost/api/devtools/sessions/:session_id/refresh`，body 为 `{"scope":"full"}`，触发 page bridge 重新上报 full snapshot。
+5. 读取 session snapshot 中 `network` 列表，筛选 URL 包含 `/devtools/api/ping?case=basic` 的记录。
+6. 查询 `GET /_bifrost/api/devtools/network/traffic/:client_req_id`，再读取对应 Traffic 详情。
+
+预期结果：
+
+- `/devtools/api/ping?case=basic` 在 snapshot `network` 列表中只出现 1 条。
+- 该记录包含 `client_req_id`，证明来自 frontend bridge 采集事件，而不是单独的 PerformanceResourceTiming fallback。
+- 同一个 `client_req_id` 不会因为 live network 上报与后续 full snapshot 重放而重复进入 Admin broker 缓存。
+- 通过 `client_req_id` 能精确映射到 Traffic 记录。
+- Traffic 记录的 method、status、URL 与 Network 事件一致。
+- Traffic request headers 中不包含内部 `x-bifrost-client-request-id`。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -758,3 +778,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-30：通过。补充并执行 TC-CDP-37，验证 WebUI DevTools 侧栏入口使用稳定 `data-testid="app-sidebar-nav-item"` + `data-nav-label="DevTools"` 定位，不再依赖可见文本等待；同时验证 DevTools 入口仍位于 Scripts 之后，点击后进入 `devtools-page-list`。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`，随后执行 `bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-04-30：通过。补充并执行 TC-CDP-38，验证 CI `build-e2e` release artifact 构建命令不再设置 `SKIP_FRONTEND_BUILD=1`，从而让 shell shard 下载的 release binary 内嵌真实 WebUI，避免 DevTools 入口定位时只看到 `Frontend not built` 占位页。执行命令：`pnpm --dir web run build`，随后执行 `cargo build --release --bin bifrost` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。
 - 2026-04-30：通过。继续执行 TC-CDP-38 的 macOS aarch64 artifact 回归验证，确认 `build-cli-macos-aarch64` 安装 WebUI 构建依赖且不再设置 `SKIP_FRONTEND_BUILD=1`，避免 macOS shell shard 下载占位 WebUI。执行命令：`pnpm --dir web run build`，随后执行 `cargo build -p bifrost-cli --release --target aarch64-apple-darwin`，再用临时 `BIFROST_DATA_DIR` 和随机非 9900 端口启动 `target/aarch64-apple-darwin/release/bifrost start --unsafe-ssl --no-system-proxy`，通过 `curl http://127.0.0.1:<port>/_bifrost/` 验证返回真实 WebUI 且不包含 `Frontend not built`。
+- 2026-05-01：通过。补充并执行 TC-CDP-39，验证 Admin broker 对 live network 与 full snapshot replay 使用同一套 `client_req_id` 去重逻辑，避免 CI 中 `/devtools/api/ping?case=basic` 概率性重复展示。执行命令：`source ~/.zshrc && cargo test -p bifrost-admin devtools::tests::test_page_bridge_network_cache --all-features`，输出 `2 passed; 0 failed`；随后执行 `source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。

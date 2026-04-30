@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
+#[path = "devtools_network.rs"]
+mod devtools_network;
+use devtools_network::{merge_network_event, merge_network_events, network_event_from_input};
+
 const BRIDGE_COMMAND_QUEUE_CAPACITY: usize = 128;
 const SESSION_LIVE_QUEUE_CAPACITY: usize = 512;
 const BRIDGE_SEEN_SEQ_CAPACITY: usize = 2048;
@@ -481,7 +485,7 @@ impl BrowserDebugBroker {
                 .cloned()
                 .filter_map(network_event_from_input)
                 .collect();
-            page.network_events.extend(events);
+            merge_network_events(&mut page.network_events, events);
             trim_vec_front(&mut page.network_events, PAGE_NETWORK_CACHE_CAPACITY);
         }
         let snapshot = snapshot_from_bridge_payload(page, payload);
@@ -883,7 +887,7 @@ impl BrowserDebugBroker {
         let event = network_event_from_input(payload.event);
         page.last_seen_at_ms = now_ms();
         if let Some(event) = event.clone() {
-            page.network_events.push(event);
+            merge_network_event(&mut page.network_events, event);
             trim_vec_front(&mut page.network_events, PAGE_NETWORK_CACHE_CAPACITY);
         }
         drop(pages);
@@ -1225,29 +1229,6 @@ impl Default for BrowserDebugBroker {
     }
 }
 
-fn network_event_from_input(event: NetworkEventInput) -> Option<NetworkEvent> {
-    if event.url.trim().is_empty() {
-        return None;
-    }
-    let client_req_id = event
-        .client_req_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    Some(NetworkEvent {
-        url: event.url,
-        method: event.method.unwrap_or_else(|| "GET".to_string()),
-        status: event.status,
-        resource_type: event.resource_type.unwrap_or_else(|| "Other".to_string()),
-        at_ms: now_ms(),
-        query_params: event.query_params,
-        request_headers: event.request_headers,
-        response_headers: event.response_headers,
-        from_cache: event.from_cache,
-        client_req_id,
-        traffic_id: None,
-    })
-}
-
 fn snapshot_for_page(page: &DebugPage) -> serde_json::Value {
     serde_json::json!({
         "page": page,
@@ -1405,307 +1386,5 @@ pub fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn input(url: &str) -> RegisterPageInput {
-        RegisterPageInput {
-            url: url.to_string(),
-            origin: "http://example.test".to_string(),
-            traffic_id: "101".to_string(),
-            mode: DevtoolsMode::Read,
-            matched_rule: Some(MatchedDevtoolsRule {
-                pattern: "example.test".to_string(),
-                raw: Some("example.test devtools://mode=read".to_string()),
-                line: Some(1),
-                evaluate_allowlist: Vec::new(),
-            }),
-        }
-    }
-
-    #[test]
-    fn test_proxied_page_registry_records_document_request_with_devtools_rule() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-
-        let pages = broker.list_pages(true);
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].page_id, page_id);
-        assert_eq!(pages[0].state, DebugPageState::Candidate);
-        assert_eq!(pages[0].traffic_ids, vec!["101".to_string()]);
-        assert!(!token.is_empty());
-        assert!(
-            broker.list_debuggable_pages(true).is_empty(),
-            "unconnected candidates must not be shown as selectable DevTools pages"
-        );
-    }
-
-    #[test]
-    fn test_page_bridge_hello_marks_page_discoverable() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-
-        broker
-            .bridge_hello(
-                &page_id,
-                BridgeHelloPayload {
-                    token,
-                    scope: None,
-                    tab_id: Some("tab-a".to_string()),
-                    title: Some("Fixture".to_string()),
-                    url: None,
-                    user_agent: Some("Mobile Safari".to_string()),
-                    dom_snapshot: Some("<html></html>".to_string()),
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("bridge hello");
-
-        let page = broker.list_pages(true).remove(0);
-        assert_eq!(page.title.as_deref(), Some("Fixture"));
-        assert_eq!(page.state, DebugPageState::Discoverable);
-        assert_eq!(page.user_agent.as_deref(), Some("Mobile Safari"));
-    }
-
-    #[test]
-    fn test_page_bridge_close_hides_stale_page_from_debuggable_list() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-        broker
-            .bridge_hello(
-                &page_id,
-                BridgeHelloPayload {
-                    token: token.clone(),
-                    scope: None,
-                    tab_id: Some("tab-a".to_string()),
-                    title: Some("Fixture".to_string()),
-                    url: None,
-                    user_agent: None,
-                    dom_snapshot: None,
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("bridge hello");
-
-        broker
-            .bridge_close(&page_id, BridgeClosePayload { token })
-            .expect("bridge close");
-
-        let stale_page = broker.list_pages(true).remove(0);
-        assert_eq!(stale_page.state, DebugPageState::Stale);
-        assert!(
-            broker.list_debuggable_pages(true).is_empty(),
-            "stale pages must not remain selectable"
-        );
-    }
-
-    #[test]
-    fn test_page_bridge_reload_migrates_open_session_to_new_page_id() {
-        let broker = BrowserDebugBroker::new();
-        let (old_page_id, old_token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-        broker
-            .bridge_hello(
-                &old_page_id,
-                BridgeHelloPayload {
-                    token: old_token.clone(),
-                    scope: None,
-                    tab_id: Some("tab-a".to_string()),
-                    title: Some("Before".to_string()),
-                    url: None,
-                    user_agent: None,
-                    dom_snapshot: Some("<html><body>before</body></html>".to_string()),
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("old bridge hello");
-        let session = broker.open_session(&old_page_id).expect("session");
-        broker
-            .bridge_close(&old_page_id, BridgeClosePayload { token: old_token })
-            .expect("old bridge close");
-
-        let (new_page_id, new_token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-        broker
-            .bridge_hello(
-                &new_page_id,
-                BridgeHelloPayload {
-                    token: new_token,
-                    scope: None,
-                    tab_id: Some("tab-a".to_string()),
-                    title: Some("After".to_string()),
-                    url: Some("http://example.test/devtools/basic.html?after=1".to_string()),
-                    user_agent: None,
-                    dom_snapshot: Some("<html><body>after</body></html>".to_string()),
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("new bridge hello");
-
-        let snapshot = broker.snapshot(&session.session_id).expect("snapshot");
-        assert_eq!(snapshot["page"]["page_id"], new_page_id);
-        assert_eq!(snapshot["page"]["title"], "After");
-        assert_eq!(broker.list_debuggable_pages(true).len(), 1);
-        assert!(broker.get_page(&old_page_id).is_none());
-    }
-
-    #[test]
-    fn test_page_bridge_same_tab_id_keeps_concurrent_pages_separate() {
-        let broker = BrowserDebugBroker::new();
-        let (first_page_id, first_token) =
-            broker.register_page_candidate(input("http://example.test/assistant"));
-        broker
-            .bridge_hello(
-                &first_page_id,
-                BridgeHelloPayload {
-                    token: first_token.clone(),
-                    scope: None,
-                    tab_id: Some("cloned-tab".to_string()),
-                    title: Some("Assistant A".to_string()),
-                    url: None,
-                    user_agent: None,
-                    dom_snapshot: None,
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("first hello");
-        let (tx, _rx) = mpsc::channel(1);
-        broker
-            .bridge_ws_attach(&first_page_id, &first_token, tx)
-            .expect("attach");
-
-        let (second_page_id, second_token) =
-            broker.register_page_candidate(input("http://example.test/assistant"));
-        broker
-            .bridge_hello(
-                &second_page_id,
-                BridgeHelloPayload {
-                    token: second_token,
-                    scope: None,
-                    tab_id: Some("cloned-tab".to_string()),
-                    title: Some("Assistant B".to_string()),
-                    url: None,
-                    user_agent: None,
-                    dom_snapshot: None,
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("second hello");
-
-        let pages = broker.list_debuggable_pages(true);
-        assert_eq!(pages.len(), 2);
-        assert!(pages.iter().any(|page| page.page_id == first_page_id));
-        assert!(pages.iter().any(|page| page.page_id == second_page_id));
-    }
-
-    #[test]
-    fn test_page_bridge_rejects_token_replay_or_mismatch() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, _token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-
-        let result = broker.bridge_hello(
-            &page_id,
-            BridgeHelloPayload {
-                token: "wrong".to_string(),
-                scope: None,
-                tab_id: Some("tab-a".to_string()),
-                title: Some("Fixture".to_string()),
-                url: None,
-                user_agent: None,
-                dom_snapshot: None,
-                dom_tree: None,
-                storage: None,
-                console: Vec::new(),
-                network: Vec::new(),
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(broker.list_pages(true)[0].state, DebugPageState::Candidate);
-    }
-
-    #[test]
-    fn test_page_bridge_seq_dedupes_replayed_messages() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, _token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-
-        assert!(broker.remember_bridge_seq(&page_id, 42));
-        assert!(
-            !broker.remember_bridge_seq(&page_id, 42),
-            "replayed bridge messages with the same seq must not be processed twice"
-        );
-        assert!(broker.remember_bridge_seq(&page_id, 43));
-    }
-
-    #[test]
-    fn test_page_bridge_live_queues_are_bounded() {
-        assert!(bridge_command_queue_capacity() > 0);
-        assert!(session_live_queue_capacity() > 0);
-        assert!(
-            session_live_queue_capacity() <= 1024,
-            "WebUI live queues must remain bounded to protect the admin process from slow consumers"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_runtime_evaluate_allowed_for_default_session_scope() {
-        let broker = BrowserDebugBroker::new();
-        let (page_id, token) =
-            broker.register_page_candidate(input("http://example.test/devtools/basic.html"));
-        broker
-            .bridge_hello(
-                &page_id,
-                BridgeHelloPayload {
-                    token,
-                    scope: None,
-                    tab_id: Some("tab-a".to_string()),
-                    title: Some("Fixture".to_string()),
-                    url: None,
-                    user_agent: None,
-                    dom_snapshot: None,
-                    dom_tree: None,
-                    storage: None,
-                    console: Vec::new(),
-                    network: Vec::new(),
-                },
-            )
-            .expect("bridge hello");
-        let session = broker.open_session(&page_id).expect("session");
-
-        let result = broker
-            .command(
-                &session.session_id,
-                "runtime.evaluate",
-                serde_json::json!({"expression": "document.title"}),
-            )
-            .await;
-
-        assert!(
-            result.unwrap_err().contains("timed out"),
-            "runtime.evaluate should be queued even for legacy read-mode pages"
-        );
-    }
-}
+#[path = "devtools_tests.rs"]
+mod tests;
