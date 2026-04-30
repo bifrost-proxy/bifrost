@@ -217,6 +217,444 @@ IM Gateway
 
 历史展示默认脱敏，只保留必要摘要。需要排查时可通过受控开关保存更详细 payload。
 
+### WebUI 交互示意图
+
+#### 一级信息架构
+
+```mermaid
+flowchart LR
+    Settings["Settings"]
+    RemoteInvoke["Remote Invoke"]
+    ImGateway["IM Gateway"]
+    Connections["Connections"]
+    Targets["Targets"]
+    Routes["Routes"]
+    Schedules["Schedules"]
+    History["History"]
+    Grants["Remote Invoke Grants"]
+
+    Settings --> RemoteInvoke
+    Settings --> ImGateway
+    ImGateway --> Connections
+    ImGateway --> Targets
+    ImGateway --> Routes
+    ImGateway --> Schedules
+    ImGateway --> History
+    RemoteInvoke --> Grants
+    Connections -. "grant status summary only" .-> Grants
+    Routes -. "script execution permission" .-> Grants
+    Schedules -. "script execution permission" .-> Grants
+```
+
+说明：
+
+- `IM Gateway` 是 Settings 一级 Tab，不放进 `Remote Invoke` 内部。
+- `Remote Invoke Grants` 仍是 IM grant 的完整管理入口。
+- `IM Gateway` 内只展示 grant 状态摘要和权限缺失提示，避免两套权限事实源。
+
+#### Provider / Target 配置流程
+
+```mermaid
+flowchart TD
+    OpenTab["Open Settings / IM Gateway"]
+    AddProvider["Connections: Add Feishu Provider"]
+    InputCred["Input app_id and app_secret"]
+    SaveProvider["Save Provider"]
+    CreateGrant["Auto create remote_im_gateway grant keyed by app_id"]
+    ConnectLong["Start Feishu long connection"]
+    AddTarget["Targets: Add receive target"]
+    CheckTarget["Channel Check"]
+    Ready["Ready for send / route / schedule"]
+
+    OpenTab --> AddProvider
+    AddProvider --> InputCred
+    InputCred --> SaveProvider
+    SaveProvider --> CreateGrant
+    SaveProvider --> ConnectLong
+    ConnectLong --> AddTarget
+    AddTarget --> CheckTarget
+    CheckTarget --> Ready
+```
+
+交互要求：
+
+- `app_secret` 输入后不再回显，页面只显示 `secret configured`。
+- provider 卡片展示 masked app_id、长连接状态、最近事件时间、最近错误。
+- provider 创建成功后，Remote Invoke Grants 中必须能看到对应 `remote_im_gateway` grant。
+- `Channel Check` 只返回 safe summary，不展示 secret_ref、token cache 或完整 provider config。
+
+#### 发送消息流程
+
+```mermaid
+sequenceDiagram
+    participant User as WebUI User
+    participant UI as IM Gateway / Send
+    participant Admin as Admin API
+    participant Grant as Remote Invoke Grant Check
+    participant Provider as Feishu Provider
+    participant Feishu as Feishu OpenAPI
+    participant History as IM History
+
+    User->>UI: Select target and input card JSON
+    UI->>Admin: POST /api/im-gateway/messages/send
+    Admin->>Grant: Check send_message permission
+    Grant-->>Admin: Allowed
+    Admin->>Provider: send_card(target, card)
+    Provider->>Feishu: Send message
+    Feishu-->>Provider: message_id / request_id
+    Provider-->>Admin: SendResult
+    Admin->>History: Store safe run/send summary
+    Admin-->>UI: message_id / request_id
+    UI-->>User: Show success state
+```
+
+失败展示：
+
+- provider 未连接：显示 channel disconnected / reconnecting。
+- target 不可用：显示 target invalid 或 send permission denied。
+- permission 缺失：跳转或提示去 Remote Invoke Grants 调整 IM grant。
+- 所有错误都不得展示 secret、token 或完整 provider config。
+
+#### 接收消息执行脚本并回复
+
+```mermaid
+sequenceDiagram
+    participant Feishu as Feishu Long Connection
+    participant Conn as IM Gateway Connection
+    participant Router as Event Router
+    participant Grant as IM Grant Permission Check
+    participant Exec as Task Executor
+    participant Provider as Feishu Provider
+    participant History as History
+    participant UI as WebUI
+
+    Feishu->>Conn: message.receive event
+    Conn->>History: Store event safe summary
+    Conn->>Router: Normalize and match route
+    Router->>Grant: Check execute_script permission
+    alt Allowed
+        Grant-->>Router: Allowed
+        Router->>Exec: Run script with matched env
+        Exec-->>Router: stdout / stderr / exit_code
+        Router->>Provider: Reply message after script completion
+        Provider-->>Feishu: Send reply
+        Router->>History: Store run result
+        History-->>UI: Event and run appear in History
+    else Denied
+        Grant-->>Router: Denied
+        Router->>History: Store rejected run
+        Router->>Provider: Optional permission denied reply
+        History-->>UI: Event appears, run is rejected
+    end
+```
+
+V1 交互边界：
+
+- 只支持收到消息后执行脚本，脚本完成后回复消息。
+- 不支持收到消息后触发已有 schedule。
+- 不支持卡片交互回调触发任务。
+- route 创建页要把 action 固定为 `Run Script and Reply`，后续 action 显示为 disabled 或不展示。
+
+#### 定时任务管理流程
+
+```mermaid
+flowchart TD
+    List["Schedules list"]
+    Create["Create schedule"]
+    GrantManage["Check manage_schedule"]
+    EditScript["Configure script, target, cron/interval, timeout"]
+    Save["Save schedule"]
+    NextRun["Show next_run_at"]
+    ManualRun["Run now"]
+    GrantExecute["Check execute_script"]
+    Execute["Execute script"]
+    SendResult["Send result message"]
+    Runs["Runs history"]
+    Pause["Pause"]
+    Resume["Resume"]
+    Delete["Delete"]
+
+    List --> Create
+    Create --> GrantManage
+    GrantManage --> EditScript
+    EditScript --> Save
+    Save --> NextRun
+    List --> ManualRun
+    ManualRun --> GrantExecute
+    GrantExecute --> Execute
+    Execute --> SendResult
+    Execute --> Runs
+    List --> Pause
+    Pause --> List
+    List --> Resume
+    Resume --> List
+    List --> Delete
+    Delete --> List
+```
+
+界面状态：
+
+- schedule 行展示 enabled / paused / running / last status / next run。
+- `Run now` 缺少 `execute_script` 时禁用或点击后明确报权限不足。
+- `Pause` 后 next_run_at 停止推进。
+- `Delete` 需要确认，删除后不影响历史摘要。
+
+#### Remote Agent 使用路径
+
+```mermaid
+sequenceDiagram
+    participant Agent as Remote Agent
+    participant CLI as bifrost remote im
+    participant Relay as Remote Invoke Relay
+    participant Target as Target Bifrost
+    participant Grant as IM Grant
+    participant IM as IM Gateway
+    participant Feishu as Feishu
+
+    Agent->>CLI: remote im channel check
+    CLI->>Relay: encrypted im.gateway command
+    Relay->>Target: route command
+    Target->>Grant: read_status
+    Target->>IM: channel safe summary
+    IM-->>Agent: connected / target sendable
+
+    Agent->>CLI: remote im send
+    CLI->>Relay: encrypted im.gateway command
+    Relay->>Target: route command
+    Target->>Grant: send_message
+    Target->>IM: send card
+    IM->>Feishu: send message
+    Feishu-->>IM: message_id
+    IM-->>Agent: message_id / request_id
+```
+
+Remote WebUI / CLI 共同要求：
+
+- remote 只能读取 safe summary。
+- remote 不能读取密钥、完整 provider config、token cache 或 raw event payload。
+- remote 新增/修改 schedule 或 route 时，审批文案必须提示持久化脚本执行风险。
+
+### UI 布局线框图
+
+#### IM Gateway 总体布局
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Settings                                                                     │
+├──────────────┬───────────────────────────────────────────────────────────────┤
+│ Proxy        │ IM Gateway                                                    │
+│ Certificate  │ ┌───────────────────────────────────────────────────────────┐ │
+│ TLS          │ │ Connections | Targets | Routes | Schedules | History      │ │
+│ Remote Invoke│ └───────────────────────────────────────────────────────────┘ │
+│ IM Gateway ◀ │                                                               │
+│ Performance  │  [current tab content]                                        │
+│ Access       │                                                               │
+│ Appearance   │                                                               │
+│ Metrics      │                                                               │
+│ Sync         │                                                               │
+└──────────────┴───────────────────────────────────────────────────────────────┘
+```
+
+布局原则：
+
+- 左侧复用 Settings 现有一级 Tab 导航。
+- 右侧 `IM Gateway` 内容顶部使用二级 tabs。
+- 页面不再嵌套大卡片；只对 provider、target、route、schedule 这类重复项使用紧凑 card 或表格行。
+- 所有 secret 只显示 configured / missing，不显示可复制明文。
+
+#### Connections 子页
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ IM Gateway / Connections                                      [+ Provider]   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Summary                                                                      │
+│ Connected providers: 1    Last event: 14:03:12    Failed providers: 0        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Provider list                                                                │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │ Feishu Main                                      connected   [⋯]         │ │
+│ │ type: feishu    app_id: cli_***abcd    secret: configured               │ │
+│ │ long connection: connected    reconnects: 0    last event: 14:03:12     │ │
+│ │ grant: remote_im_gateway / send_message, manage_schedule, execute_script│ │
+│ │ [Channel Check] [Targets] [Routes] [Open Grant]                         │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │ Add / Edit Provider Drawer                                               │ │
+│ │ Provider type: [Feishu v]                                                │ │
+│ │ Display name: [ Feishu Main                 ]                            │ │
+│ │ App ID:       [ cli_xxx                     ]                            │ │
+│ │ App Secret:   [ ************************    ] [Replace]                  │ │
+│ │ Long connection: [on/off]                                                │ │
+│ │ Event types: [message.receive] [app.mention]                             │ │
+│ │                         [Cancel] [Save]                                  │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+关键状态：
+
+- `Open Grant` 跳转到 Remote Invoke Grants 对应 IM grant。
+- provider 行只展示 grant summary，不在本页编辑完整 grant。
+- 长连接失败时 provider 行显示最近错误摘要和 reconnect 状态。
+
+#### Targets 子页
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ IM Gateway / Targets                                           [+ Target]    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Filters: Provider [Feishu Main v]   Type [all v]   Search [              ]   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Target table                                                                 │
+│ ┌──────────────┬──────────┬────────────────┬──────────┬─────────┬────────┐ │
+│ │ Name         │ Provider │ receive_id_type│ receive_id│ Status  │ Action │ │
+│ ├──────────────┼──────────┼────────────────┼──────────┼─────────┼────────┤ │
+│ │ Oncall Group │ Feishu   │ chat_id        │ oc_***42 │ sendable│ ⋯      │ │
+│ │ Eden         │ Feishu   │ open_id        │ ou_***ab │ sendable│ ⋯      │ │
+│ └──────────────┴──────────┴────────────────┴──────────┴─────────┴────────┘ │
+│                                                                              │
+│ Right drawer: Add / Edit Target                                              │
+│ - Provider                                                                   │
+│ - receive_id_type                                                            │
+│ - receive_id                                                                 │
+│ - Display name                                                               │
+│ - [Channel Check] [Save]                                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+关键状态：
+
+- `receive_id` 可以显示完整值，因为它不是 secret，但列表中可按需要做中间截断。
+- `Channel Check` 返回 provider connected / target sendable / permission denied。
+- target 删除前要提示会影响 route / schedule。
+
+#### Routes 子页
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ IM Gateway / Routes                                             [+ Route]    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Notice: V1 only supports "message -> run script -> reply".                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Route list                                                                   │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │ /check service                                      enabled   last: ok   │ │
+│ │ provider: Feishu Main    event: message.receive                         │ │
+│ │ match: chat_id=oc_***42, regex=^/check (?P<service>\S+)$                │ │
+│ │ action: Run Script and Reply    timeout: 30s                             │ │
+│ │ grant: execute_script allowed                                            │ │
+│ │ [Test Match] [Run Sample] [Pause] [Edit] [Delete]                        │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│ Right drawer: Add / Edit Route                                               │
+│ ┌──────────────────────────────────────────────────────────────────────────┐ │
+│ │ Basic                                                                    │ │
+│ │   Name: [ /check service             ]                                   │ │
+│ │   Provider: [ Feishu Main v          ]                                   │ │
+│ │   Event: [ message.receive v         ]                                   │ │
+│ │ Match                                                                    │ │
+│ │   Chat IDs: [ oc_xxx, ...            ]                                   │ │
+│ │   User IDs: [ optional               ]                                   │ │
+│ │   Keyword:  [ optional               ]                                   │ │
+│ │   Regex:    [ ^/check (?P<service>\S+)$ ]                                │ │
+│ │ Action                                                                   │ │
+│ │   [Run Script and Reply]                                                  │ │
+│ │   Script: [script_text | script_file]                                     │ │
+│ │   CWD:    [ /repo/path               ]                                   │ │
+│ │   Env:    [ KEY=VALUE                ]                                   │ │
+│ │   Timeout: [30s]    Max output: [4KiB]                                    │ │
+│ │ Reply                                                                    │ │
+│ │   Reply target: [original chat v]                                         │ │
+│ │   Reply mode:   [text summary v]                                          │ │
+│ │ Permission                                                               │ │
+│ │   execute_script: allowed / missing                                      │ │
+│ │                         [Cancel] [Save]                                  │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+关键状态：
+
+- 如果 provider IM grant 缺少 `execute_script`，保存按钮禁用或保存后 route 保持 disabled，并提示去 Remote Invoke Grants。
+- `Test Match` 只测试 matcher，不执行脚本。
+- `Run Sample` 执行脚本，必须走 `execute_script` 和 Remote Shell 风格策略。
+
+#### Schedules 子页
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ IM Gateway / Schedules                                      [+ Schedule]     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Filters: Enabled [all v]   Target [all v]   Search [                    ]    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Schedule table                                                               │
+│ ┌──────────────┬──────────────┬──────────┬──────────┬────────────┬────────┐ │
+│ │ Name         │ Target       │ Trigger  │ Status   │ Next run   │ Action │ │
+│ ├──────────────┼──────────────┼──────────┼──────────┼────────────┼────────┤ │
+│ │ heartbeat    │ Oncall Group │ */30 * * │ enabled  │ 14:30:00   │ ⋯      │ │
+│ │ daily report │ Oncall Group │ 09:00    │ paused   │ -          │ ⋯      │ │
+│ └──────────────┴──────────────┴──────────┴──────────┴────────────┴────────┘ │
+│                                                                              │
+│ Row actions: [Run now] [Pause/Resume] [Edit] [Delete] [Runs]                 │
+│                                                                              │
+│ Right drawer: Add / Edit Schedule                                            │
+│ - Name                                                                       │
+│ - Target                                                                     │
+│ - Trigger: cron / interval                                                   │
+│ - Script text/file                                                           │
+│ - CWD / Env                                                                  │
+│ - Timeout / max output                                                       │
+│ - Reply card/text template                                                   │
+│ - Permission summary: manage_schedule + execute_script                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+关键状态：
+
+- `Run now` 必须同时检查 `manage_schedule` 和 `execute_script`。
+- `Pause/Resume` 只需要 `manage_schedule`。
+- timeout run 要在表格 last status 中展示 `timeout`，进入 Runs 可看 stderr 摘要。
+
+#### History 子页
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ IM Gateway / History                                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Tabs: Events | Runs                                                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Events                                                                       │
+│ ┌────────────┬──────────┬──────────────┬──────────────┬──────────────────┐ │
+│ │ Time       │ Provider │ Event        │ Source       │ Summary          │ │
+│ ├────────────┼──────────┼──────────────┼──────────────┼──────────────────┤ │
+│ │ 14:03:12   │ Feishu   │ msg.receive  │ oc_***42     │ /check bifrost   │ │
+│ └────────────┴──────────┴──────────────┴──────────────┴──────────────────┘ │
+│                                                                              │
+│ Runs                                                                         │
+│ ┌────────────┬──────────┬──────────────┬──────────┬────────────┬──────────┐ │
+│ │ Time       │ Trigger  │ Route/Job    │ Status   │ Duration   │ Action   │ │
+│ ├────────────┼──────────┼──────────────┼──────────┼────────────┼──────────┤ │
+│ │ 14:03:13   │ message  │ /check       │ success  │ 320ms      │ Details  │ │
+│ │ 14:05:00   │ schedule │ heartbeat    │ timeout  │ 30s        │ Details  │ │
+│ └────────────┴──────────┴──────────────┴──────────┴────────────┴──────────┘ │
+│                                                                              │
+│ Details drawer                                                               │
+│ - safe event summary                                                         │
+│ - stdout/stderr preview                                                      │
+│ - exit_code / duration / digest                                              │
+│ - provider request id / message id                                           │
+│ - no secret, no token, no raw full payload by default                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+关键状态：
+
+- Events 和 Runs 默认只展示 safe summary。
+- Details 中只显示 stdout/stderr preview 和 digest，不显示完整敏感 payload。
+- 如后续增加 debug raw payload，也必须有短期 retention 和显式开关。
+
 ## 架构
 
 ### 模块分层
@@ -991,6 +1429,24 @@ WebUI 和 CLI 输出必须避免泄露 secret，同时保留 request id / error 
 ## 测试方案
 
 本节是实现前的测试用例设计草案。正式实现时必须把真实场景用例落到 `human_tests/im-gateway.md` 并立即逐条执行；当前仍处于方案 review 阶段，所以不提前创建 human_tests 文件。
+
+### 测试凭据安全要求
+
+如果需要使用真实飞书测试应用做验证，测试凭据只允许从本机文件读取：
+
+```text
+/Users/eden/ak.txt
+```
+
+强制要求：
+
+- 禁止把该文件内容写入任何设计文档、human_tests、E2E 脚本注释、日志、CLI 输出、截图说明或提交信息。
+- 禁止在 shell history 中展开打印凭据；测试脚本只能读取文件并传入进程环境或临时 stdin。
+- 禁止把真实 `app_id` / `app_secret` 写入仓库内任何文件。
+- 如果测试失败，错误输出必须只展示 masked app_id、request id、错误码和错误摘要。
+- 测试结束后必须检查 CLI 输出、Recent Calls、IM History、relay 日志、store 文件均不包含该文件中的任何完整密钥值。
+
+建议 E2E 默认仍使用 fake Feishu server；只有需要验证真实飞书长连接 / 真实消息收发时，才读取 `/Users/eden/ak.txt` 作为运行时输入。
 
 ### 单元测试
 

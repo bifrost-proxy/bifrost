@@ -4753,6 +4753,53 @@ PY
 
 ---
 
+### TC-RI-回归-143：Recent Calls 本地 echo fixture 端口 fallback 后必须使用实际端口
+
+**背景**：CI 并发执行 shell E2E 时，`test_remote_invoke_recent_calls_args_preview_e2e.sh` 先通过 `pick_free_port` 选择 mock HTTP 端口，再启动 `http_echo_server.py --retries 5`。如果端口在选择后、bind 前被其他测试占用，mock server 会 fallback 到下一个可用端口并打印 `READY`，但旧脚本仍轮询原端口，导致出现“本地 echo fixture 未在超时内就绪”的假失败。
+
+**前置条件**：
+- 使用隔离的 relay / target admin / caller 数据目录
+- target admin 使用随机端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`、`curl`、`jq`、`cargo`、`npx`
+
+**操作步骤**：
+1. 执行以下命令，预占脚本指定的 mock 端口，强制 `http_echo_server.py --retries 5` fallback 到下一个端口：
+   ```bash
+   source ~/.zshrc
+   TEST_PORT=$(python3 - <<'PY'
+   import socket
+   s = socket.socket()
+   s.bind(("127.0.0.1", 0))
+   print(s.getsockname()[1])
+   s.close()
+   PY
+   )
+   python3 -m http.server "$TEST_PORT" --bind 127.0.0.1 >/tmp/bifrost-ri-port-holder.log 2>&1 &
+   HOLDER_PID=$!
+   MOCK_HTTP_PORT="$TEST_PORT" bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   kill "$HOLDER_PID"
+   ```
+2. 观察脚本输出，确认出现：
+   ```text
+   Local HTTP echo fixture fell back from port <requested> to <actual>
+   ```
+3. 继续观察 Recent Calls 参数预览、长参数截断、落盘恢复和清理断言。
+
+**预期结果**：
+- 脚本不会因为原 mock 端口被占用而停在 `/health` 探活阶段
+- 脚本从 mock server 日志解析实际绑定端口，并用实际端口生成 Recent Calls 流量
+- `TC-RI-GRANTS-TIME-01`、`TC-RI-GRANTS-TIME-02`、`TC-RI-ARGS-01` 到 `TC-RI-ARGS-05` 全部通过
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-143 执行结果（2026-04-30，Recent Calls fixture 端口 fallback）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-143 | ✅ PASS | 2026-04-30 在当前 checkout 执行强制端口 fallback 回归：先用 `python3 -m http.server <TEST_PORT> --bind 127.0.0.1` 预占脚本指定的 `MOCK_HTTP_PORT`，再执行 `SKIP_BUILD=true MOCK_HTTP_PORT=<TEST_PORT> bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本输出 `Local HTTP echo fixture fell back from port 60953 to 60954`，随后完整通过 Grants 时间字段、Recent Calls 参数预览、长参数 120 字符截断、本地落盘恢复、重启恢复与清理断言，最终输出 `Recent Calls args preview and persistence E2E passed`。全流程使用随机 relay/admin/mock 端口，未使用 `9900`，target admin 由脚本以隔离数据目录和 `--no-system-proxy` 启动。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

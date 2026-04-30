@@ -17,6 +17,7 @@ PLATFORM="$(uname -s)"
 REPORT_DIR=""
 SHARD_INDEX="${BIFROST_E2E_SHARD_INDEX:-0}"
 SHARD_TOTAL="${BIFROST_E2E_SHARD_TOTAL:-0}"
+EXTRACT_FAILURE_REASON_LOG=""
 
 declare -a SUITE_NAMES=()
 declare -a SUITE_STATUSES=()
@@ -142,6 +143,14 @@ while [[ $# -gt 0 ]]; do
     --list-shell-tests)
       LIST_SHELL_TESTS=1
       shift
+      ;;
+    --extract-failure-reason)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --extract-failure-reason requires a log file path" >&2
+        exit 1
+      fi
+      EXTRACT_FAILURE_REASON_LOG="$2"
+      shift 2
       ;;
     --shard)
       if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
@@ -306,6 +315,8 @@ ansi = re.compile(r"\x1b\[[0-9;]*m")
 patterns = [
     re.compile(r"^✗\s*(.+)"),
     re.compile(r"^Error:\s*(.+)", re.IGNORECASE),
+    re.compile(r"^(TimeoutError|AssertionError|ReferenceError|TypeError|SyntaxError):\s*(.+)"),
+    re.compile(r"^([A-Za-z][A-Za-z0-9_.]*\.(?:launch|goto|click|fill|waitFor|waitForFunction|evaluate|newPage|newContext|textContent):\s*.+)"),
     re.compile(r"^ERROR:\s*(.+)"),
     re.compile(r"^Failed:\s*(.+)"),
     re.compile(r"^Caused by:\s*(.+)"),
@@ -317,6 +328,8 @@ ignore_prefixes = (
     "compiling ",
     "building ",
     "downloaded ",
+    "preserving failed test root",
+    "--- ",
 )
 
 with open(path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -332,7 +345,8 @@ for line in lines:
     for pattern in patterns:
         match = pattern.match(stripped)
         if match:
-            msg = match.group(1).strip() or stripped
+            groups = [group for group in match.groups() if group]
+            msg = " ".join(groups).strip() or stripped
             print(msg[:400])
             sys.exit(0)
 
@@ -347,6 +361,11 @@ for line in reversed(lines):
     sys.exit(0)
 PY
 }
+
+if [[ -n "${EXTRACT_FAILURE_REASON_LOG:-}" ]]; then
+  extract_failure_reason "$EXTRACT_FAILURE_REASON_LOG"
+  exit 0
+fi
 
 run_and_capture() {
   local name="$1"
