@@ -110,7 +110,7 @@ jobs:
         with:
           save-if: always()
       - name: Build release binary
-        run: SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+        run: cargo build --release --bin bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:

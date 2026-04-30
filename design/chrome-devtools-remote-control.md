@@ -272,6 +272,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 WebUI DevTools 详情刷新按钮仅通过 session WS 请求当前 tab snapshot，不触发目标页 reload 或重新发起业务请求
 - 验证 HTTPS/TLS 全截包浏览器代理场景下，Network 中 fetch/XHR 与标签资源请求都能匹配到完整 Traffic 记录
 - 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后
+- 验证 CI `build-e2e` 产出的 release binary 必须包含真实 WebUI 前端资源；DevTools shell E2E 不允许使用 `Frontend not built` 占位页作为通过条件
 - 验证 Storage 行内新增/编辑/删除后目标页真实读到新值
 - 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染
 - 验证 Bridge 主要经由 WebSocket 通信
