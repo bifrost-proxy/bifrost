@@ -368,6 +368,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         res_script_results: None,
         decode_req_script_results: None,
         decode_res_script_results: None,
+        devtools_client_req_id: None,
     }
 }
 

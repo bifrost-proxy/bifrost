@@ -1100,6 +1100,7 @@ impl ReplayExecutor {
             res_script_results: None,
             decode_req_script_results: None,
             decode_res_script_results: None,
+            devtools_client_req_id: None,
         };
 
         if let Some(ref traffic_db) = self.admin_state.traffic_db_store {

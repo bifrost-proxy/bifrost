@@ -1111,18 +1111,12 @@ impl RemoteInvokeWorker {
                         let gid = gi.grant_id.clone();
                         relay_active_ids.insert(gid.clone());
                         let mut gi = apply_stored_grant_policy(gi, synced_policy.get(&gid));
-                        // Preserve existing local timestamps on SSE reconciliation so
+                        // Preserve existing local runtime state on SSE reconciliation so
                         // first_authorized_at (displayed as first_connected_at) is stable
                         // across reconnects. Only adopt current time if we have never
                         // seen this grant locally.
                         if let Some(existing) = self.local_grants.read().get(&gid) {
-                            gi.first_authorized_at = existing.first_authorized_at;
-                            if gi.last_command_at.is_none() {
-                                gi.last_command_at = existing.last_command_at;
-                            }
-                            if gi.last_used_at.is_none() {
-                                gi.last_used_at = existing.last_used_at;
-                            }
+                            preserve_existing_grant_runtime_state(&mut gi, existing);
                         }
                         if !has_usable_grant_crypto(&synced_transport, &gi) {
                             warn!(
@@ -1886,15 +1880,21 @@ impl RemoteInvokeWorker {
             }
         };
         let grant_id = grant_info.grant_id.clone();
-        let grant_info = {
+        let mut grant_info = {
             let stored = self.grant_policy.read();
             apply_stored_grant_policy(grant_info, stored.get(&grant_id))
         };
+        if let Some(existing) = self.local_grants.read().get(&grant_id) {
+            preserve_existing_grant_runtime_state(&mut grant_info, existing);
+        }
         if !has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
             // Race condition: The relay sends the SSE grant_created event before the HTTP
             // response to submit_grant_decision. If approve_pairing hasn't stored the crypto
             // yet, we might mistakenly consider this grant stale. Wait briefly and retry.
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if let Some(existing) = self.local_grants.read().get(&grant_id) {
+                preserve_existing_grant_runtime_state(&mut grant_info, existing);
+            }
             if has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
                 info!(grant_id = %grant_id, "grant crypto arrived after brief wait; accepting grant");
                 self.persist_grant_info(&grant_id, &grant_info);
@@ -3924,6 +3924,34 @@ fn apply_stored_grant_policy(
     grant
 }
 
+fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn min_optional_u32(left: Option<u32>, right: Option<u32>) -> Option<u32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn preserve_existing_grant_runtime_state(grant: &mut GrantInfo, existing: &GrantInfo) {
+    grant.first_authorized_at = existing.first_authorized_at;
+    grant.last_command_at = max_optional_u64(existing.last_command_at, grant.last_command_at);
+    grant.last_used_at = max_optional_u64(existing.last_used_at, grant.last_used_at);
+    grant.max_calls = existing.max_calls.or(grant.max_calls);
+    grant.remaining_calls = min_optional_u32(existing.remaining_calls, grant.remaining_calls);
+    grant.use_count = existing.use_count.max(grant.use_count);
+    if existing.status != GrantStatus::Active {
+        grant.status = existing.status;
+    }
+}
+
 fn repair_legacy_ssh_grant_identity(
     grant: &mut GrantInfo,
     active_ssh_key: Option<&SshKeyRecord>,
@@ -4353,6 +4381,34 @@ mod tests {
         });
 
         assert!(build_grant_info_from_grant_created(&payload, "client-c", 42).is_none());
+    }
+
+    #[test]
+    fn test_preserve_existing_grant_runtime_state_keeps_first_authorized_at_stable() {
+        let mut existing = make_active_grant("grant-time", GrantMode::Permanent);
+        existing.first_authorized_at = 1777557672411;
+        existing.last_command_at = Some(1777557673000);
+        existing.last_used_at = Some(1777557673000);
+        existing.max_calls = Some(1);
+        existing.remaining_calls = Some(0);
+        existing.use_count = 3;
+
+        let mut rebuilt = make_active_grant("grant-time", GrantMode::Permanent);
+        rebuilt.first_authorized_at = 1777557672410;
+        rebuilt.last_command_at = Some(1777557672999);
+        rebuilt.last_used_at = None;
+        rebuilt.max_calls = None;
+        rebuilt.remaining_calls = Some(1);
+        rebuilt.use_count = 1;
+
+        preserve_existing_grant_runtime_state(&mut rebuilt, &existing);
+
+        assert_eq!(rebuilt.first_authorized_at, existing.first_authorized_at);
+        assert_eq!(rebuilt.last_command_at, existing.last_command_at);
+        assert_eq!(rebuilt.last_used_at, existing.last_used_at);
+        assert_eq!(rebuilt.max_calls, existing.max_calls);
+        assert_eq!(rebuilt.remaining_calls, existing.remaining_calls);
+        assert_eq!(rebuilt.use_count, existing.use_count);
     }
 
     #[test]

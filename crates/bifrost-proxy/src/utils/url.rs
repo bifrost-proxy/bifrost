@@ -198,6 +198,27 @@ pub fn find_host_rule_source_path(
     })
 }
 
+pub fn host_rule_uses_exact_target_path(
+    rules: &[crate::server::RuleValue],
+    host_protocol: bifrost_core::Protocol,
+    host_rule: &str,
+) -> bool {
+    use bifrost_core::Protocol;
+    rules.iter().any(|rule| {
+        matches!(
+            rule.protocol,
+            Protocol::Host
+                | Protocol::XHost
+                | Protocol::Http
+                | Protocol::Https
+                | Protocol::Ws
+                | Protocol::Wss
+        ) && rule.protocol == host_protocol
+            && rule.value == host_rule
+            && rule.pattern.trim_start_matches('!').starts_with('^')
+    })
+}
+
 pub fn rewrite_path_with_prefix(
     request_path: &str,
     source_path: Option<&str>,
@@ -282,6 +303,7 @@ pub fn build_redirect_uri(base_uri: &Uri, redirect_target: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bifrost_core::Protocol;
 
     fn mock_ctx() -> RequestContext {
         RequestContext::new()
@@ -551,6 +573,27 @@ mod tests {
     fn test_rewrite_path_no_source_path_root_request() {
         let result = rewrite_path_with_prefix("/", None, "/api/");
         assert_eq!(result, "/api/");
+    }
+
+    #[test]
+    fn test_host_rule_uses_exact_target_path_for_path_wildcard() {
+        let rules = vec![crate::server::RuleValue {
+            protocol: Protocol::Http,
+            value: "127.0.0.1:8999/approvals".to_string(),
+            pattern:
+                "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html"
+                    .to_string(),
+            options: std::collections::HashMap::new(),
+            line: Some(1),
+            raw: None,
+            rule_name: None,
+        }];
+
+        assert!(host_rule_uses_exact_target_path(
+            &rules,
+            Protocol::Http,
+            "127.0.0.1:8999/approvals",
+        ));
     }
 
     #[test]

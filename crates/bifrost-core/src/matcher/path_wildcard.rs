@@ -41,14 +41,29 @@ impl PathWildcardMatcher {
         }
     }
 
+    fn split_protocol_prefix(pattern: &str) -> (&'static str, &str) {
+        if let Some(stripped) = pattern.strip_prefix("https://") {
+            ("^https://", stripped)
+        } else if let Some(stripped) = pattern.strip_prefix("http://") {
+            ("^http://", stripped)
+        } else if let Some(stripped) = pattern.strip_prefix("http*://") {
+            ("^https?://", stripped)
+        } else if let Some(stripped) = pattern.strip_prefix("//") {
+            ("^https?://", stripped)
+        } else {
+            ("^https?://", pattern)
+        }
+    }
+
     fn to_regex(pattern: &str) -> (PathWildcardType, usize, String) {
+        let (protocol_prefix, pattern) = Self::split_protocol_prefix(pattern);
         let mut result = String::with_capacity(pattern.len() * 2);
         let special_chars = ['.', '+', '^', '(', ')', '[', ']', '{', '}', '|', '\\', '$'];
         let mut capture_count = 0;
         let mut chars = pattern.chars().peekable();
         let mut wildcard_type = PathWildcardType::Single;
 
-        result.push_str("^https?://");
+        result.push_str(protocol_prefix);
 
         while let Some(c) = chars.next() {
             match c {
@@ -348,6 +363,55 @@ mod tests {
         assert!(result.matched);
 
         let result = matcher.matches("http://example.com/api/users", "example.com", "/api/users");
+        assert!(result.matched);
+    }
+
+    #[test]
+    fn test_explicit_https_path_wildcard_support() {
+        let matcher = PathWildcardMatcher::new(
+            "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html",
+        )
+        .unwrap();
+
+        let result = matcher.matches(
+            "https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+            "cdn-tos-cn.bytedance.net",
+            "/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+        );
+        assert!(result.matched);
+        assert_eq!(result.captures, Some(vec!["3505".to_string()]));
+
+        let result = matcher.matches(
+            "http://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+            "cdn-tos-cn.bytedance.net",
+            "/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+        );
+        assert!(!result.matched);
+    }
+
+    #[test]
+    fn test_explicit_http_path_wildcard_support() {
+        let matcher = PathWildcardMatcher::new("^http://example.com/api/*").unwrap();
+
+        let result = matcher.matches("http://example.com/api/users", "example.com", "/api/users");
+        assert!(result.matched);
+
+        let result = matcher.matches("https://example.com/api/users", "example.com", "/api/users");
+        assert!(!result.matched);
+    }
+
+    #[test]
+    fn test_scheme_wildcard_path_wildcard_support() {
+        let matcher = PathWildcardMatcher::new("^http*://example.com/api/*").unwrap();
+
+        let result = matcher.matches("http://example.com/api/users", "example.com", "/api/users");
+        assert!(result.matched);
+
+        let result = matcher.matches("https://example.com/api/users", "example.com", "/api/users");
+        assert!(result.matched);
+
+        let matcher = PathWildcardMatcher::new("^//example.com/api/*").unwrap();
+        let result = matcher.matches("https://example.com/api/users", "example.com", "/api/users");
         assert!(result.matched);
     }
 

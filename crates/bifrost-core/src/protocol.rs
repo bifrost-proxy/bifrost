@@ -88,6 +88,7 @@ pub enum Protocol {
     TlsPassthrough,
     TlsOptions,
     SniCallback,
+    DevTools,
 
     // 直连/透传
     Passthrough,
@@ -137,6 +138,7 @@ pub const MULTI_MATCH_PROTOCOLS: &[Protocol] = &[
     Protocol::Decode,
     Protocol::Delete,
     Protocol::Skip,
+    Protocol::DevTools,
 ];
 
 pub fn protocol_aliases() -> HashMap<&'static str, &'static str> {
@@ -350,6 +352,7 @@ impl Protocol {
             "tlsPassthrough" => Some(Protocol::TlsPassthrough),
             "tlsOptions" => Some(Protocol::TlsOptions),
             "sniCallback" => Some(Protocol::SniCallback),
+            "devtools" => Some(Protocol::DevTools),
             "passthrough" => Some(Protocol::Passthrough),
             "tunnel" => Some(Protocol::Tunnel),
             _ => None,
@@ -428,6 +431,7 @@ impl Protocol {
             Protocol::TlsPassthrough => "tlsPassthrough",
             Protocol::TlsOptions => "tlsOptions",
             Protocol::SniCallback => "sniCallback",
+            Protocol::DevTools => "devtools",
             Protocol::Passthrough => "passthrough",
             Protocol::Tunnel => "tunnel",
         }
@@ -439,6 +443,7 @@ impl Protocol {
             | Protocol::TlsPassthrough
             | Protocol::TlsOptions
             | Protocol::SniCallback
+            | Protocol::DevTools
             | Protocol::Passthrough
             | Protocol::Tunnel
             | Protocol::Skip => ProtocolCategory::Control,
@@ -548,7 +553,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 72] = [
+pub const ALL_PROTOCOLS: [Protocol; 73] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -619,6 +624,7 @@ pub const ALL_PROTOCOLS: [Protocol; 72] = [
     Protocol::TlsPassthrough,
     Protocol::TlsOptions,
     Protocol::SniCallback,
+    Protocol::DevTools,
     Protocol::Passthrough,
     Protocol::Tunnel,
 ];
@@ -629,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 72);
+        assert_eq!(ALL_PROTOCOLS.len(), 73);
     }
 
     #[test]
@@ -705,6 +711,7 @@ mod tests {
             "tlsPassthrough",
             "tlsOptions",
             "sniCallback",
+            "devtools",
             "passthrough",
             "tunnel",
         ];
@@ -714,7 +721,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 72);
+        assert_eq!(protocol_names.len(), 73);
     }
 
     #[test]
@@ -835,6 +842,7 @@ mod tests {
             Protocol::TlsPassthrough.category(),
             ProtocolCategory::Control
         );
+        assert_eq!(Protocol::DevTools.category(), ProtocolCategory::Control);
     }
 
     #[test]

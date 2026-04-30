@@ -139,6 +139,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "Disable TLS interception",
         Protocol::TlsOptions => "Configure CONNECT upstream TLS options",
         Protocol::SniCallback => "Configure SNI callback metadata for CONNECT requests",
+        Protocol::DevTools => "Enable Bifrost DevTools discovery for matched pages",
         Protocol::Passthrough => "Pass through without modification",
         Protocol::Tunnel => "Redirect CONNECT tunnel target",
     }
@@ -179,6 +180,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::Dns => "dns_server",
         Protocol::TlsOptions => "tls_options",
         Protocol::SniCallback => "callback_spec",
+        Protocol::DevTools => "empty",
         Protocol::Delete
         | Protocol::Skip
         | Protocol::ReqCors
@@ -275,6 +277,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::TlsPassthrough => "tlsPassthrough://",
         Protocol::TlsOptions => "tlsOptions://minVersion=TLSv1.2&maxVersion=TLSv1.3",
         Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
+        Protocol::DevTools => "devtools://",
         Protocol::Passthrough => "passthrough://",
         Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }
@@ -357,6 +360,7 @@ pub fn get_all_protocols() -> Vec<ProtocolInfo> {
         Protocol::TlsPassthrough,
         Protocol::TlsOptions,
         Protocol::SniCallback,
+        Protocol::DevTools,
         Protocol::Tunnel,
         Protocol::Passthrough,
     ];
@@ -1047,6 +1051,14 @@ mod tests {
         assert!(!info.template_variables.is_empty());
         assert!(!info.patterns.is_empty());
         assert!(!info.protocol_aliases.is_empty());
+
+        let devtools = info
+            .protocols
+            .iter()
+            .find(|protocol| protocol.name == "devtools")
+            .expect("devtools protocol should be listed");
+        assert_eq!(devtools.value_type, "empty");
+        assert_eq!(devtools.example, "devtools://");
     }
 
     #[test]

@@ -61,7 +61,7 @@ use crate::utils::tee::{
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::url::{
     apply_url_rules, extract_target_path_from_host_rule, find_host_rule_source_path,
-    rewrite_path_with_prefix,
+    host_rule_uses_exact_target_path, rewrite_path_with_prefix,
 };
 
 mod content_type;
@@ -77,6 +77,11 @@ use self::decode::{
     DecodeForStorageResult,
 };
 use self::scripts::{execute_request_scripts, execute_response_scripts, headers_to_hashmap};
+use super::devtools::{
+    attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
+    maybe_inject_devtools_bridge_html, strip_devtools_client_req_id_from_url,
+    take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
+};
 
 #[allow(clippy::too_many_arguments)]
 fn record_http_mock_traffic(
@@ -90,6 +95,7 @@ fn record_http_mock_traffic(
     resolved_rules: &ResolvedRules,
     response: &Response<BoxBody>,
     request: &Request<Incoming>,
+    devtools_client_req_id: &Option<String>,
 ) {
     let total_ms = start_time.elapsed().as_millis() as u64;
     let mock_host = uri.host().unwrap_or("unknown").to_string();
@@ -110,6 +116,7 @@ fn record_http_mock_traffic(
         method.to_string(),
         record_url.to_string(),
     );
+    attach_devtools_client_req_id(&mut record, devtools_client_req_id);
     record.status = mock_status;
     record.duration_ms = total_ms;
     record.host = mock_host;
@@ -169,6 +176,9 @@ pub(crate) fn headers_to_pairs(headers: &hyper::HeaderMap) -> Vec<(String, Strin
     let mut cookie_insert_pos: Option<usize> = None;
 
     for (key, value) in headers {
+        if is_devtools_client_req_id_header(key.as_str()) {
+            continue;
+        }
         if key == hyper::header::COOKIE {
             if cookie_insert_pos.is_none() {
                 cookie_insert_pos = Some(pairs.len());
@@ -729,7 +739,7 @@ pub fn needs_request_body_processing(rules: &ResolvedRules) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_http_request(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     rules: Arc<dyn RulesResolver>,
     verbose_logging: bool,
     unsafe_ssl: bool,
@@ -745,6 +755,9 @@ pub async fn handle_http_request(
         return handle_http_websocket(req, rules, ctx, admin_state, push_manager, unsafe_ssl).await;
     }
 
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let uri = req.uri().clone();
     let method = req.method().to_string();
     let url = uri.to_string();
@@ -753,6 +766,7 @@ pub async fn handle_http_request(
     } else {
         ctx.url.clone()
     };
+    let record_url = strip_devtools_client_req_id_from_url(&record_url);
     let start_time = std::time::Instant::now();
     let incoming_headers: HashMap<String, String> = req
         .headers()
@@ -861,6 +875,7 @@ pub async fn handle_http_request(
 
             let mut record =
                 TrafficRecord::new(ctx.id_str().to_string(), method.clone(), record_url.clone());
+            attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
             record.status = mock_status;
             record.duration_ms = total_ms;
             record.host = mock_host;
@@ -923,6 +938,7 @@ pub async fn handle_http_request(
                 &resolved_rules,
                 &response,
                 &req,
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -945,6 +961,7 @@ pub async fn handle_http_request(
                 &resolved_rules,
                 &response,
                 &req,
+                &devtools_client_req_id,
             );
         }
         return Ok(response);
@@ -976,7 +993,6 @@ pub async fn handle_http_request(
     }
 
     let (mut parts, body) = req.into_parts();
-
     let request_origin = parts
         .headers
         .get(hyper::header::ORIGIN)
@@ -1319,6 +1335,7 @@ pub async fn handle_http_request(
                     method.clone(),
                     record_url.clone(),
                 );
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = if needs_response_override(&resolved_rules) {
                     resolved_rules
                         .status_code
@@ -1445,16 +1462,25 @@ pub async fn handle_http_request(
             if let Some(target_path) =
                 crate::utils::url::extract_target_path_from_host_rule(host_rule)
             {
-                let source_path = crate::utils::url::find_host_rule_source_path(
+                let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+                if crate::utils::url::host_rule_uses_exact_target_path(
                     &resolved_rules.rules,
-                    resolved_rules.host_protocol.unwrap_or(Protocol::Host),
+                    host_protocol,
                     host_rule,
-                );
-                crate::utils::url::rewrite_path_with_prefix(
-                    original_path,
-                    source_path.as_deref(),
-                    &target_path,
-                )
+                ) {
+                    target_path
+                } else {
+                    let source_path = crate::utils::url::find_host_rule_source_path(
+                        &resolved_rules.rules,
+                        host_protocol,
+                        host_rule,
+                    );
+                    crate::utils::url::rewrite_path_with_prefix(
+                        original_path,
+                        source_path.as_deref(),
+                        &target_path,
+                    )
+                }
             } else {
                 original_path.to_string()
             }
@@ -1916,8 +1942,11 @@ pub async fn handle_http_request(
     let res_content_type = get_content_type(&res_parts);
     let force_body_processing_for_badge =
         inject_bifrost_badge && res_content_type.starts_with("text/html");
-    let needs_processing =
-        needs_body_processing(&resolved_rules) || force_body_processing_for_badge;
+    let force_body_processing_for_devtools =
+        devtools_bridge_requested(&resolved_rules) && res_content_type.starts_with("text/html");
+    let needs_processing = needs_body_processing(&resolved_rules)
+        || force_body_processing_for_badge
+        || force_body_processing_for_devtools;
     let has_res_body_override = resolved_rules.res_body.is_some();
     let needs_res_body_read = needs_processing && !has_res_body_override;
 
@@ -2042,6 +2071,8 @@ pub async fn handle_http_request(
             .unwrap_or_else(|| format!(">{}", res_body_limit));
         let skip_detail = if force_body_processing_for_badge {
             "skipping body rules and badge injection"
+        } else if force_body_processing_for_devtools {
+            "skipping body rules and DevTools bridge injection"
         } else {
             "skipping body rules"
         };
@@ -2120,6 +2151,7 @@ pub async fn handle_http_request(
                     .expect("response headers captured when admin state is enabled");
                 let mut record =
                     TrafficRecord::new(record_id.to_string(), method.clone(), record_url.clone());
+                attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
                 record.status = res_parts.status.as_u16();
                 record.content_type = res_parts
                     .headers
@@ -2307,6 +2339,67 @@ pub async fn handle_http_request(
         injection_result.body
     };
 
+    if content_type.to_ascii_lowercase().starts_with("text/html")
+        && devtools_bridge_requested(&resolved_rules)
+    {
+        res_parts.headers.insert(
+            hyper::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        res_parts
+            .headers
+            .insert(hyper::header::PRAGMA, HeaderValue::from_static("no-cache"));
+        let final_content_encoding = response_content_encoding(&res_parts);
+        if let Some(content_encoding) = final_content_encoding.as_deref() {
+            match try_decompress_body_with_limit(
+                final_res_body.as_ref(),
+                content_encoding,
+                max_decompress_output_bytes,
+            ) {
+                Ok(decompressed) => {
+                    let injected_body = maybe_inject_devtools_bridge_html(
+                        Bytes::from(decompressed),
+                        &content_type,
+                        &resolved_rules,
+                        admin_state.as_deref(),
+                        &record_url,
+                        ctx.id_str(),
+                    );
+                    match compress_body(injected_body.as_ref(), content_encoding) {
+                        Ok(compressed) => {
+                            final_res_body = Bytes::from(compressed);
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "[{}] [DEVTOOLS] Failed to recompress response body ({}), fallback to identity",
+                                ctx.id_str(),
+                                e
+                            );
+                            res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+                            final_res_body = injected_body;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "[{}] [DEVTOOLS] Skip bridge injection: failed to decompress response body ({}).",
+                        ctx.id_str(),
+                        e
+                    );
+                }
+            }
+        } else {
+            final_res_body = maybe_inject_devtools_bridge_html(
+                final_res_body,
+                &content_type,
+                &resolved_rules,
+                admin_state.as_deref(),
+                &record_url,
+                ctx.id_str(),
+            );
+        }
+    }
+
     let res_script_results = if has_res_scripts {
         let mut res_script_status = res_parts.status.as_u16();
         let mut res_script_status_text = res_parts
@@ -2433,6 +2526,7 @@ pub async fn handle_http_request(
 
         let mut record =
             TrafficRecord::new(ctx.id_str().to_string(), method.clone(), record_url.clone());
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = res_parts.status.as_u16();
         record.content_type = res_parts
             .headers
@@ -2474,29 +2568,16 @@ pub async fn handle_http_request(
                 record.original_request_headers = Some(orig.clone());
             }
         }
-        if host != original_host || port != original_port {
+        let original_path_and_query = processed_uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        if host != original_host || port != original_port || path != original_path_and_query {
             let actual_scheme = if use_tls { "https" } else { "http" };
             let actual_url = if (use_tls && port == 443) || (!use_tls && port == 80) {
-                format!(
-                    "{}://{}{}",
-                    actual_scheme,
-                    host,
-                    processed_uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                )
+                format!("{}://{}{}", actual_scheme, host, path)
             } else {
-                format!(
-                    "{}://{}:{}{}",
-                    actual_scheme,
-                    host,
-                    port,
-                    processed_uri
-                        .path_and_query()
-                        .map(|pq| pq.as_str())
-                        .unwrap_or("/")
-                )
+                format!("{}://{}:{}{}", actual_scheme, host, port, path)
             };
             record.actual_url = Some(actual_url);
             record.actual_host = Some(host.clone());
@@ -2734,7 +2815,7 @@ fn get_default_port(host_protocol: &Option<Protocol>, is_https: bool) -> u16 {
 }
 
 async fn handle_http_websocket(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     rules: Arc<dyn RulesResolver>,
     ctx: &RequestContext,
     admin_state: Option<Arc<AdminState>>,
@@ -2747,6 +2828,9 @@ async fn handle_http_websocket(
     use tokio_rustls::rustls::pki_types::ServerName;
 
     let start_time = Instant::now();
+    let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
+    let devtools_client_req_id =
+        take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let uri = req.uri().clone();
     let method = req.method().to_string();
 
@@ -2790,6 +2874,16 @@ async fn handle_http_websocket(
         .or(host_port_from_header)
         .unwrap_or(if is_wss { 443 } else { 80 });
 
+    if uri
+        .path()
+        .starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/"))
+    {
+        if let Some(state) = admin_state.clone() {
+            let peer_addr = peer_addr_from_client_ip(&ctx.client_ip);
+            return Ok(AdminRouter::handle(req, state, push_manager.clone(), peer_addr).await);
+        }
+    }
+
     if should_route_websocket_to_local_admin(&host, port, uri.path(), ctx.port) {
         if let (Some(state), Some(push_manager)) = (admin_state.clone(), push_manager.clone()) {
             let req = rewrite_local_admin_websocket_request(req, &host);
@@ -2830,19 +2924,21 @@ async fn handle_http_websocket(
         let h = parts[0].to_string();
         let p = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(port);
         let path = if let Some(target_path) = extract_target_path_from_host_rule(host_rule) {
-            let source_path = find_host_rule_source_path(
-                &resolved_rules.rules,
-                resolved_rules.host_protocol.unwrap_or(Protocol::Host),
-                host_rule,
-            );
-            rewrite_path_with_prefix(
-                req.uri()
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/"),
-                source_path.as_deref(),
-                &target_path,
-            )
+            let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+            if host_rule_uses_exact_target_path(&resolved_rules.rules, host_protocol, host_rule) {
+                target_path
+            } else {
+                let source_path =
+                    find_host_rule_source_path(&resolved_rules.rules, host_protocol, host_rule);
+                rewrite_path_with_prefix(
+                    req.uri()
+                        .path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/"),
+                    source_path.as_deref(),
+                    &target_path,
+                )
+            }
         } else {
             req.uri()
                 .path_and_query()
@@ -2987,6 +3083,7 @@ async fn handle_http_websocket(
 
         let mut record =
             bifrost_admin::TrafficRecord::new(record_id.to_string(), method.clone(), ws_url);
+        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
         record.status = 101;
         record.protocol = record_protocol.to_string();
         record.duration_ms = total_ms;
@@ -3192,6 +3289,7 @@ fn build_http_websocket_handshake(
             || n.eq_ignore_ascii_case("keep-alive")
             || n.eq_ignore_ascii_case("te")
             || n.eq_ignore_ascii_case("trailer")
+            || is_devtools_client_req_id_header(n)
         {
             continue;
         }

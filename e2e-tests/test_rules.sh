@@ -47,7 +47,7 @@ SUPPORTED_PROTOCOL_NAMES=(
     resCharset resReplace responseFor replaceStatus statusCode cache attachment trailers resMerge
     headerReplace htmlAppend htmlPrepend htmlBody jsAppend jsPrepend jsBody cssAppend
     cssPrepend cssBody urlReplace reqScript resScript decode dns tlsIntercept
-    tlsPassthrough passthrough tlsOptions sniCallback
+    tlsPassthrough passthrough tlsOptions sniCallback devtools
 )
 
 SUPPORTED_PROTOCOL_ALIASES=(

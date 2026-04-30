@@ -46,6 +46,16 @@
 - 如果 relay 返回无可用 grant，自动从本地 connections 中移除该条目（标记为 stale）
 - 给出更明确的错误信息和修复建议
 
+### 改进 4：Recent Calls E2E 本地 fixture 端口 fallback
+
+**现状**：`test_remote_invoke_recent_calls_args_preview_e2e.sh` 使用 `pick_free_port` 选择本地 HTTP echo fixture 端口，再启动 `http_echo_server.py --retries 5`。在 CI 并发 shell E2E 中，端口可能在选择后、bind 前被其他测试占用。`http_echo_server.py` 会按设计 fallback 到下一个可用端口并打印实际绑定端口，但脚本仍然轮询原端口，导致日志中出现 `READY` 后仍报“本地 echo fixture 未在超时内就绪”。
+
+**改进**：
+- 启动 fixture 后从日志中的 `Starting HTTP Echo Server on <host>:<actual_port>...` 解析实际绑定端口。
+- 只对实际绑定端口执行 `/health` 探活，避免误命中占用原端口的其他服务。
+- 如果实际端口与请求端口不同，输出 fallback 日志，并更新后续 Recent Calls 流量使用的 `MOCK_HTTP_PORT`。
+- 保持 `http_echo_server.py --retries 5` 行为不变，避免影响其他复用该 fixture 的测试。
+
 ## 测试方案
 
 ### 单元测试
@@ -58,6 +68,8 @@
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：pair-code 授权后先断言 Grants API 有 `first_connected_at` 且 `last_command_at` 为空；执行一次远程搜索命令后断言 `last_command_at` 非空且不早于 `first_connected_at`。
+- 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：当本地 echo fixture 请求端口被占用并 fallback 到新端口时，脚本必须解析实际端口、使用实际端口生成 Recent Calls 流量，并完整通过参数预览、长参数截断、落盘恢复与清理断言。
 
 ### 真实场景测试
 - 更新 `human_tests/remote-invoke.md`，新增 Grants 时间字段回归用例，并按文档逐条执行：进入 discovery、批准授权、查看 Grants、执行远程命令、再次查看 Grants。
+- 更新 `human_tests/remote-invoke.md`，新增 Recent Calls fixture 端口 fallback 回归用例，并按文档执行：预占 mock 请求端口、运行脚本、确认脚本切换到实际端口且 Recent Calls 断言全部通过。

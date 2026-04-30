@@ -110,7 +110,7 @@ jobs:
         with:
           save-if: always()
       - name: Build release binary
-        run: SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+        run: cargo build --release --bin bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
@@ -178,6 +178,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-shell:
     name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
@@ -208,6 +209,16 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+        working-directory: web
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright browsers (chromium headless shell)
+        run: pnpm exec playwright install --with-deps chromium-headless-shell
         working-directory: web
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
@@ -248,6 +259,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-runner:
     name: E2E Runner (Linux)
@@ -301,6 +313,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   build-linux-x86:
     name: Linux Build (x86_64)
@@ -443,6 +456,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
@@ -451,8 +473,6 @@ jobs:
           key: cli-build-aarch64-apple-darwin
           save-if: always()
       - name: Build CLI
-        env:
-          SKIP_FRONTEND_BUILD: "1"
         run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
       - name: Upload release binary
         uses: actions/upload-artifact@v4
@@ -547,6 +567,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-macos-shell:
     name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
@@ -577,6 +598,16 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+        working-directory: web
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright browsers (chromium headless shell)
+        run: pnpm exec playwright install chromium-headless-shell
         working-directory: web
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
@@ -619,6 +650,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-macos-runner:
     name: E2E Runner (aarch64-apple-darwin)
@@ -674,6 +706,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   bundle-desktop-macos:
     name: Bundle macOS (${{ matrix.target }})
@@ -909,6 +942,7 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-windows-runner:
     name: E2E Runner (${{ matrix.target }})
@@ -972,3 +1006,4 @@ jobs:
             ${{ github.workspace }}/.bifrost-e2e-ci/
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true

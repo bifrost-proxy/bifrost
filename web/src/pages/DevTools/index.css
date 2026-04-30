@@ -1,0 +1,41 @@
+.devtools-workspace-tabs.ant-tabs {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.devtools-workspace-tabs > .ant-tabs-nav {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  min-width: 0;
+  padding-right: 0;
+}
+
+.devtools-workspace-tabs > .ant-tabs-nav::before {
+  inset-inline-start: 0;
+  inset-inline-end: 0;
+}
+
+.devtools-workspace-tabs > .ant-tabs-nav .ant-tabs-nav-wrap {
+  min-width: 0;
+}
+
+.devtools-workspace-tabs > .ant-tabs-nav .ant-tabs-extra-content {
+  flex: 0 1 420px;
+  min-width: 220px;
+  margin-inline-start: 12px;
+}
+
+.devtools-workspace-tabs > .ant-tabs-content-holder {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.devtools-workspace-tabs > .ant-tabs-content-holder > .ant-tabs-content,
+.devtools-workspace-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}

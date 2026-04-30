@@ -91,7 +91,7 @@ http_post_json() {
 
 RELAY_PORT="$(pick_free_port)"
 ADMIN_PORT="$(pick_free_port)"
-MOCK_HTTP_PORT="$(pick_free_port)"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-$(pick_free_port)}"
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 CLIENT_ADMIN_URL="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
@@ -145,7 +145,8 @@ cleanup() {
 trap cleanup EXIT
 
 start_mock_server() {
-    log "Starting local HTTP echo fixture on port $MOCK_HTTP_PORT"
+    local requested_port="$MOCK_HTTP_PORT"
+    log "Starting local HTTP echo fixture on port $requested_port"
     python3 "$REPO_DIR/e2e-tests/mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_SERVER_LOG" 2>&1 &
     MOCK_SERVER_PID=$!
 
@@ -154,7 +155,14 @@ start_mock_server() {
             _log_fail "本地 echo fixture 提前退出" "server keeps running" "$(cat "$MOCK_SERVER_LOG")"
             exit 1
         fi
-        if curl -fsS --max-time 2 "http://127.0.0.1:${MOCK_HTTP_PORT}/health" >/dev/null 2>&1; then
+
+        local actual_port
+        actual_port="$(sed -nE 's/^Starting HTTP Echo Server on [^:]+:([0-9]+)\.\.\.$/\1/p' "$MOCK_SERVER_LOG" 2>/dev/null | tail -n 1)"
+        if [[ -n "$actual_port" ]] && curl -fsS --max-time 2 "http://127.0.0.1:${actual_port}/health" >/dev/null 2>&1; then
+            MOCK_HTTP_PORT="$actual_port"
+            if [[ "$MOCK_HTTP_PORT" != "$requested_port" ]]; then
+                log "Local HTTP echo fixture fell back from port $requested_port to $MOCK_HTTP_PORT"
+            fi
             return 0
         fi
         sleep 0.2

@@ -4,7 +4,7 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/`
 
@@ -26,9 +26,11 @@
   - Rules（FileTextOutlined 图标）— 对应 `/rules`
   - Values（DatabaseOutlined 图标）— 对应 `/values`
   - Scripts（CodeOutlined 图标）— 对应 `/scripts`
+  - DevTools（BugOutlined 图标）— 对应 `/devtools`
   - Settings（SettingOutlined 图标）— 对应 `/settings`
 - 每个图标下方显示 9px 大小的文字标签
-- 如果 Sync 功能已启用，在 Scripts 和 Settings 之间显示 Groups（UsergroupAddOutlined 图标）
+- DevTools 位于 Scripts 之后，不出现在 Network 后的高优先级位置
+- 如果 Sync 功能已启用，在 DevTools 和 Settings 之间显示 Groups（UsergroupAddOutlined 图标）
 - 侧边栏底部显示主题切换圆形按钮
 
 ---
@@ -54,7 +56,7 @@
 ### TC-WLN-03：侧边栏逐个导航验证
 
 **操作步骤**：
-1. 依次点击侧边栏所有导航图标：Network → Replay → Rules → Values → Scripts → Settings
+1. 依次点击侧边栏所有导航图标：Network → Replay → Rules → Values → Scripts → DevTools → Settings
 
 **预期结果**：
 - 点击 Network：URL 变为 `/traffic`，显示流量列表页
@@ -62,6 +64,7 @@
 - 点击 Rules：URL 变为 `/rules`，显示规则列表页
 - 点击 Values：URL 变为 `/values`，显示 Values 页面
 - 点击 Scripts：URL 变为 `/scripts`，显示脚本页面
+- 点击 DevTools：URL 变为 `/devtools`，显示 DevTools 页面
 - 点击 Settings：URL 变为 `/settings`，显示设置页面
 - 每次切换都更新激活指示器到当前页面图标
 

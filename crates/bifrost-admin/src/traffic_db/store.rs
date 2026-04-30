@@ -492,6 +492,7 @@ impl TrafficDbStore {
                 socket_frame_count as i64,
                 rule_count as i64,
                 rule_protocols_json,
+                &record.devtools_client_req_id,
             ],
         )?;
         tx.execute(
@@ -714,6 +715,7 @@ impl TrafficDbStore {
                     socket_frame_count as i64,
                     rule_count as i64,
                     rule_protocols_json,
+                    &record.devtools_client_req_id,
                     &record.id,
                 ],
             )?;
@@ -1074,6 +1076,25 @@ impl TrafficDbStore {
         self.get_by_id_from_db(id)
     }
 
+    pub fn get_id_by_devtools_client_req_id(&self, client_req_id: &str) -> Option<String> {
+        let client_req_id = client_req_id.trim();
+        if client_req_id.is_empty() {
+            return None;
+        }
+
+        let conn = self.read_pool.acquire();
+        conn.query_row(
+            "SELECT id FROM traffic_records \
+             WHERE devtools_client_req_id = ?1 AND (flags & 32) = 0 \
+             ORDER BY sequence ASC LIMIT 1",
+            [client_req_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
     fn get_by_id_from_db(&self, id: &str) -> Option<TrafficRecord> {
         let conn = self.read_pool.acquire();
         let mut record = conn
@@ -1082,7 +1103,8 @@ impl TrafficDbStore {
                  content_type, request_content_type, request_size, response_size, duration_ms, \
                  client_ip, client_app, client_pid, client_path, flags, frame_count, \
                  last_frame_id, socket_is_open, socket_send_count, socket_receive_count, \
-                 socket_send_bytes, socket_receive_bytes, socket_frame_count \
+                 socket_send_bytes, socket_receive_bytes, socket_frame_count, \
+                 devtools_client_req_id \
                  FROM traffic_records WHERE id = ?",
                 [id],
                 Self::row_to_record_core,
@@ -1232,6 +1254,7 @@ impl TrafficDbStore {
             res_script_results: None,
             decode_req_script_results: None,
             decode_res_script_results: None,
+            devtools_client_req_id: row.get("devtools_client_req_id")?,
         })
     }
 
@@ -1952,6 +1975,48 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_devtools_client_req_id_lookup_uses_first_non_replay_record() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        let mut first = TrafficRecord::new(
+            "traffic-first".to_string(),
+            "GET".to_string(),
+            "https://example.test/api".to_string(),
+        );
+        first.devtools_client_req_id = Some("client-req-1".to_string());
+        store.record(first);
+
+        let mut duplicate = TrafficRecord::new(
+            "traffic-duplicate".to_string(),
+            "GET".to_string(),
+            "https://example.test/api".to_string(),
+        );
+        duplicate.devtools_client_req_id = Some("client-req-1".to_string());
+        store.record(duplicate);
+
+        let mut replay = TrafficRecord::new(
+            "traffic-replay".to_string(),
+            "GET".to_string(),
+            "https://example.test/api".to_string(),
+        );
+        replay.is_replay = true;
+        replay.devtools_client_req_id = Some("client-req-replay".to_string());
+        store.record(replay);
+
+        assert_eq!(
+            store.get_id_by_devtools_client_req_id("client-req-1"),
+            Some("traffic-first".to_string())
+        );
+        assert_eq!(
+            store.get_id_by_devtools_client_req_id("client-req-replay"),
+            None
+        );
+
+        cleanup_test_dir(&dir);
     }
 
     #[test]

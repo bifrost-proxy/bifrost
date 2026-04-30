@@ -4295,16 +4295,23 @@ PY
    ```bash
    BIFROST_DATA_DIR=<caller_dir> ./target/debug/bifrost remote status --relay-url http://127.0.0.1:<relay_port> --client-id <client_prefix>
    ```
+6. 检查 caller 数据目录中的 `remote-connections.json`：
+   ```bash
+   find <caller_dir> -name remote-connections.json -print -quit | xargs jq '.connections | length'
+   ```
+7. 重新生成 pair code 并执行 fresh `remote connect`，确认后续连接流程仍可用。
 
 **预期结果**：
 - 第 3 步重连后，target client 不会继续保留这条缺少本地加密材料的 grant
 - 第 4 步 grants 列表为空，不再展示幽灵授权
-- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect
+- 第 5 步 caller 侧会直接提示授权失效/需要重新 connect；即使 relay 短暂返回 reusable grant、`open_call` 才收到 `403 grant_not_active`，CLI 也必须归一化为 `expired` / `revoked` / `connect` 语义
 - 第 5 步不再出现 `missing grant shared secret for encrypted remote command`
+- 第 6 步 caller 本地连接数为 `0`，stale connection 已从 `remote-connections.json` 移除
+- 第 7 步新的 pairing / connect 流程可以重新建立 fresh grant，不受 stale connection 清理影响
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-131 | ✅ PASS | 2026-04-24 代码修复后执行：worker.rs `new()` 与 `update_relay_url()` 启动时检测 grant_info 中有条目但 grant_crypto 为空的孤儿 grant，立即从 local_grants 与 grant_info_store 中移除；caller 侧 remote.rs 新增 `is_stale_grant_crypto_error()` 检测，在 call_exit 携带 `missing grant shared secret` 时按"授权失效"路径清理本地连接。`SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh` 全套 72 条断言全部通过，其中 TC-RI-07A 三条（grants 列表为 0、caller 提示重新 connect 而非 missing shared secret、caller 本地连接已清空）均 ✅。 |
+| TC-RI-回归-131 | ✅ PASS | 2026-04-30 本轮执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`，全套 `total=73 passed=73 failed=0`。TC-RI-07A 验证 client 丢失 grant crypto 后 grants 列表为 0、caller 输出重新 connect 语义且不含 `missing grant shared secret`、caller 本地 `remote-connections.json` 连接数清空；TC-RI-07B 随后重新建立 fresh grant 并继续通过 disconnect 回归。 |
 
 ---
 
@@ -4707,6 +4714,133 @@ PY
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-141 | ✅ PASS | 2026-04-28 在当前 checkout 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Remote Invoke Grants 展示 SSH key 与 Pair code 连接方式"`。测试通过 Playwright mock `/remote-invoke/grants` 返回一条 `auth_method=ssh_publickey` grant 和一条 `auth_method=pair_code` grant；页面打开 `Settings -> Remote Invoke` 后，`Grants` 卡片可见，SSH grant 行显示 `ssh caller` 与 `SSH key` 标签，pair-code grant 行显示 `code caller` 与 `Pair code` 标签。该测试未使用 `9900`，也没有修改系统代理。 |
+
+---
+
+### TC-RI-回归-142：Shell E2E 不再优先运行陈旧 sync-server dist
+
+**背景**：完整 shell E2E 在本地工作区存在陈旧 `packages/bifrost-sync-server/dist/cli.js` 时，会优先运行旧 relay 构建，导致 `remote file` open_call 缺少 `command_kind`、grant update 路由返回 404、SSH grant 字段缺失等假失败。本用例验证测试 helper 只有在 dist 新于源码时才使用 dist，否则回退到源码入口，确保 E2E 运行的是当前 checkout 的 relay 逻辑。
+
+**前置条件**：
+- 工作区可执行 `pnpm --dir packages/bifrost-sync-server run build`
+- 测试端口由脚本动态分配，禁止使用 `9900`
+- Bifrost 启动参数必须包含 `--no-system-proxy`
+- 使用隔离 `BIFROST_DATA_DIR`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server run build
+   ```
+2. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_file_relay_e2e.sh
+   ```
+3. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+4. 执行：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+5. 检查三条脚本输出中的 relay、target admin、caller CLI 均使用随机端口和隔离临时目录。
+
+**预期结果**：
+- `remote_file_relay_e2e` 全部断言通过，不再出现 `command_kind_required`
+- `remote_invoke_ssh_e2e` 全部断言通过，relay reusable grant 返回 `ssh_key_fingerprint`
+- `remote_shell_exec_streaming_e2e` 全部断言通过，grant update 不再返回 `remote invoke endpoint not found`
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-142 执行结果（2026-04-30，sync-server dist 新鲜度）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-142 | ✅ PASS | 2026-04-30 在当前 checkout 先执行 `pnpm --dir packages/bifrost-sync-server run build` 刷新 relay 构建，再依次执行 `SKIP_BUILD=true e2e-tests/tests/test_remote_file_relay_e2e.sh`、`SKIP_BUILD=true e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`、`SKIP_BUILD=true e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`。其中 remote file relay 输出 `Total: 79 / Passed: 79 / Failed: 0`；SSH E2E 完成 `All SSH remote invoke E2E checks passed`；shell streaming 输出 `Total: 33 / Passed: 33 / Failed: 0`。三条链路均使用随机端口与隔离临时目录，未使用 `9900`，未修改系统代理。 |
+
+---
+
+### TC-RI-回归-143：Recent Calls 本地 echo fixture 端口 fallback 后必须使用实际端口
+
+**背景**：CI 并发执行 shell E2E 时，`test_remote_invoke_recent_calls_args_preview_e2e.sh` 先通过 `pick_free_port` 选择 mock HTTP 端口，再启动 `http_echo_server.py --retries 5`。如果端口在选择后、bind 前被其他测试占用，mock server 会 fallback 到下一个可用端口并打印 `READY`，但旧脚本仍轮询原端口，导致出现“本地 echo fixture 未在超时内就绪”的假失败。
+
+**前置条件**：
+- 使用隔离的 relay / target admin / caller 数据目录
+- target admin 使用随机端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`、`curl`、`jq`、`cargo`、`npx`
+
+**操作步骤**：
+1. 执行以下命令，预占脚本指定的 mock 端口，强制 `http_echo_server.py --retries 5` fallback 到下一个端口：
+   ```bash
+   source ~/.zshrc
+   TEST_PORT=$(python3 - <<'PY'
+   import socket
+   s = socket.socket()
+   s.bind(("127.0.0.1", 0))
+   print(s.getsockname()[1])
+   s.close()
+   PY
+   )
+   python3 -m http.server "$TEST_PORT" --bind 127.0.0.1 >/tmp/bifrost-ri-port-holder.log 2>&1 &
+   HOLDER_PID=$!
+   MOCK_HTTP_PORT="$TEST_PORT" bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   kill "$HOLDER_PID"
+   ```
+2. 观察脚本输出，确认出现：
+   ```text
+   Local HTTP echo fixture fell back from port <requested> to <actual>
+   ```
+3. 继续观察 Recent Calls 参数预览、长参数截断、落盘恢复和清理断言。
+
+**预期结果**：
+- 脚本不会因为原 mock 端口被占用而停在 `/health` 探活阶段
+- 脚本从 mock server 日志解析实际绑定端口，并用实际端口生成 Recent Calls 流量
+- `TC-RI-GRANTS-TIME-01`、`TC-RI-GRANTS-TIME-02`、`TC-RI-ARGS-01` 到 `TC-RI-ARGS-05` 全部通过
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-143 执行结果（2026-04-30，Recent Calls fixture 端口 fallback）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-143 | ✅ PASS | 2026-04-30 在当前 checkout 执行强制端口 fallback 回归：先用 `python3 -m http.server <TEST_PORT> --bind 127.0.0.1` 预占脚本指定的 `MOCK_HTTP_PORT`，再执行 `SKIP_BUILD=true MOCK_HTTP_PORT=<TEST_PORT> bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。脚本输出 `Local HTTP echo fixture fell back from port 60953 to 60954`，随后完整通过 Grants 时间字段、Recent Calls 参数预览、长参数 120 字符截断、本地落盘恢复、重启恢复与清理断言，最终输出 `Recent Calls args preview and persistence E2E passed`。全流程使用随机 relay/admin/mock 端口，未使用 `9900`，target admin 由脚本以隔离数据目录和 `--no-system-proxy` 启动。 |
+
+---
+
+### TC-RI-回归-144：Grant `first_connected_at` 在命令执行后严格稳定
+
+**背景**：`first_connected_at` 来自目标端 `GrantInfo.first_authorized_at`，用于表示 caller 首次连接/授权成功时间。CI 曾出现执行命令后同一 grant 的 `first_connected_at` 从 `1777557672411` 回退到 `1777557672410` 的 1ms 回归，说明命令期间的 relay `grant_created` / 重建 grant 路径覆盖了本地首次授权时间。
+
+**前置条件**：
+- 使用隔离的 relay / target admin / caller 数据目录
+- target admin 使用随机端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`、`curl`、`jq`、`cargo`、`npx`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh
+   ```
+2. 脚本完成 pair-code 授权后，在执行远程命令前读取 `/_bifrost/api/remote-invoke/grants`。
+3. 记录同一条 grant 的 `grant_id`、`first_connected_at`、`last_command_at`。
+4. 脚本执行真实 `remote traffic search` 命令。
+5. 脚本再次读取 `/_bifrost/api/remote-invoke/grants`，按步骤 3 的 `grant_id` 查回同一 grant。
+6. 对比执行前后的 `first_connected_at` 与 `last_command_at`。
+
+**预期结果**：
+- 执行命令前 `first_connected_at` 非空
+- 执行命令前 `last_command_at` 为空
+- 执行命令后 `first_connected_at` 与执行前严格相等，不允许 1ms 容差或回退
+- 执行命令后 `last_command_at` 非空，且不早于 `first_connected_at`
+- Recent Calls 参数预览、长参数 120 字符截断、本地落盘恢复、重启恢复与清理断言继续通过
+- 全流程不使用 `9900` 作为测试端口，不修改系统代理
+
+### TC-RI-回归-144 执行结果（2026-04-30，Grant 首次连接时间稳定）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-144 | ✅ PASS | 2026-04-30 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`，脚本因 Rust 源码更新先重建 `target/release/bifrost`，随后使用随机 relay/admin/mock 端口与隔离数据目录启动 target admin，启动参数包含 `--no-system-proxy` 且未占用 `9900`。脚本在执行命令前读取 Grants API，确认 `grant_id` 与 `first_connected_at` 非空、`last_command_at` 为空；执行真实 remote search 后按同一 `grant_id` 再次读取 Grants API，`TC-RI-GRANTS-TIME-01` 通过，证明 `first_connected_at` 执行命令后严格保持不变，`last_command_at` 非空且不早于首次连接时间。后续 `TC-RI-GRANTS-TIME-02`、`TC-RI-ARGS-01` 至 `TC-RI-ARGS-05` 全部通过，包含 CLI grant list 时间展示、Recent Calls 参数预览、120 字符截断、落盘恢复、重启恢复与清理全部记录。 |
 
 ---
 

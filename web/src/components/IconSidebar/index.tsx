@@ -11,6 +11,7 @@ import {
   MoonOutlined,
   UsergroupAddOutlined,
   BellOutlined,
+  BugOutlined,
 } from "@ant-design/icons";
 import { useEffect, type CSSProperties } from "react";
 import { useThemeStore } from "../../stores/useThemeStore";
@@ -47,6 +48,7 @@ export default function IconSidebar() {
     { key: "/replay", icon: <ThunderboltOutlined />, label: "Replay" },
     { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
     { key: "/scripts", icon: <CodeOutlined />, label: "Scripts" },
+    { key: "/devtools", icon: <BugOutlined />, label: "DevTools" },
     { key: "/values", icon: <TeamOutlined />, label: "Values" },
     { key: "/groups", icon: <UsergroupAddOutlined />, label: "Groups", hidden: !showGroups },
     { key: "/notifications", icon: <BellOutlined />, label: "Notifications" },
@@ -120,6 +122,7 @@ export default function IconSidebar() {
       })}
       <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"} placement="right">
         <div
+          data-testid="theme-toggle"
           style={{
             marginTop: "auto",
             marginBottom: 8,

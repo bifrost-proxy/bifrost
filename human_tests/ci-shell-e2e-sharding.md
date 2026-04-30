@@ -94,6 +94,49 @@
 - 第 2 步退出码为 0，表示系统代理用例仍可在本地 full-shell 全量场景收集
 - 两个命令只列出测试脚本，不启动 Bifrost 服务、不修改系统代理配置
 
+### TC-CS-10: E2E 失败日志 artifact 与失败摘要可诊断
+
+**操作步骤**：
+1. 运行 `rg -n "include-hidden-files: true" .github/workflows/ci.yml | wc -l`。
+2. 运行以下命令构造包含真实 Playwright 错误和 cleanup 尾巴的临时日志，并通过 `scripts/run_all_e2e.sh` 内置的 `extract_failure_reason` 逻辑验证摘要：
+   ```bash
+   TMP_LOG="$(mktemp)"
+   {
+     echo "browserType.launch: Host system is missing dependencies"
+     echo "--- bifrost.log ---"
+     echo "Preserving failed test root: /tmp/bifrost-devtools-e2e.demo"
+   } > "$TMP_LOG"
+   bash scripts/run_all_e2e.sh --extract-failure-reason "$TMP_LOG"
+   ```
+3. 运行 `BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh`。
+
+**预期结果**：
+- 第 1 步输出为 `8`，覆盖 Linux/macOS/Windows rules、shell、runner E2E 日志上传步骤。
+- 上传 `.e2e-reports/` 与 `.bifrost-e2e-ci/` 的 artifact 步骤均包含 `include-hidden-files: true`。
+- 第 2 步输出 `browserType.launch: Host system is missing dependencies`，不会把 `Preserving failed test root` 当作失败原因。
+- 第 3 步 shard 3 shell E2E 全部通过；其中 `test_devtools_page_bridge_api.sh` 通过，且使用非 9900 临时端口与临时数据目录。
+
+### TC-CS-11: CLI offline help alternation 断言回归
+
+**操作步骤**：
+1. 运行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+2. 运行 `rg -n 'grep\\s+(-[^ ]*)?q[^ ]*\\s+"[^"]*\\\\\\|' e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+3. 运行 `bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+
+**预期结果**：
+- 第 1 步退出码为 0。
+- 第 2 步没有输出，表示脚本中不再存在默认 BRE 模式下的 `\|` alternation 断言。
+- 第 3 步全部通过，包含 `rule rename --help`、`rule reorder --help`、`script rename --help`，汇总为 106 个测试通过且 0 个失败。
+
+## 本轮执行记录
+
+测试日期：2026-04-30
+
+| 用例 | 结果 | 实际结果 |
+|------|------|----------|
+| TC-CS-10 | 通过 | `rg -n "include-hidden-files: true" .github/workflows/ci.yml \| wc -l` 输出 `8`；`bash scripts/run_all_e2e.sh --extract-failure-reason "$TMP_LOG"` 输出 `browserType.launch: Host system is missing dependencies`；本地执行 `source ~/.zshrc && BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh`，24/24 通过，`test_devtools_page_bridge_api.sh` 在并行 shard 3 中 44s 通过。 |
+| TC-CS-11 | 通过 | 2026-04-30 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'grep\s+(-[^ ]*)?q[^ ]*\s+"[^"]*\\\|' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `rule rename --help`、`rule reorder --help`、`script rename --help` 均通过。 |
+
 ## 清理步骤
 
 - 无特殊清理需求，测试使用临时数据目录

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use bifrost_core::{Protocol, RequestContext, Rule, RulesResolver as CoreRulesResolver};
 use bifrost_proxy::{
-    ResolvedRules as ProxyResolvedRules, RuleValue, RulesResolver as ProxyRulesResolverTrait,
+    DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
+    RulesResolver as ProxyRulesResolverTrait,
 };
 use parking_lot::RwLock;
 
@@ -126,6 +127,66 @@ fn parse_pac_proxy_target(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn parse_devtools_rule(value: &str) -> DevtoolsRule {
+    let mut rule = DevtoolsRule {
+        raw_value: value.to_string(),
+        ..Default::default()
+    };
+
+    for part in value.split([',', '&']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (key, raw_value) = part.split_once('=').unwrap_or((part, "true"));
+        let key = key.trim();
+        let raw_value = raw_value.trim();
+        match key {
+            "mode" if raw_value.eq_ignore_ascii_case("control") => {
+                rule.mode = DevtoolsMode::Control;
+            }
+            "mode" if raw_value.eq_ignore_ascii_case("read") => {
+                rule.mode = DevtoolsMode::Read;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("bridge") => {
+                rule.inject = DevtoolsInjectMode::Bridge;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("off") => {
+                rule.inject = DevtoolsInjectMode::Off;
+            }
+            "inject" if raw_value.eq_ignore_ascii_case("auto") => {
+                rule.inject = DevtoolsInjectMode::Auto;
+            }
+            "deny" => {
+                rule.deny = matches!(
+                    raw_value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                );
+            }
+            "evaluate_allowlist" => {
+                rule.evaluate_allowlist = parse_devtools_evaluate_allowlist(raw_value);
+            }
+            _ => {}
+        }
+    }
+
+    rule
+}
+
+fn parse_devtools_evaluate_allowlist(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split('|')
+        .map(|item| item.trim().trim_matches('"').trim_matches('\''))
+        .filter(|item| !item.is_empty())
+        .map(|item| item.replace("\\\\", "\\"))
+        .collect()
 }
 
 pub fn parse_cli_rules(
@@ -596,6 +657,9 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             }
             Protocol::SniCallback => {
                 result.sni_callback = Some(value.to_string());
+            }
+            Protocol::DevTools => {
+                result.devtools = Some(parse_devtools_rule(value));
             }
             Protocol::Passthrough => {
                 result.ignored.host = true;
@@ -2042,6 +2106,56 @@ x-use-ppe: 1
             &HashMap::new(),
         );
         assert_eq!(resolved.sni_callback.as_deref(), Some("custom_sni_handler"));
+    }
+
+    #[test]
+    fn test_devtools_evaluate_allowlist_parses_regex() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                r#"example.com devtools://mode=control,evaluate_allowlist=["^document\\.title$"]"#,
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let devtools = resolved.devtools.expect("devtools rule");
+        assert_eq!(devtools.mode, DevtoolsMode::Control);
+        assert_eq!(
+            devtools.evaluate_allowlist,
+            vec![r#"^document\.title$"#.to_string()]
+        );
+        assert_eq!(
+            parse_devtools_evaluate_allowlist(r#"["^document\\.title$"]"#),
+            vec![r#"^document\.title$"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_devtools_evaluate_allowlist_omitted_allows_any_expression() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com devtools://mode=control")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(!resolved
+            .devtools
+            .expect("devtools rule")
+            .raw_value
+            .is_empty());
+        assert!(parse_devtools_evaluate_allowlist("").is_empty());
     }
 
     #[test]

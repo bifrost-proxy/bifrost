@@ -177,6 +177,8 @@ pub struct TrafficRecord {
     /// decode（落库前解码）脚本执行结果：响应阶段
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_res_script_results: Option<Vec<ScriptExecutionResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub devtools_client_req_id: Option<String>,
 }
 
 pub use bifrost_script::ScriptExecutionResult;
@@ -244,6 +246,7 @@ impl TrafficRecord {
             res_script_results: None,
             decode_req_script_results: None,
             decode_res_script_results: None,
+            devtools_client_req_id: None,
         }
     }
 

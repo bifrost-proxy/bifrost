@@ -10,6 +10,7 @@ use url::Url;
 pub struct AppliedRules {
     pub forward_url: Option<String>,
     pub forward_source_path: Option<String>,
+    pub forward_target_path_exact: bool,
     pub forwarding_passthrough: bool,
     pub host: Option<String>,
     pub method: Option<String>,
@@ -57,6 +58,8 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                     format!("{}://{}", scheme, value)
                 };
                 applied.forward_source_path = extract_path_from_pattern(&rule.rule.pattern);
+                applied.forward_target_path_exact =
+                    rule.rule.pattern.trim_start_matches('!').starts_with('^');
                 applied.forward_url = Some(forward_url);
             }
             Protocol::Host | Protocol::XHost
@@ -68,6 +71,7 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 applied.forwarding_passthrough = true;
                 applied.forward_url = None;
                 applied.forward_source_path = None;
+                applied.forward_target_path_exact = false;
                 applied.host = None;
             }
             Protocol::Method if applied.method.is_none() => {
@@ -227,11 +231,15 @@ pub fn apply_all_request_rules(
                 .unwrap_or_default()
                 .as_str();
         if let Some(target_path) = extract_target_path_from_forward_url(forward_url) {
-            let rewritten_path = rewrite_path_with_prefix(
-                &original_path,
-                applied_rules.forward_source_path.as_deref(),
-                &target_path,
-            );
+            let rewritten_path = if applied_rules.forward_target_path_exact {
+                target_path
+            } else {
+                rewrite_path_with_prefix(
+                    &original_path,
+                    applied_rules.forward_source_path.as_deref(),
+                    &target_path,
+                )
+            };
             let (path, query) = split_path_and_query(&rewritten_path);
             new_url.set_path(path);
             new_url.set_query(query);
@@ -774,6 +782,26 @@ mod tests {
             result.url,
             "http://127.0.0.1:13000/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1"
         );
+    }
+
+    #[test]
+    fn test_apply_forward_rule_from_path_wildcard_uses_exact_target_path() {
+        let rules = parse_rules(
+            "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html http://127.0.0.1:8999/approvals",
+        )
+        .unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx = RequestContext::from_url(
+            "https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+        )
+        .with_method("GET");
+        let resolved_rules = resolver.resolve(&ctx);
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        let result =
+            apply_all_request_rules(&ctx.url, "GET", &[], None, &applied_rules, false).unwrap();
+
+        assert_eq!(result.url, "http://127.0.0.1:8999/approvals");
     }
 
     #[test]

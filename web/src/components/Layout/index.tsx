@@ -11,6 +11,7 @@ import {
   MoonOutlined,
   UsergroupAddOutlined,
   BellOutlined,
+  BugOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import { useEffect, useMemo } from "react";
@@ -84,6 +85,7 @@ export default function AppLayout() {
       { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
       { key: "/values", icon: <DatabaseOutlined />, label: "Values" },
       { key: "/scripts", icon: <CodeOutlined />, label: "Scripts" },
+      { key: "/devtools", icon: <BugOutlined />, label: "DevTools" },
       { key: "/groups", icon: <UsergroupAddOutlined />, label: "Groups", hidden: !showGroups },
       { key: "/notifications", icon: <BellOutlined />, label: "Notify" },
       { key: "/settings", icon: <SettingOutlined />, label: "Settings" },
@@ -313,6 +315,10 @@ export default function AppLayout() {
             const active = isActive(item.key);
             return (
               <div
+                key={item.key}
+                data-testid="app-sidebar-nav-item"
+                data-nav-label={item.label}
+                data-nav-key={item.key}
                 style={{
                   ...styles.menuItem,
                   ...(active ? styles.menuItemActive : {}),
@@ -326,6 +332,7 @@ export default function AppLayout() {
             );
           })}
           <div
+            data-testid="theme-toggle"
             style={{
               marginTop: "auto",
               marginBottom: 8,

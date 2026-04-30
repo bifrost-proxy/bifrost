@@ -742,6 +742,7 @@ fn record_traffic_for_unified(
         res_script_results: None,
         decode_req_script_results: None,
         decode_res_script_results: None,
+        devtools_client_req_id: None,
     };
 
     if let Some(ref traffic_db) = state.traffic_db_store {
@@ -2565,6 +2566,7 @@ fn record_traffic_for_stream(
         res_script_results: None,
         decode_req_script_results: None,
         decode_res_script_results: None,
+        devtools_client_req_id: None,
     };
 
     if let Some(ref traffic_db) = state.traffic_db_store {

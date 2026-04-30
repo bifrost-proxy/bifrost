@@ -8,8 +8,9 @@ use bifrost_core::{
     RulesResolver as CoreRulesResolver,
 };
 use bifrost_proxy::{
-    ProxyConfig, ProxyServer, ResolvedRules as ProxyResolvedRules, RuleValue,
-    RulesResolver as ProxyRulesResolverTrait, TlsConfig,
+    DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ProxyConfig, ProxyServer,
+    ResolvedRules as ProxyResolvedRules, RuleValue, RulesResolver as ProxyRulesResolverTrait,
+    TlsConfig,
 };
 use bifrost_storage::RulesStorage;
 use bifrost_tls::{generate_root_ca, init_crypto_provider, DynamicCertGenerator, SniResolver};
@@ -44,6 +45,31 @@ fn parse_redirect_target(value: &str) -> (Option<u16>, String) {
     }
 
     (None, value.to_string())
+}
+
+fn parse_devtools_rule(value: &str) -> DevtoolsRule {
+    let mut rule = DevtoolsRule {
+        raw_value: value.to_string(),
+        ..Default::default()
+    };
+    for part in value.split([',', '&']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (key, raw_value) = part.split_once('=').unwrap_or((part, "true"));
+        match (key.trim(), raw_value.trim().to_ascii_lowercase().as_str()) {
+            ("mode", "control") => rule.mode = DevtoolsMode::Control,
+            ("mode", "read") => rule.mode = DevtoolsMode::Read,
+            ("inject", "bridge") => rule.inject = DevtoolsInjectMode::Bridge,
+            ("inject", "off") => rule.inject = DevtoolsInjectMode::Off,
+            ("inject", "auto") => rule.inject = DevtoolsInjectMode::Auto,
+            ("deny", "1" | "true" | "yes" | "on") => rule.deny = true,
+            ("deny", _) => rule.deny = false,
+            _ => {}
+        }
+    }
+    rule
 }
 
 fn normalize_rule_line(rule: &str) -> String {
@@ -431,6 +457,9 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                 }
                 Protocol::TlsPassthrough => {
                     result.tls_intercept = Some(false);
+                }
+                Protocol::DevTools => {
+                    result.devtools = Some(parse_devtools_rule(value));
                 }
                 Protocol::Passthrough => {
                     result.ignored.host = true;
