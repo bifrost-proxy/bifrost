@@ -8,6 +8,21 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+ensure_playwright_browser() {
+  # Check if chrome-headless-shell is installed; if not, try to install it.
+  # Idempotent: fast path exits quickly when already installed.
+  local bin_path
+  bin_path=$(node --input-type=module -e "import('./web/node_modules/playwright-core/lib/server/registry/index.js').then(m => process.stdout.write(m.registry.findExecutable('chromium-headless-shell').executablePath() || ''))" 2>/dev/null || true)
+  if [ -n "$bin_path" ] && [ -x "$bin_path" ]; then
+    return 0
+  fi
+  echo "[INFO] Playwright chrome-headless-shell missing; installing via pnpm exec playwright install chromium-headless-shell" >&2
+  (cd web && pnpm exec playwright install chromium-headless-shell) >&2 || {
+    echo "[ERROR] Failed to install Playwright browser; test cannot proceed" >&2
+    return 1
+  }
+}
+
 pick_port() {
   python3 - <<'PY'
 import socket
@@ -373,6 +388,7 @@ devtools-tls-fixture.test tunnel://127.0.0.1:$HTTPS_SITE_PORT tlsIntercept://
 devtools-tls-fixture.test devtools:// https://127.0.0.1:$HTTPS_SITE_PORT
 TLSEOF
 )"
+ensure_playwright_browser
 PROXY_PORT="$PROXY_PORT" SITE_PORT="$SITE_PORT" HTTPS_SITE_PORT="$HTTPS_SITE_PORT" HTTPS_HOST="$HTTPS_HOST" TEST_ROOT="$TEST_ROOT" RULE_CONTENT="$RULE_CONTENT" CONTROL_RULE_CONTENT="$CONTROL_RULE_CONTENT" TLS_RULE_CONTENT="$TLS_RULE_CONTENT" node --input-type=module <<'NODE'
 import { chromium } from './web/node_modules/playwright/index.mjs';
 import NodeWebSocket from './web/node_modules/ws/index.js';

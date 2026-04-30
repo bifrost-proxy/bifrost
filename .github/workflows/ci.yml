@@ -210,6 +210,16 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright browsers (chromium headless shell)
+        run: pnpm exec playwright install --with-deps chromium-headless-shell
+        working-directory: web
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
         working-directory: packages/bifrost-sync-server
@@ -581,6 +591,16 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+        working-directory: web
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright browsers (chromium headless shell)
+        run: pnpm exec playwright install chromium-headless-shell
         working-directory: web
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
