@@ -171,7 +171,7 @@ pub struct DevtoolsRule {
 
 `<img>` / `<script>` / `<link>` / `<iframe>` 等浏览器解析器发起的标签资源请求不能由 JS 设置 header。为实现精准映射，Bifrost 在注入 bridge 前只改写同源 HTML 常见资源标签 URL，添加内部 query `__bifrost_client_req_id=...`；bridge 也 patch `setAttribute` 与常见 URL 属性 setter，但仅在同源且当前页面未被 Service Worker 控制时覆盖动态创建的标签资源。跨域、protocol-relative、Service Worker 控制页面的动态标签资源不得追加内部 query，避免破坏业务 SW cache/route 匹配。代理在请求处理最前面通过 `take_devtools_client_req_id_from_uri` 提取该 query 并从 URI 中删除，再继续规则匹配、Traffic 记录与上游转发。该 query 不得出现在真实上游请求、Traffic URL、Traffic request headers 或 WebUI Network 展示 URL 中。
 
-Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作为 status/header/size/duration/详情的补全来源。Traffic 详情只允许通过 `client_req_id` 精确查询，禁止使用 URL + 时间窗口猜测匹配。Traffic DB 查询同一 `client_req_id` 时以第一条非 replay 记录为准，后续重放或重复请求不得覆盖初始绑定。Performance resource timing 作为标签资源发现和兜底采集，动态 `<img>` / `<script>` / `<link>` 等无法匹配 Traffic 时，也必须展示发起端可采集的 URL、method、status、type、query、时间与 cache hint。若同一 URL/method 已有带 client request id 的事件，必须去重并优先保留带 id 的事件。Admin broker 在处理 live `network` 事件和后续 `hello` / scoped snapshot 重放时必须使用同一套缓存合并逻辑：`client_req_id` 是强主键；没有 id 的 PerformanceResourceTiming fallback 只能作为兜底，不得在已有同 URL/method 且带 id 的 bridge 事件旁边再次展示。
+Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作为 status/header/size/duration/详情的补全来源。Traffic 详情只允许通过 `client_req_id` 精确查询，禁止使用 URL + 时间窗口猜测匹配。Traffic DB 查询同一 `client_req_id` 时以第一条非 replay 记录为准，后续重放或重复请求不得覆盖初始绑定。WebUI 点击 Network 行后，`client_req_id -> traffic id` 查询允许短暂重试，以吸收 bridge 事件先于 Traffic 落库完成的竞态；重试仍失败时才展示 fallback 详情。Performance resource timing 作为标签资源发现和兜底采集，动态 `<img>` / `<script>` / `<link>` 等无法匹配 Traffic 时，也必须展示发起端可采集的 URL、method、status、type、query、时间与 cache hint。若同一 URL/method 已有带 client request id 的事件，必须去重并优先保留带 id 的事件。Admin broker 在处理 live `network` 事件和后续 `hello` / scoped snapshot 重放时必须使用同一套缓存合并逻辑：`client_req_id` 是强主键；没有 id 的 PerformanceResourceTiming fallback 只能作为兜底，不得在已有同 URL/method 且带 id 的 bridge 事件旁边再次展示。
 
 ## WebUI 设计
 
@@ -197,7 +197,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 多页面切换重新打开对应 page session 并刷新 snapshot。
 - 同一 tab 刷新或导航时，Broker 通过稳定 `tab_id` 把旧 session 迁移到新 page id，旧 page 标记为 `Stale` 后隐藏。
 - Elements：DOM tree 可展开/折叠，标签名/属性名/属性值分色。首个可见节点从 `<html>` 开始，`#document` 仅作为容器。纯空白 text node 过滤。超长属性/文本默认展示 ≤120 字符预览，点击弹窗查看完整内容。节点点击调用 `dom.highlight` 在目标页显示 overlay；点击元素拾取按钮调用 `dom.inspect`，目标页进入鼠标选择模式，hover 时实时高亮，click 时阻止原页面默认点击、退出拾取模式并通过 page bridge WS 上报 `node_selected`，WebUI 收到后展开祖先节点、滚动到对应 DOM row 并设为 selected。
-- Network：复用 Traffic 页面虚拟列表结构和视觉风格。列表展示 page bridge 前端采集事件，并用 Traffic 补全 status、size、duration、headers 与详情。点击行优先通过 `x-bifrost-client-request-id` 或 `__bifrost_client_req_id` 映射到 Traffic 详情，在 DevTools 当前页面内展示 TrafficDetail，不跳转到 `/traffic` 路由。找不到 Traffic 记录时展示前端已上报的 URL / method / status / type / client request id / query / request headers / response headers / cache hint 等 metadata；标签资源受浏览器安全限制无法读取 header 时，仍保留 status/query/timing 等基础事实。默认不采集 request body 或 response body。
+- Network：复用 Traffic 页面虚拟列表结构和视觉风格。列表展示 page bridge 前端采集事件，并用 Traffic 补全 status、size、duration、headers 与详情。点击行优先通过 `x-bifrost-client-request-id` 或 `__bifrost_client_req_id` 映射到 Traffic 详情，在 DevTools 当前页面内展示 TrafficDetail，不跳转到 `/traffic` 路由；映射查询需要短暂重试，避免目标页 bridge 事件先到、Traffic DB 记录稍后落库时概率性展示 fallback。找不到 Traffic 记录时展示前端已上报的 URL / method / status / type / client request id / query / request headers / response headers / cache hint 等 metadata；标签资源受浏览器安全限制无法读取 header 时，仍保留 status/query/timing 等基础事实。默认不采集 request body 或 response body。
 - Cookies / LocalStorage / SessionStorage：key/value 表格展示，行内新增/编辑/复制/删除。编辑默认可用，不受 mode 限制。
 - Console：日志区域在上方滚动，底部多行输入框固定。每条行展示低对比度毫秒级时间。Object/Array 默认摘要，点击展开。支持浏览器标准 `%c` 样式格式化并隐藏样式参数文本。全屏编辑入口使用 JavaScript Monaco editor。执行代码作为 `input` 行、结果作为 `result` 行展示。目标页 JS 抛错以成功 HTTP 响应返回异常详情，WebUI 展示真实 JS error。
 - 面板 tab 右侧提供当前模块搜索框。Elements 搜索自动展开并选中匹配节点；其他面板搜索直接过滤列表并高亮匹配文本。
@@ -268,7 +268,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 Elements tree 首个可见节点为 `<html>`，无空文本 DOM 行，超长属性/文本 ≤120 字符预览
 - 验证 Elements 点击节点后目标页出现 highlight overlay，并展示节点名称、尺寸、color、font、padding、margin
 - 验证 Elements 元素拾取模式可以在目标页 hover/click 选中节点，WebUI 自动切换并选中对应 DOM row
-- 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息；搜索后必须点击匹配业务 URL 的具体虚拟列表行，禁止点击当前首行，避免 CI 中旧行或虚拟列表复用导致 fallback 详情断言概率性落到其它请求
+- 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息；搜索后必须点击匹配业务 URL 的具体虚拟列表行，禁止点击当前首行，避免 CI 中旧行或虚拟列表复用导致 fallback 详情断言概率性落到其它请求；动态标签资源点击时必须覆盖 bridge 事件先于 Traffic 落库的映射重试路径
 - 验证 WebUI DevTools 详情刷新按钮仅通过 session WS 请求当前 tab snapshot，不触发目标页 reload 或重新发起业务请求
 - 验证 HTTPS/TLS 全截包浏览器代理场景下，Network 中 fetch/XHR 与标签资源请求都能匹配到完整 Traffic 记录
 - 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后

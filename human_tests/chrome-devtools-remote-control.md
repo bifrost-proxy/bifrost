@@ -770,6 +770,23 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - Traffic 可映射动态标签资源也按具体匹配行点击，不会因同一文本同时出现在路径列、完整 URL、详情等多个元素中触发 Playwright strict mode 假失败。
 - 用例在 macOS shell shard 与 Linux shell shard 下都不依赖列表首行顺序。
 
+### TC-CDP-41：Network 详情等待 Traffic 映射落库完成
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 在目标页动态创建 `<img src="/devtools/api/parser-resource?case=ui-traffic-enrich&foo=img">`。
+3. 立即点击 WebUI DevTools 详情页 refresh 按钮，并在 Network tab 搜索 `ui-traffic-enrich`。
+4. 点击包含 `ui-traffic-enrich` 的 `data-testid="traffic-row"`。
+5. 观察右侧 `devtools-network-detail`。
+
+预期结果：
+
+- WebUI 在点击后可短暂显示 TrafficDetail loading 状态，等待 `client_req_id -> traffic id` 映射落库。
+- 如果映射在短时间内完成，右侧最终展示 `traffic-detail`，且详情包含 `ui-traffic-enrich`。
+- 不会因为 bridge network 事件先于 Traffic 记录落库而立即固定为 fallback 详情。
+- 若映射持续不可用，仍保留 fallback 详情路径，不跳转 `/traffic`。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -806,3 +823,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-05-01：通过。补充并执行 TC-CDP-39，验证 Admin broker 对 live network 与 full snapshot replay 使用同一套 `client_req_id` 去重逻辑，避免 CI 中 `/devtools/api/ping?case=basic` 概率性重复展示。执行命令：`source ~/.zshrc && cargo test -p bifrost-admin devtools::tests::test_page_bridge_network_cache --all-features`，输出 `2 passed; 0 failed`；随后执行 `source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。补充并执行 TC-CDP-40，验证 DevTools Network 搜索后点击包含目标业务 URL 的具体虚拟列表行，避免 macOS shell shard 中 fallback detail 点击到旧首行。首次执行因当前 worktree 的 `mise.toml` 未信任导致 fixture server 未启动；执行 `mise trust /Users/eden/work/github/bifrost-devtools-avcdp39/mise.toml` 后重跑通过。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。根据 CI #827 Linux shell shard 3 新失败补充 TC-CDP-40 的 Traffic 可映射动态标签资源回归，避免 `ui-traffic-enrich` 文本同时出现在多处时触发 Playwright strict mode，也避免依赖行内状态列时序。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-05-01：通过。根据 CI #829 macOS aarch64 shell shard 3 新失败补充 TC-CDP-41，验证点击动态标签资源 Network 行时，WebUI 会短暂等待 `client_req_id -> traffic id` 映射落库，不因 page bridge network 事件先到而概率性固定为 fallback 详情。执行命令：`source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
