@@ -594,12 +594,22 @@ collect_failed_result_indices() {
 
 result_failure_mentions_mock_outage() {
     local idx="$1"
-    local log_file="${RESULTS_DIR}/test_${idx}.log"
-    [[ -f "$log_file" ]] || return 1
+    local log_file
+    local log_files=(
+        "${RESULTS_DIR}/log_${idx}.txt"
+        "${RESULTS_DIR}/test_${idx}.log"
+    )
 
-    grep -Eq \
-        "Mock 服务器未运行|target machine actively refused|REQUEST_CONNECT_REFUSED|Connection refused|os error 10061" \
-        "$log_file" 2>/dev/null
+    for log_file in "${log_files[@]}"; do
+        [[ -f "$log_file" ]] || continue
+        if grep -Eq \
+            "Mock 服务器未运行|target machine actively refused|REQUEST_CONNECT_REFUSED|Connection refused|os error 10061" \
+            "$log_file" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 count_mock_outage_failures() {

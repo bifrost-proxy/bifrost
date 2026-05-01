@@ -93,6 +93,35 @@
 - 如果 Windows rules job 的失败全是共享 mock outage，runner 会重启 mock servers，并串行重试全部失败套件，重试预算不少于 900 秒。
 - 普通真实规则失败仍受 `BIFROST_E2E_MAX_RETRY_SUITES` 限制，避免掩盖大面积功能回归。
 
+### TC-REF-04：mock outage 统计读取真实 suite 日志路径回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/run_all_tests_parallel.sh
+   ```
+2. 检查失败日志识别函数读取 runner 实际生成的 suite 日志路径：
+   ```bash
+   rg -n 'log_\$\{idx\}\.txt|test_\$\{idx\}\.log|result_failure_mentions_mock_outage' e2e-tests/run_all_tests_parallel.sh
+   ```
+3. 执行缩小分类的 rules runner，显式开启失败重试并限制本地并行度：
+   ```bash
+   BIFROST_E2E_RULE_JOBS=2 \
+   BIFROST_E2E_RULE_JOBS_CAP=2 \
+   BIFROST_E2E_RETRY_FAILED_ONCE=1 \
+   BIFROST_E2E_MAX_RETRY_SUITES=6 \
+   BIFROST_E2E_RETRY_BUDGET_SECS=180 \
+   bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once
+   ```
+4. 在 GitHub Actions Windows rules job 中确认若所有失败日志都包含 `Mock 服务器未运行`、`REQUEST_CONNECT_REFUSED`、`Connection refused` 或 `os error 10061`，runner 输出会进入 `失败套件均指向共享 Mock 服务器掉线` 分支。
+
+**预期结果**：
+- 脚本语法检查通过。
+- `result_failure_mentions_mock_outage` 优先读取 `log_${idx}.txt`，该路径与 `run_single_test` 写入的 `log_${test_index}.txt` 保持一致。
+- 兼容读取历史 `test_${idx}.log` fallback，但不能只读取该旧路径。
+- 本地缩小分类 runner 通过，且未使用 9900 端口。
+- GitHub Actions Windows rules job 中，全量 mock outage 失败会被计入 `count_mock_outage_failures`，从而绕过普通失败数量上限并重试全部失败套件。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -108,3 +137,4 @@
 ## 执行记录
 
 - 2026-05-01：通过。补充并执行 TC-REF-03，本地先执行 `bash -n e2e-tests/run_all_tests_parallel.sh`，随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 49368、HTTPS 49369、WS 49371、WSS 49372、SSE 49373、Proxy 49374），选择代理起始端口 11402，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 串行 cap 和共享 mock outage 全量重试继续由 GitHub Actions Windows rules job 验证。
+- 2026-05-01：通过。补充并执行 TC-REF-04，本地执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'log_\$\{idx\}\.txt|test_\$\{idx\}\.log|result_failure_mentions_mock_outage' e2e-tests/run_all_tests_parallel.sh` 确认 outage 识别优先读取 `log_${idx}.txt`，并保留 `test_${idx}.log` fallback；随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 60377、HTTPS 60378、WS 60379、WSS 60380、SSE 60381、Proxy 60382），选择代理起始端口 11362，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 全量 mock outage 失败计数由后续 GitHub Actions Windows rules job 验证。
