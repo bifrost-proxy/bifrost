@@ -399,7 +399,9 @@ run_and_capture() {
     command_pid=$!
     log_info "${name} started with pid ${command_pid}"
 
-    tail -n +1 -f "$log_file" | sed "s/^/[$name] /" &
+    (
+      tail -n +1 -f "$log_file" | sed "s/^/[$name] /"
+    ) &
     stream_pid=$!
 
     heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
@@ -475,6 +477,7 @@ run_and_capture() {
   wait "$watchdog_pid" 2>/dev/null || true
 
   if is_windows && [[ -n "$stream_pid" ]]; then
+    kill_process_tree "$stream_pid"
     kill "$stream_pid" 2>/dev/null || true
   fi
 

@@ -140,7 +140,7 @@
 - `scripts/run_all_e2e.sh` 语法检查通过。
 - Windows 分支中 `command_pid` 指向真实 suite 命令，而不是 `tee`/`sed` 日志管道进程。
 - Windows timeout watchdog 对 `command_pid` 调用 `kill_process_tree`，可终止真实 runner 及其子进程。
-- 日志流由独立 `tail -f "$log_file" | sed ...` 提供，命令结束后会被主动停止，不影响 suite 结果收集。
+- 日志流由独立子 shell 包裹 `tail -f "$log_file" | sed ...` 提供，命令结束后会对日志流子 shell 调用 `kill_process_tree`，不留下 `tail -f` 残留进程，也不影响 suite 结果收集。
 - 如果 Windows rules 后续仍失败，GitHub 会上传 `.e2e-reports/` 与 `.bifrost-e2e-ci/` artifact，避免再次出现无日志红灯。
 
 ## 清理步骤
@@ -159,4 +159,5 @@
 
 - 2026-05-01：通过。补充并执行 TC-REF-03，本地先执行 `bash -n e2e-tests/run_all_tests_parallel.sh`，随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 49368、HTTPS 49369、WS 49371、WSS 49372、SSE 49373、Proxy 49374），选择代理起始端口 11402，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 串行 cap 和共享 mock outage 全量重试继续由 GitHub Actions Windows rules job 验证。
 - 2026-05-01：通过。补充并执行 TC-REF-04，本地执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'log_\$\{idx\}\.txt|test_\$\{idx\}\.log|result_failure_mentions_mock_outage' e2e-tests/run_all_tests_parallel.sh` 确认 outage 识别优先读取 `log_${idx}.txt`，并保留 `test_${idx}.log` fallback；随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 60377、HTTPS 60378、WS 60379、WSS 60380、SSE 60381、Proxy 60382），选择代理起始端口 11362，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 全量 mock outage 失败计数由后续 GitHub Actions Windows rules job 验证。
-- 2026-05-01：通过。补充并执行 TC-REF-05，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `rg -n 'is_windows|tail -n \+1 -f|command_pid=\$!|kill_process_tree "\$command_pid"' scripts/run_all_e2e.sh` 和 `sed -n '392,420p' scripts/run_all_e2e.sh`，确认 Windows 分支先后台运行真实命令并记录 `command_pid=$!`，再通过 `tail -n +1 -f "$log_file"` 流式打印日志，watchdog 对真实 `command_pid` 调用 `kill_process_tree`，命令结束后会主动停止日志流。GitHub Actions Windows rules timeout artifact 行为由后续 CI 复跑验证。
+- 2026-05-01：通过。补充并执行 TC-REF-05，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `rg -n 'is_windows|tail -n \+1 -f|command_pid=\$!|kill_process_tree "\$command_pid"' scripts/run_all_e2e.sh` 和 `sed -n '392,420p' scripts/run_all_e2e.sh`，确认 Windows 分支先后台运行真实命令并记录 `command_pid=$!`，再用子 shell 包裹 `tail -n +1 -f "$log_file"` 流式打印日志，watchdog 对真实 `command_pid` 调用 `kill_process_tree`，命令结束后会对日志流子 shell调用 `kill_process_tree` 主动停止日志流。GitHub Actions Windows rules timeout artifact 行为由后续 CI 复跑验证。
+- 2026-05-01：通过。TC-REF-05 二次执行，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `sed -n '396,482p' scripts/run_all_e2e.sh` 和 `rg -n 'tail -n \+1 -f|kill_process_tree "\$stream_pid"|kill_process_tree "\$command_pid"|command_pid=\$!' scripts/run_all_e2e.sh`，确认日志流已改为子 shell 后台任务，命令结束后对 `stream_pid` 调用 `kill_process_tree`，避免 `tail -f` 残留导致 Windows runner/rules wrapper 不退出。
