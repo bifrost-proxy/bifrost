@@ -5,6 +5,7 @@ edition = "2021"
 description = "Admin API and web interface for Bifrost proxy"
 
 [dependencies]
+bifrost-agent = { path = "../agent" }
 bifrost-command = { path = "../bifrost-command" }
 bifrost-core = { path = "../bifrost-core" }
 bifrost-tls = { path = "../bifrost-tls" }
@@ -15,7 +16,7 @@ bifrost-power = { path = "../bifrost-power" }
 
 tokio = { version = "1", features = ["full", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -64,6 +65,8 @@ bcrypt = "0.17"
 rand.workspace = true
 gethostname = "1"
 ring = "0.17"
+async-trait.workspace = true
+prost = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 icns = "0.3"

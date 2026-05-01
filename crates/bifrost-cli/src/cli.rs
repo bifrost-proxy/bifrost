@@ -757,6 +757,14 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::commands::keepawake::KeepAwakeAction,
     },
+    #[command(
+        about = "Manage IM Gateway (providers, targets, routes, schedules)",
+        long_about = "Manage IM Gateway for sending messages, routing events to scripts, and scheduling tasks.\n\nSUBCOMMANDS:\n  provider    Manage IM providers (feishu, wechat, webhook)\n  target      Manage message targets (groups, users)\n  send        Send a message to a target\n  route       Manage event routes (message → script)\n  schedule    Manage scheduled tasks\n  history     View event and task run history"
+    )]
+    Im {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]

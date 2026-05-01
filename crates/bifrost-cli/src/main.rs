@@ -228,6 +228,9 @@ fn main() {
         Some(Commands::KeepAwake { action }) => {
             commands::keepawake::handle_local(action, get_effective_port(cli.port))
         }
+        Some(Commands::Im { args }) => {
+            commands::handle_im_command("127.0.0.1", get_effective_port(cli.port), &args)
+        }
         Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes, restart }) => handle_upgrade(yes, restart),
         Some(Commands::InstallSkill {

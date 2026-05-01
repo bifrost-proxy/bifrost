@@ -124,6 +124,8 @@ pub struct AdminState {
     pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
     remote_invoke_worker:
         parking_lot::RwLock<Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>>,
+    im_gateway_service:
+        parking_lot::RwLock<Option<crate::handlers::im_gateway::SharedImGatewayService>>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
     group_cache_resolved: AtomicBool,
     badge_rules_cache: parking_lot::RwLock<String>,
@@ -178,6 +180,7 @@ impl AdminState {
             devtools_broker: Arc::new(BrowserDebugBroker::new()),
             keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
+            im_gateway_service: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
             badge_rules_cache: parking_lot::RwLock::new(
@@ -868,6 +871,27 @@ impl AdminState {
         &self,
     ) -> Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker> {
         self.remote_invoke_worker.read().clone()
+    }
+
+    pub fn with_im_gateway_service(
+        self,
+        service: crate::handlers::im_gateway::SharedImGatewayService,
+    ) -> Self {
+        self.set_im_gateway_service(service);
+        self
+    }
+
+    pub fn set_im_gateway_service(
+        &self,
+        service: crate::handlers::im_gateway::SharedImGatewayService,
+    ) {
+        *self.im_gateway_service.write() = Some(service);
+    }
+
+    pub fn im_gateway_service(
+        &self,
+    ) -> Option<crate::handlers::im_gateway::SharedImGatewayService> {
+        self.im_gateway_service.read().clone()
     }
 
     pub fn set_replay_executor(&self, executor: SharedReplayExecutor) {

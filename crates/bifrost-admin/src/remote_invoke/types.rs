@@ -55,6 +55,8 @@ pub enum GrantScope {
     RemoteShellInteractive,
     #[serde(rename = "remote_power_mgmt")]
     RemotePowerMgmt,
+    #[serde(rename = "remote_im_gateway")]
+    RemoteImGateway,
 }
 
 impl GrantScope {
@@ -67,6 +69,7 @@ impl GrantScope {
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
                 | (Self::RemotePowerMgmt, CommandKind::PowerMgmt)
+                | (Self::RemoteImGateway, CommandKind::ImGateway)
         )
     }
 }
@@ -104,6 +107,7 @@ impl FileAccessScope {
             GrantScope::RemoteShellExec | GrantScope::RemoteShellInteractive => Self::ReadWrite,
             GrantScope::RemotePowerMgmt => Self::None,
             GrantScope::RemoteQuery => Self::None,
+            GrantScope::RemoteImGateway => Self::None,
         }
     }
 }
@@ -131,6 +135,8 @@ pub enum CommandKind {
     File,
     #[serde(rename = "power.mgmt")]
     PowerMgmt,
+    #[serde(rename = "im.gateway")]
+    ImGateway,
 }
 
 impl CommandKind {
@@ -140,6 +146,7 @@ impl CommandKind {
             Self::ShellExec => "shell.exec",
             Self::File => "file",
             Self::PowerMgmt => "power.mgmt",
+            Self::ImGateway => "im.gateway",
         }
     }
 }
@@ -403,6 +410,7 @@ impl RemoteCommand {
             CommandKind::ShellExec => "shell.exec",
             CommandKind::File => "file",
             CommandKind::PowerMgmt => "power.mgmt",
+            CommandKind::ImGateway => "im.gateway",
         }
     }
 

@@ -303,6 +303,9 @@ impl RemoteInvokeExecutor {
                     let body = self.execute_power_op(command).await?;
                     self.emit_stdout(&mut on_stdout, body).await
                 }
+                super::types::CommandKind::ImGateway => {
+                    return self.execute_im_gateway_op(command).await;
+                }
             },
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -409,6 +412,50 @@ impl RemoteInvokeExecutor {
             other => Err(BifrostError::Config(format!(
                 "unknown power command: {other}"
             ))),
+        }
+    }
+
+    /// Execute an IM Gateway remote operation.
+    /// This is called by the worker when it receives a CommandKind::ImGateway command.
+    pub async fn execute_im_gateway_op(
+        &self,
+        command: &RemoteCommand,
+    ) -> Result<RemoteInvokeResponse> {
+        let args_json = command.args_json.as_deref().unwrap_or("{}");
+
+        let url = format!(
+            "http://{}:{}/_bifrost/api/im-gateway/remote-execute",
+            self.admin_host, self.admin_port
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(args_json.to_string())
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .send()
+            .await
+            .map_err(|e| BifrostError::Config(format!("im gateway request failed: {}", e)))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| BifrostError::Config(format!("im gateway response read failed: {}", e)))?;
+
+        if status.is_success() {
+            Ok(RemoteInvokeResponse {
+                exit_code: 0,
+                stdout: Some(body),
+                ..Default::default()
+            })
+        } else {
+            Ok(RemoteInvokeResponse {
+                exit_code: 1,
+                stderr: Some(body),
+                ..Default::default()
+            })
         }
     }
 

@@ -16,6 +16,7 @@ import {
   ThunderboltOutlined,
   SafetyOutlined,
   ApiOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import { useMetricsStore } from "../../stores/useMetricsStore";
 import { useProxyStore } from "../../stores/useProxyStore";
@@ -64,6 +65,8 @@ import PerformanceTab from "./tabs/PerformanceTab";
 import SyncTab from "./tabs/SyncTab";
 import RemoteAccessTab from "./tabs/RemoteAccessTab";
 import RemoteInvokeTab from "./tabs/RemoteInvokeTab";
+import ImGatewayTab from "./tabs/ImGatewayTab";
+import AgentTab from "./tabs/AgentTab";
 import { updateDesktopProxyPort } from "../../desktop/tauri";
 import {
   getDesktopPlatform,
@@ -87,6 +90,8 @@ const VALID_TABS = [
   "sync",
   "remote",
   "remote-invoke",
+  "im-gateway",
+  "agent",
 ];
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -1204,6 +1209,24 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           onSyncSignIn={handleSyncSignIn}
         />
       ),
+    },
+    {
+      key: "im-gateway",
+      label: (
+        <span>
+          <CloudOutlined /> IM Gateway
+        </span>
+      ),
+      children: <ImGatewayTab />,
+    },
+    {
+      key: "agent",
+      label: (
+        <span>
+          <RobotOutlined /> Agent
+        </span>
+      ),
+      children: <AgentTab />,
     },
   ];
 

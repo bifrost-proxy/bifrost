@@ -1184,6 +1184,14 @@ pub fn run_foreground(
                 admin_state.with_ip_tls_pending_manager(bifrost_admin::IpTlsPendingManager::new());
             let admin_state = admin_state
                 .with_client_trust_tracker(bifrost_admin::ClientTlsTrustTracker::new());
+
+            // Initialize IM Gateway service
+            let im_gateway_data_dir = shared_config_manager.data_dir().to_path_buf();
+            let im_gateway_service = std::sync::Arc::new(
+                bifrost_admin::ImGatewayService::new(&im_gateway_data_dir),
+            );
+            let admin_state = admin_state.with_im_gateway_service(im_gateway_service);
+
             let admin_state = Arc::new(admin_state);
 
             {
@@ -1225,6 +1233,14 @@ pub fn run_foreground(
             let db_cleanup_task = bifrost_admin::start_db_cleanup_task(traffic_db_store);
             let connection_cleanup_task =
                 bifrost_admin::start_connection_cleanup_task(admin_state.connection_monitor.clone());
+
+            // Auto-connect IM Gateway providers that have owner_open_id configured
+            if let Some(im_service) = admin_state.im_gateway_service() {
+                let im_service_clone = im_service.clone();
+                tokio::spawn(async move {
+                    im_service_clone.auto_connect_providers().await;
+                });
+            }
 
             let metrics_collector = admin_state.metrics_collector.clone();
             let rules_storage_for_resolver = admin_state.rules_storage.clone();
@@ -1892,10 +1908,25 @@ pub fn run_daemon(
                     let admin_state = admin_state
                         .with_client_trust_tracker(bifrost_admin::ClientTlsTrustTracker::new());
 
+                    // Initialize IM Gateway service (daemon mode)
+                    let im_gateway_data_dir = shared_config_manager.data_dir().to_path_buf();
+                    let im_gateway_service = std::sync::Arc::new(
+                        bifrost_admin::ImGatewayService::new(&im_gateway_data_dir),
+                    );
+                    let admin_state = admin_state.with_im_gateway_service(im_gateway_service);
+
                     std::mem::drop(bifrost_admin::start_db_cleanup_task(traffic_db_store));
                     std::mem::drop(bifrost_admin::start_connection_cleanup_task(
                         admin_state.connection_monitor.clone(),
                     ));
+
+                    // Auto-connect IM Gateway providers (daemon mode)
+                    if let Some(im_service) = admin_state.im_gateway_service() {
+                        let im_service_clone = im_service.clone();
+                        tokio::spawn(async move {
+                            im_service_clone.auto_connect_providers().await;
+                        });
+                    }
 
                     let metrics_collector = admin_state.metrics_collector.clone();
                     let rules_storage_for_resolver = admin_state.rules_storage.clone();

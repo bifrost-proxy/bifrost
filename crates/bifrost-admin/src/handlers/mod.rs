@@ -9,6 +9,7 @@ pub mod env;
 pub mod frames;
 pub mod group;
 pub mod group_rules;
+pub mod im_gateway;
 pub mod metrics;
 pub mod notification;
 pub mod power;

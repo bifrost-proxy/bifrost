@@ -1,0 +1,154 @@
+/**
+ * Shared types and constants for Agent settings
+ */
+
+// API base path
+export const BASE = "/im-gateway";
+
+// Defaults matching Rust AgentConfig::default()
+export const DEFAULTS = {
+  model: "gpt-5.4-2026-03-05",
+  model_provider: "aidp_crawl",
+  model_reasoning_effort: "medium",
+  model_reasoning_summary: "auto",
+  model_context_window: 200_000,
+  model_auto_compact_token_limit: 80_000,
+  max_completion_tokens: 16_384,
+  shell_timeout_secs: 30,
+  max_turn_iterations: 20,
+  max_history_messages: 50,
+  session_ttl_secs: 3600,
+  request_timeout_secs: 120,
+  project_doc_max_bytes: 32_768,
+  background_terminal_max_timeout: 300_000,
+} as const;
+
+// Types
+export interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  bearer_token_env_var?: string;
+  enabled: boolean;
+  startup_timeout_secs?: number;
+  tool_timeout_sec?: number;
+}
+
+export interface HistoryConfig {
+  persistence?: "save-all" | "none";
+  max_bytes?: number;
+}
+
+export interface MemoriesConfig {
+  disable_on_external_context?: boolean;
+  generate_memories?: boolean;
+  use_memories?: boolean;
+  max_raw_memories_for_consolidation?: number;
+  max_unused_days?: number;
+  max_rollout_age_days?: number;
+  max_rollouts_per_startup?: number;
+  min_rollout_idle_hours?: number;
+  extract_model?: string;
+  consolidation_model?: string;
+}
+
+export interface AgentConfig {
+  enabled: boolean;
+  model?: string;
+  model_provider?: string;
+  model_providers: Record<string, Record<string, unknown>>;
+  instructions?: string;
+  model_reasoning_effort?: string;
+  model_reasoning_summary?: string;
+  model_context_window?: number;
+  model_auto_compact_token_limit?: number;
+  max_completion_tokens?: number;
+  mcp_servers: Record<string, McpServerConfig>;
+  skills?: Record<string, unknown>;
+  project_doc_max_bytes?: number;
+  shell_timeout_secs?: number;
+  max_turn_iterations?: number;
+  max_history_messages?: number;
+  session_ttl_secs?: number;
+  tool_output_token_limit?: number;
+  request_timeout_secs?: number;
+  work_dir?: string;
+  // History & Session (Codex-compatible)
+  history?: HistoryConfig;
+  ephemeral?: boolean;
+  // Memories subsystem (Codex-compatible)
+  memories?: MemoriesConfig;
+  // Background terminal
+  background_terminal_max_timeout?: number;
+  // Provider-level fields (resolved from active provider)
+  request_max_retries?: number;
+  stream_idle_timeout_ms?: number;
+  stream_max_retries?: number;
+}
+
+export interface SessionInfo {
+  session_key: string;
+  message_count?: number;
+  total_tokens_used?: number;
+  created_at?: number;
+  last_active_at?: number;
+  compaction_count?: number;
+  estimated_tokens?: number;
+  history_version?: number;
+  work_dir?: string;
+}
+
+export interface SessionMessage {
+  role: string;
+  content: string;
+  tool_calls?: string[];
+}
+
+export interface SessionDetail extends SessionInfo {
+  messages: SessionMessage[];
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  base_url: string | null;
+  env_key: string | null;
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  short_description?: string;
+  path: string;
+  scope: "Repo" | "User" | "System";
+}
+
+export interface HistoryFileInfo {
+  path: string;
+  filename: string;
+  session_key: string;
+  timestamp: number;
+}
+
+export interface HistoryMessage {
+  role: string;
+  content: string | null;
+}
+
+export interface ConversationEvent {
+  timestamp: number;
+  event_type:
+    | "session_start"
+    | "user_message"
+    | "assistant_message"
+    | "tool_call"
+    | "tool_result"
+    | "compaction"
+    | "session_end"
+    | "mcp_tools_loaded"
+    | "skills_loaded";
+  session_key: string;
+  content: unknown;
+}
