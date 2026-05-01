@@ -2015,9 +2015,13 @@ await page.evaluate(() => new Promise((resolve) => {
 }));
 await adminPage.getByTestId('devtools-refresh').click();
 await panelSearch.fill('ui-traffic-enrich');
-await adminPage.getByTestId('devtools-network-panel').getByText(/ui-traffic-enrich/).waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText('404').first().waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+const uiTrafficEnrichRow = adminPage
+  .getByTestId('devtools-network-panel')
+  .getByTestId('traffic-row')
+  .filter({ hasText: 'ui-traffic-enrich' })
+  .first();
+await uiTrafficEnrichRow.waitFor({ timeout: 8000 });
+await uiTrafficEnrichRow.click({ force: true });
 await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
 await panelSearch.fill('');

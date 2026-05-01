@@ -758,12 +758,16 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 7. 再发起动态标签资源 fallback 请求 `/devtools/api/static-resource?case=bridge-only-tag-fallback&foo=tagfallback`。
 8. 搜索 `bridge-only-tag-fallback`，等待包含该 URL 的匹配行可见后点击该行。
 9. 验证右侧 fallback 详情展示 `bridge-only-tag-fallback`、`404` 和 query 参数 `foo=tagfallback`。
+10. 再发起可映射 Traffic 详情的动态标签资源 `/devtools/api/parser-resource?case=ui-traffic-enrich&foo=img`。
+11. 搜索 `ui-traffic-enrich`，等待包含该 URL 的匹配行可见后点击该行。
+12. 验证右侧 `devtools-network-detail` 展示 `traffic-detail`，且详情中包含 `ui-traffic-enrich`。
 
 预期结果：
 
 - 搜索后点击的是包含目标业务 URL 的具体虚拟列表行。
 - 不会因虚拟列表复用、旧记录排在第一行或搜索状态更新时序导致点击到其它请求。
 - fetch fallback 与动态标签资源 fallback 都在 DevTools Network 当前页右侧展示发起端 metadata。
+- Traffic 可映射动态标签资源也按具体匹配行点击，不会因同一文本同时出现在路径列、完整 URL、详情等多个元素中触发 Playwright strict mode 假失败。
 - 用例在 macOS shell shard 与 Linux shell shard 下都不依赖列表首行顺序。
 
 ## 清理步骤
@@ -801,3 +805,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-04-30：通过。继续执行 TC-CDP-38 的 macOS aarch64 artifact 回归验证，确认 `build-cli-macos-aarch64` 安装 WebUI 构建依赖且不再设置 `SKIP_FRONTEND_BUILD=1`，避免 macOS shell shard 下载占位 WebUI。执行命令：`pnpm --dir web run build`，随后执行 `cargo build -p bifrost-cli --release --target aarch64-apple-darwin`，再用临时 `BIFROST_DATA_DIR` 和随机非 9900 端口启动 `target/aarch64-apple-darwin/release/bifrost start --unsafe-ssl --no-system-proxy`，通过 `curl http://127.0.0.1:<port>/_bifrost/` 验证返回真实 WebUI 且不包含 `Frontend not built`。
 - 2026-05-01：通过。补充并执行 TC-CDP-39，验证 Admin broker 对 live network 与 full snapshot replay 使用同一套 `client_req_id` 去重逻辑，避免 CI 中 `/devtools/api/ping?case=basic` 概率性重复展示。执行命令：`source ~/.zshrc && cargo test -p bifrost-admin devtools::tests::test_page_bridge_network_cache --all-features`，输出 `2 passed; 0 failed`；随后执行 `source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。补充并执行 TC-CDP-40，验证 DevTools Network 搜索后点击包含目标业务 URL 的具体虚拟列表行，避免 macOS shell shard 中 fallback detail 点击到旧首行。首次执行因当前 worktree 的 `mise.toml` 未信任导致 fixture server 未启动；执行 `mise trust /Users/eden/work/github/bifrost-devtools-avcdp39/mise.toml` 后重跑通过。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-05-01：通过。根据 CI #827 Linux shell shard 3 新失败补充 TC-CDP-40 的 Traffic 可映射动态标签资源回归，避免 `ui-traffic-enrich` 文本同时出现在多处时触发 Playwright strict mode，也避免依赖行内状态列时序。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
