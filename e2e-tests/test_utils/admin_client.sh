@@ -158,13 +158,26 @@ admin_start_bifrost() {
     elif [[ -f "$windows_bin" ]]; then
         bifrost_bin="$windows_bin"
     fi
+    local start_args=(
+        -H "$host"
+        -p "$port"
+        start
+        -y
+        --access-mode allow_all
+        --skip-cert-check
+        --no-system-proxy
+    )
+    if [[ "${ADMIN_CLIENT_START_UNSAFE_SSL:-1}" == "1" ]]; then
+        start_args+=(--unsafe-ssl)
+    fi
+
     if [[ -n "$bifrost_bin" ]]; then
         SKIP_FRONTEND_BUILD=1 \
             HOME="$ADMIN_CLIENT_HOME_DIR" \
             XDG_CONFIG_HOME="$ADMIN_CLIENT_XDG_CONFIG_HOME" \
             XDG_DATA_HOME="$ADMIN_CLIENT_XDG_DATA_HOME" \
             BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-            "$bifrost_bin" -H "$host" -p "$port" start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy \
+            "$bifrost_bin" "${start_args[@]}" \
             >"$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>&1 &
     else
         (cd "$ADMIN_CLIENT_REPO_DIR" && \
@@ -173,7 +186,7 @@ admin_start_bifrost() {
             XDG_CONFIG_HOME="$ADMIN_CLIENT_XDG_CONFIG_HOME" \
             XDG_DATA_HOME="$ADMIN_CLIENT_XDG_DATA_HOME" \
             BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
-            cargo run --release --bin bifrost -- -H "$host" -p "$port" start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy \
+            cargo run --release --bin bifrost -- "${start_args[@]}" \
         ) >"$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>&1 &
     fi
 

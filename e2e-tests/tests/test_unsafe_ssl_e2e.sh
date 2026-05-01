@@ -16,10 +16,15 @@ source "$SCRIPT_DIR/../test_utils/assert.sh"
 
 ADMIN_HOST="${ADMIN_HOST:-127.0.0.1}"
 ADMIN_PORT="${ADMIN_PORT:-9900}"
-PROXY_PORT="${PROXY_PORT:-9900}"
+PROXY_PORT="${PROXY_PORT:-8895}"
 HTTPS_MOCK_PORT="${HTTPS_MOCK_PORT:-3443}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 export ADMIN_PATH_PREFIX
+export ADMIN_CLIENT_START_UNSAFE_SSL="${ADMIN_CLIENT_START_UNSAFE_SSL:-0}"
+HTTPS_MOCK_PID=""
+HTTPS_MOCK_STARTED="0"
+UNSAFE_SSL_RULE_NAME="unsafe-ssl-e2e"
+UNSAFE_SSL_TEST_URL="http://unsafe-ssl-fixture.test/echo"
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -56,21 +61,77 @@ check_proxy_available() {
 
 check_mock_server_available() {
     if ! nc -z 127.0.0.1 "$HTTPS_MOCK_PORT" 2>/dev/null; then
-        log_fail "HTTPS mock server not available at port $HTTPS_MOCK_PORT"
         return 1
     fi
     return 0
 }
 
-request_via_proxy_https() {
+start_https_mock_server() {
+    if check_mock_server_available; then
+        log_info "Using existing HTTPS mock server on port $HTTPS_MOCK_PORT"
+        return 0
+    fi
+
+    local mock_log_dir="${SERVER_LOG_DIR:-${BIFROST_DATA_DIR:-/tmp}}"
+    mkdir -p "$mock_log_dir"
+    local mock_log="$mock_log_dir/unsafe_ssl_https_mock.log"
+    local mock_script="$SCRIPT_DIR/../mock_servers/https_echo_server.py"
+
+    log_info "Starting HTTPS mock server on 127.0.0.1:$HTTPS_MOCK_PORT..."
+    python3 "$mock_script" "$HTTPS_MOCK_PORT" >"$mock_log" 2>&1 &
+    HTTPS_MOCK_PID=$!
+    HTTPS_MOCK_STARTED="1"
+
+    for _ in {1..50}; do
+        if ! kill -0 "$HTTPS_MOCK_PID" 2>/dev/null; then
+            log_fail "HTTPS mock server exited early"
+            tail -80 "$mock_log" 2>/dev/null || true
+            return 1
+        fi
+        if check_mock_server_available; then
+            log_info "HTTPS mock server ready (PID: $HTTPS_MOCK_PID)"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    log_fail "HTTPS mock server not available at port $HTTPS_MOCK_PORT"
+    tail -80 "$mock_log" 2>/dev/null || true
+    return 1
+}
+
+stop_https_mock_server() {
+    if [[ "$HTTPS_MOCK_STARTED" == "1" && -n "$HTTPS_MOCK_PID" ]]; then
+        kill "$HTTPS_MOCK_PID" 2>/dev/null || true
+        wait "$HTTPS_MOCK_PID" 2>/dev/null || true
+    fi
+}
+
+setup_forward_rule() {
+    local rule_content="unsafe-ssl-fixture.test https://127.0.0.1:${HTTPS_MOCK_PORT}"
+    delete_rule "$UNSAFE_SSL_RULE_NAME" >/dev/null 2>&1 || true
+    local response
+    response=$(create_rule "$UNSAFE_SSL_RULE_NAME" "$rule_content" "true")
+    if ! echo "$response" | jq -e --arg name "$UNSAFE_SSL_RULE_NAME" '.success == true or .name == $name' >/dev/null 2>&1; then
+        log_fail "Failed to create unsafe_ssl forwarding rule: $response"
+        return 1
+    fi
+    log_info "Created unsafe_ssl forwarding rule to https://127.0.0.1:${HTTPS_MOCK_PORT}"
+}
+
+request_via_proxy() {
     local url="$1"
     local timeout="${2:-10}"
     
-    curl -s -k --connect-timeout "$timeout" \
+    curl -s --connect-timeout "$timeout" \
          --max-time "$timeout" \
          --proxy "http://${ADMIN_HOST}:${PROXY_PORT}" \
          --write-out "\n%{http_code}" \
          "$url" 2>&1
+}
+
+strip_trailing_status_line() {
+    sed '$d'
 }
 
 test_initial_state() {
@@ -104,9 +165,9 @@ test_unsafe_ssl_false_should_fail() {
         return 1
     fi
     
-    log_debug "Requesting HTTPS mock server via proxy (should fail due to cert validation)..."
+    log_debug "Requesting forwarded HTTPS mock server via proxy (should fail due to cert validation)..."
     local result
-    result=$(request_via_proxy_https "https://127.0.0.1:${HTTPS_MOCK_PORT}/echo" 10)
+    result=$(request_via_proxy "$UNSAFE_SSL_TEST_URL" 10)
     
     log_debug "Request result: $result"
     
@@ -115,7 +176,7 @@ test_unsafe_ssl_false_should_fail() {
     
     if [[ "$http_code" == "200" ]]; then
         log_fail "Request succeeded but should have failed (unsafe_ssl=false)"
-        log_debug "Response body: $(echo "$result" | head -n -1)"
+        log_debug "Response body: $(echo "$result" | strip_trailing_status_line)"
         return 1
     fi
     
@@ -150,9 +211,9 @@ test_unsafe_ssl_true_should_succeed() {
         return 1
     fi
     
-    log_debug "Requesting HTTPS mock server via proxy (should succeed with unsafe_ssl=true)..."
+    log_debug "Requesting forwarded HTTPS mock server via proxy (should succeed with unsafe_ssl=true)..."
     local result
-    result=$(request_via_proxy_https "https://127.0.0.1:${HTTPS_MOCK_PORT}/echo" 10)
+    result=$(request_via_proxy "$UNSAFE_SSL_TEST_URL" 10)
     
     log_debug "Request result: $result"
     
@@ -162,7 +223,7 @@ test_unsafe_ssl_true_should_succeed() {
     if [[ "$http_code" == "200" ]]; then
         log_debug "Request succeeded as expected"
         local body
-        body=$(echo "$result" | head -n -1)
+        body=$(echo "$result" | strip_trailing_status_line)
         if echo "$body" | grep -q "method\|path\|headers"; then
             log_debug "Got valid echo response from mock server"
             return 0
@@ -170,7 +231,7 @@ test_unsafe_ssl_true_should_succeed() {
         return 0
     else
         log_fail "Request failed with HTTP code: $http_code (expected 200)"
-        log_debug "Response: $(echo "$result" | head -n -1)"
+        log_debug "Response: $(echo "$result" | strip_trailing_status_line)"
         return 1
     fi
 }
@@ -191,9 +252,9 @@ test_switch_back_to_false() {
         return 1
     fi
     
-    log_debug "Requesting HTTPS mock server via proxy (should fail again)..."
+    log_debug "Requesting forwarded HTTPS mock server via proxy (should fail again)..."
     local result
-    result=$(request_via_proxy_https "https://127.0.0.1:${HTTPS_MOCK_PORT}/echo" 10)
+    result=$(request_via_proxy "$UNSAFE_SSL_TEST_URL" 10)
     
     local http_code
     http_code=$(echo "$result" | tail -1)
@@ -240,6 +301,15 @@ test_config_persistence_in_session() {
 cleanup() {
     log_info "Cleaning up: restoring unsafe_ssl to false..."
     set_unsafe_ssl "false" > /dev/null 2>&1
+    delete_rule "$UNSAFE_SSL_RULE_NAME" >/dev/null 2>&1 || true
+    stop_https_mock_server
+}
+
+cleanup_and_exit() {
+    local status=$?
+    cleanup
+    admin_cleanup_bifrost
+    exit "$status"
 }
 
 main() {
@@ -253,7 +323,7 @@ main() {
     echo "  HTTPS Mock: https://127.0.0.1:${HTTPS_MOCK_PORT}"
     echo ""
     
-    trap 'cleanup; admin_cleanup_bifrost' EXIT
+    trap cleanup_and_exit EXIT
     
     admin_ensure_bifrost || { echo "ERROR: Could not start Bifrost"; exit 1; }
 
@@ -263,23 +333,15 @@ main() {
         exit 1
     fi
     
-    if ! check_mock_server_available; then
-        echo ""
-        echo "WARNING: HTTPS mock server is not available at port $HTTPS_MOCK_PORT"
-        echo "Some tests will be skipped."
-        echo ""
-    fi
+    start_https_mock_server || { echo "ERROR: Could not start HTTPS mock server"; exit 1; }
+    setup_forward_rule || { echo "ERROR: Could not create forwarding rule"; exit 1; }
     
     run_test "Initial state check" test_initial_state
     run_test "Config persistence in session" test_config_persistence_in_session
     
-    if check_mock_server_available; then
-        run_test "unsafe_ssl=false should reject self-signed cert" test_unsafe_ssl_false_should_fail
-        run_test "unsafe_ssl=true should accept self-signed cert" test_unsafe_ssl_true_should_succeed
-        run_test "Switch back to false should reject again" test_switch_back_to_false
-    else
-        log_info "Skipping mock server tests (mock server not available)"
-    fi
+    run_test "unsafe_ssl=false should reject self-signed cert" test_unsafe_ssl_false_should_fail
+    run_test "unsafe_ssl=true should accept self-signed cert" test_unsafe_ssl_true_should_succeed
+    run_test "Switch back to false should reject again" test_switch_back_to_false
     
     echo ""
     echo "=========================================="
