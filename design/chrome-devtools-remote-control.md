@@ -268,7 +268,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 Elements tree 首个可见节点为 `<html>`，无空文本 DOM 行，超长属性/文本 ≤120 字符预览
 - 验证 Elements 点击节点后目标页出现 highlight overlay，并展示节点名称、尺寸、color、font、padding、margin
 - 验证 Elements 元素拾取模式可以在目标页 hover/click 选中节点，WebUI 自动切换并选中对应 DOM row
-- 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息
+- 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息；搜索后必须点击匹配业务 URL 的具体虚拟列表行，禁止点击当前首行，避免 CI 中旧行或虚拟列表复用导致 fallback 详情断言概率性落到其它请求
 - 验证 WebUI DevTools 详情刷新按钮仅通过 session WS 请求当前 tab snapshot，不触发目标页 reload 或重新发起业务请求
 - 验证 HTTPS/TLS 全截包浏览器代理场景下，Network 中 fetch/XHR 与标签资源请求都能匹配到完整 Traffic 记录
 - 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后

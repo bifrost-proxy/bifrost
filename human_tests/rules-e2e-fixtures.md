@@ -67,6 +67,32 @@
 - runner 启动和停止共享 mock server 正常完成，不残留测试端口。
 - `replay/forward_localhost_api.txt` 的直接转发能力由 TC-REF-01 覆盖，避免因分类跳过导致误判。
 
+### TC-REF-03：Windows 共享 mock outage 后重试全部失败 rules 套件
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/run_all_tests_parallel.sh
+   ```
+2. 执行缩小分类的 rules runner，显式开启失败重试并限制本地并行度：
+   ```bash
+   BIFROST_E2E_RULE_JOBS=2 \
+   BIFROST_E2E_RULE_JOBS_CAP=2 \
+   BIFROST_E2E_RETRY_FAILED_ONCE=1 \
+   BIFROST_E2E_MAX_RETRY_SUITES=6 \
+   BIFROST_E2E_RETRY_BUDGET_SECS=180 \
+   bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once
+   ```
+3. 在 Windows GitHub Actions rules job 中触发同一 runner。
+4. 若失败日志全部指向共享 mock 掉线或连接拒绝，检查 runner 输出是否包含 `失败套件均指向共享 Mock 服务器掉线`，并确认不再因 `BIFROST_E2E_MAX_RETRY_SUITES=6` 只重试前 6 个。
+
+**预期结果**：
+- 本地脚本语法检查通过。
+- 本地缩小分类 runner 能正常启动共享 mock servers，使用临时数据目录和非 9900 动态端口，代理启动仍包含 `--no-system-proxy`。
+- Windows rules job 中 `JOBS>1` 时会降级为串行，降低共享 mock server 被并发套件打爆的概率。
+- 如果 Windows rules job 的失败全是共享 mock outage，runner 会重启 mock servers，并串行重试全部失败套件，重试预算不少于 900 秒。
+- 普通真实规则失败仍受 `BIFROST_E2E_MAX_RETRY_SUITES` 限制，避免掩盖大面积功能回归。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -78,3 +104,7 @@
    lsof -nP -iTCP:18880 -sTCP:LISTEN || true
    lsof -nP -iTCP:18881 -sTCP:LISTEN || true
    ```
+
+## 执行记录
+
+- 2026-05-01：通过。补充并执行 TC-REF-03，本地先执行 `bash -n e2e-tests/run_all_tests_parallel.sh`，随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 49368、HTTPS 49369、WS 49371、WSS 49372、SSE 49373、Proxy 49374），选择代理起始端口 11402，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 串行 cap 和共享 mock outage 全量重试继续由 GitHub Actions Windows rules job 验证。

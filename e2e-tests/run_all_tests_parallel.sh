@@ -592,6 +592,34 @@ collect_failed_result_indices() {
     done
 }
 
+result_failure_mentions_mock_outage() {
+    local idx="$1"
+    local log_file="${RESULTS_DIR}/test_${idx}.log"
+    [[ -f "$log_file" ]] || return 1
+
+    grep -Eq \
+        "Mock 服务器未运行|target machine actively refused|REQUEST_CONNECT_REFUSED|Connection refused|os error 10061" \
+        "$log_file" 2>/dev/null
+}
+
+count_mock_outage_failures() {
+    local count=0
+    local result_file idx status
+    for result_file in "${RESULTS_DIR}"/result_*.txt; do
+        [[ -f "$result_file" ]] || continue
+
+        status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        [[ "$status" == "failed" ]] || continue
+
+        idx="${result_file##*result_}"
+        idx="${idx%.txt}"
+        if result_failure_mentions_mock_outage "$idx"; then
+            count=$((count + 1))
+        fi
+    done
+    printf '%s\n' "$count"
+}
+
 ensure_mock_servers_alive() {
     local need_restart=false
     if ! is_http_echo_ready; then
@@ -651,8 +679,19 @@ retry_failed_suites_once() {
     local retried=0
     local skipped=0
 
+    local mock_outage_failures
+    mock_outage_failures="$(count_mock_outage_failures)"
+    local retry_all_mock_outage=false
+    if [[ "$mock_outage_failures" -gt 0 && "$mock_outage_failures" -eq "${#failed_indices[@]}" ]]; then
+        retry_all_mock_outage=true
+        if [[ "$retry_budget" -lt 900 ]]; then
+            retry_budget=900
+        fi
+        warn "失败套件均指向共享 Mock 服务器掉线，扩大串行重试范围并延长预算到 ${retry_budget}s"
+    fi
+
     local max_retry_suites="${BIFROST_E2E_MAX_RETRY_SUITES:-10}"
-    if [[ ${#failed_indices[@]} -gt $max_retry_suites ]]; then
+    if [[ "$retry_all_mock_outage" != "true" && ${#failed_indices[@]} -gt $max_retry_suites ]]; then
         warn "失败套件过多 (${#failed_indices[@]} > ${max_retry_suites})，仅重试前 ${max_retry_suites} 个"
         failed_indices=("${failed_indices[@]:0:$max_retry_suites}")
     fi
@@ -854,6 +893,10 @@ main() {
     if [[ -n "${jobs_cap:-}" && "$jobs_cap" -gt 0 && "$JOBS" -gt "$jobs_cap" ]]; then
         warn "并行度过高 (jobs=$JOBS)，为稳定性自动降级到 ${jobs_cap}。可通过 BIFROST_E2E_RULE_JOBS_CAP 或 --jobs 调整。"
         JOBS="$jobs_cap"
+    fi
+    if is_windows && [[ "$JOBS" -gt 1 ]]; then
+        warn "Windows rules E2E 使用共享 mock servers，强制串行执行以避免并发夹具掉线"
+        JOBS=1
     fi
 
     header "Bifrost 并行端到端测试运行器"

@@ -46,3 +46,23 @@
 ### 校验要求
 - 规则 E2E 需优先于 rust-project-validate 执行。
 - 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
+
+## 2026-05-01：Windows 并行 rules 共享 mock 掉线恢复
+
+### 背景
+- Windows rules CI 使用共享 mock servers 承载 HTTP/HTTPS/WS/SSE/Proxy 夹具；当共享 HTTP echo 进程在并行套件中途掉线时，大量套件会同时报 `Mock 服务器未运行`、`REQUEST_CONNECT_REFUSED` 或 `os error 10061`。
+- 旧 runner 会把这类基础设施掉线当作普通测试失败处理，并受 `BIFROST_E2E_MAX_RETRY_SUITES` 限制只重试前若干套件。CI 中出现 59 个套件失败、仅前 6 个重试通过，其余仍保持失败，导致概率性红灯。
+
+### 实现逻辑
+- `run_all_tests_parallel.sh` 在 Windows 平台强制 rules E2E 串行执行，避免多 worker 同时共享同一组 mock servers 时放大 fixture 掉线风险。
+- 重试前扫描失败套件日志；若所有失败都指向共享 mock 掉线或连接拒绝，则判定为基础设施 outage，跳过普通失败数量上限，重启 mock servers 后串行重试全部失败套件。
+- 基础设施 outage 重试预算至少提升到 900 秒，避免大量套件在共享 mock 恢复后因默认预算过短被截断。
+
+### 测试方案
+- 脚本语法检查：`bash -n e2e-tests/run_all_tests_parallel.sh`。
+- E2E 测试：执行缩小分类的 rules runner，验证共享 mock servers 启停、并行参数解析、失败重试入口不回归。
+- 真实场景测试：更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows 共享 mock outage 回归用例；本地执行可用的 runner 场景，Windows 串行 cap 与全量 outage 重试由 GitHub Actions Windows rules job 继续验证。
+
+### 校验要求
+- rules E2E 需优先于 rust-project-validate 执行。
+- 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
