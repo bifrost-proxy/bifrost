@@ -61,6 +61,7 @@
 - 基础设施 outage 重试预算至少提升到 900 秒，避免大量套件在共享 mock 恢复后因默认预算过短被截断。
 - 失败统计优先读取 runner 实际生成的 `log_<idx>.txt`，同时保留历史 `test_<idx>.log` fallback，避免日志文件名漂移再次让 mock outage 识别失效。
 - `scripts/run_all_e2e.sh::run_and_capture` 在 Windows 下直接后台运行真实命令并把输出写入日志文件，再用独立子 shell 包裹 `tail -f | sed` 流式打印日志。这样 `command_pid` 指向真实 suite runner，watchdog 可使用 `kill_process_tree` 终止整个命令树；命令结束后也会对日志流子 shell 调用 `kill_process_tree`，避免 `tail -f` 残留导致 wrapper 自身挂住。
+- Windows rules job 的 GitHub Actions timeout 提升到 90 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 提升到 4800 秒。该配置只作用于 Windows rules 矩阵，目的是给共享 mock outage 后的全量串行重试留出完整预算，避免 suite watchdog 在重试尚未收敛时提前终止。
 
 ### 测试方案
 - 脚本语法检查：`bash -n e2e-tests/run_all_tests_parallel.sh`。
@@ -68,7 +69,8 @@
 - E2E 测试：执行缩小分类的 rules runner，验证共享 mock servers 启停、并行参数解析、失败重试入口不回归。
 - 日志路径回归：检查 `result_failure_mentions_mock_outage` 会读取 `log_<idx>.txt`，确保 `count_mock_outage_failures` 能正确识别 suite 日志中的 mock outage。
 - Windows 超时回归：检查 `run_and_capture` 的 Windows 分支后台运行真实命令后再 `tail -f` 日志，watchdog 对真实命令 PID 调用 `kill_process_tree`。
-- 真实场景测试：更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows 共享 mock outage、日志路径回归和 suite timeout 诊断用例；本地执行可用的 runner 场景，Windows 串行 cap、全量 outage 重试与超时 artifact 由 GitHub Actions Windows rules job 继续验证。
+- Windows 预算回归：检查 `.github/workflows/ci.yml` 中 Windows rules job 的 timeout 与 `BIFROST_E2E_SUITE_TIMEOUT` 足够覆盖全量 outage 重试。
+- 真实场景测试：更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows 共享 mock outage、日志路径回归、suite timeout 诊断和 CI 预算用例；本地执行可用的 runner 场景，Windows 串行 cap、全量 outage 重试与超时 artifact 由 GitHub Actions Windows rules job 继续验证。
 
 ### 校验要求
 - rules E2E 需优先于 rust-project-validate 执行。

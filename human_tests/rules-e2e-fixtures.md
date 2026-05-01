@@ -143,6 +143,22 @@
 - 日志流由独立子 shell 包裹 `tail -f "$log_file" | sed ...` 提供，命令结束后会对日志流子 shell 调用 `kill_process_tree`，不留下 `tail -f` 残留进程，也不影响 suite 结果收集。
 - 如果 Windows rules 后续仍失败，GitHub 会上传 `.e2e-reports/` 与 `.bifrost-e2e-ci/` artifact，避免再次出现无日志红灯。
 
+### TC-REF-06：Windows rules 全量 outage 重试预算不被 job timeout 截断
+
+**操作步骤**：
+1. 检查 Windows rules job timeout：
+   ```bash
+   rg -n 'e2e-windows-rules|timeout-minutes: 90|BIFROST_E2E_SUITE_TIMEOUT: "4800"|BIFROST_E2E_RETRY_BUDGET_SECS: "180"' .github/workflows/ci.yml
+   ```
+2. 在 GitHub Actions Windows rules job 中触发 rules E2E。
+3. 若 Windows x86 rules 进入共享 mock outage 后的全量串行重试路径，观察 job 不应在约 50 分钟处被 suite watchdog 或 GitHub job timeout 截断。
+
+**预期结果**：
+- Windows rules job 的 `timeout-minutes` 为 `90`，只影响 `e2e-windows-rules` 矩阵。
+- Windows rules job 的 `BIFROST_E2E_SUITE_TIMEOUT` 为 `4800` 秒，大于共享 mock outage 全量重试路径的最长预期耗时。
+- `BIFROST_E2E_RETRY_BUDGET_SECS` 仍保持 `180`，普通失败不会因为 job timeout 提升而被无限重试。
+- Windows x86 和 aarch64 rules job 都应完成为 success；若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -161,3 +177,4 @@
 - 2026-05-01：通过。补充并执行 TC-REF-04，本地执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'log_\$\{idx\}\.txt|test_\$\{idx\}\.log|result_failure_mentions_mock_outage' e2e-tests/run_all_tests_parallel.sh` 确认 outage 识别优先读取 `log_${idx}.txt`，并保留 `test_${idx}.log` fallback；随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 60377、HTTPS 60378、WS 60379、WSS 60380、SSE 60381、Proxy 60382），选择代理起始端口 11362，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 全量 mock outage 失败计数由后续 GitHub Actions Windows rules job 验证。
 - 2026-05-01：通过。补充并执行 TC-REF-05，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `rg -n 'is_windows|tail -n \+1 -f|command_pid=\$!|kill_process_tree "\$command_pid"' scripts/run_all_e2e.sh` 和 `sed -n '392,420p' scripts/run_all_e2e.sh`，确认 Windows 分支先后台运行真实命令并记录 `command_pid=$!`，再用子 shell 包裹 `tail -n +1 -f "$log_file"` 流式打印日志，watchdog 对真实 `command_pid` 调用 `kill_process_tree`，命令结束后会对日志流子 shell调用 `kill_process_tree` 主动停止日志流。GitHub Actions Windows rules timeout artifact 行为由后续 CI 复跑验证。
 - 2026-05-01：通过。TC-REF-05 二次执行，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `sed -n '396,482p' scripts/run_all_e2e.sh` 和 `rg -n 'tail -n \+1 -f|kill_process_tree "\$stream_pid"|kill_process_tree "\$command_pid"|command_pid=\$!' scripts/run_all_e2e.sh`，确认日志流已改为子 shell 后台任务，命令结束后对 `stream_pid` 调用 `kill_process_tree`，避免 `tail -f` 残留导致 Windows runner/rules wrapper 不退出。
+- 2026-05-01：通过。补充并执行 TC-REF-06，本地执行 `rg -n 'e2e-windows-rules|timeout-minutes: 90|BIFROST_E2E_SUITE_TIMEOUT: "4800"|BIFROST_E2E_RETRY_BUDGET_SECS: "180"' .github/workflows/ci.yml` 与 `sed -n '860,890p' .github/workflows/ci.yml`，确认 Windows rules job timeout 为 90 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 为 4800 秒，普通 retry budget 仍为 180 秒。Windows x86/aarch64 rules 完整完成情况由后续 CI 复跑验证。
