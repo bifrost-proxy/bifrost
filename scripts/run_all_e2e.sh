@@ -394,9 +394,13 @@ run_and_capture() {
   echo "Log file: $log_file"
 
   if is_windows; then
-    "$@" 2>&1 | tee "$log_file" | sed "s/^/[$name] /" &
+    : >"$log_file"
+    "$@" >"$log_file" 2>&1 &
     command_pid=$!
     log_info "${name} started with pid ${command_pid}"
+
+    tail -n +1 -f "$log_file" | sed "s/^/[$name] /" &
+    stream_pid=$!
 
     heartbeat_while_running "$name" "$command_pid" "$log_file" "$start_ts" &
     heartbeat_pid=$!
@@ -405,8 +409,10 @@ run_and_capture() {
       sleep "$suite_timeout"
       if kill -0 "$command_pid" 2>/dev/null; then
         echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
+        kill_process_tree "$command_pid"
         kill -TERM "$command_pid" 2>/dev/null || true
         sleep 5
+        kill_process_tree "$command_pid"
         kill -9 "$command_pid" 2>/dev/null || true
         kill_all_bifrost
       fi
@@ -467,6 +473,10 @@ run_and_capture() {
 
   kill "$watchdog_pid" 2>/dev/null || true
   wait "$watchdog_pid" 2>/dev/null || true
+
+  if is_windows && [[ -n "$stream_pid" ]]; then
+    kill "$stream_pid" 2>/dev/null || true
+  fi
 
   wait "$stream_pid" 2>/dev/null || true
   rm -f "$pipe_path"
