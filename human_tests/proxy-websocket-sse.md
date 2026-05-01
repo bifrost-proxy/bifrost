@@ -192,6 +192,37 @@
 
 ---
 
+### TC-PWS-08：Frames Admin API SSE 前置流量失败不得假通过
+
+**前置条件**：
+- 已存在可执行的 `target/release/bifrost` 或先执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost`。
+- 测试必须使用临时数据目录和非正式代理端口，不得使用 `9900`。
+
+**操作步骤**：
+1. 使用隔离端口执行 Frames Admin API shell E2E：
+   ```bash
+   TMP_DIR="$(mktemp -d /tmp/bifrost-frames-human.XXXXXX)"
+   PROXY_PORT=18890 WS_PORT=18891 SSE_PORT=18892 BIFROST_DATA_DIR="$TMP_DIR" bash e2e-tests/tests/test_frames_admin_api.sh
+   ```
+2. 检查脚本输出的前置流量生成阶段。
+3. 测试结束后清理临时目录：
+   ```bash
+   rm -rf "$TMP_DIR"
+   ```
+
+**预期结果**：
+- WebSocket traffic generated
+- SSE traffic generated
+- Admin API Test Summary 中 `Tests Failed: 0`
+- 如果 SSE fixture 已启动但代理请求持续失败，脚本必须退出失败，不允许把 SSE 相关测试标记为跳过后整体通过
+
+**本轮执行记录（2026-05-01）**：
+- 使用临时数据目录 `/tmp/bifrost-frames-human.Q60DBr`、测试代理端口 `55581`、WebSocket fixture 端口 `55582`、SSE fixture 端口 `55583` 执行本用例；未使用正式端口 `9900`。
+- 脚本输出 `WebSocket traffic generated` 与 `SSE traffic generated`，确认 SSE shell function 调用路径已真实执行。
+- 12 个 Admin API 断言全部通过，最终摘要为 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和本地测试服务：

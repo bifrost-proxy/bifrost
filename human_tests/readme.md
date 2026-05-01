@@ -90,8 +90,8 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 26 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、旧版 `^https://` path wildcard 兼容回归 |
-| [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 3 | SOCKS5 基本代理、DNS 解析、HTTPS 透传 |
-| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 7 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断 |
+| [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 4 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归 |
+| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 8 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 65 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏和上游 HTTP/2 body 断流 fallback 真实回归 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |

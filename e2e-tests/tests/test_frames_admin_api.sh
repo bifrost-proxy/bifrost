@@ -36,6 +36,7 @@ BIFROST_DATA_DIR=""
 BIFROST_LOG_FILE=""
 STARTED_BIFROST=0
 CREATED_DATA_DIR=0
+SSE_SERVER_STARTED=0
 SSE_TRAFFIC_OK=0
 
 TESTS_RUN=0
@@ -365,19 +366,22 @@ generate_sse_traffic() {
 
     local sse_ok=0
     local attempt
-    for attempt in 1 2 3; do
+    for attempt in $(seq 1 10); do
         local sse_output
-        sse_output=$(env NO_PROXY="" no_proxy="" SSE_PROXY="http://$PROXY_HOST:$PROXY_PORT" sse_fetch_all "$sse_url" "/sse?count=3" 10 2>&1)
+        sse_output=$(NO_PROXY="" no_proxy="" SSE_PROXY="http://$PROXY_HOST:$PROXY_PORT" sse_fetch_all "$sse_url" "/sse?count=3" 15 2>&1)
         local sse_exit=$?
         if [[ $sse_exit -eq 0 ]] && echo "$sse_output" | grep -q "data:" 2>/dev/null; then
             sse_ok=1
             break
         fi
         log_debug "SSE traffic attempt $attempt: exit=$sse_exit output_len=${#sse_output}"
-        sleep 0.5
+        sleep 1
     done
     if [[ "$sse_ok" -ne 1 ]]; then
-        log_fail "curl SSE request through proxy failed after 3 attempts"
+        log_fail "curl SSE request through proxy failed after 10 attempts"
+        if [[ "${DEBUG:-0}" == "1" && -n "${sse_output:-}" ]]; then
+            printf '%s\n' "$sse_output" | tail -20
+        fi
         return 1
     fi
 
@@ -813,7 +817,9 @@ main() {
         exit 1
     fi
 
-    if ! start_sse_server; then
+    if start_sse_server; then
+        SSE_SERVER_STARTED=1
+    else
         log_info "SSE server failed to start; SSE-dependent tests will be skipped"
     fi
 
@@ -822,8 +828,18 @@ main() {
         exit 1
     fi
 
-    generate_ws_traffic
-    generate_sse_traffic
+    if ! generate_ws_traffic; then
+        log_fail "Failed to generate required WebSocket traffic"
+        exit 1
+    fi
+    if [[ "$SSE_SERVER_STARTED" -eq 1 ]]; then
+        if ! generate_sse_traffic; then
+            log_fail "Failed to generate required SSE traffic"
+            exit 1
+        fi
+    else
+        log_warn "SSE server was not started; SSE-dependent tests will be skipped"
+    fi
     generate_http_traffic
 
     run_test "Traffic List API" test_traffic_list_api
