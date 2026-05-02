@@ -1,10 +1,35 @@
 use crate::model::{MemoryOp, SkillRecord, ToolBinding};
-use memory::{
-    DefaultMemoryRecaller, MemoryKind, MemoryRecaller, MemoryScope, MemorySearchQuery,
-    MemorySource, MemoryStore, NewMemoryRecord, RecallContext, SqliteMemoryStore,
-};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    Fact,
+    Preference,
+    Rule,
+    Skill,
+    TaskContext,
+    Other,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum MemoryScope {
+    Global,
+    User(String),
+    Project(String),
+    Session(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryFileEntry {
+    pub id: String,
+    pub path: String,
+    pub content: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -24,19 +49,19 @@ pub enum MemoryToolRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemoryToolResponse {
-    Read { records: Vec<memory::MemoryRecord> },
+    Read { records: Vec<MemoryFileEntry> },
     Write { id: String },
 }
 
 #[derive(Clone, Debug)]
 pub struct SkillToolBridge {
-    store_root: std::path::PathBuf,
+    memory_root: PathBuf,
 }
 
 impl SkillToolBridge {
-    pub fn new(store_root: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(memory_root: impl Into<PathBuf>) -> Self {
         Self {
-            store_root: store_root.into(),
+            memory_root: memory_root.into(),
         }
     }
 
@@ -61,25 +86,13 @@ impl SkillToolBridge {
         record: &SkillRecord,
         request: MemoryToolRequest,
     ) -> Result<MemoryToolResponse, String> {
-        let store = SqliteMemoryStore::open(&self.store_root)
-            .map_err(|error| format!("open memory store: {error}"))?;
+        ensure_layout(&self.memory_root)?;
         match request {
             MemoryToolRequest::Read { query, limit } => {
                 if !Self::memory_allowed(record, MemoryOp::Read) {
                     return Err("skill is not allowed to read memory".to_string());
                 }
-                let recaller = DefaultMemoryRecaller::new(&store);
-                let records = recaller
-                    .recall(RecallContext {
-                        user_id: None,
-                        project_path: current_project_path(),
-                        session_key: None,
-                        latest_user_message: query,
-                        history_tail_tokens: 0,
-                        max_items: limit.unwrap_or(8),
-                        max_chars: 4000,
-                    })
-                    .map_err(|error| format!("recall memory: {error}"))?;
+                let records = search_memory_files(&self.memory_root, &query, limit.unwrap_or(8))?;
                 Ok(MemoryToolResponse::Read { records })
             }
             MemoryToolRequest::Write {
@@ -91,45 +104,113 @@ impl SkillToolBridge {
                 if !Self::memory_allowed(record, MemoryOp::Write) {
                     return Err("skill is not allowed to write memory".to_string());
                 }
-                let mut tags = tags.unwrap_or_default();
-                tags.push(format!("source_skill={}@{}", record.name, record.version));
-                let inserted = store
-                    .insert(NewMemoryRecord {
-                        scope,
-                        kind,
-                        content,
-                        source: MemorySource::UserExplicit,
-                        tags,
-                        pinned: false,
-                        confidence: 1.0,
-                        expires_at: None,
-                    })
-                    .map_err(|error| format!("write memory: {error}"))?;
-                Ok(MemoryToolResponse::Write {
-                    id: inserted.id.to_string(),
-                })
+                let id = format!("skill-{}-{}", now_secs(), record.name);
+                let tags = tags.unwrap_or_default().join(",");
+                let line = format!(
+                    "\n- id: `{id}`\n  source_skill: `{}@{}`\n  kind: {:?}\n  scope: {:?}\n  tags: {tags}\n  content: {}\n",
+                    record.name,
+                    record.version,
+                    kind,
+                    scope,
+                    content.trim()
+                );
+                append_line(&self.memory_root.join("MEMORY.md"), &line)?;
+                append_line(
+                    &self.memory_root.join("memory_summary.md"),
+                    &format!("- {}\n", content.trim()),
+                )?;
+                Ok(MemoryToolResponse::Write { id })
             }
         }
     }
 
-    pub fn search_raw(
-        &self,
-        query: MemorySearchQuery,
-    ) -> Result<Vec<memory::MemoryRecord>, String> {
-        let store = SqliteMemoryStore::open(&self.store_root)
-            .map_err(|error| format!("open memory store: {error}"))?;
-        store
-            .search(query)
-            .map_err(|error| format!("search memory: {error}"))
+    pub fn search_raw(&self, query: &str, limit: usize) -> Result<Vec<MemoryFileEntry>, String> {
+        ensure_layout(&self.memory_root)?;
+        search_memory_files(&self.memory_root, query, limit)
     }
 }
 
-fn current_project_path() -> Option<String> {
-    std::env::current_dir()
-        .ok()
-        .as_deref()
-        .map(Path::display)
-        .map(|display| display.to_string())
+fn ensure_layout(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root.join("rollout_summaries"))
+        .map_err(|error| format!("create rollout_summaries: {error}"))?;
+    fs::create_dir_all(root.join("skills")).map_err(|error| format!("create skills: {error}"))?;
+    ensure_file(&root.join("MEMORY.md"), "# Memory\n\n")?;
+    ensure_file(&root.join("memory_summary.md"), "")?;
+    Ok(())
+}
+
+fn ensure_file(path: &Path, default_content: &str) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    fs::write(path, default_content).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn append_line(path: &Path, line: &str) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("open {}: {error}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| format!("append {}: {error}", path.display()))
+}
+
+/// Maximum memory file size we will load (8 MiB).
+const MAX_MEMORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn search_memory_files(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<MemoryFileEntry>, String> {
+    let query = query.trim().to_lowercase();
+    let mut entries = Vec::new();
+    for file_name in ["memory_summary.md", "MEMORY.md"] {
+        let path = root.join(file_name);
+        // Guard against OOM from unexpectedly large files.
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > MAX_MEMORY_FILE_BYTES {
+                return Err(format!(
+                    "memory file {} is too large ({} bytes, limit {} bytes)",
+                    path.display(),
+                    meta.len(),
+                    MAX_MEMORY_FILE_BYTES
+                ));
+            }
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if !query.is_empty() && !trimmed.to_lowercase().contains(&query) {
+                continue;
+            }
+            entries.push(MemoryFileEntry {
+                id: format!("{file_name}:{}", idx + 1),
+                path: file_name.to_string(),
+                content: trimmed.to_string(),
+            });
+            if entries.len() >= limit {
+                return Ok(entries);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -137,24 +218,63 @@ mod tests {
     use super::*;
     use crate::model::{SkillManifest, SkillScope};
 
-    #[test]
-    fn memory_permission_checks_requested_operation() {
-        let mut manifest = SkillManifest::minimal_inline("mem", "mem", SkillScope::Project);
-        manifest.allowed_tools = vec![ToolBinding::Memory { op: MemoryOp::Read }];
-        let record = SkillRecord {
+    fn record_with_tools(tools: Vec<ToolBinding>) -> SkillRecord {
+        let mut manifest = SkillManifest::minimal_inline("mem", "mem", SkillScope::Repo);
+        manifest.allowed_tools = tools;
+        SkillRecord {
             name: manifest.name.clone(),
             version: manifest.version.clone(),
             description: manifest.description.clone(),
-            scope: SkillScope::Project,
-            effective_scope: SkillScope::Project,
+            scope: SkillScope::Repo,
+            effective_scope: SkillScope::Repo,
             shadow_scopes: Vec::new(),
             enabled: true,
             path: ".".into(),
             skill_md_path: "SKILL.md".into(),
             checksum: String::new(),
             manifest,
-        };
+        }
+    }
+
+    #[test]
+    fn memory_permission_checks_requested_operation() {
+        let record = record_with_tools(vec![ToolBinding::Memory { op: MemoryOp::Read }]);
         assert!(SkillToolBridge::memory_allowed(&record, MemoryOp::Read));
         assert!(!SkillToolBridge::memory_allowed(&record, MemoryOp::Write));
+    }
+
+    #[test]
+    fn memory_bridge_reads_and_writes_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bridge = SkillToolBridge::new(temp.path());
+        let record = record_with_tools(vec![ToolBinding::Memory { op: MemoryOp::Both }]);
+        let written = bridge
+            .handle_memory(
+                &record,
+                MemoryToolRequest::Write {
+                    content: "Skill memory content".to_string(),
+                    kind: MemoryKind::Fact,
+                    scope: MemoryScope::Global,
+                    tags: None,
+                },
+            )
+            .expect("write");
+        assert!(matches!(written, MemoryToolResponse::Write { .. }));
+        let read = bridge
+            .handle_memory(
+                &record,
+                MemoryToolRequest::Read {
+                    query: "Skill memory".to_string(),
+                    limit: Some(4),
+                },
+            )
+            .expect("read");
+        let MemoryToolResponse::Read { records } = read else {
+            panic!("expected read response");
+        };
+        assert!(records
+            .iter()
+            .any(|entry| entry.content.contains("Skill memory")));
+        assert!(!temp.path().join("memories.sqlite").exists());
     }
 }

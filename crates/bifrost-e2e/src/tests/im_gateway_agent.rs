@@ -336,13 +336,26 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "im_gateway_agent_long_term_memory_remember_recall",
-            "Validate /remember persists across sessions and injects recalled memory into the next model prompt",
+            "Validate Codex-style file memories inject read-path instructions without SQLite",
             "admin",
             || async move {
                 let mock = ChatCompletionMock::start().await?;
                 let temp_dir = tempfile::tempdir()
                     .map_err(|e| format!("failed to create temp dir: {e}"))?;
                 let _agent_home_guard = EnvVarGuard::set("BIFROST_AGENT_HOME", temp_dir.path());
+                let memory_root = temp_dir.path().join("memory");
+                std::fs::create_dir_all(&memory_root)
+                    .map_err(|e| format!("failed to create memory root: {e}"))?;
+                std::fs::write(
+                    memory_root.join("memory_summary.md"),
+                    "Bifrost should use Codex-style on-demand memory loading.",
+                )
+                .map_err(|e| format!("failed to write memory summary: {e}"))?;
+                std::fs::write(
+                    memory_root.join("MEMORY.md"),
+                    "# Memory\n\n- Codex-style memory evidence lives here.\n",
+                )
+                .map_err(|e| format!("failed to write MEMORY.md: {e}"))?;
 
                 let mut config = AgentConfig {
                     model: Some("mock-model".to_string()),
@@ -361,6 +374,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
                         env_key: None,
+                        api_key: None,
                         http_headers: Some(HashMap::from([(
                             "Authorization".to_string(),
                             "Bearer test".to_string(),
@@ -374,30 +388,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
                 let client = bifrost_agent::AgentClient::new();
                 let tools = ToolRegistry::new();
-                let mut first_session = AgentSession::new("session-a");
-                first_session.user_id = Some("user-memory-e2e".to_string());
-                let remembered = run_turn(
-                    &client,
-                    &config,
-                    &mut first_session,
-                    &tools,
-                    "/remember 用户偏好所有 Bifrost 长期记忆回答都使用中文",
-                    None,
-                )
-                .await
-                .map_err(|e| format!("remember command failed: {e}"))?;
-                if !remembered.response.contains("已记住长期记忆") {
-                    return Err(format!("unexpected remember response: {}", remembered.response));
-                }
-
-                let mut second_session = AgentSession::new("session-b");
-                second_session.user_id = Some("user-memory-e2e".to_string());
+                let mut second_session = AgentSession::new("session-file-memory");
                 let result = run_turn(
                     &client,
                     &config,
                     &mut second_session,
                     &tools,
-                    "下一轮应该使用什么长期偏好？",
+                    "需要时应该如何读取长期记忆？",
                     None,
                 )
                 .await
@@ -419,13 +416,153 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .get("content")
                         .and_then(|value| value.as_str())
                         .map(|content| {
-                            content.contains("# Long-term memories (per user)")
-                                && content.contains("所有 Bifrost 长期记忆回答都使用中文")
+                            content.contains("## Memory")
+                                && content.contains("memory_summary.md (already provided below; do NOT open again)")
+                                && content.contains("MEMORY.md (searchable registry; primary file to query)")
+                                && content.contains("Bifrost should use Codex-style on-demand memory loading.")
+                                && content.contains("<oai-mem-citation>")
                         })
                         .unwrap_or(false)
                 });
                 if !injected {
-                    return Err(format!("memory system message was not injected: {messages:?}"));
+                    return Err(format!("memory read-path instructions were not injected: {messages:?}"));
+                }
+                if memory_root.join("memories.sqlite").exists() {
+                    return Err("file-backed memory path created memories.sqlite".to_string());
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "im_gateway_agent_auto_memory_new_session_consumes",
+            "Validate generated file memory is loaded and consumed by a later fresh session",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let temp_dir = tempfile::tempdir()
+                    .map_err(|e| format!("failed to create temp dir: {e}"))?;
+                let _agent_home_guard = EnvVarGuard::set("BIFROST_AGENT_HOME", temp_dir.path());
+                let memory_root = temp_dir.path().join("memory");
+
+                let mut config = AgentConfig {
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
+                    memories: Some(bifrost_agent::config::MemoriesConfig {
+                        use_memories: Some(true),
+                        generate_memories: Some(true),
+                        ..Default::default()
+                    }),
+                    ..AgentConfig::default()
+                };
+                config.model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock.url()),
+                        env_key: None,
+                        api_key: None,
+                        http_headers: Some(HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer test".to_string(),
+                        )])),
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+
+                let client = bifrost_agent::AgentClient::new();
+                let tools = ToolRegistry::new();
+                let mut first_session = AgentSession::new("auto-memory-source");
+                let first = run_turn(
+                    &client,
+                    &config,
+                    &mut first_session,
+                    &tools,
+                    "请记住：我的 Bifrost 项目代号是 MEM-AUTO-42。",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("source turn failed: {e}"))?;
+                if first.response.is_empty() {
+                    return Err("expected source turn response".to_string());
+                }
+
+                let summary = std::fs::read_to_string(memory_root.join("memory_summary.md"))
+                    .map_err(|e| format!("read generated memory_summary.md: {e}"))?;
+                let memory = std::fs::read_to_string(memory_root.join("MEMORY.md"))
+                    .map_err(|e| format!("read generated MEMORY.md: {e}"))?;
+                let raw = std::fs::read_to_string(memory_root.join("raw_memories.md"))
+                    .map_err(|e| format!("read generated raw_memories.md: {e}"))?;
+                let rollout_count = std::fs::read_dir(memory_root.join("rollout_summaries"))
+                    .map_err(|e| format!("read rollout_summaries: {e}"))?
+                    .filter_map(Result::ok)
+                    .count();
+                if !summary.contains("MEM-AUTO-42")
+                    || !memory.contains("MEM-AUTO-42")
+                    || !raw.contains("MEM-AUTO-42")
+                    || rollout_count == 0
+                {
+                    return Err(format!(
+                        "auto memory was not persisted to Codex files; summary={summary:?}; memory={memory:?}; raw={raw:?}; rollout_count={rollout_count}"
+                    ));
+                }
+                if memory_root.join("memories.sqlite").exists() {
+                    return Err("auto memory path created memories.sqlite".to_string());
+                }
+
+                let recall_config = AgentConfig {
+                    memories: Some(bifrost_agent::config::MemoriesConfig {
+                        use_memories: Some(true),
+                        generate_memories: Some(false),
+                        ..Default::default()
+                    }),
+                    ..config.clone()
+                };
+                let mut second_session = AgentSession::new("auto-memory-consumer");
+                let second = run_turn(
+                    &client,
+                    &recall_config,
+                    &mut second_session,
+                    &tools,
+                    "这是新的对话。请根据长期记忆回答我的 Bifrost 项目代号。",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("consumer turn failed: {e}"))?;
+                if !second.response.contains("MEM-AUTO-42") {
+                    return Err(format!(
+                        "new session did not consume auto memory; response={:?}",
+                        second.response
+                    ));
+                }
+
+                let requests = mock.requests.lock();
+                let consumer_request = requests
+                    .last()
+                    .ok_or_else(|| "mock did not receive consumer request".to_string())?;
+                let consumer_messages = consumer_request
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| "consumer request missing messages".to_string())?;
+                let loaded = consumer_messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(|value| value.as_str())
+                        .map(|content| {
+                            content.contains("## Memory")
+                                && content.contains("MEM-AUTO-42")
+                                && content.contains("MEMORY.md (searchable registry; primary file to query)")
+                        })
+                        .unwrap_or(false)
+                });
+                if !loaded {
+                    return Err(format!(
+                        "new session request did not include generated memory instructions: {consumer_messages:?}"
+                    ));
                 }
 
                 Ok(())
@@ -454,6 +591,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
                         env_key: None,
+                        api_key: None,
                         http_headers: Some(HashMap::from([(
                             "Authorization".to_string(),
                             "Bearer test".to_string(),
@@ -590,6 +728,20 @@ impl ChatCompletionMock {
                                 );
                             }
 
+                            let is_memory_extract = request_messages_contain(
+                                &body,
+                                "You extract durable memories from a Bifrost Agent conversation",
+                            );
+                            let is_memory_consolidation = request_messages_contain(
+                                &body,
+                                "Bifrost memory consolidation agent",
+                            );
+                            let consumes_auto_memory = request_messages_contain(&body, "## Memory")
+                                && request_messages_contain(&body, "MEM-AUTO-42")
+                                && request_messages_contain(
+                                    &body,
+                                    "新的对话。请根据长期记忆回答我的 Bifrost 项目代号",
+                                );
                             let has_tools = body
                                 .get("tools")
                                 .and_then(|value| value.as_array())
@@ -601,8 +753,26 @@ impl ChatCompletionMock {
                                 .and_then(|messages| messages.last())
                                 .and_then(|message| message.get("role"))
                                 .and_then(|role| role.as_str());
-                            let should_call_tool = has_tools && last_role != Some("tool");
-                            let message = if should_call_tool {
+                            let should_call_tool = has_tools
+                                && last_role != Some("tool")
+                                && !is_memory_extract
+                                && !is_memory_consolidation;
+                            let message = if is_memory_extract {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "{\"memories\":[\"User's Bifrost project code is MEM-AUTO-42.\"]}"
+                                })
+                            } else if is_memory_consolidation {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "{\"memory_summary\":\"- User's Bifrost project code is MEM-AUTO-42.\",\"memory\":\"# Memory\\n\\n- User's Bifrost project code is MEM-AUTO-42.\\n  source: phase2_consolidated\",\"skills\":[]}"
+                                })
+                            } else if consumes_auto_memory {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "我从长期记忆中读取到项目代号是 MEM-AUTO-42。"
+                                })
+                            } else if should_call_tool {
                                 json!({
                                     "role": "assistant",
                                     "content": null,
@@ -690,6 +860,21 @@ fn validate_chat_messages_json(body: &serde_json::Value) -> Option<String> {
         return Some("assistant tool_calls were not followed by tool results".to_string());
     }
     None
+}
+
+fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
+    body.get("messages")
+        .and_then(|value| value.as_array())
+        .map(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .map(|content| content.contains(needle))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {

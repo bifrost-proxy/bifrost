@@ -24,7 +24,7 @@ use crate::prompt;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
 use crate::types::{ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -74,6 +74,10 @@ pub struct AgentSession {
 
     /// Slash command router for built-in commands and skill-declared slash commands.
     pub slash_router: SlashCommandRouter,
+
+    /// When true, skip memory injection for this turn (set by /clear, reset after use).
+    /// This prevents the model from "remembering" prior context immediately after a clear.
+    pub memory_cleared: bool,
 }
 
 impl AgentSession {
@@ -93,6 +97,7 @@ impl AgentSession {
             source: "unknown".to_string(),
             recorder: None,
             slash_router: SlashCommandRouter::with_default_builtins(),
+            memory_cleared: false,
         }
     }
 
@@ -113,6 +118,10 @@ impl AgentSession {
         self.total_tokens_used = None;
         self.last_response_tokens = None;
         self.history_version = self.history_version.saturating_add(1);
+        // Mark that memory should be skipped for the next turn
+        self.memory_cleared = true;
+        // Drop the recorder so a new file will be created for the fresh session
+        self.recorder = None;
     }
 
     /// Drop the last `num_turns` user turns from history (rollback).
@@ -270,13 +279,13 @@ impl AgentSession {
                         .unwrap_or(0)
             })
             .sum();
-        (total_chars / 4) as u32
+        (total_chars / 4).min(u32::MAX as usize) as u32
     }
 
     /// Get the effective token count — prefers real API data over estimates.
     pub fn effective_token_count(&self) -> u32 {
         self.last_response_tokens
-            .map(|t| t as u32)
+            .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
             .unwrap_or_else(|| self.estimate_tokens())
     }
 }
@@ -288,6 +297,8 @@ impl AgentSession {
 /// Manages multiple agent sessions with concurrent access.
 pub struct AgentSessionManager {
     sessions: DashMap<String, AgentSession>,
+    /// Tracks session keys that are currently being processed by a turn loop.
+    active_sessions: DashSet<String>,
     session_ttl_secs: u64,
 }
 
@@ -295,17 +306,40 @@ impl AgentSessionManager {
     pub fn new(session_ttl_secs: u64) -> Self {
         Self {
             sessions: DashMap::new(),
+            active_sessions: DashSet::new(),
             session_ttl_secs,
         }
     }
 
+    /// Check if a session is currently being processed by a turn loop.
+    pub fn is_session_active(&self, session_key: &str) -> bool {
+        self.active_sessions.contains(session_key)
+    }
+
     /// Take a session out of the manager for exclusive use during a turn.
     /// Returns a new session if one doesn't exist.
+    /// Marks the session as active (busy).
     pub fn take_session(&self, session_key: &str) -> AgentSession {
+        self.active_sessions.insert(session_key.to_string());
         self.sessions
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key))
+    }
+
+    /// Try to take a session. Returns `None` if the session is currently
+    /// being processed by another turn loop (busy).
+    pub fn try_take_session(&self, session_key: &str) -> Option<AgentSession> {
+        // DashSet::insert returns true if the value was newly inserted.
+        if !self.active_sessions.insert(session_key.to_string()) {
+            return None; // already active
+        }
+        let session = self
+            .sessions
+            .remove(session_key)
+            .map(|(_, s)| s)
+            .unwrap_or_else(|| AgentSession::new(session_key));
+        Some(session)
     }
 
     /// Take a session, creating one with a specific work_dir if it doesn't exist.
@@ -314,15 +348,43 @@ impl AgentSessionManager {
         session_key: &str,
         work_dir: Option<String>,
     ) -> AgentSession {
+        self.active_sessions.insert(session_key.to_string());
         self.sessions
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir))
     }
 
+    /// Try to take a session with a specific work_dir. Returns `None` if busy.
+    pub fn try_take_session_with_work_dir(
+        &self,
+        session_key: &str,
+        work_dir: Option<String>,
+    ) -> Option<AgentSession> {
+        if !self.active_sessions.insert(session_key.to_string()) {
+            return None;
+        }
+        let session = self
+            .sessions
+            .remove(session_key)
+            .map(|(_, s)| s)
+            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir));
+        Some(session)
+    }
+
     /// Return a session to the manager after a turn completes.
+    /// Also removes the session from the active set.
     pub fn return_session(&self, session: AgentSession) {
-        self.sessions.insert(session.session_key.clone(), session);
+        let key = session.session_key.clone();
+        self.sessions.insert(key.clone(), session);
+        self.active_sessions.remove(&key);
+    }
+
+    /// Release a session from the active set without returning it.
+    /// Use this when the session was lost (e.g. due to a panic) to prevent
+    /// the session from being permanently marked as busy.
+    pub fn release_active(&self, session_key: &str) {
+        self.active_sessions.remove(session_key);
     }
 
     /// Remove expired sessions.
@@ -441,6 +503,82 @@ pub struct SessionDetail {
 }
 
 // ---------------------------------------------------------------------------
+// Session-free command handling (no session lock required)
+// ---------------------------------------------------------------------------
+
+/// Handle built-in commands that don't require session state.
+///
+/// These commands can respond immediately even while another turn loop is
+/// processing the same session. Returns `Some(response)` if the command was
+/// handled, `None` if the message is not a session-free command.
+pub fn handle_session_free_command(
+    session_key: &str,
+    user_message: &str,
+    config: &AgentConfig,
+) -> Option<String> {
+    let dispatch = SlashCommandRouter::dispatch_builtin_only(user_message);
+    match dispatch {
+        Dispatch::Builtin {
+            command: BuiltinCommand::Help,
+            ..
+        } => {
+            // Return builtin-only help text (skill commands not available without session).
+            let router = SlashCommandRouter::with_default_builtins();
+            Some(router.help_text())
+        }
+        Dispatch::Builtin {
+            command: BuiltinCommand::Remember,
+            ref args,
+        } => {
+            if args.trim().is_empty() {
+                return Some("用法: /remember <text>".to_string());
+            }
+            // Build a minimal session for remember_explicit (only needs session_key)
+            let stub = AgentSession::new(session_key);
+            match memory_runtime::remember_explicit(config, &stub, args.trim()) {
+                Ok(record) => Some(format!("已记住长期记忆: {}", record.id)),
+                Err(e) => Some(format!("保存记忆失败: {e}")),
+            }
+        }
+        Dispatch::Builtin {
+            command: BuiltinCommand::Memories,
+            ..
+        } => {
+            let stub = AgentSession::new(session_key);
+            match memory_runtime::list_visible_memories(config, &stub, 20) {
+                Ok(records) if records.is_empty() => Some("当前 scope 没有长期记忆。".to_string()),
+                Ok(records) => {
+                    let mut lines = vec!["当前可见长期记忆文件条目:".to_string()];
+                    for record in records {
+                        lines.push(format!(
+                            "- {} [{}] {}",
+                            record.id, record.path, record.content
+                        ));
+                    }
+                    Some(lines.join("\n"))
+                }
+                Err(e) => Some(format!("查询记忆失败: {e}")),
+            }
+        }
+        Dispatch::Builtin {
+            command: BuiltinCommand::Forget,
+            ref args,
+        } => {
+            if args.trim().is_empty() {
+                return Some("用法: /forget <id|last>".to_string());
+            }
+            let stub = AgentSession::new(session_key);
+            match memory_runtime::forget_memory(config, &stub, args.trim()) {
+                Ok(Some(id)) => Some(format!("已忘记长期记忆: {id}")),
+                Ok(None) => Some("没有找到可忘记的长期记忆。".to_string()),
+                Err(e) => Some(format!("删除记忆失败: {e}")),
+            }
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Turn Loop
 // ---------------------------------------------------------------------------
 
@@ -520,6 +658,22 @@ pub async fn run_turn_with_mcp(
         }
         Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
     }
+
+    // /help — show available commands
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Help,
+            ..
+        }
+    ) {
+        return Ok(TurnResult {
+            response: session.slash_router.help_text(),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
+    }
+
     if matches!(
         slash_dispatch,
         Dispatch::Builtin {
@@ -681,14 +835,11 @@ pub async fn run_turn_with_mcp(
         let response = if records.is_empty() {
             "当前 scope 没有长期记忆。".to_string()
         } else {
-            let mut lines = vec!["当前可见长期记忆:".to_string()];
+            let mut lines = vec!["当前可见长期记忆文件条目:".to_string()];
             for record in records {
                 lines.push(format!(
-                    "- {} [{} {}] {}",
-                    record.id,
-                    record.kind.as_str(),
-                    record.scope.scope_kind(),
-                    record.content
+                    "- {} [{}] {}",
+                    record.id, record.path, record.content
                 ));
             }
             lines.join("\n")
@@ -781,33 +932,52 @@ pub async fn run_turn_with_mcp(
                 files = legacy_files;
             }
         }
-        if let Some(latest) = files.last() {
-            match persistence::load_conversation(latest) {
-                Ok(messages) => {
+        // Exclude the current recorder's file (it was just created for this request
+        // and contains no conversation data yet).
+        if let Some(ref rec) = recorder {
+            let current_file = rec.file_path().to_path_buf();
+            files.retain(|f| f != &current_file);
+        }
+        // Try files from newest to oldest, skipping any that load 0 messages.
+        while let Some(candidate) = files.pop() {
+            match persistence::load_conversation(&candidate) {
+                Ok(messages) if !messages.is_empty() => {
+                    let count = messages.len();
                     session.history = messages;
-                    let count = session.history.len();
                     session.history_version = session.history_version.saturating_add(1);
                     return Ok(TurnResult {
                         response: format!(
                             "已恢复会话历史，加载了 {} 条消息（来源: {}）。",
                             count,
-                            latest.display()
+                            candidate.display()
                         ),
                         tool_calls_log: Vec::new(),
                         work_dir_switched: None,
                     });
                 }
+                Ok(_) => {
+                    // 0 messages — skip this file (e.g. session_start only)
+                    debug!(
+                        file = %candidate.display(),
+                        "skipping session file with 0 messages during resume"
+                    );
+                    continue;
+                }
                 Err(e) => {
-                    return Err(format!("恢复会话失败: {e}"));
+                    warn!(
+                        file = %candidate.display(),
+                        error = %e,
+                        "failed to load session file during resume, trying next"
+                    );
+                    continue;
                 }
             }
-        } else {
-            return Ok(TurnResult {
-                response: "没有找到可恢复的会话记录。".to_string(),
-                tool_calls_log: Vec::new(),
-                work_dir_switched: None,
-            });
         }
+        return Ok(TurnResult {
+            response: "没有找到可恢复的会话记录。".to_string(),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
     }
 
     if matches!(
@@ -915,7 +1085,18 @@ pub async fn run_turn_with_mcp(
         "starting agent turn"
     );
 
-    let memory_message = memory_runtime::recall_system_message(config, session, user_message);
+    // Skip memory injection if session was just cleared (prevents model from
+    // "remembering" prior conversation context immediately after /clear).
+    let memory_message = if session.memory_cleared {
+        info!(
+            session_key = %session.session_key,
+            "skipping memory injection after /clear"
+        );
+        session.memory_cleared = false; // reset for future turns
+        None
+    } else {
+        memory_runtime::recall_system_message(config, session, user_message)
+    };
 
     for iteration in 0..max_iterations {
         // Build messages with history limit enforcement
@@ -1207,7 +1388,9 @@ pub async fn run_turn_with_mcp(
             // budget (matching Codex's policy * 1.2) to account for JSON escaping
             // overhead when the text is serialized into the API request payload
             let output = if tool_output_limit > 0 {
-                let budget = ((tool_output_limit as f64) * 1.2) as usize;
+                let budget = (tool_output_limit as u64)
+                    .saturating_mul(12)
+                    .saturating_div(10) as usize;
                 truncate_tool_output(&result.output, budget)
             } else {
                 result.output.clone()
@@ -1334,9 +1517,9 @@ const TELEMETRY_PREVIEW_MAX_LINES: usize = 64;
 /// Create a truncated preview of tool output for telemetry/logging.
 /// Truncates both by bytes and lines, whichever limit is hit first.
 fn telemetry_preview(output: &str) -> String {
-    // First truncate by bytes
+    // First truncate by bytes (using safe UTF-8 boundary truncation)
     let truncated = if output.len() > TELEMETRY_PREVIEW_MAX_BYTES {
-        let end = output.floor_char_boundary(TELEMETRY_PREVIEW_MAX_BYTES);
+        let end = bifrost_core::text::floor_char_boundary(output, TELEMETRY_PREVIEW_MAX_BYTES);
         format!("{}... ({} bytes total)", &output[..end], output.len())
     } else {
         output.to_string()
@@ -1540,6 +1723,14 @@ mod tests {
         assert!(session.history.is_empty());
         assert_eq!(session.compaction_count, 0);
         assert!(session.total_tokens_used.is_none());
+        assert!(
+            session.memory_cleared,
+            "memory_cleared should be set after clear"
+        );
+        assert!(
+            session.recorder.is_none(),
+            "recorder should be dropped after clear"
+        );
     }
 
     #[test]
@@ -1690,6 +1881,22 @@ mod tests {
         assert_eq!(session.history_version, 0);
         session.clear();
         assert_eq!(session.history_version, 1);
+    }
+
+    #[test]
+    fn test_clear_sets_memory_cleared_flag() {
+        let mut session = AgentSession::new("test");
+        assert!(!session.memory_cleared);
+        session.add_user_message("hello");
+        session.add_assistant_message("hi");
+        session.clear();
+        assert!(session.memory_cleared, "clear should set memory_cleared");
+        assert!(session.history.is_empty());
+
+        // After adding a new message, the flag should still be set
+        // (it's only reset by the turn loop, not by adding messages)
+        session.add_user_message("new message");
+        assert!(session.memory_cleared);
     }
 
     #[test]

@@ -5,7 +5,6 @@ edition.workspace = true
 description = "Skill creator storage, validation, registry, execution, and packaging"
 
 [dependencies]
-memory = { path = "../memory" }
 chrono.workspace = true
 notify = "6"
 parking_lot.workspace = true

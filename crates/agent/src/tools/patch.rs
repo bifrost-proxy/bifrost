@@ -6,7 +6,7 @@
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
 use async_trait::async_trait;
-use bifrost_core::text::truncate_bytes_with_suffix;
+use bifrost_core::text::{check_file_size, truncate_bytes_with_suffix, MAX_READ_FILE_BYTES};
 use serde::Deserialize;
 use std::path::Path;
 use tracing::{info, warn};
@@ -82,6 +82,14 @@ impl ToolHandler for ApplyPatchTool {
             "applying patch"
         );
 
+        // Check file size before reading (prevent OOM)
+        if let Err(e) = check_file_size(&file_path, MAX_READ_FILE_BYTES) {
+            return ToolResult {
+                success: false,
+                output: e,
+            };
+        }
+
         // Read current file content
         let content = match std::fs::read_to_string(&file_path) {
             Ok(c) => c,
@@ -110,9 +118,21 @@ impl ToolHandler for ApplyPatchTool {
             };
         }
 
-        // Apply the patch
+        // Apply the patch with size guard
         let (new_content, count) = if args.replace_all {
             let count = content.matches(&args.old_text).count();
+            // Guard: if the replacement would produce a huge string, refuse
+            let growth_per_match = args.new_text.len().saturating_sub(args.old_text.len());
+            let total_growth = count.saturating_mul(growth_per_match);
+            if total_growth > 256 * 1024 * 1024 {
+                return ToolResult {
+                    success: false,
+                    output: format!(
+                        "replace_all would expand the file by ~{} bytes ({count} matches) — too large",
+                        total_growth
+                    ),
+                };
+            }
             (content.replace(&args.old_text, &args.new_text), count)
         } else {
             (content.replacen(&args.old_text, &args.new_text, 1), 1)

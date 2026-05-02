@@ -207,13 +207,13 @@ mod tests {
 
     #[tokio::test]
     async fn inline_executor_returns_prompt_payload() {
-        let manifest = SkillManifest::minimal_inline("inline", "inline", SkillScope::Project);
+        let manifest = SkillManifest::minimal_inline("inline", "inline", SkillScope::Repo);
         let record = SkillRecord {
             name: manifest.name.clone(),
             version: manifest.version.clone(),
             description: manifest.description.clone(),
-            scope: SkillScope::Project,
-            effective_scope: SkillScope::Project,
+            scope: SkillScope::Repo,
+            effective_scope: SkillScope::Repo,
             shadow_scopes: Vec::new(),
             enabled: true,
             path: ".".into(),

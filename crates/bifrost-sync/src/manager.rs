@@ -192,6 +192,15 @@ impl SyncManager {
     pub fn new(config_manager: Arc<ConfigManager>, admin_port: u16) -> Result<Self> {
         let state_file = config_manager.data_dir().join("sync-state.json");
         let state = if state_file.exists() {
+            const MAX_STATE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+            if let Ok(meta) = std::fs::metadata(&state_file) {
+                if meta.len() > MAX_STATE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("sync state file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&state_file)?;
             serde_json::from_str(&content).unwrap_or_default()
         } else {

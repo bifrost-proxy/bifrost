@@ -166,7 +166,7 @@ mod tests {
     fn state_machine_moves_through_interview_and_cancel() {
         let dir = tempdir().unwrap();
         let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
-            SkillScope::Project,
+            SkillScope::Repo,
             dir.path(),
         )]));
         let mut session = SkillAuthoringSession::start(store, "make weather");

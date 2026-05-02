@@ -111,6 +111,15 @@ impl GrantPolicyStore {
                 entries: Vec::new(),
             });
         }
+        const MAX_STORE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&self.file_path) {
+            if meta.len() > MAX_STORE_FILE_BYTES {
+                return Err(BifrostError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("store file too large ({} bytes)", meta.len()),
+                )));
+            }
+        }
         let content = std::fs::read_to_string(&self.file_path).map_err(|e| {
             BifrostError::Io(std::io::Error::other(format!(
                 "read {}: {e}",

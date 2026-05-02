@@ -11,23 +11,18 @@ import {
   Tag,
   Tooltip,
   Typography,
-  message,
 } from "antd";
 import {
   DeleteOutlined,
   EditOutlined,
-  ExportOutlined,
   ImportOutlined,
-  PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import {
   deleteSkill,
   listSkills,
-  packageSkill,
   patchSkill,
-  testSkill,
 } from "../../../../api/agent-skills";
 import type { SkillRecord, SkillScope } from "./types";
 import SkillCreatorWizard from "./SkillCreatorWizard";
@@ -74,7 +69,7 @@ export default function SkillsSection() {
       return (
         skill.name.toLowerCase().includes(normalized) ||
         skill.description.toLowerCase().includes(normalized) ||
-        (skill.manifest.slash_command ?? "").toLowerCase().includes(normalized)
+        (skill.manifest?.slash_command ?? "").toLowerCase().includes(normalized)
       );
     });
   }, [filter, query, skills]);
@@ -84,11 +79,6 @@ export default function SkillsSection() {
       const rest = current.filter((item) => item.name !== record.name);
       return [record, ...rest];
     });
-  };
-
-  const runTest = async (record: SkillRecord) => {
-    const report = await testSkill(record.name, {});
-    message.success(`Exit ${report.exit_code ?? "unknown"} in ${report.duration_ms}ms`);
   };
 
   const toggleEnabled = async (record: SkillRecord, enabled: boolean) => {
@@ -105,11 +95,6 @@ export default function SkillsSection() {
     setSkills((current) => current.filter((item) => item.name !== record.name));
   };
 
-  const exportPackage = async (record: SkillRecord) => {
-    const result = await packageSkill(record.name);
-    message.success(`Package ready: ${result.bytes ?? 0} bytes`);
-  };
-
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
       <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
@@ -121,9 +106,9 @@ export default function SkillsSection() {
             options={[
               { label: "All", value: "all" },
               { label: "Enabled", value: "enabled" },
-              { label: "Project", value: "project" },
+              { label: "Repo", value: "repo" },
               { label: "User", value: "user" },
-              { label: "Global", value: "global" },
+              { label: "System", value: "system" },
             ]}
           />
           <Input.Search
@@ -159,13 +144,19 @@ export default function SkillsSection() {
           {
             title: "",
             width: 52,
-            render: (_: unknown, record) => (
-              <Switch
-                size="small"
-                checked={record.enabled}
-                onChange={(checked) => toggleEnabled(record, checked)}
-              />
-            ),
+            render: (_: unknown, record) => {
+              const isSystem = record.effective_scope === "system";
+              return (
+                <Tooltip title={isSystem ? "System skills cannot be disabled" : undefined}>
+                  <Switch
+                    size="small"
+                    checked={record.enabled}
+                    disabled={isSystem}
+                    onChange={(checked) => toggleEnabled(record, checked)}
+                  />
+                </Tooltip>
+              );
+            },
           },
           {
             title: "Skill",
@@ -175,7 +166,7 @@ export default function SkillsSection() {
                   <Text strong>{record.name}</Text>
                   <Tag>v{record.version}</Tag>
                   <Tag color={scopeColor(record.effective_scope)}>{record.effective_scope}</Tag>
-                  {record.manifest.slash_command ? <Tag>{record.manifest.slash_command}</Tag> : null}
+                  {record.manifest?.slash_command ? <Tag>{record.manifest.slash_command}</Tag> : null}
                 </Space>
                 <Text type="secondary">{record.description}</Text>
               </Space>
@@ -183,23 +174,26 @@ export default function SkillsSection() {
           },
           {
             title: "Actions",
-            width: 260,
-            render: (_: unknown, record) => (
-              <Space>
-                <Tooltip title="Run test">
-                  <Button size="small" icon={<PlayCircleOutlined />} onClick={() => runTest(record)} />
-                </Tooltip>
-                <Tooltip title="Edit">
-                  <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(record)} />
-                </Tooltip>
-                <Tooltip title="Package">
-                  <Button size="small" icon={<ExportOutlined />} onClick={() => exportPackage(record)} />
-                </Tooltip>
-                <Popconfirm title="Delete skill?" onConfirm={() => remove(record)}>
-                  <Button size="small" danger icon={<DeleteOutlined />} />
-                </Popconfirm>
-              </Space>
-            ),
+            width: 120,
+            render: (_: unknown, record) => {
+              const isSystem = record.effective_scope === "system";
+              return (
+                <Space>
+                  <Tooltip title="Edit">
+                    <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(record)} />
+                  </Tooltip>
+                  {isSystem ? (
+                    <Tooltip title="System skills cannot be deleted">
+                      <Button size="small" danger icon={<DeleteOutlined />} disabled />
+                    </Tooltip>
+                  ) : (
+                    <Popconfirm title="Delete skill?" onConfirm={() => remove(record)}>
+                      <Button size="small" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  )}
+                </Space>
+              );
+            },
           },
         ]}
       />
@@ -220,7 +214,7 @@ export default function SkillsSection() {
 }
 
 function scopeColor(scope: SkillScope) {
-  if (scope === "project") {
+  if (scope === "repo") {
     return "blue";
   }
   if (scope === "user") {

@@ -390,13 +390,14 @@ export default function SessionDetailPage({
             >
               {skills.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {["Repo", "User", "System"].map((scope) => {
+                  {(["repo", "user", "system"] as const).map((scope) => {
                     const filtered = skills.filter((s) => s.scope === scope);
                     if (filtered.length === 0) return null;
+                    const label = scope === "repo" ? "Workspace" : scope === "user" ? "User" : "System";
                     return (
                       <div key={scope}>
                         <Text type="secondary" style={{ fontSize: 11 }}>
-                          {scope === "Repo" ? "Workspace" : scope} ({filtered.length})
+                          {label} ({filtered.length})
                         </Text>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
                           {filtered.map((s) => (

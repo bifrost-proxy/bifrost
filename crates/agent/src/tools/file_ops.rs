@@ -3,6 +3,7 @@
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
 use async_trait::async_trait;
+use bifrost_core::text::{check_file_size, floor_char_boundary, MAX_READ_FILE_BYTES};
 use serde::Deserialize;
 use std::path::Path;
 use tracing::info;
@@ -146,6 +147,14 @@ impl ToolHandler for ReadFileTool {
         let file_path = resolve_path(&args.path, work_dir);
         info!(path = %file_path.display(), "reading file");
 
+        // Check file size before reading (prevent OOM)
+        if let Err(e) = check_file_size(&file_path, MAX_READ_FILE_BYTES) {
+            return ToolResult {
+                success: false,
+                output: e,
+            };
+        }
+
         match std::fs::read_to_string(&file_path) {
             Ok(content) => {
                 let lines: Vec<&str> = content.lines().collect();
@@ -156,13 +165,15 @@ impl ToolHandler for ReadFileTool {
                 let showing = selected.len();
 
                 let result = selected.join("\n");
-                // Cap at 128 KiB
-                let result = if result.len() > 128 * 1024 {
+                // Cap at 128 KiB with UTF-8 safe truncation
+                const MAX_OUTPUT_BYTES: usize = 128 * 1024;
+                let result = if result.len() > MAX_OUTPUT_BYTES {
+                    let end = floor_char_boundary(&result, MAX_OUTPUT_BYTES);
                     format!(
                         "(file has {total_lines} lines, showing lines {}-{}, output truncated)\n{}",
                         offset + 1,
                         offset + showing,
-                        &result[..128 * 1024]
+                        &result[..end]
                     )
                 } else if offset > 0 || showing < total_lines {
                     format!(

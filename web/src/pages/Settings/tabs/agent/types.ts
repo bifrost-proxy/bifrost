@@ -60,6 +60,7 @@ export interface MemoriesConfig {
   max_rollout_age_days?: number;
   max_rollouts_per_startup?: number;
   min_rollout_idle_hours?: number;
+  min_rate_limit_remaining_percent?: number;
   extract_model?: string;
   consolidation_model?: string;
 }
@@ -80,27 +81,16 @@ export interface MemoryScope {
 
 export interface MemoryRecord {
   id: string;
-  scope: MemoryScope;
-  kind: MemoryKind;
+  path: string;
   content: string;
-  source: unknown;
-  tags: string[];
-  pinned: boolean;
-  confidence: number;
-  created_at: number;
-  updated_at: number;
-  last_used_at?: number;
-  use_count: number;
-  expires_at?: number;
-  dedupe_hash: string;
 }
 
 export interface MemoryStats {
-  total: number;
-  by_scope: Array<[string, number]>;
-  by_kind: Array<[string, number]>;
-  written_last_7_days: number;
-  recalled_last_7_days: number;
+  memory_root: string;
+  memory_summary_bytes: number;
+  memory_md_bytes: number;
+  rollout_summary_count: number;
+  skill_count: number;
 }
 
 export interface AgentConfig {
@@ -172,13 +162,13 @@ export interface SkillInfo {
   description: string;
   short_description?: string;
   path: string;
-  scope: "Repo" | "User" | "System";
+  scope: "repo" | "user" | "system";
 }
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type SkillScope = "global" | "user" | "project";
+export type SkillScope = "repo" | "user" | "system";
 export type ShellKind = "bash" | "sh" | "zsh" | "power_shell";
 export type MemoryOp = "read" | "write" | "both";
 

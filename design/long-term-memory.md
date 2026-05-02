@@ -1,368 +1,141 @@
 # Bifrost Long-term Memory 长期方案
 
-## 目标
+## 2026-05-02 方案修订：对齐 Codex 文件记忆
 
-- 为 Bifrost Agent 提供跨 session、跨 chat、跨设备且按用户隔离的长期记忆。
-- 支持自动沉淀、显式沉淀、召回注入、WebUI 管理、JSONL 导入导出、脱敏、GC 与后续 consolidation/embedding 扩展。
-- 记忆系统必须是长期架构骨架：抽取、召回、存储、脱敏、管理 API 互相解耦，后续替换召回策略或加入 embedding 时不推倒重来。
+本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆复用 Codex 的文件化 read-path，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
 
-## 非目标
+## 目录布局
 
-- 本期不接入任何网络 embedding 服务，也不调用 OpenAI/Cohere/Voyage embedding。
-- 本期不做真实 LLM consolidation 合并，只保留 trait 与配置消费点，并落日志。
-- 本期不把 relay/sync-server 改成记忆传输层；跨设备迁移先通过 JSONL 导入导出。
+记忆根目录：
 
-## 参考与差异
+- 正常运行：`$BIFROST_DATA_DIR/agent/memory/`
+- 测试显式覆盖：`$BIFROST_AGENT_HOME/memory/`
 
-实际探查命令：
+文件布局：
 
-```text
-ls -la ~/.codex/ ~/.codex/memories/ ~/.claude/ ~/.claude/memories/ ~/.claude/projects/ 2>/dev/null
-head -50 ~/.codex/memories/memory_summary.md
-head -50 ~/.codex/memories/MEMORY.md
-head -80 ~/.codex/config.toml
-```
+- `memory_summary.md`：随请求注入的轻量摘要。为空时不注入 memory instructions。
+- `MEMORY.md`：可搜索的长期记忆索引。
+- `raw_memories.md`：Codex-style 原始记忆汇总，用于后续 consolidation。
+- `rollout_summaries/`：每次自动抽取产生的可追溯摘要。
+- `skills/`：保留 Codex memory skill 目录，用于后续 consolidation 生成/更新 skills。
+- `.phase2_state.json`：无数据库 Phase 2 的 bounded input hash 与处理计数状态，用于判断是否需要再次 consolidation。
 
-观察证据：
+禁止创建或依赖 `memories.sqlite`。
 
-- `~/.codex/config.toml` 存在 `[features] memories = true` 与 `[memories] no_memories_if_mcp_or_web_search = true`。Bifrost 对应保留 `MemoriesConfig`，但要把字段全部接到抽取、召回、GC 与 consolidation 占位流程。
-- `~/.codex/memories/` 是 git 化目录，包含 `MEMORY.md`、`memory_summary.md`、`raw_memories.md`、`rollout_summaries/`、`skills/`。Codex 的主路径偏 Markdown + rollout consolidation，适合人读和上下文压缩，不适合作为 Bifrost WebUI 高频增删改查主存储。
-- `~/.codex/memories/MEMORY.md` 按 task group、scope、rollout_summary_files、keywords、user preferences 组织，说明“可召回事实”需要携带 scope、来源、关键词/tag 与可追溯来源。
-- 本机 `~/.claude/` 只有 `skills/`，没有 `~/.claude/memories/` 或 `~/.claude/projects/`。因此 Claude Code 的 `CLAUDE.md` 分层记忆模型只作为概念参考：Global/User/Project/Session 分层优先级，不照搬本机不存在的目录形态。
+## 读路径
 
-Bifrost 本土化差异：
+turn 前执行：
 
-- 主存储采用 SQLite，文件在 `$agent_home/memory/memories.sqlite`，适合 Admin API、WebUI 管理、FTS5 搜索和事务去重。
-- JSONL 只作为导入导出与 tombstone 审计，不作为在线主存储。
-- scope 固化为 `Global / User(user_id) / Project(path_hash) / Session(session_key)`，召回时按照更具体 scope 优先。
+1. 如果 `memories.use_memories == Some(false)`，直接短路。
+2. 确保 `agent/memory/` 布局存在。
+3. 读取 `memory_summary.md`，为空则不注入。
+4. 非空时注入 Codex `read_path.md` 同构 instructions，模型按需决定是否读取 `MEMORY.md`、`rollout_summaries/` 或 `skills/`。
 
-## Crate 划分
+Bifrost 不再在 turn 前做 topK 数据库召回，也不维护 `scope/kind/use_count/FTS` 等数据库字段。
 
-决策：新增 `crates/memory`。
+## 写路径
 
-理由：
+### 显式写入
 
-- `crates/agent` 负责 turn loop、prompt、tool 与模型调用；记忆存储和 WebUI API 不应被耦合进 session 主循环。
-- `crates/bifrost-admin` 需要直接暴露管理 API 和 stats，如果记忆只放在 agent 子模块会形成 admin 反向依赖 agent 内部实现。
-- `crates/memory` 只依赖 serde/rusqlite/regex/tracing/uuid/time，不依赖 admin 或 agent；agent 通过 trait 使用抽取与召回，admin 通过同一个 store 暴露 HTTP。
+`/remember` 和 Admin append：
 
-## 数据模型
+- 追加 `MEMORY.md`
+- 追加 `memory_summary.md`
+- 追加 `raw_memories.md`
+- 不创建 SQLite
 
-```rust
-pub struct MemoryRecord {
-    pub id: MemoryId,
-    pub scope: MemoryScope,
-    pub kind: MemoryKind,
-    pub content: String,
-    pub source: MemorySource,
-    pub tags: Vec<String>,
-    pub pinned: bool,
-    pub confidence: f32,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub last_used_at: Option<u64>,
-    pub use_count: u32,
-    pub expires_at: Option<u64>,
-    pub dedupe_hash: String,
-}
+### 自动写入
 
-pub enum MemoryScope { Global, User(String), Project(String), Session(String) }
-pub enum MemoryKind { Fact, Preference, Rule, Skill, TaskContext, Other }
-pub enum MemorySource {
-    AutoExtract { session_key: String, turn: u64 },
-    UserExplicit,
-    Import,
-    Seed,
-}
-```
+当 `memories.generate_memories != Some(false)` 时，assistant turn 完成后用 `extract_model` 或主模型执行轻量抽取：
 
-## SQLite schema v1
+1. 输入当前 user message 与 assistant response。
+2. 模型返回 `{"memories":["..."]}`。
+3. 过滤空项和同批重复项。
+4. 写入 `MEMORY.md`、`memory_summary.md`、`raw_memories.md`。
+5. 为每条自动记忆写入 `rollout_summaries/<timestamp>-<hash>-<session>.md`。
 
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+自动写入完成后触发无数据库 Phase 2 consolidation。
 
-CREATE TABLE IF NOT EXISTS schema_version (
-  version INTEGER PRIMARY KEY,
-  applied_at INTEGER NOT NULL
-);
+## Phase 2 Consolidation
 
-CREATE TABLE IF NOT EXISTS memories (
-  id TEXT PRIMARY KEY,
-  scope_kind TEXT NOT NULL,
-  scope_type TEXT NOT NULL,
-  scope_value TEXT,
-  kind TEXT NOT NULL,
-  content TEXT NOT NULL,
-  source_json TEXT NOT NULL,
-  tags_json TEXT NOT NULL,
-  pinned INTEGER NOT NULL DEFAULT 0,
-  confidence REAL NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  last_used_at INTEGER,
-  use_count INTEGER NOT NULL DEFAULT 0,
-  expires_at INTEGER,
-  dedupe_hash TEXT NOT NULL,
-  deleted_at INTEGER
-);
+Bifrost 不复制 Codex 的 state DB job/lease/watermark 表，而是在 `agent/memory/` 内使用文件状态实现 Phase 2：
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_dedupe
-  ON memories(scope_kind, dedupe_hash)
-  WHERE deleted_at IS NULL;
+1. 获取 `agent/memory/.phase2.lock` 文件锁；锁存在且未过期时跳过本轮，避免多个 session 同时 consolidation 覆盖彼此结果。
+2. 按 `memories.max_raw_memories_for_consolidation` 选择最近 N 条 raw/rollout 输入；未配置时使用内置默认值，且最小为 1。
+3. 只基于“本轮实际进入 prompt 的 bounded input”计算稳定 hash。`.phase2_state.json` 只记录这批输入的 hash/count，不把被 retention 排除或截断之外的内容标记为已 consolidated。
+4. 读取 `.phase2_state.json`，如果 `last_input_hash` 相同则跳过。
+5. 构造 consolidation prompt，输入包括：
+   - 当前 `memory_summary.md`
+   - 当前 `MEMORY.md`
+   - selected `raw_memories.md` sections
+   - selected `rollout_summaries/*.md`
+6. 使用 `memories.consolidation_model`；未配置时复用主模型。
+7. 模型返回 JSON：
 
-CREATE INDEX IF NOT EXISTS idx_memories_scope_last_used
-  ON memories(scope_kind, last_used_at DESC, updated_at DESC)
-  WHERE deleted_at IS NULL;
-
-CREATE INDEX IF NOT EXISTS idx_memories_kind
-  ON memories(kind)
-  WHERE deleted_at IS NULL;
-
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-  id UNINDEXED,
-  content,
-  tags,
-  tokenize = 'unicode61'
-);
-```
-
-`scope_kind` 使用稳定字符串：`global:*`、`user:<id>`、`project:<path_hash>`、`session:<session_key>`，用于唯一索引和查询。
-
-## 抽取流程
-
-```text
-assistant turn 完成
-  |
-  v
-检查 generate_memories / disable_on_external_context / skip_threshold_bytes
-  |
-  v
-MemoryExtractor.extract(turn transcript, extract_model)
-  |
-  v
-严格 JSON 数组 candidates
-  |
-  v
-redact -> normalize -> tags sanitize -> dedupe_hash
-  |
-  +-- 命中 (scope_kind, dedupe_hash) -> use_count++, updated_at, last_used_at
-  |
-  +-- 未命中 -> INSERT memories + memories_fts
-```
-
-prompt 文件固定放在 `crates/memory/prompts/extract.md`，agent 读取后传给 `AgentClient::chat_completion`。
-
-## 召回流程
-
-```text
-build_messages() 前
-  |
-  v
-检查 use_memories == Some(false)
-  |
-  v
-构造 RecallContext(user_id, project_path, session_key, latest_user_message, max_items, max_chars)
-  |
-  v
-FTS/关键词 + scope 过滤 + pinned/specificity/time/rank 排序
-  |
-  v
-截断到 topK 与 max_chars
-  |
-  v
-插入 system message:
-  # Long-term memories (per user)
-  - [kind scope tags] content
-  |
-  v
-mark_used(ids): use_count++, last_used_at=now
-```
-
-## GC / consolidation 流程
-
-```text
-启动或 12h interval
-  |
-  v
-读取 MemoriesConfig max_unused_days / max_raw_memories_for_consolidation / max_rollout_age_days
-  |
-  v
-软删除: 非 pinned 且 unused >= max_unused_days
-  |
-  v
-写 tombstones.jsonl
-  |
-  v
-若 consolidation_model 配置存在 -> 调用 Consolidator trait 占位日志
-```
-
-本期 GC 至少实际执行软删除；consolidation 只记录配置已消费、候选数量和跳过原因。
-
-## 导入导出流程
-
-```text
-导出: query active records -> JSONL -> $agent_home/memory/exports/<ts>.jsonl
-导入: read JSONL -> validate -> redact -> normalize -> dedupe -> insert/update
-```
-
-导入不信任外部内容，仍然执行脱敏和 tag 规范化。
-
-## 隐私脱敏流程
-
-```text
-candidate/explicit/import content
-  |
-  v
-Redactor regex pass
-  |
-  v
-normalize whitespace
-  |
-  v
-dedupe_hash
-```
-
-规则覆盖：
-
-- `sk-[A-Za-z0-9]{20,}`
-- `ghp_[A-Za-z0-9_]{20,}`
-- `AIza[A-Za-z0-9_-]{20,}`
-- `Bearer\s+[A-Za-z0-9\._-]+`
-- 长度 >= 32 的 base64
-- `password=...`
-- `token=...`
-- `api[_-]?key\s*[:=]\s*...`
-- `BF-[A-F0-9]{16}`
-
-## Rust API
-
-```rust
-pub trait MemoryStore {
-    fn insert(&self, record: NewMemoryRecord) -> Result<MemoryRecord>;
-    fn update(&self, id: &MemoryId, patch: MemoryPatch) -> Result<MemoryRecord>;
-    fn soft_delete(&self, id: &MemoryId) -> Result<bool>;
-    fn get(&self, id: &MemoryId) -> Result<Option<MemoryRecord>>;
-    fn search(&self, query: MemorySearchQuery) -> Result<Vec<MemoryRecord>>;
-    fn mark_used(&self, ids: &[MemoryId], now: u64) -> Result<usize>;
-    fn stats(&self, now: u64) -> Result<MemoryStats>;
-    fn export_jsonl(&self, writer: impl Write) -> Result<usize>;
-    fn import_jsonl(&self, reader: impl BufRead) -> Result<ImportReport>;
-    fn gc(&self, policy: GcPolicy) -> Result<GcReport>;
-}
-
-pub trait MemoryExtractor {
-    async fn extract(&self, request: ExtractRequest) -> Result<Vec<MemoryCandidate>>;
-}
-
-pub trait MemoryRecaller {
-    fn recall(&self, context: RecallContext) -> Result<Vec<MemoryRecord>>;
-}
-
-pub trait MemoryConsolidator {
-    async fn consolidate(&self, request: ConsolidationRequest) -> Result<ConsolidationReport>;
+```json
+{
+  "memory_summary": "- compact summary",
+  "memory": "# Memory\n\n- durable fact",
+  "skills": [
+    {"name": "optional-skill", "skill_md": "---\nname: optional-skill\n---\n# Skill\n..."}
+  ]
 }
 ```
 
-## HTTP API
+8. 成功后通过临时文件 + rename 原子替换 `memory_summary.md`、`MEMORY.md`、`.phase2_state.json`，并写入 `skills/<name>/SKILL.md`。
+9. `.phase2_state.json` 记录 `last_input_hash`、`processed_input_count`、`total_input_count`、`has_more_inputs` 和 `updated_at_unix`。
 
-- `GET /agent/memories`：分页列表，支持 scope/kind/tag/query。
-- `POST /agent/memories`：显式创建，复用 Redactor。
-- `PATCH /agent/memories/:id`：编辑 content/kind/tags/pinned/expires_at。
-- `DELETE /agent/memories/:id`：软删除。
-- `POST /agent/memories/search`：FTS 搜索。
-- `POST /agent/memories/import`：JSONL 导入。
-- `GET /agent/memories/export`：JSONL 导出。
-- `GET /agent/memories/stats`：总数、按 scope/kind 分布、近 7 天写入/召回次数。
+如果模型输出非法 JSON，保留 turn-end append 产生的原始文件，不更新 Phase 2 状态，后续输入变化时可重试。
 
-鉴权复用已有 Admin API auth，不新增认证体系。
+## Codex 对齐情况
 
-## TS 类型
+已对齐：
 
-同步到 `web/src/pages/Settings/tabs/agent/types.ts`：
+- 用户数据目录下的文件化 memory root。
+- `memory_summary.md` 非空才注入 Codex-style read-path instructions。
+- `MEMORY.md`、`raw_memories.md`、`rollout_summaries/`、`skills/` 布局。
+- `generate_memories` 与 `use_memories` 默认开启，显式 `false` 关闭。
+- 自动抽取后跨独立 session 可消费记忆。
+- `disable_on_external_context` 与旧 alias `no_memories_if_mcp_or_web_search` 的配置字段保留。
+- Admin PATCH 接收 Codex memories 配置字段，包括 `min_rate_limit_remaining_percent`。
+- 无数据库 Phase 2 consolidation：基于 bounded `raw_memories.md`/`rollout_summaries/` 输入重写 `MEMORY.md`、`memory_summary.md`，使用文件锁和原子替换，并支持生成 memory skills。
 
-```ts
-export type MemoryScopeType = 'global' | 'user' | 'project' | 'session';
-export type MemoryKind = 'fact' | 'preference' | 'rule' | 'skill' | 'task_context' | 'other';
-export interface MemoryRecord { id: string; scope: MemoryScope; kind: MemoryKind; content: string; tags: string[]; pinned: boolean; confidence: number; created_at: number; updated_at: number; last_used_at?: number; use_count: number; expires_at?: number; }
-```
+不复制：
 
-## WebUI 线框
+- Codex state DB 中的 stage1/stage2 job、lease、watermark、retry/backoff 表。用户要求 Bifrost 不使用数据库存储记忆。
 
-位置：Settings -> Agent -> Memories 独立页面。
+仍未完全对齐，后续可继续补：
 
-布局：
+- memory root git baseline：Bifrost 当前没有在 `agent/memory/` 下初始化 git，也没有 `phase2_workspace_diff.md`。
+- per-thread `ThreadMemoryMode`：Bifrost 当前是配置级开关，没有 Codex 的 thread metadata `enabled/disabled/polluted`。
+- `disable_on_external_context` 的污染语义：字段存在，但尚未在 MCP/web/search 等外部上下文进入时自动禁用该 session 的 memory generation。
+- memory citation 解析与隐藏：Bifrost 注入 `<oai-mem-citation>` 要求，但还没有 Codex 的 citation parser/telemetry/UI 消费链路。
+- usage-based retention：Bifrost 当前不维护 `last_usage/use_count`，`max_unused_days` 等字段尚未驱动 pruning；Phase 2 已支持基于最近 N 条 raw/rollout 输入的 bounded selection。
+- rate-limit gating：字段可配置，但自动抽取尚未按 `min_rate_limit_remaining_percent` 跳过低余量窗口。
 
-```text
-Agent Settings
-  Sessions | Skills | MCP | Instructions | Memories
-
-Memories
-  Toolbar: Search [      ] Scope [all] Kind [all] Tag [all] New Import Export
-  Main list:
-    Pin | Kind | Scope | Content preview | Tags | Updated | Last used | Actions(Edit/Delete)
-  Side panel / modal:
-    Content textarea
-    Scope selector
-    Kind selector
-    Tags input
-    Pinned toggle
-  Recent recalled:
-    Top N by last_used_at
-```
-
-颜色使用现有 CSS 变量，亮色/暗色主题都要验证。
-
-## Hook 点
-
-- `ConversationRecorder`：新增 `record_compaction()`，修复 `event_types::COMPACTION` 只定义不写入的问题。
-- `compact_session()`：成功后由调用方或返回结果触发 recorder 写 compaction 事件。
-- `run_turn_with_mcp()`：
-  - 内置命令层增加 `/remember <text>`、`/memories`、`/forget <id|last>`。
-  - pre-turn compaction 后、模型请求前构造 `RecallContext`，把召回 system message 插入主 system prompt 后。
-  - assistant final response 记录后触发 auto-extract。
-- `build_messages()`：保持纯函数形态，增加可选 extra system memories 参数，避免直接访问 DB。
-- IM Gateway：已有 `process_agent_chat` 走 `run_turn_with_mcp()`，因此不单独实现记忆逻辑，只保证 session_key/user_id/source 传入 RecallContext。
-- `/resume`：统一从 `agent_home_dir()` 查找 session JSONL，若旧 work_dir 路径存在则 fallback 并写日志。
-- `HistoryConfig.max_bytes`：优先实装历史文件写入后的大小修剪，保留配置字段。
-
-## MemoriesConfig 接线计划
-
-- `use_memories`：`Some(false)` 时召回完全短路，不打开 SQLite、不注入 system message。
-- `generate_memories`：`Some(false)` 时自动抽取完全短路，显式 `/remember` 和 WebUI 创建仍可用。
-- `disable_on_external_context`：用户消息超过 `extractor.skip_threshold_bytes` 默认 8KB 时，本轮不自动抽取。
-- `max_raw_memories_for_consolidation`：GC/consolidation 选择候选上限。
-- `max_unused_days`：非 pinned 且 `last_used_at/updated_at` 超过阈值时软删除。
-- `max_rollout_age_days`：consolidation 候选时间窗，本期记录并用于候选查询。
-- `max_rollouts_per_startup`：启动 consolidation 扫描上限。
-- `min_rollout_idle_hours`：只处理空闲超过该时长的 raw/session 候选。
-- `extract_model`：传入 LLM 抽取调用；为空复用当前 agent model。
-- `consolidation_model`：传入 `MemoryConsolidator` 占位日志。
-
-## 测试计划
+## 测试方案
 
 单元测试：
 
-- Redactor 每条规则各一例，并验证无敏感内容时不误替换。
-- normalize/dedupe：空白归一、大小写 tag、重复插入更新 use_count。
-- SqliteMemoryStore：insert/update/delete/get/search/stats/export/import，每个方法正常 + 边界。
-- Recall 排序：pinned 优先、Project/User/Global specificity、last_used_at/updated_at、max_chars 截断。
-- Extractor 合约：mock completion 输出 JSON 数组、空数组、非法 JSON。
+- `memory_read_instructions_use_agent_memory_root`：验证注入内容包含 `memory_summary.md`、`MEMORY.md`、`rollout_summaries/`、`skills/` 与 citation 要求。
+- `empty_memory_summary_does_not_inject`：验证空 summary 不注入。
+- `use_memories_disabled_short_circuits`：验证 `use_memories=false` 不读取文件。
+- `remember_writes_codex_files_without_sqlite`：验证显式写入更新 `MEMORY.md`、`memory_summary.md`、`raw_memories.md`，且不生成 SQLite。
+- `remember_auto_writes_codex_files_without_sqlite`：验证自动抽取写入 `MEMORY.md`、`memory_summary.md`、`raw_memories.md` 和 `rollout_summaries/`。
+- `phase2_prompt_is_dirty_when_raw_memory_changes`：验证 raw/rollout 输入变化会改变 Phase 2 hash，并构造 consolidation prompt。
+- `phase2_input_selection_uses_recent_bounded_inputs`：验证 Phase 2 只选择最近 N 条输入，不会把截断外旧输入误标为已处理。
+- `phase2_lock_prevents_concurrent_consolidation`：验证 `.phase2.lock` 能阻止并发 consolidation。
+- `apply_consolidated_memory_rewrites_summary_memory_and_skills`：验证 consolidation 输出重写 `memory_summary.md`、`MEMORY.md`，并写入 `skills/<name>/SKILL.md`。
 
-E2E：
+E2E 测试：
 
-- 新增 `e2e-tests/tests/test_long_term_memory_remember_recall.sh`，使用 mock Chat Completions 跑 `/remember -> 新 session -> 召回注入 prompt`。
+- `e2e-tests/tests/test_long_term_memory_remember_recall.sh`：预置文件记忆，断言模型请求包含 Codex-style read-path instructions。
+- `e2e-tests/tests/test_long_term_memory_human_api.sh`：启动真实 Bifrost 和 OpenAI-compatible mock，使用对话接口创建多个独立 session，验证“请记住我是独孤怼怼”自动沉淀并在新 session 消费。
+  - mock 同时验证自动抽取请求和 Phase 2 consolidation 请求。
+  - 断言 `MEMORY.md` 中最终来源为 `phase2_consolidated`，`raw_memories.md` 保留 `source: auto_extract` 追溯材料。
+  - 断言 `.phase2_state.json` 记录 bounded input 元数据：`processed_input_count`、`total_input_count`、`has_more_inputs`。
 
-human_tests：
+真实场景测试：
 
-- 新增 `human_tests/long-term-memory.md`，至少 10 条用例覆盖 `/remember`、`/memories`、`/forget`、自动抽取、召回注入、WebUI 增删改查、导入导出、GC、隐私脱敏、关闭召回。
-- 更新 `human_tests/readme.md` 索引。
-- 文档创建后立即逐条执行，记录实际结果。
-
-项目校验：
-
-- `cargo fmt --all`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo check --workspace`
-- `cargo test -p memory -p bifrost-agent -p bifrost-admin`
-- `cargo test --workspace --all-features`
+- `human_tests/long-term-memory.md` 覆盖目录初始化、按需加载说明注入、显式写入、自动写入、Admin 文件 API、WebUI 文件视图、不创建 SQLite、跨独立 session 消费。
+- 每次修改后必须按文档逐条执行并记录实际结果。

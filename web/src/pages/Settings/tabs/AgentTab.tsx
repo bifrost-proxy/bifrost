@@ -368,7 +368,7 @@ export default function AgentTab() {
                     {selected.env_key && (
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         <KeyOutlined style={{ marginRight: 4 }} />
-                        API Key Env: <Text code style={{ fontSize: 11 }}>{selected.env_key}</Text>
+                        Default Env: <Text code style={{ fontSize: 11 }}>{selected.env_key}</Text>
                       </Text>
                     )}
                     {!selected.env_key && !selected.base_url && (
@@ -379,6 +379,60 @@ export default function AgentTab() {
                   </Space>
                 );
               })()}
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <Row justify="space-between" align="middle" gutter={16}>
+                <Col flex="none">
+                  <Tooltip title="API Key for the model provider. Use $ENV_VAR to read from an environment variable (e.g. $OPENAI_API_KEY).">
+                    <Text>API Key</Text>
+                  </Tooltip>
+                </Col>
+                <Col flex="auto" style={{ textAlign: "right" }}>
+                  <Input.Password
+                    value={
+                      (getProviderField("api_key") as string | undefined) ?? ""
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setConfig((prev) => {
+                        if (!prev) return prev;
+                        const providerId = prev.model_provider || "aidp_crawl";
+                        const existingProvider = prev.model_providers?.[providerId] || {};
+                        return {
+                          ...prev,
+                          model_providers: {
+                            ...prev.model_providers,
+                            [providerId]: {
+                              ...existingProvider,
+                              api_key: val || undefined,
+                            },
+                          },
+                        };
+                      });
+                      debouncedPatch("api_key", val, 800);
+                    }}
+                    placeholder={(() => {
+                      const selected = providers.find(
+                        (p) => p.id === config.model_provider,
+                      );
+                      return selected?.env_key
+                        ? `$${selected.env_key}`
+                        : "sk-xxx... or $ENV_VAR_NAME";
+                    })()}
+                    style={{ maxWidth: 480 }}
+                    size="small"
+                  />
+                </Col>
+              </Row>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Direct key or <Text code style={{ fontSize: 11 }}>$VAR_NAME</Text> to resolve from environment variable. Empty = <Text code style={{ fontSize: 11 }}>{(() => {
+                  const selected = providers.find(
+                    (p) => p.id === config.model_provider,
+                  );
+                  return selected?.env_key ? `$${selected.env_key}` : "provider default";
+                })()}</Text>
+              </Text>
 
               <Divider style={{ margin: "12px 0" }} />
 

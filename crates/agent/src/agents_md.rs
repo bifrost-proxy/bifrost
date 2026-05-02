@@ -167,23 +167,28 @@ impl AgentsMdManager {
     }
 
     /// Read a file and truncate to max bytes if needed.
+    /// Uses Vec<u8> truncate + from_utf8_lossy to avoid UTF-8 boundary panics
+    /// (matching Codex's approach in agents_md.rs).
     fn read_and_truncate(&self, path: &Path) -> Option<String> {
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                if content.is_empty() {
+        match std::fs::read(path) {
+            Ok(data) => {
+                if data.is_empty() {
                     return None;
                 }
-                if content.len() > self.project_doc_max_bytes {
+                let data = if data.len() > self.project_doc_max_bytes {
                     warn!(
                         path = %path.display(),
-                        size = content.len(),
+                        size = data.len(),
                         max = self.project_doc_max_bytes,
                         "AGENTS.md exceeds max size, truncating"
                     );
-                    Some(content[..self.project_doc_max_bytes].to_string())
+                    let mut truncated = data;
+                    truncated.truncate(self.project_doc_max_bytes);
+                    truncated
                 } else {
-                    Some(content)
-                }
+                    data
+                };
+                Some(String::from_utf8_lossy(&data).into_owned())
             }
             Err(_) => None,
         }

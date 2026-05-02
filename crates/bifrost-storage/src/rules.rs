@@ -316,12 +316,21 @@ impl RulesStorage {
     }
 
     pub fn load(&self, name: &str) -> Result<RuleFile> {
+        const MAX_RULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
         let bifrost_path = self.rule_path(name);
         let legacy_path = self.legacy_rule_path(name);
         let raw_bifrost_path = self.raw_rule_path(name);
         let raw_legacy_path = self.raw_legacy_rule_path(name);
 
         if bifrost_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&bifrost_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&bifrost_path)?;
             let file = BifrostFileParser::parse_rules(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -334,6 +343,14 @@ impl RulesStorage {
             }
             Ok(rule)
         } else if raw_bifrost_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&raw_bifrost_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&raw_bifrost_path)?;
             let file = BifrostFileParser::parse_rules(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -352,6 +369,14 @@ impl RulesStorage {
                 content: String,
                 enabled: bool,
             }
+            if let Ok(meta) = std::fs::metadata(&legacy_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
                 BifrostError::Parse(format!("Failed to parse legacy rule file: {}", e))
@@ -367,6 +392,14 @@ impl RulesStorage {
                 name: String,
                 content: String,
                 enabled: bool,
+            }
+            if let Ok(meta) = std::fs::metadata(&raw_legacy_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
             }
             let content = fs::read_to_string(&raw_legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
@@ -620,10 +653,19 @@ fn ensure_sync_metadata(rule: &mut RuleFile) -> bool {
 
 impl RulesStorage {
     fn load_summary(&self, name: &str) -> Result<RuleSummary> {
+        const MAX_RULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
         let bifrost_path = self.rule_path(name);
         let legacy_path = self.legacy_rule_path(name);
 
         if bifrost_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&bifrost_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&bifrost_path)?;
             let raw = BifrostFileParser::parse_raw(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -648,6 +690,14 @@ impl RulesStorage {
                 enabled: bool,
             }
 
+            if let Ok(meta) = std::fs::metadata(&legacy_path) {
+                if meta.len() > MAX_RULE_FILE_BYTES {
+                    return Err(BifrostError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("rule file too large ({} bytes)", meta.len()),
+                    )));
+                }
+            }
             let content = fs::read_to_string(&legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
                 BifrostError::Parse(format!("Failed to parse legacy rule file: {}", e))

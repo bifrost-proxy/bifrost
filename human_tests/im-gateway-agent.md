@@ -894,3 +894,28 @@ rm -rf ./.bifrost-test
   - `cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture`：PASS，1 个 trim 清洗测试通过
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用
+
+### TC-IMA-68: Agent 配置 API - API Key 写入保持 Azure header 认证
+
+- **操作步骤**:
+  1. 使用临时数据目录启动 Bifrost，避免影响正式实例：
+     ```bash
+     BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy
+     ```
+  2. 通过 PATCH 设置默认 `aidp_crawl` provider 的 `api_key`：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18868/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{"model": "test-model-e2e", "base_url": "https://test.example.com", "api_key": "test-api-key-e2e"}' | jq .
+     ```
+  3. 再次 GET 配置：
+     ```bash
+     curl -s http://127.0.0.1:18868/_bifrost/api/im-gateway/agent | jq '.model_providers.aidp_crawl'
+     ```
+- **预期结果**:
+  - PATCH 返回 200 和完整 AgentConfig JSON
+  - GET 返回的 `model_providers.aidp_crawl.api_key` 为 `"test-api-key-e2e"`
+  - GET 返回的 `model_providers.aidp_crawl.http_headers.api-key` 为 `"test-api-key-e2e"`
+  - 运行时仍按 `api-key` header 使用 Azure/MODELHUB 认证，不退化成 Bearer 认证
+- **执行记录（2026-05-03）**:
+  - 自动化真实链路回归 `cargo run -p bifrost-e2e -- --test im_gateway_agent_config_patch --test-timeout 120 --port 18180`：PASS，PATCH 后 GET 可见 `model_providers.aidp_crawl.api_key = "test-api-key-e2e"`，且 `http_headers.api-key = "test-api-key-e2e"`，保持 Azure/MODELHUB `api-key` header 认证路径

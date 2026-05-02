@@ -148,6 +148,10 @@ pub struct ModelProviderConfig {
     pub base_url: Option<String>,
     /// Environment variable name for the API key.
     pub env_key: Option<String>,
+    /// Direct API key value, or `$ENV_VAR` to resolve from an environment variable.
+    /// Takes precedence over `env_key` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// Static HTTP headers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_headers: Option<HashMap<String, String>>,
@@ -263,7 +267,10 @@ pub struct HistoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct MemoriesConfig {
     /// When `true`, external context sources mark the thread `memory_mode` as polluted.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        alias = "no_memories_if_mcp_or_web_search",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub disable_on_external_context: Option<bool>,
     /// When `false`, newly created threads are stored with `memory_mode = "disabled"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,6 +293,9 @@ pub struct MemoriesConfig {
     /// Minimum idle time between last thread activity and memory creation (hours).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rollout_idle_hours: Option<i64>,
+    /// Minimum remaining percentage required in rate-limit windows before memory jobs run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_rate_limit_remaining_percent: Option<i64>,
     /// Model used for thread summarisation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_model: Option<String>,
@@ -416,14 +426,20 @@ impl AgentConfig {
     /// - Falls back to `u32::MAX` (effectively disabled) when neither
     ///   context window nor explicit limit is configured.
     pub fn get_compact_threshold_tokens(&self) -> u32 {
-        let context_ceiling = self
-            .model_context_window
-            .map(|cw| (cw * Self::DEFAULT_COMPACT_THRESHOLD_PERCENT / 100) as u32);
+        let context_ceiling = self.model_context_window.map(|cw| {
+            // Use saturating arithmetic to prevent i64 overflow on extreme values,
+            // then clamp to u32 range.
+            let product = cw.saturating_mul(Self::DEFAULT_COMPACT_THRESHOLD_PERCENT) / 100;
+            u32::try_from(product.max(0)).unwrap_or(u32::MAX)
+        });
         match (self.model_auto_compact_token_limit, context_ceiling) {
             // User configured + context window known → clamp to 90% ceiling
-            (Some(user_limit), Some(ceiling)) => (user_limit as u32).min(ceiling),
+            (Some(user_limit), Some(ceiling)) => {
+                let user_val = u32::try_from(user_limit.max(0)).unwrap_or(u32::MAX);
+                user_val.min(ceiling)
+            }
             // User configured, no context window → trust user value
-            (Some(user_limit), None) => user_limit as u32,
+            (Some(user_limit), None) => u32::try_from(user_limit.max(0)).unwrap_or(u32::MAX),
             // Not configured, context window known → derive 90%
             (None, Some(ceiling)) => ceiling,
             // Neither configured → effectively disabled
@@ -481,6 +497,7 @@ impl AgentConfig {
                 name: user_provider.name.clone().or(builtin.name),
                 base_url: user_provider.base_url.clone().or(builtin.base_url),
                 env_key: user_provider.env_key.clone().or(builtin.env_key),
+                api_key: user_provider.api_key.clone().or(builtin.api_key),
                 http_headers: user_provider.http_headers.clone().or(builtin.http_headers),
                 env_http_headers: user_provider
                     .env_http_headers
@@ -504,9 +521,14 @@ impl AgentConfig {
             .base_url
             .ok_or_else(|| format!("provider '{}' has no base_url", provider_id))?;
 
-        // Resolve API key from env
-        let env_key = provider.env_key.as_deref().unwrap_or("OPENAI_API_KEY");
-        let api_key = std::env::var(env_key).unwrap_or_default();
+        // Resolve API key: api_key field takes precedence over env_key.
+        // If api_key starts with '$', treat the rest as an environment variable name.
+        let api_key = if let Some(ref key_value) = provider.api_key {
+            resolve_env_value(key_value)
+        } else {
+            let env_key = provider.env_key.as_deref().unwrap_or("OPENAI_API_KEY");
+            std::env::var(env_key).unwrap_or_default()
+        };
 
         // Resolve headers
         let mut extra_headers = HashMap::new();
@@ -560,6 +582,21 @@ impl AgentConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Environment variable resolution helper
+// ---------------------------------------------------------------------------
+
+/// Resolve a value that may reference an environment variable.
+/// If the value starts with `$`, the remainder is treated as an env var name.
+/// Otherwise, the value is returned as-is.
+pub fn resolve_env_value(value: &str) -> String {
+    if let Some(var_name) = value.strip_prefix('$') {
+        std::env::var(var_name).unwrap_or_default()
+    } else {
+        value.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Built-in providers
 // ---------------------------------------------------------------------------
 
@@ -571,6 +608,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("OpenAI".to_string()),
             base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
             env_key: Some("OPENAI_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -592,6 +630,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
                 "https://search.bytedance.net/gpt/openapi/online/multimodal/crawl".to_string(),
             ),
             env_key: Some("MODELHUB_AK".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -608,6 +647,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Azure OpenAI".to_string()),
             base_url: None, // User must provide: https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=...
             env_key: Some("AZURE_OPENAI_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -623,6 +663,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Anthropic".to_string()),
             base_url: Some("https://api.anthropic.com/v1/chat/completions".to_string()),
             env_key: Some("ANTHROPIC_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -641,6 +682,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
                     .to_string(),
             ),
             env_key: Some("GOOGLE_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -656,6 +698,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Groq".to_string()),
             base_url: Some("https://api.groq.com/openai/v1/chat/completions".to_string()),
             env_key: Some("GROQ_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -667,6 +710,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("DeepSeek".to_string()),
             base_url: Some("https://api.deepseek.com/v1/chat/completions".to_string()),
             env_key: Some("DEEPSEEK_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -678,6 +722,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Ollama".to_string()),
             base_url: Some("http://localhost:11434/v1/chat/completions".to_string()),
             env_key: None, // No API key needed for local
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: None,
@@ -689,6 +734,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("LM Studio".to_string()),
             base_url: Some("http://localhost:1234/v1/chat/completions".to_string()),
             env_key: None, // No API key needed for local
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: None,
@@ -702,6 +748,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
                 "https://bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions".to_string(),
             ),
             env_key: None, // Uses AWS credentials chain
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -713,6 +760,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("OpenRouter".to_string()),
             base_url: Some("https://openrouter.ai/api/v1/chat/completions".to_string()),
             env_key: Some("OPENROUTER_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: Some({
                 let mut m = HashMap::new();
@@ -732,6 +780,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("xAI (Grok)".to_string()),
             base_url: Some("https://api.x.ai/v1/chat/completions".to_string()),
             env_key: Some("XAI_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -743,6 +792,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Mistral AI".to_string()),
             base_url: Some("https://api.mistral.ai/v1/chat/completions".to_string()),
             env_key: Some("MISTRAL_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -754,6 +804,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: Some("Cerebras".to_string()),
             base_url: Some("https://api.cerebras.ai/v1/chat/completions".to_string()),
             env_key: Some("CEREBRAS_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(4),
@@ -765,6 +816,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             name: None,
             base_url: None,
             env_key: Some("OPENAI_API_KEY".to_string()),
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: None,
@@ -984,6 +1036,12 @@ fn dirs_home() -> Option<PathBuf> {
         .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
 }
 
+/// Returns the user's home directory (e.g. `~`).
+/// Used as the root for Codex-compatible paths like `~/.agents/skills/`.
+pub fn user_home_dir() -> PathBuf {
+    dirs_home().unwrap_or_else(|| PathBuf::from("."))
+}
+
 // ---------------------------------------------------------------------------
 // AgentConfigStore (JSON persistence - backward compat)
 // ---------------------------------------------------------------------------
@@ -1082,6 +1140,7 @@ mod tests {
                 name: Some("Custom".to_string()),
                 base_url: Some("https://custom.example.com/v1/chat".to_string()),
                 env_key: Some("CUSTOM_KEY".to_string()),
+                api_key: None,
                 http_headers: None,
                 env_http_headers: None,
                 request_max_retries: None,
@@ -1193,6 +1252,7 @@ enabled = true
                 name: Some("aidp_crawl".to_string()),
                 base_url: None, // null — should fall back to built-in
                 env_key: None,  // null — should fall back to built-in
+                api_key: None,
                 http_headers: None,
                 env_http_headers: None,
                 request_max_retries: None,
@@ -1225,6 +1285,7 @@ enabled = true
                 name: None,
                 base_url: Some("https://custom.example.com/api".to_string()),
                 env_key: None, // falls back to built-in MODELHUB_AK
+                api_key: None,
                 http_headers: None,
                 env_http_headers: None,
                 request_max_retries: None,

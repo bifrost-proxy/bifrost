@@ -1,12 +1,8 @@
-use bifrost_agent::config::agent_home_dir;
+use bifrost_agent::memory_runtime;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
-use memory::{
-    GcPolicy, MemoryId, MemoryKind, MemoryPatch, MemoryScope, MemorySearchQuery, MemorySource,
-    MemoryStore, NewMemoryRecord, SqliteMemoryStore,
-};
 use serde::{Deserialize, Serialize};
-use std::io::BufReader;
+use std::fs;
 
 use super::{
     error_response, full_body, json_response, json_response_with_status, method_not_allowed,
@@ -16,33 +12,18 @@ use super::{
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     query: Option<String>,
-    scope_type: Option<String>,
-    scope_value: Option<String>,
-    kind: Option<String>,
-    tag: Option<String>,
     limit: Option<usize>,
-    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateMemoryRequest {
-    scope: Option<MemoryScope>,
-    kind: Option<MemoryKind>,
     content: String,
-    tags: Option<Vec<String>>,
-    pinned: Option<bool>,
-    confidence: Option<f32>,
-    expires_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SearchMemoryRequest {
     query: Option<String>,
-    scopes: Option<Vec<MemoryScope>>,
-    kind: Option<MemoryKind>,
-    tag: Option<String>,
     limit: Option<usize>,
-    offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,7 +32,12 @@ struct ExportResponse {
     count: usize,
 }
 
-/// 处理长期记忆管理 API。
+#[derive(Debug, Serialize)]
+struct ImportReport {
+    imported: usize,
+}
+
+/// 处理 Codex-style 文件长期记忆管理 API。
 pub async fn handle_agent_memories(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
     let suffix = path.strip_prefix("/api/agent/memories").unwrap_or("");
     match (req.method(), suffix) {
@@ -79,22 +65,17 @@ async fn handle_list(req: Request<Incoming>) -> Response<BoxBody> {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid query: {error}"));
         }
     };
-    let store = match open_store() {
-        Ok(store) => store,
+    let root = match memory_runtime::ensure_memory_layout() {
+        Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    let search = MemorySearchQuery {
-        query: params.query,
-        scopes: scope_filter(params.scope_type, params.scope_value),
-        kind: params.kind.and_then(|kind| kind.parse().ok()),
-        tag: params.tag,
-        include_deleted: false,
-        limit: params.limit.unwrap_or(50),
-        offset: params.offset.unwrap_or(0),
-    };
-    match store.search(search) {
+    match memory_runtime::search_memory_files(
+        params.query.as_deref().unwrap_or(""),
+        params.limit.unwrap_or(100),
+        &root,
+    ) {
         Ok(records) => json_response(&records),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -106,50 +87,31 @@ async fn handle_create(req: Request<Incoming>) -> Response<BoxBody> {
     if body.content.trim().is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "content must not be empty");
     }
-    let store = match open_store() {
-        Ok(store) => store,
-        Err(error) => return memory_store_error(error),
-    };
-    let result = store.insert(NewMemoryRecord {
-        scope: body.scope.unwrap_or(MemoryScope::Global),
-        kind: body.kind.unwrap_or(MemoryKind::Fact),
-        content: body.content,
-        source: MemorySource::UserExplicit,
-        tags: body.tags.unwrap_or_default(),
-        pinned: body.pinned.unwrap_or(false),
-        confidence: body.confidence.unwrap_or(1.0),
-        expires_at: body.expires_at,
-    });
-    match result {
+    let mut session = bifrost_agent::AgentSession::new("admin-api");
+    session.source = "admin-api".to_string();
+    match memory_runtime::remember_explicit(
+        &bifrost_agent::AgentConfig::default(),
+        &session,
+        &body.content,
+    ) {
         Ok(record) => json_response_with_status(StatusCode::CREATED, &record),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
-async fn handle_patch(req: Request<Incoming>, id: &str) -> Response<BoxBody> {
-    let patch = match read_json::<MemoryPatch>(req).await {
-        Ok(patch) => patch,
-        Err(resp) => return resp,
-    };
-    let store = match open_store() {
-        Ok(store) => store,
-        Err(error) => return memory_store_error(error),
-    };
-    match store.update(&MemoryId::from_string(id), patch) {
-        Ok(record) => json_response(&record),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-    }
+async fn handle_patch(_req: Request<Incoming>, _id: &str) -> Response<BoxBody> {
+    error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "file-backed memories are append-oriented; edit MEMORY.md directly under agent/memory",
+    )
 }
 
 async fn handle_delete(id: &str) -> Response<BoxBody> {
-    let store = match open_store() {
-        Ok(store) => store,
-        Err(error) => return memory_store_error(error),
-    };
-    match store.soft_delete(&MemoryId::from_string(id)) {
-        Ok(true) => json_response(&serde_json::json!({ "deleted": true })),
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "memory not found"),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    let session = bifrost_agent::AgentSession::new("admin-api");
+    match memory_runtime::forget_memory(&bifrost_agent::AgentConfig::default(), &session, id) {
+        Ok(Some(id)) => json_response(&serde_json::json!({ "deleted": true, "id": id })),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "memory entry not found"),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -158,21 +120,17 @@ async fn handle_search(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(body) => body,
         Err(resp) => return resp,
     };
-    let store = match open_store() {
-        Ok(store) => store,
+    let root = match memory_runtime::ensure_memory_layout() {
+        Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    match store.search(MemorySearchQuery {
-        query: body.query,
-        scopes: body.scopes.unwrap_or_default(),
-        kind: body.kind,
-        tag: body.tag,
-        include_deleted: false,
-        limit: body.limit.unwrap_or(50),
-        offset: body.offset.unwrap_or(0),
-    }) {
+    match memory_runtime::search_memory_files(
+        body.query.as_deref().unwrap_or(""),
+        body.limit.unwrap_or(50),
+        &root,
+    ) {
         Ok(records) => json_response(&records),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -181,77 +139,79 @@ async fn handle_import(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(body) => body,
         Err(resp) => return resp,
     };
-    let store = match open_store() {
-        Ok(store) => store,
+    let root = match memory_runtime::ensure_memory_layout() {
+        Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    match store.import_jsonl(BufReader::new(body.as_bytes())) {
-        Ok(report) => json_response(&report),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    let path = root.join("MEMORY.md");
+    if let Err(error) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, body.as_bytes()))
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("append {}: {error}", path.display()),
+        );
     }
+    json_response(&ImportReport {
+        imported: body.lines().filter(|line| !line.trim().is_empty()).count(),
+    })
 }
 
 async fn handle_export() -> Response<BoxBody> {
-    let store = match open_store() {
-        Ok(store) => store,
+    let root = match memory_runtime::ensure_memory_layout() {
+        Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    let mut output = Vec::new();
-    match store.export_jsonl(&mut output) {
-        Ok(count) => {
-            let content = String::from_utf8(output).unwrap_or_default();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .body(full_body(
-                    serde_json::to_string(&ExportResponse { content, count })
-                        .unwrap_or_else(|_| "{}".to_string()),
-                ))
-                .unwrap()
-        }
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-    }
+    const MAX_MEMORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
+    let summary_path = root.join("memory_summary.md");
+    let summary = if std::fs::metadata(&summary_path)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        <= MAX_MEMORY_FILE_BYTES
+    {
+        fs::read_to_string(&summary_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let memory_path = root.join("MEMORY.md");
+    let memory = if std::fs::metadata(&memory_path)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        <= MAX_MEMORY_FILE_BYTES
+    {
+        fs::read_to_string(&memory_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let content = format!("--- memory_summary.md ---\n{summary}\n--- MEMORY.md ---\n{memory}");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(full_body(
+            serde_json::to_string(&ExportResponse {
+                count: content.lines().count(),
+                content,
+            })
+            .unwrap_or_else(|_| "{}".to_string()),
+        ))
+        .unwrap()
 }
 
 async fn handle_stats() -> Response<BoxBody> {
-    let store = match open_store() {
-        Ok(store) => store,
-        Err(error) => return memory_store_error(error),
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let _ = store.gc(GcPolicy {
-        now,
-        max_unused_days: None,
-        tombstone_path: None,
-    });
-    match store.stats(now) {
+    match memory_runtime::memory_stats() {
         Ok(stats) => json_response(&stats),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => memory_store_error(error),
     }
-}
-
-fn open_store() -> Result<SqliteMemoryStore, String> {
-    SqliteMemoryStore::open(agent_home_dir()).map_err(|error| error.to_string())
 }
 
 fn memory_store_error(error: String) -> Response<BoxBody> {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
-        &format!("Failed to open memory store: {error}"),
+        &format!("Failed to access memory files: {error}"),
     )
-}
-
-fn scope_filter(scope_type: Option<String>, scope_value: Option<String>) -> Vec<MemoryScope> {
-    match scope_type.as_deref() {
-        Some("global") => vec![MemoryScope::Global],
-        Some("user") => scope_value.into_iter().map(MemoryScope::User).collect(),
-        Some("project") => scope_value.into_iter().map(MemoryScope::Project).collect(),
-        Some("session") => scope_value.into_iter().map(MemoryScope::Session).collect(),
-        _ => Vec::new(),
-    }
 }
 
 async fn read_body(req: Request<Incoming>) -> Result<String, Response<BoxBody>> {
@@ -277,26 +237,4 @@ async fn read_json<T: for<'de> Deserialize<'de>>(
     let body = read_body(req).await?;
     serde_json::from_str(&body)
         .map_err(|error| error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {error}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_filter_builds_global_scope() {
-        assert_eq!(
-            scope_filter(Some("global".to_string()), None),
-            vec![MemoryScope::Global]
-        );
-    }
-
-    #[test]
-    fn scope_filter_requires_value_for_user_scope() {
-        assert!(scope_filter(Some("user".to_string()), None).is_empty());
-        assert_eq!(
-            scope_filter(Some("user".to_string()), Some("u1".to_string())),
-            vec![MemoryScope::User("u1".to_string())]
-        );
-    }
 }

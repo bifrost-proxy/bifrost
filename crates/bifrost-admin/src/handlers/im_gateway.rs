@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
 use crate::im_gateway::event_router::ImEventRouter;
@@ -45,6 +45,9 @@ pub struct ImGatewayService {
 
 impl ImGatewayService {
     pub fn new(data_dir: &std::path::Path) -> Self {
+        // Install embedded system skills on startup (idempotent, fingerprint-checked)
+        bifrost_agent::install_system_skills();
+
         // Store agent config under data_dir/agent/ for unified directory structure
         let agent_data_dir = data_dir.join("agent");
         let _ = std::fs::create_dir_all(&agent_data_dir);
@@ -741,6 +744,8 @@ async fn run_event_loop(
                                 panic = %panic_msg,
                                 "process_agent_chat panicked, event loop continues"
                             );
+                            // Release active session to prevent permanent busy state
+                            agent_session_manager.release_active(&session_key);
                             // Best-effort: send error card to user
                             let _ = send_error_card_to_owner(
                                 &feishu,
@@ -812,6 +817,8 @@ async fn run_event_loop(
                         panic = %panic_msg,
                         "process_agent_chat panicked (route), event loop continues"
                     );
+                    // Release active session to prevent permanent busy state
+                    agent_session_manager.release_active(&session_key);
                     let _ = send_error_card_to_owner(
                         &feishu,
                         &provider,
@@ -853,8 +860,36 @@ async fn process_agent_chat(
         "invoking agent chat (turn loop)"
     );
 
-    // Take session for exclusive use during this turn
-    let mut session = session_manager.take_session(session_key);
+    // ── Session-free command fast path ────────────────────────────────────
+    // Commands like /help, /remember, /memories, /forget don't need session
+    // state and can respond immediately even while a turn loop is running.
+    if let Some(response) =
+        bifrost_agent::handle_session_free_command(session_key, user_message, agent_config)
+    {
+        debug!(
+            session_key = %session_key,
+            "handled session-free command without taking session"
+        );
+        send_agent_reply(feishu, provider, event, &response, message_log_store).await;
+        return;
+    }
+
+    // ── Busy check ───────────────────────────────────────────────────────
+    // If another turn loop is already processing this session, reject early
+    // instead of creating a duplicate empty session.
+    let mut session = match session_manager.try_take_session(session_key) {
+        Some(s) => s,
+        None => {
+            info!(
+                session_key = %session_key,
+                "session is busy, rejecting concurrent request"
+            );
+            let busy_msg =
+                "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。";
+            send_agent_reply(feishu, provider, event, busy_msg, message_log_store).await;
+            return;
+        }
+    };
     session.source = "feishu".to_string();
 
     // Create a conversation recorder for persistence if enabled
@@ -944,8 +979,10 @@ async fn process_agent_chat(
         }
     };
 
-    // Put the recorder back into the session so it persists across turns
-    if recorder.is_some() {
+    // Put the recorder back into the session so it persists across turns.
+    // Skip this if session was cleared during the turn (/clear drops the recorder
+    // deliberately so a new file will be created for the fresh session).
+    if recorder.is_some() && !session.memory_cleared {
         session.recorder = recorder;
     }
 
@@ -1079,6 +1116,102 @@ async fn process_agent_chat(
     match send_result {
         Ok(_) => info!(session_key = %session_key, "agent reply sent successfully"),
         Err(e) => error!(session_key = %session_key, error = %e, "failed to send agent reply"),
+    }
+}
+
+/// Send an agent reply text via Feishu card and log the outbound message.
+///
+/// Extracted helper to share between the main turn loop and session-free command fast path.
+async fn send_agent_reply(
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_text: &str,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let target_open_id = provider
+        .owner_open_id
+        .as_deref()
+        .or(event.source.user_id.as_deref())
+        .unwrap_or("");
+    if target_open_id.is_empty() {
+        error!("no target open_id to send agent reply");
+        return;
+    }
+
+    let reply_target = crate::im_gateway::types::ImTarget {
+        id: "__agent_reply__".to_string(),
+        provider_id: provider.id.clone(),
+        display_name: "Agent Reply".to_string(),
+        enabled: true,
+        receive_id_type: "open_id".to_string(),
+        receive_id: target_open_id.to_string(),
+        default_msg_type: "interactive".to_string(),
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let card = serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true
+        },
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": "Bifrost AI"
+            }
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": reply_text,
+                    "element_id": "agent_reply"
+                }
+            ]
+        }
+    });
+
+    let send_result = feishu
+        .send_card(
+            provider,
+            &reply_target,
+            card,
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await;
+
+    let (status, message_id, error_msg) = match &send_result {
+        Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
+        Err(e) => (MessageStatus::Failed, None, Some(e.to_string())),
+    };
+    let log = ImMessageLog {
+        id: uuid_short(),
+        provider_id: provider.id.clone(),
+        direction: MessageDirection::Outbound,
+        status,
+        timestamp: now_ms(),
+        target_id: Some("__agent_reply__".to_string()),
+        target_name: Some("Agent Reply".to_string()),
+        message_id,
+        msg_type: Some("interactive".to_string()),
+        content_preview: Some(truncate_str(reply_text, 200)),
+        trigger: Some("agent".to_string()),
+        error: error_msg,
+        sender_open_id: None,
+        event_id: Some(event.event_id.clone()),
+        reaction_added: None,
+    };
+    if let Err(e) = message_log_store.add(log) {
+        error!(error = %e, "failed to store agent outbound message log");
+    }
+
+    match send_result {
+        Ok(_) => debug!("agent reply sent successfully"),
+        Err(e) => error!(error = %e, "failed to send agent reply"),
     }
 }
 
@@ -2070,9 +2203,32 @@ async fn handle_agent(
         let session_key = body
             .session_key
             .unwrap_or_else(|| "test-session".to_string());
-        let mut session = service
+
+        // ── Session-free command fast path ──────────────────────────────
+        if let Some(response) =
+            bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
+        {
+            return json_response(&serde_json::json!({
+                "success": true,
+                "response": response,
+                "tool_calls": []
+            }));
+        }
+
+        // ── Busy check ─────────────────────────────────────────────────
+        let mut session = match service
             .agent_session_manager
-            .take_session_with_work_dir(&session_key, body.work_dir);
+            .try_take_session_with_work_dir(&session_key, body.work_dir)
+        {
+            Some(s) => s,
+            None => {
+                return json_response(&serde_json::json!({
+                    "success": true,
+                    "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
+                    "tool_calls": []
+                }));
+            }
+        };
         session.source = "api".to_string();
         // Initialize MCP from config for test endpoint (mirrors event loop behavior)
         let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
@@ -2127,7 +2283,7 @@ async fn handle_agent(
         )
         .await;
         mcp_manager.shutdown().await;
-        if recorder.is_some() {
+        if recorder.is_some() && !session.memory_cleared {
             session.recorder = recorder;
         }
         service.agent_session_manager.return_session(session);
@@ -2158,7 +2314,7 @@ fn apply_agent_config_patch(
         config.model_provider = Some(provider.to_string());
     }
     if let Some(tokens) = patch.get("max_completion_tokens").and_then(|v| v.as_u64()) {
-        config.max_completion_tokens = Some(tokens as u32);
+        config.max_completion_tokens = Some(u32::try_from(tokens).unwrap_or(u32::MAX));
     }
     if let Some(effort) = patch
         .get("model_reasoning_effort")
@@ -2196,7 +2352,7 @@ fn apply_agent_config_patch(
         config.instructions = Some(prompt.to_string());
     }
     if let Some(max_hist) = patch.get("max_history_messages").and_then(|v| v.as_u64()) {
-        config.max_history_messages = Some(max_hist as u32);
+        config.max_history_messages = Some(u32::try_from(max_hist).unwrap_or(u32::MAX));
     }
     if let Some(ttl) = patch.get("session_ttl_secs").and_then(|v| v.as_u64()) {
         config.session_ttl_secs = Some(ttl);
@@ -2208,7 +2364,7 @@ fn apply_agent_config_patch(
         config.shell_timeout_secs = Some(shell_timeout);
     }
     if let Some(max_iter) = patch.get("max_turn_iterations").and_then(|v| v.as_u64()) {
-        config.max_turn_iterations = Some(max_iter as u32);
+        config.max_turn_iterations = Some(u32::try_from(max_iter).unwrap_or(u32::MAX));
     }
     if let Some(tool_limit) = patch
         .get("tool_output_token_limit")
@@ -2284,6 +2440,12 @@ fn apply_agent_config_patch(
         {
             memories.min_rollout_idle_hours = Some(v);
         }
+        if let Some(v) = memories_obj
+            .get("min_rate_limit_remaining_percent")
+            .and_then(|v| v.as_i64())
+        {
+            memories.min_rate_limit_remaining_percent = Some(v);
+        }
         if let Some(v) = memories_obj.get("extract_model").and_then(|v| v.as_str()) {
             memories.extract_model = Some(v.to_string());
         }
@@ -2310,9 +2472,10 @@ fn apply_agent_config_patch(
         .model_providers
         .entry(provider_id.clone())
         .or_insert_with(|| bifrost_agent::ModelProviderConfig {
-            name: Some(provider_id),
+            name: Some(provider_id.clone()),
             base_url: None,
             env_key: None,
+            api_key: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: None,
@@ -2323,8 +2486,23 @@ fn apply_agent_config_patch(
         provider.base_url = Some(url.to_string());
     }
     if let Some(key) = patch.get("api_key").and_then(|v| v.as_str()) {
-        let headers = provider.http_headers.get_or_insert_with(HashMap::new);
-        headers.insert("api-key".to_string(), key.to_string());
+        if key.is_empty() {
+            provider.api_key = None;
+            if let Some(headers) = provider.http_headers.as_mut() {
+                headers.remove("api-key");
+                if headers.is_empty() {
+                    provider.http_headers = None;
+                }
+            }
+        } else {
+            provider.api_key = Some(key.to_string());
+            if uses_api_key_header(&provider_id, patch) {
+                provider
+                    .http_headers
+                    .get_or_insert_with(HashMap::new)
+                    .insert("api-key".to_string(), key.to_string());
+            }
+        }
     }
     if let Some(env_key) = patch.get("env_key").and_then(|v| v.as_str()) {
         provider.env_key = Some(env_key.to_string());
@@ -2376,6 +2554,13 @@ fn apply_agent_config_patch(
         }
         config.model_providers = model_providers;
     }
+}
+
+fn uses_api_key_header(provider_id: &str, patch: &serde_json::Value) -> bool {
+    patch
+        .get("by_azure")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(matches!(provider_id, "aidp_crawl" | "azure"))
 }
 
 // ---------------------------------------------------------------------------

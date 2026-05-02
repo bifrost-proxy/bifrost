@@ -3,7 +3,7 @@ use crate::store::{SkillStore, StoreError};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use tracing::warn;
@@ -79,6 +79,22 @@ impl SkillRegistry {
             .cloned()
     }
 
+    /// List all registered slash commands from skills.
+    /// Returns `(command, Option<description>)` pairs sorted by command name.
+    pub fn list_slash_commands(&self) -> Vec<(String, Option<String>)> {
+        let inner = self.inner.read();
+        let mut cmds: Vec<_> = inner
+            .by_slash
+            .iter()
+            .map(|(cmd, name)| {
+                let desc = inner.by_name.get(name).map(|r| r.description.clone());
+                (cmd.clone(), desc)
+            })
+            .collect();
+        cmds.sort_by(|a, b| a.0.cmp(&b.0));
+        cmds
+    }
+
     pub fn get(&self, name: &str) -> Option<SkillRecord> {
         self.inner.read().by_name.get(name).cloned()
     }
@@ -152,12 +168,36 @@ impl std::fmt::Debug for SkillRegistry {
     }
 }
 
-pub fn default_roots(agent_home: PathBuf, work_dir: PathBuf) -> Vec<crate::model::ScopeRoot> {
+/// Build default skill roots aligned with Bifrost data directory layout.
+///
+/// - System: `~/.bifrost/agent/skills/.system` (embedded/cached system skills)
+/// - Global: `~/.agents/skills/` (cross-agent shared, Codex-compatible)
+/// - User: `~/.bifrost/agent/skills/` (user-created skills)
+/// - Repo: `<work_dir>/.agents/skills/`
+pub fn default_roots(user_home: PathBuf, work_dir: PathBuf) -> Vec<crate::model::ScopeRoot> {
     vec![
-        crate::model::ScopeRoot::new(SkillScope::Global, agent_home.join("skills")),
-        crate::model::ScopeRoot::new(SkillScope::User, agent_home.join("skills/users/default")),
-        crate::model::ScopeRoot::new(SkillScope::Project, work_dir.join(".bifrost/skills")),
+        // System skills (lowest priority): cached under user's bifrost data.
+        crate::model::ScopeRoot::new(SkillScope::System, system_skills_cache_dir(&user_home)),
+        // Global skills: ~/.agents/skills/ (cross-agent shared, Codex-compatible).
+        crate::model::ScopeRoot::new(SkillScope::Global, user_home.join(".agents/skills")),
+        // User skills: ~/.bifrost/agent/skills/ (user-created, bifrost-specific).
+        crate::model::ScopeRoot::new(SkillScope::User, user_home.join(".bifrost/agent/skills")),
+        // Repo skills: <work_dir>/.agents/skills/ (highest priority).
+        crate::model::ScopeRoot::new(SkillScope::Repo, work_dir.join(".agents/skills")),
     ]
+}
+
+/// Return the cache directory for embedded system skills.
+///
+/// Layout: `~/.bifrost/agent/skills/.system/`
+/// System skills are installed here at startup and have the lowest priority,
+/// allowing user and repo skills to override them.
+pub fn system_skills_cache_dir(user_home: &Path) -> PathBuf {
+    user_home
+        .join(".bifrost")
+        .join("agent")
+        .join("skills")
+        .join(".system")
 }
 
 #[cfg(test)]
@@ -171,16 +211,16 @@ mod tests {
     fn resolves_enabled_slash() {
         let dir = tempdir().unwrap();
         let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
-            SkillScope::Project,
+            SkillScope::Repo,
             dir.path(),
         )]));
-        let mut manifest = SkillManifest::minimal_inline("weather", "weather", SkillScope::Project);
+        let mut manifest = SkillManifest::minimal_inline("weather", "weather", SkillScope::Repo);
         manifest.slash_command = Some("/weather".into());
         manifest.triggers = vec![TriggerRule::SlashCommand];
         store
             .commit(SkillDraft {
                 manifest,
-                skill_md: "---\nname: weather\n---\n# Weather".into(),
+                skill_md: "---\nname: weather\nslash_command: /weather\n---\n# Weather".into(),
                 draft_dir: None,
                 assets: Vec::new(),
             })

@@ -197,7 +197,12 @@ impl AdminQueryService {
             .parse()
             .map_err(|_| BifrostError::Parse(format!("Invalid traffic sequence suffix: {}", id)))?;
         let server_seq = self.fetch_server_sequence().await?;
-        let modulus = 10u64.pow(id.len() as u32);
+        let Some(modulus) = 10u64.checked_pow(id.len() as u32) else {
+            return Err(BifrostError::Parse(format!(
+                "Traffic ID suffix too long: {}",
+                id
+            )));
+        };
         let suffix = suffix_val % modulus;
 
         let mut candidates = Vec::new();

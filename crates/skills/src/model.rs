@@ -31,9 +31,14 @@ pub struct SkillManifest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillScope {
+    /// Embedded system skills (lowest priority, overridable).
+    System,
+    /// Global cross-agent skills from `~/.agents/skills/`.
     Global,
+    /// User-level skills from `~/.bifrost/agent/skills/`.
     User,
-    Project,
+    /// Repository-level skills from `<work_dir>/.agents/skills/`.
+    Repo,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -142,9 +147,10 @@ impl ScopeRoot {
 impl SkillScope {
     pub fn priority(&self) -> u8 {
         match self {
-            SkillScope::Global => 0,
-            SkillScope::User => 1,
-            SkillScope::Project => 2,
+            SkillScope::System => 0,
+            SkillScope::Global => 1,
+            SkillScope::User => 2,
+            SkillScope::Repo => 3,
         }
     }
 }
@@ -194,7 +200,7 @@ mod tests {
                 },
             ],
             triggers: vec![TriggerRule::SlashCommand],
-            ..SkillManifest::minimal_inline("weather-lookup", "weather", SkillScope::Project)
+            ..SkillManifest::minimal_inline("weather-lookup", "weather", SkillScope::Repo)
         };
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(json.contains("\"kind\":\"owned\""));

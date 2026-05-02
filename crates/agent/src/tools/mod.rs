@@ -11,7 +11,6 @@ pub mod file_ops;
 pub mod head_tail_buffer;
 pub mod patch;
 pub mod shell;
-pub mod skill_creator;
 pub mod switch_workdir;
 
 use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
@@ -68,7 +67,6 @@ impl ToolRegistry {
         registry.register(Arc::new(file_ops::ListDirectoryTool));
         registry.register(Arc::new(patch::ApplyPatchTool));
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
-        skill_creator::register_skill_creator_tools(&mut registry);
         registry
     }
 

@@ -159,6 +159,25 @@
 - `BIFROST_E2E_RETRY_BUDGET_SECS` 仍保持 `180`，普通失败不会因为 job timeout 提升而被无限重试。
 - Windows x86 和 aarch64 rules job 都应完成为 success；若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact。
 
+### TC-REF-07：bifrost-e2e admin 测试目录重复端口重跑隔离
+
+**操作步骤**：
+1. 使用同一个 base port 连续运行 body cache 分类两次：
+   ```bash
+   cargo run -p bifrost-e2e -- --category body_cache --jobs 1 --test-timeout 120 --port 18180
+   cargo run -p bifrost-e2e -- --category body_cache --jobs 1 --test-timeout 120 --port 18180
+   ```
+2. 单独重跑曾经受旧 traffic.db 污染的用例：
+   ```bash
+   cargo run -p bifrost-e2e -- --test binary_performance_mode_skips_binary_recording --test-timeout 120 --port 18180
+   ```
+3. 检查第二次运行不应读取上一次 `/var/folders/.../bifrost_e2e_test_<port>/traffic/traffic.db` 或 body cache 残留。
+
+**预期结果**：
+- 两次 body cache 分类均全部通过。
+- `binary_performance_mode_skips_binary_recording` 只看到当前测试生成的记录，不能因为同端口重跑读到历史 traffic.db 而报 `Expected only 1 image record in performance mode, got 3 records`。
+- 正式 `9900` 服务不受影响，测试仍使用非 9900 临时端口。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -178,3 +197,4 @@
 - 2026-05-01：通过。补充并执行 TC-REF-05，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `rg -n 'is_windows|tail -n \+1 -f|command_pid=\$!|kill_process_tree "\$command_pid"' scripts/run_all_e2e.sh` 和 `sed -n '392,420p' scripts/run_all_e2e.sh`，确认 Windows 分支先后台运行真实命令并记录 `command_pid=$!`，再用子 shell 包裹 `tail -n +1 -f "$log_file"` 流式打印日志，watchdog 对真实 `command_pid` 调用 `kill_process_tree`，命令结束后会对日志流子 shell调用 `kill_process_tree` 主动停止日志流。GitHub Actions Windows rules timeout artifact 行为由后续 CI 复跑验证。
 - 2026-05-01：通过。TC-REF-05 二次执行，本地执行 `bash -n scripts/run_all_e2e.sh` 通过；执行 `sed -n '396,482p' scripts/run_all_e2e.sh` 和 `rg -n 'tail -n \+1 -f|kill_process_tree "\$stream_pid"|kill_process_tree "\$command_pid"|command_pid=\$!' scripts/run_all_e2e.sh`，确认日志流已改为子 shell 后台任务，命令结束后对 `stream_pid` 调用 `kill_process_tree`，避免 `tail -f` 残留导致 Windows runner/rules wrapper 不退出。
 - 2026-05-01：通过。补充并执行 TC-REF-06，本地执行 `rg -n 'e2e-windows-rules|timeout-minutes: 90|BIFROST_E2E_SUITE_TIMEOUT: "4800"|BIFROST_E2E_RETRY_BUDGET_SECS: "180"' .github/workflows/ci.yml` 与 `sed -n '860,890p' .github/workflows/ci.yml`，确认 Windows rules job timeout 为 90 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 为 4800 秒，普通 retry budget 仍为 180 秒。Windows x86/aarch64 rules 完整完成情况由后续 CI 复跑验证。
+- 2026-05-03：通过。补充并执行 TC-REF-07；在清理旧 mock server 后，先用同一 base port `18180` 执行 `cargo run -p bifrost-e2e -- --test body_resMerge_add_field --test-timeout 120 --port 18180` 通过，确认早先失败是旧 `ws_echo_server.py 24200` 端口占用；随后执行 `cargo run -p bifrost-e2e -- --test binary_performance_mode_skips_binary_recording --test-timeout 120 --port 18180` 通过，并执行 `cargo run -p bifrost-e2e -- --category body_cache --jobs 1 --test-timeout 120 --port 18180`，5/5 通过。回归确认 `start_with_admin`/`start_with_admin_sync` 启动前清理 `bifrost_e2e_test_*` 数据目录，避免同端口聚合重跑读取旧 traffic.db/body cache。

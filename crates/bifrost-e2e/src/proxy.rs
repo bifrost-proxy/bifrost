@@ -1251,6 +1251,10 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_{}", port));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)
+                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
+        }
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1437,6 +1441,10 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_sync_{}", port));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)
+                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
+        }
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,

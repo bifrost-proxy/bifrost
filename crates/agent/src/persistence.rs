@@ -311,8 +311,13 @@ impl Drop for ConversationRecorder {
 // Loading conversations
 // ---------------------------------------------------------------------------
 
+/// Maximum session file size we will attempt to load (64 MiB).
+const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Load a previous conversation from a JSONL file.
 pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
+    bifrost_core::text::check_file_size(path, MAX_SESSION_FILE_BYTES)
+        .map_err(|e| format!("session file too large to load: {e}"))?;
     let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
     let reader = std::io::BufReader::new(file);
 
@@ -579,8 +584,19 @@ pub fn cleanup_expired_sessions(data_dir: &Path, cutoff_secs: u64) -> usize {
     removed
 }
 
-/// Recursively collect .jsonl files.
+/// Maximum recursion depth for directory traversal to prevent stack overflow
+/// from symlink loops or excessively nested directories.
+const MAX_DIR_RECURSION_DEPTH: usize = 16;
+
+/// Recursively collect .jsonl files with a depth limit.
 fn collect_jsonl_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    collect_jsonl_files_depth(dir, files, 0);
+}
+
+fn collect_jsonl_files_depth(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
+    if depth >= MAX_DIR_RECURSION_DEPTH {
+        return;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -589,7 +605,7 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl_files(&path, files);
+            collect_jsonl_files_depth(&path, files, depth + 1);
         } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             files.push(path);
         }

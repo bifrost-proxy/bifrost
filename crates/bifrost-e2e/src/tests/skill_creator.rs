@@ -14,7 +14,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         || async move {
             let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
             let import_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Project, dir.path())]);
+            let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
             let manifest = manifest("weather-skill");
 
             let record = store
@@ -48,10 +48,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 return Err(format!("unexpected slash record: {}", invoked.name));
             }
 
-            let archive = SkillPackager::package(&store, SkillScope::Project, "weather-skill")
+            let archive = SkillPackager::package(&store, SkillScope::Repo, "weather-skill")
                 .map_err(|error| format!("package skill: {error}"))?;
             store
-                .delete(SkillScope::Project, "weather-skill")
+                .delete(SkillScope::Repo, "weather-skill")
                 .map_err(|error| format!("delete skill: {error}"))?;
             let registry = SkillRegistry::without_watcher(Arc::new(store.clone()))
                 .map_err(|error| format!("registry after delete: {error}"))?;
@@ -60,8 +60,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
 
             let import_store =
-                SkillStore::new(vec![ScopeRoot::new(SkillScope::Project, import_dir.path())]);
-            let imported = SkillPackager::import(&import_store, SkillScope::Project, &archive)
+                SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, import_dir.path())]);
+            let imported = SkillPackager::import(&import_store, SkillScope::Repo, &archive)
                 .map_err(|error| format!("import skill: {error}"))?;
             if imported.name != "weather-skill" {
                 return Err(format!("unexpected imported skill: {}", imported.name));
@@ -77,7 +77,7 @@ fn manifest(name: &str) -> SkillManifest {
         name: name.to_string(),
         version: "0.1.0".to_string(),
         description: "Weather skill".to_string(),
-        scope: SkillScope::Project,
+        scope: SkillScope::Repo,
         entrypoint: Entrypoint::Inline {
             instructions_md: "Return weather for the input city.".to_string(),
         },

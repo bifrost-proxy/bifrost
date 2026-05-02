@@ -219,13 +219,26 @@ async fn import_skill(req: Request<Incoming>, store: &SkillStore) -> Response<Bo
         Ok(body) => body,
         Err(resp) => return resp,
     };
+    const MAX_SKILL_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(&body.path) {
+        if meta.len() > MAX_SKILL_ARCHIVE_BYTES {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "archive too large ({} bytes, limit {} bytes)",
+                    meta.len(),
+                    MAX_SKILL_ARCHIVE_BYTES
+                ),
+            );
+        }
+    }
     let bytes = match std::fs::read(&body.path) {
         Ok(bytes) => bytes,
         Err(error) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("read archive: {error}"))
         }
     };
-    match SkillPackager::import(store, body.scope.unwrap_or(SkillScope::Project), &bytes) {
+    match SkillPackager::import(store, body.scope.unwrap_or(SkillScope::Repo), &bytes) {
         Ok(record) => json_response_with_status(
             StatusCode::CREATED,
             &serde_json::json!({ "record": record }),
@@ -289,7 +302,7 @@ fn commit_payload(
 fn store_for(service: &ImGatewayService) -> SkillStore {
     let config = service.agent_config_store.load();
     SkillStore::new(default_roots(
-        bifrost_agent::config::agent_home_dir(),
+        bifrost_agent::config::user_home_dir(),
         config.resolve_work_dir(),
     ))
 }
@@ -345,12 +358,12 @@ mod tests {
     fn agent_skills_crud_store_happy_path() {
         let dir = tempdir().unwrap();
         let store = SkillStore::new(vec![bifrost_skills::ScopeRoot::new(
-            SkillScope::Project,
+            SkillScope::Repo,
             dir.path(),
         )]);
         let record = store
             .commit(SkillDraft {
-                manifest: manifest("admin-skill", SkillScope::Project),
+                manifest: manifest("admin-skill", SkillScope::Repo),
                 skill_md: "---\nname: admin-skill\n---\n# Admin".into(),
                 draft_dir: None,
                 assets: Vec::new(),
@@ -358,29 +371,29 @@ mod tests {
             .unwrap();
         assert_eq!(record.name, "admin-skill");
         assert!(store
-            .verify_checksum(SkillScope::Project, "admin-skill")
+            .verify_checksum(SkillScope::Repo, "admin-skill")
             .unwrap());
         store
-            .enable(SkillScope::Project, "admin-skill", false)
+            .enable(SkillScope::Repo, "admin-skill", false)
             .unwrap();
         assert!(
             !store
-                .read_one(SkillScope::Project, "admin-skill")
+                .read_one(SkillScope::Repo, "admin-skill")
                 .unwrap()
                 .enabled
         );
-        store.delete(SkillScope::Project, "admin-skill").unwrap();
-        assert!(store.read_one(SkillScope::Project, "admin-skill").is_err());
+        store.delete(SkillScope::Repo, "admin-skill").unwrap();
+        assert!(store.read_one(SkillScope::Repo, "admin-skill").is_err());
     }
 
     #[test]
     fn agent_skills_detects_slash_conflict() {
         let dir = tempdir().unwrap();
         let store = SkillStore::new(vec![bifrost_skills::ScopeRoot::new(
-            SkillScope::Project,
+            SkillScope::Repo,
             dir.path(),
         )]);
-        let mut first = manifest("first-skill", SkillScope::Project);
+        let mut first = manifest("first-skill", SkillScope::Repo);
         first.slash_command = Some("/first".into());
         first.triggers = vec![TriggerRule::SlashCommand];
         store
@@ -391,7 +404,7 @@ mod tests {
                 assets: Vec::new(),
             })
             .unwrap();
-        let mut second = manifest("second-skill", SkillScope::Project);
+        let mut second = manifest("second-skill", SkillScope::Repo);
         second.slash_command = Some("/first".into());
         second.triggers = vec![TriggerRule::SlashCommand];
         let error = store

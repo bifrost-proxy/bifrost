@@ -97,7 +97,7 @@
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
-| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 6 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断和 CI 预算的稳定性回归 |
+| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 7 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算和 bifrost-e2e admin 临时数据目录重复端口重跑隔离的稳定性回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 7 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证 |
 
@@ -119,7 +119,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [memory-sqlite-cache-optimization.md](./memory-sqlite-cache-optimization.md) | SQLite Cache Size 与内存优化 | 6 | SQLite cache_size 降低、读连接池缩减、metadata_cache LRU 化后的功能回归与内存验证 |
-| [long-term-memory.md](./long-term-memory.md) | Long-term Memory 长期记忆系统 | 12 | 跨 session `/remember` 显式沉淀、召回注入、关闭召回、自动抽取开关、隐私脱敏、SQLite/FTS、导入导出、GC、Admin API、WebUI 管理、compaction 事件 |
+| [long-term-memory.md](./long-term-memory.md) | Long-term Memory 长期记忆系统 | 9 | Codex-style 文件记忆目录、`raw_memories.md`/`rollout_summaries` 追溯文件、无数据库 bounded Phase 2 consolidation、文件锁、原子写、按需加载说明注入、关闭召回、`/remember` 文件追加、不创建 SQLite、Admin 文件 API、WebUI 文件视图、导入导出、真实对话接口自动生成并跨独立 Session 消费 |
 
 ### CI/DevOps 测试
 
@@ -127,6 +127,7 @@
 |------|---------|-----------|------|
 | [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 12 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片耗时 <5min、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、unsafe_ssl 自带 HTTPS mock fixture 回归 |
 | [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 4 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E |
+| [skill-loading-e2e.md](./skill-loading-e2e.md) | Skill Loading E2E 一致性 | 11 | 4 scope 加载可见性、优先级覆盖、启用/停用一致性（管理端→消费端）、prompt 注入、slash 命令解析、default_roots 路径对齐、隐藏目录过滤、嵌套发现、单元测试回归 |
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
 | [codex-task-dispatch.md](./codex-task-dispatch.md) | Codex 异步任务派发 | 5 | 后台启动 Codex 任务、watch 最近任务、prompt 缺失报错、PATH 隔离无 codex 报错、同名任务历史产物不覆盖 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
@@ -137,12 +138,14 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 30 | Settings Tab、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
-| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 67 | Agent 配置 API（获取/更新/禁用启用）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call） |
+| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 68 | Agent 配置 API（获取/更新/禁用启用）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call、API Key 写入保持 Azure header 认证） |
+| [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
+| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
 
 ---
 
-**总计：75 个测试文件，1457 个测试用例**
+**总计：77 个测试文件，1479 个测试用例**
 
 ## 工作流程
 

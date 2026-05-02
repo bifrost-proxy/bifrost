@@ -52,7 +52,9 @@ pub use config::{
     list_builtin_providers, AgentConfig, AgentConfigStore, HistoryConfig, HistoryPersistence,
     McpServerConfig, MemoriesConfig, ModelProviderConfig, ProviderInfo,
 };
-pub use session::{AgentSession, AgentSessionManager, SessionDetail, SessionInfo};
-pub use skills::{SkillMetadata, SkillScope, SkillsManager};
+pub use session::{
+    handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
+};
+pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::ToolRegistry;
 pub use types::{ChatMessage, ToolCallLog, TurnResult};

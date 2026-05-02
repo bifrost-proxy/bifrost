@@ -925,6 +925,14 @@ impl AdminState {
         if !path.exists() {
             return;
         }
+        const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_CACHE_FILE_BYTES {
+            tracing::warn!(
+                target: "bifrost_admin::state",
+                "group cache file too large, skipping"
+            );
+            return;
+        }
         match std::fs::read_to_string(&path) {
             Ok(data) => match serde_json::from_str::<HashMap<String, String>>(&data) {
                 Ok(map) => {

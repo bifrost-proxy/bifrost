@@ -349,6 +349,15 @@ pub fn stable_checksum(skill_dir: &Path) -> Result<String, std::io::Error> {
         let rel = file.strip_prefix(skill_dir).unwrap_or(&file);
         hasher.update(rel.to_string_lossy().as_bytes());
         hasher.update([0]);
+        const MAX_SKILL_FILE_BYTES: u64 = 64 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&file) {
+            if meta.len() > MAX_SKILL_FILE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("skill file too large: {}", file.display()),
+                ));
+            }
+        }
         hasher.update(std::fs::read(file)?);
     }
     Ok(format!("{:x}", hasher.finalize()))
@@ -374,7 +383,7 @@ mod tests {
             name: "weather-lookup".to_string(),
             version: "0.1.0".to_string(),
             description: "Fetch weather".to_string(),
-            scope: SkillScope::Project,
+            scope: SkillScope::Repo,
             entrypoint: Entrypoint::Inline {
                 instructions_md: "Do weather".to_string(),
             },

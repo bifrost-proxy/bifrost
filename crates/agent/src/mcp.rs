@@ -90,6 +90,10 @@ enum McpTransport {
     },
 }
 
+/// Maximum bytes for a single JSON-RPC response line from an MCP server.
+/// 10 MiB should accommodate even large tool results.
+const MAX_JSONRPC_LINE_BYTES: usize = 10 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // McpConnection
 // ---------------------------------------------------------------------------
@@ -139,12 +143,27 @@ impl McpConnection {
                     .await
                     .map_err(|e| format!("flush MCP server '{}': {e}", self.server_name))?;
 
-                // Read response line
+                // Read response line with a size limit to prevent OOM from
+                // a misbehaving server sending unbounded data.
                 let mut line = String::new();
-                stdout_reader
-                    .read_line(&mut line)
-                    .await
-                    .map_err(|e| format!("read from MCP server '{}': {e}", self.server_name))?;
+                loop {
+                    let bytes_read = stdout_reader
+                        .read_line(&mut line)
+                        .await
+                        .map_err(|e| format!("read from MCP server '{}': {e}", self.server_name))?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    if line.len() > MAX_JSONRPC_LINE_BYTES {
+                        return Err(format!(
+                            "MCP server '{}' response exceeded {} byte limit",
+                            self.server_name, MAX_JSONRPC_LINE_BYTES
+                        ));
+                    }
+                    if line.ends_with('\n') {
+                        break;
+                    }
+                }
 
                 if line.is_empty() {
                     return Err(format!(

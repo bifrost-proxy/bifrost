@@ -98,21 +98,18 @@ mod tests {
     fn package_import_round_trip() {
         let source = tempdir().unwrap();
         let target = tempdir().unwrap();
-        let source_store =
-            SkillStore::new(vec![ScopeRoot::new(SkillScope::Project, source.path())]);
-        let target_store =
-            SkillStore::new(vec![ScopeRoot::new(SkillScope::Project, target.path())]);
+        let source_store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, source.path())]);
+        let target_store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, target.path())]);
         source_store
             .commit(SkillDraft {
-                manifest: SkillManifest::minimal_inline("pkg-skill", "pkg", SkillScope::Project),
+                manifest: SkillManifest::minimal_inline("pkg-skill", "pkg", SkillScope::Repo),
                 skill_md: "---\nname: pkg-skill\n---\n# Pkg".into(),
                 draft_dir: None,
                 assets: vec![("assets/example.txt".into(), b"hello".to_vec())],
             })
             .unwrap();
-        let archive =
-            SkillPackager::package(&source_store, SkillScope::Project, "pkg-skill").unwrap();
-        let imported = SkillPackager::import(&target_store, SkillScope::Project, &archive).unwrap();
+        let archive = SkillPackager::package(&source_store, SkillScope::Repo, "pkg-skill").unwrap();
+        let imported = SkillPackager::import(&target_store, SkillScope::Repo, &archive).unwrap();
         assert_eq!(imported.name, "pkg-skill");
         assert!(target.path().join("pkg-skill/assets/example.txt").is_file());
     }

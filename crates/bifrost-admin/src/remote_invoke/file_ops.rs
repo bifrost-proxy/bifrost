@@ -386,7 +386,7 @@ pub async fn handle_file_read(
             )
         })?;
         let all_lines: Vec<&str> = text.lines().collect();
-        let total_lines = all_lines.len() as u32;
+        let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
         let start = offset.unwrap_or(1).max(1);
         let count = limit.unwrap_or(total_lines);
         let start_idx = ((start - 1) as usize).min(all_lines.len());
@@ -397,7 +397,8 @@ pub async fn handle_file_read(
         // ends with '\n'. Otherwise we would inject a byte that
         // never existed on disk and break sha256 round-trip.
         let source_ends_with_nl = buf.last().copied() == Some(b'\n');
-        let reached_eof = (end_idx as u32) == total_lines;
+        let end_idx_u32 = u32::try_from(end_idx).unwrap_or(u32::MAX);
+        let reached_eof = end_idx_u32 == total_lines;
         let need_trailing_nl = start_idx < end_idx && (!reached_eof || source_ends_with_nl);
         let selected_bytes = if start_idx < end_idx {
             if need_trailing_nl {
@@ -409,7 +410,8 @@ pub async fn handle_file_read(
             Vec::new()
         };
         let sha256 = sha256_hex(&selected_bytes);
-        let line_truncated = (end_idx as u32) < total_lines || bytes_truncated;
+        let start_idx_u32 = u32::try_from(start_idx).unwrap_or(u32::MAX);
+        let line_truncated = end_idx_u32 < total_lines || bytes_truncated;
         // Always compute whole-file sha for the line-range branch too —
         // `sha256` above is only over the selected lines, so it cannot be
         // used as `base_sha256` for a subsequent file.write.
@@ -423,8 +425,8 @@ pub async fn handle_file_read(
             "file_sha256": file_sha256,
             "mtime_unix": mtime_unix,
             "total_lines": total_lines,
-            "start_line": start_idx as u32 + 1,
-            "end_line": end_idx as u32,
+            "start_line": start_idx_u32.saturating_add(1),
+            "end_line": end_idx_u32,
         }));
     }
 
@@ -448,7 +450,7 @@ pub async fn handle_file_read(
     });
     // Include total_lines for text content so coding agents can plan chunked reads.
     if let Ok(text) = std::str::from_utf8(&buf) {
-        result["total_lines"] = json!(text.lines().count() as u32);
+        result["total_lines"] = json!(u32::try_from(text.lines().count()).unwrap_or(u32::MAX));
     }
     Ok(result)
 }

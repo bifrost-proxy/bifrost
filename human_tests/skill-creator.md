@@ -38,6 +38,7 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
 
 - **操作步骤**: `bash e2e-tests/tests/test_skill_creator_flow.sh`
 - **预期结果**: 自动跑通 create -> test -> invoke -> delete -> import，删除后 `/weather` 不再解析，导入后 skill 恢复。
+- **本次执行结果**: 2026-05-03 复跑通过。回归覆盖 `ModelProviderConfig.api_key` 新字段补齐后，`test_skill_creator_flow.sh` 能重新编译 `bifrost-agent`/`bifrost-e2e` 并完成 `skill_creator_create_test_invoke_delete_import`，结果 `1 passed, 0 failed`。
 
 ### TC-SC-05: WebUI Skills 面板构建与 lint
 

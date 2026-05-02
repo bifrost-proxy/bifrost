@@ -107,6 +107,10 @@ impl ImProviderStore {
         if !file_path.exists() {
             return None;
         }
+        const MAX_STORE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+        if std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0) > MAX_STORE_FILE_BYTES {
+            return None;
+        }
         let content = std::fs::read_to_string(file_path).ok()?;
         match serde_json::from_str::<StoreData>(&content) {
             Ok(data) if data.version == STORE_VERSION => Some(data),

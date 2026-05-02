@@ -59,7 +59,7 @@ export default function SkillCreatorWizard({ open, onClose, onSaved }: Props) {
       name: "",
       version: "0.1.0",
       description: "",
-      scope: "project",
+      scope: "repo",
       entrypoint_kind: "inline",
       script: "",
       shell: "bash",
@@ -201,9 +201,9 @@ export default function SkillCreatorWizard({ open, onClose, onSaved }: Props) {
             <Form.Item name="scope" label="Scope" rules={[{ required: true }]} style={{ width: "33%" }}>
               <Select
                 options={[
-                  { value: "project", label: "Project" },
+                  { value: "repo", label: "Repo" },
                   { value: "user", label: "User" },
-                  { value: "global", label: "Global" },
+                  { value: "system", label: "System" },
                 ]}
               />
             </Form.Item>

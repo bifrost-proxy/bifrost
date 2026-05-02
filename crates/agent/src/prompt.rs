@@ -11,7 +11,7 @@
 
 use crate::agents_md::AgentsMdManager;
 use crate::config::{agent_home_dir, AgentConfig};
-use crate::tools::skill_creator::registry_for_work_dir;
+use crate::skills::SkillsManager;
 
 /// Build the system prompt for the agent.
 ///
@@ -110,28 +110,13 @@ Use for: switching to a different project directory when the user explicitly req
         prompt.push_str(&agents_instructions);
     }
 
-    // Append progressive-disclosure skill descriptions. Full SKILL.md bodies are
-    // loaded only when a skill is pulled into the turn.
-    let skills_text = build_registry_skills_instructions(&work_dir);
+    // Append skills instructions (loaded via SkillsManager from all scopes).
+    let skills_manager = SkillsManager::new(config.skills.clone());
+    let skills = skills_manager.load_skills(&work_dir);
+    let skills_text = skills_manager.build_skills_instructions(&skills);
     if !skills_text.is_empty() {
         prompt.push_str(&skills_text);
     }
 
     prompt
-}
-
-fn build_registry_skills_instructions(work_dir: &std::path::Path) -> String {
-    let Some(registry) = registry_for_work_dir(work_dir) else {
-        return String::new();
-    };
-    let skills = registry.enabled();
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut output = String::from("\n\n## Available Skills\n\n");
-    output.push_str("The following skills are available by name and description. Load detailed instructions only when a skill is relevant.\n\n");
-    for skill in skills {
-        output.push_str(&format!("- {}: {}\n", skill.name, skill.description));
-    }
-    output
 }

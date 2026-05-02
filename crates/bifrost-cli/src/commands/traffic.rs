@@ -393,7 +393,12 @@ fn find_id_by_sequence_suffix(port: u16, suffix: &str) -> Result<SeqSuffixResult
         .parse()
         .map_err(|_| BifrostError::Parse(format!("Invalid sequence suffix: {}", suffix)))?;
 
-    let modulus = 10u64.pow(suffix.len() as u32);
+    let Some(modulus) = 10u64.checked_pow(suffix.len() as u32) else {
+        return Err(BifrostError::Parse(format!(
+            "Traffic ID suffix too long: {}",
+            suffix
+        )));
+    };
 
     let mut candidates: Vec<u64> = Vec::new();
     let mut candidate = suffix_val;

@@ -20,7 +20,7 @@ pub use model::{
     SkillScope, ToolBinding, TriggerRule,
 };
 pub use packager::SkillPackager;
-pub use registry::{default_roots, SkillRegistry};
+pub use registry::{default_roots, system_skills_cache_dir, SkillRegistry};
 pub use store::{SkillDraft, SkillStore};
 pub use tool_bridge::{MemoryToolRequest, MemoryToolResponse, SkillToolBridge};
 pub use validator::{SkillValidator, ValidationError, ValidationIssue, ValidationResult};
