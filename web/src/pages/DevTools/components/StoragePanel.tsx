@@ -1,9 +1,9 @@
-import { useMemo, useRef, type CSSProperties } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { CheckOutlined, CloseOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button, Empty, Input, Space, Typography } from "antd";
 import type { DebugStorageSnapshot } from "../../../api/devtools";
-import { HighlightedText, filterBySearch } from "./shared";
+import { HighlightedText } from "./shared";
+import { filterBySearch } from "./sharedUtils";
 
 const { Text } = Typography;
 
@@ -40,19 +40,11 @@ export function StorageView({
   onDelete: (area: string, key: string) => void;
   onSave: () => void;
 }) {
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
   const activeRows = useMemo(() => (storage ? storageRowsForArea(storage, area) : []), [area, storage]);
   const filteredRows = useMemo(
     () => filterBySearch(activeRows, searchQuery, ([key, value]) => `${key} ${value}`),
     [activeRows, searchQuery],
   );
-  const rowVirtualizer = useVirtualizer({
-    count: filteredRows.length,
-    getScrollElement: () => scrollerRef.current,
-    estimateSize: () => 36,
-    overscan: 12,
-  });
-  const virtualRows = rowVirtualizer.getVirtualItems();
   if (!storage) return <Empty description="No storage snapshot yet" />;
   return (
     <div style={storageShellStyle}>
@@ -67,7 +59,7 @@ export function StorageView({
           Add
         </Button>
       </div>
-      <div ref={scrollerRef} style={storageTableStyle}>
+      <div style={storageTableStyle}>
         <div style={storageHeaderRowStyle}>
           <Text strong>Key</Text>
           <Text strong>Value</Text>
@@ -87,19 +79,10 @@ export function StorageView({
           />
         ) : null}
         {filteredRows.length ? (
-          <div style={{ ...storageVirtualSpaceStyle, height: rowVirtualizer.getTotalSize() }}>
-            {virtualRows.map((virtualRow) => {
-              const [key, value] = filteredRows[virtualRow.index];
+          <div style={storageRowsStyle}>
+            {filteredRows.map(([key, value]) => {
               return (
-                <div
-                  key={`${area}-${key}`}
-                  data-index={virtualRow.index}
-                  ref={rowVirtualizer.measureElement}
-                  style={{
-                    ...storageVirtualRowStyle,
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
+                <div key={`${area}-${key}`}>
                   {editingKey === key ? (
                     <StorageEditRow
                       storageKey={storageKey}
@@ -237,16 +220,7 @@ const storageRowStyle: CSSProperties = {
   minHeight: 36,
 };
 
-const storageVirtualSpaceStyle: CSSProperties = {
-  position: "relative",
-  minWidth: 620,
-};
-
-const storageVirtualRowStyle: CSSProperties = {
-  position: "absolute",
-  top: 0,
-  left: 0,
-  right: 0,
+const storageRowsStyle: CSSProperties = {
   minWidth: 620,
 };
 

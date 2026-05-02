@@ -29,11 +29,13 @@ import {
 import type { TrafficRecord } from "../../types";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import TrafficDetail from "../../components/TrafficDetail";
-import { ConsoleView, consoleValueFromRuntimeResult, type ConsoleUiEntry } from "./components/ConsolePanel";
-import { DomTree, collectDefaultExpandedDomKeys, findDomNodePathById, findFirstDomSearchMatch } from "./components/ElementsPanel";
+import { ConsoleView, type ConsoleUiEntry } from "./components/ConsolePanel";
+import { DomTree } from "./components/ElementsPanel";
 import { NetworkList } from "./components/NetworkPanel";
 import { StorageView } from "./components/StoragePanel";
-import { tabSearchLabel } from "./components/shared";
+import { consoleValueFromRuntimeResult } from "./components/consoleValueUtils";
+import { collectDefaultExpandedDomKeys, findDomNodePathById, findFirstDomSearchMatch } from "./components/domUtils";
+import { tabSearchLabel } from "./components/sharedUtils";
 import "./index.css";
 
 const { Text, Title } = Typography;
@@ -170,9 +172,10 @@ export default function DevTools() {
     }, 80);
   }, []);
 
+  const sessionId = session?.session_id;
+
   useEffect(() => {
-    if (!session) return;
-    const sessionId = session.session_id;
+    if (!sessionId) return;
     const socket = new WebSocket(buildDevtoolsSessionWsUrl(sessionId));
     socket.onmessage = (event) => {
       try {
@@ -230,12 +233,12 @@ export default function DevTools() {
       );
     };
     return () => socket.close();
-  }, [navigate, requestCurrentTabRefresh, routePageId, selectDomNodeFromTarget, session?.session_id]);
+  }, [navigate, routePageId, selectDomNodeFromTarget, sessionId]);
 
   useEffect(() => {
-    if (!session || !sessionWsReady) return;
-    void requestCurrentTabRefresh(session.session_id, activeToolTab);
-  }, [activeToolTab, requestCurrentTabRefresh, session?.session_id, sessionWsReady]);
+    if (!sessionId || !sessionWsReady) return;
+    void requestCurrentTabRefresh(sessionId, activeToolTab);
+  }, [activeToolTab, requestCurrentTabRefresh, sessionId, sessionWsReady]);
 
   const filteredPages = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -276,7 +279,18 @@ export default function DevTools() {
     });
   }, [activeToolTab, panelSearch, snapshot?.dom_tree]);
 
-  const resetDetailState = () => {
+  const clearNetworkDetail = useCallback(() => {
+    networkDetailRequestRef.current += 1;
+    setNetworkTrafficId(null);
+    setNetworkRecord(null);
+    setNetworkRequestBody(null);
+    setNetworkResponseBody(null);
+    setNetworkDetailError(null);
+    setNetworkDetailEvent(null);
+    setNetworkDetailLoading(false);
+  }, []);
+
+  const resetDetailState = useCallback(() => {
     setSelectedPageId(null);
     setSession(null);
     setSessionWsReady(false);
@@ -284,9 +298,9 @@ export default function DevTools() {
     setSelectedNodeId(null);
     setExpandedDomKeys(new Set());
     clearNetworkDetail();
-  };
+  }, [clearNetworkDetail]);
 
-  const openPage = async (page: DebugPage, options: { replaceRoute?: boolean; updateRoute?: boolean } = {}) => {
+  const openPage = useCallback(async (page: DebugPage, options: { replaceRoute?: boolean; updateRoute?: boolean } = {}) => {
     if (openingPageIdRef.current === page.page_id) return;
     openingPageIdRef.current = page.page_id;
     if (options.updateRoute !== false) {
@@ -314,7 +328,7 @@ export default function DevTools() {
       setLoading(false);
       openingPageIdRef.current = null;
     }
-  };
+  }, [clearNetworkDetail, navigate]);
 
   useEffect(() => {
     if (!routePageId) {
@@ -326,7 +340,7 @@ export default function DevTools() {
     if (page) {
       void openPage(page, { replaceRoute: true, updateRoute: false });
     }
-  }, [loading, pages, routePageId, selectedPageId]);
+  }, [loading, openPage, pages, resetDetailState, routePageId, selectedPageId]);
 
   const runConsoleExpression = async () => {
     if (!session) return;
@@ -472,17 +486,6 @@ export default function DevTools() {
     } catch {
       message.error("Failed to copy URL");
     }
-  };
-
-  const clearNetworkDetail = () => {
-    networkDetailRequestRef.current += 1;
-    setNetworkTrafficId(null);
-    setNetworkRecord(null);
-    setNetworkRequestBody(null);
-    setNetworkResponseBody(null);
-    setNetworkDetailError(null);
-    setNetworkDetailEvent(null);
-    setNetworkDetailLoading(false);
   };
 
   const openTrafficRecord = () => {
