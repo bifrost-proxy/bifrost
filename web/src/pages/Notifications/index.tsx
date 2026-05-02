@@ -170,7 +170,9 @@ function NotificationsTable({
         try {
           const meta = JSON.parse(n.metadata || '{}');
           domain = meta.domain || null;
-        } catch {}
+        } catch {
+          domain = null;
+        }
         return { id: n.id, domain };
       })
       .filter((i): i is { id: number; domain: string } => i.domain !== null);
@@ -251,7 +253,9 @@ function NotificationsTable({
           try {
             const meta = JSON.parse(record.metadata || '{}');
             domain = meta.domain || null;
-          } catch {}
+          } catch {
+            domain = null;
+          }
 
           if (record.action_taken === 'passthrough') {
             return <Tag color="green">Passthrough ✓</Tag>;
@@ -473,7 +477,7 @@ export default function Notifications() {
     if (urlTab && VALID_TABS.includes(urlTab) && urlTab !== activeTab) {
       setActiveTab(urlTab);
     }
-  }, []);
+  }, [activeTab, searchParams, setActiveTab]);
 
   useEffect(() => {
     fetchClientTrust();
