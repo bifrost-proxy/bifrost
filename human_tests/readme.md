@@ -46,7 +46,7 @@
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
-| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 38 | 显式裸 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、bridge WebSocket 双向通信且页面侧无独立 HTTP 上报/轮询、WebUI session WebSocket 推送、服务端轻量路由且不保存完整调试历史、目标页有界 buffer、事件队列短延迟批量异步发送、服务端 bridge 消息重放去重、WebUI/目标页 live channel 有界队列保护、broker 忙碌时不阻塞代理主流程、shell E2E fixture HTTP server 端口探活与 cleanup PID 精确回收、HTTP fixture API 路由返回 200 避免 DevTools 等待超时、WebUI DevTools 侧栏入口使用稳定 data-nav-label 定位避免 locator 假超时、Linux 与 macOS aarch64 CI release artifact 内嵌真实 WebUI 避免 Frontend not built 占位页、WebUI DevTools tab 自有 Elements/Network/Cookies/LocalStorage/SessionStorage/Console 面板、Elements 目标页鼠标拾取节点、WebUI 自动展开选中对应 DOM row、目标页 overlay 展示节点名称/尺寸/Color/Font/Padding/Margin、Network 复用 Traffic 页面虚拟列表风格并内嵌复用 TrafficDetail 展示详情、Network 前端采集去重与 `x-bifrost-client-request-id` / 安全同源内部 query id 精准映射 Traffic、Service Worker / 跨域标签资源不被内部 query 污染、Network 浏览器侧 status/query/request headers/response headers metadata 采集、动态标签资源 request id 与 status 兜底展示、Traffic 匹配失败时仍展示发起端基础信息、Storage 大数据量虚拟列表与 tab 切换性能、Console 标准 `%c` 样式格式化、Console 纯文本按日志等级着色且对象展开树对齐、DevTools 明暗主题切换、详情路由刷新恢复、紧凑详情页头、Traffic 跳转入口、URL hover 复制、content 区域填满剩余高度、右侧模块搜索、规则编辑器无参数智能提示、vConsole/Chrome DevTools 风格 Elements 树、超长值 120 字符预览与详情弹窗完整复制、存储行内新增/编辑/复制/删除、Chrome 风格 Console 底部多行输入、对象/数组结构化摘要与层级展开、原始内容一键复制、毫秒级低对比度时间戳、全屏 JavaScript 编辑器与 input/result/error 行、默认 Console evaluate 真实执行并展示远端 JS 异常、多页面切换、HTML candidate 幽灵页隐藏、静默但 WS 连接页面仍在线、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
+| [chrome-devtools-remote-control.md](./chrome-devtools-remote-control.md) | Bifrost DevTools Remote Control | 41 | 显式裸 `devtools://` 规则驱动的代理页面发现、page_bridge 降级调试、bridge WebSocket 双向通信且页面侧无独立 HTTP 上报/轮询、WebUI session WebSocket 推送、服务端轻量路由且不保存完整调试历史、目标页有界 buffer、事件队列短延迟批量异步发送、服务端 bridge 消息重放去重、WebUI/目标页 live channel 有界队列保护、broker 忙碌时不阻塞代理主流程、shell E2E fixture HTTP server 端口探活与 cleanup PID 精确回收、HTTP fixture API 路由返回 200 避免 DevTools 等待超时、WebUI DevTools 侧栏入口使用稳定 data-nav-label 定位避免 locator 假超时、Linux 与 macOS aarch64 CI release artifact 内嵌真实 WebUI 避免 Frontend not built 占位页、WebUI DevTools tab 自有 Elements/Network/Cookies/LocalStorage/SessionStorage/Console 面板、Elements 目标页鼠标拾取节点、WebUI 自动展开选中对应 DOM row、目标页 overlay 展示节点名称/尺寸/Color/Font/Padding/Margin、Network 复用 Traffic 页面虚拟列表风格并内嵌复用 TrafficDetail 展示详情、Network 前端采集去重与 `x-bifrost-client-request-id` / 安全同源内部 query id 精准映射 Traffic、Network 点击详情短暂重试等待 Traffic 映射落库、Admin broker 对 live network 与 snapshot 重放按 `client_req_id` 去重、Service Worker / 跨域标签资源不被内部 query 污染、Network 浏览器侧 status/query/request headers/response headers metadata 采集、动态标签资源 request id 与 status 兜底展示、Traffic 匹配失败时仍展示发起端基础信息、Network 搜索后点击匹配业务 URL 的具体虚拟列表行避免 fallback 详情概率性落到旧首行、Storage 大数据量虚拟列表与 tab 切换性能、Console 标准 `%c` 样式格式化、Console 纯文本按日志等级着色且对象展开树对齐、DevTools 明暗主题切换、详情路由刷新恢复、紧凑详情页头、Traffic 跳转入口、URL hover 复制、content 区域填满剩余高度、右侧模块搜索、规则编辑器无参数智能提示、vConsole/Chrome DevTools 风格 Elements 树、超长值 120 字符预览与详情弹窗完整复制、存储行内新增/编辑/复制/删除、Chrome 风格 Console 底部多行输入、对象/数组结构化摘要与层级展开、原始内容一键复制、毫秒级低对比度时间戳、全屏 JavaScript 编辑器与 input/result/error 行、默认 Console evaluate 真实执行并展示远端 JS 异常、多页面切换、HTML candidate 幽灵页隐藏、静默但 WS 连接页面仍在线、目标页刷新后 WebUI session 自动恢复、移动 Safari UA 降级路径，以及 Chrome DevTools frontend 安装/托管/打开入口清理回归 |
 
 ### 远程调用测试
 
@@ -90,13 +90,13 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 26 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、旧版 `^https://` path wildcard 兼容回归 |
-| [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 3 | SOCKS5 基本代理、DNS 解析、HTTPS 透传 |
-| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 7 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断 |
+| [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 4 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归 |
+| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 8 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 65 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏和上游 HTTP/2 body 断流 fallback 真实回归 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
-| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 2 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符与并行 runner 动态 echo 端口兼容回归 |
+| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 6 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断和 CI 预算的稳定性回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 7 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证 |
 
@@ -123,13 +123,13 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 11 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片耗时 <5min、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归 |
+| [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 12 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片耗时 <5min、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、unsafe_ssl 自带 HTTPS mock fixture 回归 |
 | [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 4 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E |
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
 
 ---
 
-**总计：68 个测试文件，1332 个测试用例**
+**总计：68 个测试文件，1336 个测试用例**
 
 ## 工作流程
 

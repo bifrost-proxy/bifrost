@@ -527,29 +527,48 @@ export default function DevTools() {
   };
 
   const openNetworkTrafficRecord = async (event: DebugNetworkEvent) => {
+    const requestId = networkDetailRequestRef.current + 1;
+    networkDetailRequestRef.current = requestId;
     setNetworkDetailEvent(event);
+    setNetworkTrafficId(null);
+    setNetworkRecord(null);
+    setNetworkRequestBody(null);
+    setNetworkResponseBody(null);
+    setNetworkDetailError(null);
+    setNetworkDetailLoading(true);
     let trafficId: string | null = null;
     try {
       trafficId =
-        event.traffic_id || (event.client_req_id ? await findTrafficForDevtoolsRequest(event.client_req_id) : null);
+        event.traffic_id ||
+        (event.client_req_id
+          ? await findTrafficForDevtoolsRequestWithRetry(
+              event.client_req_id,
+              () => networkDetailRequestRef.current === requestId,
+            )
+          : null);
     } catch (error) {
-      setNetworkTrafficId(null);
-      setNetworkRecord(null);
-      setNetworkRequestBody(null);
-      setNetworkResponseBody(null);
-      setNetworkDetailError(
-        error instanceof Error
-          ? error.message
-          : "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
-      );
+      if (networkDetailRequestRef.current === requestId) {
+        setNetworkTrafficId(null);
+        setNetworkRecord(null);
+        setNetworkRequestBody(null);
+        setNetworkResponseBody(null);
+        setNetworkDetailError(
+          error instanceof Error
+            ? error.message
+            : "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
+        );
+        setNetworkDetailLoading(false);
+      }
       return;
     }
+    if (networkDetailRequestRef.current !== requestId) return;
     if (!trafficId) {
       setNetworkTrafficId(null);
       setNetworkRecord(null);
       setNetworkRequestBody(null);
       setNetworkResponseBody(null);
       setNetworkDetailError("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+      setNetworkDetailLoading(false);
       return;
     }
     await openNetworkTrafficById(trafficId);
@@ -951,6 +970,32 @@ function TabLabel({ icon, text }: { icon: ReactNode; text: string }) {
       <span>{text}</span>
     </Space>
   );
+}
+
+async function findTrafficForDevtoolsRequestWithRetry(
+  clientReqId: string,
+  isCurrent: () => boolean,
+): Promise<string> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (!isCurrent()) {
+      throw new Error("Network detail request was replaced.");
+    }
+    try {
+      return await findTrafficForDevtoolsRequest(clientReqId);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 9) break;
+      await sleep(200);
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function NetworkEventDetail({

@@ -13,7 +13,7 @@ BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
-DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-udp-rules-test"
+DATA_DIR="${BIFROST_DATA_DIR:-${PROJECT_ROOT}/.bifrost-socks5-udp-rules-test}"
 PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 source "$E2E_DIR/test_utils/rule_fixture.sh"
 source "$E2E_DIR/test_utils/process.sh"
@@ -24,12 +24,51 @@ cleanup() {
     if [ -n "${PROXY_PID:-}" ]; then
         safe_cleanup_proxy "$PROXY_PID"
     fi
-    if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
+    kill_bifrost_on_port "$PROXY_PORT"
+    kill_bifrost_on_port "$SOCKS5_PORT"
     sleep 1
     rm -rf "$DATA_DIR"
 }
 
 trap cleanup EXIT
+
+wait_for_tcp_port() {
+    local host="$1"
+    local port="$2"
+    local timeout="${3:-30}"
+    local waited=0
+
+    while [[ "$waited" -lt "$timeout" ]]; do
+        if (echo > /dev/tcp/"$host"/"$port") >/dev/null 2>&1; then
+            return 0
+        fi
+        if command -v nc >/dev/null 2>&1 && nc -z "$host" "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            echo "ERROR: Proxy process exited while waiting for ${host}:${port}"
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+wait_for_proxy_ready() {
+    local admin_url="http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/system"
+
+    if ! wait_for_http_ready "$admin_url" 45 0.5; then
+        echo "ERROR: Admin API did not become ready at $admin_url"
+        return 1
+    fi
+
+    if ! wait_for_tcp_port "$PROXY_HOST" "$SOCKS5_PORT" 45; then
+        echo "ERROR: SOCKS5 port did not become ready at ${PROXY_HOST}:${SOCKS5_PORT}"
+        return 1
+    fi
+}
 
 start_proxy() {
     echo "Starting Bifrost proxy on port $PROXY_PORT (SOCKS5: $SOCKS5_PORT)..."
@@ -48,10 +87,8 @@ start_proxy() {
         --unsafe-ssl --skip-cert-check --no-system-proxy >"$PROXY_LOG_FILE" 2>&1 &
     PROXY_PID=$!
     
-    sleep 5
-    
-    if ! kill -0 $PROXY_PID 2>/dev/null; then
-        echo "ERROR: Proxy failed to start"
+    if ! wait_for_proxy_ready; then
+        echo "ERROR: Proxy failed to become ready"
         echo "=== Proxy log ==="
         cat "$PROXY_LOG_FILE" 2>/dev/null || true
         exit 1
@@ -96,10 +133,8 @@ restart_proxy() {
         --unsafe-ssl --skip-cert-check --no-system-proxy >"$PROXY_LOG_FILE" 2>&1 &
     PROXY_PID=$!
     
-    sleep 5
-    
-    if ! kill -0 $PROXY_PID 2>/dev/null; then
-        echo "ERROR: Proxy failed to restart"
+    if ! wait_for_proxy_ready; then
+        echo "ERROR: Proxy failed to become ready after restart"
         echo "=== Proxy log ==="
         cat "$PROXY_LOG_FILE" 2>/dev/null || true
         exit 1

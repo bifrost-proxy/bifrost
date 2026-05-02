@@ -1970,8 +1970,13 @@ await page.evaluate(() => fetch('/devtools/api/missing?case=bridge-only-detail&f
 }).catch(() => {}));
 await adminPage.getByTestId('devtools-refresh').click();
 await panelSearch.fill('bridge-only-detail');
-await adminPage.getByTestId('devtools-network-panel').getByText(/bridge-only-detail/).waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+const bridgeOnlyDetailRow = adminPage
+  .getByTestId('devtools-network-panel')
+  .getByTestId('traffic-row')
+  .filter({ hasText: 'bridge-only-detail' })
+  .first();
+await bridgeOnlyDetailRow.waitFor({ timeout: 8000 });
+await bridgeOnlyDetailRow.click({ force: true });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-query').getByText('foo').waitFor({ timeout: 8000 });
@@ -1989,9 +1994,13 @@ await page.evaluate(() => new Promise((resolve) => {
 }));
 await adminPage.getByTestId('devtools-refresh').click();
 await panelSearch.fill('bridge-only-tag-fallback');
-await adminPage.getByTestId('devtools-network-panel').getByText(/bridge-only-tag-fallback/).waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText('404').first().waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+const bridgeOnlyTagRow = adminPage
+  .getByTestId('devtools-network-panel')
+  .getByTestId('traffic-row')
+  .filter({ hasText: 'bridge-only-tag-fallback' })
+  .first();
+await bridgeOnlyTagRow.waitFor({ timeout: 8000 });
+await bridgeOnlyTagRow.click({ force: true });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
@@ -2006,9 +2015,13 @@ await page.evaluate(() => new Promise((resolve) => {
 }));
 await adminPage.getByTestId('devtools-refresh').click();
 await panelSearch.fill('ui-traffic-enrich');
-await adminPage.getByTestId('devtools-network-panel').getByText(/ui-traffic-enrich/).waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText('404').first().waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+const uiTrafficEnrichRow = adminPage
+  .getByTestId('devtools-network-panel')
+  .getByTestId('traffic-row')
+  .filter({ hasText: 'ui-traffic-enrich' })
+  .first();
+await uiTrafficEnrichRow.waitFor({ timeout: 8000 });
+await uiTrafficEnrichRow.click({ force: true });
 await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
 await panelSearch.fill('');

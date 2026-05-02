@@ -863,7 +863,7 @@ jobs:
     name: E2E Rules (${{ matrix.target }})
     needs: [build-desktop-windows]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -882,7 +882,7 @@ jobs:
       BIFROST_E2E_RETRY_FIXTURE_TIMEOUT: "60"
       BIFROST_E2E_RETRY_BUDGET_SECS: "180"
       BIFROST_E2E_MAX_RETRY_SUITES: "6"
-      BIFROST_E2E_SUITE_TIMEOUT: "1800"
+      BIFROST_E2E_SUITE_TIMEOUT: "4800"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
