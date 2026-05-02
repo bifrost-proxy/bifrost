@@ -256,6 +256,7 @@ dependencies = [
  "jsonwebtoken",
  "local-ip-address",
  "lru 0.16.3",
+ "memory",
  "mime_guess",
  "nix 0.28.0",
  "objc2",
@@ -304,6 +305,7 @@ dependencies = [
  "async-trait",
  "bifrost-core",
  "dashmap",
+ "memory",
  "reqwest",
  "serde",
  "serde_json",
@@ -2597,6 +2599,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memory"
+version = "0.0.67"
+dependencies = [
+ "async-trait",
+ "regex 1.12.3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
