@@ -45,14 +45,14 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if json.get("model").is_none() {
                     return Err("Expected 'model' field in agent config".to_string());
                 }
-                if json.get("by_azure").is_none() {
-                    return Err("Expected 'by_azure' field in agent config".to_string());
+                if json.get("model_provider").is_none() {
+                    return Err("Expected 'model_provider' field in agent config".to_string());
                 }
-                if json.get("base_url").is_none() {
-                    return Err("Expected 'base_url' field in agent config".to_string());
+                if json.get("model_providers").is_none() {
+                    return Err("Expected 'model_providers' field in agent config".to_string());
                 }
-                if json.get("api_key").is_none() {
-                    return Err("Expected 'api_key' field in agent config".to_string());
+                if json.get("request_timeout_secs").is_none() {
+                    return Err("Expected 'request_timeout_secs' field in agent config".to_string());
                 }
 
                 Ok(())
@@ -92,14 +92,14 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
                 assert_status(&patch_response, 200)?;
 
-                // Verify the patch was successful
+                // PATCH returns the updated full AgentConfig.
                 let patch_json: serde_json::Value = patch_response
                     .json()
                     .await
                     .map_err(|e| format!("Failed to parse patch response: {}", e))?;
-                if patch_json.get("success").and_then(|v| v.as_bool()) != Some(true) {
+                if patch_json.get("enabled").and_then(|v| v.as_bool()) != Some(false) {
                     return Err(format!(
-                        "Expected success: true in patch response, got: {}",
+                        "Expected updated config in patch response, got: {}",
                         serde_json::to_string_pretty(&patch_json).unwrap_or_default()
                     ));
                 }
@@ -134,17 +134,27 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         json.get("model")
                     ));
                 }
-                if json.get("base_url").and_then(|v| v.as_str()) != Some("https://test.example.com")
+                let provider = json
+                    .get("model_providers")
+                    .and_then(|v| v.get("aidp_crawl"))
+                    .ok_or("Expected aidp_crawl provider in model_providers")?;
+                if provider.get("base_url").and_then(|v| v.as_str())
+                    != Some("https://test.example.com")
                 {
                     return Err(format!(
                         "Expected base_url: 'https://test.example.com', got: {:?}",
-                        json.get("base_url")
+                        provider.get("base_url")
                     ));
                 }
-                if json.get("api_key").and_then(|v| v.as_str()) != Some("test-api-key-e2e") {
+                if provider
+                    .get("http_headers")
+                    .and_then(|v| v.get("api-key"))
+                    .and_then(|v| v.as_str())
+                    != Some("test-api-key-e2e")
+                {
                     return Err(format!(
                         "Expected api_key: 'test-api-key-e2e', got: {:?}",
-                        json.get("api_key")
+                        provider.get("http_headers")
                     ));
                 }
 
@@ -219,8 +229,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "enabled": true,
                     "event_type": "message_receive",
                     "matcher": {
-                        "chat_ids": [],
-                        "user_ids": []
+                        "keyword": "agent"
                     },
                     "action": {
                         "type": "agent_chat",
