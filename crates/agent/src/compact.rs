@@ -16,6 +16,7 @@ use crate::config::AgentConfig;
 use crate::history;
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
+use bifrost_core::text::truncate_chars_with_suffix;
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -323,11 +324,12 @@ fn format_history_for_compaction(history: &[ChatMessage]) -> String {
         match &msg.content {
             Some(content) if !content.is_empty() => {
                 // Truncate very long messages in the compaction input
-                let truncated = if content.len() > COMPACT_USER_MESSAGE_MAX_CHARS {
+                let char_count = content.chars().count();
+                let truncated = if char_count > COMPACT_USER_MESSAGE_MAX_CHARS {
                     format!(
-                        "{}...(truncated, {} chars total)",
-                        &content[..COMPACT_USER_MESSAGE_MAX_CHARS],
-                        content.len()
+                        "{}(truncated, {} chars total)",
+                        truncate_chars_with_suffix(content, COMPACT_USER_MESSAGE_MAX_CHARS, "..."),
+                        char_count
                     )
                 } else {
                     content.clone()
@@ -339,11 +341,8 @@ fn format_history_for_compaction(history: &[ChatMessage]) -> String {
                     let calls: Vec<String> = tool_calls
                         .iter()
                         .map(|tc| {
-                            let args = if tc.function.arguments.len() > 500 {
-                                format!("{}...", &tc.function.arguments[..500])
-                            } else {
-                                tc.function.arguments.clone()
-                            };
+                            let args =
+                                truncate_chars_with_suffix(&tc.function.arguments, 500, "...");
                             format!("{}({})", tc.function.name, args)
                         })
                         .collect();
@@ -386,6 +385,7 @@ fn collect_recent_user_messages(history: &[ChatMessage], count: usize) -> Vec<Ch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{FunctionCallInfo, ToolCallMessage};
 
     #[test]
     fn test_format_history_basic() {
@@ -407,6 +407,40 @@ mod tests {
         let formatted = format_history_for_compaction(&history);
         assert!(formatted.contains("...(truncated,"));
         assert!(formatted.len() < long_msg.len() + 200);
+    }
+
+    #[test]
+    fn test_format_history_truncates_multibyte_user_messages() {
+        let long_msg = "前".repeat(COMPACT_USER_MESSAGE_MAX_CHARS + 2);
+        let history = vec![ChatMessage::user(&long_msg)];
+        let formatted = format_history_for_compaction(&history);
+
+        assert!(formatted.contains("...(truncated,"));
+        assert!(formatted.contains("chars total)"));
+    }
+
+    #[test]
+    fn test_format_history_handles_multibyte_tool_arguments() {
+        let arguments = format!(
+            "{{\"path\":\"/tmp/example.md\",\"content\":\"{}\"}}",
+            "前".repeat(600)
+        );
+        let history = vec![ChatMessage::assistant_with_tool_calls(vec![
+            ToolCallMessage {
+                id: "call-1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCallInfo {
+                    name: "write_file".to_string(),
+                    arguments,
+                },
+            },
+        ])];
+
+        let formatted = format_history_for_compaction(&history);
+
+        assert!(formatted.contains("write_file("));
+        assert!(formatted.contains("..."));
+        assert!(formatted.is_char_boundary(formatted.len()));
     }
 
     #[test]

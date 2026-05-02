@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bifrost_admin::MatchedRule;
+use bifrost_core::text::floor_char_boundary;
 
 use crate::server::ResolvedRules;
 
@@ -313,13 +314,13 @@ pub fn truncate_body(body: &[u8], max_len: usize) -> String {
         return "<empty>".to_string();
     }
 
-    let display_len = body.len().min(max_len);
-    match std::str::from_utf8(&body[..display_len]) {
-        Ok(s) => {
+    match std::str::from_utf8(body) {
+        Ok(full) => {
             if body.len() > max_len {
-                format!("{}... ({} bytes total)", s, body.len())
+                let display_len = floor_char_boundary(full, max_len);
+                format!("{}... ({} bytes total)", &full[..display_len], body.len())
             } else {
-                s.to_string()
+                full.to_string()
             }
         }
         Err(_) => format!("<binary {} bytes>", body.len()),
@@ -401,6 +402,13 @@ mod tests {
         let result = truncate_body(body, 10);
         assert!(result.contains("hello worl"));
         assert!(result.contains("33 bytes total"));
+    }
+
+    #[test]
+    fn test_truncate_body_multibyte_boundary() {
+        let body = "ab前cd".as_bytes();
+        let result = truncate_body(body, 3);
+        assert_eq!(result, "ab... (7 bytes total)");
     }
 
     #[test]

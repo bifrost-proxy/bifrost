@@ -1,4 +1,6 @@
 #[cfg(feature = "http3")]
+use bifrost_core::text::truncate_chars_with_suffix;
+#[cfg(feature = "http3")]
 use bifrost_proxy::http3::Http3Client;
 use bytes::Bytes;
 use hyper::Request;
@@ -49,11 +51,7 @@ async fn main() {
                 println!("\nBody length: {} bytes", response.body().len());
 
                 if let Ok(body_str) = std::str::from_utf8(response.body()) {
-                    let preview = if body_str.len() > 500 {
-                        &body_str[..500]
-                    } else {
-                        body_str
-                    };
+                    let preview = truncate_chars_with_suffix(body_str, 500, "");
                     println!("Body preview:\n{}", preview);
                 }
 

@@ -1,5 +1,7 @@
 use crate::cli::MetricsCommands;
 
+use bifrost_core::text::truncate_chars;
+
 use super::config::client::ConfigApiClient;
 
 pub fn handle_metrics_command(
@@ -128,7 +130,7 @@ fn show_apps(client: &ConfigApiClient) -> bifrost_core::Result<()> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let display_name = if name.len() > 28 { &name[..28] } else { name };
+        let display_name = truncate_chars(name, 28);
         println!(
             "{:<30} {:>10} {:>12} {:>12}",
             display_name,
@@ -182,7 +184,7 @@ fn show_hosts(client: &ConfigApiClient) -> bifrost_core::Result<()> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let display_name = if name.len() > 38 { &name[..38] } else { name };
+        let display_name = truncate_chars(name, 38);
         println!(
             "{:<40} {:>10} {:>12} {:>12}",
             display_name,
@@ -236,7 +238,7 @@ fn show_history(client: &ConfigApiClient, limit: Option<usize>) -> bifrost_core:
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let display_ts = if ts.len() > 22 { &ts[..22] } else { ts };
+        let display_ts = truncate_chars(ts, 22);
         println!(
             "{:<24} {:>10} {:>10} {:>12} {:>12}",
             display_ts,

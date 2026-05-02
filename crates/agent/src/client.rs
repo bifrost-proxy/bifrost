@@ -2,6 +2,7 @@
 
 use crate::config::AgentConfig;
 use crate::types::{ChatMessage, ModelResponse, TokenUsage, ToolCallMessage, ToolDefinition};
+use bifrost_core::text::truncate_bytes_with_suffix;
 use tracing::{debug, info};
 
 /// HTTP client that calls a Chat Completions endpoint with tool support.
@@ -172,10 +173,5 @@ impl AgentClient {
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let end = s.floor_char_boundary(max_len);
-        format!("{}...", &s[..end])
-    }
+    truncate_bytes_with_suffix(s, max_len, "...")
 }

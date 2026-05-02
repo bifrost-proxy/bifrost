@@ -5,7 +5,7 @@ use colored::Colorize;
 use serde_json::{json, Value};
 use tracing::debug;
 
-use bifrost_core::Result;
+use bifrost_core::{text::truncate_chars_with_suffix, Result};
 
 const IM_GATEWAY_API_PREFIX: &str = "/_bifrost/api/im-gateway";
 
@@ -222,8 +222,8 @@ fn print_provider_list(resp: &Value) {
             "webhook"
         };
         let app_id = p["app_id"].as_str().unwrap_or("-");
-        let masked_app_id = if app_id.len() > 8 {
-            format!("{}***", &app_id[..8])
+        let masked_app_id = if app_id.chars().count() > 8 {
+            format!("{}***", truncate_chars_with_suffix(app_id, 8, ""))
         } else {
             app_id.to_string()
         };
@@ -427,8 +427,8 @@ fn print_target_list(resp: &Value) {
         let id_type = t["receive_id_type"].as_str().unwrap_or("-");
         let enabled = t["enabled"].as_bool().unwrap_or(false);
         let receive_id = t["receive_id"].as_str().unwrap_or("-");
-        let masked_id = if receive_id.len() > 10 {
-            format!("{}***", &receive_id[..10])
+        let masked_id = if receive_id.chars().count() > 10 {
+            format!("{}***", truncate_chars_with_suffix(receive_id, 10, ""))
         } else {
             receive_id.to_string()
         };
@@ -1031,8 +1031,8 @@ fn print_events(resp: &Value) {
     for e in events.iter().take(50) {
         let event_id = e["event_id"]
             .as_str()
-            .map(|s| if s.len() > 10 { &s[..10] } else { s })
-            .unwrap_or("-");
+            .map(|s| truncate_chars_with_suffix(s, 10, ""))
+            .unwrap_or_else(|| "-".to_string());
         let provider = e["provider_id"].as_str().unwrap_or("-");
         let event_type = e["event_type"].as_str().unwrap_or("-");
         let source = e["source"]["chat_id"]
@@ -1073,8 +1073,8 @@ fn print_task_runs(resp: &Value) {
     for r in runs.iter().take(50) {
         let run_id = r["run_id"]
             .as_str()
-            .map(|s| if s.len() > 10 { &s[..10] } else { s })
-            .unwrap_or("-");
+            .map(|s| truncate_chars_with_suffix(s, 10, ""))
+            .unwrap_or_else(|| "-".to_string());
         let trigger = r["trigger_source"].as_str().unwrap_or("-");
         let status = r["status"].as_str().unwrap_or("-");
         let duration = r["duration_ms"]
@@ -1316,7 +1316,7 @@ fn print_message_logs(resp: &Value) {
                 .as_str()
                 .map(|s| {
                     if s.len() > 18 {
-                        format!("{}...", &s[..15])
+                        truncate_chars_with_suffix(s, 15, "...")
                     } else {
                         s.to_string()
                     }
@@ -1332,7 +1332,7 @@ fn print_message_logs(resp: &Value) {
             .as_str()
             .map(|s| {
                 if s.len() > 18 {
-                    format!("{}...", &s[..15])
+                    truncate_chars_with_suffix(s, 15, "...")
                 } else {
                     s.to_string()
                 }

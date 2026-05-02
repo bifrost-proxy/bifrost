@@ -3,6 +3,7 @@ use std::io::Write as _;
 use std::process::Stdio;
 use std::time::Duration;
 
+use bifrost_core::text::truncate_chars_with_suffix;
 use sha1::{Digest, Sha1};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
@@ -304,12 +305,11 @@ fn truncate_preview(output: &str, max_len: usize) -> Option<String> {
     if output.is_empty() {
         return None;
     }
-    if output.len() <= max_len {
-        Some(output.to_string())
-    } else {
-        let truncated = &output[..max_len];
-        Some(format!("{}...[truncated]", truncated))
-    }
+    Some(truncate_chars_with_suffix(
+        output,
+        max_len,
+        "...[truncated]",
+    ))
 }
 
 /// Compute SHA1 hex digest of a string.
@@ -376,6 +376,14 @@ mod tests {
     #[test]
     fn test_truncate_preview_empty() {
         assert_eq!(truncate_preview("", 100), None);
+    }
+
+    #[test]
+    fn test_truncate_preview_multibyte_boundary() {
+        let output = "前".repeat(20);
+        let result = truncate_preview(&output, 5).expect("preview");
+
+        assert_eq!(result, format!("{}...[truncated]", "前".repeat(5)));
     }
 
     #[test]

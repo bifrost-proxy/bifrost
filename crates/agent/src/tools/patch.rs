@@ -6,6 +6,7 @@
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
 use async_trait::async_trait;
+use bifrost_core::text::truncate_bytes_with_suffix;
 use serde::Deserialize;
 use std::path::Path;
 use tracing::{info, warn};
@@ -95,12 +96,7 @@ impl ToolHandler for ApplyPatchTool {
         // Check if old_text exists in the file
         if !content.contains(&args.old_text) {
             // Try to help: show nearby content
-            let preview = if content.len() > 500 {
-                let end = content.floor_char_boundary(500);
-                format!("{}...", &content[..end])
-            } else {
-                content.clone()
-            };
+            let preview = truncate_bytes_with_suffix(&content, 500, "...");
             warn!(
                 path = %file_path.display(),
                 "old_text not found in file"

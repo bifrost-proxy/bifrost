@@ -1,4 +1,5 @@
 use base64::Engine;
+use bifrost_core::text::truncate_chars;
 use futures_util::{SinkExt, StreamExt};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
@@ -147,8 +148,8 @@ fn parse_subscription_from_query(query: &str) -> (String, ClientSubscription) {
     }
 
     let mut client_key = client_key.unwrap_or_else(|| "unknown".to_string());
-    if client_key.len() > MAX_ID_LEN {
-        client_key.truncate(MAX_ID_LEN);
+    if client_key.chars().count() > MAX_ID_LEN {
+        client_key = truncate_chars(&client_key, MAX_ID_LEN);
     }
     (client_key, sanitize_subscription(subscription))
 }

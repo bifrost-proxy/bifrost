@@ -1,5 +1,5 @@
 use bifrost_admin::admin_auth_db::AuthDb;
-use bifrost_core::{BifrostError, Result};
+use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use dialoguer::{theme::ColorfulTheme, Password};
 
 use crate::cli::{AdminCommands, AdminRemoteCommands};
@@ -162,11 +162,7 @@ pub fn handle_admin_command(action: AdminCommands) -> Result<()> {
                 let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(item.ts, 0)
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| item.ts.to_string());
-                let ua_preview = if item.ua.len() > 120 {
-                    format!("{}...", &item.ua[..120])
-                } else {
-                    item.ua.clone()
-                };
+                let ua_preview = truncate_chars_with_suffix(&item.ua, 120, "...");
                 println!(
                     "- id={} ts={} user={} ip={} ua={}",
                     item.id, ts, item.username, item.ip, ua_preview

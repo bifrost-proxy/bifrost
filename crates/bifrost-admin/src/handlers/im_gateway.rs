@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use bifrost_core::text::truncate_bytes_with_suffix;
 use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -969,12 +970,7 @@ async fn process_agent_chat(
                 for log in &turn_result.tool_calls_log {
                     let icon = if log.success { "✅" } else { "❌" };
                     text.push_str(&format!("{} `{}`\n", icon, log.tool_name));
-                    let result_preview = if log.result.len() > 500 {
-                        let end = log.result.floor_char_boundary(500);
-                        format!("{}...", &log.result[..end])
-                    } else {
-                        log.result.clone()
-                    };
+                    let result_preview = truncate_bytes_with_suffix(&log.result, 500, "...");
                     text.push_str(&format!("```\n{}\n```\n", result_preview));
                 }
                 text.push_str("\n---\n\n");

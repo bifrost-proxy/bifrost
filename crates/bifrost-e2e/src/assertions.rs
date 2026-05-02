@@ -1,3 +1,4 @@
+use bifrost_core::text::truncate_chars_with_suffix;
 use reqwest::Response;
 use serde_json::Value;
 
@@ -69,11 +70,7 @@ pub fn assert_body_contains(body: &str, substring: &str) -> AssertResult {
     if body.contains(substring) {
         Ok(())
     } else {
-        let preview = if body.len() > 200 {
-            format!("{}...", &body[..200])
-        } else {
-            body.to_string()
-        };
+        let preview = truncate_chars_with_suffix(body, 200, "...");
         Err(format!(
             "Body does not contain '{}', preview: '{}'",
             substring, preview
@@ -216,5 +213,19 @@ pub fn assert_is_uuid(value: &str) -> AssertResult {
         Ok(())
     } else {
         Err(format!("'{}' is not a valid UUID", value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assert_body_contains_multibyte_preview() {
+        let body = "前".repeat(300);
+        let err = assert_body_contains(&body, "missing").expect_err("expected failure");
+
+        assert!(err.contains("preview"));
+        assert!(err.contains("..."));
     }
 }
