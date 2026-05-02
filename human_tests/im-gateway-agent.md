@@ -893,3 +893,4 @@ rm -rf ./.bifrost-test
   - `cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture`：PASS，1 个请求裁剪清洗测试通过
   - `cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture`：PASS，1 个 trim 清洗测试通过
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
+  - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用

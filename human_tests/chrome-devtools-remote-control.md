@@ -468,6 +468,8 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - LocalStorage / SessionStorage 只渲染视口附近的可见行，不一次性渲染所有几百上千条数据。
 - 搜索、行内编辑、复制、删除仍可用。
 - 切换 tab 触发的 storage snapshot 刷新是异步的，不阻塞 tab 激活状态更新。
+- **执行记录（2026-05-02）**：
+  - `BIFROST_E2E_REPORT_DIR=/tmp/bifrost-e2e-shell-shard3-fixed2 BIFROST_E2E_SHELL_JOBS=16 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 bash scripts/ci/local-ci.sh --skip-static --e2e-only shell --shard 3/3`：PASS，shard 3 共 25 个 shell 用例全部通过；其中 `test_devtools_page_bridge_api.sh` 28s 通过，覆盖 AV-CDP-40 Storage 大数据量虚拟列表、tab 切换性能和后续行内新增/编辑/复制/删除
 
 ### TC-CDP-24：Console 标准 `%c` 样式格式化
 

@@ -59,6 +59,12 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - compaction 输出历史、context overflow trim 后的历史也会 sanitize。
 - 发现修复时写入 warn 日志，包含丢弃的 orphan tool 数和不完整 tool-call 片段数。
 
+### E2E mock 稳定性
+
+`crates/bifrost-e2e/src/tests/im_gateway_agent.rs` 中的 Chat Completions mock 必须按请求消息状态决定是否返回 `tool_calls`：当请求包含 tools 且最后一条消息不是 `role=tool` 时返回工具调用；当最后一条消息是工具结果时返回普通 stop 响应。
+
+禁止用全局请求奇偶数决定返回类型。长期记忆自动抽取、重试或其它后台模型调用会共享同一个 mock 服务并消耗请求序号，导致恢复后的第二个用户 turn 错误拿到 stop 响应，CI 中表现为 `im_gateway_agent_tool_history_resume_regression` 未执行恢复后的工具调用。
+
 ### 覆盖场景
 
 该设计覆盖：
@@ -494,6 +500,7 @@ tracing = "0.1"
 | 会话清空 | /clear 命令 → 历史清空 |
 | 配置热更新 | PATCH 配置 → 立即生效 |
 | E2E 启动器服务注入回归 | `ProxyInstance::start_with_admin` 启动后 `/api/im-gateway/agent` 与 `/api/im-gateway/routes` 返回 200，确保测试启动路径与真实 CLI 一样注入 `ImGatewayService` |
+| Agent tool history 恢复回归 | `im_gateway_agent_tool_history_resume_regression` 在长期记忆后台调用存在时仍完成首次工具调用、JSONL 恢复和恢复后再次工具调用 |
 
 ### 真实场景测试（human_tests）
 
@@ -508,6 +515,7 @@ tracing = "0.1"
 | TC-AG-05 | 非_OWNER_拦截 | 非 owner 用户 → 无响应 |
 | TC-AG-06 | 配置更新 | 通过 API 更新配置 → 生效 |
 | TC-IMA-66 | CI E2E 启动器服务注入回归 | 运行 `bifrost-e2e --test im_gateway_agent`，验证新增 Agent API 用例不再返回 503 |
+| TC-IMA-67 | Agent Loop tool message 序列回归 | 运行 `im_gateway_agent_tool_history_resume_regression`，验证恢复后的 turn 仍会执行工具调用 |
 
 ## 扩展性考虑
 

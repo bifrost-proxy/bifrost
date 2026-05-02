@@ -595,7 +595,14 @@ impl ChatCompletionMock {
                                 .and_then(|value| value.as_array())
                                 .map(|items| !items.is_empty())
                                 .unwrap_or(false);
-                            let message = if has_tools && current_call % 2 == 1 {
+                            let last_role = body
+                                .get("messages")
+                                .and_then(|value| value.as_array())
+                                .and_then(|messages| messages.last())
+                                .and_then(|message| message.get("role"))
+                                .and_then(|role| role.as_str());
+                            let should_call_tool = has_tools && last_role != Some("tool");
+                            let message = if should_call_tool {
                                 json!({
                                     "role": "assistant",
                                     "content": null,
@@ -617,7 +624,7 @@ impl ChatCompletionMock {
                             let response = json!({
                                 "choices": [{
                                     "message": message,
-                                    "finish_reason": if current_call % 2 == 1 { "tool_calls" } else { "stop" }
+                                    "finish_reason": if should_call_tool { "tool_calls" } else { "stop" }
                                 }],
                                 "usage": {
                                     "prompt_tokens": 10,

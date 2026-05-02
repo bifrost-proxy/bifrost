@@ -363,7 +363,7 @@ pages/Groups/
 - bifrost-sync-server: Group DAO 层测试（SQLite）
 - bifrost-storage: Group 规则子文件夹存储测试
 - bifrost-sync: Group 类型序列化测试
-- bifrost-cli: Group CLI 命令测试（27 个测试，使用 mock HTTP server 覆盖全部命令）
+- bifrost-cli: Group CLI 命令测试（33 个测试，使用 mock HTTP server 覆盖全部命令）。mock HTTP server 必须串行持有测试锁，避免 lib/bin 两套 group 测试在 workspace 并发运行时共享 HTTP mock 时序导致相邻 add/update 用例偶发拿不到预期响应。
 
 ### E2E 测试
 - 通过 bifrost-admin API 测试完整的 Group CRUD 流程
