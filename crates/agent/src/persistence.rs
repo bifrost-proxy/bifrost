@@ -6,6 +6,7 @@
 use crate::history;
 use crate::types::{ChatMessage, FunctionCallInfo, ToolCallMessage};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -44,6 +45,7 @@ pub mod event_types {
 pub struct ConversationRecorder {
     file_path: PathBuf,
     writer: Option<BufWriter<std::fs::File>>,
+    max_bytes: Option<usize>,
 }
 
 impl ConversationRecorder {
@@ -65,7 +67,19 @@ impl ConversationRecorder {
         Self {
             file_path,
             writer: None,
+            max_bytes: None,
         }
+    }
+
+    /// Create a recorder with a maximum JSONL file size.
+    pub fn new_with_max_bytes(
+        data_dir: &Path,
+        session_key: &str,
+        max_bytes: Option<usize>,
+    ) -> Self {
+        let mut recorder = Self::new(data_dir, session_key);
+        recorder.max_bytes = max_bytes.filter(|value| *value > 0);
+        recorder
     }
 
     /// Record a conversation event.
@@ -79,6 +93,7 @@ impl ConversationRecorder {
         // Flush immediately so events are durable even if the process crashes
         // or the recorder is held open across turns.
         writer.flush().map_err(|e| format!("flush event: {e}"))?;
+        self.enforce_max_bytes()?;
 
         Ok(())
     }
@@ -198,6 +213,20 @@ impl ConversationRecorder {
         })
     }
 
+    /// Record a compaction event.
+    pub fn record_compaction(
+        &mut self,
+        session_key: &str,
+        metadata: serde_json::Value,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::COMPACTION.to_string(),
+            session_key: session_key.to_string(),
+            content: metadata,
+        })
+    }
+
     /// Flush and close the recorder.
     pub fn close(&mut self) {
         if let Some(ref mut writer) = self.writer {
@@ -230,6 +259,46 @@ impl ConversationRecorder {
 
         Ok(self.writer.as_mut().unwrap())
     }
+
+    fn enforce_max_bytes(&mut self) -> Result<(), String> {
+        let Some(max_bytes) = self.max_bytes else {
+            return Ok(());
+        };
+        let metadata = std::fs::metadata(&self.file_path)
+            .map_err(|e| format!("stat session file for max_bytes: {e}"))?;
+        if metadata.len() as usize <= max_bytes {
+            return Ok(());
+        }
+
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .map_err(|e| format!("flush before history trim: {e}"))?;
+        }
+        self.writer = None;
+
+        let content = std::fs::read_to_string(&self.file_path)
+            .map_err(|e| format!("read session file for max_bytes trim: {e}"))?;
+        let mut kept = Vec::new();
+        let mut total = 0usize;
+        for line in content.lines().rev() {
+            let line_len = line.len() + 1;
+            if !kept.is_empty() && total + line_len > max_bytes {
+                break;
+            }
+            kept.push(line);
+            total += line_len;
+        }
+        kept.reverse();
+        let next = if kept.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", kept.join("\n"))
+        };
+        std::fs::write(&self.file_path, next)
+            .map_err(|e| format!("write trimmed session file: {e}"))?;
+        Ok(())
+    }
 }
 
 impl Drop for ConversationRecorder {
@@ -248,7 +317,8 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
     let reader = std::io::BufReader::new(file);
 
     let mut messages = Vec::new();
-    let mut pending_tool_call: Option<ToolCallMessage> = None;
+    let mut pending_tool_calls: HashMap<String, ToolCallMessage> = HashMap::new();
+    let mut pending_tool_call_order: VecDeque<String> = VecDeque::new();
     let mut recovered_tool_call_count = 0usize;
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read line: {e}"))?;
@@ -261,13 +331,15 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
 
         match event.event_type.as_str() {
             event_types::USER_MESSAGE => {
-                pending_tool_call = None;
+                pending_tool_calls.clear();
+                pending_tool_call_order.clear();
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     messages.push(ChatMessage::user(msg));
                 }
             }
             event_types::ASSISTANT_MESSAGE => {
-                pending_tool_call = None;
+                pending_tool_calls.clear();
+                pending_tool_call_order.clear();
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     messages.push(ChatMessage::assistant(msg));
                 }
@@ -291,23 +363,44 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("recovered-tool-call-{recovered_tool_call_count}"));
-                pending_tool_call = Some(ToolCallMessage {
-                    id: call_id,
+                let tool_call = ToolCallMessage {
+                    id: call_id.clone(),
                     call_type: "function".to_string(),
                     function: FunctionCallInfo {
                         name: tool_name.to_string(),
                         arguments: arguments.to_string(),
                     },
-                });
+                };
+                if !pending_tool_calls.contains_key(&call_id) {
+                    pending_tool_call_order.push_back(call_id.clone());
+                }
+                pending_tool_calls.insert(call_id, tool_call);
             }
             event_types::TOOL_RESULT => {
-                if let (Some(tool_call), Some(result)) = (
-                    pending_tool_call.take(),
-                    event.content.get("result").and_then(|v| v.as_str()),
-                ) {
-                    let call_id = tool_call.id.clone();
-                    messages.push(ChatMessage::assistant_with_tool_calls(vec![tool_call]));
-                    messages.push(ChatMessage::tool_result(&call_id, result));
+                if let Some(result) = event.content.get("result").and_then(|v| v.as_str()) {
+                    let result_call_id = event
+                        .content
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+                    let tool_call = result_call_id
+                        .and_then(|call_id| {
+                            pending_tool_call_order.retain(|id| id != call_id);
+                            pending_tool_calls.remove(call_id)
+                        })
+                        .or_else(|| {
+                            while let Some(call_id) = pending_tool_call_order.pop_front() {
+                                if let Some(tool_call) = pending_tool_calls.remove(&call_id) {
+                                    return Some(tool_call);
+                                }
+                            }
+                            None
+                        });
+                    if let Some(tool_call) = tool_call {
+                        let call_id = tool_call.id.clone();
+                        messages.push(ChatMessage::assistant_with_tool_calls(vec![tool_call]));
+                        messages.push(ChatMessage::tool_result(&call_id, result));
+                    }
                 }
             }
             _ => {
@@ -672,6 +765,74 @@ mod tests {
     }
 
     #[test]
+    fn test_load_conversation_matches_multiple_pending_tool_calls_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-multi-tools.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"inspect"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"tool_call","session_key":"s","content":{"call_id":"call-a","tool_name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"tool_call","session_key":"s","content":{"call_id":"call-b","tool_name":"list_directory","arguments":"{\"path\":\".\"}"}}"#
+                + "\n"
+                + r#"{"timestamp":4,"event_type":"tool_result","session_key":"s","content":{"call_id":"call-a","tool_name":"read_file","result":"cargo content","success":true}}"#
+                + "\n"
+                + r#"{"timestamp":5,"event_type":"tool_result","session_key":"s","content":{"call_id":"call-b","tool_name":"list_directory","result":"directory content","success":true}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let messages = load_conversation(&path).unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call-a");
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-a"));
+        assert_eq!(messages[2].content.as_deref(), Some("cargo content"));
+        assert_eq!(messages[3].tool_calls.as_ref().unwrap()[0].id, "call-b");
+        assert_eq!(messages[4].tool_call_id.as_deref(), Some("call-b"));
+        assert_eq!(messages[4].content.as_deref(), Some("directory content"));
+        assert!(history::is_valid_chat_history(&messages));
+    }
+
+    #[test]
+    fn test_load_conversation_matches_legacy_tool_results_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-legacy-multi-tools.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"inspect"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"tool_call","session_key":"s","content":{"tool_name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"tool_call","session_key":"s","content":{"tool_name":"list_directory","arguments":"{\"path\":\".\"}"}}"#
+                + "\n"
+                + r#"{"timestamp":4,"event_type":"tool_result","session_key":"s","content":{"tool_name":"read_file","result":"cargo content","success":true}}"#
+                + "\n"
+                + r#"{"timestamp":5,"event_type":"tool_result","session_key":"s","content":{"tool_name":"list_directory","result":"directory content","success":true}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let messages = load_conversation(&path).unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(
+            messages[1].tool_calls.as_ref().unwrap()[0].function.name,
+            "read_file"
+        );
+        assert_eq!(messages[2].content.as_deref(), Some("cargo content"));
+        assert_eq!(
+            messages[3].tool_calls.as_ref().unwrap()[0].function.name,
+            "list_directory"
+        );
+        assert_eq!(messages[4].content.as_deref(), Some("directory content"));
+        assert!(history::is_valid_chat_history(&messages));
+    }
+
+    #[test]
     fn test_list_conversations() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -818,5 +979,26 @@ mod tests {
 
         assert_eq!(events[2].event_type, SESSION_END);
         assert_eq!(events[2].content["total_tokens"], 1500);
+    }
+
+    #[test]
+    fn record_compaction_event_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "compact-session");
+        recorder
+            .record_compaction(
+                "compact-session",
+                serde_json::json!({
+                    "trigger": "manual",
+                    "tokens_saved": 42,
+                }),
+            )
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, COMPACTION);
+        assert_eq!(events[0].content["tokens_saved"], 42);
     }
 }

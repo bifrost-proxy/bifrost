@@ -36,6 +36,7 @@ pub mod compact;
 pub mod config;
 pub mod history;
 pub mod mcp;
+pub mod memory_runtime;
 pub mod persistence;
 pub mod prompt;
 pub mod session;

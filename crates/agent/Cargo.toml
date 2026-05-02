@@ -6,6 +6,7 @@ description = "AI Agent runtime for Bifrost with tool calling, multi-turn dialog
 
 [dependencies]
 bifrost-core = { path = "../bifrost-core" }
+memory = { path = "../memory" }
 tokio = { version = "1", features = ["full", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

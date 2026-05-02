@@ -17,6 +17,7 @@ use crate::compact;
 use crate::config::AgentConfig;
 use crate::history;
 use crate::mcp::McpManager;
+use crate::memory_runtime;
 use crate::persistence;
 use crate::persistence::ConversationRecorder;
 use crate::prompt;
@@ -36,6 +37,9 @@ pub struct AgentSession {
 
     /// Session key (e.g. user ID or chat ID).
     pub session_key: String,
+
+    /// Stable user ID used for per-user long-term memory scope.
+    pub user_id: Option<String>,
 
     /// Created timestamp (seconds since epoch).
     pub created_at: u64,
@@ -74,6 +78,7 @@ impl AgentSession {
         Self {
             history: Vec::new(),
             session_key: session_key.to_string(),
+            user_id: None,
             created_at: now,
             last_active_at: now,
             compaction_count: 0,
@@ -193,10 +198,18 @@ impl AgentSession {
     ///
     /// Enforces `max_history_messages` limit by dropping the oldest non-summary messages
     /// while preserving the compaction summary (first message after compaction).
-    fn build_messages(&self, system_prompt: &str, max_history: u32) -> Vec<ChatMessage> {
+    fn build_messages(
+        &self,
+        system_prompt: &str,
+        memory_message: Option<&ChatMessage>,
+        max_history: u32,
+    ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         if !system_prompt.is_empty() {
             messages.push(ChatMessage::system(system_prompt));
+        }
+        if let Some(memory_message) = memory_message {
+            messages.push(memory_message.clone());
         }
 
         let history = &self.history;
@@ -321,6 +334,7 @@ impl AgentSessionManager {
                 let s = r.value();
                 SessionInfo {
                     session_key: s.session_key.clone(),
+                    user_id: s.user_id.clone(),
                     message_count: s.history.len(),
                     created_at: s.created_at,
                     last_active_at: s.last_active_at,
@@ -351,6 +365,7 @@ impl AgentSessionManager {
             let s = r.value();
             SessionDetail {
                 session_key: s.session_key.clone(),
+                user_id: s.user_id.clone(),
                 message_count: s.history.len(),
                 created_at: s.created_at,
                 last_active_at: s.last_active_at,
@@ -382,6 +397,7 @@ impl AgentSessionManager {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
     pub session_key: String,
+    pub user_id: Option<String>,
     pub message_count: usize,
     pub created_at: u64,
     pub last_active_at: u64,
@@ -406,6 +422,7 @@ pub struct SessionMessage {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionDetail {
     pub session_key: String,
+    pub user_id: Option<String>,
     pub message_count: usize,
     pub created_at: u64,
     pub last_active_at: u64,
@@ -534,6 +551,23 @@ pub async fn run_turn_with_mcp(
         .await
         {
             Ok(result) if result.performed => {
+                if let Some(ref mut rec) = recorder {
+                    if let Err(e) = rec.record_compaction(
+                        &session.session_key,
+                        serde_json::json!({
+                            "trigger": "manual",
+                            "reason": "user_requested",
+                            "phase": "standalone_turn",
+                            "pre_tokens": result.pre_tokens,
+                            "post_tokens": result.post_tokens,
+                            "tokens_saved": result.tokens_saved,
+                            "messages_removed": result.messages_removed,
+                            "compaction_count": session.compaction_count,
+                        }),
+                    ) {
+                        warn!(error = %e, "failed to record compaction event");
+                    }
+                }
                 return Ok(TurnResult {
                     response: format!(
                         "记忆压缩完成。\n- 压缩前 token: ~{}\n- 压缩后 token: ~{}\n- 节省: ~{}\n- 移除消息: {}\n- 累计压缩次数: {}\n- 耗时: {}ms",
@@ -561,6 +595,69 @@ pub async fn run_turn_with_mcp(
         }
     }
 
+    // /remember <text> — explicit long-term memory write.
+    if let Some(content) = trimmed.strip_prefix("/remember ") {
+        if let Some(ref mut rec) = recorder {
+            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                warn!(error = %e, "failed to record user message");
+            }
+        }
+        let record = memory_runtime::remember_explicit(config, session, content.trim())?;
+        return Ok(TurnResult {
+            response: format!("已记住长期记忆: {}", record.id),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
+    }
+
+    // /memories — list visible long-term memories.
+    if trimmed == "/memories" {
+        if let Some(ref mut rec) = recorder {
+            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                warn!(error = %e, "failed to record user message");
+            }
+        }
+        let records = memory_runtime::list_visible_memories(config, session, 20)?;
+        let response = if records.is_empty() {
+            "当前 scope 没有长期记忆。".to_string()
+        } else {
+            let mut lines = vec!["当前可见长期记忆:".to_string()];
+            for record in records {
+                lines.push(format!(
+                    "- {} [{} {}] {}",
+                    record.id,
+                    record.kind.as_str(),
+                    record.scope.scope_kind(),
+                    record.content
+                ));
+            }
+            lines.join("\n")
+        };
+        return Ok(TurnResult {
+            response,
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
+    }
+
+    // /forget <id|last> — soft delete one visible memory.
+    if let Some(id_or_last) = trimmed.strip_prefix("/forget ") {
+        if let Some(ref mut rec) = recorder {
+            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                warn!(error = %e, "failed to record user message");
+            }
+        }
+        let response = match memory_runtime::forget_memory(config, session, id_or_last.trim())? {
+            Some(id) => format!("已忘记长期记忆: {id}"),
+            None => "没有找到可忘记的长期记忆。".to_string(),
+        };
+        return Ok(TurnResult {
+            response,
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
+    }
+
     // /status — show session state (token usage, compaction count, etc.)
     if trimmed == "/status" {
         if let Some(ref mut rec) = recorder {
@@ -586,8 +683,21 @@ pub async fn run_turn_with_mcp(
 
     // /resume — load the most recent JSONL conversation and restore session history
     if trimmed == "/resume" {
-        let work_dir = config.resolve_work_dir();
-        let files = persistence::list_conversations(&work_dir, Some(&session.session_key));
+        let agent_home = crate::config::agent_home_dir();
+        let mut files = persistence::list_conversations(&agent_home, Some(&session.session_key));
+        if files.is_empty() {
+            let legacy_dir = config.resolve_work_dir();
+            let legacy_files =
+                persistence::list_conversations(&legacy_dir, Some(&session.session_key));
+            if !legacy_files.is_empty() {
+                warn!(
+                    agent_home = %agent_home.display(),
+                    fallback_dir = %legacy_dir.display(),
+                    "resume fell back to legacy work_dir session path"
+                );
+                files = legacy_files;
+            }
+        }
         if let Some(latest) = files.last() {
             match persistence::load_conversation(latest) {
                 Ok(messages) => {
@@ -637,6 +747,23 @@ pub async fn run_turn_with_mcp(
         .await
         {
             Ok(result) if result.performed => {
+                if let Some(ref mut rec) = recorder {
+                    if let Err(e) = rec.record_compaction(
+                        &session.session_key,
+                        serde_json::json!({
+                            "trigger": "auto",
+                            "reason": "context_limit",
+                            "phase": "pre_turn",
+                            "pre_tokens": result.pre_tokens,
+                            "post_tokens": result.post_tokens,
+                            "tokens_saved": result.tokens_saved,
+                            "messages_removed": result.messages_removed,
+                            "compaction_count": session.compaction_count,
+                        }),
+                    ) {
+                        warn!(error = %e, "failed to record compaction event");
+                    }
+                }
                 info!(
                     tokens_saved = result.tokens_saved,
                     duration_ms = ?result.duration_ms,
@@ -691,9 +818,15 @@ pub async fn run_turn_with_mcp(
         "starting agent turn"
     );
 
+    let memory_message = memory_runtime::recall_system_message(config, session, user_message);
+
     for iteration in 0..max_iterations {
         // Build messages with history limit enforcement
-        let messages = session.build_messages(&system_prompt, config.get_max_history_messages());
+        let messages = session.build_messages(
+            &system_prompt,
+            memory_message.as_ref(),
+            config.get_max_history_messages(),
+        );
 
         debug!(
             iteration,
@@ -752,8 +885,11 @@ pub async fn run_turn_with_mcp(
 
                     // Step 2: If compact worked, retry once
                     if compacted {
-                        let retry_messages = session
-                            .build_messages(&system_prompt, config.get_max_history_messages());
+                        let retry_messages = session.build_messages(
+                            &system_prompt,
+                            memory_message.as_ref(),
+                            config.get_max_history_messages(),
+                        );
                         match client
                             .chat_completion(config, &retry_messages, &tool_defs)
                             .await
@@ -890,6 +1026,15 @@ pub async fn run_turn_with_mcp(
                 total_tokens_used = ?session.total_tokens_used,
                 "agent turn completed"
             );
+
+            memory_runtime::auto_extract_after_turn(
+                client,
+                config,
+                session,
+                user_message,
+                &content,
+            )
+            .await;
 
             return Ok(TurnResult {
                 response: content,
@@ -1038,6 +1183,23 @@ pub async fn run_turn_with_mcp(
             .await
             {
                 Ok(result) if result.performed => {
+                    if let Some(ref mut rec) = recorder {
+                        if let Err(e) = rec.record_compaction(
+                            &session.session_key,
+                            serde_json::json!({
+                                "trigger": "auto",
+                                "reason": "context_limit",
+                                "phase": "mid_turn",
+                                "pre_tokens": result.pre_tokens,
+                                "post_tokens": result.post_tokens,
+                                "tokens_saved": result.tokens_saved,
+                                "messages_removed": result.messages_removed,
+                                "compaction_count": session.compaction_count,
+                            }),
+                        ) {
+                            warn!(error = %e, "failed to record compaction event");
+                        }
+                    }
                     info!(
                         tokens_saved = result.tokens_saved,
                         duration_ms = ?result.duration_ms,
@@ -1192,7 +1354,7 @@ async fn trim_loop_retry(
         );
 
         let retry_messages =
-            session.build_messages(system_prompt, config.get_max_history_messages());
+            session.build_messages(system_prompt, None, config.get_max_history_messages());
         match client
             .chat_completion(config, &retry_messages, tool_defs)
             .await
@@ -1249,6 +1411,18 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{FunctionCallInfo, ToolCallMessage};
+
+    fn test_tool_call(id: &str) -> ToolCallMessage {
+        ToolCallMessage {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCallInfo {
+                name: "list_directory".to_string(),
+                arguments: r#"{"path":"."}"#.to_string(),
+            },
+        }
+    }
 
     #[test]
     fn test_session_new() {
@@ -1292,7 +1466,7 @@ mod tests {
             session.add_user_message(&format!("msg {i}"));
         }
         // Limit to 5 messages
-        let messages = session.build_messages("system", 5);
+        let messages = session.build_messages("system", None, 5);
         // 1 system + 5 history = 6
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
@@ -1310,7 +1484,7 @@ mod tests {
             session.add_user_message(&format!("msg {i}"));
         }
         // Limit to 5 messages
-        let messages = session.build_messages("system", 5);
+        let messages = session.build_messages("system", None, 5);
         // 1 system + 1 summary + 4 recent = 6
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
@@ -1326,8 +1500,20 @@ mod tests {
         for i in 0..5 {
             session.add_user_message(&format!("msg {i}"));
         }
-        let messages = session.build_messages("system", 0); // 0 = no limit
+        let messages = session.build_messages("system", None, 0); // 0 = no limit
         assert_eq!(messages.len(), 6); // 1 system + 5 history
+    }
+
+    #[test]
+    fn test_build_messages_sanitizes_tool_when_history_limit_cuts_assistant_tool_calls() {
+        let mut session = AgentSession::new("test");
+        session.add_user_message("inspect");
+        session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
+        session.add_tool_result("call-1", "[file] Cargo.toml");
+
+        let messages = session.build_messages("system", None, 1);
+
+        assert_eq!(messages.len(), 1);
     }
 
     #[test]
@@ -1433,13 +1619,15 @@ mod tests {
     #[test]
     fn test_trim_oldest_messages() {
         let mut session = AgentSession::new("test");
-        for i in 0..5 {
-            session.add_user_message(&format!("msg{i}"));
-        }
+        session.add_user_message("inspect");
+        session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
+        session.add_tool_result("call-1", "[file] Cargo.toml");
+        session.add_user_message("continue");
         let trimmed = trim_oldest_messages_count(&mut session, 2);
         assert_eq!(trimmed, 2);
-        assert_eq!(session.history.len(), 3);
-        assert_eq!(session.history[0].content.as_deref(), Some("msg2"));
+        assert_eq!(session.history.len(), 1);
+        assert_eq!(session.history[0].content.as_deref(), Some("continue"));
+        assert!(history::is_valid_chat_history(&session.history));
     }
 
     #[test]
