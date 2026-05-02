@@ -44,6 +44,7 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - `ConversationRecorder` 新增带 `call_id` 的记录方法，正常 turn loop 会把模型返回的真实 tool call id 写入 `tool_call` 和 `tool_result` 事件。
 - `load_conversation()` 恢复时读取 `tool_call` 事件，重建 `ToolCallMessage`，再在对应 `tool_result` 到达时生成合法的 `assistant_with_tool_calls([tool_call])` + `tool_result(call_id, result)` 消息对。
 - 对历史旧 JSONL 中缺失 `call_id` 的 `tool_call`，恢复时生成稳定的 `recovered-tool-call-N` synthetic id，保证旧会话也不会恢复出 orphan `tool`。
+- 恢复层维护 pending tool-call 集合；如果同一轮先连续落盘多个 `tool_call`、再依次落盘 `tool_result`，优先按 `call_id` 精确匹配，旧记录缺少 `call_id` 时按记录顺序匹配，避免单个 pending 被后续工具调用覆盖后把结果错配到错误的 tool call。
 - 无前置 `tool_call` 的孤立 `tool_result` 会被跳过，不再进入模型上下文。
 
 ### 防御机制
@@ -54,6 +55,7 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - 孤立 `role=tool` 会被删除。
 - 不完整的 `assistant(tool_calls)` 片段会被删除，避免残留非法 suffix。
 - `build_messages()` 在 max history 裁剪之后统一 sanitize，防止裁剪刚好切掉 assistant tool_calls 后只保留 tool results。
+- context overflow trim 每次删除旧消息后统一 sanitize，防止 trim 正好切断 `assistant(tool_calls)` 与 `tool` 结果之间的配对关系。
 - compaction 输出历史、context overflow trim 后的历史也会 sanitize。
 - 发现修复时写入 warn 日志，包含丢弃的 orphan tool 数和不完整 tool-call 片段数。
 
@@ -67,6 +69,7 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - auto/mid-turn compaction
 - `/resume`
 - session persistence + history reload
+- 多 tool-call pending 队列恢复
 - `switch_workdir` 后 clear
 - `/undo` / clear / reset 后续请求
 - MCP tool 与本地 tool 共用同一 ChatMessage invariant

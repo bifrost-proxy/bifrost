@@ -863,14 +863,33 @@ rm -rf ./.bifrost-test
 ### TC-IMA-67: Agent Loop tool message 序列回归
 
 - **操作步骤**:
-  1. 执行自动化真实链路回归：
+  1. 执行消息历史 invariant 单元回归：
+     ```bash
+     cargo test -p bifrost-agent -- --nocapture
+     ```
+  2. 执行恢复链路的精准单元回归：
+     ```bash
+     cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture
+     cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture
+     cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture
+     ```
+  3. 执行自动化真实链路回归：
      ```bash
      cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240
      ```
-  2. 观察输出中的 mock Chat Completions 请求校验结果。
-  3. 确认测试完成后无 `messages with role 'tool' must be a response`、`messages.[].role=tool has no preceding assistant tool_calls` 或 `assistant tool_calls were not followed by tool results` 错误。
+  4. 观察输出中的 mock Chat Completions 请求校验结果。
+  5. 确认测试完成后无 `messages with role 'tool' must be a response`、`messages.[].role=tool has no preceding assistant tool_calls` 或 `assistant tool_calls were not followed by tool results` 错误。
 - **预期结果**:
+  - `bifrost-agent` history / persistence / session 单元回归全部通过
+  - 多个 pending `tool_call` 先落盘、后续 `tool_result` 按 `call_id` 或旧记录顺序恢复时，不出现结果错配或 orphan `tool`
+  - max_history 裁剪和 context overflow trim 切断 tool-call 片段时，请求前会删除非法 `tool` suffix
   - E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
   - 测试至少完成两轮模型工具调用：首次工具调用、JSONL 持久化恢复后的再次工具调用
   - mock 模型服务未观察到 orphan `tool` message
   - Agent turn 正常结束，不返回 400 invalid parameter
+- **执行记录（2026-05-02）**:
+  - `cargo test -p bifrost-agent -- --nocapture`：PASS，94 个单元测试 + 1 个 doctest 通过
+  - `cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture`：PASS，2 个恢复匹配测试通过
+  - `cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture`：PASS，1 个请求裁剪清洗测试通过
+  - `cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture`：PASS，1 个 trim 清洗测试通过
+  - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
