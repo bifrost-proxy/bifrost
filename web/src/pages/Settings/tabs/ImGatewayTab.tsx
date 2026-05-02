@@ -77,9 +77,11 @@ function ConnectionsPanel({
   }, [providers]);
 
   useEffect(() => {
-    if (providers.length > 0) {
-      fetchStatuses();
-    }
+    if (providers.length === 0) return;
+    const timer = window.setTimeout(() => {
+      void fetchStatuses();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [providers, fetchStatuses]);
 
   const handleAdd = async () => {
