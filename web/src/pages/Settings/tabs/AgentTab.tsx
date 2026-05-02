@@ -44,6 +44,7 @@ import McpServersSection from "./agent/McpServersSection";
 import SkillsSection from "./agent/SkillsSection";
 import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
 import SessionDetailPage from "./agent/SessionDetailPage";
+import MemoriesSection from "./agent/MemoriesSection";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -1058,6 +1059,21 @@ export default function AgentTab() {
                 </Col>
               </Row>
             </Space>
+          </Card>
+        </Col>
+
+        {/* MCP Servers */}
+        <Col xs={24}>
+          <Card
+            title={
+              <Space>
+                <SettingOutlined />
+                <span>Memory Records</span>
+              </Space>
+            }
+            size="small"
+          >
+            <MemoriesSection />
           </Card>
         </Col>
 

@@ -64,6 +64,45 @@ export interface MemoriesConfig {
   consolidation_model?: string;
 }
 
+export type MemoryScopeType = "global" | "user" | "project" | "session";
+export type MemoryKind =
+  | "fact"
+  | "preference"
+  | "rule"
+  | "skill"
+  | "task_context"
+  | "other";
+
+export interface MemoryScope {
+  type: MemoryScopeType;
+  value?: string;
+}
+
+export interface MemoryRecord {
+  id: string;
+  scope: MemoryScope;
+  kind: MemoryKind;
+  content: string;
+  source: unknown;
+  tags: string[];
+  pinned: boolean;
+  confidence: number;
+  created_at: number;
+  updated_at: number;
+  last_used_at?: number;
+  use_count: number;
+  expires_at?: number;
+  dedupe_hash: string;
+}
+
+export interface MemoryStats {
+  total: number;
+  by_scope: Array<[string, number]>;
+  by_kind: Array<[string, number]>;
+  written_last_7_days: number;
+  recalled_last_7_days: number;
+}
+
 export interface AgentConfig {
   enabled: boolean;
   model?: string;
