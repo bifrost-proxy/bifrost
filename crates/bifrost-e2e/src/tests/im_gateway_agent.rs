@@ -335,6 +335,103 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_agent_long_term_memory_remember_recall",
+            "Validate /remember persists across sessions and injects recalled memory into the next model prompt",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let temp_dir = tempfile::tempdir()
+                    .map_err(|e| format!("failed to create temp dir: {e}"))?;
+                let _agent_home_guard = EnvVarGuard::set("BIFROST_AGENT_HOME", temp_dir.path());
+
+                let mut config = AgentConfig {
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
+                    memories: Some(bifrost_agent::config::MemoriesConfig {
+                        use_memories: Some(true),
+                        generate_memories: Some(false),
+                        ..Default::default()
+                    }),
+                    ..AgentConfig::default()
+                };
+                config.model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock.url()),
+                        env_key: None,
+                        http_headers: Some(HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer test".to_string(),
+                        )])),
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+
+                let client = bifrost_agent::AgentClient::new();
+                let tools = ToolRegistry::new();
+                let mut first_session = AgentSession::new("session-a");
+                first_session.user_id = Some("user-memory-e2e".to_string());
+                let remembered = run_turn(
+                    &client,
+                    &config,
+                    &mut first_session,
+                    &tools,
+                    "/remember 用户偏好所有 Bifrost 长期记忆回答都使用中文",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("remember command failed: {e}"))?;
+                if !remembered.response.contains("已记住长期记忆") {
+                    return Err(format!("unexpected remember response: {}", remembered.response));
+                }
+
+                let mut second_session = AgentSession::new("session-b");
+                second_session.user_id = Some("user-memory-e2e".to_string());
+                let result = run_turn(
+                    &client,
+                    &config,
+                    &mut second_session,
+                    &tools,
+                    "下一轮应该使用什么长期偏好？",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("recall turn failed: {e}"))?;
+                if result.response.is_empty() {
+                    return Err("expected model response after recall".to_string());
+                }
+
+                let requests = mock.requests.lock();
+                let recall_request = requests
+                    .last()
+                    .ok_or_else(|| "mock did not receive recall request".to_string())?;
+                let messages = recall_request
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| "recall request missing messages".to_string())?;
+                let injected = messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(|value| value.as_str())
+                        .map(|content| {
+                            content.contains("# Long-term memories (per user)")
+                                && content.contains("所有 Bifrost 长期记忆回答都使用中文")
+                        })
+                        .unwrap_or(false)
+                });
+                if !injected {
+                    return Err(format!("memory system message was not injected: {messages:?}"));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_tool_history_resume_regression",
             "Validate tool-call session persistence reloads into a valid Chat Completions message sequence",
             "admin",
@@ -493,7 +590,12 @@ impl ChatCompletionMock {
                                 );
                             }
 
-                            let message = if current_call % 2 == 1 {
+                            let has_tools = body
+                                .get("tools")
+                                .and_then(|value| value.as_array())
+                                .map(|items| !items.is_empty())
+                                .unwrap_or(false);
+                            let message = if has_tools && current_call % 2 == 1 {
                                 json!({
                                     "role": "assistant",
                                     "content": null,
@@ -598,4 +700,29 @@ fn pick_unused_port() -> Result<u16, String> {
         .local_addr()
         .map(|addr| addr.port())
         .map_err(|e| format!("Failed to read ephemeral port: {}", e))
+}
+
+struct EnvVarGuard {
+    key: String,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self {
+            key: key.to_string(),
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(&self.key, value),
+            None => std::env::remove_var(&self.key),
+        }
+    }
 }
