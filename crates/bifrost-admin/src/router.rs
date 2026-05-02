@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::cors::apply_cors_headers;
 use crate::handlers::{
+    agent_memories::handle_agent_memories,
     app_icon::handle_app_icon,
     audit::handle_audit,
     auth::{extract_bearer_token, handle_auth},
@@ -106,7 +107,9 @@ impl AdminRouter {
             return handle_audit(req, path).await;
         }
 
-        if path.starts_with("/api/rules") {
+        if path.starts_with("/api/agent/memories") {
+            handle_agent_memories(req, path).await
+        } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {
             handle_devtools(req, state, path).await

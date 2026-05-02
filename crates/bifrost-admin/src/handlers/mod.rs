@@ -1,3 +1,4 @@
+pub mod agent_memories;
 pub mod app_icon;
 pub mod audit;
 pub mod auth;

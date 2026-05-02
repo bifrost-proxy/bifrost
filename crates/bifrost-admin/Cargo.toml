@@ -13,6 +13,7 @@ bifrost-storage = { path = "../bifrost-storage" }
 bifrost-sync = { path = "../bifrost-sync" }
 bifrost-script = { path = "../bifrost-script" }
 bifrost-power = { path = "../bifrost-power" }
+memory = { path = "../memory" }
 
 tokio = { version = "1", features = ["full", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

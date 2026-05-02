@@ -870,7 +870,9 @@ async fn process_agent_chat(
                 session.recorder.take()
             } else {
                 let data_dir = bifrost_agent::config::agent_home_dir();
-                let mut rec = ConversationRecorder::new(&data_dir, session_key);
+                let max_bytes = agent_config.history.as_ref().and_then(|h| h.max_bytes);
+                let mut rec =
+                    ConversationRecorder::new_with_max_bytes(&data_dir, session_key, max_bytes);
                 // Record session start metadata
                 let _ = rec.record_session_start(
                     session_key,
@@ -2104,7 +2106,12 @@ async fn handle_agent(
                     session.recorder.take()
                 } else {
                     let data_dir = bifrost_agent::config::agent_home_dir();
-                    let mut rec = ConversationRecorder::new(&data_dir, &session_key);
+                    let max_bytes = config.history.as_ref().and_then(|h| h.max_bytes);
+                    let mut rec = ConversationRecorder::new_with_max_bytes(
+                        &data_dir,
+                        &session_key,
+                        max_bytes,
+                    );
                     let _ = rec.record_session_start(
                         &session_key,
                         serde_json::json!({
