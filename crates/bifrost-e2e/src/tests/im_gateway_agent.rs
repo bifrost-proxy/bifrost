@@ -2,7 +2,9 @@
 
 use crate::assertions::assert_status;
 use crate::{ProxyInstance, TestCase};
+use bifrost_admin::{AdminState, ImGatewayService};
 use std::net::TcpListener;
+use std::sync::Arc;
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -12,10 +14,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "admin",
             || async move {
                 let port = pick_unused_port()?;
-                let (_proxy, _admin_state) =
-                    ProxyInstance::start_with_admin(port, vec![], false, true)
-                        .await
-                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
 
                 let client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
@@ -65,10 +64,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "admin",
             || async move {
                 let port = pick_unused_port()?;
-                let (_proxy, _admin_state) =
-                    ProxyInstance::start_with_admin(port, vec![], false, true)
-                        .await
-                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
 
                 let client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
@@ -161,10 +157,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "admin",
             || async move {
                 let port = pick_unused_port()?;
-                let (_proxy, _admin_state) =
-                    ProxyInstance::start_with_admin(port, vec![], false, true)
-                        .await
-                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
 
                 let client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
@@ -210,10 +203,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "admin",
             || async move {
                 let port = pick_unused_port()?;
-                let (_proxy, _admin_state) =
-                    ProxyInstance::start_with_admin(port, vec![], false, true)
-                        .await
-                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
 
                 let client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
@@ -322,6 +312,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
     ]
+}
+
+async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {
+    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], false, true)
+        .await
+        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+    let data_dir = std::env::temp_dir().join(format!("bifrost_e2e_im_gateway_agent_{port}"));
+    admin_state.set_im_gateway_service(Arc::new(ImGatewayService::new(&data_dir)));
+    Ok((proxy, admin_state))
 }
 
 fn pick_unused_port() -> Result<u16, String> {
