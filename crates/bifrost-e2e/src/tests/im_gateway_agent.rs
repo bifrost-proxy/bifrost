@@ -3,7 +3,21 @@
 use crate::assertions::assert_status;
 use crate::{ProxyInstance, TestCase};
 use bifrost_admin::{AdminState, ImGatewayService};
+use bifrost_agent::config::{AgentConfig, ModelProviderConfig};
+use bifrost_agent::persistence::{load_conversation, ConversationRecorder};
+use bifrost_agent::session::{run_turn, run_turn_with_mcp, AgentSession};
+use bifrost_agent::ToolRegistry;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
+use serde_json::json;
+use std::collections::HashMap;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub fn get_all_tests() -> Vec<TestCase> {
@@ -320,7 +334,253 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
+        TestCase::standalone(
+            "im_gateway_agent_tool_history_resume_regression",
+            "Validate tool-call session persistence reloads into a valid Chat Completions message sequence",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let temp_dir = tempfile::tempdir()
+                    .map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+                let mut config = AgentConfig {
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
+                    max_turn_iterations: Some(4),
+                    request_timeout_secs: Some(20),
+                    ..AgentConfig::default()
+                };
+                config.model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock.url()),
+                        env_key: None,
+                        http_headers: Some(HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer test".to_string(),
+                        )])),
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+
+                let client = bifrost_agent::AgentClient::new();
+                let tools = ToolRegistry::with_defaults(5);
+                let mut session = AgentSession::new("resume-tool-e2e");
+                let mut recorder = ConversationRecorder::new(temp_dir.path(), "resume-tool-e2e");
+                recorder
+                    .record_session_start(
+                        "resume-tool-e2e",
+                        json!({"model": "mock-model", "provider": "mock", "source": "e2e"}),
+                    )
+                    .map_err(|e| format!("record session start failed: {e}"))?;
+
+                let first = run_turn_with_mcp(
+                    &client,
+                    &config,
+                    &mut session,
+                    &tools,
+                    None,
+                    "list the current directory",
+                    None,
+                    Some(&mut recorder),
+                )
+                .await
+                .map_err(|e| format!("first tool loop failed: {e}"))?;
+                if first.tool_calls_log.is_empty() {
+                    return Err("expected first turn to execute a tool call".to_string());
+                }
+                recorder.close();
+
+                let restored = load_conversation(recorder.file_path())
+                    .map_err(|e| format!("failed to reload conversation: {e}"))?;
+                if !bifrost_agent::history::is_valid_chat_history(&restored) {
+                    return Err("reloaded conversation history is malformed".to_string());
+                }
+                if !restored.iter().any(|m| m.role == "tool") {
+                    return Err("expected restored history to include a legal tool result".to_string());
+                }
+
+                let mut resumed_session = AgentSession::new("resume-tool-e2e");
+                resumed_session.history = restored;
+                let second = run_turn(
+                    &client,
+                    &config,
+                    &mut resumed_session,
+                    &tools,
+                    "continue and list the directory again",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("resumed tool loop failed: {e}"))?;
+                if second.tool_calls_log.is_empty() {
+                    return Err("expected resumed turn to execute a tool call".to_string());
+                }
+
+                let requests = mock.requests.lock();
+                if requests.len() < 4 {
+                    return Err(format!(
+                        "expected at least 4 model requests, got {}",
+                        requests.len()
+                    ));
+                }
+                if let Some(error) = requests.iter().find_map(validate_chat_messages_json) {
+                    return Err(format!("mock observed malformed message history: {error}"));
+                }
+
+                Ok(())
+            },
+        ),
     ]
+}
+
+struct ChatCompletionMock {
+    port: u16,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl ChatCompletionMock {
+    async fn start() -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("bind mock chat server: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("mock local addr: {e}"))?
+            .port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = Arc::clone(&requests);
+        let request_count_for_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let requests = Arc::clone(&requests_for_server);
+                let request_count = Arc::clone(&request_count_for_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let requests = Arc::clone(&requests);
+                        let request_count = Arc::clone(&request_count);
+                        async move {
+                            let current_call = request_count.fetch_add(1, Ordering::SeqCst) + 1;
+                            let body_bytes = req
+                                .into_body()
+                                .collect()
+                                .await
+                                .map(|b| b.to_bytes())
+                                .unwrap_or_else(|_| Bytes::new());
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}));
+                            requests.lock().push(body.clone());
+
+                            if let Some(error) = validate_chat_messages_json(&body) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(Bytes::from(
+                                            json!({"error": {"message": error}}).to_string(),
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let message = if current_call % 2 == 1 {
+                                json!({
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": format!("call-{current_call}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_directory",
+                                            "arguments": "{\"path\":\".\"}"
+                                        }
+                                    }]
+                                })
+                            } else {
+                                json!({
+                                    "role": "assistant",
+                                    "content": format!("tool loop complete after request {current_call}")
+                                })
+                            };
+                            let response = json!({
+                                "choices": [{
+                                    "message": message,
+                                    "finish_reason": if current_call % 2 == 1 { "tool_calls" } else { "stop" }
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 10,
+                                    "completion_tokens": 5,
+                                    "total_tokens": 15
+                                }
+                            });
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(response.to_string())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        Ok(Self { port, requests })
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/chat/completions", self.port)
+    }
+}
+
+fn validate_chat_messages_json(body: &serde_json::Value) -> Option<String> {
+    let messages = body.get("messages")?.as_array()?;
+    let mut pending: Vec<String> = Vec::new();
+    for (idx, message) in messages.iter().enumerate() {
+        match message.get("role").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                pending.clear();
+                if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    pending = tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            tc.get("id").and_then(|id| id.as_str()).map(str::to_string)
+                        })
+                        .collect();
+                }
+            }
+            Some("tool") => {
+                let Some(id) = message.get("tool_call_id").and_then(|v| v.as_str()) else {
+                    return Some(format!("messages.[{idx}].tool_call_id missing"));
+                };
+                let Some(pos) = pending.iter().position(|pending_id| pending_id == id) else {
+                    return Some(format!(
+                        "messages.[{idx}].role=tool has no preceding assistant tool_calls"
+                    ));
+                };
+                pending.remove(pos);
+            }
+            Some(_) => pending.clear(),
+            None => return Some(format!("messages.[{idx}].role missing")),
+        }
+    }
+    if !pending.is_empty() {
+        return Some("assistant tool_calls were not followed by tool results".to_string());
+    }
+    None
 }
 
 async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {

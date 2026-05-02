@@ -13,6 +13,7 @@
 
 use crate::client::AgentClient;
 use crate::config::AgentConfig;
+use crate::history;
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
 use tracing::{info, warn};
@@ -199,6 +200,16 @@ pub async fn compact_session(
     // Preserve recent user messages for context continuity
     for msg in &recent_user_messages {
         new_history.push(msg.clone());
+    }
+
+    let (new_history, sanitize_report) = history::sanitize_chat_history(&new_history);
+    if sanitize_report.dropped_anything() {
+        warn!(
+            session_key = %session.session_key,
+            dropped_orphan_tool_messages = sanitize_report.dropped_orphan_tool_messages,
+            dropped_incomplete_tool_call_messages = sanitize_report.dropped_incomplete_tool_call_messages,
+            "sanitized malformed history produced by compaction"
+        );
     }
 
     let post_messages = new_history.len();
@@ -413,6 +424,31 @@ mod tests {
         // Should include from "third" onwards (last 2 user messages + everything after)
         assert!(recent.len() >= 2);
         assert_eq!(recent[0].content.as_deref(), Some("third"));
+    }
+
+    #[test]
+    fn test_compaction_preserves_tool_call_tool_result_invariants() {
+        let history = vec![
+            ChatMessage::user("first"),
+            ChatMessage::assistant("reply"),
+            ChatMessage::user("inspect"),
+            ChatMessage::assistant_with_tool_calls(vec![crate::types::ToolCallMessage {
+                id: "call-1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::FunctionCallInfo {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                },
+            }]),
+            ChatMessage::tool_result("call-1", "content"),
+            ChatMessage::assistant("done"),
+        ];
+
+        let recent = collect_recent_user_messages(&history, 1);
+
+        assert!(history::is_valid_chat_history(&recent));
+        assert_eq!(recent[1].role, "assistant");
+        assert_eq!(recent[2].role, "tool");
     }
 
     #[test]

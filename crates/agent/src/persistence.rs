@@ -3,7 +3,8 @@
 //! Events are stored in JSONL files organized by date and session key:
 //! `{data_dir}/sessions/YYYY/MM/DD/session-{session_key}-{timestamp}.jsonl`
 
-use crate::types::ChatMessage;
+use crate::history;
+use crate::types::{ChatMessage, FunctionCallInfo, ToolCallMessage};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -113,11 +114,23 @@ impl ConversationRecorder {
         tool_name: &str,
         arguments: &str,
     ) -> Result<(), String> {
+        self.record_tool_call_with_id(session_key, tool_name, arguments, None)
+    }
+
+    /// Record a tool call event with the provider's tool call id.
+    pub fn record_tool_call_with_id(
+        &mut self,
+        session_key: &str,
+        tool_name: &str,
+        arguments: &str,
+        call_id: Option<&str>,
+    ) -> Result<(), String> {
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_CALL.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({
+                "call_id": call_id,
                 "tool_name": tool_name,
                 "arguments": arguments,
             }),
@@ -132,11 +145,24 @@ impl ConversationRecorder {
         result: &str,
         success: bool,
     ) -> Result<(), String> {
+        self.record_tool_result_with_call_id(session_key, tool_name, result, success, None)
+    }
+
+    /// Record a tool result event with the provider's tool call id.
+    pub fn record_tool_result_with_call_id(
+        &mut self,
+        session_key: &str,
+        tool_name: &str,
+        result: &str,
+        success: bool,
+        call_id: Option<&str>,
+    ) -> Result<(), String> {
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_RESULT.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({
+                "call_id": call_id,
                 "tool_name": tool_name,
                 "result": result,
                 "success": success,
@@ -222,6 +248,8 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
     let reader = std::io::BufReader::new(file);
 
     let mut messages = Vec::new();
+    let mut pending_tool_call: Option<ToolCallMessage> = None;
+    let mut recovered_tool_call_count = 0usize;
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read line: {e}"))?;
         if line.trim().is_empty() {
@@ -233,18 +261,53 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
 
         match event.event_type.as_str() {
             event_types::USER_MESSAGE => {
+                pending_tool_call = None;
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     messages.push(ChatMessage::user(msg));
                 }
             }
             event_types::ASSISTANT_MESSAGE => {
+                pending_tool_call = None;
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     messages.push(ChatMessage::assistant(msg));
                 }
             }
+            event_types::TOOL_CALL => {
+                recovered_tool_call_count += 1;
+                let tool_name = event
+                    .content
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown_tool");
+                let arguments = event
+                    .content
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                let call_id = event
+                    .content
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("recovered-tool-call-{recovered_tool_call_count}"));
+                pending_tool_call = Some(ToolCallMessage {
+                    id: call_id,
+                    call_type: "function".to_string(),
+                    function: FunctionCallInfo {
+                        name: tool_name.to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                });
+            }
             event_types::TOOL_RESULT => {
-                if let Some(result) = event.content.get("result").and_then(|v| v.as_str()) {
-                    messages.push(ChatMessage::tool_result("recovered", result));
+                if let (Some(tool_call), Some(result)) = (
+                    pending_tool_call.take(),
+                    event.content.get("result").and_then(|v| v.as_str()),
+                ) {
+                    let call_id = tool_call.id.clone();
+                    messages.push(ChatMessage::assistant_with_tool_calls(vec![tool_call]));
+                    messages.push(ChatMessage::tool_result(&call_id, result));
                 }
             }
             _ => {
@@ -253,7 +316,7 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
         }
     }
 
-    Ok(messages)
+    Ok(history::sanitize_chat_history(&messages).0)
 }
 
 /// Load raw conversation events from a JSONL file.
@@ -534,8 +597,78 @@ mod tests {
         recorder.close();
 
         let messages = load_conversation(recorder.file_path()).unwrap();
-        // user_message + tool_result + assistant_message = 3
-        assert_eq!(messages.len(), 3);
+        // user_message + recovered assistant(tool_calls) + tool_result + assistant_message
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, "assistant");
+        assert!(messages[1].tool_calls.is_some());
+        assert_eq!(messages[2].role, "tool");
+        assert_eq!(
+            messages[2].tool_call_id.as_deref(),
+            Some(messages[1].tool_calls.as_ref().unwrap()[0].id.as_str())
+        );
+        assert!(history::is_valid_chat_history(&messages));
+    }
+
+    #[test]
+    fn test_load_conversation_does_not_restore_orphan_tool_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-orphan.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"hello"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"tool_result","session_key":"s","content":{"tool_name":"shell","result":"orphan","success":true}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let messages = load_conversation(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert!(history::is_valid_chat_history(&messages));
+    }
+
+    #[test]
+    fn test_resume_rebuilds_valid_chat_message_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "resume-valid");
+
+        recorder
+            .record_user_message("resume-valid", "list files")
+            .unwrap();
+        recorder
+            .record_tool_call_with_id(
+                "resume-valid",
+                "list_directory",
+                r#"{"path":"."}"#,
+                Some("call-real-id"),
+            )
+            .unwrap();
+        recorder
+            .record_tool_result_with_call_id(
+                "resume-valid",
+                "list_directory",
+                "[file] Cargo.toml",
+                true,
+                Some("call-real-id"),
+            )
+            .unwrap();
+        recorder
+            .record_assistant_message("resume-valid", "done")
+            .unwrap();
+        recorder.close();
+
+        let messages = load_conversation(recorder.file_path()).unwrap();
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages[1].tool_calls.as_ref().unwrap()[0].id,
+            "call-real-id"
+        );
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-real-id"));
+        assert!(history::is_valid_chat_history(&messages));
     }
 
     #[test]

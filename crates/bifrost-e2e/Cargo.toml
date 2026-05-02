@@ -13,6 +13,7 @@ path = "src/main.rs"
 bifrost-core = { path = "../bifrost-core" }
 bifrost-proxy = { path = "../bifrost-proxy" }
 bifrost-admin = { path = "../bifrost-admin" }
+bifrost-agent = { path = "../agent" }
 bifrost-storage = { path = "../bifrost-storage" }
 bifrost-sync = { path = "../bifrost-sync" }
 bifrost-cli = { path = "../bifrost-cli" }
@@ -51,5 +52,6 @@ parking_lot = { workspace = true }
 bytes = { workspace = true }
 portpicker = "0.1"
 urlencoding = "2.1"
+tempfile = { workspace = true }
 
 [dev-dependencies]

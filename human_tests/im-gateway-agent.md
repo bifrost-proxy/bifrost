@@ -859,3 +859,18 @@ rm -rf ./.bifrost-test
   - 4 个 `im_gateway_agent_*` E2E 用例全部通过
   - `/api/im-gateway/agent`、`PATCH /api/im-gateway/agent`、`/api/im-gateway/agent/sessions`、`POST /api/im-gateway/routes` 均返回 200
   - 测试启动器 `ProxyInstance::start_with_admin` 已配置 `ImGatewayService`，不再返回 `IM Gateway not configured`
+
+### TC-IMA-67: Agent Loop tool message 序列回归
+
+- **操作步骤**:
+  1. 执行自动化真实链路回归：
+     ```bash
+     cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240
+     ```
+  2. 观察输出中的 mock Chat Completions 请求校验结果。
+  3. 确认测试完成后无 `messages with role 'tool' must be a response`、`messages.[].role=tool has no preceding assistant tool_calls` 或 `assistant tool_calls were not followed by tool results` 错误。
+- **预期结果**:
+  - E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
+  - 测试至少完成两轮模型工具调用：首次工具调用、JSONL 持久化恢复后的再次工具调用
+  - mock 模型服务未观察到 orphan `tool` message
+  - Agent turn 正常结束，不返回 400 invalid parameter

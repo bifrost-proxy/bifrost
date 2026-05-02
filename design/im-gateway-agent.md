@@ -17,6 +17,61 @@ Agent 功能集成在 Bifrost 的 IM Gateway 模块中，通过 Azure 兼容的 
                      └──────────────┘      └─────────────────┘
 ```
 
+## Agent Loop tool message 序列稳定性
+
+### 问题根因
+
+2026-05-02 发现生产默认数据目录中的 IM Agent 会话在恢复后可能向模型发送非法 Chat Completions 消息序列：
+
+```text
+API error (status 400 Bad Request): messages with role 'tool' must be a response to a preceeding message with 'tool_calls'
+```
+
+根因在 `crates/agent/src/persistence.rs::load_conversation()`：JSONL 中记录的是事件流，工具轮次以 `tool_call` 和 `tool_result` 两类事件落盘；旧恢复逻辑跳过 `tool_call`，却把 `tool_result` 直接恢复成 `role=tool` 的 `ChatMessage::tool_result("recovered", ...)`。恢复后的历史缺少前置 `assistant(tool_calls)`，下一轮 `build_messages()` 会把 orphan `tool` 发给模型。
+
+默认数据目录中的实际证据位于 `~/.bifrost/agent/sessions/2026/05/02/session-ou_64f88363f262c64aba91f0b9e1aaed81-*.jsonl`：同一轮存在连续的 `tool_call` / `tool_result` 事件，但旧 `load_conversation()` 只恢复 `tool_result`，足以构造出 `messages.[2].role=tool`。
+
+### 修复原则
+
+Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可恢复消息。合法片段必须是：
+
+1. `assistant` 消息包含非空 `tool_calls`
+2. 随后紧邻每个 `tool_call.id` 对应的 `role=tool` 消息
+3. 不能出现无 `tool_call_id`、未知 `tool_call_id`、重复 `tool_call_id` 或不完整的 tool-call suffix
+
+### 根修复
+
+- `ConversationRecorder` 新增带 `call_id` 的记录方法，正常 turn loop 会把模型返回的真实 tool call id 写入 `tool_call` 和 `tool_result` 事件。
+- `load_conversation()` 恢复时读取 `tool_call` 事件，重建 `ToolCallMessage`，再在对应 `tool_result` 到达时生成合法的 `assistant_with_tool_calls([tool_call])` + `tool_result(call_id, result)` 消息对。
+- 对历史旧 JSONL 中缺失 `call_id` 的 `tool_call`，恢复时生成稳定的 `recovered-tool-call-N` synthetic id，保证旧会话也不会恢复出 orphan `tool`。
+- 无前置 `tool_call` 的孤立 `tool_result` 会被跳过，不再进入模型上下文。
+
+### 防御机制
+
+新增 `crates/agent/src/history.rs` 作为统一 history invariant 层：
+
+- `sanitize_chat_history()` 在发送模型请求前检查完整 messages。
+- 孤立 `role=tool` 会被删除。
+- 不完整的 `assistant(tool_calls)` 片段会被删除，避免残留非法 suffix。
+- `build_messages()` 在 max history 裁剪之后统一 sanitize，防止裁剪刚好切掉 assistant tool_calls 后只保留 tool results。
+- compaction 输出历史、context overflow trim 后的历史也会 sanitize。
+- 发现修复时写入 warn 日志，包含丢弃的 orphan tool 数和不完整 tool-call 片段数。
+
+### 覆盖场景
+
+该设计覆盖：
+
+- 正常 tool call loop
+- retry 后继续 loop
+- manual `/compact`
+- auto/mid-turn compaction
+- `/resume`
+- session persistence + history reload
+- `switch_workdir` 后 clear
+- `/undo` / clear / reset 后续请求
+- MCP tool 与本地 tool 共用同一 ChatMessage invariant
+- 多轮对话后的 max history 裁剪
+
 ## 关键组件
 
 ### 1. ImAgentConfig - 全局配置

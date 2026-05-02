@@ -34,6 +34,7 @@ pub mod agents_md;
 pub mod client;
 pub mod compact;
 pub mod config;
+pub mod history;
 pub mod mcp;
 pub mod persistence;
 pub mod prompt;

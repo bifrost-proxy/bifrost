@@ -152,6 +152,25 @@
 - 所有文本、卡片、标签在暗色主题下清晰可辨
 - 事件卡片颜色适配暗色主题
 
+### TC-ASP-13：恢复持久化 session 后继续 tool loop 回归
+
+**操作步骤**：
+1. 执行持久化恢复回归：
+   ```bash
+   cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240
+   ```
+2. 该用例会使用临时目录创建 `ConversationRecorder`，先触发一次 `list_directory` 工具调用并写入 JSONL。
+3. 用 `load_conversation()` 从 JSONL 恢复 session history。
+4. 恢复后再次发起需要工具调用的 turn。
+5. 检查输出中 mock Chat Completions 服务没有拒绝任何请求。
+
+**预期结果**：
+- E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
+- 恢复出的 history 包含合法的 `assistant(tool_calls)` + `tool` 消息对
+- 第二轮恢复后工具调用成功执行
+- 不出现 `messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`
+- 不出现 orphan `tool` message 或不完整 tool-call suffix
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

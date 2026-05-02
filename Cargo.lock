@@ -404,6 +404,7 @@ version = "0.0.67"
 dependencies = [
  "base64",
  "bifrost-admin",
+ "bifrost-agent",
  "bifrost-cli",
  "bifrost-core",
  "bifrost-proxy",
@@ -423,6 +424,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",

@@ -15,6 +15,7 @@
 use crate::client::AgentClient;
 use crate::compact;
 use crate::config::AgentConfig;
+use crate::history;
 use crate::mcp::McpManager;
 use crate::persistence;
 use crate::persistence::ConversationRecorder;
@@ -219,7 +220,18 @@ impl AgentSession {
             messages.extend(history.iter().cloned());
         }
 
-        messages
+        let (sanitized, report) = history::sanitize_chat_history(&messages);
+        if report.dropped_anything() {
+            warn!(
+                dropped_orphan_tool_messages = report.dropped_orphan_tool_messages,
+                dropped_incomplete_tool_call_messages =
+                    report.dropped_incomplete_tool_call_messages,
+                original_message_count = messages.len(),
+                sanitized_message_count = sanitized.len(),
+                "sanitized malformed agent chat history before model request"
+            );
+        }
+        sanitized
     }
 
     /// Rough token count estimate (1 token ≈ 4 chars).
@@ -579,8 +591,8 @@ pub async fn run_turn_with_mcp(
         if let Some(latest) = files.last() {
             match persistence::load_conversation(latest) {
                 Ok(messages) => {
-                    let count = messages.len();
                     session.history = messages;
+                    let count = session.history.len();
                     session.history_version = session.history_version.saturating_add(1);
                     return Ok(TurnResult {
                         response: format!(
@@ -906,10 +918,11 @@ pub async fn run_turn_with_mcp(
 
             // Record tool call
             if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.record_tool_call(
+                if let Err(e) = rec.record_tool_call_with_id(
                     &session.session_key,
                     &tc.function.name,
                     &tc.function.arguments,
+                    Some(&tc.id),
                 ) {
                     warn!(error = %e, "failed to record tool call");
                 }
@@ -967,11 +980,12 @@ pub async fn run_turn_with_mcp(
 
             // Record tool result
             if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.record_tool_result(
+                if let Err(e) = rec.record_tool_result_with_call_id(
                     &session.session_key,
                     &tc.function.name,
                     &result.output,
                     result.success,
+                    Some(&tc.id),
                 ) {
                     warn!(error = %e, "failed to record tool result");
                 }
@@ -1215,6 +1229,16 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
     if start < end {
         let removed = end - start;
         session.history.drain(start..end);
+        let (sanitized, report) = history::sanitize_chat_history(&session.history);
+        if report.dropped_anything() {
+            warn!(
+                dropped_orphan_tool_messages = report.dropped_orphan_tool_messages,
+                dropped_incomplete_tool_call_messages =
+                    report.dropped_incomplete_tool_call_messages,
+                "trim removed tool-call context; sanitized malformed history suffix"
+            );
+            session.history = sanitized;
+        }
         session.history_version = session.history_version.saturating_add(1);
         removed
     } else {
