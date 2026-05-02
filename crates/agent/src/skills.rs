@@ -55,11 +55,25 @@ struct SkillFrontmatter {
 /// Manages skill discovery and loading.
 pub struct SkillsManager {
     config: Option<SkillsConfig>,
+    /// Override for the user home directory (for testing isolation).
+    user_home_override: Option<PathBuf>,
 }
 
 impl SkillsManager {
     pub fn new(config: Option<SkillsConfig>) -> Self {
-        Self { config }
+        Self {
+            config,
+            user_home_override: None,
+        }
+    }
+
+    /// Create a SkillsManager with an explicit user home directory (bypasses HOME env var).
+    #[cfg(test)]
+    pub fn with_user_home(config: Option<SkillsConfig>, user_home: PathBuf) -> Self {
+        Self {
+            config,
+            user_home_override: Some(user_home),
+        }
     }
 
     /// Load all skills from the working directory hierarchy and user home.
@@ -75,7 +89,12 @@ impl SkillsManager {
         }
 
         // 2. Load from user home ~/.agents/skills/ (Codex-compatible global scope)
-        if let Some(user_home) = home_dir_path() {
+        let detected_home = home_dir_path();
+        let effective_home = self
+            .user_home_override
+            .as_deref()
+            .or(detected_home.as_deref());
+        if let Some(user_home) = effective_home {
             let global_skills_dir = user_home.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
             if global_skills_dir.is_dir() {
                 let global_skills = self.scan_skills_dir(&global_skills_dir, SkillScope::User);
@@ -307,9 +326,6 @@ This is the body content.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Isolate HOME so global ~/.agents/skills/ is not loaded
-        std::env::set_var("HOME", root.to_str().unwrap());
-
         // Create .agents/skills/test-skill/SKILL.md
         let skill_dir = root
             .join(AGENTS_DIR_NAME)
@@ -327,7 +343,8 @@ Do something useful.
         )
         .unwrap();
 
-        let manager = SkillsManager::new(None);
+        // Use with_user_home to isolate from real ~/.agents/skills/
+        let manager = SkillsManager::with_user_home(None, root.to_path_buf());
         let skills = manager.load_skills(root, None);
 
         assert_eq!(skills.len(), 1);
@@ -341,9 +358,6 @@ Do something useful.
     fn test_skills_manager_filter_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-
-        // Isolate HOME so global ~/.agents/skills/ is not loaded
-        std::env::set_var("HOME", root.to_str().unwrap());
 
         // Create two skills
         for name in &["skill-a", "skill-b"] {
@@ -368,7 +382,8 @@ Do something useful.
             }],
         };
 
-        let manager = SkillsManager::new(Some(skills_config));
+        // Use with_user_home to isolate from real ~/.agents/skills/
+        let manager = SkillsManager::with_user_home(Some(skills_config), root.to_path_buf());
         let skills = manager.load_skills(root, None);
 
         assert_eq!(skills.len(), 1);
@@ -405,9 +420,6 @@ Do something useful.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Isolate HOME so global ~/.agents/skills/ is not loaded
-        std::env::set_var("HOME", root.to_str().unwrap());
-
         // Create skill without name in frontmatter
         let skill_dir = root
             .join(AGENTS_DIR_NAME)
@@ -420,7 +432,8 @@ Do something useful.
         )
         .unwrap();
 
-        let manager = SkillsManager::new(None);
+        // Use with_user_home to isolate from real ~/.agents/skills/
+        let manager = SkillsManager::with_user_home(None, root.to_path_buf());
         let skills = manager.load_skills(root, None);
 
         assert_eq!(skills.len(), 1);

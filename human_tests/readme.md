@@ -132,12 +132,12 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 30 | Settings Tab、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
-| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 54 | Agent 配置 API（获取/更新/禁用启用）、会话列表、AgentChat 路由创建、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响） |
+| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 65 | Agent 配置 API（获取/更新/禁用启用）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航） |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 12 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容 |
 
 ---
 
-**总计：71 个测试文件，1421 个测试用例**
+**总计：71 个测试文件，1432 个测试用例**
 
 ## 工作流程
 

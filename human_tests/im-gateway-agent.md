@@ -450,68 +450,86 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - URL/Key 信息的 Code 样式块在暗色主题下对比度良好
   - 下拉列表的选中项高亮在暗色主题下可见
 
-### TC-IMA-37: Session 管理 - Active Sessions 列表展示
+### TC-IMA-37: 统一 Sessions 管理 - 列表展示
 
 - **操作步骤**:
   1. 打开 Settings → Agent Tab
-  2. 滚动到 "Active Sessions" 区域
-  3. 确认表格显示活跃会话列表（Session Key, Messages, Tokens, Created, Last Active, Actions 列）
-  4. 点击 Refresh 按钮
+  2. 滚动到 "Sessions" 区域（统一表格）
+  3. 确认表格显示列：Status / Session Key / Source / Work Dir / Turns / Tokens / Started / Last Active / Duration / Actions
+  4. 确认表格按 Last Active 降序排序（最新在前）
+  5. 点击 Refresh 按钮
+  6. 使用 Status 过滤器切换 Active / Ended
+  7. 使用 Source 过滤器切换 Feishu / API
 - **预期结果**:
   - 表格正确渲染，无 JS 错误
-  - 如果有活跃会话，显示在表格中
-  - 如果没有活跃会话，显示 "No active sessions" 空状态
+  - 顶部显示统计：`N sessions`, `M active`, `K history`
+  - Status 列显示 Active（绿色 Tag）/ Ended（灰色 Tag）
+  - Source 列显示 Feishu（蓝色 Tag）/ API（绿色 Tag）/ —
+  - Work Dir 列显示目录或 "default"
+  - 默认按 Last Active 降序排序
   - Refresh 按钮可正常刷新列表
+  - 过滤器正确过滤结果
 
-### TC-IMA-38: Session 管理 - Session History 列表展示
-
-- **操作步骤**:
-  1. 打开 Settings → Agent Tab
-  2. 滚动到 "Session History" 区域
-  3. 确认表格显示持久化会话文件列表（Session Key, Created, Filename, Actions 列）
-  4. 点击 Refresh 按钮
-- **预期结果**:
-  - 表格正确渲染，无 JS 错误
-  - 如果有持久化会话文件，显示在表格中
-  - 如果没有持久化会话文件，显示 "No persisted sessions" 空状态
-  - Refresh 按钮可正常刷新列表
-
-### TC-IMA-39: Session 管理 - Active Session 详情查看
+### TC-IMA-38: Session 管理 - 子页面详情查看
 
 - **操作步骤**:
   1. 先通过 API 创建一个会话：
   ```bash
   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
     -H 'Content-Type: application/json' \
-    -d '{"session_key": "ui-test", "message": "hello"}'
+    -d '{"session_key": "ui-test-unified", "message": "hello, this is a test"}'
   ```
-  2. 打开 Agent Tab → Active Sessions，点击 Refresh
-  3. 点击 "ui-test" 会话的查看按钮（眼睛图标）
+  2. 打开 Agent Tab → Sessions，点击 Refresh
+  3. 找到 "ui-test-unified" 会话，点击查看按钮（眼睛图标）
+  4. 确认进入子页面（URL 包含 `?tab=agent&session=...`）
+  5. 检查子页面内容：Session Info / AGENTS.md / Skills / Messages
+  6. 点击 "Back" 按钮返回列表
 - **预期结果**:
-  - Modal 弹出显示 Session Detail
-  - 包含 Session Key、History Version、Created、Last Active、Compactions 元信息
-  - Messages 区域显示会话消息，角色标签颜色区分（user=绿色, assistant=蓝色, system=紫色）
+  - **不是 Modal 弹窗，而是子页面导航**
+  - URL 变为 `?tab=agent&session=ui-test-unified&view=active`
+  - 子页面顶部有 "Back" 按钮
+  - Session Info 显示 Source / Work Dir / Messages / Tokens / Created / Last Active / Duration
+  - AGENTS.md Instructions 卡片显示内容（如果有）
+  - Skills 卡片显示已加载 Skills 列表（分 Workspace/User/System 三组）
+  - Messages 区域显示会话消息，角色标签颜色区分（user=绿色, assistant=蓝色）
+  - 点击 Back 返回列表页，URL 恢复为 `?tab=agent`
 
-### TC-IMA-40: Session 管理 - Active Session 删除
+### TC-IMA-39: Session 管理 - History Session 详情查看
 
 - **操作步骤**:
-  1. 在 Active Sessions 表格中找到 "ui-test" 会话
+  1. 确保存在至少一个 Ended 状态的 history session
+  2. 打开 Agent Tab → Sessions
+  3. 使用 Status 过滤器选择 "Ended"
+  4. 点击 history session 的查看按钮
+  5. 确认进入子页面显示历史事件时间线
+- **预期结果**:
+  - URL 包含 `view=history&historyPath=...`
+  - Session Info 显示历史会话的 Source / Turns / Tool Calls / Events / Duration
+  - Event Timeline 显示事件卡片（session_start, user_message, assistant_message, tool_call, tool_result, session_end）
+  - 每个事件卡片有对应图标和颜色区分
+
+### TC-IMA-40: Session 管理 - Session 删除
+
+- **操作步骤**:
+  1. 在 Sessions 表格中找到 "ui-test-unified" 会话
   2. 点击删除按钮（垃圾桶图标）
   3. 确认弹窗中点击确认
 - **预期结果**:
   - 显示 "Session deleted" 成功提示
-  - 表格自动刷新，"ui-test" 不再出现
-  - API 验证：`curl http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions` 不包含 "ui-test"
+  - 表格自动刷新，"ui-test-unified" 不再出现
+  - API 验证：`curl http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions` 不包含 "ui-test-unified"
 
-### TC-IMA-41: Session History API - 列出持久化文件
+### TC-IMA-41: 统一 Sessions API - sessions/all 端点
 
 - **操作步骤**:
   ```bash
-  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/history | jq .
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq .
   ```
 - **预期结果**:
-  - 返回 JSON 包含 `history` 数组和 `total` 计数
-  - 每个 history 项包含 `path`, `filename`, `session_key`, `timestamp` 字段
+  - 返回 JSON 包含 `sessions` 数组、`total`、`active_count`、`history_count`
+  - 每个 session 项包含：`session_key`, `status`（"active"/"ended"）, `source`, `work_dir`, `turns`, `tokens`, `start_time`, `last_active_time`, `duration_secs`
+  - 默认按 `last_active_time` 降序排序
+  - active sessions 排在前面（如果有相同 last_active_time）
 
 ### TC-IMA-42: 组件拆分验证 - AgentTab 页面完整渲染
 
@@ -524,24 +542,27 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
      - History & Session
      - Memories
      - MCP Servers
-     - Skills
-     - AGENTS.md Instructions
-     - Active Sessions
-     - Session History
+     - **Sessions（统一表格，含 Status/Source/Work Dir/Turns/Tokens 等列）**
+  3. **注意**：Skills 和 AGENTS.md 已移至 Session 详情子页面展示
 - **预期结果**:
-  - 所有 10 个 Card 区域完整渲染，无缺失
+  - 所有 7 个 Card 区域完整渲染，无缺失
   - 各配置项数值正确显示（非空，有默认值）
   - 无控制台 JS 错误
+  - **不在主页面显示 Skills Card 和 AGENTS.md Card**
 
 ### TC-IMA-43: 组件拆分验证 - 暗色主题兼容性
 
 - **操作步骤**:
   1. 切换到暗色主题
   2. 打开 Settings → Agent Tab
-  3. 检查 Active Sessions 和 Session History 区域
+  3. 检查 Sessions 统一表格区域
+  4. 点击进入 Session 详情子页面
+  5. 检查 Session Info / AGENTS.md / Skills / Messages 各区域
 - **预期结果**:
-  - 表格、按钮、Modal 在暗色主题下颜色正确
-  - Session Detail Modal 中的消息卡片颜色区分清晰
+  - 表格、按钮在暗色主题下颜色正确
+  - Session 详情子页面中的消息卡片颜色区分清晰
+  - AGENTS.md 代码块背景色与主题适配
+  - Skills Tag 在暗色主题下可读
 
 ## 动态工作目录与 Session 管理
 
@@ -627,6 +648,144 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 带 work_dir 的 session 显示完整路径
   - 不带 work_dir 的 session 显示 "Using default from config"
 
+## 边界测试与回归验证
+
+### TC-IMA-55: 空状态 - 无 Session 时表格展示
+
+- **操作步骤**:
+  1. 通过 API 删除所有 active sessions：`curl -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/active`
+  2. 逐个删除所有 history sessions（通过 sessions/all 获取 history_path 后 URL-encode 删除）
+  3. 验证 API 返回空：`curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all`
+  4. 刷新 WebUI Agent Tab → Sessions 区域
+- **预期结果**:
+  - API 返回 `{"active_count":0,"history_count":0,"sessions":[],"total":0}`
+  - 表格头部显示 "0 sessions", "0 active", "0 history"
+  - 表格内容区域显示 Ant Design 空状态图标和 "No sessions" 文案
+  - 表格列头（Status/Session Key/Source 等）仍正常渲染
+
+### TC-IMA-56: Session Key 去重 - 含特殊字符的 session key
+
+- **操作步骤**:
+  1. 创建含空格的 session key：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "test session with spaces", "message": "hello"}'
+     ```
+  2. 等待 session 结束变为 history
+  3. 查看 sessions/all：`curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all`
+- **预期结果**:
+  - JSONL 文件名中空格被替换为下划线（`session-test_session_with_spaces-*.jsonl`）
+  - sessions/all API 返回的 `session_key` 为原始值 `"test session with spaces"`（非 sanitized 值）
+  - 同一 session 在 active 和 history 之间不会因 key 不匹配而重复出现
+  - 验证原因：修复了 `sanitize_key` 导致的 dedup 失败 bug
+
+### TC-IMA-57: URL 边界 - 不存在的 session key
+
+- **操作步骤**:
+  1. 直接访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent&session=nonexistent-session&view=active`
+  2. 检查页面行为
+- **预期结果**:
+  - 页面正常加载子页面布局（不崩溃）
+  - 显示 "Back" 按钮可返回列表
+  - Session Info 区域显示加载状态或"未找到"提示
+  - 无 JS 控制台错误
+
+### TC-IMA-58: URL 边界 - 无效 view 参数
+
+- **操作步骤**:
+  1. 直接访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent&session=test-key&view=invalid`
+  2. 检查页面行为
+- **预期结果**:
+  - 页面不崩溃
+  - 默认降级为 active view 或显示错误提示
+  - "Back" 按钮可正常返回列表
+
+### TC-IMA-59: 删除操作 - Cancel Popconfirm
+
+- **操作步骤**:
+  1. 在 Sessions 表格中找到一个 session
+  2. 点击删除按钮（垃圾桶图标）
+  3. 在弹出的确认框中点击 "Cancel"
+- **预期结果**:
+  - 确认框消失
+  - Session 未被删除，仍在表格中
+  - 无 API 调用发出（取消操作不触发后端请求）
+
+### TC-IMA-60: 排序与过滤组合 - Turns 升序 + Status 过滤
+
+- **操作步骤**:
+  1. 确保表格有多行 session 数据（混合 active 和 ended）
+  2. 点击 Turns 列头进行升序排序
+  3. 同时使用 Status 过滤器选择 "Active"
+  4. 切换 Status 过滤器为 "Ended"
+  5. 清除过滤器：点击 Reset → OK
+- **预期结果**:
+  - 排序和过滤可同时工作，互不干扰
+  - 清除过滤器后所有行恢复显示，排序保持
+  - 表格头部统计数字反映过滤后的实际数量
+
+### TC-IMA-61: API 边界 - 405 Method Not Allowed
+
+- **操作步骤**:
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}" -X POST \
+    http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all
+  ```
+- **预期结果**:
+  - 返回 405 状态码（sessions/all 仅支持 GET）
+  - 不会误触发其他操作
+
+### TC-IMA-62: API 边界 - 幂等删除（双重删除）
+
+- **操作步骤**:
+  1. 创建一个 session 并获取其 key
+  2. 第一次删除：`curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/{key}`
+  3. 第二次删除（同一 key）：`curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/{key}`
+- **预期结果**:
+  - 第一次删除返回 `{"ok":true}`
+  - 第二次删除不崩溃（返回 ok 或 not found 均可接受）
+  - 系统无副作用
+
+### TC-IMA-63: 亮色主题 - Sessions 列表与详情完整验证
+
+- **操作步骤**:
+  1. 切换到亮色主题（点击 sun 图标 → 变为 moon 图标）
+  2. 验证 `data-theme="light"`
+  3. 打开 Agent Tab → Sessions 列表，检查表格渲染
+  4. 点击 active session 进入详情子页面
+  5. 检查 Session Info / AGENTS.md / Skills / Messages 各区域
+  6. 返回，点击 history session 进入详情子页面
+  7. 检查 Event Timeline 事件卡片渲染
+- **预期结果**:
+  - 表格在亮色主题下正确渲染，Status/Source Tag 颜色清晰
+  - Active session 详情页：消息卡片背景色与亮色主题适配
+  - History session 详情页：Event Timeline 卡片背景为白色（`rgb(255,255,255)`），文字对比度良好
+  - 所有区域无颜色异常
+
+### TC-IMA-64: Clear All Active - 一键清除
+
+- **操作步骤**:
+  1. 确保有至少 1 个 active session
+  2. 在 Sessions 表格上方找到 "Clear All Active" 按钮（仅在有 active session 时显示）
+  3. 点击按钮 → Popconfirm 确认
+- **预期结果**:
+  - 所有 active session 被删除
+  - 表格刷新后 active_count 为 0
+  - 已删除的 active session 可能变为 history session（JSONL 已持久化的）
+
+### TC-IMA-65: History Session 详情 - 直接 URL 导航
+
+- **操作步骤**:
+  1. 从 sessions/all API 获取一个 history session 的 history_path
+  2. 构造 URL：`http://127.0.0.1:8800/_bifrost/settings?tab=agent&session={key}&view=history&historyPath={path}`
+  3. 在浏览器中直接访问该 URL
+- **预期结果**:
+  - 直接进入 history session 详情子页面（无需从列表点击进入）
+  - Event Timeline 正确加载事件数据
+  - 浏览器刷新后页面恢复到同一详情页（URL 参数持久化）
+  - "Back" 按钮返回到 Sessions 列表
+
 ## 清理步骤
 
 ```bash
@@ -677,7 +836,7 @@ rm -rf ./.bifrost-test
   - 重试成功时日志显示 "retry succeeded"
   - 所有重试失败时，返回 partial 结果或错误通知
 
-### TC-IMA-54: 正常对话 - 确认错误处理不影响正常流程
+### TC-IMA-54: 正常对话 - 确认错误处理不影响正常流程（需飞书连接）
 
 - **操作步骤**:
   1. 从飞书发送简单消息："你好"

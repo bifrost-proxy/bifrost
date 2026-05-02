@@ -280,6 +280,105 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
     Ok(events)
 }
 
+/// Summary of a session file extracted from scanning events.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SessionFileSummary {
+    pub start_time: u64,
+    pub end_time: u64,
+    pub total_tokens: u64,
+    pub user_turns: u32,
+    pub assistant_turns: u32,
+    pub tool_calls: u32,
+    pub event_count: u32,
+    pub work_dir: Option<String>,
+    pub source: String,
+    /// The original session key as stored in the JSONL events (may differ from the sanitized filename).
+    pub session_key: Option<String>,
+}
+
+/// Quick scan of a session JSONL file to extract summary info without loading all events.
+/// Returns (total_tokens, user_message_count, start_time, end_time, work_dir, source)
+pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
+    let mut summary = SessionFileSummary::default();
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return summary,
+    };
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: ConversationEvent = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Extract the original session key from the first event
+        if summary.session_key.is_none() && !event.session_key.is_empty() {
+            summary.session_key = Some(event.session_key.clone());
+        }
+
+        // Track timestamps
+        if summary.start_time == 0 || event.timestamp < summary.start_time {
+            summary.start_time = event.timestamp;
+        }
+        if event.timestamp > summary.end_time {
+            summary.end_time = event.timestamp;
+        }
+
+        match event.event_type.as_str() {
+            "session_start" => {
+                if let Some(obj) = event.content.as_object() {
+                    if let Some(s) = obj.get("source").and_then(|v| v.as_str()) {
+                        summary.source = s.to_string();
+                    }
+                    if let Some(wd) = obj.get("work_dir").and_then(|v| v.as_str()) {
+                        summary.work_dir = Some(wd.to_string());
+                    }
+                }
+            }
+            "user_message" => {
+                summary.user_turns += 1;
+            }
+            "assistant_message" => {
+                summary.assistant_turns += 1;
+                if let Some(obj) = event.content.as_object() {
+                    if let Some(tokens) = obj.get("tokens").and_then(|v| v.as_u64()) {
+                        summary.total_tokens += tokens;
+                    }
+                }
+            }
+            "compaction" => {
+                if let Some(obj) = event.content.as_object() {
+                    if let Some(tokens) = obj.get("total_tokens").and_then(|v| v.as_u64()) {
+                        summary.total_tokens = tokens; // Use the latest total from compaction
+                    }
+                }
+            }
+            "session_end" => {
+                if let Some(obj) = event.content.as_object() {
+                    if let Some(tokens) = obj.get("total_tokens").and_then(|v| v.as_u64()) {
+                        summary.total_tokens = tokens;
+                    }
+                }
+            }
+            "tool_call" => {
+                summary.tool_calls += 1;
+            }
+            _ => {}
+        }
+        summary.event_count += 1;
+    }
+
+    summary
+}
+
 /// List available conversation files for a session.
 pub fn list_conversations(data_dir: &Path, session_key: Option<&str>) -> Vec<PathBuf> {
     let sessions_dir = data_dir.join("sessions");
@@ -303,6 +402,25 @@ pub fn list_conversations(data_dir: &Path, session_key: Option<&str>) -> Vec<Pat
 
     files.sort();
     files
+}
+
+/// Remove session JSONL files whose last activity is older than `cutoff_secs`
+/// (unix timestamp). Returns the number of files removed.
+pub fn cleanup_expired_sessions(data_dir: &Path, cutoff_secs: u64) -> usize {
+    let files = list_conversations(data_dir, None);
+    let mut removed = 0;
+    for p in files {
+        let summary = scan_session_summary(&p);
+        let last_time = if summary.end_time > 0 {
+            summary.end_time
+        } else {
+            summary.start_time
+        };
+        if last_time > 0 && last_time < cutoff_secs && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Recursively collect .jsonl files.

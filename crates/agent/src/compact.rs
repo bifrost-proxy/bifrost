@@ -251,13 +251,12 @@ pub async fn compact_session(
     })
 }
 
-/// Check if compaction should be triggered based on current context size.
+/// Check whether the session should be compacted based on token usage.
 ///
-/// Uses `estimate_tokens()` which measures the current history size (not cumulative API usage).
-/// This matches Codex's approach of comparing current context against the compaction threshold.
+/// Matches Codex's approach: compare current context tokens against the
+/// auto-compact threshold, which defaults to `context_window × 90%` and
+/// is clamped to that ceiling even when the user sets a custom value.
 pub fn should_compact(session: &AgentSession, config: &AgentConfig) -> bool {
-    // Prefer real API token usage over estimate (matching Codex's approach
-    // of comparing total_usage_tokens against auto_compact_limit)
     let context_tokens = session.effective_token_count();
     context_tokens > config.get_compact_threshold_tokens()
 }

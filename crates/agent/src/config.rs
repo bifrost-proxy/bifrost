@@ -237,6 +237,8 @@ pub enum HistoryPersistence {
     /// Save all history entries to disk.
     #[default]
     SaveAll,
+    /// Keep only history entries from the last 90 days.
+    Last90Days,
     /// Do not write history to disk.
     None,
 }
@@ -326,7 +328,9 @@ impl AgentConfig {
     pub const DEFAULT_REQUEST_TIMEOUT: u64 = 120;
     pub const DEFAULT_SHELL_TIMEOUT: u64 = 30;
     pub const DEFAULT_MAX_TURN_ITERATIONS: u32 = 20;
-    pub const DEFAULT_COMPACT_THRESHOLD: u32 = 80000;
+    /// Default auto-compact threshold as a percentage of context window (90%),
+    /// matching Codex's behavior of `(context_window * 9) / 10`.
+    pub const DEFAULT_COMPACT_THRESHOLD_PERCENT: i64 = 90;
     pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32768;
     pub const DEFAULT_MODEL: &'static str = "gpt-5.4-2026-03-05";
     pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
@@ -345,7 +349,7 @@ impl Default for AgentConfig {
             model_reasoning_effort: Some("medium".to_string()),
             model_reasoning_summary: Some("auto".to_string()),
             model_context_window: Some(200_000),
-            model_auto_compact_token_limit: Some(Self::DEFAULT_COMPACT_THRESHOLD as i64),
+            model_auto_compact_token_limit: None,
             max_completion_tokens: Some(Self::DEFAULT_MAX_COMPLETION_TOKENS),
             mcp_servers: HashMap::new(),
             skills: None,
@@ -402,10 +406,29 @@ impl AgentConfig {
             .unwrap_or(Self::DEFAULT_MAX_TURN_ITERATIONS)
     }
 
+    /// Get the auto-compact token threshold.
+    ///
+    /// Matches Codex's approach:
+    /// - When `model_auto_compact_token_limit` is `None`, derives from
+    ///   `context_window × 90%`.
+    /// - When set, clamps to at most `context_window × 90%` so the user
+    ///   cannot exceed the safe ceiling.
+    /// - Falls back to `u32::MAX` (effectively disabled) when neither
+    ///   context window nor explicit limit is configured.
     pub fn get_compact_threshold_tokens(&self) -> u32 {
-        self.model_auto_compact_token_limit
-            .map(|v| v as u32)
-            .unwrap_or(Self::DEFAULT_COMPACT_THRESHOLD)
+        let context_ceiling = self
+            .model_context_window
+            .map(|cw| (cw * Self::DEFAULT_COMPACT_THRESHOLD_PERCENT / 100) as u32);
+        match (self.model_auto_compact_token_limit, context_ceiling) {
+            // User configured + context window known → clamp to 90% ceiling
+            (Some(user_limit), Some(ceiling)) => (user_limit as u32).min(ceiling),
+            // User configured, no context window → trust user value
+            (Some(user_limit), None) => user_limit as u32,
+            // Not configured, context window known → derive 90%
+            (None, Some(ceiling)) => ceiling,
+            // Neither configured → effectively disabled
+            (None, None) => u32::MAX,
+        }
     }
 
     pub fn get_project_doc_max_bytes(&self) -> usize {

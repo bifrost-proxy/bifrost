@@ -1,8 +1,9 @@
 /**
- * Agent Tab - Main configuration component
+ * Agent Tab — Main configuration component
  * Sub-components are in ./agent/ directory
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Button,
   Card,
@@ -22,9 +23,8 @@ import {
   message,
 } from "antd";
 import {
-  FileTextOutlined,
-  ReadOutlined,
   ReloadOutlined,
+  ReadOutlined,
   RobotOutlined,
   SettingOutlined,
   ThunderboltOutlined,
@@ -35,15 +35,15 @@ import { get, patch } from "../../../api/client";
 import {
   BASE,
   DEFAULTS,
+  getEffectiveCompactLimit,
   type AgentConfig,
   type McpServerConfig,
   type ProviderInfo,
 } from "./agent/types";
 import McpServersSection from "./agent/McpServersSection";
-import SessionsSection from "./agent/SessionsSection";
-import SessionHistorySection from "./agent/SessionHistorySection";
 import SkillsSection from "./agent/SkillsSection";
-import InstructionsSection from "./agent/InstructionsSection";
+import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
+import SessionDetailPage from "./agent/SessionDetailPage";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -116,7 +116,12 @@ export default function AgentTab() {
   );
 
   const handleNumberChange = (field: string, value: number | null) => {
-    if (value === null) return;
+    if (value === null) {
+      // Clear the field — send null to backend to fall back to default
+      setConfig((prev) => (prev ? { ...prev, [field]: undefined } : prev));
+      debouncedPatch(field, null as unknown as number);
+      return;
+    }
     setConfig((prev) => (prev ? { ...prev, [field]: value } : prev));
     debouncedPatch(field, value);
   };
@@ -151,12 +156,57 @@ export default function AgentTab() {
     [config],
   );
 
+  // Session detail navigation via URL params
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedSession = searchParams.get("session");
+  const sessionView = (searchParams.get("view") || "active") as "active" | "history";
+  const historyFilePath = searchParams.get("historyPath") || undefined;
+
+  const handleOpenSession = useCallback(
+    (sessionKey: string, view: "active" | "history", filePath?: string) => {
+      setSearchParams(
+        (prev) => {
+          prev.set("session", sessionKey);
+          prev.set("view", view);
+          if (filePath) prev.set("historyPath", filePath);
+          else prev.delete("historyPath");
+          return prev;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const handleBackFromSession = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        prev.delete("session");
+        prev.delete("view");
+        prev.delete("historyPath");
+        return prev;
+      },
+      { replace: false },
+    );
+  }, [setSearchParams]);
+
   if (loading && !config) {
     return <Spin style={{ display: "block", margin: "60px auto" }} />;
   }
 
   if (!config) {
     return <Empty description="Unable to load agent configuration" />;
+  }
+
+  if (selectedSession) {
+    return (
+      <SessionDetailPage
+        sessionKey={selectedSession}
+        view={sessionView}
+        historyFilePath={historyFilePath}
+        onBack={handleBackFromSession}
+      />
+    );
   }
 
   return (
@@ -425,19 +475,20 @@ export default function AgentTab() {
 
               <Row justify="space-between" align="middle">
                 <Col>
-                  <Tooltip title="Token threshold for auto-compacting context">
+                  <Tooltip title="Token threshold for auto-compacting context. When empty, defaults to context_window × 90%.">
                     <Text>Auto Compact Token Limit</Text>
                   </Tooltip>
                 </Col>
                 <Col>
                   <InputNumber
-                    value={config.model_auto_compact_token_limit ?? DEFAULTS.model_auto_compact_token_limit}
+                    value={config.model_auto_compact_token_limit ?? undefined}
+                    placeholder={`${getEffectiveCompactLimit(config)} (90%)`}
                     onChange={(val) =>
                       handleNumberChange("model_auto_compact_token_limit", val)
                     }
                     min={1}
                     step={1000}
-                    style={{ width: 140 }}
+                    style={{ width: 180 }}
                     size="small"
                   />
                 </Col>
@@ -733,6 +784,7 @@ export default function AgentTab() {
                     }}
                     options={[
                       { label: "Save All", value: "save-all" },
+                      { label: "Last 90 Days", value: "last-90-days" },
                       { label: "None", value: "none" },
                     ]}
                     style={{ width: 140 }}
@@ -1039,52 +1091,22 @@ export default function AgentTab() {
             }
             size="small"
           >
-            <SkillsSection />
+            <SkillsSection scopes={["User", "System"]} />
           </Card>
         </Col>
 
-        {/* AGENTS.md / Instructions */}
-        <Col xs={24}>
-          <Card
-            title={
-              <Space>
-                <FileTextOutlined />
-                <span>AGENTS.md Instructions</span>
-              </Space>
-            }
-            size="small"
-          >
-            <InstructionsSection />
-          </Card>
-        </Col>
-
-        {/* Active Sessions */}
+        {/* Sessions (Unified — Active + History) */}
         <Col xs={24}>
           <Card
             title={
               <Space>
                 <RobotOutlined />
-                <span>Active Sessions</span>
+                <span>Sessions</span>
               </Space>
             }
             size="small"
           >
-            <SessionsSection />
-          </Card>
-        </Col>
-
-        {/* Session History (Persisted) */}
-        <Col xs={24}>
-          <Card
-            title={
-              <Space>
-                <FileTextOutlined />
-                <span>Session History</span>
-              </Space>
-            }
-            size="small"
-          >
-            <SessionHistorySection />
+            <UnifiedSessionsSection onOpenSession={handleOpenSession} />
           </Card>
         </Col>
       </Row>

@@ -12,7 +12,8 @@ export const DEFAULTS = {
   model_reasoning_effort: "medium",
   model_reasoning_summary: "auto",
   model_context_window: 200_000,
-  model_auto_compact_token_limit: 80_000,
+  // When null/undefined, backend derives from context_window × 90% (Codex-compatible).
+  model_auto_compact_token_limit: undefined as number | undefined,
   max_completion_tokens: 16_384,
   shell_timeout_secs: 30,
   max_turn_iterations: 20,
@@ -22,6 +23,15 @@ export const DEFAULTS = {
   project_doc_max_bytes: 32_768,
   background_terminal_max_timeout: 300_000,
 } as const;
+
+/** Derive the effective compact threshold (context_window × 90%). */
+export function getEffectiveCompactLimit(config: Partial<AgentConfig>): number {
+  if (config.model_auto_compact_token_limit != null) {
+    return config.model_auto_compact_token_limit;
+  }
+  const cw = config.model_context_window ?? DEFAULTS.model_context_window;
+  return Math.floor(cw * 0.9);
+}
 
 // Types
 export interface McpServerConfig {
@@ -98,6 +108,7 @@ export interface SessionInfo {
   estimated_tokens?: number;
   history_version?: number;
   work_dir?: string;
+  source?: string;
 }
 
 export interface SessionMessage {
@@ -130,6 +141,17 @@ export interface HistoryFileInfo {
   filename: string;
   session_key: string;
   timestamp: number;
+  // New fields from backend summary scan
+  total_tokens?: number;
+  user_turns?: number;
+  assistant_turns?: number;
+  tool_calls?: number;
+  event_count?: number;
+  work_dir?: string;
+  source?: string;
+  start_time?: number;
+  end_time?: number;
+  duration_secs?: number;
 }
 
 export interface HistoryMessage {

@@ -4,21 +4,16 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
-  Card,
   Col,
-  Divider,
   Empty,
-  Modal,
   Popconfirm,
   Row,
   Space,
-  Spin,
   Table,
   Tag,
   Tooltip,
   Typography,
   message,
-  theme,
 } from "antd";
 import {
   ClearOutlined,
@@ -27,17 +22,17 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { get, del } from "../../../../api/client";
-import { BASE, type SessionInfo, type SessionDetail } from "./types";
+import { BASE, type SessionInfo } from "./types";
 
 const { Text } = Typography;
 
-export default function SessionsSection() {
-  const { token } = theme.useToken();
+interface SessionsSectionProps {
+  onOpenSession?: (sessionKey: string, view: "active" | "history") => void;
+}
+
+export default function SessionsSection({ onOpenSession }: SessionsSectionProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
 
   const fetchSessions = useCallback(async () => {
     setLoading(true);
@@ -77,23 +72,6 @@ export default function SessionsSection() {
     }
   };
 
-  const handleViewDetail = async (key: string) => {
-    setDetailLoading(true);
-    setDetailOpen(true);
-    setDetail(null);
-    try {
-      const data = await get<SessionDetail>(
-        `${BASE}/agent/sessions/${encodeURIComponent(key)}`,
-      );
-      setDetail(data);
-    } catch {
-      message.error("Failed to load session detail");
-      setDetailOpen(false);
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
   const formatTs = (ts?: number) => {
     if (!ts) return "-";
     return new Date(ts * 1000).toLocaleString();
@@ -110,6 +88,17 @@ export default function SessionsSection() {
           {val}
         </Text>
       ),
+    },
+    {
+      title: "Source",
+      dataIndex: "source",
+      key: "source",
+      width: 80,
+      render: (val?: string) => {
+        if (val === "feishu") return <Tag color="blue" style={{ fontSize: 10 }}>Feishu</Tag>;
+        if (val === "api") return <Tag color="green" style={{ fontSize: 10 }}>API</Tag>;
+        return <Tag style={{ fontSize: 10 }}>{val || "—"}</Tag>;
+      },
     },
     {
       title: "Work Dir",
@@ -169,11 +158,11 @@ export default function SessionsSection() {
       width: 100,
       render: (_: unknown, record: SessionInfo) => (
         <Space size="small">
-          <Tooltip title="View messages">
+          <Tooltip title="View details">
             <Button
               size="small"
               icon={<EyeOutlined />}
-              onClick={() => handleViewDetail(record.session_key)}
+              onClick={() => onOpenSession?.(record.session_key, "active")}
             />
           </Tooltip>
           <Popconfirm
@@ -229,153 +218,6 @@ export default function SessionsSection() {
         locale={{ emptyText: <Empty description="No active sessions" /> }}
         scroll={{ x: 1100 }}
       />
-
-      {/* Session Detail Modal */}
-      <Modal
-        title={
-          detail ? (
-            <Space>
-              <EyeOutlined />
-              <span>Session Detail</span>
-              <Tag>{detail.message_count} messages</Tag>
-            </Space>
-          ) : (
-            "Session Detail"
-          )
-        }
-        open={detailOpen}
-        onCancel={() => setDetailOpen(false)}
-        footer={null}
-        width={720}
-      >
-        {detailLoading ? (
-          <Spin style={{ display: "block", margin: "40px auto" }} />
-        ) : detail ? (
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            {/* Meta info */}
-            <Row gutter={[16, 8]}>
-              <Col span={24}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Session Key</Text>
-                <br />
-                <Text code style={{ fontSize: 11 }}>{detail.session_key}</Text>
-              </Col>
-              <Col span={24}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Working Directory</Text>
-                <br />
-                {detail.work_dir ? (
-                  <Text code style={{ fontSize: 11 }}>{detail.work_dir}</Text>
-                ) : (
-                  <Text type="secondary" style={{ fontSize: 11 }}>Using default from config</Text>
-                )}
-              </Col>
-              <Col span={8}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Created</Text>
-                <br />
-                <Text>{formatTs(detail.created_at)}</Text>
-              </Col>
-              <Col span={8}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Last Active</Text>
-                <br />
-                <Text>{formatTs(detail.last_active_at)}</Text>
-              </Col>
-              <Col span={8}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Compactions</Text>
-                <br />
-                <Text>{detail.compaction_count}</Text>
-              </Col>
-            </Row>
-
-            <Divider style={{ margin: "8px 0" }} />
-
-            {/* Messages */}
-            <Text strong>Messages ({detail.messages.length})</Text>
-            <div
-              style={{
-                maxHeight: 400,
-                overflowY: "auto",
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              {detail.messages.length === 0 ? (
-                <Empty description="No messages in this session" />
-              ) : (
-                detail.messages.map((msg, idx) => (
-                  <Card
-                    key={idx}
-                    size="small"
-                    style={{
-                      borderColor:
-                        msg.role === "assistant"
-                          ? token.colorPrimaryBorder
-                          : msg.role === "user"
-                            ? token.colorSuccessBorder
-                            : token.colorBorderSecondary,
-                      background:
-                        msg.role === "assistant"
-                          ? token.colorPrimaryBg
-                          : msg.role === "user"
-                            ? token.colorSuccessBg
-                            : undefined,
-                    }}
-                  >
-                    <Space
-                      direction="vertical"
-                      size={2}
-                      style={{ width: "100%" }}
-                    >
-                      <Tag
-                        color={
-                          msg.role === "assistant"
-                            ? "blue"
-                            : msg.role === "user"
-                              ? "green"
-                              : msg.role === "system"
-                                ? "purple"
-                                : "default"
-                        }
-                        style={{ fontSize: 11 }}
-                      >
-                        {msg.role}
-                      </Tag>
-                      <Text
-                        style={{
-                          fontSize: 12,
-                          whiteSpace: "pre-wrap",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {msg.content || "(empty)"}
-                      </Text>
-                      {msg.tool_calls && msg.tool_calls.length > 0 && (
-                        <div>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Tool calls:
-                          </Text>
-                          {msg.tool_calls.map((tc, i) => (
-                            <Text
-                              key={i}
-                              code
-                              style={{
-                                fontSize: 10,
-                                display: "block",
-                                marginTop: 2,
-                              }}
-                            >
-                              {tc}
-                            </Text>
-                          ))}
-                        </div>
-                      )}
-                    </Space>
-                  </Card>
-                ))
-              )}
-            </div>
-          </Space>
-        ) : null}
-      </Modal>
     </Space>
   );
 }

@@ -539,6 +539,23 @@ async fn run_event_loop(
 
     // Initialize MCP manager from agent config (TOML + JSON merged)
     let init_config = agent_config_store.load();
+
+    // Cleanup expired session files on startup if retention policy is active
+    if let Some(ref history) = init_config.history {
+        if history.persistence == bifrost_agent::config::HistoryPersistence::Last90Days {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cutoff = now.saturating_sub(90 * 24 * 3600);
+            let data_dir = bifrost_agent::config::agent_home_dir();
+            let removed = bifrost_agent::persistence::cleanup_expired_sessions(&data_dir, cutoff);
+            if removed > 0 {
+                info!(removed, "cleaned up expired session files (>90 days)");
+            }
+        }
+    }
+
     let mut mcp_manager = ImMcpManager::new(&init_config.mcp_servers).await;
     let mcp_tool_count = mcp_manager.list_tools().len();
     if mcp_tool_count > 0 {
@@ -837,6 +854,7 @@ async fn process_agent_chat(
 
     // Take session for exclusive use during this turn
     let mut session = session_manager.take_session(session_key);
+    session.source = "feishu".to_string();
 
     // Create a conversation recorder for persistence if enabled
     let mut recorder = if !agent_config.is_ephemeral() {
@@ -858,6 +876,7 @@ async fn process_agent_chat(
                     serde_json::json!({
                         "model": agent_config.model,
                         "provider": agent_config.model_provider,
+                        "source": "feishu",
                     }),
                 );
                 Some(rec)
@@ -1817,6 +1836,120 @@ async fn handle_agent(
         return method_not_allowed();
     }
 
+    // GET /agent/sessions/all — unified list of active + history sessions
+    if rest == "/sessions/all" {
+        if req.method() != Method::GET {
+            return method_not_allowed();
+        }
+        let active_sessions = service.agent_session_manager.list_sessions();
+        let active_keys: std::collections::HashSet<String> = active_sessions
+            .iter()
+            .map(|s| s.session_key.clone())
+            .collect();
+
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
+
+        // Determine retention cutoff based on persistence mode
+        let agent_config = service.agent_config_store.load();
+        let cutoff_ts: u64 = match agent_config
+            .history
+            .as_ref()
+            .map(|h| h.persistence)
+            .unwrap_or_default()
+        {
+            bifrost_agent::HistoryPersistence::Last90Days => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                now.saturating_sub(90 * 24 * 3600)
+            }
+            _ => 0, // no cutoff
+        };
+
+        // Build unified list
+        let mut unified: Vec<serde_json::Value> = Vec::new();
+
+        // Add active sessions
+        for s in active_sessions {
+            let duration_secs = s.last_active_at.saturating_sub(s.created_at);
+            unified.push(serde_json::json!({
+                "session_key": s.session_key,
+                "status": "active",
+                "source": s.source,
+                "work_dir": s.work_dir,
+                "turns": s.message_count,
+                "tokens": s.total_tokens_used,
+                "start_time": s.created_at,
+                "last_active_time": s.last_active_at,
+                "duration_secs": duration_secs,
+                "compaction_count": s.compaction_count,
+                "estimated_tokens": s.estimated_tokens,
+            }));
+        }
+
+        // Add history sessions (excluding those already active or expired)
+        for p in files {
+            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let (parsed_key, _timestamp) = parse_session_filename(filename);
+            let summary = bifrost_agent::persistence::scan_session_summary(&p);
+            // Prefer the original session key from JSONL content (handles sanitized filenames)
+            let session_key = summary
+                .session_key
+                .as_deref()
+                .unwrap_or(&parsed_key)
+                .to_string();
+            if active_keys.contains(&session_key) {
+                continue; // skip duplicate
+            }
+            // Skip sessions older than the retention cutoff
+            let last_time = if summary.end_time > 0 {
+                summary.end_time
+            } else {
+                summary.start_time
+            };
+            if cutoff_ts > 0 && last_time < cutoff_ts {
+                continue;
+            }
+            unified.push(serde_json::json!({
+                "session_key": session_key,
+                "status": "ended",
+                "source": summary.source,
+                "work_dir": summary.work_dir,
+                "turns": (summary.user_turns as usize) + (summary.assistant_turns as usize),
+                "tokens": summary.total_tokens,
+                "start_time": summary.start_time,
+                "last_active_time": summary.end_time,
+                "duration_secs": summary.end_time.saturating_sub(summary.start_time),
+                "history_path": p.display().to_string(),
+            }));
+        }
+
+        // Sort by last_active_time descending (newest first)
+        unified.sort_by(|a, b| {
+            let t_a = a
+                .get("last_active_time")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let t_b = b
+                .get("last_active_time")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            t_b.cmp(&t_a)
+        });
+
+        let active_count = active_keys.len();
+        let history_count = unified.len() - active_count;
+
+        return json_response(&serde_json::json!({
+            "sessions": unified,
+            "total": unified.len(),
+            "active_count": active_count,
+            "history_count": history_count,
+        }));
+    }
+
     // GET /agent/sessions/history — list persisted session files
     if rest == "/sessions/history" {
         if req.method() != Method::GET {
@@ -1828,13 +1961,28 @@ async fn handle_agent(
             .iter()
             .map(|p| {
                 let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // Parse session-{key}-{timestamp}.jsonl
-                let (session_key, timestamp) = parse_session_filename(filename);
+                let (parsed_key, timestamp) = parse_session_filename(filename);
+                let summary = bifrost_agent::persistence::scan_session_summary(p);
+                let session_key = summary
+                    .session_key
+                    .as_deref()
+                    .unwrap_or(&parsed_key)
+                    .to_string();
                 serde_json::json!({
                     "path": p.display().to_string(),
                     "filename": filename,
                     "session_key": session_key,
                     "timestamp": timestamp,
+                    "total_tokens": summary.total_tokens,
+                    "user_turns": summary.user_turns,
+                    "assistant_turns": summary.assistant_turns,
+                    "tool_calls": summary.tool_calls,
+                    "event_count": summary.event_count,
+                    "work_dir": summary.work_dir,
+                    "source": summary.source,
+                    "start_time": summary.start_time,
+                    "end_time": summary.end_time,
+                    "duration_secs": summary.end_time.saturating_sub(summary.start_time),
                 })
             })
             .collect();
@@ -1940,6 +2088,7 @@ async fn handle_agent(
         let mut session = service
             .agent_session_manager
             .take_session_with_work_dir(&session_key, body.work_dir);
+        session.source = "api".to_string();
         // Initialize MCP from config for test endpoint (mirrors event loop behavior)
         let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
         let mcp_opt: Option<&mut ImMcpManager> = if mcp_manager.list_tools().is_empty() {
@@ -1965,6 +2114,7 @@ async fn handle_agent(
                         serde_json::json!({
                             "model": config.model,
                             "provider": config.model_provider,
+                            "source": "api",
                         }),
                     );
                     Some(rec)
@@ -2040,9 +2190,13 @@ fn apply_agent_config_patch(
     if let Some(compact) = patch
         .get("model_auto_compact_token_limit")
         .or_else(|| patch.get("compact_threshold_tokens"))
-        .and_then(|v| v.as_i64())
     {
-        config.model_auto_compact_token_limit = Some(compact);
+        if compact.is_null() {
+            // null → clear override, fall back to context_window × 90%
+            config.model_auto_compact_token_limit = None;
+        } else if let Some(v) = compact.as_i64() {
+            config.model_auto_compact_token_limit = Some(v);
+        }
     }
     if let Some(prompt) = patch
         .get("instructions")
@@ -2088,6 +2242,7 @@ fn apply_agent_config_patch(
         if let Some(persistence) = history_obj.get("persistence").and_then(|v| v.as_str()) {
             history.persistence = match persistence {
                 "none" => bifrost_agent::HistoryPersistence::None,
+                "last-90-days" => bifrost_agent::HistoryPersistence::Last90Days,
                 _ => bifrost_agent::HistoryPersistence::SaveAll,
             };
         }

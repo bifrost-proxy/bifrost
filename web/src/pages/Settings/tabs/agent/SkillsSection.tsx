@@ -18,7 +18,12 @@ import { BASE, type SkillInfo } from "./types";
 
 const { Text } = Typography;
 
-export default function SkillsSection() {
+interface SkillsSectionProps {
+  /** Only show skills matching these scopes. If omitted, show all scopes. */
+  scopes?: Array<"Repo" | "User" | "System">;
+}
+
+export default function SkillsSection({ scopes }: SkillsSectionProps) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [workDir, setWorkDir] = useState<string>("");
@@ -44,9 +49,10 @@ export default function SkillsSection() {
     fetchSkills();
   }, [fetchSkills]);
 
-  const repoSkills = skills.filter((s) => s.scope === "Repo");
-  const userSkills = skills.filter((s) => s.scope === "User");
-  const systemSkills = skills.filter((s) => s.scope === "System");
+  const filtered = scopes ? skills.filter((s) => scopes.includes(s.scope as "Repo" | "User" | "System")) : skills;
+  const repoSkills = filtered.filter((s) => s.scope === "Repo");
+  const userSkills = filtered.filter((s) => s.scope === "User");
+  const systemSkills = filtered.filter((s) => s.scope === "System");
 
   const columns = [
     {
@@ -82,7 +88,7 @@ export default function SkillsSection() {
       <Row justify="space-between" align="middle">
         <Col>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {skills.length} skill{skills.length !== 1 ? "s" : ""} loaded
+            {filtered.length} skill{filtered.length !== 1 ? "s" : ""} loaded
           </Text>
         </Col>
         <Col>
@@ -145,7 +151,7 @@ export default function SkillsSection() {
         </div>
       )}
 
-      {skills.length === 0 && !loading && (
+      {filtered.length === 0 && !loading && (
         <Empty description="No skills loaded" />
       )}
     </Space>

@@ -59,6 +59,9 @@ pub struct AgentSession {
     /// Working directory for this session. Overrides config.work_dir when set.
     pub work_dir: Option<String>,
 
+    /// Source of the session (e.g., "feishu", "api", "unknown").
+    pub source: String,
+
     /// Optional conversation recorder for session persistence.
     /// When set, events are recorded to a JSONL file across turns.
     pub recorder: Option<ConversationRecorder>,
@@ -77,6 +80,7 @@ impl AgentSession {
             last_response_tokens: None,
             history_version: 0,
             work_dir: None,
+            source: "unknown".to_string(),
             recorder: None,
         }
     }
@@ -85,6 +89,11 @@ impl AgentSession {
         let mut session = Self::new(session_key);
         session.work_dir = work_dir;
         session
+    }
+
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = source.to_string();
+        self
     }
 
     pub fn clear(&mut self) {
@@ -308,6 +317,7 @@ impl AgentSessionManager {
                     estimated_tokens: s.estimate_tokens(),
                     history_version: s.history_version,
                     work_dir: s.work_dir.clone(),
+                    source: s.source.clone(),
                 }
             })
             .collect()
@@ -337,6 +347,7 @@ impl AgentSessionManager {
                 estimated_tokens: s.estimate_tokens(),
                 history_version: s.history_version,
                 work_dir: s.work_dir.clone(),
+                source: s.source.clone(),
                 messages: s
                     .history
                     .iter()
@@ -367,6 +378,7 @@ pub struct SessionInfo {
     pub estimated_tokens: u32,
     pub history_version: u64,
     pub work_dir: Option<String>,
+    pub source: String,
 }
 
 /// A single message in session detail view.
@@ -390,6 +402,7 @@ pub struct SessionDetail {
     pub estimated_tokens: u32,
     pub history_version: u64,
     pub work_dir: Option<String>,
+    pub source: String,
     pub messages: Vec<SessionMessage>,
 }
 
