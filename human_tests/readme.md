@@ -129,6 +129,7 @@
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
 | [codex-task-dispatch.md](./codex-task-dispatch.md) | Codex 异步任务派发 | 5 | 后台启动 Codex 任务、watch 最近任务、prompt 缺失报错、PATH 隔离无 codex 报错、同名任务历史产物不覆盖 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
+| [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
 
 ### IM Gateway 测试
 
@@ -140,7 +141,7 @@
 
 ---
 
-**总计：74 个测试文件，1455 个测试用例**
+**总计：75 个测试文件，1457 个测试用例**
 
 ## 工作流程
 
