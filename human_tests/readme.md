@@ -118,6 +118,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [memory-sqlite-cache-optimization.md](./memory-sqlite-cache-optimization.md) | SQLite Cache Size 与内存优化 | 6 | SQLite cache_size 降低、读连接池缩减、metadata_cache LRU 化后的功能回归与内存验证 |
+| [long-term-memory.md](./long-term-memory.md) | Long-term Memory 长期记忆系统 | 12 | 跨 session `/remember` 显式沉淀、召回注入、关闭召回、自动抽取开关、隐私脱敏、SQLite/FTS、导入导出、GC、Admin API、WebUI 管理、compaction 事件 |
 
 ### CI/DevOps 测试
 
@@ -139,7 +140,7 @@
 
 ---
 
-**总计：73 个测试文件，1443 个测试用例**
+**总计：74 个测试文件，1455 个测试用例**
 
 ## 工作流程
 
