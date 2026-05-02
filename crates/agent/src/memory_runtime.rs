@@ -38,6 +38,50 @@ pub fn open_default_store() -> Result<SqliteMemoryStore, String> {
     SqliteMemoryStore::open(agent_home_dir()).map_err(|error| format!("open memory store: {error}"))
 }
 
+/// Skill-scoped memory read bridge exposed as `memory.read`.
+pub fn skill_memory_read(query: &str, limit: Option<usize>) -> Result<Vec<MemoryRecord>, String> {
+    let store = open_default_store()?;
+    let recaller = DefaultMemoryRecaller::new(&store);
+    recaller
+        .recall(RecallContext {
+            user_id: None,
+            project_path: std::env::current_dir()
+                .ok()
+                .map(|path| path.display().to_string()),
+            session_key: None,
+            latest_user_message: query.to_string(),
+            history_tail_tokens: 0,
+            max_items: limit.unwrap_or(8),
+            max_chars: 4000,
+        })
+        .map_err(|error| format!("skill memory read: {error}"))
+}
+
+/// Skill-scoped memory write bridge exposed as `memory.write`.
+pub fn skill_memory_write(
+    content: &str,
+    kind: MemoryKind,
+    scope: MemoryScope,
+    tags: Vec<String>,
+    source_skill: &str,
+) -> Result<MemoryRecord, String> {
+    let store = open_default_store()?;
+    let mut tags = tags;
+    tags.push(format!("source_skill={source_skill}"));
+    store
+        .insert(NewMemoryRecord {
+            scope,
+            kind,
+            content: content.to_string(),
+            source: MemorySource::UserExplicit,
+            tags,
+            pinned: false,
+            confidence: 1.0,
+            expires_at: None,
+        })
+        .map_err(|error| format!("skill memory write: {error}"))
+}
+
 /// 显式记住一条用户输入。
 pub fn remember_explicit(
     config: &AgentConfig,

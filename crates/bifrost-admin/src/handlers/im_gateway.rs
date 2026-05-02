@@ -1786,21 +1786,8 @@ async fn handle_agent(
         return json_response(&providers);
     }
 
-    // GET /agent/skills — list loaded skills (global + workspace)
-    if rest == "/skills" {
-        if req.method() != Method::GET {
-            return method_not_allowed();
-        }
-        let config = service.agent_config_store.load();
-        let work_dir = config.resolve_work_dir();
-        let home_dir = bifrost_agent::config::agent_home_dir();
-        let skills_manager = bifrost_agent::SkillsManager::new(config.skills.clone());
-        let skills = skills_manager.load_skills(&work_dir, Some(&home_dir));
-        return json_response(&serde_json::json!({
-            "skills": skills,
-            "work_dir": work_dir.display().to_string(),
-            "home_dir": home_dir.display().to_string(),
-        }));
+    if let Some(skills_rest) = rest.strip_prefix("/skills") {
+        return crate::handlers::agent_skills::handle_agent_skills(req, service, skills_rest).await;
     }
 
     // GET /agent/instructions — show loaded AGENTS.md sources

@@ -25,6 +25,7 @@ pub mod routing;
 pub mod rule_merge_strategy;
 pub mod rule_priority;
 pub mod rule_validation;
+pub mod skill_creator;
 pub mod status_redirect;
 pub mod template;
 pub mod tls_config_disconnect;
@@ -75,5 +76,6 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(group_rules::get_all_tests());
     tests.extend(mock_traffic::get_all_tests());
     tests.extend(im_gateway_agent::get_all_tests());
+    tests.extend(skill_creator::get_all_tests());
     tests
 }

@@ -41,6 +41,7 @@ pub mod persistence;
 pub mod prompt;
 pub mod session;
 pub mod skills;
+pub mod slash;
 pub mod tools;
 pub mod types;
 

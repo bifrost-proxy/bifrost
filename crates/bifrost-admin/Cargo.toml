@@ -6,6 +6,7 @@ description = "Admin API and web interface for Bifrost proxy"
 
 [dependencies]
 bifrost-agent = { path = "../agent" }
+bifrost-skills = { package = "skills", path = "../skills" }
 bifrost-command = { path = "../bifrost-command" }
 bifrost-core = { path = "../bifrost-core" }
 bifrost-tls = { path = "../bifrost-tls" }
@@ -25,6 +26,7 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
+tempfile.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 thiserror.workspace = true
@@ -101,3 +103,7 @@ nix = { version = "0.28", features = ["net"] }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile.workspace = true
+
+[features]
+default = ["skills-crud"]
+skills-crud = []

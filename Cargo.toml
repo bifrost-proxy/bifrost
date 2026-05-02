@@ -4,6 +4,7 @@ members = [
   "crates/agent",
   "crates/bifrost-command",
   "crates/bifrost-core",
+  "crates/skills",
   "crates/memory",
   "crates/bifrost-proxy",
   "crates/bifrost-tls",

@@ -21,6 +21,7 @@ use crate::memory_runtime;
 use crate::persistence;
 use crate::persistence::ConversationRecorder;
 use crate::prompt;
+use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
 use crate::types::{ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
 use dashmap::DashMap;
@@ -70,6 +71,9 @@ pub struct AgentSession {
     /// Optional conversation recorder for session persistence.
     /// When set, events are recorded to a JSONL file across turns.
     pub recorder: Option<ConversationRecorder>,
+
+    /// Slash command router for built-in commands and skill-declared slash commands.
+    pub slash_router: SlashCommandRouter,
 }
 
 impl AgentSession {
@@ -88,6 +92,7 @@ impl AgentSession {
             work_dir: None,
             source: "unknown".to_string(),
             recorder: None,
+            slash_router: SlashCommandRouter::with_default_builtins(),
         }
     }
 
@@ -490,7 +495,38 @@ pub async fn run_turn_with_mcp(
 
     // Handle built-in commands
     let trimmed = user_message.trim();
-    if trimmed == "/clear" || trimmed == "/reset" {
+    let slash_dispatch = session.slash_router.dispatch(trimmed);
+    match &slash_dispatch {
+        Dispatch::Unknown(command) => {
+            return Ok(TurnResult {
+                response: format!("未知命令: {command}"),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+            });
+        }
+        Dispatch::RunSkill { record, invocation } => {
+            let report = bifrost_skills::SkillExecutor::default()
+                .execute(record.as_ref(), invocation.clone())
+                .await?;
+            return Ok(TurnResult {
+                response: if report.stdout.trim().is_empty() {
+                    "Skill 执行完成。".to_string()
+                } else {
+                    report.stdout.trim().to_string()
+                },
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+            });
+        }
+        Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
+    }
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Clear | BuiltinCommand::Reset,
+            ..
+        }
+    ) {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
@@ -505,16 +541,17 @@ pub async fn run_turn_with_mcp(
     }
 
     // /undo [N] — rollback last N user turns (default 1)
-    if trimmed == "/undo" || trimmed.starts_with("/undo ") {
+    if let Dispatch::Builtin {
+        command: BuiltinCommand::Undo,
+        ref args,
+    } = slash_dispatch
+    {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
             }
         }
-        let n: u32 = trimmed
-            .strip_prefix("/undo")
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(1);
+        let n: u32 = args.parse().unwrap_or(1);
         let removed = session.rollback(n);
         return Ok(TurnResult {
             response: format!(
@@ -527,7 +564,13 @@ pub async fn run_turn_with_mcp(
     }
 
     // /compact — manual compaction (same as Codex's CompactionTrigger::Manual)
-    if trimmed == "/compact" {
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Compact,
+            ..
+        }
+    ) {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
@@ -596,13 +639,24 @@ pub async fn run_turn_with_mcp(
     }
 
     // /remember <text> — explicit long-term memory write.
-    if let Some(content) = trimmed.strip_prefix("/remember ") {
+    if let Dispatch::Builtin {
+        command: BuiltinCommand::Remember,
+        ref args,
+    } = slash_dispatch
+    {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
             }
         }
-        let record = memory_runtime::remember_explicit(config, session, content.trim())?;
+        if args.trim().is_empty() {
+            return Ok(TurnResult {
+                response: "用法: /remember <text>".to_string(),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+            });
+        }
+        let record = memory_runtime::remember_explicit(config, session, args.trim())?;
         return Ok(TurnResult {
             response: format!("已记住长期记忆: {}", record.id),
             tool_calls_log: Vec::new(),
@@ -611,7 +665,13 @@ pub async fn run_turn_with_mcp(
     }
 
     // /memories — list visible long-term memories.
-    if trimmed == "/memories" {
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Memories,
+            ..
+        }
+    ) {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
@@ -641,13 +701,24 @@ pub async fn run_turn_with_mcp(
     }
 
     // /forget <id|last> — soft delete one visible memory.
-    if let Some(id_or_last) = trimmed.strip_prefix("/forget ") {
+    if let Dispatch::Builtin {
+        command: BuiltinCommand::Forget,
+        ref args,
+    } = slash_dispatch
+    {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
             }
         }
-        let response = match memory_runtime::forget_memory(config, session, id_or_last.trim())? {
+        if args.trim().is_empty() {
+            return Ok(TurnResult {
+                response: "用法: /forget <id|last>".to_string(),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+            });
+        }
+        let response = match memory_runtime::forget_memory(config, session, args.trim())? {
             Some(id) => format!("已忘记长期记忆: {id}"),
             None => "没有找到可忘记的长期记忆。".to_string(),
         };
@@ -659,7 +730,13 @@ pub async fn run_turn_with_mcp(
     }
 
     // /status — show session state (token usage, compaction count, etc.)
-    if trimmed == "/status" {
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Status,
+            ..
+        }
+    ) {
         if let Some(ref mut rec) = recorder {
             if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
                 warn!(error = %e, "failed to record user message");
@@ -682,7 +759,13 @@ pub async fn run_turn_with_mcp(
     }
 
     // /resume — load the most recent JSONL conversation and restore session history
-    if trimmed == "/resume" {
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Resume,
+            ..
+        }
+    ) {
         let agent_home = crate::config::agent_home_dir();
         let mut files = persistence::list_conversations(&agent_home, Some(&session.session_key));
         if files.is_empty() {
@@ -725,6 +808,20 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
             });
         }
+    }
+
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Skill,
+            ..
+        }
+    ) {
+        return Ok(TurnResult {
+            response: "Skill Creator 已启动。请描述要创建或编辑的 skill。".to_string(),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+        });
     }
 
     // Pre-turn compaction: check using real tokens if available, else estimate

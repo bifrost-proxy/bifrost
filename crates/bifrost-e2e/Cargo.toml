@@ -14,6 +14,7 @@ bifrost-core = { path = "../bifrost-core" }
 bifrost-proxy = { path = "../bifrost-proxy" }
 bifrost-admin = { path = "../bifrost-admin" }
 bifrost-agent = { path = "../agent" }
+bifrost-skills = { package = "skills", path = "../skills" }
 bifrost-storage = { path = "../bifrost-storage" }
 bifrost-sync = { path = "../bifrost-sync" }
 bifrost-cli = { path = "../bifrost-cli" }

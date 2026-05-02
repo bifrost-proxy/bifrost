@@ -1062,6 +1062,21 @@ export default function AgentTab() {
           </Card>
         </Col>
 
+        {/* Skills */}
+        <Col xs={24}>
+          <Card
+            title={
+              <Space>
+                <ReadOutlined />
+                <span>Skills</span>
+              </Space>
+            }
+            size="small"
+          >
+            <SkillsSection />
+          </Card>
+        </Col>
+
         {/* MCP Servers */}
         <Col xs={24}>
           <Card
@@ -1093,21 +1108,6 @@ export default function AgentTab() {
               servers={config.mcp_servers || {}}
               onUpdate={handleMcpServersUpdate}
             />
-          </Card>
-        </Col>
-
-        {/* Skills */}
-        <Col xs={24}>
-          <Card
-            title={
-              <Space>
-                <ReadOutlined />
-                <span>Skills</span>
-              </Space>
-            }
-            size="small"
-          >
-            <SkillsSection scopes={["User", "System"]} />
           </Card>
         </Col>
 

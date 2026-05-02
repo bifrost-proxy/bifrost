@@ -6,6 +6,7 @@ description = "AI Agent runtime for Bifrost with tool calling, multi-turn dialog
 
 [dependencies]
 bifrost-core = { path = "../bifrost-core" }
+bifrost-skills = { package = "skills", path = "../skills" }
 memory = { path = "../memory" }
 tokio = { version = "1", features = ["full", "process"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +22,10 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2.0"
 dashmap = "6"
+
+[features]
+default = ["slash-router"]
+slash-router = []
 
 [dev-dependencies]
 tokio-test = "0.4"

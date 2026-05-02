@@ -1,4 +1,5 @@
 pub mod agent_memories;
+pub mod agent_skills;
 pub mod app_icon;
 pub mod audit;
 pub mod auth;
