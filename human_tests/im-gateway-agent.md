@@ -848,3 +848,14 @@ rm -rf ./.bifrost-test
   - 第二条消息收到工具调用结果和模型回复
   - 日志中无 error/warn 级别的重试相关日志
   - 会话正常进行，无异常中断
+
+### TC-IMA-66: CI E2E 启动器服务注入回归
+
+- **操作步骤**:
+  1. 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 cargo run -p bifrost-e2e -- --test im_gateway_agent --jobs 1 --timeout 240`
+  2. 检查输出中的 4 个用例：`im_gateway_agent_config_get`、`im_gateway_agent_config_patch`、`im_gateway_agent_sessions_empty`、`im_gateway_agent_route_create`
+  3. 确认没有 `Expected status 200, got 503` 错误
+- **预期结果**:
+  - 4 个 `im_gateway_agent_*` E2E 用例全部通过
+  - `/api/im-gateway/agent`、`PATCH /api/im-gateway/agent`、`/api/im-gateway/agent/sessions`、`POST /api/im-gateway/routes` 均返回 200
+  - 测试启动器 `ProxyInstance::start_with_admin` 已配置 `ImGatewayService`，不再返回 `IM Gateway not configured`

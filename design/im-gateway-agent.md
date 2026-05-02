@@ -435,6 +435,7 @@ tracing = "0.1"
 | 会话持久性 | 多轮对话 → 上下文保持 |
 | 会话清空 | /clear 命令 → 历史清空 |
 | 配置热更新 | PATCH 配置 → 立即生效 |
+| E2E 启动器服务注入回归 | `ProxyInstance::start_with_admin` 启动后 `/api/im-gateway/agent` 与 `/api/im-gateway/routes` 返回 200，确保测试启动路径与真实 CLI 一样注入 `ImGatewayService` |
 
 ### 真实场景测试（human_tests）
 
@@ -448,6 +449,7 @@ tracing = "0.1"
 | TC-AG-04 | 路由覆盖 | 触发 AgentChat 路由 → 使用自定义配置 |
 | TC-AG-05 | 非_OWNER_拦截 | 非 owner 用户 → 无响应 |
 | TC-AG-06 | 配置更新 | 通过 API 更新配置 → 生效 |
+| TC-IMA-66 | CI E2E 启动器服务注入回归 | 运行 `bifrost-e2e --test im_gateway_agent`，验证新增 Agent API 用例不再返回 503 |
 
 ## 扩展性考虑
 

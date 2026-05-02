@@ -1,7 +1,7 @@
 use bifrost_admin::{
     start_async_traffic_processor, start_connection_cleanup_task, start_frame_cleanup_task,
     start_ws_payload_cleanup_task, AdminState, AsyncTrafficWriter, BodyStore, ConnectionRegistry,
-    RuntimeConfig, WsPayloadStore,
+    ImGatewayService, RuntimeConfig, WsPayloadStore,
 };
 use bifrost_core::{
     normalize_rule_content, parse_rules, Protocol, RequestContext, Rule, RuleParser,
@@ -1294,6 +1294,7 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path)
             .expect("failed to create auth db");
+        let im_gateway_service = Arc::new(ImGatewayService::new(&temp_dir));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -1305,7 +1306,8 @@ impl ProxyInstance {
             .with_frame_store_shared(frame_store)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
-            .with_auth_db(auth_db);
+            .with_auth_db(auth_db)
+            .with_im_gateway_service(im_gateway_service);
         std::mem::drop(start_connection_cleanup_task(
             admin_state.connection_monitor.clone(),
         ));
@@ -1487,6 +1489,7 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db2 = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path2)
             .expect("failed to create auth db");
+        let im_gateway_service = Arc::new(ImGatewayService::new(&temp_dir));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -1499,7 +1502,8 @@ impl ProxyInstance {
             .with_sync_manager_shared(sync_manager)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
-            .with_auth_db(auth_db2);
+            .with_auth_db(auth_db2)
+            .with_im_gateway_service(im_gateway_service);
         std::mem::drop(start_connection_cleanup_task(
             admin_state.connection_monitor.clone(),
         ));
