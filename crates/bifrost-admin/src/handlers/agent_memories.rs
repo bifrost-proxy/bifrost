@@ -1,8 +1,14 @@
+use base64::Engine;
 use bifrost_agent::memory_runtime;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 
 use super::{
     error_response, full_body, json_response, json_response_with_status, method_not_allowed,
@@ -21,6 +27,11 @@ struct CreateMemoryRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct PatchMemoryRequest {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SearchMemoryRequest {
     query: Option<String>,
     limit: Option<usize>,
@@ -28,13 +39,27 @@ struct SearchMemoryRequest {
 
 #[derive(Debug, Serialize)]
 struct ExportResponse {
-    content: String,
-    count: usize,
+    /// Base64-encoded tar.gz archive of the full memory root.
+    archive_b64: String,
+    /// Archive byte size (pre-base64).
+    bytes: u64,
+    /// Number of files included in the archive.
+    file_count: usize,
+    /// Absolute memory root on disk (for debugging).
+    memory_root: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ImportReport {
-    imported: usize,
+    imported_files: usize,
+    imported_bytes: u64,
+    memory_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportRequest {
+    /// Base64-encoded tar.gz archive.
+    archive_b64: String,
 }
 
 /// 处理 Codex-style 文件长期记忆管理 API。
@@ -99,11 +124,32 @@ async fn handle_create(req: Request<Incoming>) -> Response<BoxBody> {
     }
 }
 
-async fn handle_patch(_req: Request<Incoming>, _id: &str) -> Response<BoxBody> {
-    error_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        "file-backed memories are append-oriented; edit MEMORY.md directly under agent/memory",
-    )
+async fn handle_patch(req: Request<Incoming>, id: &str) -> Response<BoxBody> {
+    if id.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "memory id required in path");
+    }
+    let body = match read_json::<PatchMemoryRequest>(req).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    if body.content.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "content must not be empty");
+    }
+    let session = bifrost_agent::AgentSession::new("admin-api");
+    match memory_runtime::replace_memory(
+        &bifrost_agent::AgentConfig::default(),
+        &session,
+        id,
+        &body.content,
+    ) {
+        Ok(Some(id)) => json_response(&serde_json::json!({
+            "updated": true,
+            "id": id,
+            "content": body.content,
+        })),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "memory entry not found"),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
 }
 
 async fn handle_delete(id: &str) -> Response<BoxBody> {
@@ -134,8 +180,14 @@ async fn handle_search(req: Request<Incoming>) -> Response<BoxBody> {
     }
 }
 
+/// Import the full Codex-style memory tree from a base64-encoded tar.gz.
+///
+/// The payload must be a JSON object `{"archive_b64":"..."}`. Entries whose
+/// paths escape the memory root are rejected. Existing files with the same
+/// relative path are overwritten in place (atomic rename is not guaranteed,
+/// but Bifrost memory APIs are append/replace tolerant).
 async fn handle_import(req: Request<Incoming>) -> Response<BoxBody> {
-    let body = match read_body(req).await {
+    let body = match read_json::<ImportRequest>(req).await {
         Ok(body) => body,
         Err(resp) => return resp,
     };
@@ -143,61 +195,222 @@ async fn handle_import(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    let path = root.join("MEMORY.md");
-    if let Err(error) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, body.as_bytes()))
-    {
+    let archive =
+        match base64::engine::general_purpose::STANDARD.decode(body.archive_b64.as_bytes()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("invalid base64 archive: {error}"),
+                );
+            }
+        };
+    let mut decoder = GzDecoder::new(Cursor::new(archive));
+    let mut expanded = Vec::new();
+    if let Err(error) = decoder.read_to_end(&mut expanded) {
         return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("append {}: {error}", path.display()),
+            StatusCode::BAD_REQUEST,
+            &format!("failed to gunzip archive: {error}"),
         );
     }
+    let mut archive = tar::Archive::new(Cursor::new(expanded));
+    let mut imported_files = 0usize;
+    let mut imported_bytes = 0u64;
+    let entries = match archive.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("failed to read tar entries: {error}"),
+            );
+        }
+    };
+    for entry in entries {
+        let mut entry = match entry {
+            Ok(e) => e,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("tar entry read error: {error}"),
+                );
+            }
+        };
+        let rel_path = match entry.path() {
+            Ok(p) => p.into_owned(),
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("tar entry path error: {error}"),
+                );
+            }
+        };
+        if !is_safe_relative(&rel_path) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("tar entry escapes archive root: {}", rel_path.display()),
+            );
+        }
+        let target = root.join(&rel_path);
+        if !target.starts_with(&root) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("tar entry writes outside root: {}", target.display()),
+            );
+        }
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            if let Err(error) = fs::create_dir_all(&target) {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("create {}: {error}", target.display()),
+                );
+            }
+            continue;
+        }
+        if !entry_type.is_file() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("create {}: {error}", parent.display()),
+                );
+            }
+        }
+        let mut buf = Vec::new();
+        if let Err(error) = entry.read_to_end(&mut buf) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("read tar entry {}: {error}", rel_path.display()),
+            );
+        }
+        if let Err(error) = fs::write(&target, &buf) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write {}: {error}", target.display()),
+            );
+        }
+        imported_bytes += buf.len() as u64;
+        imported_files += 1;
+    }
     json_response(&ImportReport {
-        imported: body.lines().filter(|line| !line.trim().is_empty()).count(),
+        imported_files,
+        imported_bytes,
+        memory_root: root.display().to_string(),
     })
 }
 
+/// Export the full memory root as a base64-encoded tar.gz archive.
+///
+/// Returning the archive inline keeps the endpoint JSON-only and avoids having
+/// to introduce multipart or streaming download paths elsewhere in the admin
+/// API. Callers that need a raw blob can pipe the decoded bytes through
+/// `base64 -d | tar -xz`.
 async fn handle_export() -> Response<BoxBody> {
     let root = match memory_runtime::ensure_memory_layout() {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    const MAX_MEMORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
-    let summary_path = root.join("memory_summary.md");
-    let summary = if std::fs::metadata(&summary_path)
-        .map(|m| m.len())
-        .unwrap_or(0)
-        <= MAX_MEMORY_FILE_BYTES
-    {
-        fs::read_to_string(&summary_path).unwrap_or_default()
-    } else {
-        String::new()
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.mode(tar::HeaderMode::Deterministic);
+    let file_count = match append_tree(&mut builder, &root, &root) {
+        Ok(count) => count,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to archive memory root: {error}"),
+            );
+        }
     };
-    let memory_path = root.join("MEMORY.md");
-    let memory = if std::fs::metadata(&memory_path)
-        .map(|m| m.len())
-        .unwrap_or(0)
-        <= MAX_MEMORY_FILE_BYTES
-    {
-        fs::read_to_string(&memory_path).unwrap_or_default()
-    } else {
-        String::new()
+    let encoder = match builder.into_inner() {
+        Ok(enc) => enc,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("finalize tar: {error}"),
+            );
+        }
     };
-    let content = format!("--- memory_summary.md ---\n{summary}\n--- MEMORY.md ---\n{memory}");
+    let compressed = match encoder.finish() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("finalize gzip: {error}"),
+            );
+        }
+    };
+    let bytes = compressed.len() as u64;
+    let archive_b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(full_body(
             serde_json::to_string(&ExportResponse {
-                count: content.lines().count(),
-                content,
+                archive_b64,
+                bytes,
+                file_count,
+                memory_root: root.display().to_string(),
             })
             .unwrap_or_else(|_| "{}".to_string()),
         ))
         .unwrap()
+}
+
+fn append_tree<W: Write>(
+    builder: &mut tar::Builder<W>,
+    root: &Path,
+    current: &Path,
+) -> std::io::Result<usize> {
+    let mut count = 0usize;
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = match path.strip_prefix(root) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        // skip transient lock/telemetry files by default to keep archives small
+        if let Some(name) = rel.file_name().and_then(|n| n.to_str()) {
+            if name == ".phase2.lock" {
+                continue;
+            }
+        }
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            builder.append_dir(&rel, &path)?;
+            count += append_tree(builder, root, &path)?;
+        } else if meta.is_file() {
+            let mut file = fs::File::open(&path)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_metadata(&meta);
+            header.set_size(meta.len());
+            header.set_cksum();
+            builder.append_data(&mut header, &rel, &mut file)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn is_safe_relative(path: &Path) -> bool {
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => return false,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => return false,
+            _ => {}
+        }
+    }
+    let _ = PathBuf::from(path);
+    true
 }
 
 async fn handle_stats() -> Response<BoxBody> {

@@ -1348,13 +1348,12 @@ pub async fn run_turn_with_mcp(
             );
 
             memory_runtime::auto_extract_after_turn(
-                client,
-                config,
-                session,
-                user_message,
-                &content,
-            )
-            .await;
+                std::sync::Arc::new(client.clone()),
+                config.clone(),
+                session.session_key.clone(),
+                user_message.to_string(),
+                content.clone(),
+            );
 
             return Ok(TurnResult {
                 response: content,

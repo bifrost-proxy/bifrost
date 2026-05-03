@@ -139,3 +139,98 @@ E2E 测试：
 
 - `human_tests/long-term-memory.md` 覆盖目录初始化、按需加载说明注入、显式写入、自动写入、Admin 文件 API、WebUI 文件视图、不创建 SQLite、跨独立 session 消费。
 - 每次修改后必须按文档逐条执行并记录实际结果。
+
+## 2026-05-03 硬化修订（P0/P1/P2 合并落地）
+
+本次修订在不改变上节整体 read/write 语义的前提下，一次性收敛了 Phase 2 的并发与可用性、记忆管理的运维面、以及观测能力。要点如下。
+
+### Phase 2 锁改用 `fs2` 文件锁
+
+- `.phase2.lock` 不再记录 pid/启动时间也不再做 staleness 心跳判断。
+- 运行态使用 `fs2::FileExt::try_lock_exclusive`；进程崩溃后 OS 会自动释放，避免旧版“pid 号复用”误判。
+- 长摘要 append/轮转等共享写路径通过同一把 `agent/memory/.phase2.lock` 的 `lock_exclusive` 串行化，`append_line` 显式 `flush + sync_data + unlock`，保证崩溃后内容落盘且锁被释放。
+
+### 稳健的 JSON 解析与熔断
+
+- 抽取与 consolidation 的模型输出都通过 `strip_markdown_fences + extract_balanced_json` 兜底解析：
+  - 优先剥离 ``` / ```json 栅栏。
+  - 按括号配对扫描首个平衡 JSON 对象，字符串字面量与转义字符不会误断。
+- `.phase2_state.json` 新增 `failure_count` 与 `pinned_failure_hash`；同一 bounded input hash 连续失败 **5 次**后熔断，直到输入变化才解除。避免模型死循环浪费 token。
+
+### 自动抽取改为后台 fire-and-forget
+
+- `auto_extract_after_turn` 使用 `tokio::spawn`，assistant turn 不再被抽取阻塞。
+- 抽取本体套 `tokio::time::timeout(MEMORY_EXTRACT_TIMEOUT_SECS = 30s)`。
+- 触发的 Phase 2 consolidation 内部套 `MEMORY_CONSOLIDATION_TIMEOUT_SECS = 120s`。
+- 任一超时只记录 telemetry，不影响主 turn。
+
+### Memory Skills 与用户 skills 隔离
+
+- 所有 consolidation 生成的 skills 写在 `agent/memory/skills/_memory/<name>/SKILL.md`。
+- 写入前显式检查 `agent/memory/skills/<name>/` 是否由用户创建：命中则拒绝写入并记 `memory_skill_shadow_refused` telemetry，永不覆盖用户手写内容。
+
+### Retention Sweep
+
+- `prune_memory_artifacts` 在每轮 Phase 2 成功后运行，按以下配置收敛：
+  - `max_unused_days`：超期未访问的 `rollout_summaries/*.md` 直接删除。
+  - `max_rollout_age_days`：按 mtime 截断 rollout summaries。
+  - `max_rollouts_per_startup`：每次启动最多保留最近 N 条 rollout。
+  - `raw_memories.md` 超限时尾部段落迁入 `raw_memories.archive.md`。
+- 所有删除/迁移前先抓 `.phase2.lock` 避免和并发 consolidation 冲突。
+
+### `/forget` 与 PATCH 语义
+
+- `forget_memory` 现在可命中显式写入和 `auto_extract` 条目；支持按 id 或 id 前缀匹配，命中唯一项才删除。
+- Admin PATCH `/api/agent/memories/:id` 通过 `memory_runtime::replace_memory` 实现：按行定位目标条目，原子重写 `MEMORY.md` / `memory_summary.md` / `raw_memories.md` 中同一条的副本；sha 不一致自动回滚。
+
+### Telemetry (`.telemetry.jsonl`)
+
+- 事件以 JSON Lines 形式落盘到 `agent/memory/.telemetry.jsonl`，单行格式 `{ts_unix,event,value,success,detail}`。
+- 关键事件：`memory_extract_started/finished/timeout`、`phase2_started/finished/skipped/locked/circuit_open`、`memory_skill_shadow_refused`、`prune_completed`、`export_archive`、`import_archive`、`replace_memory`、`forget_memory`。
+- 写入前抢 `.phase2.lock`，确保并发 session 的事件不会交叉撕裂。
+- 纯本地文件，不外发。
+
+### 全量导出/导入
+
+- GET `/api/agent/memories/export` 返回 `{archive_b64, bytes, file_count, memory_root}`，tar.gz 打包整个 `agent/memory/`（跳过 `.phase2.lock`）。
+- POST `/api/agent/memories/import` 接 `{archive_b64}`：gunzip → `tar::Archive` → 逐项做 `is_safe_relative` 校验（拒绝绝对路径、`..`、盘符前缀），再原子落到 memory root 下。返回 `ImportReport { imported_files, imported_bytes, memory_root }`。
+- 作为用户自备份/迁移机器的一等方案，无需 SQLite dump。
+
+### 新增 / 更新的关键常量
+
+```rust
+pub const MEMORY_EXTRACT_TIMEOUT_SECS: u64 = 30;
+pub const MEMORY_CONSOLIDATION_TIMEOUT_SECS: u64 = 120;
+const MEMORY_CONSOLIDATION_FAILURE_LIMIT: usize = 5;
+const MEMORY_SKILLS_SUBDIR: &str = "_memory";
+```
+
+### 新增单元测试（节选）
+
+- `phase2_failure_counter_opens_breaker`：连续 5 次同 hash 失败进入熔断，输入变化后解除。
+- `apply_consolidated_memory_preserves_user_authored_skill`：user skill 同名时拒绝覆盖，memory skill 落在 `_memory/` 子目录。
+- `prune_memory_artifacts_caps_raw_memories`：raw 超限段落迁入 archive；超期 rollout 被清理。
+- `telemetry_event_writes_jsonl`：并发写入不互相撕裂。
+- `replace_memory_rewrites_content_line`：同一条目在三个 md 中同步替换；sha 变化则回滚。
+- `extract_balanced_json_handles_nested_braces_in_strings`：字符串内的 `}` 不会错误终止解析。
+- `phase2_lock_blocks_concurrent_append_line`：append 在 consolidation 持锁期间会排队，不会切碎行。
+
+### 对齐情况更新
+
+已补齐的 Codex 行为：
+
+- usage-based / age-based retention 已落地（`max_unused_days`、`max_rollout_age_days`、`max_rollouts_per_startup`）。
+- memory skills 写路径（与用户 skills 隔离）。
+- 观测维度（通过本地 `.telemetry.jsonl`，不依赖 Codex 的 DB telemetry）。
+- 稳健 JSON 解析与抽取熔断。
+
+仍保持不对齐（故意选择）：
+
+- 不引入 SQLite，不复制 stage1/stage2 job/lease/watermark。
+- 不复用 Codex 的 citation parser / UI，Bifrost 只注入 citation 要求。
+
+### 迁移说明
+
+- 老 `.phase2.lock` 内容（pid/ts 文本）首次启动会被 `fs2` 重建为 0 字节占位，无需手工清理。
+- 旧 `skills/<name>/SKILL.md` 中由旧版本 consolidation 自动生成的记忆 skills 不会被自动迁入 `_memory/`；如需清理请手工 `rm -r skills/<name>`，新一轮 Phase 2 会在 `_memory/` 下重建。
+- `rollout_summaries/` 历史文件不受影响，下一次 Phase 2 会按新的 retention 策略裁剪。

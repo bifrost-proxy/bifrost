@@ -1,16 +1,38 @@
 //! Skill system: discovery, parsing, and instruction building.
 //!
-//! Skills are loaded from (highest priority first):
-//! - `.agents/skills/` in the project directory (repo scope)
-//! - `~/.bifrost/agent/skills/` (user scope, for user-created skills)
-//! - `~/.bifrost/agent/skills/.system/` (system scope, built-in embedded skills)
+//! This module is a thin compatibility layer over `bifrost_skills::SkillStore`.
+//! Historically, the agent crate shipped its own walkdir-based loader that
+//! lived in parallel with the canonical skill store in the `bifrost-skills`
+//! crate. The two implementations drifted (duplicated scope semantics,
+//! diverging disabled-marker handling, and no shared validation).
 //!
-//! Each skill is a directory containing a SKILL.md file with YAML frontmatter.
+//! As of the 2026/05 refactor, all discovery routes through `SkillStore`,
+//! which already enforces:
+//! - Scope priority (Repo > User > Global > System) via `apply_effective_scopes`.
+//! - `.disabled` marker filtering.
+//! - Hidden directory skipping (including `.history`, `.drafts`, `.git`).
+//! - Manifest / frontmatter validation at commit time.
+//!
+//! `SkillRegistry` (which layers slash-command indexing and filesystem watcher
+//! on top of `SkillStore`) is deliberately **not** used in this read-only
+//! prompt-build path; it is wired by session / admin paths that need slash
+//! resolution and hot-reload.
+//!
+//! The surface exposed by this module (`SkillsManager`, `SkillMetadata`,
+//! `SkillScope` re-export, `install_system_skills`) is preserved verbatim so
+//! existing callers (`prompt.rs`, `bifrost-e2e/tests/skill_loading.rs`,
+//! `bifrost-admin`) continue to compile without modification.
+//!
+//! Embedded system skills are still bootstrapped from `src/assets/samples/`
+//! via `include_dir!` — that concern is orthogonal to the loader and remains
+//! in this module because it is agent-crate-specific packaging.
 
 use crate::config::{agent_home_dir, user_home_dir, SkillsConfig};
+use bifrost_skills::{ScopeRoot, SkillStore};
 use include_dir::{Dir, DirEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -18,6 +40,11 @@ use tracing::{debug, warn};
 pub const SKILLS_DIR_NAME: &str = "skills";
 pub const AGENTS_DIR_NAME: &str = ".agents";
 pub const SKILL_FILENAME: &str = "SKILL.md";
+
+/// Re-export the canonical `SkillScope` so the agent crate stays in lockstep
+/// with `bifrost_skills`. The variant set (`Repo`, `User`, `Global`, `System`)
+/// and priority ordering are identical to the legacy agent-local enum.
+pub use bifrost_skills::SkillScope;
 
 /// Embedded system skills directory (compiled into the binary).
 const SYSTEM_SKILLS_DIR: Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src/assets/samples");
@@ -27,12 +54,6 @@ const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".bifrost-system-skills.marker";
 /// Salt for fingerprint versioning (bump to force reinstall).
 const SYSTEM_SKILLS_MARKER_SALT: &str = "v1";
 
-/// Maximum BFS traversal depth from a skills root directory.
-const MAX_SCAN_DEPTH: usize = 6;
-/// Maximum number of directories to visit per root during BFS scan.
-const MAX_DIRS_PER_ROOT: usize = 2000;
-/// Maximum size for a SKILL.md file (2 MiB). Larger files are skipped.
-const MAX_SKILL_MD_BYTES: u64 = 2 * 1024 * 1024;
 /// Maximum allowed length for a skill name (characters).
 const MAX_NAME_LEN: usize = 64;
 /// Maximum allowed length for a skill description (characters).
@@ -162,28 +183,16 @@ pub struct SkillMetadata {
     pub scope: SkillScope,
 }
 
-/// Where the skill was discovered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum SkillScope {
-    Repo,
-    User,
-    Global,
-    System,
-}
-
-/// YAML frontmatter fields in SKILL.md.
-#[derive(Debug, Deserialize)]
-struct SkillFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    short_description: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // SkillsManager
 // ---------------------------------------------------------------------------
 
 /// Manages skill discovery and loading.
+///
+/// Internally delegates to `bifrost_skills::SkillStore` so that scope
+/// priority, `.disabled` filtering, and manifest validation live in a single
+/// implementation shared with `/skill`, `SkillRegistry`, and the admin HTTP
+/// surface.
 pub struct SkillsManager {
     config: Option<SkillsConfig>,
     /// Override for the agent home directory (for testing isolation).
@@ -224,205 +233,96 @@ impl SkillsManager {
     }
 
     /// Resolve the effective user home directory.
-    fn effective_user_home(&self) -> Option<PathBuf> {
+    fn effective_user_home(&self) -> PathBuf {
         self.user_home_override
             .clone()
-            .or_else(|| Some(user_home_dir()))
+            .unwrap_or_else(user_home_dir)
+    }
+
+    /// Build the four `ScopeRoot`s this manager reads from, in scope-priority
+    /// order (System → Global → User → Repo).
+    fn scope_roots(&self, work_dir: &Path) -> Vec<ScopeRoot> {
+        let agent_home = self.effective_agent_home();
+        let user_home = self.effective_user_home();
+        vec![
+            // System: <agent_home>/skills/.system/
+            ScopeRoot::new(
+                SkillScope::System,
+                agent_home.join(SKILLS_DIR_NAME).join(".system"),
+            ),
+            // Global: <user_home>/.agents/skills/
+            ScopeRoot::new(
+                SkillScope::Global,
+                user_home.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+            ),
+            // User: <agent_home>/skills/
+            ScopeRoot::new(SkillScope::User, agent_home.join(SKILLS_DIR_NAME)),
+            // Repo: <work_dir>/.agents/skills/  (highest priority)
+            ScopeRoot::new(
+                SkillScope::Repo,
+                work_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+            ),
+        ]
     }
 
     /// Load all skills from the working directory hierarchy and user home.
     ///
-    /// Loading order (first occurrence wins on name collision):
-    /// 1. Repo scope: `<work_dir>/.agents/skills/`
-    /// 2. User scope: `~/.bifrost/agent/skills/` (skips `.system` hidden dir)
-    /// 3. Global scope: `~/.agents/skills/` (cross-agent shared directory)
-    /// 4. System scope: `~/.bifrost/agent/skills/.system/`
+    /// Discovery is delegated to `SkillStore::read_all`, which:
+    /// 1. Performs a depth-limited BFS over each scope root.
+    /// 2. Skips hidden directories (`.history`, `.drafts`, `.git`, `.system`
+    ///    when not directly configured as a root, etc.).
+    /// 3. Respects `.disabled` markers (written by `SkillStore::enable(false)`).
+    /// 4. Applies the scope-priority overlay so a Repo skill shadows a
+    ///    same-named User/Global/System skill.
+    ///
+    /// Each surviving `SkillRecord` is then projected into `SkillMetadata`
+    /// (which carries the raw SKILL.md body used for prompt injection), and
+    /// finally filtered by the user's config-level enable/disable list.
+    ///
+    /// Unlike `SkillRegistry::init`, this path does **not** spawn a filesystem
+    /// watcher and does **not** build a slash-command index; it is cheap to
+    /// call repeatedly from prompt construction.
     pub fn load_skills(&self, work_dir: &Path) -> Vec<SkillMetadata> {
-        let mut skills = Vec::new();
-        let agent_home = self.effective_agent_home();
-
-        // 1. Load from project's .agents/skills/ (highest priority)
-        let repo_skills_dir = work_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
-        if repo_skills_dir.is_dir() {
-            let repo_skills = self.scan_skills_dir(&repo_skills_dir, SkillScope::Repo);
-            debug!(count = repo_skills.len(), dir = %repo_skills_dir.display(), "loaded repo skills");
-            skills.extend(repo_skills);
-        }
-
-        // 2. Load from user scope: ~/.bifrost/agent/skills/ (BFS skips .system)
-        let user_skills_dir = agent_home.join(SKILLS_DIR_NAME);
-        if user_skills_dir.is_dir() {
-            let user_skills = self.scan_skills_dir(&user_skills_dir, SkillScope::User);
-            debug!(count = user_skills.len(), dir = %user_skills_dir.display(), "loaded user skills");
-            skills.extend(user_skills);
-        }
-
-        // 3. Load from global scope: ~/.agents/skills/ (cross-agent shared)
-        if let Some(user_home) = self.effective_user_home() {
-            let global_skills_dir = user_home.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
-            if global_skills_dir.is_dir() {
-                let global_skills = self.scan_skills_dir(&global_skills_dir, SkillScope::Global);
-                debug!(count = global_skills.len(), dir = %global_skills_dir.display(), "loaded global shared skills");
-                skills.extend(global_skills);
-            }
-        }
-
-        // 4. Load from system scope: ~/.bifrost/agent/skills/.system/ (lowest priority)
-        let system_dir = agent_home.join(SKILLS_DIR_NAME).join(".system");
-        if system_dir.is_dir() {
-            let system_skills = self.scan_skills_dir(&system_dir, SkillScope::System);
-            debug!(count = system_skills.len(), dir = %system_dir.display(), "loaded system skills");
-            skills.extend(system_skills);
-        }
-
-        // Deduplicate by name (first occurrence wins — repo > user > global > system)
-        let mut seen = std::collections::HashSet::new();
-        skills.retain(|s| seen.insert(s.name.clone()));
-
-        // Filter by config
-        self.filter_skills(&mut skills);
-
-        skills
-    }
-
-    /// Scan a skills directory for SKILL.md files using BFS traversal.
-    /// Matches Codex behavior: max depth 6, max 2000 directories, skip hidden dirs.
-    fn scan_skills_dir(&self, dir: &Path, scope: SkillScope) -> Vec<SkillMetadata> {
-        let mut skills = Vec::new();
-        let mut queue = std::collections::VecDeque::new();
-        let mut visited = std::collections::HashSet::new();
-        visited.insert(dir.to_path_buf());
-        queue.push_back((dir.to_path_buf(), 0usize));
-
-        while let Some((current_dir, depth)) = queue.pop_front() {
-            let entries = match std::fs::read_dir(&current_dir) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    warn!(dir = %current_dir.display(), error = %e, "failed to read skills directory");
-                    continue;
-                }
-            };
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(name) => name.to_string(),
-                    None => continue,
-                };
-
-                // Skip hidden directories (., .git, .drafts, .history, .system, etc.)
-                if file_name.starts_with('.') {
-                    continue;
-                }
-
-                if !path.is_dir() {
-                    continue;
-                }
-
-                // If this directory contains SKILL.md, parse it as a skill.
-                let skill_file = path.join(SKILL_FILENAME);
-                if skill_file.is_file() {
-                    // Respect .disabled marker written by SkillStore.enable().
-                    if path.join(".disabled").exists() {
-                        debug!(dir = %path.display(), "skill disabled via .disabled marker, skipping");
-                        continue;
-                    }
-                    if let Some(skill) = self.parse_skill_md(&skill_file, scope.clone()) {
-                        skills.push(skill);
-                    }
-                }
-
-                // Enqueue for deeper scan if within depth limit.
-                if depth < MAX_SCAN_DEPTH
-                    && visited.len() < MAX_DIRS_PER_ROOT
-                    && visited.insert(path.clone())
-                {
-                    queue.push_back((path, depth + 1));
-                }
-            }
-        }
-
-        skills
-    }
-
-    /// Parse a SKILL.md file (YAML frontmatter + body).
-    fn parse_skill_md(&self, path: &Path, scope: SkillScope) -> Option<SkillMetadata> {
-        // Guard against OOM from unexpectedly large files.
-        if let Err(e) = bifrost_core::text::check_file_size(path, MAX_SKILL_MD_BYTES) {
-            warn!(path = %path.display(), error = %e, "SKILL.md too large, skipping");
-            return None;
-        }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to read SKILL.md");
-                return None;
+        let roots = self.scope_roots(work_dir);
+        let store = SkillStore::new(roots);
+        let records = match store.read_all() {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(error = %error, "failed to read skills via SkillStore, returning empty list");
+                return Vec::new();
             }
         };
 
-        let (frontmatter, body) = parse_frontmatter(&content);
+        let mut skills: Vec<SkillMetadata> = records
+            .into_iter()
+            .filter(|record| record.enabled)
+            .filter_map(|record| project_record(&record))
+            .collect();
 
-        // Derive skill name from directory name if not in frontmatter
-        let dir_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let name = sanitize_single_line(
-            &frontmatter
-                .as_ref()
-                .and_then(|f| f.name.clone())
-                .unwrap_or_else(|| dir_name.clone()),
+        debug!(
+            count = skills.len(),
+            work_dir = %work_dir.display(),
+            "loaded skills via SkillStore"
         );
 
-        let description = sanitize_single_line(
-            &frontmatter
-                .as_ref()
-                .and_then(|f| f.description.clone())
-                .unwrap_or_else(|| format!("Skill: {}", name)),
-        );
-
-        let short_description = frontmatter
-            .as_ref()
-            .and_then(|f| f.short_description.clone())
-            .map(|s| sanitize_single_line(&s))
-            .filter(|s| !s.is_empty());
-
-        // Validate field lengths (aligned with Codex limits).
-        if name.chars().count() > MAX_NAME_LEN {
-            warn!(path = %path.display(), "skill name too long ({} chars, max {}), skipping", name.chars().count(), MAX_NAME_LEN);
-            return None;
-        }
-        if description.chars().count() > MAX_DESCRIPTION_LEN {
-            warn!(path = %path.display(), "skill description too long ({} chars, max {}), skipping", description.chars().count(), MAX_DESCRIPTION_LEN);
-            return None;
-        }
-
-        Some(SkillMetadata {
-            name,
-            description,
-            short_description,
-            prompt_content: body.to_string(),
-            path: path.to_path_buf(),
-            scope,
-        })
+        // Apply user-configured enable/disable overlay.
+        self.filter_skills(&mut skills);
+        skills
     }
 
     /// Filter skills based on config enable/disable settings.
     fn filter_skills(&self, skills: &mut Vec<SkillMetadata>) {
-        if let Some(ref config) = self.config {
-            let disabled: Vec<&str> = config
-                .config
-                .iter()
-                .filter(|e| !e.enabled)
-                .map(|e| e.name.as_str())
-                .collect();
-
-            if !disabled.is_empty() {
-                skills.retain(|s| !disabled.contains(&s.name.as_str()));
-            }
+        let Some(config) = self.config.as_ref() else {
+            return;
+        };
+        let disabled: HashSet<&str> = config
+            .config
+            .iter()
+            .filter(|e| !e.enabled)
+            .map(|e| e.name.as_str())
+            .collect();
+        if !disabled.is_empty() {
+            skills.retain(|s| !disabled.contains(s.name.as_str()));
         }
     }
 
@@ -474,9 +374,85 @@ fn sanitize_single_line(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Project a `SkillRecord` (from `bifrost_skills`) into the `SkillMetadata`
+/// shape consumed by prompt injection and the admin API.
+///
+/// - `name` / `description` come from the validated manifest and are sanitized
+///   to a single line (matches legacy behavior).
+/// - `prompt_content` is the body of SKILL.md (minus YAML frontmatter). Read
+///   fresh from disk so edits to instructions propagate without rebuilding the
+///   manifest.
+/// - `short_description` is recovered from the SKILL.md frontmatter when
+///   present. It is optional and not carried on `SkillRecord`.
+/// - `scope` uses `effective_scope` so the caller sees the winning scope after
+///   the override overlay (e.g. a Repo skill shadowing a System skill reports
+///   `Repo`).
+fn project_record(record: &bifrost_skills::SkillRecord) -> Option<SkillMetadata> {
+    let name = sanitize_single_line(&record.name);
+    let description = sanitize_single_line(&record.description);
+
+    // Length guards (kept consistent with legacy behavior / Codex limits).
+    if name.chars().count() > MAX_NAME_LEN {
+        warn!(
+            path = %record.skill_md_path.display(),
+            "skill name too long ({} chars, max {}), skipping",
+            name.chars().count(),
+            MAX_NAME_LEN,
+        );
+        return None;
+    }
+    if description.chars().count() > MAX_DESCRIPTION_LEN {
+        warn!(
+            path = %record.skill_md_path.display(),
+            "skill description too long ({} chars, max {}), skipping",
+            description.chars().count(),
+            MAX_DESCRIPTION_LEN,
+        );
+        return None;
+    }
+
+    // Read SKILL.md body for prompt injection.
+    let (short_description, prompt_content) = match std::fs::read_to_string(&record.skill_md_path) {
+        Ok(content) => {
+            let (frontmatter, body) = parse_frontmatter(&content);
+            let short = frontmatter
+                .and_then(|fm| fm.short_description)
+                .map(|s| sanitize_single_line(&s))
+                .filter(|s| !s.is_empty());
+            (short, body.to_string())
+        }
+        Err(e) => {
+            warn!(
+                path = %record.skill_md_path.display(),
+                error = %e,
+                "failed to read SKILL.md, using empty prompt body"
+            );
+            (None, String::new())
+        }
+    };
+
+    Some(SkillMetadata {
+        name,
+        description,
+        short_description,
+        prompt_content,
+        path: record.skill_md_path.clone(),
+        scope: record.effective_scope.clone(),
+    })
+}
+
 // ---------------------------------------------------------------------------
-// Frontmatter parsing
+// Frontmatter parsing (retained for `short_description` extraction)
 // ---------------------------------------------------------------------------
+
+/// Minimal YAML frontmatter shape. The authoritative manifest (name, description,
+/// scope, etc.) lives in `manifest.json`; we only reach into SKILL.md frontmatter
+/// here to surface `short_description`, which is an agent-prompt concern not
+/// tracked by `SkillManifest`.
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatter {
+    short_description: Option<String>,
+}
 
 /// Parse YAML frontmatter from a markdown file.
 /// Frontmatter is delimited by `---` lines at the start of the file.
@@ -517,14 +493,29 @@ mod tests {
         let content = r#"---
 name: my-skill
 description: A test skill
+short_description: short
 ---
 This is the body content.
 "#;
         let (fm, body) = parse_frontmatter(content);
         let fm = fm.unwrap();
-        assert_eq!(fm.name.as_deref(), Some("my-skill"));
-        assert_eq!(fm.description.as_deref(), Some("A test skill"));
+        assert_eq!(fm.short_description.as_deref(), Some("short"));
         assert!(body.contains("This is the body content."));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_without_short_description() {
+        // Frontmatter without short_description is still valid; body is returned verbatim.
+        let content = r#"---
+name: plain-skill
+description: No short form
+---
+Body only.
+"#;
+        let (fm, body) = parse_frontmatter(content);
+        let fm = fm.unwrap();
+        assert!(fm.short_description.is_none());
+        assert!(body.contains("Body only."));
     }
 
     #[test]
@@ -641,7 +632,8 @@ Do something useful.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Create skill without name in frontmatter
+        // Create skill without name in frontmatter — SkillStore falls back to
+        // the directory slug as the skill name.
         let skill_dir = root
             .join(AGENTS_DIR_NAME)
             .join(SKILLS_DIR_NAME)
@@ -766,5 +758,78 @@ Do something useful.
             !skills.iter().any(|s| s.name == "disabled-skill"),
             "disabled skill should not be loaded"
         );
+    }
+
+    #[test]
+    fn test_scope_roots_layout_and_order() {
+        // Guardrail: `scope_roots` ordering and path layout are part of the
+        // contract with the E2E suite. Break this and `skill_loading_*` fails.
+        let dir = tempfile::tempdir().unwrap();
+        let agent_home = dir.path().join("agent");
+        let user_home = dir.path().join("user-home");
+        let work_dir = dir.path().join("project");
+
+        let manager = SkillsManager::with_overrides(None, agent_home.clone(), user_home.clone());
+        let roots = manager.scope_roots(&work_dir);
+
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots[0].scope, SkillScope::System);
+        assert_eq!(
+            roots[0].path,
+            agent_home.join(SKILLS_DIR_NAME).join(".system")
+        );
+        assert_eq!(roots[1].scope, SkillScope::Global);
+        assert_eq!(
+            roots[1].path,
+            user_home.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
+        );
+        assert_eq!(roots[2].scope, SkillScope::User);
+        assert_eq!(roots[2].path, agent_home.join(SKILLS_DIR_NAME));
+        assert_eq!(roots[3].scope, SkillScope::Repo);
+        assert_eq!(
+            roots[3].path,
+            work_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
+        );
+    }
+
+    #[test]
+    fn test_filter_skills_removes_disabled_entries() {
+        // Unit test for `filter_skills` independent of disk IO.
+        use crate::config::{SkillConfigEntry, SkillsConfig};
+        let manager = SkillsManager::new(Some(SkillsConfig {
+            include_instructions: true,
+            config: vec![
+                SkillConfigEntry {
+                    name: "keep".to_string(),
+                    enabled: true,
+                },
+                SkillConfigEntry {
+                    name: "drop".to_string(),
+                    enabled: false,
+                },
+            ],
+        }));
+
+        let mut skills = vec![
+            SkillMetadata {
+                name: "keep".to_string(),
+                description: "k".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/dev/null"),
+                scope: SkillScope::Repo,
+            },
+            SkillMetadata {
+                name: "drop".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/dev/null"),
+                scope: SkillScope::Repo,
+            },
+        ];
+        manager.filter_skills(&mut skills);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "keep");
     }
 }

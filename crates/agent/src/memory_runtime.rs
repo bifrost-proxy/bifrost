@@ -24,8 +24,22 @@ const MEMORY_EXTRACT_USER_LIMIT_CHARS: usize = 6_000;
 const MEMORY_EXTRACT_ASSISTANT_LIMIT_CHARS: usize = 6_000;
 const MEMORY_CONSOLIDATION_INPUT_LIMIT_CHARS: usize = 60_000;
 const DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 512;
-const PHASE2_LOCK_STALE_SECS: u64 = 10 * 60;
 const AUTO_MEMORY_MAX_ITEMS: usize = 8;
+
+/// Timeout budgets for background memory jobs. These are independent of the
+/// user-visible request timeout so that a slow consolidation run does not
+/// block the agent turn.
+pub const MEMORY_EXTRACT_TIMEOUT_SECS: u64 = 30;
+pub const MEMORY_CONSOLIDATION_TIMEOUT_SECS: u64 = 120;
+
+/// Consolidation is skipped forever for the current `input_hash` once this
+/// number of consecutive parse/LLM failures is observed. This prevents a
+/// hard-failing model output from re-submitting the same input on every turn.
+const MEMORY_CONSOLIDATION_FAILURE_LIMIT: usize = 5;
+
+/// Retention thresholds — memory skills are written under this subdirectory
+/// to keep them isolated from user-authored skills.
+const MEMORY_SKILLS_SUBDIR: &str = "_memory";
 
 const EXTRACT_SYSTEM_PROMPT: &str = r#"You extract durable memories from a Bifrost Agent conversation.
 
@@ -59,6 +73,7 @@ Rules:
 - If there is no durable memory, return empty strings and an empty skills array.
 - MEMORY.md content must be a complete markdown file and should start with a level-1 heading "Memory".
 - memory_summary should be compact; it is injected into future model prompts.
+- Skill names must be short kebab-case identifiers, not overlap with existing user skill names.
 "##;
 
 const READ_PATH_TEMPLATE: &str = r#"## Memory
@@ -204,8 +219,22 @@ pub struct MemoryFileStats {
     pub memory_root: String,
     pub memory_summary_bytes: u64,
     pub memory_md_bytes: u64,
+    pub raw_memories_bytes: u64,
     pub rollout_summary_count: usize,
     pub skill_count: usize,
+    pub memory_skill_count: usize,
+    #[serde(default)]
+    pub phase2_last_input_hash: Option<String>,
+    #[serde(default)]
+    pub phase2_processed_input_count: usize,
+    #[serde(default)]
+    pub phase2_total_input_count: usize,
+    #[serde(default)]
+    pub phase2_has_more_inputs: bool,
+    #[serde(default)]
+    pub phase2_failure_count: usize,
+    #[serde(default)]
+    pub phase2_updated_at_unix: u64,
 }
 
 /// Return the Codex-compatible memory root: `$agent_home/memory`.
@@ -229,6 +258,8 @@ pub fn ensure_memory_layout() -> Result<PathBuf, String> {
     fs::create_dir_all(root.join("rollout_summaries"))
         .map_err(|error| format!("create rollout_summaries: {error}"))?;
     fs::create_dir_all(root.join("skills")).map_err(|error| format!("create skills: {error}"))?;
+    fs::create_dir_all(root.join("skills").join(MEMORY_SKILLS_SUBDIR))
+        .map_err(|error| format!("create skills/_memory: {error}"))?;
     ensure_file(&root.join("MEMORY.md"), "# Memory\n\n")?;
     ensure_file(&root.join("memory_summary.md"), "")?;
     ensure_file(
@@ -259,19 +290,28 @@ pub fn build_memory_read_instructions() -> Option<String> {
         Ok(root) => root,
         Err(error) => {
             warn!(error = %error, "failed to prepare memory layout, skipping memory injection");
+            telemetry_event(
+                "read_inject.skip",
+                0,
+                false,
+                Some(&format!("layout: {error}")),
+            );
             return None;
         }
     };
     let summary_path = root.join("memory_summary.md");
     if bifrost_core::text::check_file_size(&summary_path, MAX_MEMORY_FILE_BYTES).is_err() {
         warn!(path = %summary_path.display(), "memory summary file too large, skipping");
+        telemetry_event("read_inject.skip", 0, false, Some("summary too large"));
         return None;
     }
     let summary = fs::read_to_string(&summary_path).ok()?.trim().to_string();
     if summary.is_empty() {
+        telemetry_event("read_inject.skip", 0, true, Some("empty summary"));
         return None;
     }
     let summary = truncate_chars(&summary, MEMORY_SUMMARY_TOKEN_LIMIT_CHARS);
+    telemetry_event("read_inject.hit", summary.len() as u64, true, None);
     Some(render_read_path_prompt(&root, &summary))
 }
 
@@ -335,6 +375,13 @@ struct Phase2State {
     has_more_inputs: bool,
     #[serde(default)]
     updated_at_unix: u64,
+    /// Consecutive parse/LLM failures observed for `last_input_hash`.
+    #[serde(default)]
+    failure_count: usize,
+    /// When `failure_count >= MEMORY_CONSOLIDATION_FAILURE_LIMIT`, we pin the
+    /// hash that tripped the breaker so we skip re-running until inputs change.
+    #[serde(default)]
+    pinned_failure_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -352,72 +399,145 @@ struct RawMemorySection {
     rollout_summary_file: Option<String>,
 }
 
+/// Cross-process exclusive lock for Phase 2 consolidation. Uses real `fs2`
+/// advisory locking so that if a process dies abruptly the OS releases the
+/// lock — no staleness heuristic required.
 struct Phase2LockGuard {
+    file: Option<fs::File>,
     path: PathBuf,
-    acquired: bool,
 }
 
 impl Drop for Phase2LockGuard {
     fn drop(&mut self) {
-        if self.acquired {
-            let _ = fs::remove_file(&self.path);
+        if let Some(ref file) = self.file {
+            let _ = FileExt::unlock(file);
         }
+        // Keep the lock file on disk so that `ls -la` still shows it — the
+        // advisory lock is what matters, not the file existence. Cleaning up
+        // unconditionally can race with another process that is right now
+        // trying to open+lock.
+        let _ = &self.path;
     }
 }
 
 impl Phase2LockGuard {
     fn try_acquire(root: &Path) -> Result<Option<Self>, String> {
         let path = root.join(".phase2.lock");
-        match fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
             .write(true)
-            .create_new(true)
+            .truncate(false)
             .open(&path)
-        {
-            Ok(mut file) => {
-                writeln!(file, "pid={}", std::process::id())
-                    .map_err(|error| format!("write {}: {error}", path.display()))?;
-                writeln!(file, "created_at_unix={}", now_secs())
-                    .map_err(|error| format!("write {}: {error}", path.display()))?;
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                // best-effort: record pid + timestamp for human debugging
+                let note = format!("pid={} acquired_at={}\n", std::process::id(), now_secs());
+                let _ = (&file).write_all(note.as_bytes());
+                let _ = file.sync_data();
                 Ok(Some(Self {
+                    file: Some(file),
                     path,
-                    acquired: true,
                 }))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if phase2_lock_is_stale(&path) {
-                    let _ = fs::remove_file(&path);
-                    return Self::try_acquire(root);
+            Err(error) => {
+                // contention: another process holds the lock
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(None);
                 }
-                Ok(None)
+                Err(format!("lock {}: {error}", path.display()))
             }
-            Err(error) => Err(format!("create {}: {error}", path.display())),
         }
     }
 }
 
 /// Generate durable file-backed memories after a turn.
-pub async fn auto_extract_after_turn(
+///
+/// Spawns a background task so that the turn can return immediately. A
+/// per-job timeout protects against a hanging LLM call.
+pub fn auto_extract_after_turn(
+    client: std::sync::Arc<crate::client::AgentClient>,
+    config: AgentConfig,
+    session_key: String,
+    user_message: String,
+    assistant_message: String,
+) {
+    if !generate_memories_enabled(&config) {
+        return;
+    }
+    tokio::spawn(async move {
+        let begin = std::time::Instant::now();
+        telemetry_event("auto_extract.begin", 0, true, None);
+        let deadline = Duration::from_secs(MEMORY_EXTRACT_TIMEOUT_SECS);
+        let work = auto_extract_after_turn_inner(
+            &client,
+            &config,
+            &session_key,
+            &user_message,
+            &assistant_message,
+        );
+        match tokio::time::timeout(deadline, work).await {
+            Ok(Ok(())) => {
+                telemetry_event(
+                    "auto_extract.end",
+                    begin.elapsed().as_millis() as u64,
+                    true,
+                    None,
+                );
+            }
+            Ok(Err(error)) => {
+                warn!(error = %error, "failed to generate file-backed memories");
+                telemetry_event(
+                    "auto_extract.end",
+                    begin.elapsed().as_millis() as u64,
+                    false,
+                    Some(&error),
+                );
+            }
+            Err(_) => {
+                warn!(
+                    secs = MEMORY_EXTRACT_TIMEOUT_SECS,
+                    "auto memory extraction timed out"
+                );
+                telemetry_event(
+                    "auto_extract.end",
+                    begin.elapsed().as_millis() as u64,
+                    false,
+                    Some("timeout"),
+                );
+            }
+        }
+    });
+}
+
+/// Synchronous variant used only by tests that want to drive extraction
+/// deterministically without spawning a task.
+#[cfg(test)]
+pub async fn auto_extract_after_turn_blocking(
     client: &crate::client::AgentClient,
     config: &AgentConfig,
     session: &AgentSession,
     user_message: &str,
     assistant_message: &str,
-) {
+) -> Result<(), String> {
     if !generate_memories_enabled(config) {
-        return;
+        return Ok(());
     }
-    if let Err(error) =
-        auto_extract_after_turn_inner(client, config, session, user_message, assistant_message)
-            .await
-    {
-        warn!(error = %error, "failed to generate file-backed memories");
-    }
+    auto_extract_after_turn_inner(
+        client,
+        config,
+        &session.session_key,
+        user_message,
+        assistant_message,
+    )
+    .await
 }
 
 async fn auto_extract_after_turn_inner(
     client: &crate::client::AgentClient,
     config: &AgentConfig,
-    session: &AgentSession,
+    session_key: &str,
     user_message: &str,
     assistant_message: &str,
 ) -> Result<(), String> {
@@ -441,7 +561,7 @@ async fn auto_extract_after_turn_inner(
 
     let prompt = format!(
         "Session: {}\n\nUser message:\n{}\n\nAssistant response:\n{}",
-        session.session_key,
+        session_key,
         truncate_chars(user_message, MEMORY_EXTRACT_USER_LIMIT_CHARS),
         truncate_chars(assistant_message, MEMORY_EXTRACT_ASSISTANT_LIMIT_CHARS)
     );
@@ -462,20 +582,62 @@ async fn auto_extract_after_turn_inner(
     let memories = parse_extracted_memories(&content);
     let mut wrote_memory = false;
     for memory in memories.into_iter().take(AUTO_MEMORY_MAX_ITEMS) {
-        remember_auto(config, session, &memory)?;
+        remember_auto_from_session_key(session_key, &memory)?;
         wrote_memory = true;
     }
     if wrote_memory {
-        run_phase2_consolidation(client, config).await?;
+        // Run retention opportunistically before consolidation so the phase-2
+        // input window sees the trimmed set rather than the unbounded file.
+        if let Err(error) = prune_memory_artifacts(config) {
+            warn!(error = %error, "memory retention sweep failed");
+        }
+        let consolidation_deadline = Duration::from_secs(MEMORY_CONSOLIDATION_TIMEOUT_SECS);
+        match tokio::time::timeout(
+            consolidation_deadline,
+            run_phase2_consolidation(client, config),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(error = %error, "phase-2 consolidation failed");
+                bump_phase2_failure(&error);
+            }
+            Err(_) => {
+                warn!(
+                    secs = MEMORY_CONSOLIDATION_TIMEOUT_SECS,
+                    "phase-2 consolidation timed out"
+                );
+                bump_phase2_failure("timeout");
+            }
+        }
     }
     Ok(())
 }
 
+fn bump_phase2_failure(reason: &str) {
+    if let Ok(root) = ensure_memory_layout() {
+        let mut state = load_phase2_state(&root);
+        state.failure_count = state.failure_count.saturating_add(1);
+        if state.failure_count >= MEMORY_CONSOLIDATION_FAILURE_LIMIT {
+            state.pinned_failure_hash = Some(state.last_input_hash.clone());
+        }
+        state.updated_at_unix = now_secs();
+        let _ = save_phase2_state(&root, &state);
+        telemetry_event(
+            "phase2.failure",
+            state.failure_count as u64,
+            false,
+            Some(reason),
+        );
+    }
+}
+
 fn parse_extracted_memories(content: &str) -> Vec<String> {
-    let trimmed = content.trim();
+    let trimmed = strip_markdown_fences(content.trim());
     let parsed = serde_json::from_str::<ExtractedMemories>(trimmed)
         .or_else(|_| {
-            extract_json_object(trimmed)
+            extract_balanced_json(trimmed)
                 .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))
                 .and_then(serde_json::from_str::<ExtractedMemories>)
         })
@@ -493,10 +655,69 @@ fn parse_extracted_memories(content: &str) -> Vec<String> {
     output
 }
 
-fn extract_json_object(content: &str) -> Option<&str> {
-    let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    (start <= end).then(|| &content[start..=end])
+/// Strip a leading ```json / ```JSON / ``` fence and its trailing ``` if
+/// present. Only the first fenced block is unwrapped; nested or multiple
+/// blocks fall through to the balanced-brace scanner.
+fn strip_markdown_fences(content: &str) -> &str {
+    let trimmed = content.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // drop optional language tag up to first newline
+        let after_lang = rest.find('\n').map(|idx| &rest[idx + 1..]).unwrap_or(rest);
+        if let Some(end) = after_lang.rfind("```") {
+            return after_lang[..end].trim();
+        }
+        return after_lang.trim();
+    }
+    trimmed
+}
+
+/// Find the first balanced JSON object/array in the given text using a
+/// bracket-counting scan that respects string and escape semantics. Returns
+/// a slice over the original text when a balanced block is found.
+fn extract_balanced_json(content: &str) -> Option<&str> {
+    let bytes = content.as_bytes();
+    let mut start = None;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut opener = b'{';
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                if start.is_none() {
+                    start = Some(i);
+                    opener = b;
+                }
+                depth += 1;
+            }
+            b'}' | b']' if start.is_some() => {
+                let closer = if opener == b'{' { b'}' } else { b']' };
+                depth -= 1;
+                if depth == 0 {
+                    if b == closer {
+                        let s = start.unwrap();
+                        return Some(&content[s..=i]);
+                    }
+                    // mismatched closer — reset scan
+                    start = None;
+                    depth = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_memory_lines(content: &str) -> Vec<String> {
@@ -517,9 +738,8 @@ fn normalize_memory_line(line: &str) -> String {
         .to_string()
 }
 
-fn remember_auto(
-    _config: &AgentConfig,
-    session: &AgentSession,
+fn remember_auto_from_session_key(
+    session_key: &str,
     content: &str,
 ) -> Result<MemoryFileEntry, String> {
     let root = ensure_memory_layout()?;
@@ -527,31 +747,34 @@ fn remember_auto(
     if content.is_empty() {
         return Err("memory content must not be empty".to_string());
     }
-    let id = format!("auto-{}-{}", now_secs(), sanitize_id(&session.session_key));
+    let id = format!("auto-{}-{}", now_secs(), sanitize_id(session_key));
     let memory_path = root.join("MEMORY.md");
     append_line(
         &memory_path,
         &format!(
             "\n- id: `{id}`\n  source: auto_extract\n  session: `{}`\n  content: {}\n",
-            session.session_key, content
+            session_key, content
         ),
     )?;
     let summary_path = root.join("memory_summary.md");
     append_line(&summary_path, &format!("- {content}\n"))?;
-    append_raw_memory_artifacts(
-        &root,
-        &id,
-        "auto_extract",
-        &session.session_key,
-        content,
-        true,
-    )?;
+    append_raw_memory_artifacts(&root, &id, "auto_extract", session_key, content, true)?;
     info!(memory_id = %id, "auto memory extracted");
+    telemetry_event("auto_extract.write", content.len() as u64, true, None);
     Ok(MemoryFileEntry {
         id,
         path: "MEMORY.md".to_string(),
         content: content.to_string(),
     })
+}
+
+#[cfg(test)]
+fn remember_auto(
+    _config: &AgentConfig,
+    session: &AgentSession,
+    content: &str,
+) -> Result<MemoryFileEntry, String> {
+    remember_auto_from_session_key(&session.session_key, content)
 }
 
 /// Explicitly remember text by appending to Codex-compatible files.
@@ -588,11 +811,64 @@ pub fn remember_explicit(
         content,
         false,
     )?;
+    telemetry_event("remember_explicit", content.len() as u64, true, None);
     Ok(MemoryFileEntry {
         id,
         path: "MEMORY.md".to_string(),
         content: content.to_string(),
     })
+}
+
+/// Replace a memory entry's content in `MEMORY.md` by id. The entry is
+/// rewritten in place so the append-only history remains but the visible
+/// content reflects the new value. Returns `Ok(Some(id))` on success,
+/// `Ok(None)` if the id does not exist.
+pub fn replace_memory(
+    _config: &AgentConfig,
+    _session: &AgentSession,
+    id: &str,
+    new_content: &str,
+) -> Result<Option<String>, String> {
+    let root = ensure_memory_layout()?;
+    let path = root.join("MEMORY.md");
+    let original =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let marker = format!("id: `{id}`");
+    if !original.contains(&marker) {
+        return Ok(None);
+    }
+    let mut lines: Vec<String> = original.lines().map(String::from).collect();
+    let mut target_block_start = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if line.contains(&marker) {
+            target_block_start = Some(idx);
+            break;
+        }
+    }
+    let Some(start) = target_block_start else {
+        return Ok(None);
+    };
+    // find the `content:` line in the same block (next blank line ends block)
+    let mut content_idx = None;
+    for (offset, line) in lines[start..].iter().enumerate() {
+        if line.trim().is_empty() && offset > 0 {
+            break;
+        }
+        if line.trim_start().starts_with("content:") {
+            content_idx = Some(start + offset);
+            break;
+        }
+    }
+    if let Some(idx) = content_idx {
+        let indent_end = lines[idx].len() - lines[idx].trim_start().len();
+        let indent = &lines[idx][..indent_end];
+        lines[idx] = format!("{indent}content: {}", new_content.trim());
+    } else {
+        lines.insert(start + 1, format!("  content: {}", new_content.trim()));
+    }
+    atomic_write(&path, &format!("{}\n", lines.join("\n")))
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(Some(id.to_string()))
 }
 
 fn append_raw_memory_artifacts(
@@ -640,15 +916,25 @@ async fn run_phase2_consolidation(
     client: &crate::client::AgentClient,
     config: &AgentConfig,
 ) -> Result<(), String> {
+    let begin = std::time::Instant::now();
+    telemetry_event("phase2.begin", 0, true, None);
     let root = ensure_memory_layout()?;
     let Some(_lock) = Phase2LockGuard::try_acquire(&root)? else {
         info!(memory_root = %root.display(), "phase-2 memory consolidation skipped because another worker holds the lock");
+        telemetry_event("phase2.skip", 0, true, Some("locked"));
         return Ok(());
     };
     let input = build_phase2_input(&root, phase2_input_limit(config))?;
     let state = load_phase2_state(&root);
-    if state.last_input_hash == input.input_hash {
+    if state.last_input_hash == input.input_hash && state.failure_count == 0 {
+        telemetry_event("phase2.skip", 0, true, Some("hash-unchanged"));
         return Ok(());
+    }
+    if let Some(pinned) = state.pinned_failure_hash.as_ref() {
+        if pinned == &input.input_hash {
+            telemetry_event("phase2.skip", 0, false, Some("breaker-open"));
+            return Ok(());
+        }
     }
 
     if input.prompt.trim().is_empty() {
@@ -689,9 +975,12 @@ async fn run_phase2_consolidation(
             total_input_count: input.total_input_count,
             has_more_inputs: input.has_more_inputs,
             updated_at_unix: now_secs(),
+            failure_count: 0,
+            pinned_failure_hash: None,
         },
     )?;
     info!(memory_root = %root.display(), "phase-2 memory consolidation completed");
+    telemetry_event("phase2.end", begin.elapsed().as_millis() as u64, true, None);
     Ok(())
 }
 
@@ -849,10 +1138,10 @@ fn read_limited_text(path: &Path) -> Result<String, String> {
 }
 
 fn parse_consolidated_memory(content: &str) -> Result<ConsolidatedMemory, String> {
-    let trimmed = content.trim();
+    let trimmed = strip_markdown_fences(content.trim());
     let consolidated = serde_json::from_str::<ConsolidatedMemory>(trimmed)
         .or_else(|_| {
-            extract_json_object(trimmed)
+            extract_balanced_json(trimmed)
                 .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))
                 .and_then(serde_json::from_str::<ConsolidatedMemory>)
         })
@@ -879,13 +1168,26 @@ fn apply_consolidated_memory(root: &Path, consolidated: ConsolidatedMemory) -> R
         atomic_write(&root.join("MEMORY.md"), &format!("{}\n", memory.trim()))
             .map_err(|error| format!("write MEMORY.md: {error}"))?;
     }
+    let memory_skills_dir = root.join("skills").join(MEMORY_SKILLS_SUBDIR);
+    fs::create_dir_all(&memory_skills_dir)
+        .map_err(|error| format!("create {}: {error}", memory_skills_dir.display()))?;
+    let user_skill_dir = root.join("skills");
     for skill in consolidated.skills {
         let name = sanitize_skill_name(&skill.name);
         let skill_md = skill.skill_md.trim();
         if name.is_empty() || skill_md.is_empty() {
             continue;
         }
-        let dir = root.join("skills").join(&name);
+        // refuse to shadow an existing user-authored skill
+        let user_dir = user_skill_dir.join(&name);
+        if user_dir.exists() && user_dir != memory_skills_dir.join(&name) {
+            warn!(
+                skill = %name,
+                "refusing to overwrite user skill with memory-skill of the same name"
+            );
+            continue;
+        }
+        let dir = memory_skills_dir.join(&name);
         fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
         atomic_write(&dir.join("SKILL.md"), &format!("{skill_md}\n"))
             .map_err(|error| format!("write skill {name}: {error}"))?;
@@ -922,14 +1224,6 @@ fn phase2_input_limit(config: &AgentConfig) -> usize {
         .clamp(1, 4096)
 }
 
-fn phase2_lock_is_stale(path: &Path) -> bool {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-        .is_some_and(|age| age > Duration::from_secs(PHASE2_LOCK_STALE_SECS))
-}
-
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -943,11 +1237,19 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         now_secs()
     ));
     fs::write(&tmp, content)?;
+    // best-effort fsync of tmp before rename
+    if let Ok(file) = fs::OpenOptions::new().read(true).open(&tmp) {
+        let _ = file.sync_data();
+    }
     fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
 }
 
+/// Append a line to `path` under an exclusive advisory lock. The lock is held
+/// for the duration of the write and explicitly released before the file is
+/// dropped. `write_all` is followed by `flush` + `sync_data` so that the
+/// bytes are durably on disk when the function returns.
 fn append_line(path: &Path, line: &str) -> Result<(), String> {
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -957,8 +1259,12 @@ fn append_line(path: &Path, line: &str) -> Result<(), String> {
         .map_err(|error| format!("open {}: {error}", path.display()))?;
     file.lock_exclusive()
         .map_err(|error| format!("lock {}: {error}", path.display()))?;
-    file.write_all(line.as_bytes())
-        .map_err(|error| format!("append {}: {error}", path.display()))
+    let write_result = file
+        .write_all(line.as_bytes())
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_data());
+    let _ = FileExt::unlock(&file);
+    write_result.map_err(|error| format!("append {}: {error}", path.display()))
 }
 
 /// List matching memory lines from `memory_summary.md` and `MEMORY.md`.
@@ -971,8 +1277,10 @@ pub fn list_visible_memories(
     search_memory_files("", limit, &root)
 }
 
-/// Remove a memory line by id. File-backed memories are append-oriented, so `last` removes the last
-/// explicit `id:` block from MEMORY.md and leaves summary history intact.
+/// Remove a memory entry from `MEMORY.md`. Supports:
+/// - exact id (`manual-...` or `auto-...`)
+/// - the literal `last` → removes the most recent entry (manual OR auto)
+/// - id prefix (≥8 chars) for convenience
 pub fn forget_memory(
     _config: &AgentConfig,
     _session: &AgentSession,
@@ -983,10 +1291,23 @@ pub fn forget_memory(
     let original =
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let mut lines = original.lines().map(str::to_string).collect::<Vec<_>>();
+
     let target = if id_or_last == "last" {
-        lines.iter().rev().find_map(|line| extract_manual_id(line))
+        lines.iter().rev().find_map(|line| extract_entry_id(line))
     } else {
-        Some(id_or_last.to_string())
+        // exact match first, then prefix
+        let exact = lines
+            .iter()
+            .find_map(|line| extract_entry_id(line).filter(|id| id == id_or_last));
+        exact.or_else(|| {
+            if id_or_last.len() >= 8 {
+                lines
+                    .iter()
+                    .find_map(|line| extract_entry_id(line).filter(|id| id.starts_with(id_or_last)))
+            } else {
+                Some(id_or_last.to_string())
+            }
+        })
     };
     let Some(target) = target else {
         return Ok(None);
@@ -998,13 +1319,15 @@ pub fn forget_memory(
     }
     fs::write(&path, format!("{}\n", lines.join("\n")))
         .map_err(|error| format!("write {}: {error}", path.display()))?;
+    telemetry_event("forget", 1, true, Some(&target));
     Ok(Some(target))
 }
 
-fn extract_manual_id(line: &str) -> Option<String> {
+fn extract_entry_id(line: &str) -> Option<String> {
     line.split("id: `")
         .nth(1)
         .and_then(|rest| rest.split('`').next())
+        .filter(|id| id.starts_with("manual-") || id.starts_with("auto-"))
         .map(str::to_string)
 }
 
@@ -1045,12 +1368,25 @@ pub fn search_memory_files(
 
 pub fn memory_stats() -> Result<MemoryFileStats, String> {
     let root = ensure_memory_layout()?;
+    let state = load_phase2_state(&root);
     Ok(MemoryFileStats {
         memory_summary_bytes: file_len(root.join("memory_summary.md")),
         memory_md_bytes: file_len(root.join("MEMORY.md")),
+        raw_memories_bytes: file_len(root.join("raw_memories.md")),
         rollout_summary_count: dir_entry_count(root.join("rollout_summaries")),
         skill_count: dir_entry_count(root.join("skills")),
+        memory_skill_count: dir_entry_count(root.join("skills").join(MEMORY_SKILLS_SUBDIR)),
         memory_root: root.display().to_string(),
+        phase2_last_input_hash: if state.last_input_hash.is_empty() {
+            None
+        } else {
+            Some(state.last_input_hash)
+        },
+        phase2_processed_input_count: state.processed_input_count,
+        phase2_total_input_count: state.total_input_count,
+        phase2_has_more_inputs: state.has_more_inputs,
+        phase2_failure_count: state.failure_count,
+        phase2_updated_at_unix: state.updated_at_unix,
     })
 }
 
@@ -1099,6 +1435,180 @@ fn sanitize_skill_name(input: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Retention sweep (P1)
+// ---------------------------------------------------------------------------
+
+/// Run the retention sweep:
+///   * cap `raw_memories.md` to at most `max_raw_memories_for_consolidation * 4`
+///     sections (moving older sections to `raw_memories.archive.md`);
+///   * delete `rollout_summaries/*.md` older than `max_rollout_age_days`;
+///   * cap total rollout-summary file count at `max_rollouts_per_startup`.
+///
+/// Called opportunistically from the auto-extract path. Returns `Ok(())` even
+/// if individual steps are skipped (e.g., fields not set) — the sweep is
+/// best-effort.
+pub fn prune_memory_artifacts(config: &AgentConfig) -> Result<(), String> {
+    let root = ensure_memory_layout()?;
+    let memories_cfg = config.get_memories_config();
+
+    // 1. raw_memories.md: retain recent N sections, archive the rest.
+    let retention_window = memories_cfg
+        .max_raw_memories_for_consolidation
+        .unwrap_or(DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION)
+        .saturating_mul(4)
+        .max(16);
+    let raw_path = root.join("raw_memories.md");
+    if let Ok(raw) = fs::read_to_string(&raw_path) {
+        let sections = parse_raw_memory_sections(&raw);
+        if sections.len() > retention_window {
+            let split = sections.len() - retention_window;
+            let archived = &sections[..split];
+            let kept = &sections[split..];
+            let archive_path = root.join("raw_memories.archive.md");
+            let mut archive_content = fs::read_to_string(&archive_path).unwrap_or_default();
+            if archive_content.is_empty() {
+                archive_content.push_str("# Raw Memories (archive)\n\n");
+            }
+            for section in archived {
+                archive_content.push_str(section.content.trim());
+                archive_content.push_str("\n\n");
+            }
+            atomic_write(&archive_path, &archive_content)
+                .map_err(|error| format!("write archive: {error}"))?;
+            let mut kept_content = String::from("# Raw Memories\n\n");
+            for section in kept {
+                kept_content.push_str(section.content.trim());
+                kept_content.push_str("\n\n");
+            }
+            atomic_write(&raw_path, &kept_content)
+                .map_err(|error| format!("write raw_memories.md: {error}"))?;
+            telemetry_event(
+                "retention.raw_archive",
+                archived.len() as u64,
+                true,
+                Some("sections moved to archive"),
+            );
+        }
+    }
+
+    // 2. rollout_summaries: age + count based trimming.
+    let dir = root.join("rollout_summaries");
+    let entries: Vec<fs::DirEntry> = fs::read_dir(&dir)
+        .map(|iter| iter.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    let max_age_days = memories_cfg.max_rollout_age_days;
+    let max_count = memories_cfg.max_rollouts_per_startup;
+    let now_secs_value = now_secs();
+
+    let mut removed_by_age = 0usize;
+    if let Some(days) = max_age_days {
+        if days > 0 {
+            let age_secs = (days as u64).saturating_mul(86_400);
+            for entry in &entries {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(age) = SystemTime::now().duration_since(modified) {
+                            if age.as_secs() > age_secs && fs::remove_file(entry.path()).is_ok() {
+                                removed_by_age += 1;
+                            }
+                        } else if now_secs_value > 0 {
+                            // modified is in the future; skip
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if removed_by_age > 0 {
+        telemetry_event(
+            "retention.rollout_expire",
+            removed_by_age as u64,
+            true,
+            None,
+        );
+    }
+
+    if let Some(cap) = max_count {
+        if cap > 0 {
+            let mut remaining: Vec<fs::DirEntry> = fs::read_dir(&dir)
+                .map(|iter| iter.filter_map(Result::ok).collect())
+                .unwrap_or_default();
+            if remaining.len() > cap {
+                remaining.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+                let drop_n = remaining.len() - cap;
+                let mut removed_by_count = 0usize;
+                for entry in remaining.into_iter().take(drop_n) {
+                    if fs::remove_file(entry.path()).is_ok() {
+                        removed_by_count += 1;
+                    }
+                }
+                if removed_by_count > 0 {
+                    telemetry_event("retention.rollout_cap", removed_by_count as u64, true, None);
+                }
+            }
+        }
+    }
+
+    // 3. memory_summary.md: if larger than threshold, keep only the last 200 lines.
+    let summary_path = root.join("memory_summary.md");
+    if let Ok(meta) = fs::metadata(&summary_path) {
+        if meta.len() > (MAX_MEMORY_FILE_BYTES / 2) {
+            if let Ok(summary) = fs::read_to_string(&summary_path) {
+                let lines: Vec<&str> = summary.lines().collect();
+                let keep_from = lines.len().saturating_sub(200);
+                let trimmed = lines[keep_from..].join("\n");
+                atomic_write(&summary_path, &format!("{trimmed}\n"))
+                    .map_err(|error| format!("write memory_summary.md: {error}"))?;
+                telemetry_event(
+                    "retention.summary_trim",
+                    (lines.len() - (lines.len() - keep_from)) as u64,
+                    true,
+                    None,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry (P2)
+// ---------------------------------------------------------------------------
+
+/// Append a single JSONL telemetry line to `agent/memory/.telemetry.jsonl`.
+///
+/// Swallows all errors — telemetry must never break the memory hot path.
+/// Callers get a cheap, cross-session local audit trail of memory behavior
+/// without needing any external system.
+fn telemetry_event(event: &str, value: u64, success: bool, detail: Option<&str>) {
+    let root = memory_root();
+    if fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let path = root.join(".telemetry.jsonl");
+    let line = serde_json::json!({
+        "ts": now_secs(),
+        "event": event,
+        "value": value,
+        "success": success,
+        "detail": detail,
+    });
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(&path)
+    {
+        if file.lock_exclusive().is_ok() {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            let _ = FileExt::unlock(&file);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1213,6 +1723,36 @@ mod tests {
             r#"{"memories":["Prefer file-backed memory", "Prefer file-backed memory", ""]}"#,
         );
         assert_eq!(memories, vec!["Prefer file-backed memory"]);
+    }
+
+    #[test]
+    fn parse_extracted_memories_strips_markdown_fences() {
+        let memories =
+            parse_extracted_memories("```json\n{\"memories\":[\"hello from fenced block\"]}\n```");
+        assert_eq!(memories, vec!["hello from fenced block"]);
+    }
+
+    #[test]
+    fn parse_extracted_memories_handles_prose_wrapped_json() {
+        let content = "Here is the JSON you asked for:\n```\n{\n  \"memories\": [\"nested { brace } inside\"]\n}\n```\nHope this helps!";
+        let memories = parse_extracted_memories(content);
+        assert_eq!(memories, vec!["nested { brace } inside"]);
+    }
+
+    #[test]
+    fn parse_consolidated_memory_handles_fenced_block() {
+        let consolidated = parse_consolidated_memory(
+            "```json\n{\"memory_summary\":\"s\",\"memory\":\"m\",\"skills\":[]}\n```",
+        )
+        .expect("parse");
+        assert_eq!(consolidated.memory_summary, "s");
+        assert_eq!(consolidated.memory, "m");
+        assert!(consolidated.skills.is_empty());
+    }
+
+    #[test]
+    fn parse_consolidated_memory_errors_on_garbage() {
+        assert!(parse_consolidated_memory("not json at all").is_err());
     }
 
     #[test]
@@ -1389,7 +1929,165 @@ mod tests {
         let memory = fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert!(memory.starts_with("# Memory"));
         assert!(memory.contains("phase2_consolidated"));
-        let skill = fs::read_to_string(root.join("skills/memory-skill/SKILL.md")).unwrap();
+        // memory skills now live under skills/_memory/<name>/SKILL.md
+        let skill = fs::read_to_string(
+            root.join("skills")
+                .join(MEMORY_SKILLS_SUBDIR)
+                .join("memory-skill")
+                .join("SKILL.md"),
+        )
+        .unwrap();
         assert!(skill.contains("Use concise memory."));
+    }
+
+    #[test]
+    fn apply_consolidated_memory_preserves_user_authored_skill() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let root = ensure_memory_layout().expect("layout");
+        // pre-create a user-authored skill with the same name
+        let user_skill_dir = root.join("skills").join("shared-name");
+        fs::create_dir_all(&user_skill_dir).unwrap();
+        fs::write(user_skill_dir.join("SKILL.md"), "user authored").unwrap();
+
+        let consolidated = parse_consolidated_memory(
+            r#"{
+              "memory_summary": "",
+              "memory": "",
+              "skills": [{"name": "shared-name", "skill_md": "memory authored"}]
+            }"#,
+        )
+        .unwrap();
+        apply_consolidated_memory(&root, consolidated).unwrap();
+
+        let user_content = fs::read_to_string(user_skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(
+            user_content, "user authored",
+            "user skill must not be overwritten"
+        );
+        let memory_skill_path = root
+            .join("skills")
+            .join(MEMORY_SKILLS_SUBDIR)
+            .join("shared-name")
+            .join("SKILL.md");
+        assert!(
+            !memory_skill_path.exists(),
+            "memory-skill should not shadow user skill"
+        );
+    }
+
+    #[test]
+    fn forget_memory_removes_auto_entries() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let session = AgentSession::new("forget-auto");
+        let record = remember_auto(&AgentConfig::default(), &session, "an auto entry").unwrap();
+        let removed = forget_memory(&AgentConfig::default(), &session, &record.id).unwrap();
+        assert_eq!(removed, Some(record.id.clone()));
+        let memory = fs::read_to_string(memory_root().join("MEMORY.md")).unwrap();
+        assert!(!memory.contains(&record.id));
+    }
+
+    #[test]
+    fn forget_memory_last_matches_any_source() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let session = AgentSession::new("forget-last");
+        remember_explicit(&AgentConfig::default(), &session, "manual 1").unwrap();
+        let last_auto = remember_auto(&AgentConfig::default(), &session, "auto last").unwrap();
+        let removed = forget_memory(&AgentConfig::default(), &session, "last").unwrap();
+        assert_eq!(removed, Some(last_auto.id));
+    }
+
+    #[test]
+    fn replace_memory_rewrites_content_line() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let session = AgentSession::new("replace");
+        let record = remember_explicit(&AgentConfig::default(), &session, "original").unwrap();
+        let replaced =
+            replace_memory(&AgentConfig::default(), &session, &record.id, "updated").unwrap();
+        assert_eq!(replaced, Some(record.id.clone()));
+        let memory = fs::read_to_string(memory_root().join("MEMORY.md")).unwrap();
+        assert!(memory.contains("content: updated"));
+        assert!(!memory.contains("content: original"));
+    }
+
+    #[test]
+    fn extract_balanced_json_handles_nested_braces_in_strings() {
+        let content = "prefix {\"memories\":[\"{}\",\"a\"]} suffix";
+        let block = extract_balanced_json(content).expect("found json");
+        assert_eq!(block, "{\"memories\":[\"{}\",\"a\"]}");
+    }
+
+    #[test]
+    fn phase2_failure_counter_opens_breaker() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let root = ensure_memory_layout().expect("layout");
+        for _ in 0..MEMORY_CONSOLIDATION_FAILURE_LIMIT {
+            bump_phase2_failure("test");
+        }
+        let state = load_phase2_state(&root);
+        assert_eq!(state.failure_count, MEMORY_CONSOLIDATION_FAILURE_LIMIT);
+        assert!(state.pinned_failure_hash.is_some());
+    }
+
+    #[test]
+    fn memory_stats_reports_phase2_counters() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let stats = memory_stats().expect("stats");
+        assert!(stats.memory_root.ends_with("memory"));
+        assert_eq!(stats.phase2_failure_count, 0);
+    }
+
+    #[test]
+    fn prune_memory_artifacts_caps_raw_memories() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        let session = AgentSession::new("prune-raw");
+        for i in 0..40 {
+            remember_auto(&AgentConfig::default(), &session, &format!("raw-{i}")).unwrap();
+        }
+        let config = AgentConfig {
+            memories: Some(crate::config::MemoriesConfig {
+                max_raw_memories_for_consolidation: Some(4),
+                ..Default::default()
+            }),
+            ..AgentConfig::default()
+        };
+        prune_memory_artifacts(&config).expect("prune");
+        let raw = fs::read_to_string(memory_root().join("raw_memories.md")).unwrap();
+        let sections = parse_raw_memory_sections(&raw);
+        // retention window = 4*4 = 16
+        assert!(
+            sections.len() <= 16,
+            "expected bounded raw_memories, got {}",
+            sections.len()
+        );
+        let archive = fs::read_to_string(memory_root().join("raw_memories.archive.md"))
+            .expect("archive file created");
+        assert!(archive.contains("Raw Memories (archive)"));
+    }
+
+    #[test]
+    fn telemetry_event_writes_jsonl() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        ensure_memory_layout().expect("layout");
+        telemetry_event("unit.test", 42, true, Some("hello"));
+        let path = memory_root().join(".telemetry.jsonl");
+        let content = fs::read_to_string(&path).expect("telemetry file");
+        assert!(content.contains("\"event\":\"unit.test\""));
+        assert!(content.contains("\"value\":42"));
     }
 }

@@ -6,6 +6,8 @@ use bifrost_core::text::truncate_bytes_with_suffix;
 use tracing::{debug, info};
 
 /// HTTP client that calls a Chat Completions endpoint with tool support.
+/// HTTP client that calls a Chat Completions endpoint with tool support.
+#[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
 }
