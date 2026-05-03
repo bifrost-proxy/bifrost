@@ -4379,7 +4379,7 @@ export default function RemoteInvokeTab({
                   data-testid="file-access-roots-input"
                   autoSize={{ minRows: 3, maxRows: 6 }}
                   value={(fileAccessDraft.roots ?? []).join("\n")}
-                  placeholder="/Users/eden/work/project"
+                  placeholder="/Users/<yourname>/work/project"
                   onChange={(e) => {
                     const roots = e.target.value.split("\n");
                     setFileAccessDraft((prev) => prev ? { ...prev, roots } : prev);
