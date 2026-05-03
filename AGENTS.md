@@ -382,6 +382,74 @@ let verbose_logging = matches!(log_level.as_str(), "debug" | "trace");
 | `platform` | `scripts/ci/run-e2e-platform.sh` | 平台集成、跨端能力 |
 
 
+## GitHub Actions CI 分析与 fix-push-watch 闭环
+
+**唯一入口：`.agents/skills/github-actions-pat/`**。所有"读 CI 运行状态 / 拉 failed job 日志 / 归因失败 / 轮询 run / 做 PR review / 推完代码后自动盯 CI"的工作必须走本 skill，不得直接手写 curl、不得走 cookie / gh CLI login / OAuth device flow。
+
+### 什么时候启用
+
+触发 **任一** 条件即必须加载：
+
+1. 用户说"看看 CI / 查一下 workflow / 为什么失败了 / CI 怎么样了"等意图分析 GitHub Actions 的话
+2. 推完代码（`git push`）后需要等 CI 走完并验证绿灯
+3. 需要对已 push 的 PR 做 code review（拉 diff + 分层建议，必要时 `--post`）
+4. 进入 fix → push → watch → iterate 的自动化闭环
+5. 需要与上一次绿跑做 regression 对比，定位是哪次提交引入的失败
+
+### 如何加载
+
+本 skill 只依赖 `GITHUB_TOKEN` 环境变量（PAT，推荐 fine-grained + 仓库维度限定）。**不支持也不允许**用 cookie / OAuth / `gh auth login` 等其他认证方式。
+
+```bash
+# 1) 确认 token 已经 export（由用户在自己本地 shell rc 里配好）
+#    macOS / zsh 用户必须用 -ic（interactive 模式）才会加载 ~/.zshrc
+zsh -ic 'echo "${GITHUB_TOKEN:+present}"'   # 应输出 "present"
+
+# 2) 设置目标仓库（未设置时默认 bifrost-proxy/bifrost）
+export GH_REPO=bifrost-proxy/bifrost
+
+# 3) 所有调用都要带 proxy 隔离前缀，避免 bifrost 本身 MITM 掉证书
+NO_PROXY=api.github.com,github.com,*.blob.core.windows.net \
+HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= \
+python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
+```
+
+### 典型命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 按 run-id 分析失败 | `python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>` |
+| PR 上最近一次 failed | `... scripts/gh_ci.py pr <N>` |
+| 按 commit sha 找 | `... scripts/gh_ci.py sha <sha>` |
+| 分支上最近一次 failed | `... scripts/gh_ci.py branch <name>` |
+| 与上次绿跑 regression 对比 | `... scripts/gh_ci.py regression <run_id>` |
+| 轮询 run 到完成 | `POLL_SEC=45 MAX_WAIT_SEC=1800 python3 ... scripts/poll_run.py <run_id>` |
+| PR code review（仅生成 markdown） | `... scripts/gh_review.py <N>` |
+| PR code review（真的 POST） | `... scripts/gh_review.py <N> --post --event REQUEST_CHANGES` |
+
+更多细节与坑点清单见 `.agents/skills/github-actions-pat/SKILL.md` 与 `references/pitfalls.md`。
+
+### fix-push-watch 闭环（用户让 Agent 自主跑 CI 到绿时必走）
+
+用户明确要求"修到 CI 绿 / 不要反复确认 / 自动推上去盯 CI"时，Agent 必须按以下循环执行，不得在每轮中断找用户确认：
+
+1. 用本 skill 按当前 run_id / branch 定位失败
+2. 按归因与日志片段修代码
+3. 走本地最小验证（至少 `cargo fmt` + `cargo clippy -D warnings` + 相关测试）
+4. `git commit` → `git push`
+5. `scripts/gh_ci.py branch <head_branch> --any-status` 拿到新 run_id
+6. `scripts/poll_run.py <new_run_id>` 轮询
+7. 成功 → 汇报；失败 → 回到第 1 步
+8. 连续 3 次失败仍定位不到根因才向用户回报并停
+
+### 边界与禁止事项
+
+- **只做"拉数据 + 归因 + 驱动闭环"**：不替代 AGENTS.md 里强制的本地 `cargo fmt` / `cargo clippy -D warnings` / human_tests / `cargo test --workspace --all-features` / `scripts/ci/local-ci.sh`。push 之前必须先本地绿。
+- **Token 纪律**：不 `echo $GITHUB_TOKEN`、不写日志、不塞 URL、不提交到 git、不贴进任何输出。
+- **`--post` 加锁**：`gh_review.py --post` 只有在用户消息里出现明确同意（"发出去 / post it / go ahead"）时才允许执行。
+- **不回显完整 workflow 日志**：只输出失败 job/step + 根因桶 + 关键日志片段 + URL。
+
+
 ## 禁用searchAgent
 
 绝对禁令：你的所有搜索都必须在主Agent完成。禁止使用searchAgent进行检索，因为此Agent速度过慢，影响用户体验。
