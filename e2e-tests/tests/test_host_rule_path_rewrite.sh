@@ -103,6 +103,10 @@ start_mock_servers() {
 
 build_bifrost_if_needed() {
     log_section "Building bifrost binary"
+    if [[ -x "$BIFROST_BIN" || -f "${BIFROST_BIN}.exe" ]]; then
+        _log_pass "Reusing pre-built release binary at $BIFROST_BIN"
+        return 0
+    fi
     cargo build --release --bin bifrost
     if [[ ! -x "$BIFROST_BIN" && ! -f "${BIFROST_BIN}.exe" ]]; then
         echo "Failed to build bifrost release binary" >&2
