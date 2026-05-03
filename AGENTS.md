@@ -423,7 +423,8 @@ python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
 | 按 commit sha 找 | `... scripts/gh_ci.py sha <sha>` |
 | 分支上最近一次 failed | `... scripts/gh_ci.py branch <name>` |
 | 与上次绿跑 regression 对比 | `... scripts/gh_ci.py regression <run_id>` |
-| 轮询 run 到完成 | `POLL_SEC=45 MAX_WAIT_SEC=1800 python3 ... scripts/poll_run.py <run_id>` |
+| **fail-fast 看护**（推荐，任一 job 失败立即退出并打印归因） | `POLL_SEC=20 MAX_WAIT_SEC=3600 python3 ... scripts/watch_jobs.py <run_id>` |
+| 等整个 run 跑完（仅用于最终全绿确认） | `POLL_SEC=45 MAX_WAIT_SEC=1800 python3 ... scripts/poll_run.py <run_id>` |
 | PR code review（仅生成 markdown） | `... scripts/gh_review.py <N>` |
 | PR code review（真的 POST） | `... scripts/gh_review.py <N> --post --event REQUEST_CHANGES` |
 
@@ -431,16 +432,18 @@ python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
 
 ### fix-push-watch 闭环（用户让 Agent 自主跑 CI 到绿时必走）
 
-用户明确要求"修到 CI 绿 / 不要反复确认 / 自动推上去盯 CI"时，Agent 必须按以下循环执行，不得在每轮中断找用户确认：
+用户明确要求"修到 CI 绿 / 不要反复确认 / 自动推上去盯 CI / 遇到异常就开始修复"时，Agent 必须按以下 **fail-fast** 循环执行，不得在每轮中断找用户确认：
 
 1. 用本 skill 按当前 run_id / branch 定位失败
 2. 按归因与日志片段修代码
 3. 走本地最小验证（至少 `cargo fmt` + `cargo clippy -D warnings` + 相关测试）
 4. `git commit` → `git push`
 5. `scripts/gh_ci.py branch <head_branch> --any-status` 拿到新 run_id
-6. `scripts/poll_run.py <new_run_id>` 轮询
-7. 成功 → 汇报；失败 → 回到第 1 步
+6. **`scripts/watch_jobs.py <new_run_id>`**（fail-fast 看护，不要用 `poll_run.py`）
+7. `exit 2` → 按 stdout 归因立即回到第 1 步修复，不要等长尾 job 跑完；`exit 0` → 汇报；`exit 3` → 延长 MAX_WAIT_SEC 后重新 watch
 8. 连续 3 次失败仍定位不到根因才向用户回报并停
+
+> ⚠️ **严禁"等整个 run 跑完再看结果"**。Windows / macOS bundle / E2E Shell 这类长尾 job 动辄 20 分钟以上；早期失败的 Unit Tests / Clippy 如果要等到最后才处理，修复时间会从"立即"拖成"半小时后"。唯一例外：合入前需要全绿最终确认时才用 `poll_run.py`。
 
 ### 边界与禁止事项
 

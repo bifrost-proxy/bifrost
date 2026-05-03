@@ -83,23 +83,42 @@ python3 scripts/gh_ci.py regression 25269751068
 
 ### (B) 轮询 run 到完成（fix-push-watch 循环用）
 
+**默认用 `watch_jobs.py`（fail-fast 模式）—— 只要有任何 job 先失败就立即退出并打印归因，不必等慢的 Windows/macOS bundle 跑完。**
+
 ```bash
-POLL_SEC=45 MAX_WAIT_SEC=1800 python3 scripts/poll_run.py 25271859306
+# 推荐：fail-fast 看护。任一 job 失败立即 exit 2 并打印归因 markdown
+POLL_SEC=20 MAX_WAIT_SEC=3600 python3 scripts/watch_jobs.py <run_id>
+
+# 只有在明确需要"等全部 job 跑完"（例如最终合入前的全绿确认）时才用 poll_run.py
+POLL_SEC=45 MAX_WAIT_SEC=1800 python3 scripts/poll_run.py <run_id>
 # exit 0 = success, 2 = failure, 3 = timeout
 ```
 
-典型闭环（agent 要这么跑，不要反复问用户）：
+`watch_jobs.py` 的退出语义：
+- `0` → run 内所有 job 均 `conclusion=success`
+- `2` → 至少一个 job 进入 terminal-bad（failure / cancelled / timed_out / action_required / startup_failure）；stdout 输出首个失败 job 的 name / step / root-cause bucket / 日志片段
+- `3` → 超出 `MAX_WAIT_SEC` 仍有 job 没结束
+
+典型闭环（agent 要这么跑，不要反复问用户，**必须 fail-fast**）：
 
 ```bash
-# 1) 修代码（用 bifrost remote file edit 走乐观锁）
-# 2) push
+# 1) 修代码
+# 2) 本地最小验证：cargo fmt + cargo clippy -D warnings + 相关测试
+# 3) push
 git push origin feat/agent
-# 3) 找到新 run
-python3 scripts/gh_ci.py branch feat/agent --only-failed --any-status
-# 4) 轮询到完成
-python3 scripts/poll_run.py <new_run_id>
-# 5) 失败 → 回到 (1) 拉日志继续修；成功 → 汇报
+
+# 4) 找到新 run（注意 --any-status，否则 queued/in_progress 会被过滤掉）
+python3 scripts/gh_ci.py branch feat/agent --any-status
+
+# 5) fail-fast 看护：任一 job 失败就立刻退出并打印归因
+python3 scripts/watch_jobs.py <new_run_id>
+
+# 6) exit 2 → 按 stdout 里的 root-cause bucket + 日志片段立刻回到 (1) 修；
+#    exit 0 → 全绿，汇报用户；
+#    exit 3 → 用 gh_ci.py run <id> 查当前状态，延长 MAX_WAIT_SEC 后再 watch。
 ```
+
+> ⚠️ **严禁先 `poll_run.py` 等到"整个 run 完成"再看结果**。Windows / macOS bundle 这类长尾 job 经常要 20 分钟以上，早期失败的 Unit Tests / E2E 如果等到最后才处理，会把修复时间从"立即"拖成"半小时后"。用户明确要求"遇到异常就开始修复"。
 
 ### (C) PR code review
 
