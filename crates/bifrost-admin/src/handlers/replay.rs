@@ -354,10 +354,10 @@ async fn execute_replay_unified(
             "WebSocket URLs are not supported via HTTP endpoint. Use the WebSocket endpoint (/api/replay/execute/ws) instead.",
         );
     }
-    // timeout_ms 只用于“连接建立/首包(headers)获取”的超时控制。
-    // 不用于整个请求生命周期，避免对 SSE 等长连接造成错误断开。
-    // 通过 reqwest 原生的 connect_timeout 实现，而不是外层 tokio::time::timeout，
-    // 因为后者在 CI 高负载下可能与 body 流的后续读取产生意外耦合。
+    // timeout_ms 仅作为错误消息里的参考值，不再通过 reqwest connect_timeout 施加，
+    // 因为历史上在 Linux CI 上观察到 SSE 长连接会在 timeout_ms 边界附近被断开，
+    // 根因疑似 hyper/reqwest 在某些场景下将 connect_timeout 与 body 读取耦合。
+    // SSE 这类流式响应必须允许任意长连接。如需超时控制，应由上游调用方在外部施加。
     let timeout_ms = unified_req
         .timeout_ms
         .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
@@ -365,7 +365,6 @@ async fn execute_replay_unified(
     let unsafe_ssl = state.runtime_config.read().await.unsafe_ssl;
     let client = bifrost_core::direct_reqwest_client_builder()
         .danger_accept_invalid_certs(unsafe_ssl)
-        .connect_timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .unwrap_or_default();
 
