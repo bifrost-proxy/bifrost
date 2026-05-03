@@ -67,12 +67,13 @@ pub struct BrowserDebugBroker {
     sessions: RwLock<HashMap<String, DebugSession>>,
     eval_next_id: AtomicU64,
     eval_pending: RwLock<HashMap<String, Vec<BridgeEvalCommand>>>,
-    eval_results: RwLock<HashMap<u64, Result<Value, String>>>,
+    eval_results: RwLock<HashMap<u64, Result<serde_json::Value, String>>>,
     overlay_pending: RwLock<HashMap<String, Vec<BridgeOverlayCommand>>>,
     bridge_senders: RwLock<HashMap<String, mpsc::Sender<BridgeServerMessage>>>,
     session_senders: RwLock<HashMap<String, mpsc::Sender<DevtoolsLiveMessage>>>,
     bridge_seen_seqs: RwLock<HashMap<String, VecDeque<u64>>>,
     evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
+    evaluate_audit_capacity: usize,
 }
 
 pub enum DebugAdapterKind { PageBridge }
@@ -87,9 +88,10 @@ pub enum BridgeServerMessage {
 }
 
 pub enum DevtoolsLiveMessage {
-    Snapshot { snapshot: Value },
+    Snapshot { snapshot: serde_json::Value },
     Console { message: ConsoleMessage },
     Network { event: NetworkEvent },
+    NodeSelected { node_id: u64 },
     Disconnected { page_id: String, reason: String },
 }
 ```
@@ -208,7 +210,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 
 ## page_bridge 注入脚本
 
-实现于 `crates/bifrost-proxy/src/proxy/http/handler.rs` 中的 `devtools_bridge_script(page_id, token)` 函数。
+实现于 `crates/bifrost-proxy/src/proxy/http/devtools.rs` 中的 `devtools_bridge_script(page_id, token)` 函数。
 
 功能：
 1. 建立 WebSocket 连接到 `/_bifrost/api/devtools/bridge/{page_id}/ws`
@@ -235,7 +237,8 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 |------|------|
 | `crates/bifrost-core/src/protocol.rs` | `Protocol::DevTools` 定义 |
 | `crates/bifrost-proxy/src/server.rs` | `DevtoolsRule` / `DevtoolsMode` / `DevtoolsInjectMode` 结构体 |
-| `crates/bifrost-proxy/src/proxy/http/handler.rs` | 规则解析、注入决策、bridge 脚本生成 |
+| `crates/bifrost-proxy/src/proxy/http/handler.rs` | HTTP 代理主处理逻辑，调用 devtools 模块完成注入决策 |
+| `crates/bifrost-proxy/src/proxy/http/devtools.rs` | DevTools 规则解析、注入决策、bridge 脚本生成 |
 | `crates/bifrost-admin/src/devtools.rs` | `BrowserDebugBroker` 核心逻辑 |
 | `crates/bifrost-admin/src/handlers/devtools.rs` | HTTP/WebSocket 路由处理 |
 | `crates/bifrost-admin/src/router.rs` | `/api/devtools` 路由入口 |

@@ -121,7 +121,7 @@ pub struct UserPassAuthConfig {
     pub loopback_requires_auth: bool, // 默认 false，本机免密
 }
 
-pub struct AccessConfig {
+pub struct AccessControlConfig {
     pub mode: AccessMode,
     pub whitelist: Vec<String>,
     pub allow_lan: bool,

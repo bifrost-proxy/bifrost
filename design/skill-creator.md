@@ -2,7 +2,7 @@
 
 Status: Proposal (approved, pending implementation)
 Owners: bifrost-agent, bifrost-admin, webui
-Related: `design/long-term-memory.md`, `crates/agent/src/session.rs`, `crates/bifrost-admin/src/handlers/im_gateway.rs` (`SkillsManager`)
+Related: `design/long-term-memory.md`, `crates/agent/src/session.rs`, `crates/agent/src/skills.rs` (`SkillsManager`)
 
 ---
 
@@ -12,7 +12,7 @@ Related: `design/long-term-memory.md`, `crates/agent/src/session.rs`, `crates/bi
 
 Bifrost Agent Loop 目前对 "skill" 的支持是**被动只读发现**：
 
-- `SkillsManager`（`crates/bifrost-admin/src/handlers/im_gateway.rs`）在进程启动时扫描 `~/.bifrost/skills/` 和工作区目录，把 `SKILL.md` frontmatter 读进内存。
+- `SkillsManager`（`crates/agent/src/skills.rs`）在进程启动时扫描 `~/.bifrost/skills/` 和工作区目录，把 `SKILL.md` frontmatter 读进内存。
 - `GET /agent/skills` 返回只读清单。
 - `crates/agent/src/prompt.rs` 把 enabled skill 的 `name + description` 渲染进 system prompt 的 "Available skills" 块。
 - Agent Loop 的斜杠命令（`/clear /reset /undo /compact /status /resume /remember /memories /forget`）在 `session.rs` 里是**硬编码 match**，skill 无法声明自己的 `/xxx`。
@@ -612,7 +612,7 @@ POST /agent/skills/validate
 |---|---|---|
 | `crates/skills/**` | **新增 crate** | 模块见 §2.1 |
 | `Cargo.toml`（workspace）| 追加 | 加入 `crates/skills` |
-| `crates/agent/Cargo.toml` | 追加 | 依赖 `skills`, 移除对 im_gateway::SkillsManager 的间接依赖 |
+| `crates/agent/Cargo.toml` | 追加 | 依赖 `skills`, 移除对 skills::SkillsManager 的间接依赖 |
 | `crates/agent/src/session.rs` | 替换 L491 硬编码 match | 改为 `SlashCommandRouter::dispatch` |
 | `crates/agent/src/slash.rs` | **新增** | `SlashCommandRouter` 实现 |
 | `crates/agent/src/prompt.rs` | 修改 "Available skills" 块 | 读 `SkillRegistry::enabled()` |
@@ -622,7 +622,7 @@ POST /agent/skills/validate
 | `crates/bifrost-admin/Cargo.toml` | 依赖 `skills` | |
 | `crates/bifrost-admin/src/handlers/mod.rs` | 挂 `agent_skills` 模块 | |
 | `crates/bifrost-admin/src/handlers/agent_skills.rs` | **新增** | 见 §5 |
-| `crates/bifrost-admin/src/handlers/im_gateway.rs` | 重构 `SkillsManager` | 改为 `Arc<SkillRegistry>` 的薄封装；`GET /agent/skills` 语义保持 |
+| `crates/bifrost-admin/src/handlers/im_gateway.rs` | 重构 | 移除旧 `SkillsManager` 引用，改为 `Arc<SkillRegistry>` 的薄封装；`GET /agent/skills` 语义保持 |
 | `crates/bifrost-admin/src/router.rs` | 追加路由 | `/agent/skills/*` |
 | `web/src/pages/Settings/tabs/AgentTab.tsx` | 追加 `<SkillsSection />` | |
 | `web/src/pages/Settings/tabs/agent/SkillsSection.tsx` | **新增** | |

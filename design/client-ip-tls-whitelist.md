@@ -66,9 +66,9 @@ pub struct TlsConfigUpdate {
 ### 后端实现
 
 在 `AdminState` 中新增 `IpTlsPendingManager`：
-- `pending_ips: RwLock<Vec<(IpAddr, u64, u32)>>` — 待决定的 IP 列表
+- `pending: RwLock<Vec<(IpAddr, u64, u32)>>` — 待决定的 IP 列表
 - `session_decided: RwLock<HashSet<IpAddr>>` — 本次会话已决定的 IP（避免重复弹窗）
-- `event_sender: broadcast::Sender<IpTlsPendingEvent>` — 事件广播
+- `event_sender: broadcast::Sender<PendingIpTlsEvent>` — 事件广播
 
 ### 推送消息
 
@@ -86,11 +86,11 @@ pub struct TlsConfigUpdate {
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
-| `/api/config/tls/ip-tls/pending` | GET | 获取待决定的 IP 列表 |
-| `/api/config/tls/ip-tls/pending/stream` | GET | SSE 流订阅新 IP 事件 |
-| `/api/config/tls/ip-tls/pending/approve` | POST | 审批 IP（加入 include 列表） |
-| `/api/config/tls/ip-tls/pending/skip` | POST | 跳过 IP（加入 exclude 列表） |
-| `/api/config/tls/ip-tls/pending` | DELETE | 清空 pending 列表 |
+| `/api/config/ip-tls/pending` | GET | 获取待决定的 IP 列表 |
+| `/api/config/ip-tls/pending/stream` | GET | SSE 流订阅新 IP 事件 |
+| `/api/config/ip-tls/pending/approve` | POST | 审批 IP（加入 include 列表） |
+| `/api/config/ip-tls/pending/skip` | POST | 跳过 IP（加入 exclude 列表） |
+| `/api/config/ip-tls/pending` | DELETE | 清空 pending 列表 |
 
 ## 前端组件
 

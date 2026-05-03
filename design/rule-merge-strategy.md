@@ -31,7 +31,7 @@ x-use-ppe: 1
 
 ### 根因定位
 
-`convert_core_result_to_proxy()` 函数（[rules.rs:321-635](../crates/bifrost-cli/src/parsing/rules.rs)）中，`ReqHeaders` 和 `ResHeaders` 使用了"先到先得"的去重逻辑：
+`convert_core_result_to_proxy()` 函数（[rules.rs:382-699](../crates/bifrost-cli/src/parsing/rules.rs)）中，`ReqHeaders` 和 `ResHeaders` 使用了"先到先得"的去重逻辑：
 
 ```rust
 Protocol::ReqHeaders => {

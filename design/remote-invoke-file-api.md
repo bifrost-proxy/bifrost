@@ -71,7 +71,7 @@ File 权限从 `GrantScope` 中独立出来，以 `file_access` 字段与 `grant
 
 | 字段 | 作用 | 可选值 |
 |---|---|---|
-| `grant_scope` | Shell / query 访问级别 | `remote_query` / `remote_shell_exec` / `remote_shell_interactive` |
+| `grant_scope` | Shell / query 访问级别 | `remote_query` / `remote_shell_exec` / `remote_shell_interactive` / `remote_power_mgmt` / `remote_im_gateway` |
 | `file_access` | 文件访问级别 | `none`（默认）/ `read` / `read_write` |
 
 两字段独立设置、独立检查。一个 grant 可以同时拥有 `remote_shell_interactive` + `file_access: read_write`。
@@ -81,11 +81,13 @@ File 权限从 `GrantScope` 中独立出来，以 `file_access` 字段与 `grant
 ```rust
 // crates/bifrost-admin/src/remote_invoke/types.rs
 
-/// 3 种 shell 级别
+/// 5 种级别
 pub enum GrantScope {
     RemoteQuery,
     RemoteShellExec,
     RemoteShellInteractive,
+    RemotePowerMgmt,
+    RemoteImGateway,
 }
 
 /// 独立的 file 级别
@@ -95,11 +97,13 @@ pub enum FileAccessScope {
     ReadWrite,
 }
 
-/// 统一的命令类别（3 变体，file.* 统一为 File）
+/// 统一的命令类别（5 变体，file.* 统一为 File）
 pub enum CommandKind {
     QueryReadonly,   // "query.readonly"
     ShellExec,       // "shell.exec"
     File,            // "file" — 所有 file.* 方法
+    PowerMgmt,       // "power.mgmt"
+    ImGateway,       // "im.gateway"
 }
 
 /// 组合检查
@@ -107,6 +111,8 @@ pub fn scope_allows_command(grant_scope, file_access, kind) -> bool {
     match kind {
         CommandKind::File => file_access ∈ {Read, ReadWrite},
         CommandKind::ShellExec => grant_scope ∈ {RemoteShellExec, RemoteShellInteractive},
+        CommandKind::PowerMgmt => grant_scope == RemotePowerMgmt,
+        CommandKind::ImGateway => grant_scope == RemoteImGateway,
         CommandKind::QueryReadonly => true,
     }
 }
@@ -137,7 +143,7 @@ pub struct FileAccessPolicy {
     pub denies: Vec<String>,          // glob，读写均生效
     pub write_denies: Vec<String>,    // glob，仅写操作叠加
     pub ops: Vec<FileOp>,             // 允许的操作集合
-    pub max_read_bytes: u64,          // 默认 8 MiB
+    pub max_read_bytes: u64,          // 默认 2 MiB
     pub max_write_bytes: u64,         // 默认 2 MiB
     pub respect_gitignore: bool,      // 默认 true
     pub allow_overwrite: bool,        // 默认 true

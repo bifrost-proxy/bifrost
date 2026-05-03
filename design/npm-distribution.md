@@ -15,6 +15,8 @@
 @bifrost-proxy/bifrost              # 主包 - 入口 + 平台分发逻辑
 @bifrost-proxy/bifrost-linux-x64    # Linux x86_64
 @bifrost-proxy/bifrost-linux-arm64  # Linux aarch64
+@bifrost-proxy/bifrost-linux-x64-musl  # Linux x86_64 (musl)
+@bifrost-proxy/bifrost-linux-arm64-musl # Linux aarch64 (musl)
 @bifrost-proxy/bifrost-linux-arm    # Linux armv7
 @bifrost-proxy/bifrost-darwin-x64   # macOS Intel
 @bifrost-proxy/bifrost-darwin-arm64 # macOS Apple Silicon
@@ -80,6 +82,8 @@ npm 的 `optionalDependencies` + `os`/`cpu` 机制确保只有匹配当前平台
 |-----------------------------------|--------------------------------------|---------|-------|
 | x86_64-unknown-linux-gnu          | @bifrost-proxy/bifrost-linux-x64     | linux   | x64   |
 | aarch64-unknown-linux-gnu         | @bifrost-proxy/bifrost-linux-arm64   | linux   | arm64 |
+| x86_64-unknown-linux-musl         | @bifrost-proxy/bifrost-linux-x64-musl | linux  | x64   |
+| aarch64-unknown-linux-musl        | @bifrost-proxy/bifrost-linux-arm64-musl | linux | arm64 |
 | armv7-unknown-linux-gnueabihf     | @bifrost-proxy/bifrost-linux-arm     | linux   | arm   |
 | x86_64-apple-darwin               | @bifrost-proxy/bifrost-darwin-x64    | darwin  | x64   |
 | aarch64-apple-darwin              | @bifrost-proxy/bifrost-darwin-arm64  | darwin  | arm64 |
@@ -101,11 +105,16 @@ npm/
 │   ├── bin/
 │   │   └── bifrost             # Node.js 入口脚本
 │   ├── lib/
-│   │   └── index.js            # 平台解析逻辑（供 programmatic API 使用）
+│   │   ├── index.js            # 平台解析逻辑（供 programmatic API 使用）
+│   │   └── platform.js         # 平台映射与检测逻辑
 │   └── install.js              # postinstall 兜底脚本
 ├── bifrost-linux-x64/
 │   └── package.json
 ├── bifrost-linux-arm64/
+│   └── package.json
+├── bifrost-linux-x64-musl/
+│   └── package.json
+├── bifrost-linux-arm64-musl/
 │   └── package.json
 ├── bifrost-linux-arm/
 │   └── package.json

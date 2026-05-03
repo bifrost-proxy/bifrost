@@ -150,14 +150,14 @@ struct Session {
 - 支持 TTL 过期清理（默认 1 小时）
 - 支持内置命令：`/clear`、`/reset`
 
-### 5. handle_agent_chat() - 主入口函数
+### 5. run_turn() / run_turn_with_mcp() - 主入口函数
 
 **处理流程**：
 1. 查找或创建用户会话
 2. 构建消息列表（历史 + 当前消息）
-3. 调用模型 API
+3. 调用模型 API（run_turn_with_mcp 额外支持 MCP 工具调用）
 4. 记录对话轮次到会话历史
-5. 返回模型响应
+5. 返回模型响应（TurnResult）
 
 ## 默认模型配置
 
@@ -442,19 +442,18 @@ struct ChatMessage {
 crates/bifrost-admin/
 ├── src/
 │   ├── im_gateway/
-│   │   ├── agent.rs          # Agent 核心实现
+│   │   ├── agent.rs          # Agent 类型 re-exports (from bifrost_agent)
 │   │   │   ├── ImAgentConfig
 │   │   │   ├── ImAgentConfigStore
 │   │   │   ├── ImAgentClient
 │   │   │   ├── ImAgentSessionManager
-│   │   │   └── handle_agent_chat()
+│   │   │   ├── run_turn()
+│   │   │   └── run_turn_with_mcp()
 │   │   ├── types.rs          # ImRouteAction::AgentChat 变体
 │   │   └── mod.rs
 │   └── handlers/
-│       └── im_gateway.rs     # HTTP Handler 集成
-│           ├── get_agent_config()
-│           ├── update_agent_config()
-│           └── list_agent_sessions()
+│       └── im_gateway.rs     # HTTP Handler 统一入口
+│           └── handle_im_gateway()
 ```
 
 ## 依赖项
