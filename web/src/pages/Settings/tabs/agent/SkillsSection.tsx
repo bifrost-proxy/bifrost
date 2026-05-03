@@ -108,6 +108,7 @@ export default function SkillsSection() {
               { label: "Enabled", value: "enabled" },
               { label: "Repo", value: "repo" },
               { label: "User", value: "user" },
+              { label: "Global", value: "global" },
               { label: "System", value: "system" },
             ]}
           />
@@ -219,6 +220,9 @@ function scopeColor(scope: SkillScope) {
   }
   if (scope === "user") {
     return "green";
+  }
+  if (scope === "global") {
+    return "orange";
   }
   return "purple";
 }

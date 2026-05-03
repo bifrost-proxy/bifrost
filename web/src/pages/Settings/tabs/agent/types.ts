@@ -162,13 +162,13 @@ export interface SkillInfo {
   description: string;
   short_description?: string;
   path: string;
-  scope: "repo" | "user" | "system";
+  scope: "repo" | "user" | "global" | "system";
 }
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type SkillScope = "repo" | "user" | "system";
+export type SkillScope = "repo" | "user" | "global" | "system";
 export type ShellKind = "bash" | "sh" | "zsh" | "power_shell";
 export type MemoryOp = "read" | "write" | "both";
 
