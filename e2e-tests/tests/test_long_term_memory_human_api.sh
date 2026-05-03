@@ -118,7 +118,7 @@ MOCK_PID=$!
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
 echo "[long-term-memory-human-api] building bifrost"
-cargo build --bin bifrost
+SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 
 echo "[long-term-memory-human-api] starting bifrost on $BIFROST_PORT with temp data dir $TEST_DIR"
 BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start \

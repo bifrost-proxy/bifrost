@@ -52,8 +52,11 @@ run_test() {
 }
 
 check_proxy_available() {
-    if ! curl -s --connect-timeout 3 "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system/status" > /dev/null 2>&1; then
-        log_fail "Proxy server not available at ${ADMIN_HOST}:${ADMIN_PORT}"
+    local response
+    response=$(curl -s --connect-timeout 3 --max-time 5 \
+        "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/auth/status" 2>/dev/null || true)
+    if ! admin_is_bifrost_admin_response "$response"; then
+        log_fail "Bifrost admin API not available at ${ADMIN_HOST}:${ADMIN_PORT}; got: ${response:-<empty>}"
         return 1
     fi
     return 0

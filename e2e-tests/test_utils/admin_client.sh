@@ -71,6 +71,46 @@ admin_base_url() {
     fi
 }
 
+admin_is_bifrost_admin_response() {
+    local body="$1"
+    local py
+    py="$(python3_cmd 2>/dev/null || true)"
+    [[ -n "${py:-}" ]] || return 1
+
+    ADMIN_PROBE_BODY="$body" "$py" - <<'PY' >/dev/null 2>&1
+import json
+import os
+import sys
+
+try:
+    data = json.loads(os.environ.get("ADMIN_PROBE_BODY", ""))
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(data, dict):
+    raise SystemExit(1)
+
+required = {"remote_access_enabled", "auth_required", "has_password"}
+raise SystemExit(0 if required.issubset(data.keys()) else 1)
+PY
+}
+
+admin_probe_existing_bifrost() {
+    local auth_url
+    auth_url="$(admin_base_url)/api/auth/status"
+
+    local body_file
+    body_file="$(mktemp)"
+    local code
+    code=$(env NO_PROXY="*" no_proxy="*" curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 2 --max-time 5 "$auth_url" 2>/dev/null) || code="000"
+    local body
+    body="$(cat "$body_file" 2>/dev/null || true)"
+    rm -f "$body_file" 2>/dev/null || true
+
+    [[ "$code" =~ ^2 ]] || return 1
+    admin_is_bifrost_admin_response "$body"
+}
+
 admin_wait_for_admin_ready() {
     local timeout_secs="${1:-60}"
     local admin_url
@@ -253,11 +293,7 @@ admin_stop_bifrost() {
 }
 
 admin_ensure_bifrost() {
-    local admin_url
-    admin_url="$(admin_base_url)"
-
-    if env NO_PROXY="*" no_proxy="*" curl -s "${admin_url}/api/system/status" >/dev/null 2>&1 || \
-       env NO_PROXY="*" no_proxy="*" curl -s "${admin_url}/api/system" >/dev/null 2>&1; then
+    if admin_probe_existing_bifrost; then
         return 0
     fi
 

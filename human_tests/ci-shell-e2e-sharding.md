@@ -204,6 +204,102 @@
 - `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
 - 测试端口不使用 9900，测试数据写入临时目录。
 
+### TC-CS-15: unsafe_ssl 管理端端口碰撞回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh
+   ```
+2. 检查管理端 helper 会校验 `/api/auth/status` 的 Bifrost JSON 结构：
+   ```bash
+   rg -n 'admin_probe_existing_bifrost|admin_is_bifrost_admin_response|/api/auth/status|Bifrost admin API not available' e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh
+   ```
+3. 启动一个非 Bifrost HTTP 服务占用端口，并验证 helper 不会把它误判为 Bifrost：
+   ```bash
+   TEST_ROOT="$(mktemp -d /tmp/bifrost-admin-probe-human.XXXXXX)"
+   python3 - "$TEST_ROOT/not-bifrost.log" <<'PY' &
+   import json
+   import sys
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+   log_path = sys.argv[1]
+
+   class Handler(BaseHTTPRequestHandler):
+       def log_message(self, fmt, *args):
+           return
+
+       def _write(self, payload):
+           body = json.dumps(payload, ensure_ascii=False).encode()
+           self.send_response(200)
+           self.send_header("Content-Type", "application/json")
+           self.send_header("Content-Length", str(len(body)))
+           self.end_headers()
+           self.wfile.write(body)
+
+       def do_GET(self):
+           with open(log_path, "a", encoding="utf-8") as fh:
+               fh.write(f"GET {self.path}\n")
+           self._write({"choices": [{"message": {"content": "not bifrost"}}]})
+
+   ThreadingHTTPServer(("127.0.0.1", 18885), Handler).serve_forever()
+   PY
+   MOCK_PID=$!
+   sleep 0.5
+   ADMIN_PORT=18885 ADMIN_HOST=127.0.0.1 ADMIN_PATH_PREFIX=/_bifrost \
+     bash -c 'source e2e-tests/test_utils/admin_client.sh; if admin_probe_existing_bifrost; then exit 1; else exit 0; fi'
+   kill "$MOCK_PID" 2>/dev/null || true
+   wait "$MOCK_PID" 2>/dev/null || true
+   rm -rf "$TEST_ROOT"
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 第 2 步能定位到管理端响应结构校验逻辑和 unsafe_ssl 的明确错误输出。
+- 第 3 步退出码为 0，说明即使本机端口上有其它服务返回 200，helper 也不会复用该服务。
+- 测试端口不使用 9900，临时文件写入 `/tmp/bifrost-admin-probe-human.*`。
+
+### TC-CS-16: long-term memory human API 构建不触发 frontend build
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_long_term_memory_human_api.sh
+   ```
+2. 检查该脚本构建 Bifrost 时显式跳过 frontend build：
+   ```bash
+   rg -n 'SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' e2e-tests/tests/test_long_term_memory_human_api.sh
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 第 2 步能定位到 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`。
+- 该 shell E2E 在 CI 并行执行时不会触发 `pnpm build` 重写 `web/dist`，避免 `rust_embed` proc-macro 在 frontend 产物临时缺失时 panic。
+
+### TC-CS-17: remote relay fallback 预构建 binary 复用回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh
+   ```
+2. 检查脚本尊重外层 `SKIP_BUILD=true` 和已有 `BIFROST_BIN`：
+   ```bash
+   rg -n 'SKIP_BUILD|BIFROST_BIN|Using existing bifrost binary|SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost' e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh
+   ```
+3. 在已存在 release binary 的前提下执行 remote relay fallback E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 第 2 步能定位到复用已有 binary 的分支和 fallback build 命令。
+- 第 3 步输出 `Using existing bifrost binary`，不会输出 `Build bifrost (release)...`。
+- 三段 relay 选择断言全部通过，输出 `All remote relay URL fallback assertions passed.`。
+- 测试端口动态分配，不使用 9900，测试数据写入临时目录并在退出时清理。
+
 ## 本轮执行记录
 
 测试日期：2026-04-30
@@ -215,6 +311,9 @@
 | TC-CS-12 | 通过 | 2026-05-01 本轮执行：`bash -n e2e-tests/tests/test_unsafe_ssl_e2e.sh e2e-tests/test_utils/admin_client.sh` 通过；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-unsafe-ssl-human.XXXXXX)" PROXY_PORT=11295 ADMIN_PORT=11295 HTTPS_MOCK_PORT=11297 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行真实场景。脚本输出 `Starting HTTPS mock server on 127.0.0.1:11297`、`HTTPS mock server ready`、`Created unsafe_ssl forwarding rule to https://127.0.0.1:11297`，并完成 unsafe_ssl false/true/false 三段代理请求，汇总 `Results: 5/5 passed`，退出码 0；全程使用临时目录和 11295/11297，未使用 9900。 |
 | TC-CS-13 | 通过 | 2026-05-03 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`rg -n 'run_shell_tests_parallel\(\)\|run_shell_batch_parallel\(\)\|return 0' scripts/run_all_e2e.sh` 显示两个调度函数及其显式 `return 0`。完整 shard 3 本机执行卡在大端口段扫描前置探针，随后改用同一入口的最小 shard 验证返回码路径：`BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 选中 `test_body_cache_sync_cleanup_admin_api.sh`，输出 `[PASS] shell:test_body_cache_sync_cleanup_admin_api.sh`，最终 `Total suites : 1 / Passed : 1 / Failed : 0`，外层退出码 0。完整 macOS shard 3 由推送后的 GitHub Actions 继续验证。 |
 | TC-CS-14 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'sse/custom\?count=20&interval=0\.5\|"timeout_ms":5000\|>=8s alive\|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh` 显示 4 个预期匹配；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-replay-human.XXXXXX)" PROXY_PORT=18881 MOCK_HTTP_PORT=18882 MOCK_SSE_PORT=18883 MOCK_WS_PORT=18884 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true BIFROST_E2E_REPORT_DIR="$TEST_ROOT/reports" bash e2e-tests/tests/test_replay_rules.sh` 执行真实场景。`SSE Replay with Rules` 输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；全程使用临时目录和 18881-18884，未使用 9900。 |
+| TC-CS-15 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 通过；`rg -n 'admin_probe_existing_bifrost\|admin_is_bifrost_admin_response\|/api/auth/status\|Bifrost admin API not available' e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 显示管理端响应结构校验逻辑。随后启动非 Bifrost HTTP 服务占用 `127.0.0.1:18885`，服务对 `/_bifrost/api/auth/status` 返回 OpenAI-like JSON，执行 `ADMIN_PORT=18885 ADMIN_HOST=127.0.0.1 ADMIN_PATH_PREFIX=/_bifrost bash -c 'source e2e-tests/test_utils/admin_client.sh; if admin_probe_existing_bifrost; then exit 1; else exit 0; fi'` 退出码 0，确认 helper 不会误复用错误服务。最后使用 `PROXY_PORT=18886 ADMIN_PORT=18886 HTTPS_MOCK_PORT=18887 BIFROST_DATA_DIR=<临时目录>/data SERVER_LOG_DIR=<临时目录>/logs SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行完整 unsafe_ssl 场景，输出 `Created unsafe_ssl forwarding rule to https://127.0.0.1:18887` 和 `Results: 5/5 passed`，退出码 0；全程未使用 9900。 |
+| TC-CS-16 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 通过；`rg -n 'SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' e2e-tests/tests/test_long_term_memory_human_api.sh` 定位到构建命令。随后执行 `BIFROST_PORT=18888 MOCK_PORT=18889 bash e2e-tests/tests/test_long_term_memory_human_api.sh`，构建日志显示 `Skipping frontend build (SKIP_FRONTEND_BUILD is set)`，脚本完成三段独立 session 写入/读取长期记忆并输出 `[long-term-memory-human-api] PASS`，退出码 0；确认该用例在 CI 并行执行时不触发 frontend build。 |
+| TC-CS-17 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 通过；`rg -n 'SKIP_BUILD\|BIFROST_BIN\|Using existing bifrost binary\|SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost' e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 显示复用已有 binary 的分支和 fallback build 命令。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，输出 `Using existing bifrost binary: /Users/eden/work/github/bifrost/target/release/bifrost`，未输出 `Build bifrost (release)...`，三段 relay 选择断言全部通过并输出 `All remote relay URL fallback assertions passed.`；测试端口动态分配，未使用 9900。 |
 
 ## 清理步骤
 
