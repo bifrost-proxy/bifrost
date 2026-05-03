@@ -457,6 +457,7 @@ async fn execute_replay_unified(
         let state_clone = state.clone();
         let replay_id_clone = replay_id.clone();
         let traffic_id_clone = traffic_id.clone();
+        let heartbeat_tx = tx.clone();
 
         tokio::spawn(async move {
             let result = process_sse_response(
@@ -473,10 +474,31 @@ async fn execute_replay_unified(
             }
         });
 
+        // SSE 保活心跳：每 2s 发送一次 ":" 注释行，
+        // 防止下游中间盒/客户端在流“空闲”时误判为 EOF 而关闭连接。
+        // 这不会影响上游 body 读取，仅在代理 -> 客户端方向注入心跳帧。
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+            // 首个 tick 是立即触发，跳过以避免与 connection 事件冲突
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if heartbeat_tx.send("__HEARTBEAT__".to_string()).is_err() {
+                    break;
+                }
+            }
+        });
+
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|event| {
-            let mut sse_event = String::from("event: message\n");
-            sse_event.push_str(&format!("data: {}\n", event));
-            sse_event.push('\n');
+            let sse_event = if event == "__HEARTBEAT__" {
+                // SSE 注释行（以 `:` 开头），客户端会忽略但保持连接活跃
+                String::from(": ka\n\n")
+            } else {
+                let mut s = String::from("event: message\n");
+                s.push_str(&format!("data: {}\n", event));
+                s.push('\n');
+                s
+            };
             Ok::<_, hyper::Error>(hyper::body::Frame::data(Bytes::from(sse_event)))
         });
 
