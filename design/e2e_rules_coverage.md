@@ -75,3 +75,38 @@
 ### 校验要求
 - rules E2E 需优先于 rust-project-validate 执行。
 - 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
+
+## 2026-05-04：macOS Rules E2E 语义回归收敛
+
+### 背景
+- `feat/agent` 最新 CI 的 macOS aarch64 Rules E2E 失败集中在内容注入、URL 修改、请求 Content-Type、lineProps disabled 与 speed 限速。
+- 排查后将问题分为两类：
+  - 功能缺口：HTTPS MITM tunnel 分支没有复用普通 HTTP handler 的 URL 规则与请求头规则变换，导致 `urlParams`、`urlReplace/pathReplace`、`reqType`、`reqCharset` 在 tunnel 转发到 HTTP 上游时只匹配不生效。
+  - 测试缺口：`test_rules.sh` 对 html/js/css 注入仍断言 `{value}` 占位符而非代码块真实内容；`lineProps://disabled` 仍走“验证未实现”失败分支；speed 断言未考虑 throttle 初始窗口会立即释放首个窗口容量。
+
+### 实现逻辑
+- tunnel 分支在构建上游 URI 前调用 `apply_url_rules`，确保 URL 参数追加、删除与路径替换对 HTTPS MITM 请求同样生效。
+- tunnel 分支在复制上游请求头前调用 `apply_req_rules`，复用 `reqType`、`reqCharset`、`reqHeaders`、`reqCookies`、`ua`、`referer`、`auth` 等请求侧协议的既有实现。
+- `test_rules.sh` 对 html/js/css 注入期望值调用 `resolve_code_block_var`，用 fixture 中的 fenced code block 内容做真实响应体断言。
+- `lineProps://disabled` 断言禁用规则中的响应头值没有出现在最终响应中；若存在同名 fallback 规则，则允许最终值来自 fallback。
+- URL 修改夹具按当前协议语法收敛：`urlReplace/pathReplace` 使用 `from=to`，删除参数用例在请求 URL 中先携带待删除参数，URL 参数合并用 `urlParams://` 而不是 body merge 语义的 `params://`。
+- `urlParams` 解析补齐 `&` 分隔多参数语义，与历史 `urlParams://(key=value&key2=value2)` 规则和 template fixture 中的内联参数写法保持一致；继续保留逗号和换行分隔。
+- speed 断言按当前 `ThrottledBoxBody` 设计计算最小耗时：首个限速窗口容量可立即发送，剩余字节才需要等待后续窗口。
+
+### 测试方案
+- 单元测试：执行 `cargo test -p bifrost-proxy --utils::url -- --nocapture` 验证 URL 规则工具函数仍通过。
+- E2E 测试：逐个执行 CI 失败 rules fixture：
+  - `e2e-tests/rules/content_inject/html.txt`
+  - `e2e-tests/rules/content_inject/js.txt`
+  - `e2e-tests/rules/content_inject/css.txt`
+  - `e2e-tests/rules/control/enable_disable.txt`
+  - `e2e-tests/rules/advanced/content_type.txt`
+  - `e2e-tests/rules/request_modify/url_params.txt`
+  - `e2e-tests/rules/advanced/speed.txt`
+  - `e2e-tests/rules/template/values.txt`
+  - `e2e-tests/rules/combination/multi_rules.txt`
+- 真实场景测试：更新并执行 `human_tests/rules-e2e-fixtures.md` 中的 macOS Rules CI 回归用例，所有命令使用临时数据目录、非 9900 端口且保持 `--no-system-proxy`。
+
+### 校验要求
+- rules E2E 需优先于 rust-project-validate 执行。
+- 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。

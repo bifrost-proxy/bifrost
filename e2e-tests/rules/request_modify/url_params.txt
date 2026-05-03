@@ -15,9 +15,9 @@ test-url-params-modify.local http://127.0.0.1:3000 urlParams://existing=modified
 test-url-params-delete.local http://127.0.0.1:3000 urlParams://remove_me=
 
 # R-23 URL 路径替换 - 替换 URL 路径中的内容
-test-url-replace.local http://127.0.0.1:3000 urlReplace://old-path/new-path
+test-url-replace.local http://127.0.0.1:3000 urlReplace://old-path=new-path
 
-test-path-replace.local http://127.0.0.1:3000 pathReplace://old-path/alt-path
+test-path-replace.local http://127.0.0.1:3000 pathReplace://old-path=alt-path
 
 # R-24 params 合并 - 合并请求参数
-test-params.local http://127.0.0.1:3000 params://merged_key=merged_value&another=data
+test-params.local http://127.0.0.1:3000 urlParams://merged_key=merged_value,another=data
