@@ -59,9 +59,7 @@ impl SkillPackager {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
             if enclosed == Path::new(MANIFEST_JSON) {
-                let mut parsed: crate::model::SkillManifest = serde_json::from_slice(&bytes)?;
-                parsed.scope = scope.clone();
-                manifest = Some(parsed);
+                manifest = Some(parse_manifest_with_scope_default(&bytes, &scope)?);
             } else if enclosed == Path::new(SKILL_MD) {
                 skill_md = Some(String::from_utf8(bytes).map_err(|error| {
                     StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
@@ -88,12 +86,57 @@ fn io_error(error: impl std::fmt::Display) -> StoreError {
     ))
 }
 
+fn parse_manifest_with_scope_default(
+    bytes: &[u8],
+    default_scope: &SkillScope,
+) -> Result<crate::model::SkillManifest, StoreError> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let scope_is_valid = value
+        .get("scope")
+        .and_then(|scope| serde_json::from_value::<SkillScope>(scope.clone()).ok())
+        .is_some();
+    if !scope_is_valid {
+        let object = value.as_object_mut().ok_or_else(|| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "manifest.json must be an object",
+            ))
+        })?;
+        object.insert("scope".to_string(), serde_json::to_value(default_scope)?);
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ScopeRoot, SkillManifest};
     use tempfile::tempdir;
 
+    #[test]
+    fn import_preserves_manifest_scope_when_valid() {
+        let repo = tempdir().unwrap();
+        let user = tempdir().unwrap();
+        let store = SkillStore::new(vec![
+            ScopeRoot::new(SkillScope::User, user.path()),
+            ScopeRoot::new(SkillScope::Repo, repo.path()),
+        ]);
+        let manifest = SkillManifest::minimal_inline("repo-skill", "repo", SkillScope::Repo);
+        store
+            .commit(SkillDraft {
+                manifest,
+                skill_md: "---\nname: repo-skill\n---\n# Repo".to_string(),
+                draft_dir: None,
+                assets: Vec::new(),
+            })
+            .unwrap();
+
+        let archive = SkillPackager::package(&store, SkillScope::Repo, "repo-skill").unwrap();
+        let imported = SkillPackager::import(&store, SkillScope::User, &archive).unwrap();
+
+        assert_eq!(imported.manifest.scope, SkillScope::Repo);
+        assert_eq!(imported.scope, SkillScope::Repo);
+    }
     #[test]
     fn package_import_round_trip() {
         let source = tempdir().unwrap();

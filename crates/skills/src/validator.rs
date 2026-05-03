@@ -393,6 +393,7 @@ mod tests {
             inputs_schema: Some(serde_json::json!({"type":"object"})),
             outputs_schema: None,
             metadata: BTreeMap::new(),
+            env: BTreeMap::new(),
             created_by: SkillAuthor::User { id: "u".into() },
             created_at_unix: 1,
             updated_at_unix: 1,

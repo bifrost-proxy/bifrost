@@ -38,7 +38,7 @@
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
-| [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与 Agent 子系统 | 6 | Skill Creator crate、Agent slash router、Admin CRUD、WebUI Skills 面板/向导/编辑器、E2E create-test-invoke-delete-import、亮暗主题可读性 |
+| [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与 Agent 子系统 | 11 | Skill Creator crate、Agent slash router、Admin CRUD、WebUI Skills 面板/向导/编辑器、E2E create-test-invoke-delete-import、亮暗主题可读性、executor 环境白名单、registry watcher 单 slug 热重载、checksum 缺失 manifest、packager import scope 保留、authoring.test 非法状态 |
 | [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
@@ -145,7 +145,7 @@
 
 ---
 
-**总计：77 个测试文件，1479 个测试用例**
+**总计：77 个测试文件，1484 个测试用例**
 
 ## 工作流程
 

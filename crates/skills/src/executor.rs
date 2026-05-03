@@ -1,5 +1,6 @@
 use crate::model::{Entrypoint, ShellKind, SkillRecord};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Instant;
@@ -81,6 +82,7 @@ impl SkillExecutor {
                     record.path.as_path(),
                     shell_command(shell),
                     script,
+                    &record.manifest.env,
                     invocation,
                 )
                 .await
@@ -90,13 +92,20 @@ impl SkillExecutor {
                     record.path.as_path(),
                     python.as_deref().unwrap_or("python3"),
                     script,
+                    &record.manifest.env,
                     invocation,
                 )
                 .await
             }
             Entrypoint::Node { script } => {
-                self.run_process(record.path.as_path(), "node", script, invocation)
-                    .await
+                self.run_process(
+                    record.path.as_path(),
+                    "node",
+                    script,
+                    &record.manifest.env,
+                    invocation,
+                )
+                .await
             }
         }
     }
@@ -106,17 +115,20 @@ impl SkillExecutor {
         cwd: &Path,
         command: &str,
         script: &Path,
+        manifest_env: &BTreeMap<String, String>,
         invocation: SkillInvocation,
     ) -> Result<SkillTestReport, String> {
         let started = Instant::now();
-        let mut child = Command::new(command)
+        let mut command_builder = Command::new(command);
+        command_builder
             .arg(script)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env_clear();
+        apply_skill_env(&mut command_builder, manifest_env);
+        let mut child = command_builder
             .spawn()
             .map_err(|error| format!("spawn skill entrypoint: {error}"))?;
         let mut stdin = child.stdin.take().ok_or("missing child stdin")?;
@@ -200,6 +212,36 @@ fn shell_command(shell: &ShellKind) -> &'static str {
     }
 }
 
+const HOST_ENV_WHITELIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "TERM",
+    "SHELL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+];
+
+fn apply_skill_env(command: &mut Command, manifest_env: &BTreeMap<String, String>) {
+    for key in HOST_ENV_WHITELIST {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in manifest_env {
+        command.env(key, value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +275,22 @@ mod tests {
             .unwrap();
         assert_eq!(report.exit_code, Some(0));
         assert!(report.stdout.contains("Paris"));
+    }
+
+    #[tokio::test]
+    async fn process_executor_keeps_common_host_env() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf '%s\\n%s\\n' \"$HOME\" \"$PATH\"");
+        command.env_clear();
+        apply_skill_env(&mut command, &BTreeMap::new());
+
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<_> = stdout.lines().collect();
+        assert!(lines.first().is_some_and(|value| !value.is_empty()));
+        assert!(lines.get(1).is_some_and(|value| !value.is_empty()));
     }
 }

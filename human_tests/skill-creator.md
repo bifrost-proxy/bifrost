@@ -60,6 +60,51 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
   5. 切换暗色主题，重复第 4 步。
 - **预期结果**: Skills 列表、New Skill 向导、Edit 弹窗在亮色和暗色主题下文字不重叠，按钮可识别，表单错误提示可读。
 
+### TC-SC-07: Executor 环境白名单回归
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills process_executor_keeps_common_host_env --quiet
+  ```
+- **预期结果**: 测试通过；子进程在 `env_clear()` 后仍能读取非空 `HOME` 与 `PATH`。
+- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
+
+### TC-SC-08: Registry watcher 单 slug 热重载回归
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills watcher_reloads_one_slug_and_removes_deleted_slug --quiet
+  ```
+- **预期结果**: 测试通过；修改 `weather/SKILL.md` 后 registry description 更新，删除 `weather` 后索引移除，`notes` skill 保持存在。
+- **本次执行结果**: 2026-05-03 初次执行暴露 watcher 事件路径与 root 路径 canonicalization 不一致，修复后复跑通过，结果 `1 passed, 0 failed`。
+
+### TC-SC-09: checksum 缺失 manifest 回归
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills verify_checksum_missing_manifest_returns_false --quiet
+  ```
+- **预期结果**: 测试通过；缺失 `manifest.json` 的 skill 目录返回 `false`，不再误报校验成功。
+- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
+
+### TC-SC-10: packager import scope 保留回归
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills import_preserves_manifest_scope_when_valid --quiet
+  ```
+- **预期结果**: 测试通过；将 scope=`repo` 的包按 User 默认导入后，导入记录仍保持 `Repo` scope。
+- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
+
+### TC-SC-11: authoring.test 非法状态回归
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills test_rejects_unvalidated_state --quiet
+  ```
+- **预期结果**: 测试通过；`SkillAuthoringSession::start()` 后未 validate 直接 `test()` 返回 `AuthoringError::InvalidState`。
+- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
+
 ## 清理步骤
 
 ```bash

@@ -13,7 +13,7 @@ pub mod store;
 pub mod tool_bridge;
 pub mod validator;
 
-pub use authoring::{AuthoringState, SkillAuthoringSession};
+pub use authoring::{AuthoringError, AuthoringState, SkillAuthoringSession};
 pub use executor::{ExecutionEvent, SkillExecutor, SkillInvocation, SkillTestReport};
 pub use model::{
     Entrypoint, MemoryOp, ScopeRoot, ShellKind, SkillAuthor, SkillManifest, SkillRecord,

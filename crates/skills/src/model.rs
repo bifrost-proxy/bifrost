@@ -20,6 +20,8 @@ pub struct SkillManifest {
     pub inputs_schema: Option<serde_json::Value>,
     pub outputs_schema: Option<serde_json::Value>,
     pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     pub created_by: SkillAuthor,
     pub created_at_unix: i64,
     pub updated_at_unix: i64,
@@ -172,6 +174,7 @@ impl SkillManifest {
             inputs_schema: None,
             outputs_schema: None,
             metadata: BTreeMap::new(),
+            env: BTreeMap::new(),
             created_by: SkillAuthor::Agent {
                 session_id: "test".to_string(),
             },

@@ -112,6 +112,22 @@ bifrost install-skill [OPTIONS]
 
 ## 测试方案
 
+### Skills crate hardening 回归（feat/agent review fixpass）
+
+本模块的运行时 skill 执行、注册表热重载、checksum、导入和 authoring 状态机需要满足以下约束：
+
+1. Executor 在 `env_clear()` 后保留必要宿主环境白名单，包括 `PATH`、`HOME`、`USER`、`LOGNAME`、`LANG`、`LC_ALL`、`LC_CTYPE`、`TMPDIR`、`TEMP`、`TMP`、`TERM`、`SHELL`、`SSL_CERT_FILE`、`SSL_CERT_DIR`、`CARGO_HOME`、`RUSTUP_HOME`，再叠加 `SkillManifest.env`。
+2. `SkillRegistry::reload_one(slug)` 只能重建对应 slug。目录不存在时删除索引；其他 skill 保持不变；watcher 必须从文件事件路径反推出 root 下的第一级 slug 并触发差异重载。
+3. `verify_checksum()` 遇到缺失 `manifest.json` 必须返回 `false` 并记录 warning，交由上层处理。
+4. `SkillPackager::import()` 保留包内合法 `manifest.scope`，仅当 scope 缺失或非法时使用调用方默认 scope。
+5. `SkillAuthoringSession::test()` 在非 `Drafted`/`Validated`/`Tested` 状态下返回 `AuthoringError::InvalidState`，禁止用空 `PathBuf` 继续执行。
+
+验证计划：
+
+- 单元测试：`process_executor_keeps_common_host_env` 验证白名单环境变量；`watcher_reloads_one_slug_and_removes_deleted_slug` 验证写入、删除和其他 skill 不受影响；`verify_checksum_missing_manifest_returns_false` 验证缺失 manifest 返回 false；`import_preserves_manifest_scope_when_valid` 验证合法 scope 保留；`test_rejects_unvalidated_state` 验证非法状态报错。
+- E2E 测试：复用 `test_skill_creator_flow.sh` 覆盖 create -> test -> invoke -> delete -> import 主流程。
+- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-07 到 TC-SC-11，逐条执行对应 cargo/脚本命令并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：

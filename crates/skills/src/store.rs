@@ -272,8 +272,13 @@ impl SkillStore {
         // Only meaningful if manifest.json exists (created by commit()).
         let manifest_path = dir.join(MANIFEST_JSON);
         if !manifest_path.exists() {
-            // No manifest.json → checksum verification not applicable.
-            return Ok(true);
+            warn!(
+                scope = ?scope,
+                name,
+                path = %manifest_path.display(),
+                "skill checksum manifest missing"
+            );
+            return Ok(false);
         }
         let manifest: SkillManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
         Ok(stable_checksum(&dir)? == manifest.checksum)
@@ -318,6 +323,17 @@ impl SkillStore {
             checksum: manifest.checksum.clone(),
             manifest,
         })
+    }
+
+    pub fn read_records_for_name(&self, name: &str) -> Result<Vec<SkillRecord>> {
+        let mut records = Vec::new();
+        for root in &self.roots {
+            let path = root.path.join(name);
+            if path.is_dir() {
+                records.push(self.read_record_dir(root.scope.clone(), &path)?);
+            }
+        }
+        Ok(apply_effective_scopes(records))
     }
 
     fn root_for(&self, scope: &SkillScope) -> Result<PathBuf> {
@@ -452,6 +468,7 @@ fn manifest_from_skill_md(dir: &Path, scope: &SkillScope) -> Result<SkillManifes
         inputs_schema: None,
         outputs_schema: None,
         metadata: BTreeMap::new(),
+        env: BTreeMap::new(),
         created_by: SkillAuthor::Imported {
             origin: "skill-md".to_string(),
         },
@@ -555,6 +572,23 @@ mod tests {
             })
             .unwrap();
         assert!(dir.path().join("demo-skill/.history").is_dir());
+    }
+
+    #[test]
+    fn verify_checksum_missing_manifest_returns_false() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("missing-manifest");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join(SKILL_MD),
+            "---\nname: missing-manifest\n---\n# Missing",
+        )
+        .unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+
+        assert!(!store
+            .verify_checksum(SkillScope::Repo, "missing-manifest")
+            .unwrap());
     }
 
     #[test]

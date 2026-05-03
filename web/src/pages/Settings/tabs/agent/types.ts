@@ -207,6 +207,7 @@ export interface SkillManifest {
   inputs_schema?: JsonValue | null;
   outputs_schema?: JsonValue | null;
   metadata: Record<string, string>;
+  env?: Record<string, string>;
   created_by: SkillAuthor;
   created_at_unix: number;
   updated_at_unix: number;
