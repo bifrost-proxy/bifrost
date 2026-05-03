@@ -31,8 +31,8 @@ start_local_relay() {
     ) > "$RELAY_LOG" 2>&1 &
     RELAY_PID=$!
 
+    local waited=0
     while [[ $waited -lt 120 ]]; do
-    while [[ $waited -lt 30 ]]; do
         if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${RELAY_PORT}/v4/remote-invoke/client/register" 2>/dev/null | grep -q "4[0-9][0-9]\|200"; then
             log "Local relay server ready (PID: $RELAY_PID)"
             return 0
@@ -45,8 +45,8 @@ start_local_relay() {
         sleep 0.5
         waited=$((waited + 1))
     done
-    log "FATAL: relay server did not become ready in 15s. Log:"
     log "FATAL: relay server did not become ready in 60s. Log:"
+    tail -50 "$RELAY_LOG" 2>/dev/null || true
     exit 1
 }
 
