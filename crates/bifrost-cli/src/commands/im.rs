@@ -126,7 +126,8 @@ fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
             "--secret" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    let resolved = resolve_secret(v);
+                    let resolved = resolve_secret(v)
+                        .map_err(|error| bifrost_core::BifrostError::Config(error.to_string()))?;
                     body["app_secret"] = json!(resolved);
                 }
             }
@@ -1170,30 +1171,29 @@ fn http_delete(url: &str) -> Result<Value> {
     }
 }
 
-fn resolve_secret(value: &str) -> String {
+#[derive(Debug, thiserror::Error)]
+enum ResolveSecretError {
+    #[error("environment variable '{0}' not set")]
+    Missing(String),
+    #[error("failed to read secret file '{path}': {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+}
+
+fn resolve_secret(value: &str) -> std::result::Result<String, ResolveSecretError> {
     if let Some(env_key) = value.strip_prefix("env:") {
-        std::env::var(env_key).unwrap_or_else(|_| {
-            eprintln!(
-                "{} Environment variable '{}' not set, using empty string",
-                "warning:".bright_yellow(),
-                env_key
-            );
-            String::new()
-        })
+        std::env::var(env_key).map_err(|_| ResolveSecretError::Missing(env_key.to_string()))
     } else if let Some(file_path) = value.strip_prefix("file:") {
         fs::read_to_string(file_path)
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "{} Failed to read secret file '{}': {}",
-                    "warning:".bright_yellow(),
-                    file_path,
-                    e
-                );
-                String::new()
+            .map_err(|source| ResolveSecretError::Io {
+                path: file_path.to_string(),
+                source,
             })
     } else {
-        value.to_string()
+        Ok(value.to_string())
     }
 }
 
@@ -1393,4 +1393,36 @@ fn print_im_help() {
     println!("    bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh");
     println!("    bifrost im messages list --provider feishu-main --direction inbound");
     println!("    bifrost im messages clear feishu-main");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_secret_missing_env_returns_error() {
+        let key = format!(
+            "BIFROST_TEST_MISSING_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let error = resolve_secret(&format!("env:{key}")).expect_err("missing env must fail");
+        assert!(matches!(error, ResolveSecretError::Missing(missing) if missing == key));
+    }
+
+    #[test]
+    fn resolve_secret_missing_file_returns_io_error() {
+        let path = std::env::temp_dir().join(format!(
+            "missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let error =
+            resolve_secret(&format!("file:{}", path.display())).expect_err("missing file fails");
+        assert!(matches!(error, ResolveSecretError::Io { .. }));
+    }
 }

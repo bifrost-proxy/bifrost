@@ -141,6 +141,19 @@ System prompt 末尾追加一个有界 `## Available Skills` digest：每个 ena
 - 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill。
 - 真实场景测试：新增 `human_tests/agent-runtime-review-fixes.md`，包含 TC-ARF-01 到 TC-ARF-03，逐条执行并记录实际结果。
 
+### Admin import 与 CLI secret 回归（feat/agent review fixpass）
+
+`/agent/skills/import` 禁止继续接受客户端传入的本机 `PathBuf`。接口改为读取 `application/octet-stream` 原始包 bytes，或 multipart/form-data 中的 `package` 字段；服务端将 bytes 暂存到 agent 数据目录下 `skills/.import-tmp/` 后再调用 `SkillPackager::import()`。scope 可通过 `x-bifrost-skill-scope` 请求头传入，默认 `Repo`。
+
+管理端 skill handler 使用 `AgentSkillError` 分层映射：参数错误为 400，冲突为 409，语义校验失败为 422，未知 I/O 为 500。后续如果 handler 迁移到 typed JSON response，可以保留同一映射表。
+
+IM CLI 的 `resolve_secret` 返回 `Result<String, ResolveSecretError>`。缺失 env 映射为 `Missing`，文件读取失败映射为 `Io`，调用方转成 CLI 配置错误并停止，不再 warning 后写入空 secret。
+
+验证计划：
+
+- 单元测试：`multipart_import_extracts_package_field_bytes`、`agent_skill_error_maps_conflict_to_409`、`resolve_secret_missing_env_returns_error`、`resolve_secret_missing_file_returns_io_error`。
+- 真实场景测试：新增 `human_tests/agent-skills-admin-cli.md`，包含 TC-ASAC-01 到 TC-ASAC-03，逐条执行并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：

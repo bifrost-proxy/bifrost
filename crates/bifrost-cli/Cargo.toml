@@ -37,6 +37,7 @@ ipnet.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 urlencoding = "2.1"
 regex = "1"
 futures = "0.3"

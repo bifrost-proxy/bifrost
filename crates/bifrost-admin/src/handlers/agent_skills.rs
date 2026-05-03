@@ -8,10 +8,13 @@ use bifrost_skills::{
     SkillRegistry, SkillScope, SkillStore, SkillValidator,
 };
 use http_body_util::BodyExt;
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{
+    body::Bytes, body::Incoming, header, HeaderMap, Method, Request, Response, StatusCode,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub async fn handle_agent_skills(
     req: Request<Incoming>,
@@ -208,42 +211,32 @@ fn package_skill(store: &SkillStore, name: &str) -> Response<BoxBody> {
     }
 }
 
-#[derive(Deserialize)]
-struct ImportSkillRequest {
-    path: PathBuf,
-    scope: Option<SkillScope>,
-}
-
 async fn import_skill(req: Request<Incoming>, store: &SkillStore) -> Response<BoxBody> {
-    let body: ImportSkillRequest = match read_body_json(req).await {
-        Ok(body) => body,
-        Err(resp) => return resp,
+    let scope = skill_scope_from_headers(req.headers()).unwrap_or(SkillScope::Repo);
+    let bytes = match read_import_archive(req).await {
+        Ok(bytes) => bytes,
+        Err(error) => return agent_skill_error_response(error),
     };
-    const MAX_SKILL_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
-    if let Ok(meta) = std::fs::metadata(&body.path) {
-        if meta.len() > MAX_SKILL_ARCHIVE_BYTES {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!(
-                    "archive too large ({} bytes, limit {} bytes)",
-                    meta.len(),
-                    MAX_SKILL_ARCHIVE_BYTES
-                ),
-            );
-        }
-    }
-    let bytes = match std::fs::read(&body.path) {
+    let tmp_path = match persist_import_archive(&bytes) {
+        Ok(path) => path,
+        Err(error) => return agent_skill_error_response(error),
+    };
+    let archive = match std::fs::read(&tmp_path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("read archive: {error}"))
+            return agent_skill_error_response(AgentSkillError::Internal(format!(
+                "read staged archive: {error}"
+            )))
         }
     };
-    match SkillPackager::import(store, body.scope.unwrap_or(SkillScope::Repo), &bytes) {
+    let result = SkillPackager::import(store, scope, &archive);
+    let _ = std::fs::remove_file(&tmp_path);
+    match result {
         Ok(record) => json_response_with_status(
             StatusCode::CREATED,
             &serde_json::json!({ "record": record }),
         ),
-        Err(error) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &error.to_string()),
+        Err(error) => agent_skill_error_response(AgentSkillError::from_store_error(error)),
     }
 }
 
@@ -295,8 +288,166 @@ fn commit_payload(
         assets,
     }) {
         Ok(record) => json_response_with_status(status, &serde_json::json!({ "record": record })),
-        Err(error) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &error.to_string()),
+        Err(error) => agent_skill_error_response(AgentSkillError::from_store_error(error)),
     }
+}
+
+#[derive(Debug)]
+enum AgentSkillError {
+    BadRequest(String),
+    Conflict(String),
+    Unprocessable(String),
+    Internal(String),
+}
+
+impl AgentSkillError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::BadRequest(message)
+            | Self::Conflict(message)
+            | Self::Unprocessable(message)
+            | Self::Internal(message) => message,
+        }
+    }
+
+    fn from_store_error(error: bifrost_skills::store::StoreError) -> Self {
+        match error {
+            bifrost_skills::store::StoreError::Json(error) => Self::BadRequest(error.to_string()),
+            bifrost_skills::store::StoreError::Validation(issues) => {
+                let has_conflict = issues.iter().any(|issue| issue.code.contains("conflict"));
+                let message = format!("{issues:?}");
+                if has_conflict {
+                    Self::Conflict(message)
+                } else {
+                    Self::Unprocessable(message)
+                }
+            }
+            bifrost_skills::store::StoreError::MissingRoot(scope) => {
+                Self::BadRequest(format!("scope root not found: {scope:?}"))
+            }
+            bifrost_skills::store::StoreError::NotFound(message) => Self::BadRequest(message),
+            bifrost_skills::store::StoreError::Io(error) => {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput
+                ) {
+                    Self::Unprocessable(error.to_string())
+                } else {
+                    Self::Internal(error.to_string())
+                }
+            }
+        }
+    }
+}
+
+fn agent_skill_error_response(error: AgentSkillError) -> Response<BoxBody> {
+    error_response(error.status(), error.message())
+}
+
+const MAX_SKILL_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+
+async fn read_import_archive(req: Request<Incoming>) -> Result<Vec<u8>, AgentSkillError> {
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let body = req
+        .collect()
+        .await
+        .map_err(|error| AgentSkillError::BadRequest(format!("read request body: {error}")))?;
+    let bytes = body.to_bytes();
+    if bytes.len() > MAX_SKILL_ARCHIVE_BYTES {
+        return Err(AgentSkillError::BadRequest(format!(
+            "archive too large ({} bytes, limit {} bytes)",
+            bytes.len(),
+            MAX_SKILL_ARCHIVE_BYTES
+        )));
+    }
+    if content_type.starts_with("multipart/form-data") {
+        let boundary = multipart_boundary(&content_type)
+            .ok_or_else(|| AgentSkillError::BadRequest("multipart boundary missing".to_string()))?;
+        extract_multipart_package(&bytes, &boundary)
+    } else if content_type.starts_with("application/octet-stream")
+        || content_type.starts_with("application/zip")
+    {
+        Ok(bytes.to_vec())
+    } else {
+        Err(AgentSkillError::BadRequest(format!(
+            "unsupported content-type for skill import: {content_type}"
+        )))
+    }
+}
+
+fn persist_import_archive(bytes: &[u8]) -> Result<PathBuf, AgentSkillError> {
+    let tmp_dir = bifrost_agent::config::agent_home_dir()
+        .join("skills")
+        .join(".import-tmp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|error| AgentSkillError::Internal(format!("create import temp dir: {error}")))?;
+    let path = tmp_dir.join(format!("{}.pkg", Uuid::new_v4()));
+    std::fs::write(&path, bytes)
+        .map_err(|error| AgentSkillError::Internal(format!("write staged archive: {error}")))?;
+    Ok(path)
+}
+
+fn skill_scope_from_headers(headers: &HeaderMap) -> Option<SkillScope> {
+    headers
+        .get("x-bifrost-skill-scope")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|scope| serde_json::from_value(serde_json::Value::String(scope.to_string())).ok())
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("boundary="))
+        .map(|value| value.trim_matches('"').to_string())
+}
+
+fn extract_multipart_package(bytes: &Bytes, boundary: &str) -> Result<Vec<u8>, AgentSkillError> {
+    let marker = format!("--{boundary}");
+    let body = bytes.as_ref();
+    let mut offset = 0usize;
+    while let Some(start) = find_bytes(&body[offset..], marker.as_bytes()) {
+        let part_start = offset + start + marker.len();
+        let Some(headers_end_rel) = find_bytes(&body[part_start..], b"\r\n\r\n") else {
+            break;
+        };
+        let headers_start = part_start + 2;
+        let headers_end = part_start + headers_end_rel;
+        let headers = String::from_utf8_lossy(&body[headers_start..headers_end]);
+        let data_start = headers_end + 4;
+        let next_marker = format!("\r\n--{boundary}");
+        let Some(data_end_rel) = find_bytes(&body[data_start..], next_marker.as_bytes()) else {
+            break;
+        };
+        let data_end = data_start + data_end_rel;
+        if headers.contains("name=\"package\"") {
+            return Ok(body[data_start..data_end].to_vec());
+        }
+        offset = data_end;
+    }
+    Err(AgentSkillError::BadRequest(
+        "multipart field 'package' missing".to_string(),
+    ))
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn store_for(service: &ImGatewayService) -> SkillStore {
@@ -417,5 +568,23 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("validation"));
+    }
+
+    #[test]
+    fn multipart_import_extracts_package_field_bytes() {
+        let body = Bytes::from_static(
+            b"--boundary\r\nContent-Disposition: form-data; name=\"package\"; filename=\"skill.zip\"\r\nContent-Type: application/zip\r\n\r\nPK\x03\x04data\r\n--boundary--\r\n",
+        );
+
+        let bytes = extract_multipart_package(&body, "boundary").unwrap();
+
+        assert_eq!(bytes, b"PK\x03\x04data");
+    }
+
+    #[test]
+    fn agent_skill_error_maps_conflict_to_409() {
+        let error = AgentSkillError::Conflict("duplicate skill".to_string());
+
+        assert_eq!(error.status(), StatusCode::CONFLICT);
     }
 }
