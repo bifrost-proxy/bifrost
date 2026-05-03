@@ -20,7 +20,7 @@ use crate::im_gateway::types::{
 use crate::im_gateway::{
     ImAgentClient, ImAgentConfigStore, ImAgentSessionManager, ImAgentToolRegistry,
     ImConnectionManager, ImEventStore, ImMcpManager, ImMessageLogStore, ImProviderStore,
-    ImRouteStore, ImRunStore, ImScheduleStore, ImTargetStore,
+    ImRouteStore, ImRunStore, ImScheduleStore, ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
 
@@ -41,6 +41,7 @@ pub struct ImGatewayService {
     pub agent_client: Arc<ImAgentClient>,
     pub agent_tools: Arc<ImAgentToolRegistry>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
+    pub queue_manager: Arc<SessionQueueManager>,
 }
 
 impl ImGatewayService {
@@ -71,6 +72,7 @@ impl ImGatewayService {
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
                 agent_config.get_session_ttl_secs(),
             )),
+            queue_manager: Arc::new(SessionQueueManager::new()),
         }
     }
 
@@ -144,6 +146,7 @@ impl ImGatewayService {
             let agent_client = self.agent_client.clone();
             let agent_tools = self.agent_tools.clone();
             let agent_session_manager = self.agent_session_manager.clone();
+            let queue_manager = self.queue_manager.clone();
             tokio::spawn(async move {
                 run_event_loop(
                     rx,
@@ -156,6 +159,7 @@ impl ImGatewayService {
                     agent_client,
                     agent_tools,
                     agent_session_manager,
+                    queue_manager,
                 )
                 .await;
             });
@@ -415,6 +419,7 @@ async fn handle_provider_connect(
     let agent_client = service.agent_client.clone();
     let agent_tools = service.agent_tools.clone();
     let agent_session_manager = service.agent_session_manager.clone();
+    let queue_manager = service.queue_manager.clone();
     tokio::spawn(async move {
         run_event_loop(
             rx,
@@ -427,6 +432,7 @@ async fn handle_provider_connect(
             agent_client,
             agent_tools,
             agent_session_manager,
+            queue_manager,
         )
         .await;
     });
@@ -534,6 +540,7 @@ async fn run_event_loop(
     agent_client: Arc<ImAgentClient>,
     agent_tools: Arc<ImAgentToolRegistry>,
     agent_session_manager: Arc<ImAgentSessionManager>,
+    queue_manager: Arc<SessionQueueManager>,
 ) {
     info!(
         provider_id = %provider.id,
@@ -719,44 +726,40 @@ async fn run_event_loop(
                             .as_deref()
                             .unwrap_or("unknown")
                             .to_string();
-                        let chat_future = AssertUnwindSafe(process_agent_chat(
+
+                        // ── Guide/Queue mode: check if session is busy ──
+                        if agent_session_manager.is_session_active(&session_key) {
+                            handle_busy_message(
+                                &msg.text,
+                                &session_key,
+                                &queue_manager,
+                                &feishu,
+                                &provider,
+                                &event,
+                                &message_log_store,
+                            )
+                            .await;
+                            continue;
+                        }
+
+                        // Session is free — start processing with select! interleaving
+                        run_agent_chat_with_interleave(
+                            &mut rx,
                             &feishu,
                             &provider,
                             &event,
                             &agent_client,
-                            &agent_config,
+                            &agent_config_store,
                             &agent_tools,
                             &agent_session_manager,
+                            &queue_manager,
                             &session_key,
                             &msg.text,
                             None,
-                            Some(&mut mcp_manager),
+                            &mut mcp_manager,
                             &message_log_store,
-                        ));
-                        if let Err(panic_err) = chat_future.catch_unwind().await {
-                            let panic_msg = panic_err
-                                .downcast_ref::<String>()
-                                .map(|s| s.as_str())
-                                .or_else(|| panic_err.downcast_ref::<&str>().copied())
-                                .unwrap_or("unknown panic");
-                            error!(
-                                session_key = %session_key,
-                                panic = %panic_msg,
-                                "process_agent_chat panicked, event loop continues"
-                            );
-                            // Release active session to prevent permanent busy state
-                            agent_session_manager.release_active(&session_key);
-                            // Best-effort: send error card to user
-                            let _ = send_error_card_to_owner(
-                                &feishu,
-                                &provider,
-                                &format!(
-                                    "Agent 内部错误 (panic): {}",
-                                    truncate_str(panic_msg, 200)
-                                ),
-                            )
-                            .await;
-                        }
+                        )
+                        .await;
                     }
                 }
             }
@@ -791,41 +794,39 @@ async fn run_event_loop(
                     .as_deref()
                     .unwrap_or("unknown")
                     .to_string();
-                let agent_config = agent_config_store.load();
-                let chat_future = AssertUnwindSafe(process_agent_chat(
+
+                // ── Guide/Queue mode: check if session is busy ──
+                if agent_session_manager.is_session_active(&session_key) {
+                    handle_busy_message(
+                        message_text,
+                        &session_key,
+                        &queue_manager,
+                        &feishu,
+                        &provider,
+                        &event,
+                        &message_log_store,
+                    )
+                    .await;
+                    continue;
+                }
+
+                run_agent_chat_with_interleave(
+                    &mut rx,
                     &feishu,
                     &provider,
                     &event,
                     &agent_client,
-                    &agent_config,
+                    &agent_config_store,
                     &agent_tools,
                     &agent_session_manager,
+                    &queue_manager,
                     &session_key,
                     message_text,
                     system_prompt.as_deref(),
-                    Some(&mut mcp_manager),
+                    &mut mcp_manager,
                     &message_log_store,
-                ));
-                if let Err(panic_err) = chat_future.catch_unwind().await {
-                    let panic_msg = panic_err
-                        .downcast_ref::<String>()
-                        .map(|s| s.as_str())
-                        .or_else(|| panic_err.downcast_ref::<&str>().copied())
-                        .unwrap_or("unknown panic");
-                    error!(
-                        session_key = %session_key,
-                        panic = %panic_msg,
-                        "process_agent_chat panicked (route), event loop continues"
-                    );
-                    // Release active session to prevent permanent busy state
-                    agent_session_manager.release_active(&session_key);
-                    let _ = send_error_card_to_owner(
-                        &feishu,
-                        &provider,
-                        &format!("Agent 内部错误 (panic): {}", truncate_str(panic_msg, 200)),
-                    )
-                    .await;
-                }
+                )
+                .await;
             }
         }
     }
@@ -836,6 +837,335 @@ async fn run_event_loop(
         provider_id = %provider.id,
         "event processing loop ended"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Guide/Queue mode: handle messages when session is busy
+// ---------------------------------------------------------------------------
+
+/// Handle an incoming message when the target session is already busy.
+///
+/// Behavior:
+/// - `/q <text>`: push message to FIFO queue, reply with queue status
+/// - `/rq <N>`: remove queued message #N, reply with updated queue status
+/// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
+async fn handle_busy_message(
+    msg_text: &str,
+    session_key: &str,
+    queue_manager: &Arc<SessionQueueManager>,
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let trimmed = msg_text.trim();
+
+    // /q <text> — queue mode
+    if let Some(rest) = trimmed.strip_prefix("/q ") {
+        let queue_text = rest.trim();
+        if queue_text.is_empty() {
+            send_agent_reply(
+                feishu,
+                provider,
+                event,
+                "用法: /q <消息内容>",
+                message_log_store,
+            )
+            .await;
+            return;
+        }
+        match queue_manager.push_queue(session_key, queue_text.to_string()) {
+            Ok(items) => {
+                let reply = format_queue_status("✅ 已加入排队", &items);
+                send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+            }
+            Err(err) => {
+                send_agent_reply(
+                    feishu,
+                    provider,
+                    event,
+                    &format!("❌ {err}"),
+                    message_log_store,
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
+    // /rq <N> — remove queued message
+    if let Some(rest) = trimmed.strip_prefix("/rq ") {
+        let rest = rest.trim();
+        match rest.parse::<u64>() {
+            Ok(seq) => {
+                if queue_manager.remove_queue(session_key, seq) {
+                    let items = queue_manager.queue_status(session_key);
+                    let reply = format_queue_status(&format!("🗑️ 已删除 #{seq}"), &items);
+                    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                } else {
+                    send_agent_reply(
+                        feishu,
+                        provider,
+                        event,
+                        &format!("❌ 未找到排队消息 #{seq}"),
+                        message_log_store,
+                    )
+                    .await;
+                }
+            }
+            Err(_) => {
+                send_agent_reply(
+                    feishu,
+                    provider,
+                    event,
+                    "用法: /rq <序号>（如 /rq 1）",
+                    message_log_store,
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
+    // Default: guide mode — inject into the guide channel
+    let previous = queue_manager.inject_guide(session_key, trimmed.to_string());
+    let reply = if previous.is_some() {
+        "🔀 已更新引导消息（替换前一条未处理的引导），将在当前工具调用完成后生效"
+    } else {
+        "🔀 已注入引导消息，将在当前工具调用完成后生效"
+    };
+    info!(
+        session_key = %session_key,
+        guide_msg_len = trimmed.len(),
+        replaced_previous = previous.is_some(),
+        "guide message injected via IM"
+    );
+    send_agent_reply(feishu, provider, event, reply, message_log_store).await;
+}
+
+/// Format queue status as a user-friendly string.
+fn format_queue_status(
+    header: &str,
+    items: &[crate::im_gateway::queue_manager::QueueItem],
+) -> String {
+    let mut text = header.to_string();
+    if items.is_empty() {
+        text.push_str("\n\n📋 排队已清空");
+    } else {
+        text.push_str(&format!("\n\n📋 当前排队（{}条）：", items.len()));
+        for item in items {
+            let preview = truncate_str(&item.message, 60);
+            text.push_str(&format!(
+                "\n{}. [#{}] {}",
+                items.iter().position(|i| i.seq == item.seq).unwrap_or(0) + 1,
+                item.seq,
+                preview
+            ));
+        }
+    }
+    text
+}
+
+/// Run agent chat with `tokio::select!` interleaving.
+///
+/// While the agent turn is executing, this function continues to receive events
+/// from the channel and routes them through `handle_busy_message` (guide/queue).
+/// After the turn completes, it drains the queue by processing queued messages
+/// one by one.
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_chat_with_interleave(
+    rx: &mut mpsc::UnboundedReceiver<ImEvent>,
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    initial_event: &ImEvent,
+    agent_client: &Arc<ImAgentClient>,
+    agent_config_store: &Arc<ImAgentConfigStore>,
+    agent_tools: &Arc<ImAgentToolRegistry>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
+    queue_manager: &Arc<SessionQueueManager>,
+    session_key: &str,
+    initial_message: &str,
+    system_prompt_override: Option<&str>,
+    mcp_manager: &mut ImMcpManager,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    // Set up the guide channel before starting the turn
+    let guide_channel = queue_manager.get_or_create_guide_channel(session_key);
+
+    let agent_config = agent_config_store.load();
+    let mut current_msg = initial_message.to_string();
+
+    // Queue drain loop: process initial message, then drain queued messages
+    loop {
+        // Clone into a local so the future borrows the local, not `current_msg`.
+        let msg_for_turn = current_msg.clone();
+
+        // Run agent chat with interleaved event processing
+        let chat_future = AssertUnwindSafe(process_agent_chat(
+            feishu,
+            provider,
+            initial_event,
+            agent_client,
+            &agent_config,
+            agent_tools,
+            agent_session_manager,
+            session_key,
+            &msg_for_turn,
+            system_prompt_override,
+            Some(mcp_manager),
+            message_log_store,
+            Some(guide_channel.clone()),
+        ))
+        .catch_unwind();
+
+        // Use select! to interleave event processing with agent chat
+        tokio::pin!(chat_future);
+        loop {
+            tokio::select! {
+                result = &mut chat_future => {
+                    // Chat completed (or panicked)
+                    if let Err(panic_err) = result {
+                        let panic_msg = panic_err
+                            .downcast_ref::<String>()
+                            .map(|s| s.as_str())
+                            .or_else(|| panic_err.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        error!(
+                            session_key = %session_key,
+                            panic = %panic_msg,
+                            "process_agent_chat panicked, event loop continues"
+                        );
+                        agent_session_manager.release_active(session_key);
+                        let _ = send_error_card_to_owner(
+                            feishu,
+                            provider,
+                            &format!("Agent 内部错误 (panic): {}", truncate_str(panic_msg, 200)),
+                        )
+                        .await;
+                    }
+                    break;
+                }
+                Some(event) = rx.recv() => {
+                    // Handle concurrent event while chat is running
+                    handle_concurrent_event_during_chat(
+                        &event,
+                        provider,
+                        session_key,
+                        queue_manager,
+                        feishu,
+                        message_log_store,
+                        agent_session_manager,
+                        agent_config_store,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // After turn completes, check for queued messages
+        match queue_manager.pop_queue(session_key) {
+            Some(next_msg) => {
+                info!(
+                    session_key = %session_key,
+                    queued_msg_len = next_msg.len(),
+                    remaining_queue = queue_manager.queue_status(session_key).len(),
+                    "processing next queued message"
+                );
+                current_msg = next_msg;
+                // Continue the loop to process the next queued message
+            }
+            None => {
+                // No more queued messages, clean up and exit
+                queue_manager.clear_session(session_key);
+                break;
+            }
+        }
+    }
+}
+
+/// Handle an event that arrives during an active agent chat.
+///
+/// Performs the same security/logging/routing as the main loop, but for events
+/// that come in while a chat is being processed. Messages for the active session
+/// are routed through guide/queue mode.
+#[allow(clippy::too_many_arguments)]
+async fn handle_concurrent_event_during_chat(
+    event: &ImEvent,
+    provider: &ImProviderConfig,
+    active_session_key: &str,
+    queue_manager: &Arc<SessionQueueManager>,
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    message_log_store: &Arc<ImMessageLogStore>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
+    agent_config_store: &Arc<ImAgentConfigStore>,
+) {
+    // Security check: only process messages from the owner
+    if let Some(ref owner_id) = provider.owner_open_id {
+        let sender_id = event.source.user_id.as_deref().unwrap_or("");
+        if sender_id != owner_id {
+            debug!(
+                event_id = %event.event_id,
+                "rejecting concurrent event from non-owner"
+            );
+            return;
+        }
+    }
+
+    let msg_text = match event.message.as_ref() {
+        Some(m) if !m.text.is_empty() => &m.text,
+        _ => return,
+    };
+
+    let session_key = event.source.user_id.as_deref().unwrap_or("unknown");
+
+    // Check if this event is for the currently active session
+    if session_key == active_session_key {
+        // Session-free commands are still instant
+        let agent_config = agent_config_store.load();
+        if let Some(response) =
+            bifrost_agent::handle_session_free_command(session_key, msg_text, &agent_config)
+        {
+            send_agent_reply(feishu, provider, event, &response, message_log_store).await;
+            return;
+        }
+        // Route through guide/queue mode
+        handle_busy_message(
+            msg_text,
+            session_key,
+            queue_manager,
+            feishu,
+            provider,
+            event,
+            message_log_store,
+        )
+        .await;
+    } else {
+        // Different session — check if it's also busy
+        if agent_session_manager.is_session_active(session_key) {
+            handle_busy_message(
+                msg_text,
+                session_key,
+                queue_manager,
+                feishu,
+                provider,
+                event,
+                message_log_store,
+            )
+            .await;
+        } else {
+            // Session is free but we can't process it now (MCP is in use).
+            // Queue it for later processing.
+            let _ = queue_manager.push_queue(session_key, msg_text.to_string());
+            send_agent_reply(
+                feishu,
+                provider,
+                event,
+                "⏳ 消息已排队，将在当前任务完成后处理。",
+                message_log_store,
+            )
+            .await;
+        }
+    }
 }
 
 /// Process an agent chat: run the full turn loop (with tool calls), send reply via Feishu, log the outbound message.
@@ -853,6 +1183,7 @@ async fn process_agent_chat(
     system_prompt_override: Option<&str>,
     mcp: Option<&mut ImMcpManager>,
     message_log_store: &Arc<ImMessageLogStore>,
+    guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 ) {
     info!(
         session_key = %session_key,
@@ -891,6 +1222,7 @@ async fn process_agent_chat(
         }
     };
     session.source = "feishu".to_string();
+    session.guide_channel = guide_channel;
 
     // Create a conversation recorder for persistence if enabled
     let mut recorder = if !agent_config.is_ephemeral() {

@@ -141,6 +141,7 @@
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 30 | Settings Tab、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
 | [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 68 | Agent 配置 API（获取/更新/禁用启用）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call、API Key 写入保持 Azure header 认证） |
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
+| [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 9 | SessionQueueManager 单元测试（11项）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、全量测试 |
 | [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
 | [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
@@ -148,7 +149,7 @@
 
 ---
 
-**总计：80 个测试文件，1496 个测试用例**
+**总计：81 个测试文件，1505 个测试用例**
 
 ## 工作流程
 

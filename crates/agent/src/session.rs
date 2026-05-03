@@ -83,6 +83,11 @@ pub struct AgentSession {
     /// When true, skip memory injection for this turn (set by /clear, reset after use).
     /// This prevents the model from "remembering" prior context immediately after a clear.
     pub memory_cleared: bool,
+
+    /// Guide-mode injection channel.
+    /// When set, the turn loop checks this after each tool call batch completes.
+    /// If a message is present, it is appended to history before the next model call.
+    pub guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 impl AgentSession {
@@ -104,6 +109,7 @@ impl AgentSession {
             slash_router: SlashCommandRouter::with_default_builtins(),
             skill_registry: None,
             memory_cleared: false,
+            guide_channel: None,
         }
     }
 
@@ -1483,6 +1489,27 @@ pub async fn run_turn_with_mcp(
                     tool_calls_log,
                     work_dir_switched: Some(new_dir),
                 });
+            }
+        }
+
+        // Guide-mode injection: check if an IM user sent a guide message while
+        // this tool call batch was executing. If so, append it to history so the
+        // model sees it in the next iteration (before compaction to preserve it).
+        let guide_msg = session
+            .guide_channel
+            .as_ref()
+            .and_then(|ch| ch.lock().unwrap().take());
+        if let Some(guide_msg) = guide_msg {
+            info!(
+                session_key = %session.session_key,
+                guide_msg_len = guide_msg.len(),
+                "guide message injected mid-turn"
+            );
+            session.add_user_message(&guide_msg);
+            if let Some(ref mut rec) = recorder {
+                if let Err(e) = rec.record_user_message(&session.session_key, &guide_msg) {
+                    warn!(error = %e, "failed to record guide message");
+                }
             }
         }
 

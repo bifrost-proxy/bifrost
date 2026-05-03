@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-Skill Creator 子系统让 Bifrost Agent 在 Settings -> Agent 中管理、创建、测试、编辑、打包、删除和导入 skill，并让 Agent Loop 能通过 `/skill` 与 skill 自定义 slash command 触发 skill。
+Skill Creator 子系统让 Bifrost Agent 在 Settings -> Agent 中管理 skill，支持查看详情、删除、启用/禁用、导入 zip 包。新建 skill 必须通过 Agent 对话或导入 zip 包，WebUI 不提供直接创建和编辑功能。
 
 ## 前置条件
 
@@ -38,7 +38,6 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
 
 - **操作步骤**: `bash e2e-tests/tests/test_skill_creator_flow.sh`
 - **预期结果**: 自动跑通 create -> test -> invoke -> delete -> import，删除后 `/weather` 不再解析，导入后 skill 恢复。
-- **本次执行结果**: 2026-05-03 复跑通过。回归覆盖 `ModelProviderConfig.api_key` 新字段补齐后，`test_skill_creator_flow.sh` 能重新编译 `bifrost-agent`/`bifrost-e2e` 并完成 `skill_creator_create_test_invoke_delete_import`，结果 `1 passed, 0 failed`。
 
 ### TC-SC-05: WebUI Skills 面板构建与 lint
 
@@ -50,87 +49,98 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
   ```
 - **预期结果**: ESLint 零 error；TypeScript build 通过；Settings -> Agent 中 Skills 面板挂在 Memory Records 后、MCP Servers 前。
 
-### TC-SC-06: WebUI 亮色/暗色主题可读性回归
+### TC-SC-06: WebUI Skills 面板无 New Skill 按钮、无 Edit 按钮
 
 - **操作步骤**:
   1. 启动带临时数据目录的 Bifrost 测试实例，端口使用 `8800`，必须带 `--no-system-proxy`。
   2. 浏览器打开 `http://127.0.0.1:8800/_bifrost/`。
-  3. 进入 Settings -> Agent，定位 Memory Records 后的 Skills 面板。
-  4. 在亮色主题下打开 New Skill，依次检查 Metadata、Entrypoint、Tools、Test 四步表单文字、按钮、输入框可读。
-  5. 切换暗色主题，重复第 4 步。
-- **预期结果**: Skills 列表、New Skill 向导、Edit 弹窗在亮色和暗色主题下文字不重叠，按钮可识别，表单错误提示可读。
+  3. 进入 Settings -> Agent，定位 Skills 面板。
+- **预期结果**:
+  - 面板右上角无 `+ New Skill` 按钮
+  - 每行 Actions 列无编辑（铅笔）图标，只有查看详情（眼睛）图标和删除图标
+  - 右上角有 Import 按钮和 scope 选择器
 
-### TC-SC-07: Executor 环境白名单回归
+### TC-SC-07: WebUI Skills 查看详情弹窗
+
+- **操作步骤**:
+  1. 在 Skills 列表中找到任意一个 skill，点击眼睛图标
+- **预期结果**:
+  - 弹出只读详情弹窗，标题为 `Skill: <skill-name>`
+  - 弹窗中展示 Name、Version、Scope、Enabled、Description、Entrypoint、Triggers、Allowed Tools、Path、Checksum 等信息
+  - 如果有 SKILL.md 内容，展示预格式化文本
+  - 弹窗无 Save/Edit 按钮，只有关闭
+  - 弹窗 footer 为空（无操作按钮）
+
+### TC-SC-08: WebUI Skills Import ZIP 功能
+
+- **操作步骤**:
+  1. 在 Skills 面板右上角选择 scope（默认 Repo）
+  2. 点击 Import 按钮
+  3. 在文件选择器中选择一个 .zip 格式的 skill 包
+- **预期结果**:
+  - 文件选择器只接受 `.zip` 文件
+  - 导入成功后显示 toast 提示 `Skill "xxx" imported`
+  - Skills 列表中出现新导入的 skill
+
+### TC-SC-09: WebUI Skills 列表分页固定 10 条
+
+- **操作步骤**:
+  1. 确保 Skills 列表中有超过 10 个 skill
+  2. 观察分页器
+- **预期结果**:
+  - 每页固定显示 10 条
+  - 无 page size 切换器
+  - 使用简洁分页样式
+
+### TC-SC-10: WebUI Skills 删除功能
+
+- **操作步骤**:
+  1. 找到一个非 system scope 的 skill，点击删除图标
+  2. 在确认弹窗中点击确认
+- **预期结果**:
+  - 弹出确认弹窗 "Delete skill?"
+  - 确认后 skill 从列表中移除
+  - System scope 的 skill 删除按钮为禁用状态
+
+### TC-SC-11: Executor 环境白名单回归
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills process_executor_keeps_common_host_env --quiet
   ```
 - **预期结果**: 测试通过；子进程在 `env_clear()` 后仍能读取非空 `HOME` 与 `PATH`。
-- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
 
-### TC-SC-08: Registry watcher 单 slug 热重载回归
+### TC-SC-12: Registry watcher 单 slug 热重载回归
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills watcher_reloads_one_slug_and_removes_deleted_slug --quiet
   ```
 - **预期结果**: 测试通过；修改 `weather/SKILL.md` 后 registry description 更新，删除 `weather` 后索引移除，`notes` skill 保持存在。
-- **本次执行结果**: 2026-05-03 初次执行暴露 watcher 事件路径与 root 路径 canonicalization 不一致，修复后复跑通过，结果 `1 passed, 0 failed`。
 
-### TC-SC-09: checksum 缺失 manifest 回归
+### TC-SC-13: checksum 缺失 manifest 回归
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills verify_checksum_missing_manifest_returns_false --quiet
   ```
 - **预期结果**: 测试通过；缺失 `manifest.json` 的 skill 目录返回 `false`，不再误报校验成功。
-- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
 
-### TC-SC-10: packager import scope 保留回归
+### TC-SC-14: packager import scope 保留回归
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills import_preserves_manifest_scope_when_valid --quiet
   ```
 - **预期结果**: 测试通过；将 scope=`repo` 的包按 User 默认导入后，导入记录仍保持 `Repo` scope。
-- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
 
-### TC-SC-11: authoring.test 非法状态回归
+### TC-SC-15: authoring.test 非法状态回归
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.codex-target/fixpass cargo test -p skills test_rejects_unvalidated_state --quiet
   ```
 - **预期结果**: 测试通过；`SkillAuthoringSession::start()` 后未 validate 直接 `test()` 返回 `AuthoringError::InvalidState`。
-- **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
-
-### TC-SC-12: SkillCreatorWizard SKILL.md 转义回归
-
-- **操作步骤**:
-  ```bash
-  pnpm --dir web test:unit -- SkillCreatorWizard.test.ts
-  ```
-- **预期结果**: 测试通过；script 中包含三反引号或以独立 `---` 行开头时，生成的 SKILL.md frontmatter 仍只有开头和结尾两个 `---` 分隔行。
-- **本次执行结果**: 2026-05-03 通过，Vitest 总结果 `5 passed, 20 passed`。
-
-### TC-SC-13: SkillEditor 复用 Wizard 表单组件构建回归
-
-- **操作步骤**:
-  ```bash
-  pnpm --dir web build
-  ```
-- **预期结果**: TypeScript 和 Vite build 通过；SkillEditor 能复用 Manifest、Script、Test 三个 Wizard 表单 section 且类型无错误。
-- **本次执行结果**: 2026-05-03 通过，`tsc -b && vite build` 成功。
-
-### TC-SC-14: IM Gateway Tab loading/error 复位回归
-
-- **操作步骤**:
-  ```bash
-  pnpm --dir web build
-  ```
-- **预期结果**: TypeScript 和 Vite build 通过；`fetchData` 的 catch/finally 和 tab 切换 loading reset 逻辑类型正确。
-- **本次执行结果**: 2026-05-03 通过，`tsc -b && vite build` 成功。
 
 ## 清理步骤
 
