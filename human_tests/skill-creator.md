@@ -105,6 +105,33 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
 - **预期结果**: 测试通过；`SkillAuthoringSession::start()` 后未 validate 直接 `test()` 返回 `AuthoringError::InvalidState`。
 - **本次执行结果**: 2026-05-03 通过，结果 `1 passed, 0 failed`。
 
+### TC-SC-12: SkillCreatorWizard SKILL.md 转义回归
+
+- **操作步骤**:
+  ```bash
+  pnpm --dir web test:unit -- SkillCreatorWizard.test.ts
+  ```
+- **预期结果**: 测试通过；script 中包含三反引号或以独立 `---` 行开头时，生成的 SKILL.md frontmatter 仍只有开头和结尾两个 `---` 分隔行。
+- **本次执行结果**: 2026-05-03 通过，Vitest 总结果 `5 passed, 20 passed`。
+
+### TC-SC-13: SkillEditor 复用 Wizard 表单组件构建回归
+
+- **操作步骤**:
+  ```bash
+  pnpm --dir web build
+  ```
+- **预期结果**: TypeScript 和 Vite build 通过；SkillEditor 能复用 Manifest、Script、Test 三个 Wizard 表单 section 且类型无错误。
+- **本次执行结果**: 2026-05-03 通过，`tsc -b && vite build` 成功。
+
+### TC-SC-14: IM Gateway Tab loading/error 复位回归
+
+- **操作步骤**:
+  ```bash
+  pnpm --dir web build
+  ```
+- **预期结果**: TypeScript 和 Vite build 通过；`fetchData` 的 catch/finally 和 tab 切换 loading reset 逻辑类型正确。
+- **本次执行结果**: 2026-05-03 通过，`tsc -b && vite build` 成功。
+
 ## 清理步骤
 
 ```bash

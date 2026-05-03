@@ -1056,6 +1056,7 @@ export default function ImGatewayTab() {
       }
     } catch (err) {
       console.error("Failed to fetch IM Gateway data:", err);
+      message.error(err instanceof Error ? err.message : "Failed to fetch IM Gateway data");
     } finally {
       setLoading(false);
     }
@@ -1145,7 +1146,10 @@ export default function ImGatewayTab() {
     <div>
       <Tabs
         activeKey={activeSubTab}
-        onChange={setActiveSubTab}
+        onChange={(key) => {
+          setLoading(false);
+          setActiveSubTab(key);
+        }}
         items={subTabItems}
         size="small"
       />

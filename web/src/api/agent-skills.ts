@@ -55,8 +55,13 @@ export function packageSkill(
   );
 }
 
-export function importSkill(path: string, scope: SkillScope): Promise<{ record: SkillRecord }> {
-  return post<{ record: SkillRecord }>(`${PREFIX}/import`, { path, scope });
+export function importSkill(file: File | Blob, scope: SkillScope): Promise<{ record: SkillRecord }> {
+  return post<{ record: SkillRecord }>(`${PREFIX}/import`, file, {
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-bifrost-skill-scope": scope,
+    },
+  });
 }
 
 export function validateSkill(request: SkillCreateRequest): Promise<{ ok: boolean; warnings: JsonValue[] }> {

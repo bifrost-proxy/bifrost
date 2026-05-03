@@ -13,6 +13,12 @@ import {
   message,
 } from "antd";
 import { createSkill, testSkill } from "../../../../api/agent-skills";
+import {
+  requiredRule,
+  skillDescriptionRules,
+  skillNameRules,
+  skillSlashCommandRules,
+} from "./utils/skillFormSchema";
 import type {
   Entrypoint,
   JsonValue,
@@ -26,7 +32,7 @@ import type {
 
 const { Text } = Typography;
 
-type FormValues = {
+export type SkillFormValues = {
   name: string;
   version: string;
   description: string;
@@ -49,12 +55,12 @@ type Props = {
 };
 
 export default function SkillCreatorWizard({ open, onClose, onSaved }: Props) {
-  const [form] = Form.useForm<FormValues>();
+  const [form] = Form.useForm<SkillFormValues>();
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [testReport, setTestReport] = useState<SkillTestReport | null>(null);
 
-  const initialValues = useMemo<FormValues>(
+  const initialValues = useMemo<SkillFormValues>(
     () => ({
       name: "",
       version: "0.1.0",
@@ -180,70 +186,8 @@ export default function SkillCreatorWizard({ open, onClose, onSaved }: Props) {
         style={{ marginBottom: 16 }}
       />
       <Form form={form} layout="vertical" initialValues={initialValues}>
-        <div style={{ display: step === 0 ? "block" : "none" }}>
-          <Form.Item
-            name="name"
-            label="Name"
-            rules={[
-              { required: true },
-              { pattern: /^[a-z][a-z0-9-]{0,63}$/, message: "Use kebab-case" },
-            ]}
-          >
-            <Input placeholder="weather-lookup" />
-          </Form.Item>
-          <Form.Item name="description" label="Description" rules={[{ required: true, max: 1024 }]}>
-            <Input.TextArea rows={3} />
-          </Form.Item>
-          <Space.Compact style={{ width: "100%" }}>
-            <Form.Item name="version" label="Version" rules={[{ required: true }]} style={{ width: "33%" }}>
-              <Input />
-            </Form.Item>
-            <Form.Item name="scope" label="Scope" rules={[{ required: true }]} style={{ width: "33%" }}>
-              <Select
-                options={[
-                  { value: "repo", label: "Repo" },
-                  { value: "user", label: "User" },
-                  { value: "system", label: "System" },
-                ]}
-              />
-            </Form.Item>
-            <Form.Item
-              name="slash_command"
-              label="Slash Command"
-              rules={[{ pattern: /^\/[a-z][a-z0-9-]{0,31}$/, message: "Use /kebab-case" }]}
-              style={{ width: "34%" }}
-            >
-              <Input placeholder="/weather" />
-            </Form.Item>
-          </Space.Compact>
-          <Form.Item name="trigger_keywords" label="Keywords">
-            <Input placeholder="weather, 天气" />
-          </Form.Item>
-        </div>
-        <div style={{ display: step === 1 ? "block" : "none" }}>
-          <Form.Item name="entrypoint_kind" label="Kind" rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: "inline", label: "Inline" },
-                { value: "shell", label: "Shell" },
-                { value: "python", label: "Python" },
-                { value: "node", label: "Node" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="shell" label="Shell">
-            <Select
-              options={[
-                { value: "bash", label: "Bash" },
-                { value: "sh", label: "sh" },
-                { value: "zsh", label: "zsh" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="script" label="Instructions or Script" rules={[{ required: true }]}>
-            <Input.TextArea rows={10} />
-          </Form.Item>
-        </div>
+        <ManifestFormSection hidden={step !== 0} />
+        <ScriptEditorSection hidden={step !== 1} />
         <div style={{ display: step === 2 ? "block" : "none" }}>
           <Space direction="vertical">
             <Form.Item name="memory_read" valuePropName="checked">
@@ -257,24 +201,98 @@ export default function SkillCreatorWizard({ open, onClose, onSaved }: Props) {
             <Input.TextArea rows={8} />
           </Form.Item>
         </div>
-        <div style={{ display: step === 3 ? "block" : "none" }}>
-          <Form.Item name="test_inputs" label="Test Inputs" rules={[{ validator: validateJson }]}>
-            <Input.TextArea rows={6} />
-          </Form.Item>
-          {testReport ? (
-            <Alert
-              type={testReport.exit_code === 0 ? "success" : "warning"}
-              message={`Exit ${testReport.exit_code ?? "unknown"} in ${testReport.duration_ms}ms`}
-              description={<Text code>{testReport.stdout || testReport.stderr}</Text>}
-            />
-          ) : null}
-        </div>
+        <TestPanel hidden={step !== 3} testReport={testReport} />
       </Form>
     </Modal>
   );
 }
 
-function buildEntrypoint(values: FormValues): Entrypoint {
+export function ManifestFormSection({ hidden = false }: { hidden?: boolean }) {
+  return (
+    <div style={{ display: hidden ? "none" : "block" }}>
+      <Form.Item name="name" label="Name" rules={skillNameRules}>
+        <Input placeholder="weather-lookup" />
+      </Form.Item>
+      <Form.Item name="description" label="Description" rules={skillDescriptionRules}>
+        <Input.TextArea rows={3} />
+      </Form.Item>
+      <Space.Compact style={{ width: "100%" }}>
+        <Form.Item name="version" label="Version" rules={requiredRule} style={{ width: "33%" }}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="scope" label="Scope" rules={requiredRule} style={{ width: "33%" }}>
+          <Select
+            options={[
+              { value: "repo", label: "Repo" },
+              { value: "user", label: "User" },
+              { value: "system", label: "System" },
+            ]}
+          />
+        </Form.Item>
+        <Form.Item name="slash_command" label="Slash Command" rules={skillSlashCommandRules} style={{ width: "34%" }}>
+          <Input placeholder="/weather" />
+        </Form.Item>
+      </Space.Compact>
+      <Form.Item name="trigger_keywords" label="Keywords">
+        <Input placeholder="weather, 天气" />
+      </Form.Item>
+    </div>
+  );
+}
+
+export function ScriptEditorSection({ hidden = false }: { hidden?: boolean }) {
+  return (
+    <div style={{ display: hidden ? "none" : "block" }}>
+      <Form.Item name="entrypoint_kind" label="Kind" rules={requiredRule}>
+        <Select
+          options={[
+            { value: "inline", label: "Inline" },
+            { value: "shell", label: "Shell" },
+            { value: "python", label: "Python" },
+            { value: "node", label: "Node" },
+          ]}
+        />
+      </Form.Item>
+      <Form.Item name="shell" label="Shell">
+        <Select
+          options={[
+            { value: "bash", label: "Bash" },
+            { value: "sh", label: "sh" },
+            { value: "zsh", label: "zsh" },
+          ]}
+        />
+      </Form.Item>
+      <Form.Item name="script" label="Instructions or Script" rules={requiredRule}>
+        <Input.TextArea rows={10} />
+      </Form.Item>
+    </div>
+  );
+}
+
+export function TestPanel({
+  hidden = false,
+  testReport,
+}: {
+  hidden?: boolean;
+  testReport: SkillTestReport | null;
+}) {
+  return (
+    <div style={{ display: hidden ? "none" : "block" }}>
+      <Form.Item name="test_inputs" label="Test Inputs" rules={[{ validator: validateJson }]}>
+        <Input.TextArea rows={6} />
+      </Form.Item>
+      {testReport ? (
+        <Alert
+          type={testReport.exit_code === 0 ? "success" : "warning"}
+          message={`Exit ${testReport.exit_code ?? "unknown"} in ${testReport.duration_ms}ms`}
+          description={<Text code>{testReport.stdout || testReport.stderr}</Text>}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function buildEntrypoint(values: SkillFormValues): Entrypoint {
   if (values.entrypoint_kind === "inline") {
     return { kind: "inline", instructions_md: values.script };
   }
@@ -287,7 +305,7 @@ function buildEntrypoint(values: FormValues): Entrypoint {
   return { kind: "node", script: "scripts/run.js" };
 }
 
-function buildAssets(values: FormValues) {
+function buildAssets(values: SkillFormValues) {
   if (values.entrypoint_kind === "inline") {
     return [];
   }
@@ -300,8 +318,25 @@ function buildAssets(values: FormValues) {
   return [{ path, content: values.script }];
 }
 
-function buildSkillMd(manifest: SkillManifest, values: FormValues): string {
-  return `---\nname: ${manifest.name}\nversion: ${manifest.version}\ndescription: ${manifest.description}\nscope: ${manifest.scope}\n---\n\n# ${manifest.name}\n\n${values.script}\n`;
+export function buildSkillMd(manifest: SkillManifest, values: SkillFormValues): string {
+  const frontmatter = [
+    "---",
+    `name: ${yamlScalar(manifest.name)}`,
+    `version: ${yamlScalar(manifest.version)}`,
+    `description: ${yamlScalar(manifest.description)}`,
+    `scope: ${yamlScalar(manifest.scope)}`,
+    "---",
+  ].join("\n");
+  if (values.entrypoint_kind === "inline") {
+    return `${frontmatter}\n\n# ${manifest.name}\n\n${fencedBlock(values.script)}\n`;
+  }
+  const scriptPath =
+    values.entrypoint_kind === "shell"
+      ? "./scripts/run.sh"
+      : values.entrypoint_kind === "python"
+        ? "./scripts/run.py"
+        : "./scripts/run.js";
+  return `${frontmatter}\n\n# ${manifest.name}\n\nscript: ${scriptPath}\n`;
 }
 
 function parseJson(value: string, label: string): JsonValue {
@@ -317,4 +352,14 @@ async function validateJson(_: unknown, value?: string) {
     return;
   }
   parseJson(value, "JSON");
+}
+
+function yamlScalar(value: string): string {
+  return JSON.stringify(value);
+}
+
+function fencedBlock(value: string): string {
+  const fence = value.includes("```") || /^---$/m.test(value) ? "~~~" : "```";
+  const safeValue = value.replace(/^---$/gm, " ---");
+  return `${fence}\n${safeValue}\n${fence}`;
 }

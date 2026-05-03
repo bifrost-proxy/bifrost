@@ -154,6 +154,20 @@ IM CLI 的 `resolve_secret` 返回 `Result<String, ResolveSecretError>`。缺失
 - 单元测试：`multipart_import_extracts_package_field_bytes`、`agent_skill_error_maps_conflict_to_409`、`resolve_secret_missing_env_returns_error`、`resolve_secret_missing_file_returns_io_error`。
 - 真实场景测试：新增 `human_tests/agent-skills-admin-cli.md`，包含 TC-ASAC-01 到 TC-ASAC-03，逐条执行并记录实际结果。
 
+### Web Skill 表单与 IM Gateway 回归（feat/agent review fixpass）
+
+Skill Creator Wizard 的 Manifest、Script Editor、Test Panel 拆成可复用组件，并将 name、description、slash command、required 等字段约束放入 `utils/skillFormSchema.ts`。SkillEditor 直接复用这些 section，以单页 form 方式编辑 manifest、entrypoint、SKILL.md 和非 inline script assets，避免 Wizard 与 Editor 字段漂移。
+
+`buildSkillMd()` 不再把 shell/python/node script body 写入 SKILL.md 正文，而是引用对应 `./scripts/run.*` 文件；inline 内容使用 fenced block，并在脚本包含三反引号或独立 `---` 行时切换/转义 fence，保证 frontmatter 边界不被正文破坏。
+
+IM Gateway Tab 的 `fetchData` 在失败时通过 `message.error()` 暴露错误，并在 `finally` 中稳定清理 loading；切换 tab 时先 reset loading，再触发新 tab 的数据加载。
+
+验证计划：
+
+- 单元测试：`SkillCreatorWizard.test.ts` 覆盖三反引号和 leading `---` 两个 SKILL.md 转义回归。
+- 构建验证：`pnpm --dir web build` 验证 SkillEditor 复用组件与 IM Gateway loading/error 修改的 TypeScript/Vite 构建。
+- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-12 到 TC-SC-14，逐条执行并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：
