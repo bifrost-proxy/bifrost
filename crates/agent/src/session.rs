@@ -92,6 +92,16 @@ pub struct AgentSession {
     /// Session title (intent/topic) set by the agent via set_title tool.
     /// Displayed in the Feishu card header instead of "Bifrost AI".
     pub title: Option<String>,
+
+    /// Channel to push real-time plan updates to IM (e.g., for Feishu card rendering).
+    /// Each message carries (plan_steps, current_session_title) so the card always
+    /// reflects the latest title even when set_title is called mid-turn.
+    pub plan_sender: Option<
+        tokio::sync::mpsc::UnboundedSender<(
+            Vec<crate::tools::update_plan::PlanStep>,
+            Option<String>,
+        )>,
+    >,
 }
 
 impl AgentSession {
@@ -115,6 +125,7 @@ impl AgentSession {
             memory_cleared: false,
             guide_channel: None,
             title: None,
+            plan_sender: None,
         }
     }
 
@@ -701,6 +712,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         Dispatch::RunSkill { record, invocation } => {
@@ -716,6 +728,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
@@ -734,6 +747,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -755,6 +769,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -779,6 +794,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -801,6 +817,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         match compact::compact_session(
@@ -841,6 +858,7 @@ pub async fn run_turn_with_mcp(
                     tool_calls_log: Vec::new(),
                     work_dir_switched: None,
                     title_updated: None,
+                    plan_steps: None,
                 });
             }
             Ok(result) => {
@@ -852,6 +870,7 @@ pub async fn run_turn_with_mcp(
                     tool_calls_log: Vec::new(),
                     work_dir_switched: None,
                     title_updated: None,
+                    plan_steps: None,
                 });
             }
             Err(e) => {
@@ -877,6 +896,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         let record = memory_runtime::remember_explicit(config, session, args.trim())?;
@@ -885,6 +905,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -919,6 +940,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -939,6 +961,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         let response = match memory_runtime::forget_memory(config, session, args.trim())? {
@@ -950,6 +973,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -980,6 +1004,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -1028,6 +1053,7 @@ pub async fn run_turn_with_mcp(
                         tool_calls_log: Vec::new(),
                         work_dir_switched: None,
                         title_updated: None,
+                        plan_steps: None,
                     });
                 }
                 Ok(_) => {
@@ -1053,6 +1079,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -1067,6 +1094,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
+                plan_steps: None,
             });
         }
         return Ok(TurnResult {
@@ -1074,6 +1102,7 @@ pub async fn run_turn_with_mcp(
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
+            plan_steps: None,
         });
     }
 
@@ -1159,6 +1188,7 @@ pub async fn run_turn_with_mcp(
     // Ensure work_dir exists
     let _ = std::fs::create_dir_all(&work_dir);
     let mut tool_calls_log: Vec<crate::types::ToolCallLog> = Vec::new();
+    let mut last_plan_steps: Option<Vec<crate::tools::update_plan::PlanStep>> = None;
     let max_iterations = config.get_max_turn_iterations() as usize;
     let tool_output_limit = config
         .tool_output_token_limit
@@ -1327,6 +1357,7 @@ pub async fn run_turn_with_mcp(
                                     tool_calls_log,
                                     work_dir_switched: None,
                                     title_updated: None,
+                                    plan_steps: None,
                                 });
                             }
                             return Err(last_err);
@@ -1357,6 +1388,7 @@ pub async fn run_turn_with_mcp(
                             tool_calls_log,
                             work_dir_switched: None,
                             title_updated: None,
+                            plan_steps: None,
                         });
                     }
                     return Err(e);
@@ -1407,6 +1439,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log,
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
+                plan_steps: last_plan_steps,
             });
         }
 
@@ -1531,6 +1564,7 @@ pub async fn run_turn_with_mcp(
                     tool_calls_log,
                     work_dir_switched: Some(new_dir),
                     title_updated: None,
+                    plan_steps: None,
                 });
             }
         }
@@ -1547,6 +1581,30 @@ pub async fn run_turn_with_mcp(
                     if let Err(e) = rec.record_title_updated(&session.session_key, new_title) {
                         warn!(error = %e, "failed to record title update");
                     }
+                }
+            }
+        }
+
+        // Check if update_plan was called — if so, extract plan for IM card rendering
+        if let Some(steps) = tool_calls_log
+            .iter()
+            .rfind(|l| l.tool_name == "update_plan" && l.success)
+            .and_then(|l| l.result.strip_prefix("UPDATE_PLAN:"))
+            .and_then(|json| {
+                match serde_json::from_str::<crate::tools::update_plan::UpdatePlanArgs>(json) {
+                    Ok(args) => Some(args.plan),
+                    Err(e) => {
+                        warn!(error = %e, "failed to parse update_plan args");
+                        None
+                    }
+                }
+            })
+        {
+            last_plan_steps = Some(steps.clone());
+            // Push real-time plan update to IM channel (include current title)
+            if let Some(ref sender) = session.plan_sender {
+                if let Err(e) = sender.send((steps, session.title.clone())) {
+                    debug!(error = %e, "plan_sender channel closed");
                 }
             }
         }

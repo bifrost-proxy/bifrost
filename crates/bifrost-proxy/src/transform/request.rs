@@ -23,6 +23,7 @@ pub fn apply_req_rules(
     apply_req_header_replace(parts, rules, verbose_logging, ctx);
     apply_req_type(parts, rules, verbose_logging, ctx);
     apply_req_charset(parts, rules, verbose_logging, ctx);
+    apply_forwarded_for(parts, rules, verbose_logging, ctx);
 
     if rules.req_cors.is_enabled() {
         apply_req_cors(parts, &rules.req_cors, verbose_logging, ctx);
@@ -385,6 +386,44 @@ fn apply_req_charset(
                 );
             }
             parts.headers.insert(hyper::header::CONTENT_TYPE, value);
+        }
+    }
+}
+
+fn apply_forwarded_for(
+    parts: &mut Parts,
+    rules: &ResolvedRules,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+) {
+    if let Some(ref forwarded_for) = rules.forwarded_for {
+        let header_name: HeaderName = "x-forwarded-for".parse().unwrap();
+        let new_value = if let Some(existing) = parts
+            .headers
+            .get(&header_name)
+            .and_then(|v| v.to_str().ok())
+        {
+            format!("{}, {}", existing, forwarded_for)
+        } else {
+            forwarded_for.clone()
+        };
+
+        if let Ok(header_value) = new_value.parse::<HeaderValue>() {
+            if verbose_logging {
+                let old_value = parts
+                    .headers
+                    .get(&header_name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| format!("\"{}\"", s))
+                    .unwrap_or_else(|| "(none)".to_string());
+                info!(
+                    "[{}] [REQ_FORWARDED_FOR] X-Forwarded-For : {} -> \"{}\"",
+                    ctx.id_str(),
+                    old_value,
+                    new_value
+                );
+            }
+            parts.headers.insert(header_name, header_value);
         }
     }
 }
@@ -827,6 +866,55 @@ mod tests {
         assert_eq!(
             parts.headers.get_all(hyper::header::COOKIE).iter().count(),
             1
+        );
+    }
+
+    #[test]
+    fn test_apply_forwarded_for_new() {
+        let mut parts = create_test_parts();
+        let rules = ResolvedRules {
+            forwarded_for: Some("1.2.3.4".to_string()),
+            ..Default::default()
+        };
+        let ctx = RequestContext::new();
+
+        apply_req_rules(&mut parts, &rules, false, &ctx);
+
+        assert_eq!(
+            parts
+                .headers
+                .get("x-forwarded-for")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1.2.3.4"
+        );
+    }
+
+    #[test]
+    fn test_apply_forwarded_for_chain() {
+        let mut parts = create_test_parts();
+        let ctx = RequestContext::new();
+        parts.headers.insert(
+            "x-forwarded-for".parse::<HeaderName>().unwrap(),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+
+        let rules = ResolvedRules {
+            forwarded_for: Some("1.2.3.4".to_string()),
+            ..Default::default()
+        };
+
+        apply_req_rules(&mut parts, &rules, false, &ctx);
+
+        assert_eq!(
+            parts
+                .headers
+                .get("x-forwarded-for")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "10.0.0.1, 1.2.3.4"
         );
     }
 }

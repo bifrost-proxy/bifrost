@@ -455,6 +455,72 @@ impl ImProvider for FeishuProvider {
 // ---------------------------------------------------------------------------
 
 impl FeishuProvider {
+    /// Update an existing interactive card message.
+    ///
+    /// Uses Feishu PATCH /im/v1/messages/{message_id} API to update card content.
+    pub async fn patch_card(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card: serde_json::Value,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+
+        let url = format!("{}/im/v1/messages/{}", base_url, message_id);
+
+        let content = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card: {}", e))
+        })?;
+
+        #[derive(Serialize)]
+        struct PatchRequest<'a> {
+            msg_type: &'a str,
+            content: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct PatchResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        debug!(message_id = message_id, "patching feishu card message");
+
+        let resp = self
+            .http
+            .patch(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&PatchRequest {
+                msg_type: "interactive",
+                content: &content,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!("feishu patch request failed: {}", e))
+            })?;
+
+        let body: PatchResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu patch response parse failed: {}",
+                e
+            ))
+        })?;
+
+        if body.code.unwrap_or(0) != 0 {
+            tracing::warn!(
+                code = body.code,
+                msg = body.msg.as_deref().unwrap_or(""),
+                message_id = message_id,
+                "feishu patch_card error"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Fetch the bot owner's open_id from the Feishu Application Info API.
     ///
     /// Calls `GET /open-apis/application/v6/applications/:app_id?user_id_type=open_id`

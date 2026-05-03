@@ -93,6 +93,9 @@ test-url-params.local http://127.0.0.1:3000 urlParams://(key1=value1&key2=value2
 # 2.16 params - 参数合并 (JSON)
 test-params.local http://127.0.0.1:3000 params://({"extra":"param"})
 
+# 2.17 forwardedFor - X-Forwarded-For 设置
+test-forwarded-for.local http://127.0.0.1:3000 forwardedFor://${clientIp}
+
 # ============================================
 # 3. 响应修改协议 (Response Modification)
 # ============================================
@@ -147,6 +150,9 @@ test-res-merge.local http://127.0.0.1:3000 resMerge://({"merged":"data"})
 
 # 3.17 headerReplace - 头部内容替换
 test-header-replace.local http://127.0.0.1:3000 headerReplace://res.content-type:text/plain=application/json
+
+# 3.18 responseFor - 响应来源标识
+test-response-for.local http://127.0.0.1:3000 responseFor://upstream-server-1
 
 # ============================================
 # 4. 内容注入协议 (Content Injection)

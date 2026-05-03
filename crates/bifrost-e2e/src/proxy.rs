@@ -478,6 +478,12 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                         result.header_replace.extend(rules);
                     }
                 }
+                Protocol::ForwardedFor => {
+                    result.forwarded_for = Some(value.to_string());
+                }
+                Protocol::ResponseFor => {
+                    result.response_for = Some(value.to_string());
+                }
                 _ => {}
             }
         }

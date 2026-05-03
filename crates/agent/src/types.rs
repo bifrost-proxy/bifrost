@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tools::update_plan::PlanStep;
+
 /// A message in the Chat Completions API format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -151,4 +153,6 @@ pub struct TurnResult {
     pub work_dir_switched: Option<String>,
     /// If the agent updated the session title during this turn.
     pub title_updated: Option<String>,
+    /// If the agent updated the task plan during this turn.
+    pub plan_steps: Option<Vec<PlanStep>>,
 }

@@ -1233,6 +1233,64 @@ async fn process_agent_chat(
     session.source = "feishu".to_string();
     session.guide_channel = guide_channel;
 
+    // Set up plan update channel for real-time plan card rendering.
+    // The turn loop pushes plan steps through this channel; a background task
+    // sends (first time) or patches (subsequent) a single Feishu card.
+    let (plan_tx, mut plan_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Vec<bifrost_agent::PlanStep>, Option<String>)>();
+    session.plan_sender = Some(plan_tx);
+    {
+        let feishu = feishu.clone();
+        let provider = provider.clone();
+        let target_open_id = provider
+            .owner_open_id
+            .as_deref()
+            .or(event.source.user_id.as_deref())
+            .unwrap_or("")
+            .to_string();
+        tokio::spawn(async move {
+            let mut plan_card_msg_id: Option<String> = None;
+            while let Some((steps, title)) = plan_rx.recv().await {
+                let card = build_plan_card(&steps, title.as_deref());
+                if let Some(ref msg_id) = plan_card_msg_id {
+                    // Patch existing card
+                    if let Err(e) = feishu.patch_card(&provider, msg_id, card).await {
+                        tracing::warn!(error = %e, "failed to patch plan card");
+                    }
+                } else if !target_open_id.is_empty() {
+                    // Send new card
+                    let target = crate::im_gateway::types::ImTarget {
+                        id: "__plan_card__".to_string(),
+                        provider_id: provider.id.clone(),
+                        display_name: "Plan Card".to_string(),
+                        enabled: true,
+                        receive_id_type: "open_id".to_string(),
+                        receive_id: target_open_id.clone(),
+                        default_msg_type: "interactive".to_string(),
+                        created_at: 0,
+                        updated_at: 0,
+                    };
+                    match feishu
+                        .send_card(
+                            &provider,
+                            &target,
+                            card,
+                            crate::im_gateway::types::SendOptions::default(),
+                        )
+                        .await
+                    {
+                        Ok(r) => {
+                            plan_card_msg_id = r.message_id;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to send plan card");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Create a conversation recorder for persistence if enabled
     let mut recorder = if !agent_config.is_ephemeral() {
         let should_persist = agent_config
@@ -1337,7 +1395,7 @@ async fn process_agent_chat(
     session_manager.cleanup_expired();
 
     // Separate main response and tool calls for card rendering
-    let (main_response, tool_calls_panel) = match result {
+    let (main_response, tool_calls_panel, plan_steps) = match result {
         Ok(turn_result) => {
             // Log work_dir switch if it happened
             if let Some(ref new_dir) = turn_result.work_dir_switched {
@@ -1360,7 +1418,8 @@ async fn process_agent_chat(
             } else {
                 None
             };
-            (turn_result.response, panel)
+            let plan = turn_result.plan_steps;
+            (turn_result.response, panel, plan)
         }
         Err(e) => {
             error!(
@@ -1373,6 +1432,7 @@ async fn process_agent_chat(
                     "⚠️ **Agent 执行失败**\n\n**错误原因**: {}\n\n请稍后重试，或发送 `/clear` 重置会话。",
                     truncate_str(&e, 300)
                 ),
+                None,
                 None,
             )
         }
@@ -1409,6 +1469,35 @@ async fn process_agent_chat(
         "content": main_response,
         "element_id": "agent_reply"
     })];
+    // Plan progress panel (between response and tool calls)
+    if let Some(ref steps) = plan_steps {
+        let completed = steps
+            .iter()
+            .filter(|s| matches!(s.status, bifrost_agent::PlanStepStatus::Completed))
+            .count();
+        let total = steps.len();
+        let mut plan_md = String::new();
+        for s in steps {
+            plan_md.push_str(&format!("{} {}\n", s.status.emoji(), s.step));
+        }
+        elements.push(serde_json::json!({
+            "tag": "collapsible_panel",
+            "expanded": true,
+            "background_color": "grey",
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": format!("📋 任务计划（{}/{}）", completed, total)
+                }
+            },
+            "vertical_spacing": "2px",
+            "padding": "4px 8px 4px 8px",
+            "elements": [{
+                "tag": "markdown",
+                "content": plan_md
+            }]
+        }));
+    }
     if let Some((count, ref tool_md)) = tool_calls_panel {
         elements.push(serde_json::json!({
             "tag": "collapsible_panel",
@@ -3018,6 +3107,53 @@ fn now_ms() -> u64 {
 fn uuid_short() -> String {
     let id = uuid::Uuid::new_v4();
     id.to_string()[..8].to_string()
+}
+
+/// Build a Feishu Card 2.0 JSON for real-time plan progress display.
+///
+/// Used by the plan listener task: first call creates a new card via send_card,
+/// subsequent calls update the same card via patch_card.
+fn build_plan_card(
+    steps: &[bifrost_agent::PlanStep],
+    session_title: Option<&str>,
+) -> serde_json::Value {
+    let completed = steps
+        .iter()
+        .filter(|s| matches!(s.status, bifrost_agent::PlanStepStatus::Completed))
+        .count();
+    let total = steps.len();
+
+    let mut plan_md = String::new();
+    for s in steps {
+        plan_md.push_str(&format!("{} {}\n", s.status.emoji(), s.step));
+    }
+
+    let title = session_title.unwrap_or("Bifrost AI");
+
+    serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true
+        },
+        "header": {
+            "template": "turquoise",
+            "title": {
+                "tag": "plain_text",
+                "content": title
+            },
+            "subtitle": {
+                "tag": "plain_text",
+                "content": format!("📋 任务计划（{}/{}）", completed, total)
+            }
+        },
+        "body": {
+            "elements": [{
+                "tag": "markdown",
+                "content": plan_md
+            }]
+        }
+    })
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

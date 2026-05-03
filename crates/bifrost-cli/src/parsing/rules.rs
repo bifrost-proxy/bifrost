@@ -516,18 +516,14 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ForwardedFor => {
-                result
-                    .req_headers
-                    .push(("x-forwarded-for".to_string(), value.to_string()));
+                result.forwarded_for = Some(value.to_string());
             }
             Protocol::ResCookies => {
                 let parsed_cookies = parse_res_cookies_value(value);
                 result.res_cookies.extend(parsed_cookies);
             }
             Protocol::ResponseFor => {
-                result
-                    .res_headers
-                    .push(("x-bifrost-response-for".to_string(), value.to_string()));
+                result.response_for = Some(value.to_string());
             }
             Protocol::ReqPrepend => {
                 let content = extract_inline_content(value);
@@ -2003,10 +1999,7 @@ x-use-ppe: 1
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(resolved
-            .req_headers
-            .iter()
-            .any(|(k, v)| k == "x-forwarded-for" && v == "192.168.1.1"));
+        assert_eq!(resolved.forwarded_for.as_deref(), Some("192.168.1.1"));
     }
 
     #[test]
@@ -2023,10 +2016,7 @@ x-use-ppe: 1
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(resolved
-            .res_headers
-            .iter()
-            .any(|(k, v)| k == "x-bifrost-response-for" && v == "test-response"));
+        assert_eq!(resolved.response_for.as_deref(), Some("test-response"));
     }
 
     #[test]

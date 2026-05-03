@@ -1445,10 +1445,10 @@ test_html_inject() {
         if [[ "$HTTP_BODY" == *"$inject_content"* ]]; then
             _log_pass "响应包含注入的 HTML 内容"
         else
-            _log_pass "响应已返回 (注入规则已应用)"
+            _log_fail "响应应包含注入内容" "$inject_content" "未找到注入内容"
         fi
     else
-        _log_pass "HTML 注入规则已配置"
+        _log_fail "响应体应该非空" "非空" "空响应"
     fi
 }
 
@@ -1486,10 +1486,10 @@ test_js_inject() {
         if [[ "$HTTP_BODY" == *"$inject_content"* ]]; then
             _log_pass "响应包含注入的 JavaScript 内容"
         else
-            _log_pass "响应已返回 (注入规则已应用)"
+            _log_fail "响应应包含注入内容" "$inject_content" "未找到注入内容"
         fi
     else
-        _log_pass "JavaScript 注入规则已配置"
+        _log_fail "响应体应该非空" "非空" "空响应"
     fi
 }
 
@@ -1527,10 +1527,10 @@ test_css_inject() {
         if [[ "$HTTP_BODY" == *"$inject_content"* ]]; then
             _log_pass "响应包含注入的 CSS 内容"
         else
-            _log_pass "响应已返回 (注入规则已应用)"
+            _log_fail "响应应包含注入内容" "$inject_content" "未找到注入内容"
         fi
     else
-        _log_pass "CSS 注入规则已配置"
+        _log_fail "响应体应该非空" "非空" "空响应"
     fi
 }
 
@@ -1567,7 +1567,7 @@ test_ignore_rule() {
     if [[ "$HTTP_STATUS" == "000" ]] || [[ "$HTTP_STATUS" =~ ^[245] ]]; then
         _log_pass "Ignore 规则已配置 (请求被处理)"
     else
-        _log_pass "Ignore 规则生效 (状态码: $HTTP_STATUS)"
+        _log_fail "Ignore 规则验证失败" "000 或 2xx/4xx/5xx" "$HTTP_STATUS"
     fi
 }
 
@@ -1585,11 +1585,11 @@ test_line_props_rule() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     if [[ "$protocols" == *"lineProps://important"* ]]; then
-        _log_pass "important 规则已配置"
+        _log_fail "important 规则验证未实现" "语义验证" "仅配置检查"
     elif [[ "$protocols" == *"lineProps://disabled"* ]]; then
-        _log_pass "disabled 规则已配置"
+        _log_fail "disabled 规则验证未实现" "语义验证" "仅配置检查"
     else
-        _log_pass "lineProps 规则已配置"
+        _log_fail "lineProps 规则验证未实现" "语义验证" "仅配置检查"
     fi
 }
 
@@ -1930,7 +1930,7 @@ test_filtered_rule() {
         echo "    排除过滤器: $(echo "$protocols" | grep -o 'excludeFilter://[^[:space:]]*')"
     fi
 
-    _log_pass "过滤器规则已配置"
+    _log_fail "过滤器规则验证未实现" "过滤行为验证" "仅配置检查"
 }
 
 test_include_filter_method() {
@@ -1961,7 +1961,7 @@ test_exclude_filter_path() {
 
     https_request "$test_url"
 
-    _log_pass "路径排除过滤器已配置"
+    _log_fail "路径排除过滤器验证未实现" "排除行为验证" "仅配置检查"
 }
 
 test_priority() {
@@ -2012,10 +2012,10 @@ test_url_params() {
         if [[ -n "$query" ]] && [[ "$query" != "null" ]]; then
             _log_pass "后端收到请求 (参数规则已应用)"
         else
-            _log_pass "URL 参数规则已配置"
+            _log_fail "URL 参数验证失败" "查询参数非空" "${query:-空}"
         fi
     else
-        _log_pass "URL 参数规则已配置"
+        _log_fail "URL 参数验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
     fi
 }
 
@@ -2043,7 +2043,7 @@ test_content_type() {
         if [[ "$actual_type" == *"$content_type"* ]]; then
             _log_pass "响应 Content-Type 已修改: $actual_type"
         else
-            _log_pass "Content-Type 规则已配置 (实际: $actual_type)"
+            _log_fail "响应 Content-Type 不匹配" "$content_type" "${actual_type:-空}"
         fi
     else
         if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
@@ -2051,10 +2051,10 @@ test_content_type() {
             if [[ "$actual_type" == *"$content_type"* ]]; then
                 _log_pass "请求 Content-Type 已修改: $actual_type"
             else
-                _log_pass "请求 Content-Type 规则已配置 (实际: ${actual_type:-空})"
+                _log_fail "请求 Content-Type 不匹配" "$content_type" "${actual_type:-空}"
             fi
         else
-            _log_pass "请求 Content-Type 规则已配置"
+            _log_fail "请求 Content-Type 验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
         fi
     fi
 }
@@ -2085,7 +2085,7 @@ test_auth_header() {
             _log_fail "Authorization 头缺失" "存在 Authorization" "缺失"
         fi
     else
-        _log_pass "Basic Auth 规则已配置"
+        _log_fail "Basic Auth 验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
     fi
 }
 
@@ -2117,7 +2117,7 @@ test_cache_control() {
     if [[ "$actual_value" == *"$expected"* ]]; then
         _log_pass "Cache-Control 已设置: $actual_value"
     else
-        _log_pass "Cache-Control 规则已配置 (实际: ${actual_value:-空})"
+        _log_fail "Cache-Control 不匹配" "$expected" "${actual_value:-空}"
     fi
 }
 
@@ -2138,7 +2138,7 @@ test_attachment() {
     if [[ "$actual_value" == *"attachment"* ]] && [[ "$actual_value" == *"$filename"* ]]; then
         _log_pass "Content-Disposition 已设置: $actual_value"
     else
-        _log_pass "Attachment 规则已配置 (实际: ${actual_value:-空})"
+        _log_fail "Content-Disposition 不匹配" "attachment; filename=$filename" "${actual_value:-空}"
     fi
 }
 
@@ -2162,10 +2162,10 @@ test_url_replace_rule() {
         if [[ "$actual_path" == *"/${to}/"* ]] || [[ "$actual_path" == *"/${to}" ]]; then
             _log_pass "URL 已替换: $actual_path"
         else
-            _log_pass "URL 替换规则已配置 (实际: ${actual_path:-空})"
+            _log_fail "URL 替换未生效" "包含 /${to}/" "${actual_path:-空}"
         fi
     else
-        _log_pass "URL 替换规则已配置"
+        _log_fail "URL 替换验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
     fi
 }
 
@@ -2192,10 +2192,10 @@ test_header_replace_rule() {
             if [[ "$actual_value" == *"$replacement"* ]]; then
                 _log_pass "请求头已替换: $actual_value"
             else
-                _log_pass "请求头替换规则已配置 (实际: ${actual_value:-空})"
+                _log_fail "请求头替换未生效" "$replacement" "${actual_value:-空}"
             fi
         else
-            _log_pass "请求头替换规则已配置"
+            _log_fail "请求头替换验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
         fi
     else
         http_get "$test_url"
@@ -2204,7 +2204,7 @@ test_header_replace_rule() {
         if [[ "$actual_value" == *"$replacement"* ]]; then
             _log_pass "响应头已替换: $actual_value"
         else
-            _log_pass "响应头替换规则已配置 (实际: ${actual_value:-空})"
+            _log_fail "响应头替换未生效" "$replacement" "${actual_value:-空}"
         fi
     fi
 }
@@ -2292,7 +2292,7 @@ test_req_speed_rule() {
     if (( elapsed + 200 >= expected )); then
         _log_pass "请求速度限制生效 (${elapsed}ms)"
     else
-        _log_pass "请求速度规则已配置 (${elapsed}ms)"
+        _log_fail "请求速度限制未生效" ">=${expected}ms" "${elapsed}ms"
     fi
 }
 
@@ -2363,7 +2363,7 @@ PY
     if (( elapsed + 200 >= expected )); then
         _log_pass "响应速度限制生效 (${elapsed}ms)"
     else
-        _log_pass "响应速度规则已配置 (${elapsed}ms)"
+        _log_fail "响应速度限制未生效" ">=${expected}ms" "${elapsed}ms"
     fi
 }
 
@@ -2384,7 +2384,7 @@ test_trailers_rule() {
     if [[ "$actual_value" == *"$trailer_header"* ]]; then
         _log_pass "Trailer 头已设置: $actual_value"
     else
-        _log_pass "Trailer 规则已配置 (实际: ${actual_value:-空})"
+        _log_fail "Trailer 头不匹配" "$trailer_header" "${actual_value:-空}"
     fi
 }
 
@@ -2432,10 +2432,10 @@ test_value_ref_headers() {
         if echo "$HTTP_HEADERS" | grep -qi "X-Auth-Token\|X-Custom"; then
             _log_pass "响应头值引用生效"
         else
-            _log_pass "响应头值引用已配置"
+            _log_fail "响应头值引用未生效" "包含 X-Auth-Token 或 X-Custom" "未找到"
         fi
     else
-        _log_pass "${header_type}头值引用已配置"
+        _log_fail "${header_type}头值引用验证未实现" "响应头验证" "条件不满足"
     fi
 }
 
@@ -2452,7 +2452,7 @@ test_value_inline() {
     https_request "$test_url"
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
-    _log_pass "内联值规则已配置"
+    _log_fail "内联值规则验证未实现" "内联值验证" "仅配置检查"
 }
 
 test_value_combined() {
@@ -2466,7 +2466,7 @@ test_value_combined() {
     https_request "$test_url"
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
-    _log_pass "多值引用组合规则已配置"
+    _log_fail "多值引用组合规则验证未实现" "组合值验证" "仅配置检查"
 }
 
 detect_rule_type() {

@@ -13,6 +13,7 @@ pub mod patch;
 pub mod set_title;
 pub mod shell;
 pub mod switch_workdir;
+pub mod update_plan;
 
 use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
 use async_trait::async_trait;
@@ -68,6 +69,7 @@ impl ToolRegistry {
         registry.register(Arc::new(file_ops::ListDirectoryTool));
         registry.register(Arc::new(patch::ApplyPatchTool));
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
+        registry.register(Arc::new(update_plan::UpdatePlanTool));
         registry.register(Arc::new(set_title::SetTitleTool));
         registry
     }

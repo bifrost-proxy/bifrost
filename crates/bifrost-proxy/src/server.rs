@@ -484,6 +484,8 @@ pub struct ResolvedRules {
     pub decode_scripts: Vec<String>,
 
     pub auth: Option<String>,
+    pub forwarded_for: Option<String>,
+    pub response_for: Option<String>,
     pub delete_req_headers: Vec<String>,
     pub delete_res_headers: Vec<String>,
     pub delete_url_params: Vec<String>,
