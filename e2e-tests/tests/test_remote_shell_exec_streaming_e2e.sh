@@ -135,7 +135,7 @@ start_local_relay() {
     RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 
     local waited=0
-    while [[ $waited -lt 30 ]]; do
+    while [[ $waited -lt 120 ]]; do
         if curl -s -o /dev/null -w '%{http_code}' \
             "${RELAY_URL}/v4/remote-invoke/client/register" 2>/dev/null | grep -q "4[0-9][0-9]\|200"; then
             log "Relay ready (pid=$RELAY_PID)"

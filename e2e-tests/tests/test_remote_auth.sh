@@ -188,10 +188,13 @@ require_cmd curl
 require_cmd jq
 require_cmd cargo
 
-log "Build bifrost (release)..."
-(cd "$SCRIPT_DIR/../.." && cargo build --release --bin bifrost >/dev/null)
-
 BIFROST_BIN="$SCRIPT_DIR/../../target/release/bifrost"
+if [[ -x "$BIFROST_BIN" && "${SKIP_BUILD:-}" == "true" ]]; then
+    log "Reusing pre-built bifrost binary at $BIFROST_BIN"
+else
+    log "Build bifrost (release)..."
+    (cd "$SCRIPT_DIR/../.." && cargo build --release --bin bifrost >/dev/null)
+fi
 if [[ ! -x "$BIFROST_BIN" ]]; then
     echo "bifrost binary not found at $BIFROST_BIN" >&2
     exit 1
