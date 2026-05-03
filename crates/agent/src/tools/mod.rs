@@ -10,6 +10,7 @@
 pub mod file_ops;
 pub mod head_tail_buffer;
 pub mod patch;
+pub mod set_title;
 pub mod shell;
 pub mod switch_workdir;
 
@@ -67,6 +68,7 @@ impl ToolRegistry {
         registry.register(Arc::new(file_ops::ListDirectoryTool));
         registry.register(Arc::new(patch::ApplyPatchTool));
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
+        registry.register(Arc::new(set_title::SetTitleTool));
         registry
     }
 

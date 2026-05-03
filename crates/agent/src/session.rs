@@ -88,6 +88,10 @@ pub struct AgentSession {
     /// When set, the turn loop checks this after each tool call batch completes.
     /// If a message is present, it is appended to history before the next model call.
     pub guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+
+    /// Session title (intent/topic) set by the agent via set_title tool.
+    /// Displayed in the Feishu card header instead of "Bifrost AI".
+    pub title: Option<String>,
 }
 
 impl AgentSession {
@@ -110,6 +114,7 @@ impl AgentSession {
             skill_registry: None,
             memory_cleared: false,
             guide_channel: None,
+            title: None,
         }
     }
 
@@ -450,6 +455,7 @@ impl AgentSessionManager {
                     history_version: s.history_version,
                     work_dir: s.work_dir.clone(),
                     source: s.source.clone(),
+                    title: s.title.clone(),
                 }
             })
             .collect()
@@ -481,6 +487,7 @@ impl AgentSessionManager {
                 history_version: s.history_version,
                 work_dir: s.work_dir.clone(),
                 source: s.source.clone(),
+                title: s.title.clone(),
                 messages: s
                     .history
                     .iter()
@@ -513,6 +520,8 @@ pub struct SessionInfo {
     pub history_version: u64,
     pub work_dir: Option<String>,
     pub source: String,
+    /// Session title (intent/topic) set by the agent via set_title tool.
+    pub title: Option<String>,
 }
 
 /// A single message in session detail view.
@@ -538,6 +547,8 @@ pub struct SessionDetail {
     pub history_version: u64,
     pub work_dir: Option<String>,
     pub source: String,
+    /// Session title (intent/topic) set by the agent via set_title tool.
+    pub title: Option<String>,
     pub messages: Vec<SessionMessage>,
 }
 
@@ -675,10 +686,21 @@ pub async fn run_turn_with_mcp(
     let slash_dispatch = session.slash_router.dispatch(trimmed);
     match &slash_dispatch {
         Dispatch::Unknown(command) => {
+            // /q and /rq are IM-gateway queue commands, only valid when a session
+            // is already busy. If the session is free, give a helpful explanation.
+            let response = if command == "/q" || command.starts_with("/rq") {
+                format!(
+                    "{command} 是排队命令，仅在 Agent 正在处理任务时有效。\n\
+                     当 Agent 空闲时，直接发送消息即可开始对话。"
+                )
+            } else {
+                format!("未知命令: {command}")
+            };
             return Ok(TurnResult {
-                response: format!("未知命令: {command}"),
+                response,
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         Dispatch::RunSkill { record, invocation } => {
@@ -693,6 +715,7 @@ pub async fn run_turn_with_mcp(
                 },
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
@@ -710,6 +733,7 @@ pub async fn run_turn_with_mcp(
             response: session.slash_router.help_text(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -730,6 +754,7 @@ pub async fn run_turn_with_mcp(
             response: "会话已重置，可以开始新的对话。".to_string(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -753,6 +778,7 @@ pub async fn run_turn_with_mcp(
             ),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -774,6 +800,7 @@ pub async fn run_turn_with_mcp(
                 response: "历史消息太少，无需压缩。".to_string(),
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         match compact::compact_session(
@@ -813,6 +840,7 @@ pub async fn run_turn_with_mcp(
                     ),
                     tool_calls_log: Vec::new(),
                     work_dir_switched: None,
+                    title_updated: None,
                 });
             }
             Ok(result) => {
@@ -823,6 +851,7 @@ pub async fn run_turn_with_mcp(
                     ),
                     tool_calls_log: Vec::new(),
                     work_dir_switched: None,
+                    title_updated: None,
                 });
             }
             Err(e) => {
@@ -847,6 +876,7 @@ pub async fn run_turn_with_mcp(
                 response: "用法: /remember <text>".to_string(),
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         let record = memory_runtime::remember_explicit(config, session, args.trim())?;
@@ -854,6 +884,7 @@ pub async fn run_turn_with_mcp(
             response: format!("已记住长期记忆: {}", record.id),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -887,6 +918,7 @@ pub async fn run_turn_with_mcp(
             response,
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -906,6 +938,7 @@ pub async fn run_turn_with_mcp(
                 response: "用法: /forget <id|last>".to_string(),
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         let response = match memory_runtime::forget_memory(config, session, args.trim())? {
@@ -916,6 +949,7 @@ pub async fn run_turn_with_mcp(
             response,
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -945,6 +979,7 @@ pub async fn run_turn_with_mcp(
             ),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -992,6 +1027,7 @@ pub async fn run_turn_with_mcp(
                         ),
                         tool_calls_log: Vec::new(),
                         work_dir_switched: None,
+                        title_updated: None,
                     });
                 }
                 Ok(_) => {
@@ -1016,6 +1052,7 @@ pub async fn run_turn_with_mcp(
             response: "没有找到可恢复的会话记录。".to_string(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -1029,12 +1066,14 @@ pub async fn run_turn_with_mcp(
                 response: session.slash_router.help_text(),
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
+                title_updated: None,
             });
         }
         return Ok(TurnResult {
             response: "Skill Creator 已启动。请描述要创建或编辑的 skill。".to_string(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
+            title_updated: None,
         });
     }
 
@@ -1287,6 +1326,7 @@ pub async fn run_turn_with_mcp(
                                     response: partial_response,
                                     tool_calls_log,
                                     work_dir_switched: None,
+                                    title_updated: None,
                                 });
                             }
                             return Err(last_err);
@@ -1316,6 +1356,7 @@ pub async fn run_turn_with_mcp(
                             response: partial_response,
                             tool_calls_log,
                             work_dir_switched: None,
+                            title_updated: None,
                         });
                     }
                     return Err(e);
@@ -1365,6 +1406,7 @@ pub async fn run_turn_with_mcp(
                 response: content,
                 tool_calls_log,
                 work_dir_switched: None,
+                title_updated: session.title.clone(),
             });
         }
 
@@ -1488,7 +1530,24 @@ pub async fn run_turn_with_mcp(
                     ),
                     tool_calls_log,
                     work_dir_switched: Some(new_dir),
+                    title_updated: None,
                 });
+            }
+        }
+
+        // Check if set_title was called — if so, update session.title
+        if let Some(title_log) = tool_calls_log
+            .iter()
+            .rfind(|l| l.tool_name == "set_title" && l.success)
+        {
+            if let Some(new_title) = title_log.result.strip_prefix("SET_TITLE:") {
+                session.title = Some(new_title.to_string());
+                // Persist title update event
+                if let Some(ref mut rec) = recorder {
+                    if let Err(e) = rec.record_title_updated(&session.session_key, new_title) {
+                        warn!(error = %e, "failed to record title update");
+                    }
+                }
             }
         }
 

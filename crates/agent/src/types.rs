@@ -149,4 +149,6 @@ pub struct TurnResult {
     /// If the agent switched working directory during this turn.
     /// Contains the new work_dir path.
     pub work_dir_switched: Option<String>,
+    /// If the agent updated the session title during this turn.
+    pub title_updated: Option<String>,
 }

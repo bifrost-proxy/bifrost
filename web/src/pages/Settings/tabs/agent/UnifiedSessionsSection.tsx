@@ -41,6 +41,8 @@ interface UnifiedSession {
   duration_secs?: number;
   compaction_count?: number;
   estimated_tokens?: number;
+  /** Session title (intent/topic) set by the agent */
+  title?: string;
   /** Only for ended sessions — file path for loading detail */
   history_path?: string;
 }
@@ -204,6 +206,23 @@ export default function UnifiedSessionsSection({
           <Tag style={{ fontSize: 10, margin: 0 }}>{val || "—"}</Tag>
         );
       },
+    },
+    {
+      title: "Title",
+      dataIndex: "title",
+      key: "title",
+      width: 180,
+      ellipsis: true,
+      render: (val?: string) =>
+        val ? (
+          <Tooltip title={val}>
+            <Text style={{ fontSize: 11 }}>{val}</Text>
+          </Tooltip>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 10 }}>
+            —
+          </Text>
+        ),
     },
     {
       title: "Work Dir",
@@ -375,7 +394,7 @@ export default function UnifiedSessionsSection({
         loading={loading}
         pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No sessions" /> }}
-        scroll={{ x: 1070 }}
+        scroll={{ x: 1250 }}
       />
     </Space>
   );

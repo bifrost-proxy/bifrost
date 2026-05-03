@@ -35,6 +35,7 @@ pub mod event_types {
     pub const SESSION_END: &str = "session_end";
     pub const MCP_TOOLS_LOADED: &str = "mcp_tools_loaded";
     pub const SKILLS_LOADED: &str = "skills_loaded";
+    pub const TITLE_UPDATED: &str = "title_updated";
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,16 @@ impl ConversationRecorder {
             event_type: event_types::COMPACTION.to_string(),
             session_key: session_key.to_string(),
             content: metadata,
+        })
+    }
+
+    /// Record a title update event (set by the agent via set_title tool).
+    pub fn record_title_updated(&mut self, session_key: &str, title: &str) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::TITLE_UPDATED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({ "title": title }),
         })
     }
 
@@ -455,6 +466,8 @@ pub struct SessionFileSummary {
     pub source: String,
     /// The original session key as stored in the JSONL events (may differ from the sanitized filename).
     pub session_key: Option<String>,
+    /// Session title (intent/topic) set by the agent via set_title tool.
+    pub title: Option<String>,
 }
 
 /// Quick scan of a session JSONL file to extract summary info without loading all events.
@@ -531,6 +544,13 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
             }
             "tool_call" => {
                 summary.tool_calls += 1;
+            }
+            "title_updated" => {
+                if let Some(obj) = event.content.as_object() {
+                    if let Some(t) = obj.get("title").and_then(|v| v.as_str()) {
+                        summary.title = Some(t.to_string());
+                    }
+                }
             }
             _ => {}
         }

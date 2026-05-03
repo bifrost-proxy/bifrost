@@ -3,6 +3,7 @@ pub mod connection;
 pub mod event_router;
 pub mod event_store;
 pub mod feishu;
+pub mod markdown_converter;
 pub mod message_log_store;
 pub mod provider;
 pub mod provider_store;

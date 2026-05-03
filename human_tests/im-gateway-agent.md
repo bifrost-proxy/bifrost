@@ -895,6 +895,96 @@ rm -rf ./.bifrost-test
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用
 
+## 飞书卡片折叠面板与 Session Title
+
+### TC-IMA-69: 飞书卡片折叠面板 - 工具调用记录默认折叠
+
+- **操作步骤**:
+  1. 通过 API 发送需要工具调用的消息：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "card-collapse-test", "message": "执行 echo hello-card-test"}'
+     ```
+  2. 检查返回 JSON 中 `tool_calls` 不为空（有工具调用）
+  3. 在飞书 IM 中查看 Bot 发送的卡片消息
+- **预期结果**:
+  - 飞书卡片使用 JSON 2.0 schema（`"schema": "2.0"`）
+  - 卡片 body 包含 main response markdown 元素（默认展开可见）
+  - 卡片 body 包含 `collapsible_panel` 元素，标题为 "🔧 工具调用记录（N次）"
+  - 折叠面板默认为折叠状态（`expanded: false`）
+  - 折叠面板背景色为灰色（`background_color: "grey"`）
+  - 展开折叠面板后，显示每个工具调用的名称（带 ✅/❌ 图标）和结果预览
+
+### TC-IMA-70: 飞书卡片 - 无工具调用时不显示折叠面板
+
+- **操作步骤**:
+  1. 通过飞书或 API 发送不需要工具调用的简单对话消息（如 "你好"）
+  2. 查看 Bot 返回的飞书卡片
+- **预期结果**:
+  - 卡片仅包含 main response markdown 元素
+  - 不包含 `collapsible_panel` 元素
+  - 用户只看到 AI 的回复文本
+
+### TC-IMA-71: Session Title 落库 - set_title 工具持久化
+
+- **操作步骤**:
+  1. 通过 API 触发一次会话，使 Agent 调用 set_title 工具：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "title-persist-test", "message": "帮我查看一下 Cargo.toml 文件的内容"}'
+     ```
+  2. 检查返回 JSON 中 `title_updated` 字段不为空
+  3. 查看 sessions API 确认 title 存在：
+     ```bash
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions | jq '.sessions[] | select(.session_key == "title-persist-test") | {session_key, title}'
+     ```
+  4. 删除 active session 使其变为 history，再通过 sessions/all 检查 title 是否保留：
+     ```bash
+     curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/title-persist-test
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq '.sessions[] | select(.session_key == "title-persist-test") | {session_key, title, status}'
+     ```
+- **预期结果**:
+  - `title_updated` 包含 Agent 生成的 session 标题
+  - Active session 的 title 字段不为 null
+  - History session（从 JSONL 恢复）的 title 字段与 active session 一致
+  - JSONL 文件中包含 `title_updated` 事件类型
+
+### TC-IMA-72: Session Title 在 sessions/all API 中返回
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq '.sessions[] | {session_key, title, status}'
+  ```
+- **预期结果**:
+  - Active sessions 的 `title` 字段来自内存中的 session.title
+  - Ended sessions 的 `title` 字段从 JSONL 的 `title_updated` 事件中恢复
+  - 未设置 title 的 session 返回 `title: null`
+
+### TC-IMA-73: 飞书卡片 header 使用 Session Title
+
+- **操作步骤**:
+  1. 在飞书中开始一个新会话，发送消息触发 Agent
+  2. 等待 Agent 回复第一条消息（此时 Agent 应已调用 set_title）
+  3. 查看飞书卡片的 header 标题
+- **预期结果**:
+  - 如果 session 有 title，卡片 header 显示 title 内容（而非默认的 "Bifrost AI"）
+  - 如果 session 无 title（如第一轮 Agent 未调用 set_title），header 显示 "Bifrost AI"
+
+### TC-IMA-74: WebUI Sessions 表格 - Title 列展示
+
+- **操作步骤**:
+  1. 确保有带 title 的 session（通过前述测试创建）
+  2. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
+  3. 滚动到 Sessions 区域
+  4. 检查表格是否有 "Title" 列
+- **预期结果**:
+  - 表格在 Source 列之后显示 "Title" 列
+  - 带 title 的 session 显示 title 文本，鼠标悬浮可查看完整标题
+  - 无 title 的 session 显示 "—"（em-dash）
+  - 列宽度为 180px，超长文本省略显示
+
 ### TC-IMA-68: Agent 配置 API - API Key 写入保持 Azure header 认证
 
 - **操作步骤**:

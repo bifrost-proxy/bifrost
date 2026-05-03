@@ -1065,12 +1065,21 @@ async fn run_agent_chat_with_interleave(
         // After turn completes, check for queued messages
         match queue_manager.pop_queue(session_key) {
             Some(next_msg) => {
+                let remaining = queue_manager.queue_status(session_key).len();
                 info!(
                     session_key = %session_key,
                     queued_msg_len = next_msg.len(),
-                    remaining_queue = queue_manager.queue_status(session_key).len(),
+                    remaining_queue = remaining,
                     "processing next queued message"
                 );
+                // Notify user which queued message is being processed
+                let preview = truncate_str(&next_msg, 80);
+                let notice = if remaining > 0 {
+                    format!("📋 正在处理排队消息: {preview}\n（剩余 {remaining} 条排队）")
+                } else {
+                    format!("📋 正在处理排队消息: {preview}")
+                };
+                send_agent_reply(feishu, provider, initial_event, &notice, message_log_store).await;
                 current_msg = next_msg;
                 // Continue the loop to process the next queued message
             }
@@ -1318,13 +1327,17 @@ async fn process_agent_chat(
         session.recorder = recorder;
     }
 
+    // Extract session title before returning the session
+    let session_title = session.title.clone();
+
     // Return session after turn completes
     session_manager.return_session(session);
 
     // Best-effort cleanup
     session_manager.cleanup_expired();
 
-    let reply_text = match result {
+    // Separate main response and tool calls for card rendering
+    let (main_response, tool_calls_panel) = match result {
         Ok(turn_result) => {
             // Log work_dir switch if it happened
             if let Some(ref new_dir) = turn_result.work_dir_switched {
@@ -1334,20 +1347,20 @@ async fn process_agent_chat(
                     "session work directory switched via agent tool"
                 );
             }
-            // Format tool calls log into the response
-            let mut text = String::new();
-            if !turn_result.tool_calls_log.is_empty() {
-                text.push_str("**工具调用：**\n");
+            // Build tool calls info for collapsible panel
+            let panel = if !turn_result.tool_calls_log.is_empty() {
+                let mut tool_md = String::new();
                 for log in &turn_result.tool_calls_log {
                     let icon = if log.success { "✅" } else { "❌" };
-                    text.push_str(&format!("{} `{}`\n", icon, log.tool_name));
+                    tool_md.push_str(&format!("{} `{}`\n", icon, log.tool_name));
                     let result_preview = truncate_bytes_with_suffix(&log.result, 500, "...");
-                    text.push_str(&format!("```\n{}\n```\n", result_preview));
+                    tool_md.push_str(&format!("```\n{}\n```\n", result_preview));
                 }
-                text.push_str("\n---\n\n");
-            }
-            text.push_str(&turn_result.response);
-            text
+                Some((turn_result.tool_calls_log.len(), tool_md))
+            } else {
+                None
+            };
+            (turn_result.response, panel)
         }
         Err(e) => {
             error!(
@@ -1355,9 +1368,12 @@ async fn process_agent_chat(
                 error = %e,
                 "agent chat failed after retry"
             );
-            format!(
-                "⚠️ **Agent 执行失败**\n\n**错误原因**: {}\n\n请稍后重试，或发送 `/clear` 重置会话。",
-                truncate_str(&e, 300)
+            (
+                format!(
+                    "⚠️ **Agent 执行失败**\n\n**错误原因**: {}\n\n请稍后重试，或发送 `/clear` 重置会话。",
+                    truncate_str(&e, 300)
+                ),
+                None,
             )
         }
     };
@@ -1385,7 +1401,34 @@ async fn process_agent_chat(
         updated_at: 0,
     };
 
-    // Build Feishu Card JSON 2.0 with markdown body (wide card)
+    // Build Feishu Card JSON 2.0: main response visible, tool calls in collapsible panel
+    let main_response =
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&main_response);
+    let mut elements = vec![serde_json::json!({
+        "tag": "markdown",
+        "content": main_response,
+        "element_id": "agent_reply"
+    })];
+    if let Some((count, ref tool_md)) = tool_calls_panel {
+        elements.push(serde_json::json!({
+            "tag": "collapsible_panel",
+            "expanded": false,
+            "background_color": "grey",
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": format!("🔧 工具调用记录（{}次）", count)
+                }
+            },
+            "vertical_spacing": "2px",
+            "padding": "4px 8px 4px 8px",
+            "elements": [{
+                "tag": "markdown",
+                "content": tool_md
+            }]
+        }));
+    }
+    let rich_card_title = session_title.as_deref().unwrap_or("Bifrost AI");
     let card = serde_json::json!({
         "schema": "2.0",
         "config": {
@@ -1396,17 +1439,11 @@ async fn process_agent_chat(
             "template": "blue",
             "title": {
                 "tag": "plain_text",
-                "content": "Bifrost AI"
+                "content": rich_card_title
             }
         },
         "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": reply_text,
-                    "element_id": "agent_reply"
-                }
-            ]
+            "elements": elements
         }
     });
 
@@ -1434,7 +1471,7 @@ async fn process_agent_chat(
         target_name: Some("Agent Reply".to_string()),
         message_id,
         msg_type: Some("interactive".to_string()),
-        content_preview: Some(truncate_str(&reply_text, 200)),
+        content_preview: Some(truncate_str(&main_response, 200)),
         trigger: Some("agent".to_string()),
         error: error_msg,
         sender_open_id: None,
@@ -1461,6 +1498,18 @@ async fn send_agent_reply(
     reply_text: &str,
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
+    send_agent_reply_with_title(feishu, provider, event, reply_text, message_log_store, None).await;
+}
+
+/// Send an agent reply with a custom card title.
+async fn send_agent_reply_with_title(
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_text: &str,
+    message_log_store: &Arc<ImMessageLogStore>,
+    title: Option<&str>,
+) {
     let target_open_id = provider
         .owner_open_id
         .as_deref()
@@ -1483,6 +1532,9 @@ async fn send_agent_reply(
         updated_at: 0,
     };
 
+    let card_title = title.unwrap_or("Bifrost AI");
+    let converted_text =
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(reply_text);
     let card = serde_json::json!({
         "schema": "2.0",
         "config": {
@@ -1493,14 +1545,14 @@ async fn send_agent_reply(
             "template": "blue",
             "title": {
                 "tag": "plain_text",
-                "content": "Bifrost AI"
+                "content": card_title
             }
         },
         "body": {
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": reply_text,
+                    "content": converted_text,
                     "element_id": "agent_reply"
                 }
             ]
@@ -1570,6 +1622,8 @@ async fn send_error_card_to_owner(
         updated_at: 0,
     };
 
+    let converted_error =
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(error_message);
     let card = serde_json::json!({
         "schema": "2.0",
         "config": { "width_mode": "fill" },
@@ -1580,7 +1634,7 @@ async fn send_error_card_to_owner(
         "body": {
             "elements": [{
                 "tag": "markdown",
-                "content": error_message
+                "content": converted_error
             }]
         }
     });
@@ -2336,6 +2390,7 @@ async fn handle_agent(
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": s.estimated_tokens,
+                "title": s.title,
             }));
         }
 
@@ -2373,6 +2428,7 @@ async fn handle_agent(
                 "last_active_time": summary.end_time,
                 "duration_secs": summary.end_time.saturating_sub(summary.start_time),
                 "history_path": p.display().to_string(),
+                "title": summary.title,
             }));
         }
 
