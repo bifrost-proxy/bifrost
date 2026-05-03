@@ -144,7 +144,7 @@ export default function UnifiedSessionsSection({
       title: "Status",
       dataIndex: "status",
       key: "status",
-      width: 72,
+      width: 80,
       filters: [
         { text: "Active", value: "active" },
         { text: "Ended", value: "ended" },
@@ -180,7 +180,7 @@ export default function UnifiedSessionsSection({
       title: "Source",
       dataIndex: "source",
       key: "source",
-      width: 76,
+      width: 84,
       filters: [
         { text: "Feishu", value: "feishu" },
         { text: "API", value: "api" },
@@ -227,7 +227,7 @@ export default function UnifiedSessionsSection({
       title: "Turns",
       dataIndex: "turns",
       key: "turns",
-      width: 64,
+      width: 72,
       align: "right" as const,
       sorter: (a: UnifiedSession, b: UnifiedSession) =>
         (a.turns ?? 0) - (b.turns ?? 0),
@@ -274,7 +274,7 @@ export default function UnifiedSessionsSection({
       title: "Duration",
       dataIndex: "duration_secs",
       key: "duration_secs",
-      width: 80,
+      width: 90,
       align: "right" as const,
       sorter: (a: UnifiedSession, b: UnifiedSession) =>
         (a.duration_secs ?? 0) - (b.duration_secs ?? 0),
@@ -375,7 +375,7 @@ export default function UnifiedSessionsSection({
         loading={loading}
         pagination={{ pageSize: 20, size: "small", showSizeChanger: true }}
         locale={{ emptyText: <Empty description="No sessions" /> }}
-        scroll={{ x: 1000 }}
+        scroll={{ x: 1060 }}
       />
     </Space>
   );
