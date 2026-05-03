@@ -128,6 +128,19 @@ bifrost install-skill [OPTIONS]
 - E2E 测试：复用 `test_skill_creator_flow.sh` 覆盖 create -> test -> invoke -> delete -> import 主流程。
 - 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-07 到 TC-SC-11，逐条执行对应 cargo/脚本命令并记录实际结果。
 
+### Agent runtime skill 接入回归（feat/agent review fixpass）
+
+Agent runtime 必须在 `AgentSession::new_with_work_dir` 构造出的真实 session 中装配 `SkillRegistry`，而不是只在 slash router 单元测试中手工注入。`with_skills(Arc<SkillRegistry>)` 保持链式 API 兼容，同时 session 持有同一个 registry 供 slash router 和 prompt digest 复用。
+
+System prompt 末尾追加一个有界 `## Available Skills` digest：每个 enabled skill 一行 `- <name>: <description_one_line>`，总长度不超过 4KB；当前缺少使用次数和最近使用时间统计时按名称稳定排序，后续有统计字段后可提升排序策略。
+
+长期记忆 append 使用 `fs2::FileExt::lock_exclusive()` 对目标文件加 advisory exclusive lock，保护多个本地 session 同时追加 `MEMORY.md` 或 `raw_memories.md` 时不会出现行交错。
+
+验证计划：
+
+- 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill。
+- 真实场景测试：新增 `human_tests/agent-runtime-review-fixes.md`，包含 TC-ARF-01 到 TC-ARF-03，逐条执行并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：

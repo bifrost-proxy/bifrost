@@ -24,7 +24,9 @@ use crate::prompt;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
 use crate::types::{ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
+use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -75,6 +77,9 @@ pub struct AgentSession {
     /// Slash command router for built-in commands and skill-declared slash commands.
     pub slash_router: SlashCommandRouter,
 
+    /// Shared skill registry attached to this session.
+    pub skill_registry: Option<Arc<SkillRegistry>>,
+
     /// When true, skip memory injection for this turn (set by /clear, reset after use).
     /// This prevents the model from "remembering" prior context immediately after a clear.
     pub memory_cleared: bool,
@@ -97,6 +102,7 @@ impl AgentSession {
             source: "unknown".to_string(),
             recorder: None,
             slash_router: SlashCommandRouter::with_default_builtins(),
+            skill_registry: None,
             memory_cleared: false,
         }
     }
@@ -104,7 +110,34 @@ impl AgentSession {
     pub fn new_with_work_dir(session_key: &str, work_dir: Option<String>) -> Self {
         let mut session = Self::new(session_key);
         session.work_dir = work_dir;
+        session.attach_default_skill_registry();
         session
+    }
+
+    pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
+        self.slash_router = self.slash_router.with_skills(Arc::clone(&skills));
+        self.skill_registry = Some(skills);
+        self
+    }
+
+    fn attach_default_skill_registry(&mut self) {
+        let work_dir = self
+            .work_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::config::AgentConfig::default().resolve_work_dir());
+        let roots = default_roots(crate::config::user_home_dir(), work_dir);
+        let store = Arc::new(SkillStore::new(roots));
+        match SkillRegistry::without_watcher(store) {
+            Ok(registry) => {
+                let registry = Arc::new(registry);
+                self.slash_router = self.slash_router.clone().with_skills(Arc::clone(&registry));
+                self.skill_registry = Some(registry);
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to attach default skill registry");
+            }
+        }
     }
 
     pub fn with_source(mut self, source: &str) -> Self {
@@ -980,13 +1013,18 @@ pub async fn run_turn_with_mcp(
         });
     }
 
-    if matches!(
-        slash_dispatch,
-        Dispatch::Builtin {
-            command: BuiltinCommand::Skill,
-            ..
+    if let Dispatch::Builtin {
+        command: BuiltinCommand::Skill,
+        ref args,
+    } = slash_dispatch
+    {
+        if args.trim() == "list" {
+            return Ok(TurnResult {
+                response: session.slash_router.help_text(),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+            });
         }
-    ) {
         return Ok(TurnResult {
             response: "Skill Creator 已启动。请描述要创建或编辑的 skill。".to_string(),
             tool_calls_log: Vec::new(),
@@ -1045,8 +1083,12 @@ pub async fn run_turn_with_mcp(
     }
 
     // Build system prompt
-    let system_prompt =
-        prompt::build_system_prompt(config, system_prompt_override, session.work_dir.as_deref());
+    let system_prompt = prompt::build_system_prompt_with_skill_registry(
+        config,
+        system_prompt_override,
+        session.work_dir.as_deref(),
+        session.skill_registry.as_deref(),
+    );
 
     // Add user message to history
     session.add_user_message(user_message);

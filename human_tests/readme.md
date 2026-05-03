@@ -142,10 +142,11 @@
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
+| [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
 
 ---
 
-**总计：77 个测试文件，1484 个测试用例**
+**总计：78 个测试文件，1487 个测试用例**
 
 ## 工作流程
 

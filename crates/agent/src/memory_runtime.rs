@@ -8,6 +8,7 @@
 use crate::config::{agent_home_dir, AgentConfig};
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -951,8 +952,11 @@ fn append_line(path: &Path, line: &str) -> Result<(), String> {
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .read(true)
         .open(path)
         .map_err(|error| format!("open {}: {error}", path.display()))?;
+    file.lock_exclusive()
+        .map_err(|error| format!("lock {}: {error}", path.display()))?;
     file.write_all(line.as_bytes())
         .map_err(|error| format!("append {}: {error}", path.display()))
 }
@@ -1100,7 +1104,7 @@ fn sanitize_skill_name(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1325,6 +1329,39 @@ mod tests {
                 .is_some(),
             "lock should be acquirable after guard drop"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn append_line_locks_concurrent_writers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = Arc::new(temp.path().join("MEMORY.md"));
+        let mut tasks = Vec::new();
+
+        for task_id in 0..8usize {
+            let path = Arc::clone(&path);
+            tasks.push(tokio::task::spawn_blocking(move || {
+                for line_id in 0..1000usize {
+                    append_line(
+                        &path,
+                        &format!(
+                            "{{\"task\":{task_id},\"line\":{line_id},\"content\":\"memory\"}}\n"
+                        ),
+                    )
+                    .expect("append line");
+                }
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("writer task");
+        }
+
+        let content = fs::read_to_string(path.as_ref()).expect("read memory");
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 8000);
+        for line in lines {
+            serde_json::from_str::<serde_json::Value>(line).expect("valid memory line");
+        }
     }
 
     #[test]

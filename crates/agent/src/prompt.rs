@@ -12,6 +12,7 @@
 use crate::agents_md::AgentsMdManager;
 use crate::config::{agent_home_dir, AgentConfig};
 use crate::skills::SkillsManager;
+use bifrost_skills::SkillRegistry;
 
 /// Build the system prompt for the agent.
 ///
@@ -22,6 +23,15 @@ pub fn build_system_prompt(
     config: &AgentConfig,
     override_prompt: Option<&str>,
     work_dir_override: Option<&str>,
+) -> String {
+    build_system_prompt_with_skill_registry(config, override_prompt, work_dir_override, None)
+}
+
+pub fn build_system_prompt_with_skill_registry(
+    config: &AgentConfig,
+    override_prompt: Option<&str>,
+    work_dir_override: Option<&str>,
+    registry: Option<&SkillRegistry>,
 ) -> String {
     if let Some(custom) = override_prompt {
         return custom.to_string();
@@ -118,5 +128,87 @@ Use for: switching to a different project directory when the user explicitly req
         prompt.push_str(&skills_text);
     }
 
+    if let Some(registry) = registry {
+        let digest = build_skill_registry_digest(registry);
+        if !digest.is_empty() {
+            prompt.push_str(&digest);
+        }
+    }
+
     prompt
+}
+
+const SKILL_DIGEST_CHAR_LIMIT: usize = 4 * 1024;
+
+fn build_skill_registry_digest(registry: &SkillRegistry) -> String {
+    let mut skills = registry.enabled();
+    if skills.is_empty() {
+        return String::new();
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut output = String::from("\n\n## Available Skills\n\n");
+    let mut hidden = 0usize;
+    for (index, skill) in skills.iter().enumerate() {
+        let description = skill
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line = format!("- {}: {}\n", skill.name, description);
+        if output.len() + line.len() > SKILL_DIGEST_CHAR_LIMIT {
+            hidden = skills.len() - index;
+            break;
+        }
+        output.push_str(&line);
+    }
+    if hidden > 0 {
+        let more = format!("- ... ({hidden} more hidden)\n");
+        if output.len() + more.len() > SKILL_DIGEST_CHAR_LIMIT {
+            output.truncate(SKILL_DIGEST_CHAR_LIMIT.saturating_sub(more.len()));
+        }
+        output.push_str(&more);
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bifrost_skills::{ScopeRoot, SkillDraft, SkillManifest, SkillScope, SkillStore};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn system_prompt_includes_bounded_skill_registry_digest() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
+            SkillScope::Repo,
+            dir.path(),
+        )]));
+        for name in ["alpha", "beta", "gamma"] {
+            let manifest = SkillManifest::minimal_inline(name, name, SkillScope::Repo);
+            store
+                .commit(SkillDraft {
+                    manifest,
+                    skill_md: format!("---\nname: {name}\ndescription: {name}\n---\n# {name}"),
+                    draft_dir: None,
+                    assets: Vec::new(),
+                })
+                .unwrap();
+        }
+        let registry = SkillRegistry::without_watcher(store).unwrap();
+
+        let prompt = build_system_prompt_with_skill_registry(
+            &AgentConfig::default(),
+            None,
+            Some(dir.path().to_str().unwrap()),
+            Some(&registry),
+        );
+
+        assert!(prompt.contains("## Available Skills"));
+        assert!(prompt.contains("- alpha: alpha"));
+        assert!(prompt.contains("- beta: beta"));
+        assert!(prompt.contains("- gamma: gamma"));
+    }
 }
