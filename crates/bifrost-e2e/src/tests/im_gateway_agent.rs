@@ -520,7 +520,23 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if first.response.is_empty() {
                     return Err("expected source turn response".to_string());
                 }
-
+                // auto_extract_after_turn runs as a fire-and-forget tokio::spawn
+                // task. Wait up to 10s for the background write to land before
+                // asserting on the on-disk state (avoids a test-only race while
+                // keeping the production assistant reply non-blocking).
+                let summary_path = memory_root.join("memory_summary.md");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Ok(content) = std::fs::read_to_string(&summary_path) {
+                        if content.contains("MEM-AUTO-42") {
+                            break;
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
                 let summary = std::fs::read_to_string(memory_root.join("memory_summary.md"))
                     .map_err(|e| format!("read generated memory_summary.md: {e}"))?;
                 let memory = std::fs::read_to_string(memory_root.join("MEMORY.md"))

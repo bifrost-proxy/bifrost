@@ -315,6 +315,7 @@ dependencies = [
  "bifrost-core",
  "dashmap",
  "fs2",
+ "futures",
  "include_dir",
  "reqwest",
  "serde",

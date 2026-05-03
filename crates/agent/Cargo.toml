@@ -15,6 +15,7 @@ toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
+  "stream",
 ] }
 async-trait = "0.1"
 tracing = "0.1"
@@ -23,6 +24,7 @@ thiserror = "2.0"
 dashmap = "6"
 include_dir = "0.7"
 fs2 = "0.4"
+futures = "0.3"
 
 [features]
 default = ["slash-router"]

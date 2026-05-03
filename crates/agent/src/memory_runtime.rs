@@ -511,9 +511,11 @@ pub fn auto_extract_after_turn(
     });
 }
 
-/// Synchronous variant used only by tests that want to drive extraction
-/// deterministically without spawning a task.
-#[cfg(test)]
+/// Synchronous variant that drives extraction deterministically without
+/// spawning a task. Intended for tests and for rare callers that must observe
+/// the final on-disk memory state before returning. Production turn paths
+/// should continue to use [`auto_extract_after_turn`] so the assistant reply
+/// is not blocked on memory work.
 pub async fn auto_extract_after_turn_blocking(
     client: &crate::client::AgentClient,
     config: &AgentConfig,
