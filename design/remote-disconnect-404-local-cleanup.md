@@ -16,7 +16,7 @@
 
 ### 1. CLI 删除 grant 结果显式分类
 
-在 [crates/bifrost-cli/src/commands/remote.rs](/Users/eden/work/github/bifrost/crates/bifrost-cli/src/commands/remote.rs) 中为 caller relay delete grant 增加结果分类：
+在 [crates/bifrost-cli/src/commands/remote.rs](../crates/bifrost-cli/src/commands/remote.rs) 中为 caller relay delete grant 增加结果分类：
 
 - `Deleted`：relay 成功删除 grant
 - `AlreadyMissing`：relay 返回 `404` 或 body 含 `grant_not_found`
@@ -54,7 +54,7 @@
 
 ### E2E 测试
 
-更新 [e2e-tests/tests/test_remote_invoke_e2e.sh](/Users/eden/work/github/bifrost/e2e-tests/tests/test_remote_invoke_e2e.sh)：
+更新 [e2e-tests/tests/test_remote_invoke_e2e.sh](../e2e-tests/tests/test_remote_invoke_e2e.sh)：
 
 - 先完成一轮 `remote connect`
 - 直接调用 relay 删除 grant，制造 CLI 再次 `disconnect --all` 时命中 `404` 的场景
@@ -63,10 +63,10 @@
 
 ### 真实场景测试
 
-更新 [human_tests/remote-invoke.md](/Users/eden/work/github/bifrost/human_tests/remote-invoke.md)：
+更新 [human_tests/remote-invoke.md](../human_tests/remote-invoke.md)：
 
 - 新增回归用例，覆盖“relay 已找不到 grant 时，disconnect --all 仍必须删除本地连接记录”
-- 执行后同步更新 [human_tests/readme.md](/Users/eden/work/github/bifrost/human_tests/readme.md) 索引
+- 执行后同步更新 [human_tests/readme.md](../human_tests/readme.md) 索引
 
 ## 校验要求
 

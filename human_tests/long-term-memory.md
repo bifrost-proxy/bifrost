@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 工作目录：`/Users/eden/work/github/bifrost`
+- 工作目录：`<REPO_ROOT>`
 - 测试端口禁止使用 9900。
 - 服务启动必须使用临时数据目录并携带 `--no-system-proxy`：
 

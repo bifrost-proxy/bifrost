@@ -1592,7 +1592,7 @@ WebUI 和 CLI 输出必须避免泄露 secret，同时保留 request id / error 
 如果需要使用真实飞书测试应用做验证，测试凭据只允许从本机文件读取：
 
 ```text
-/Users/eden/ak.txt
+<USER_HOME>/ak.txt
 ```
 
 强制要求：
@@ -1603,7 +1603,7 @@ WebUI 和 CLI 输出必须避免泄露 secret，同时保留 request id / error 
 - 如果测试失败，错误输出必须只展示 masked app_id、request id、错误码和错误摘要。
 - 测试结束后必须检查 CLI 输出、Recent Calls、IM History、relay 日志、store 文件均不包含该文件中的任何完整密钥值。
 
-建议 E2E 默认仍使用 fake Feishu server；只有需要验证真实飞书长连接 / 真实消息收发时，才读取 `/Users/eden/ak.txt` 作为运行时输入。
+建议 E2E 默认仍使用 fake Feishu server；只有需要验证真实飞书长连接 / 真实消息收发时，才读取 `<USER_HOME>/ak.txt` 作为运行时输入。
 
 ### 单元测试
 

@@ -37,7 +37,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
    ```
 2. 启动本地 relay 服务 `bifrost-sync-server`（使用独立临时数据目录）：
    ```bash
-   pnpm --dir packages/bifrost-sync-server dev -- --data-dir /Users/eden/work/github/bifrost/.bifrost-sync-test -p 8686
+   pnpm --dir packages/bifrost-sync-server dev -- --data-dir <REPO_ROOT>/.bifrost-sync-test -p 8686
    ```
 3. 在 relay 服务中注册测试用户并拿到 token：
    ```bash
@@ -368,7 +368,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 **操作步骤**：
 1. 停止 `bifrost-sync-server`
-2. 确认临时数据目录 `/Users/eden/work/github/bifrost/.bifrost-sync-test/bifrost-sync.db` 仍保留
+2. 确认临时数据目录 `<REPO_ROOT>/.bifrost-sync-test/bifrost-sync.db` 仍保留
 3. 重新启动 `bifrost-sync-server`
 4. 再次执行只读查询命令
 
@@ -461,7 +461,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 **操作步骤**：
 1. 打开 relay SQLite 数据库：
    ```bash
-   sqlite3 /Users/eden/work/github/bifrost/.bifrost-sync-test/bifrost-sync.db
+   sqlite3 <REPO_ROOT>/.bifrost-sync-test/bifrost-sync.db
    ```
 2. 查询远程调用相关表中的最近记录
 3. 搜索本次命令的原始敏感参数或原始完整输出片段
@@ -4074,8 +4074,8 @@ PY
 
 **执行环境**：
 - 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
-- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
-- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-restart-ssh-caller cargo run --bin bifrost -- remote ...`
+- Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-restart-ssh-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
@@ -4085,30 +4085,30 @@ PY
 
 **执行环境**：
 - 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
-- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
-- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-repeat-pair-caller cargo run --bin bifrost -- remote ...`
+- Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-repeat-pair-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-124 | ✅ PASS | 同一 target client 先后用两个 pair code 完成两次 `remote connect`，第一次 grant 为 `1f43205651506fe6`，第二次 grant 为 `12e91b6bef344396`。第二次 connect 后，caller 本地 [remote-connections.json](/Users/eden/work/github/bifrost/.tmp-remote-repeat-pair-caller/remote-connections.json) 已被覆盖为第二次 grant，并落盘新的 `caller_ephemeral_pub` / `client_ephemeral_pub` / `shared_secret_encrypted`；同时 client 侧 `GET /api/remote-invoke/grants` 仍可看到两条 active pair-code grant 并存，证明“服务端多 grant 并存 + caller 本地只保留最后一次连接”这一高风险场景已真实出现。随后直接用同一 caller 目录执行 `cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net`，日志先告警 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，caller 改为整套使用本地最后一次连接保存的 `grant_id=12e91b6bef344396` 与对应 ephemeral pub，最终 `remote status` 成功返回目标设备状态 JSON，不再出现 `missing grant shared secret` 或 `caller_ephemeral_pub does not match saved encrypted transport context`。 |
+| TC-RI-回归-124 | ✅ PASS | 同一 target client 先后用两个 pair code 完成两次 `remote connect`，第一次 grant 为 `1f43205651506fe6`，第二次 grant 为 `12e91b6bef344396`。第二次 connect 后，caller 本地 [remote-connections.json](../.tmp-remote-repeat-pair-caller/remote-connections.json) 已被覆盖为第二次 grant，并落盘新的 `caller_ephemeral_pub` / `client_ephemeral_pub` / `shared_secret_encrypted`；同时 client 侧 `GET /api/remote-invoke/grants` 仍可看到两条 active pair-code grant 并存，证明“服务端多 grant 并存 + caller 本地只保留最后一次连接”这一高风险场景已真实出现。随后直接用同一 caller 目录执行 `cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net`，日志先告警 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，caller 改为整套使用本地最后一次连接保存的 `grant_id=12e91b6bef344396` 与对应 ephemeral pub，最终 `remote status` 成功返回目标设备状态 JSON，不再出现 `missing grant shared secret` 或 `caller_ephemeral_pub does not match saved encrypted transport context`。 |
 
 ### TC-RI-回归-125 执行结果（2026-04-22，远端 relay + 同一 caller 先 SSH key 后 pair-code）
 
 **执行环境**：
 - 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
-- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client cargo run --bin bifrost -- -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
-- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-mixed-auth-caller cargo run --bin bifrost -- remote ...`
+- Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-mixed-auth-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-125 | ✅ PASS | 先在 target client 上 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，同一 caller 目录执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立 `ssh_publickey` grant `5f25ecf0-8b1a-4804-9f47-b379a212e58a`，caller 本地 [remote-connections.json](/Users/eden/work/github/bifrost/.tmp-remote-mixed-auth-caller/remote-connections.json) 记录为 `auth_method=ssh_publickey` 且落盘对应加密上下文，随后 `remote status` 成功返回目标状态。接着在同一 target client 上开启 discovery mode，并继续用同一个 caller 目录执行 pair-code connect，成功建立 `pair_code` grant `208006cff246d9b2`；此时 caller 本地连接记录被新连接覆盖为 `auth_method=pair_code`，而 client 侧 `GET /api/remote-invoke/grants` 同时存在一条 `ssh_publickey` active grant 和一条 `pair_code` active grant。最后再用同一 caller 目录执行 `remote status`，CLI 明确按本地最后一次连接的 pair-code transport context 工作，虽然 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，但 caller 仍稳定回退到本地保存的 `grant_id=208006cff246d9b2` 与对应 ephemeral pub，命令成功返回目标设备状态 JSON。结论是：同一 client 上两种 grant 可以同时在服务端共存并都有效，但同一个 caller 数据目录只保存最后一次 connect 的那一种模式，不会同时保留两套本地加密上下文。 |
+| TC-RI-回归-125 | ✅ PASS | 先在 target client 上 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，同一 caller 目录执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立 `ssh_publickey` grant `5f25ecf0-8b1a-4804-9f47-b379a212e58a`，caller 本地 [remote-connections.json](../.tmp-remote-mixed-auth-caller/remote-connections.json) 记录为 `auth_method=ssh_publickey` 且落盘对应加密上下文，随后 `remote status` 成功返回目标状态。接着在同一 target client 上开启 discovery mode，并继续用同一个 caller 目录执行 pair-code connect，成功建立 `pair_code` grant `208006cff246d9b2`；此时 caller 本地连接记录被新连接覆盖为 `auth_method=pair_code`，而 client 侧 `GET /api/remote-invoke/grants` 同时存在一条 `ssh_publickey` active grant 和一条 `pair_code` active grant。最后再用同一 caller 目录执行 `remote status`，CLI 明确按本地最后一次连接的 pair-code transport context 工作，虽然 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，但 caller 仍稳定回退到本地保存的 `grant_id=208006cff246d9b2` 与对应 ephemeral pub，命令成功返回目标设备状态 JSON。结论是：同一 client 上两种 grant 可以同时在服务端共存并都有效，但同一个 caller 数据目录只保存最后一次 connect 的那一种模式，不会同时保留两套本地加密上下文。 |
 
 ### TC-RI-回归-126 执行结果（2026-04-22，Recent Calls 命令摘要恢复）
 
 **执行环境**：
 - 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
-- Target client：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-remote-e2e-client target/debug/bifrost -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
-- Caller：`BIFROST_DATA_DIR=/Users/eden/work/github/bifrost/.tmp-human-recentcalls-caller target/debug/bifrost remote ...`
+- Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client target/debug/bifrost -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
+- Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-human-recentcalls-caller target/debug/bifrost remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
@@ -4353,7 +4353,7 @@ PY
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-132 | ✅ PASS | 2026-04-23 在本地隔离环境执行：先将 `packages/bifrost-sync-server/dist` 临时改名，确认工作区只保留源码入口。随后依次执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。三条脚本都成功通过，relay 启动日志未再出现 `Cannot find module '/Users/eden/work/github/bifrost/packages/bifrost-sync-server/dist/cli.js'`，说明 shell E2E 已能在 `--skip-build` 场景下自动回退到源码入口完成本地 relay 启动。 |
+| TC-RI-回归-132 | ✅ PASS | 2026-04-23 在本地隔离环境执行：先将 `packages/bifrost-sync-server/dist` 临时改名，确认工作区只保留源码入口。随后依次执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`、`bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。三条脚本都成功通过，relay 启动日志未再出现 `Cannot find module '<REPO_ROOT>/packages/bifrost-sync-server/dist/cli.js'`，说明 shell E2E 已能在 `--skip-build` 场景下自动回退到源码入口完成本地 relay 启动。 |
 
 ---
 
@@ -4850,14 +4850,14 @@ PY
 
 ```bash
 rm -rf .bifrost-test
-rm -rf /Users/eden/work/github/bifrost/.bifrost-sync-test
+rm -rf <REPO_ROOT>/.bifrost-sync-test
 rm -rf /tmp/bifrost-remote-overload.*
 ```
 
 ### 本轮实际执行回归（2026-04-21，CI 失败修复）
 
 **执行环境**：
-- Local relay：`PATH=/Users/eden/.local/share/mise/installs/node/22.22.0/bin:$PATH pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
+- Local relay：`PATH=<USER_HOME>/.local/share/mise/installs/node/22.22.0/bin:$PATH pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
 - Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
 - Caller CLI：`target/release/bifrost remote ...`
 
@@ -4874,4 +4874,4 @@ rm -rf /tmp/bifrost-remote-overload.*
 - `cargo test -p bifrost-admin test_update_call_in_history_does_not_override_completed_with_cancelled -- --nocapture`：✅ PASS
 - `cargo test -p bifrost-admin test_find_call_started_at_returns_latest_matching_call -- --nocapture`：✅ PASS
 - `bash e2e-tests/tests/test_remote_invoke_e2e.sh`：✅ PASS
-- `PATH=/Users/eden/.local/share/mise/installs/node/22.22.0/bin:$PATH bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：✅ PASS
+- `PATH=<USER_HOME>/.local/share/mise/installs/node/22.22.0/bin:$PATH bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：✅ PASS

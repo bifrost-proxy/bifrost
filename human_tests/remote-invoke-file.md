@@ -17,7 +17,7 @@
    [[grant]]
    grant_id = "<目标 grant_id>"
    name = "workspace-read-write"
-   roots = ["/Users/eden/work/github/bifrost-remote-file"]
+   roots = ["<USER_HOME>/work/github/bifrost-remote-file"]
    denies = ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"]
    write_denies = ["**/Cargo.lock", "**/*.lock"]
    ops = ["read", "list", "stat", "glob", "search", "hash", "write", "edit", "mkdir", "move", "delete", "apply_patch"]
@@ -36,7 +36,7 @@
 ### TC-1.1 file.read — 读取文本文件
 **步骤**：
 ```bash
-bifrost remote file read README.md --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file read README.md --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **期望**：
 - CLI 输出为 JSON，包含 `content_b64 / size / total_size / sha256 / mtime_unix / truncated`；
@@ -86,8 +86,8 @@ bifrost remote file hash Cargo.lock --algo sha256
 **步骤**：
 ```bash
 printf 'hello remote file\n' > /tmp/bifrost-file-write.txt
-bifrost remote file write agent-write.txt --content-file /tmp/bifrost-file-write.txt --cwd /Users/eden/work/github/bifrost-remote-file
-bifrost remote file read agent-write.txt --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file write agent-write.txt --content-file /tmp/bifrost-file-write.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file read agent-write.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **期望**：
 - `write` 返回 `bytes_written / sha256 / previous_sha256`；
@@ -96,8 +96,8 @@ bifrost remote file read agent-write.txt --cwd /Users/eden/work/github/bifrost-r
 ### TC-1.9 file.edit — 行范围编辑
 **步骤**：
 ```bash
-bifrost remote file edit agent-write.txt --edits '[{"start_line":1,"end_line":1,"replacement":"edited remote file\n"}]' --cwd /Users/eden/work/github/bifrost-remote-file
-bifrost remote file read agent-write.txt --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file edit agent-write.txt --edits '[{"start_line":1,"end_line":1,"replacement":"edited remote file\n"}]' --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file read agent-write.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **期望**：
 - `edit` 返回 `applied_edits = 1` 和新的 `sha256`；
@@ -106,9 +106,9 @@ bifrost remote file read agent-write.txt --cwd /Users/eden/work/github/bifrost-r
 ### TC-1.10 file.mkdir / file.mv / file.rm — 目录与路径变更
 **步骤**：
 ```bash
-bifrost remote file mkdir agent-dir/nested --parents --cwd /Users/eden/work/github/bifrost-remote-file
-bifrost remote file mv agent-write.txt agent-dir/nested/moved.txt --cwd /Users/eden/work/github/bifrost-remote-file
-bifrost remote file rm agent-dir/nested/moved.txt --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file mkdir agent-dir/nested --parents --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file mv agent-write.txt agent-dir/nested/moved.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file rm agent-dir/nested/moved.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **期望**：
 - `mkdir` 后目录存在；
@@ -124,8 +124,8 @@ cat >/tmp/bifrost-file.patch <<'PATCH'
 @@ -0,0 +1 @@
 +patched by remote file
 PATCH
-bifrost remote file apply-patch --patch-file /tmp/bifrost-file.patch --cwd /Users/eden/work/github/bifrost-remote-file
-bifrost remote file read patch-target.txt --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file apply-patch --patch-file /tmp/bifrost-file.patch --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file read patch-target.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **期望**：
 - `apply-patch` 返回 `applied` 列表；
@@ -278,7 +278,7 @@ FP="$(curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key | jq -r
 curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/file-access-config \
   -H 'content-type: application/json' \
   -X PUT \
-  -d "{\"grant\":[{\"match\":{\"ssh_fingerprint\":\"$FP\"},\"name\":\"ssh-key:agent-default\",\"roots\":[\"/Users/eden/work/code/nextoncall/next_agent\"],\"ops\":[\"read\",\"list\",\"stat\",\"glob\",\"search\",\"hash\",\"write\",\"edit\",\"mkdir\",\"move\",\"delete\",\"apply_patch\"],\"allow_overwrite\":true,\"allow_recursive_delete\":false}]}"
+  -d "{\"grant\":[{\"match\":{\"ssh_fingerprint\":\"$FP\"},\"name\":\"ssh-key:agent-default\",\"roots\":[\"<USER_HOME>/work/code/nextoncall/next_agent\"],\"ops\":[\"read\",\"list\",\"stat\",\"glob\",\"search\",\"hash\",\"write\",\"edit\",\"mkdir\",\"move\",\"delete\",\"apply_patch\"],\"allow_overwrite\":true,\"allow_recursive_delete\":false}]}"
 
 # reset 后确认策略迁移到新 fingerprint，roots/ops 不回退
 curl -sS -X POST http://127.0.0.1:18890/_bifrost/api/remote-invoke/ssh-key/reset
@@ -289,7 +289,7 @@ curl -sS http://127.0.0.1:18890/_bifrost/api/remote-invoke/file-access-config | 
 **期望**：
 - SSH Key 卡片展示 File Access 状态，并可通过 Configure 保存 `match.ssh_fingerprint` 策略；
 - `file-access.toml` 中只有新 fingerprint 的 SSH Key 策略，不保留旧 fingerprint 重复项；
-- reset 后策略 roots 仍包含 `/Users/eden/work/code/nextoncall/next_agent`；
+- reset 后策略 roots 仍包含 `<USER_HOME>/work/code/nextoncall/next_agent`；
 - reset 后策略 ops 仍包含 `write` / `edit` / `apply_patch` 等写操作；
 - Bifrost 测试实例启动命令包含 `--no-system-proxy`，且端口不是 9900。
 
@@ -365,10 +365,10 @@ HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 \
 **步骤**：
 ```bash
 # 先读取整个文件确认行数
-bifrost remote file read Cargo.toml --cwd /Users/eden/work/github/bifrost-remote-file --output json | jq .total_size
+bifrost remote file read Cargo.toml --cwd <USER_HOME>/work/github/bifrost-remote-file --output json | jq .total_size
 
 # 读取第 5-10 行
-bifrost remote file read Cargo.toml --offset 5 --limit 6 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --offset 5 --limit 6 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 返回 `start_line: 5`, `end_line: 10`, `total_lines` 为文件实际行数
@@ -378,7 +378,7 @@ bifrost remote file read Cargo.toml --offset 5 --limit 6 --cwd /Users/eden/work/
 ### TC-3.2 file.read — offset 超出文件末尾
 **步骤**：
 ```bash
-bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 返回 `start_line` 等于 `total_lines + 1`（或 clamped），`end_line` 等于 `start_line - 1`
@@ -388,7 +388,7 @@ bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/
 ### TC-3.3 file.read — 仅指定 offset 读到文件末尾
 **步骤**：
 ```bash
-bifrost remote file read Cargo.toml --offset 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --offset 3 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `start_line: 3`, `end_line` 等于 `total_lines`
@@ -398,7 +398,7 @@ bifrost remote file read Cargo.toml --offset 3 --cwd /Users/eden/work/github/bif
 ### TC-3.4 file.search — 带上下文行
 **步骤**：
 ```bash
-bifrost remote file search "name" -B 2 -A 2 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "name" -B 2 -A 2 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 每个 match 对象包含 `context` 数组
@@ -408,7 +408,7 @@ bifrost remote file search "name" -B 2 -A 2 --cwd /Users/eden/work/github/bifros
 ### TC-3.5 file.search — 不带上下文（默认行为不变）
 **步骤**：
 ```bash
-bifrost remote file search "name" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "name" --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 每个 match 对象只有 `path`/`line`/`column`/`preview`，**没有** `context` 字段
@@ -417,7 +417,7 @@ bifrost remote file search "name" --cwd /Users/eden/work/github/bifrost-remote-f
 **步骤**：
 ```bash
 # 确保目标目录下有 .git 和 target 目录
-bifrost remote file glob "**/*" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file glob "**/*" --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `matches` 中不包含任何以 `.git/` 或 `target/` 或 `node_modules/` 开头的路径
@@ -426,7 +426,7 @@ bifrost remote file glob "**/*" --cwd /Users/eden/work/github/bifrost-remote-fil
 ### TC-3.7 file.glob — 自定义 --exclude
 **步骤**：
 ```bash
-bifrost remote file glob "**/*" --exclude "src" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file glob "**/*" --exclude "src" --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `matches` 中不包含 `src/` 开头的路径
@@ -435,7 +435,7 @@ bifrost remote file glob "**/*" --exclude "src" --cwd /Users/eden/work/github/bi
 ### TC-3.8 file.search — 默认排除 .git / node_modules / target
 **步骤**：
 ```bash
-bifrost remote file search "fn" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "fn" --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `matches` 中无来自 `.git/`、`target/`、`node_modules/` 的结果
@@ -443,7 +443,7 @@ bifrost remote file search "fn" --cwd /Users/eden/work/github/bifrost-remote-fil
 ### TC-3.9 file.list — 默认排除 .git / node_modules / target
 **步骤**：
 ```bash
-bifrost remote file list --depth 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file list --depth 3 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `entries` 中不递归进入 `.git/`、`target/`、`node_modules/` 目录
@@ -452,7 +452,7 @@ bifrost remote file list --depth 3 --cwd /Users/eden/work/github/bifrost-remote-
 ### TC-3.10 file.read — offset 超出文件末尾
 **步骤**：
 ```bash
-bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `size: 0`，`content_b64` 解码后为空
@@ -462,7 +462,7 @@ bifrost remote file read Cargo.toml --offset 99999 --limit 10 --cwd /Users/eden/
 ### TC-3.11 file.read — limit=0 返回空
 **步骤**：
 ```bash
-bifrost remote file read Cargo.toml --offset 1 --limit 0 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --offset 1 --limit 0 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `size: 0`，`content_b64` 解码后为空
@@ -471,7 +471,7 @@ bifrost remote file read Cargo.toml --offset 1 --limit 0 --cwd /Users/eden/work/
 ### TC-3.12 file.read — 非 offset 模式返回 total_lines
 **步骤**：
 ```bash
-bifrost remote file read Cargo.toml --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file read Cargo.toml --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 响应中包含 `total_lines` 字段，值为文件实际行数
@@ -481,11 +481,11 @@ bifrost remote file read Cargo.toml --cwd /Users/eden/work/github/bifrost-remote
 **步骤**：
 ```bash
 # 准备三行文件
-printf 'line1\nline2\nline3\n' | bifrost remote file write edit-test.txt --content-file - --cwd /Users/eden/work/github/bifrost-remote-file
+printf 'line1\nline2\nline3\n' | bifrost remote file write edit-test.txt --content-file - --cwd <USER_HOME>/work/github/bifrost-remote-file
 # 删除第 2 行（空 replacement）
-bifrost remote file edit edit-test.txt --edits '[{"start_line":2,"end_line":2,"replacement":""}]' --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file edit edit-test.txt --edits '[{"start_line":2,"end_line":2,"replacement":""}]' --cwd <USER_HOME>/work/github/bifrost-remote-file
 # 读取验证
-bifrost remote file read edit-test.txt --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file read edit-test.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **预期**：
 - 结果为 `line1\nline3\n`，**不应有多余空白行**（修复前 bug 会产生 `line1\n\nline3\n`）
@@ -493,7 +493,7 @@ bifrost remote file read edit-test.txt --cwd /Users/eden/work/github/bifrost-rem
 ### TC-3.14 file.search — 无匹配时带 context 不崩溃
 **步骤**：
 ```bash
-bifrost remote file search "NONEXISTENT_PATTERN_XYZ_12345" -B 3 -A 3 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "NONEXISTENT_PATTERN_XYZ_12345" -B 3 -A 3 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - `matches` 为空数组
@@ -503,7 +503,7 @@ bifrost remote file search "NONEXISTENT_PATTERN_XYZ_12345" -B 3 -A 3 --cwd /User
 ### TC-3.15 file.search — 首行匹配 + context_before 不越界
 **步骤**：
 ```bash
-bifrost remote file search "^\[package\]" -B 5 -A 2 --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "^\[package\]" -B 5 -A 2 --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 匹配 Cargo.toml 第 1 行 `[package]`
@@ -512,7 +512,7 @@ bifrost remote file search "^\[package\]" -B 5 -A 2 --cwd /Users/eden/work/githu
 ### TC-3.16 file.search — 非法正则返回清晰错误
 **步骤**：
 ```bash
-bifrost remote file search "[invalid_regex" --cwd /Users/eden/work/github/bifrost-remote-file --output json
+bifrost remote file search "[invalid_regex" --cwd <USER_HOME>/work/github/bifrost-remote-file --output json
 ```
 **预期**：
 - 返回错误，错误码包含 `file.invalid_regex`
@@ -520,8 +520,8 @@ bifrost remote file search "[invalid_regex" --cwd /Users/eden/work/github/bifros
 ### TC-3.17 file.write — sha256 前置条件不匹配拒绝
 **步骤**：
 ```bash
-printf 'data' | bifrost remote file write precond.txt --content-file - --cwd /Users/eden/work/github/bifrost-remote-file
-printf 'new' | bifrost remote file write precond.txt --content-file - --base-sha256 wrong_sha --cwd /Users/eden/work/github/bifrost-remote-file
+printf 'data' | bifrost remote file write precond.txt --content-file - --cwd <USER_HOME>/work/github/bifrost-remote-file
+printf 'new' | bifrost remote file write precond.txt --content-file - --base-sha256 wrong_sha --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **预期**：
 - 第二次写入失败，错误码包含 `file.precondition_failed`
@@ -537,7 +537,7 @@ cat >/tmp/bifrost-bad.patch <<'PATCH'
 -this_line_does_not_exist
 +replacement
 PATCH
-bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users/eden/work/github/bifrost-remote-file
+bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd <USER_HOME>/work/github/bifrost-remote-file
 ```
 **预期**：
 - 返回错误，包含 `mismatch`
@@ -582,7 +582,7 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd /Users
 | 2026-04-25 | glob 自定义 exclude | `cargo test -p bifrost-admin -- glob_custom_exclude` | PASS：build/ 被排除 |
 | 2026-04-25 | 空文件 offset | `cargo test -p bifrost-admin -- read_empty_file_with_offset_returns_empty` | PASS：total_lines=0 |
 | 2026-04-25 | TC-6.1 配对批准时 remote_file_write 不依赖 Shell Access policy | `SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh` | PASS：输出 `grant available as remote_file_write`，TC-FILE-01/19/20/09 通过，Summary 56/56 passed |
-| 2026-04-27 | TC-6.2 SSH Key 默认 File Policy 可配置且 reset 后保留 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy` + SSH key/file-access/reset API 断言 | PASS：旧 fingerprint `55a9ccae` reset 到新 fingerprint `2a018c79` 后，`file-access-config` 仅保留新 `match.ssh_fingerprint`，roots 仍为 `/Users/eden/work/code/nextoncall/next_agent`，ops 包含 `write/edit/apply_patch` |
+| 2026-04-27 | TC-6.2 SSH Key 默认 File Policy 可配置且 reset 后保留 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy` + SSH key/file-access/reset API 断言 | PASS：旧 fingerprint `55a9ccae` reset 到新 fingerprint `2a018c79` 后，`file-access-config` 仅保留新 `match.ssh_fingerprint`，roots 仍为 `<USER_HOME>/work/code/nextoncall/next_agent`，ops 包含 `write/edit/apply_patch` |
 | 2026-04-27 | TC-6.3 SSH Key 默认 File Policy 被误删后自动恢复落盘 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy-restore cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy-restore/debug/bifrost start -p 18891 --unsafe-ssl --no-system-proxy` + `PUT {"grant":[]}` / GET / grep file-access.toml 断言 | PASS：PUT 空策略后自动恢复 fingerprint `fed9b02c`；API 返回 12 个 file ops；`file-access.toml` 已写入 `match.ssh_fingerprint` |
 | 2026-04-28 | TC-6.4 旧 SSH grant 使用 caller fingerprint 时 file.write 仍命中 active SSH Key 默认策略 | `cargo test -p bifrost-admin legacy_ssh_grant -- --nocapture` | PASS：旧 SSH grant 的 `ssh_key_fingerprint=caller_fingerprint` 被修正为 active SSH key fingerprint；随后 `FileAccessPolicyStore::resolve()` 命中 `match.ssh_fingerprint` 的 `roots=["/"]` 写策略，`FileOp::Write` 检查通过，不再走 readonly fallback |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |

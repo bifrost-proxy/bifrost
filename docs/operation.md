@@ -19,7 +19,7 @@ Bifrost 会根据 value 的格式自动识别其类型，支持以下 6 种：
 | 内联参数    | `key=value&...` | `x-proxy=Bifrost&x-test=1`      | 自动解析为键值对         |
 | 小括号内容  | `(content)`     | `({"ec":0})`                    | 括号内容直接作为操作内容 |
 | Values 引用 | `{key}`         | `{config.json}`                 | 引用 Values 中的内容     |
-| 本地文件    | `/path/to/file` | `/Users/xxx/mock.json`          | 从本地文件加载内容       |
+| 本地文件    | `/path/to/file` | `<USER_HOME>/mock.json`         | 从本地文件加载内容       |
 | 远程资源    | `http(s)://url` | `https://example.com/data.json` | 从远程 URL 加载内容      |
 
 > ⚠️ **重要**：内联值、内联参数、小括号内容这三种类型的 value **不能包含空格**。规则解析器使用空格分隔多个操作符，value 中的空格会导致解析错误。如需使用包含空格的复杂内容，请使用 **Values 引用**、**本地文件** 或 **远程资源**。
@@ -114,7 +114,7 @@ pattern ua://{ua.txt}
 从本地文件或远程 URL 加载操作内容：
 
 ```txt
-pattern reqHeaders:///Users/xxx/headers.txt           # 从本地文件加载
+pattern reqHeaders://<USER_HOME>/headers.txt          # 从本地文件加载
 pattern resHeaders://https://example.com/config.json  # 从远程 URL 加载
 ```
 

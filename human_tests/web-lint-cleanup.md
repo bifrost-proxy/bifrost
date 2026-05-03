@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-1. 工作目录为 `/Users/eden/work/github/bifrost`。
+1. 工作目录为 `<REPO_ROOT>`。
 2. 当前分支为 `feat/agent`。
 3. 已执行 `cd web && pnpm install --frozen-lockfile`。
 4. 不需要启动 Bifrost 服务，不使用 9900 端口，不修改系统代理。
@@ -16,7 +16,7 @@
 ### TC-WLF-01 Web ESLint 全量零错误零警告
 
 操作步骤：
-1. 执行 `cd /Users/eden/work/github/bifrost/web && pnpm run lint 2>&1 | tee /tmp/human-web-lint-cleanup-lint.log`。
+1. 执行 `cd <REPO_ROOT>/web && pnpm run lint 2>&1 | tee /tmp/human-web-lint-cleanup-lint.log`。
 2. 检查命令退出码。
 3. 检查 `/tmp/human-web-lint-cleanup-lint.log` 中不存在 `error`、`warning`、`✖` 或 `ELIFECYCLE`。
 
@@ -30,7 +30,7 @@
 ### TC-WLF-02 Web Build 未退化
 
 操作步骤：
-1. 执行 `cd /Users/eden/work/github/bifrost/web && pnpm run build 2>&1 | tee /tmp/human-web-lint-cleanup-build.log`。
+1. 执行 `cd <REPO_ROOT>/web && pnpm run build 2>&1 | tee /tmp/human-web-lint-cleanup-build.log`。
 2. 检查命令退出码。
 3. 检查输出包含 `✓ built in`。
 

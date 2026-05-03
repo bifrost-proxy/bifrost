@@ -244,7 +244,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ### TC-IMA-22: Skills 渐进式加载验证
 
-- **前置条件**: `work_dir` 配置为 `/Users/eden/work/github/bifrost`，项目目录中存在 `.agents/skills/` 子目录
+- **前置条件**: `work_dir` 配置为 `<REPO_ROOT>`，项目目录中存在 `.agents/skills/` 子目录
 - **操作步骤**:
   ```bash
   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
@@ -572,11 +572,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```bash
   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
     -H 'Content-Type: application/json' \
-    -d '{"session_key": "wd-test-1", "work_dir": "/Users/eden/work/github/bifrost", "message": "hi"}'
+    -d '{"session_key": "wd-test-1", "work_dir": "<REPO_ROOT>", "message": "hi"}'
   ```
 - **预期结果**:
   - 返回 `success: true`
-  - GET /sessions 中 `wd-test-1` 的 `work_dir` 为 `/Users/eden/work/github/bifrost`
+  - GET /sessions 中 `wd-test-1` 的 `work_dir` 为 `<REPO_ROOT>`
 
 ### TC-IMA-45: 创建不带 work_dir 的 Session
 
@@ -606,12 +606,12 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```bash
   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
     -H 'Content-Type: application/json' \
-    -d '{"session_key": "wd-switch-test", "work_dir": "/Users/eden", "message": "请切换工作目录到 /Users/eden/work/github/bifrost"}'
+    -d '{"session_key": "wd-switch-test", "work_dir": "<USER_HOME>", "message": "请切换工作目录到 <REPO_ROOT>"}'
   ```
 - **预期结果**:
   - `tool_calls` 中包含 `switch_workdir` 工具调用，`success: true`
   - `response` 包含 "已切换工作目录到"
-  - GET /sessions 中该 session 的 `work_dir` 更新为 `/Users/eden/work/github/bifrost`
+  - GET /sessions 中该 session 的 `work_dir` 更新为 `<REPO_ROOT>`
   - `message_count` 为 0（历史已清空）
 
 ### TC-IMA-48: switch_workdir 工具 - 无效路径拒绝

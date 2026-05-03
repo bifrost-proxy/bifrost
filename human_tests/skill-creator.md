@@ -7,7 +7,7 @@ Skill Creator 子系统让 Bifrost Agent 在 Settings -> Agent 中管理、创�
 ## 前置条件
 
 ```bash
-cd /Users/eden/work/github/bifrost
+cd <REPO_ROOT>
 export BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-skill-creator-human.XXXXXX)"
 ```
 

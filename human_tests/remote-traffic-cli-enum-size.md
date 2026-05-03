@@ -12,7 +12,7 @@
 
 ## 前置条件
 
-1. 仓库位于 `/Users/eden/work/github/bifrost`
+1. 仓库位于 `<REPO_ROOT>`
 2. 可在本地执行 Cargo 命令
 3. 使用临时数据目录，且测试端口不能使用 `9900`
 4. 如需启动 Bifrost，必须带 `--no-system-proxy`

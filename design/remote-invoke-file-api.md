@@ -243,7 +243,7 @@ pub enum FileOp {
     }
   ],
   "truncated": false,             // 条目数达上限时为 true
-  "root": "/Users/eden/work/github/bifrost/crates/bifrost-core/src"
+  "root": "crates/bifrost-core/src"
 }
 ```
 
@@ -271,7 +271,7 @@ pub enum FileOp {
 ```jsonc
 {
   "pattern": "crates/**/*.rs",
-  "cwd": "/Users/eden/work/github/bifrost",
+  "cwd": "<REPO_ROOT>",
   "limit": 1000
 }
 ```
@@ -282,7 +282,7 @@ pub enum FileOp {
 {
   "matches": ["crates/bifrost-core/src/lib.rs", "…"],
   "truncated": false,
-  "root": "/Users/eden/work/github/bifrost"
+  "root": "<REPO_ROOT>"
 }
 ```
 
@@ -315,7 +315,7 @@ pub enum FileOp {
     }
   ],
   "truncated": false,
-  "root": "/Users/eden/work/github/bifrost"
+  "root": "<REPO_ROOT>"
 }
 ```
 

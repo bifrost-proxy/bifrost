@@ -418,7 +418,7 @@
      cd "$TEST_ROOT" && PATH="$TOOLCHAIN_BIN:$PATH" \
      BIFROST_INSTALL_SKILL_SOURCE=embedded \
      BIFROST_DATA_DIR=./.bifrost-test \
-     cargo run --manifest-path /Users/eden/work/github/bifrost/Cargo.toml --bin bifrost -- install-skill -t codex --cwd -y
+     cargo run --manifest-path <REPO_ROOT>/Cargo.toml --bin bifrost -- install-skill -t codex --cwd -y
    )
    ```
 2. 检查以下文件都存在且非空：

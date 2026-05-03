@@ -2070,8 +2070,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```
 4. 使用真实浏览器自动化通过代理打开页面，并记录背景图加载结果：
    ```bash
-   NODE_PATH=/Users/eden/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
-   /Users/eden/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node <<'NODE'
+   NODE_PATH=<USER_HOME>/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+   <USER_HOME>/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node <<'NODE'
    const { chromium } = require('playwright');
    (async () => {
      const browser = await chromium.launch({

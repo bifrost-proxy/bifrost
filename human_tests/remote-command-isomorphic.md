@@ -18,7 +18,7 @@
 
 ## 前置条件
 
-1. 仓库位于 `/Users/eden/work/github/bifrost`
+1. 仓库位于 `<REPO_ROOT>`
 2. 测试端口禁止使用 `9900`
 3. 启动目标 Bifrost（target client）时必须使用临时数据目录，且带 `--no-system-proxy`
 4. 远程调用使用独立 caller 数据目录，避免污染已有 remote 连接状态

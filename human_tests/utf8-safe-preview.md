@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 在仓库根目录 `/Users/eden/work/github/bifrost` 执行。
+- 在仓库根目录 `<REPO_ROOT>` 执行。
 - 不需要启动 Bifrost 服务；本用例通过真实 cargo 测试和 E2E 回归脚本触发对应代码路径。
 - 本用例不涉及系统代理，不使用 9900 端口。
 
