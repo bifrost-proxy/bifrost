@@ -161,6 +161,17 @@ MEMORY_FILE="$TEST_DIR/agent/memory/MEMORY.md"
 RAW_FILE="$TEST_DIR/agent/memory/raw_memories.md"
 PHASE2_STATE_FILE="$TEST_DIR/agent/memory/.phase2_state.json"
 ROLLOUT_DIR="$TEST_DIR/agent/memory/rollout_summaries"
+
+# auto_extract_after_turn runs as a fire-and-forget tokio::spawn after the
+# HTTP response returns, so poll until the phase-2 consolidation has
+# persisted its state artifact (up to 30 s).
+for _ in $(seq 1 60); do
+  if [[ -f "$PHASE2_STATE_FILE" ]] && grep -q '"processed_input_count": 1' "$PHASE2_STATE_FILE" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+
 test -f "$SUMMARY_FILE"
 test -f "$MEMORY_FILE"
 test -f "$RAW_FILE"
