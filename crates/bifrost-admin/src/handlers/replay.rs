@@ -354,10 +354,18 @@ async fn execute_replay_unified(
             "WebSocket URLs are not supported via HTTP endpoint. Use the WebSocket endpoint (/api/replay/execute/ws) instead.",
         );
     }
+    // timeout_ms 只用于“连接建立/首包(headers)获取”的超时控制。
+    // 不用于整个请求生命周期，避免对 SSE 等长连接造成错误断开。
+    // 通过 reqwest 原生的 connect_timeout 实现，而不是外层 tokio::time::timeout，
+    // 因为后者在 CI 高负载下可能与 body 流的后续读取产生意外耦合。
+    let timeout_ms = unified_req
+        .timeout_ms
+        .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
 
     let unsafe_ssl = state.runtime_config.read().await.unsafe_ssl;
     let client = bifrost_core::direct_reqwest_client_builder()
         .danger_accept_invalid_certs(unsafe_ssl)
+        .connect_timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .unwrap_or_default();
 
@@ -385,30 +393,18 @@ async fn execute_replay_unified(
     }
 
     let start_time = std::time::Instant::now();
-    // NOTE: timeout_ms 只用于“连接建立/首包(headers)获取”的超时控制。
-    // 不能用于整个请求生命周期，否则 SSE 这类长连接会在超时后被错误断开。
-    let timeout_ms = unified_req
-        .timeout_ms
-        .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
-    let send_future = req_builder.send();
-    let response = match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        send_future,
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
+    let response = match req_builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
             drop(permit);
+            if e.is_connect() || e.is_timeout() {
+                let error_msg = format!("Request timeout after {}ms", timeout_ms);
+                error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request timed out");
+                return error_response(StatusCode::GATEWAY_TIMEOUT, &error_msg);
+            }
             let error_msg = format!("Request failed: {}", e);
             error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request failed");
             return error_response(StatusCode::BAD_GATEWAY, &error_msg);
-        }
-        Err(_) => {
-            drop(permit);
-            let error_msg = format!("Request timeout after {}ms", timeout_ms);
-            error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request timed out");
-            return error_response(StatusCode::GATEWAY_TIMEOUT, &error_msg);
         }
     };
 
