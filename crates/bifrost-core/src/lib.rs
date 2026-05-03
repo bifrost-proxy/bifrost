@@ -3,6 +3,7 @@ pub mod bifrost_file;
 pub mod error;
 pub mod file_access;
 pub mod http_client;
+pub mod limits;
 pub mod logging;
 pub mod matcher;
 pub mod panic_handler;

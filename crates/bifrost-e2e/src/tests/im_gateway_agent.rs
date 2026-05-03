@@ -342,7 +342,19 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let mock = ChatCompletionMock::start().await?;
                 let temp_dir = tempfile::tempdir()
                     .map_err(|e| format!("failed to create temp dir: {e}"))?;
-                let _agent_home_guard = EnvVarGuard::set("BIFROST_AGENT_HOME", temp_dir.path());
+                let agent_home = temp_dir.path().to_string_lossy().to_string();
+                tokio::task::spawn_blocking(move || {
+                    temp_env::with_vars(
+                    [
+                        ("BIFROST_AGENT_HOME", Some(agent_home.as_str())),
+                        ("BIFROST_DATA_DIR", None::<&str>),
+                    ],
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("temp env runtime")
+                            .block_on(async move {
                 let memory_root = temp_dir.path().join("memory");
                 std::fs::create_dir_all(&memory_root)
                     .map_err(|e| format!("failed to create memory root: {e}"))?;
@@ -432,6 +444,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 }
 
                 Ok(())
+                            })
+                    },
+                )
+                })
+                .await
+                .map_err(|error| format!("memory env task join failed: {error}"))?
             },
         ),
         TestCase::standalone(
@@ -442,7 +460,19 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let mock = ChatCompletionMock::start().await?;
                 let temp_dir = tempfile::tempdir()
                     .map_err(|e| format!("failed to create temp dir: {e}"))?;
-                let _agent_home_guard = EnvVarGuard::set("BIFROST_AGENT_HOME", temp_dir.path());
+                let agent_home = temp_dir.path().to_string_lossy().to_string();
+                tokio::task::spawn_blocking(move || {
+                    temp_env::with_vars(
+                    [
+                        ("BIFROST_AGENT_HOME", Some(agent_home.as_str())),
+                        ("BIFROST_DATA_DIR", None::<&str>),
+                    ],
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("temp env runtime")
+                            .block_on(async move {
                 let memory_root = temp_dir.path().join("memory");
 
                 let mut config = AgentConfig {
@@ -566,6 +596,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 }
 
                 Ok(())
+                            })
+                    },
+                )
+                })
+                .await
+                .map_err(|error| format!("memory env task join failed: {error}"))?
             },
         ),
         TestCase::standalone(
@@ -892,29 +928,4 @@ fn pick_unused_port() -> Result<u16, String> {
         .local_addr()
         .map(|addr| addr.port())
         .map_err(|e| format!("Failed to read ephemeral port: {}", e))
-}
-
-struct EnvVarGuard {
-    key: String,
-    previous: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self {
-            key: key.to_string(),
-            previous,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(&self.key, value),
-            None => std::env::remove_var(&self.key),
-        }
-    }
 }

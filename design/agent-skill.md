@@ -168,6 +168,18 @@ IM Gateway Tab 的 `fetchData` 在失败时通过 `message.error()` 暴露错误
 - 构建验证：`pnpm --dir web build` 验证 SkillEditor 复用组件与 IM Gateway loading/error 修改的 TypeScript/Vite 构建。
 - 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-12 到 TC-SC-14，逐条执行并记录实际结果。
 
+### E2E env 与 storage size guard 回归（feat/agent review fixpass）
+
+`im_gateway_agent` E2E 中涉及 `BIFROST_AGENT_HOME` / `BIFROST_DATA_DIR` 的测试改用 `temp-env` 作用域。由于 e2e runner 要求 test future 为 `Send`，temp-env 的 non-Send guard 放在 `spawn_blocking` 内，并在该作用域内使用单线程 Tokio runtime 执行原异步测试体，避免 guard 跨 await 暴露给 runner。
+
+规则文件大小限制抽到 `bifrost-core/src/limits.rs`：`MAX_RULE_FILE_BYTES = 256 * 1024 * 1024`，`ensure_file_size_within_limit(path, limit)` 统一处理 metadata 检查和错误返回。`bifrost-storage/src/rules.rs` 的 load/load_summary 路径复用该 helper。
+
+验证计划：
+
+- 单元测试：`ensure_file_size_within_limit_rejects_oversized_file`。
+- 编译验证：`cargo check -p bifrost-e2e --quiet` 和 `cargo check -p bifrost-storage --quiet`。
+- 真实场景测试：新增 `human_tests/storage-e2e-safety.md`，包含 TC-SES-01 到 TC-SES-03，逐条执行并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：

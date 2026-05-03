@@ -91,6 +91,7 @@ fn manifest(name: &str) -> SkillManifest {
         })),
         outputs_schema: None,
         metadata: BTreeMap::new(),
+        env: BTreeMap::new(),
         created_by: bifrost_skills::SkillAuthor::Agent {
             session_id: "e2e".to_string(),
         },
