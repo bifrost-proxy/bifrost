@@ -510,12 +510,13 @@ impl FeishuProvider {
         })?;
 
         if body.code.unwrap_or(0) != 0 {
-            tracing::warn!(
-                code = body.code,
-                msg = body.msg.as_deref().unwrap_or(""),
-                message_id = message_id,
-                "feishu patch_card error"
-            );
+            let err = bifrost_core::BifrostError::Network(format!(
+                "feishu patch_card failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.as_deref().unwrap_or("")
+            ));
+            tracing::warn!(error = %err, message_id = message_id);
+            return Err(err);
         }
 
         Ok(())
