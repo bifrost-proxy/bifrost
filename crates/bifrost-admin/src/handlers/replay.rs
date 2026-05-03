@@ -459,7 +459,13 @@ async fn execute_replay_unified(
         let traffic_id_clone = traffic_id.clone();
         let heartbeat_tx = tx.clone();
 
+        let client_kept = client;
         tokio::spawn(async move {
+            let _client_guard = client_kept; // 保持 reqwest client 在 SSE 流期间存活，避免提前销毁导致连接被回收
+            eprintln!(
+                "[UNIFIED_REPLAY][debug] process_sse_response entering replay_id={}",
+                replay_id_clone
+            );
             let result = process_sse_response(
                 &state_clone,
                 &replay_id_clone,
@@ -469,6 +475,10 @@ async fn execute_replay_unified(
             )
             .await;
             drop(permit);
+            match &result {
+                Ok(()) => eprintln!("[UNIFIED_REPLAY][debug] process_sse_response returned Ok(()) replay_id={} (upstream closed normally)", replay_id_clone),
+                Err(e) => eprintln!("[UNIFIED_REPLAY][debug] process_sse_response returned Err({}) replay_id={}", e, replay_id_clone),
+            }
             if let Err(e) = result {
                 error!(error = %e, replay_id = %replay_id_clone, "[UNIFIED_REPLAY] SSE stream processing failed");
             }

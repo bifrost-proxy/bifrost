@@ -606,6 +606,12 @@ EOF
         tail -20 "$err_file" >&2 || true
         echo "--- curl stdout ---" >&2
         tail -20 "$out_file" >&2 || true
+        # 把 bifrost proxy 日志拷贝到 CI artifact 目录,方便诊断
+        if [ -n "${BIFROST_E2E_REPORT_DIR:-}" ] && [ -f /tmp/bifrost_e2e.log ]; then
+            cp /tmp/bifrost_e2e.log "${BIFROST_E2E_REPORT_DIR}/bifrost_replay_sse_fail.log" || true
+        fi
+        echo "--- bifrost log (last 80 lines mentioning UNIFIED_REPLAY or SSE) ---" >&2
+        grep -E 'UNIFIED_REPLAY|\[SSE\]|process_sse_response' /tmp/bifrost_e2e.log 2>/dev/null | tail -80 >&2 || true
         failed=$((failed + 1))
         return
     fi
