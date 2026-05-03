@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Empty,
   Input,
+  message,
   Popconfirm,
   Segmented,
+  Select,
   Space,
   Switch,
   Table,
@@ -14,19 +16,18 @@ import {
 } from "antd";
 import {
   DeleteOutlined,
-  EditOutlined,
+  EyeOutlined,
   ImportOutlined,
-  PlusOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import {
   deleteSkill,
+  importSkill,
   listSkills,
   patchSkill,
 } from "../../../../api/agent-skills";
 import type { SkillRecord, SkillScope } from "./types";
-import SkillCreatorWizard from "./SkillCreatorWizard";
-import SkillEditor from "./SkillEditor";
+import SkillDetailViewer from "./SkillEditor";
 
 const { Text } = Typography;
 
@@ -37,8 +38,10 @@ export default function SkillsSection() {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [editing, setEditing] = useState<SkillRecord | null>(null);
+  const [viewing, setViewing] = useState<SkillRecord | null>(null);
+  const [importScope, setImportScope] = useState<SkillScope>("repo");
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchSkills = useCallback(async () => {
     setLoading(true);
@@ -95,6 +98,27 @@ export default function SkillsSection() {
     setSkills((current) => current.filter((item) => item.name !== record.name));
   };
 
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    try {
+      const result = await importSkill(file, importScope);
+      if (result.record) {
+        updateRecord(result.record);
+        message.success(`Skill "${result.record.name}" imported`);
+      } else {
+        fetchSkills();
+        message.success("Skill imported");
+      }
+    } catch (err) {
+      message.error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
       <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
@@ -122,24 +146,51 @@ export default function SkillsSection() {
           />
         </Space>
         <Space>
-          <Tooltip title="Import .skill">
-            <Button size="small" icon={<ImportOutlined />} disabled />
+          <Select
+            size="small"
+            value={importScope}
+            onChange={setImportScope}
+            options={[
+              { value: "repo", label: "Repo" },
+              { value: "user", label: "User" },
+              { value: "global", label: "Global" },
+            ]}
+            style={{ width: 90 }}
+          />
+          <Tooltip title="Import skill from .zip package">
+            <Button
+              size="small"
+              icon={<ImportOutlined />}
+              loading={importing}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Import
+            </Button>
           </Tooltip>
           <Button size="small" icon={<ReloadOutlined />} onClick={fetchSkills} loading={loading}>
             Refresh
           </Button>
-          <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setWizardOpen(true)}>
-            New Skill
-          </Button>
         </Space>
       </Space>
+
+      {/* Hidden file input for zip import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".zip,application/zip"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) handleImport(file);
+        }}
+      />
 
       <Table
         dataSource={filtered}
         rowKey={(record) => `${record.effective_scope}:${record.name}`}
         loading={loading}
         size="small"
-        pagination={false}
+        pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No skills" /> }}
         columns={[
           {
@@ -180,8 +231,8 @@ export default function SkillsSection() {
               const isSystem = record.effective_scope === "system";
               return (
                 <Space>
-                  <Tooltip title="Edit">
-                    <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(record)} />
+                  <Tooltip title="View Detail">
+                    <Button size="small" icon={<EyeOutlined />} onClick={() => setViewing(record)} />
                   </Tooltip>
                   {isSystem ? (
                     <Tooltip title="System skills cannot be deleted">
@@ -199,16 +250,10 @@ export default function SkillsSection() {
         ]}
       />
 
-      <SkillCreatorWizard
-        open={wizardOpen}
-        onClose={() => setWizardOpen(false)}
-        onSaved={updateRecord}
-      />
-      <SkillEditor
-        record={editing}
-        open={Boolean(editing)}
-        onClose={() => setEditing(null)}
-        onSaved={updateRecord}
+      <SkillDetailViewer
+        record={viewing}
+        open={Boolean(viewing)}
+        onClose={() => setViewing(null)}
       />
     </Space>
   );

@@ -1,132 +1,142 @@
 import { useEffect, useState } from "react";
-import { Button, Form, Modal, Space, message } from "antd";
-import { patchSkill } from "../../../../api/agent-skills";
-import type { SkillRecord } from "./types";
-import {
-  buildSkillMd,
-  ManifestFormSection,
-  ScriptEditorSection,
-  TestPanel,
-  type SkillFormValues,
-} from "./SkillCreatorWizard";
+import { Descriptions, Modal, Spin, Tag, Typography } from "antd";
+import { getSkill } from "../../../../api/agent-skills";
+import type { SkillRecord, SkillDetailResponse } from "./types";
+
+const { Text, Paragraph } = Typography;
 
 type Props = {
   record: SkillRecord | null;
   open: boolean;
   onClose: () => void;
-  onSaved: (record: SkillRecord) => void;
 };
 
-export default function SkillEditor({ record, open, onClose, onSaved }: Props) {
-  const [form] = Form.useForm<SkillFormValues>();
-  const [saving, setSaving] = useState(false);
+export default function SkillDetailViewer({ record, open, onClose }: Props) {
+  const [detail, setDetail] = useState<SkillDetailResponse | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!record || !open) {
+      setDetail(null);
       return;
     }
-    form.setFieldsValue({
-      name: record.name,
-      version: record.manifest.version,
-      description: record.description,
-      scope: record.manifest.scope,
-      slash_command: record.manifest.slash_command || undefined,
-      trigger_keywords: "",
-      entrypoint_kind: record.manifest.entrypoint.kind,
-      script:
-        record.manifest.entrypoint.kind === "inline"
-          ? record.manifest.entrypoint.instructions_md
-          : "",
-      shell:
-        record.manifest.entrypoint.kind === "shell"
-          ? record.manifest.entrypoint.shell
-          : "bash",
-      inputs_schema: JSON.stringify(record.manifest.inputs_schema || { type: "object" }, null, 2),
-      test_inputs: "{}",
-    });
-  }, [form, open, record]);
+    setLoading(true);
+    getSkill(record.name)
+      .then(setDetail)
+      .finally(() => setLoading(false));
+  }, [record, open]);
 
-  const save = async () => {
-    if (!record) {
-      return;
-    }
-    const values = await form.validateFields();
-    setSaving(true);
-    try {
-      const result = await patchSkill(record.name, {
-        manifest_overrides: {
-          ...record.manifest,
-          name: values.name,
-          version: values.version,
-          description: values.description,
-          scope: values.scope,
-          slash_command: values.slash_command || null,
-          entrypoint:
-            values.entrypoint_kind === "inline"
-              ? { kind: "inline", instructions_md: values.script }
-              : values.entrypoint_kind === "shell"
-                ? { kind: "shell", script: "scripts/run.sh", shell: values.shell }
-                : values.entrypoint_kind === "python"
-                  ? { kind: "python", script: "scripts/run.py", python: null }
-                  : { kind: "node", script: "scripts/run.js" },
-        },
-        skill_md: buildSkillMd(
-          {
-            ...record.manifest,
-            name: values.name,
-            version: values.version,
-            description: values.description,
-            scope: values.scope,
-          },
-          values,
-        ),
-        assets:
-          values.entrypoint_kind === "inline"
-            ? []
-            : [
-                {
-                  path:
-                    values.entrypoint_kind === "shell"
-                      ? "scripts/run.sh"
-                      : values.entrypoint_kind === "python"
-                        ? "scripts/run.py"
-                        : "scripts/run.js",
-                  content: values.script,
-                },
-              ],
-      });
-      if (result.record) {
-        onSaved(result.record);
-      }
-      message.success("Skill saved");
-      onClose();
-    } finally {
-      setSaving(false);
-    }
-  };
+  const manifest = detail?.manifest ?? record?.manifest;
+  const entrypoint = manifest?.entrypoint;
 
   return (
     <Modal
-      title={record ? `Edit ${record.name}` : "Edit Skill"}
+      title={record ? `Skill: ${record.name}` : "Skill Detail"}
       open={open}
       onCancel={onClose}
-      width={560}
-      footer={
-        <Space>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button type="primary" onClick={save} loading={saving}>
-            Save
-          </Button>
-        </Space>
-      }
+      width={840}
+      footer={null}
     >
-      {record ? (
-        <Form form={form} layout="vertical">
-          <ManifestFormSection />
-          <ScriptEditorSection />
-          <TestPanel testReport={null} />
-        </Form>
+      {loading ? (
+        <Spin style={{ display: "block", textAlign: "center", padding: 32 }} />
+      ) : record && manifest ? (
+        <>
+          <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="Name">{manifest.name}</Descriptions.Item>
+            <Descriptions.Item label="Version">{manifest.version}</Descriptions.Item>
+            <Descriptions.Item label="Scope">
+              <Tag color={scopeColor(record.effective_scope)}>{record.effective_scope}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="Enabled">
+              <Tag color={record.enabled ? "green" : "default"}>
+                {record.enabled ? "Yes" : "No"}
+              </Tag>
+            </Descriptions.Item>
+            {manifest.slash_command ? (
+              <Descriptions.Item label="Slash Command" span={2}>
+                <Text code>{manifest.slash_command}</Text>
+              </Descriptions.Item>
+            ) : null}
+            <Descriptions.Item label="Description" span={2}>
+              {manifest.description}
+            </Descriptions.Item>
+            <Descriptions.Item label="Entrypoint" span={2}>
+              <Tag>{entrypoint?.kind ?? "unknown"}</Tag>
+              {"shell" in (entrypoint ?? {}) &&
+                (entrypoint as { shell?: string }).shell && (
+                  <Tag>{(entrypoint as { shell: string }).shell}</Tag>
+                )}
+            </Descriptions.Item>
+            {manifest.triggers?.length ? (
+              <Descriptions.Item label="Triggers" span={2}>
+                {manifest.triggers.map((t, i) => (
+                  <Tag key={i}>
+                    {t.kind}
+                    {"any_of" in t ? `: ${(t as { any_of: string[] }).any_of.join(", ")}` : ""}
+                    {"pattern" in t ? `: ${(t as { pattern: string }).pattern}` : ""}
+                  </Tag>
+                ))}
+              </Descriptions.Item>
+            ) : null}
+            {manifest.allowed_tools?.length ? (
+              <Descriptions.Item label="Allowed Tools" span={2}>
+                {manifest.allowed_tools.map((t, i) => (
+                  <Tag key={i}>{t.kind}{("op" in t) ? `.${(t as { op: string }).op}` : ""}</Tag>
+                ))}
+              </Descriptions.Item>
+            ) : null}
+            <Descriptions.Item label="Path" span={2}>
+              <Text code style={{ fontSize: 12 }}>{record.path}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="Checksum" span={2}>
+              <Text code style={{ fontSize: 12 }}>{record.checksum || "-"}</Text>
+            </Descriptions.Item>
+          </Descriptions>
+
+          {detail?.skill_md ? (
+            <>
+              <Text strong style={{ display: "block", marginBottom: 8 }}>SKILL.md</Text>
+              <Paragraph>
+                <pre style={{
+                  background: "var(--ant-color-fill-tertiary, #f5f5f5)",
+                  padding: 12,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  maxHeight: 400,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}>{detail.skill_md}</pre>
+              </Paragraph>
+            </>
+          ) : null}
+
+          {entrypoint?.kind === "inline" && entrypoint.instructions_md ? (
+            <>
+              <Text strong style={{ display: "block", marginBottom: 8 }}>Instructions</Text>
+              <Paragraph>
+                <pre style={{
+                  background: "var(--ant-color-fill-tertiary, #f5f5f5)",
+                  padding: 12,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  maxHeight: 300,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}>{entrypoint.instructions_md}</pre>
+              </Paragraph>
+            </>
+          ) : null}
+        </>
       ) : null}
     </Modal>
   );
+}
+
+function scopeColor(scope: string) {
+  if (scope === "repo") return "blue";
+  if (scope === "user") return "green";
+  if (scope === "global") return "orange";
+  return "purple";
 }

@@ -178,7 +178,7 @@ export default function MemoriesSection() {
         loading={loading}
         columns={columns}
         dataSource={records}
-        pagination={{ pageSize: 12, showSizeChanger: true }}
+        pagination={{ pageSize: 10, showSizeChanger: false }}
       />
 
       <Modal

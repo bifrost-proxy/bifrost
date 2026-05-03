@@ -274,7 +274,7 @@ export default function UnifiedSessionsSection({
       title: "Duration",
       dataIndex: "duration_secs",
       key: "duration_secs",
-      width: 90,
+      width: 100,
       align: "right" as const,
       sorter: (a: UnifiedSession, b: UnifiedSession) =>
         (a.duration_secs ?? 0) - (b.duration_secs ?? 0),
@@ -373,9 +373,9 @@ export default function UnifiedSessionsSection({
         }
         size="small"
         loading={loading}
-        pagination={{ pageSize: 20, size: "small", showSizeChanger: true }}
+        pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No sessions" /> }}
-        scroll={{ x: 1060 }}
+        scroll={{ x: 1070 }}
       />
     </Space>
   );
