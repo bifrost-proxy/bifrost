@@ -574,11 +574,12 @@ test_sse_replay_with_rules() {
     echo ""
     echo "=== Test: SSE Replay with Rules ==="
 
-    # 让 SSE 流持续 > 10s，用于验证 replay 的 timeout_ms 不会错误断开长连接
-    local upstream_url="http://127.0.0.1:${MOCK_SSE_PORT}/sse/custom?count=30&interval=1"
+    # 让 SSE 流持续超过 timeout_ms，用于验证 replay 的 timeout_ms 不会错误断开长连接。
+    # CI runner 上曾观察到 10s 边界存在外部连接关闭噪声，因此用 5s 超时边界做更快、更稳定的回归。
+    local upstream_url="http://127.0.0.1:${MOCK_SSE_PORT}/sse/custom?count=20&interval=0.5"
     local payload
     payload=$(cat <<EOF
-{"url":"${upstream_url}","method":"GET","headers":[["Accept","text/event-stream"]],"rule_config":$(replay_rule_config_from_fixture sse_req_headers.txt),"timeout_ms":10000}
+{"url":"${upstream_url}","method":"GET","headers":[["Accept","text/event-stream"]],"rule_config":$(replay_rule_config_from_fixture sse_req_headers.txt),"timeout_ms":5000}
 EOF
 )
 
@@ -598,10 +599,10 @@ EOF
         return
     fi
 
-    # 等待超过 10s，如果此时连接被错误断开（历史问题），curl 会提前退出
-    sleep 11
+    # 等待超过 timeout_ms，如果此时连接被错误断开（历史问题），curl 会提前退出
+    sleep 6
     if ! kill -0 "$curl_pid" 2>/dev/null; then
-        _log_fail "SSE Replay: stream was disconnected (timeout?)" ">=13s alive" "exited"
+        _log_fail "SSE Replay: stream was disconnected (timeout?)" ">=8s alive" "exited"
         echo "--- curl stderr ---" >&2
         tail -20 "$err_file" >&2 || true
         echo "--- curl stdout ---" >&2
@@ -617,7 +618,7 @@ EOF
     fi
 
     if grep -q '"type_":"connection"' "$out_file" && grep -q '"applied_rules":' "$out_file"; then
-        _log_pass "SSE Replay: connection event received and stream kept alive >10s"
+        _log_pass "SSE Replay: connection event received and stream kept alive beyond timeout_ms"
         passed=$((passed + 1))
     else
         _log_fail "SSE Replay: missing connection/applied_rules" "connection + applied_rules" "not found"

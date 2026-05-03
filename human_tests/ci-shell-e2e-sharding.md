@@ -175,6 +175,35 @@
 - `run_shell_tests_parallel` 与 `run_shell_batch_parallel` 的正常完成路径末尾都有显式 `return 0`。
 - shard 3 中所有 shell 子用例通过后，外层 `scripts/ci/run-e2e-shell.sh` 退出码为 0，不会在日志显示 “All tests passed” 后因为 Bash 函数最后一个 false 条件而失败。
 
+### TC-CS-14: SSE replay timeout 边界回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_replay_rules.sh
+   ```
+2. 检查 SSE replay 回归用例使用 5s timeout 边界和 8s 存活断言：
+   ```bash
+   rg -n 'sse/custom\\?count=20&interval=0\\.5|\"timeout_ms\":5000|>=8s alive|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh
+   ```
+3. 使用隔离端口与临时数据目录执行 replay rules E2E：
+   ```bash
+   TEST_ROOT="$(mktemp -d /tmp/bifrost-replay-human.XXXXXX)"
+   PROXY_PORT=18881 MOCK_HTTP_PORT=18882 MOCK_SSE_PORT=18883 MOCK_WS_PORT=18884 \
+     BIFROST_DATA_DIR="$TEST_ROOT/data" \
+     SERVER_LOG_DIR="$TEST_ROOT/logs" \
+     SKIP_BUILD=true \
+     BIFROST_E2E_REPORT_DIR="$TEST_ROOT/reports" \
+     bash e2e-tests/tests/test_replay_rules.sh
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 第 2 步能定位到 `sse/custom?count=20&interval=0.5`、`"timeout_ms":5000`、`>=8s alive` 与 `kept alive beyond timeout_ms`。
+- `SSE Replay with Rules` 用例输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`。
+- `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
+- 测试端口不使用 9900，测试数据写入临时目录。
+
 ## 本轮执行记录
 
 测试日期：2026-04-30
@@ -185,6 +214,7 @@
 | TC-CS-11 | 通过 | 2026-04-30 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'grep\s+(-[^ ]*)?q[^ ]*\s+"[^"]*\\\|' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `rule rename --help`、`rule reorder --help`、`script rename --help` 均通过。 |
 | TC-CS-12 | 通过 | 2026-05-01 本轮执行：`bash -n e2e-tests/tests/test_unsafe_ssl_e2e.sh e2e-tests/test_utils/admin_client.sh` 通过；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-unsafe-ssl-human.XXXXXX)" PROXY_PORT=11295 ADMIN_PORT=11295 HTTPS_MOCK_PORT=11297 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行真实场景。脚本输出 `Starting HTTPS mock server on 127.0.0.1:11297`、`HTTPS mock server ready`、`Created unsafe_ssl forwarding rule to https://127.0.0.1:11297`，并完成 unsafe_ssl false/true/false 三段代理请求，汇总 `Results: 5/5 passed`，退出码 0；全程使用临时目录和 11295/11297，未使用 9900。 |
 | TC-CS-13 | 通过 | 2026-05-03 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`rg -n 'run_shell_tests_parallel\(\)\|run_shell_batch_parallel\(\)\|return 0' scripts/run_all_e2e.sh` 显示两个调度函数及其显式 `return 0`。完整 shard 3 本机执行卡在大端口段扫描前置探针，随后改用同一入口的最小 shard 验证返回码路径：`BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 选中 `test_body_cache_sync_cleanup_admin_api.sh`，输出 `[PASS] shell:test_body_cache_sync_cleanup_admin_api.sh`，最终 `Total suites : 1 / Passed : 1 / Failed : 0`，外层退出码 0。完整 macOS shard 3 由推送后的 GitHub Actions 继续验证。 |
+| TC-CS-14 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'sse/custom\?count=20&interval=0\.5\|"timeout_ms":5000\|>=8s alive\|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh` 显示 4 个预期匹配；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-replay-human.XXXXXX)" PROXY_PORT=18881 MOCK_HTTP_PORT=18882 MOCK_SSE_PORT=18883 MOCK_WS_PORT=18884 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true BIFROST_E2E_REPORT_DIR="$TEST_ROOT/reports" bash e2e-tests/tests/test_replay_rules.sh` 执行真实场景。`SSE Replay with Rules` 输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；全程使用临时目录和 18881-18884，未使用 9900。 |
 
 ## 清理步骤
 
