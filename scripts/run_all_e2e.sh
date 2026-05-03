@@ -736,6 +736,8 @@ run_shell_tests_parallel() {
       done
     done
   fi
+
+  return 0
 }
 
 run_shell_test_isolated() {
@@ -907,6 +909,8 @@ run_shell_batch_parallel() {
       sleep 0.2
     fi
   done
+
+  return 0
 }
 
 ensure_bifrost_shell_shim() {
