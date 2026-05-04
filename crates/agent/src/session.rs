@@ -1358,8 +1358,8 @@ pub async fn run_turn_with_mcp(
                         trim_loop_retry(client, config, session, &system_prompt, &tool_defs).await?
                     }
                 } else if is_retryable_error(&e) {
-                    // Transient error — exponential backoff retry (up to 3 attempts)
-                    const MAX_RETRIES: usize = 3;
+                    // Transient error — exponential backoff retry (up to 5 attempts)
+                    const MAX_RETRIES: usize = 5;
                     let mut last_err = e;
                     let mut succeeded = None;
                     for retry in 0..MAX_RETRIES {
