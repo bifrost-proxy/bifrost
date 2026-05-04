@@ -2,15 +2,13 @@
 //!
 //! Priority:
 //! 1. Per-turn override prompt
-//! 2. User-configured instructions (from config)
-//! 3. Built-in prompt with environment info and tool guidance
+//! 2. Built-in prompt with environment info and tool guidance
 //!
 //! Additional context appended:
-//! - AGENTS.md instructions
+//! - Pre-loaded user instructions (AGENTS.md + config instructions, loaded once at session creation)
 //! - Available skills descriptions
 
-use crate::agents_md::AgentsMdManager;
-use crate::config::{agent_home_dir, AgentConfig};
+use crate::config::AgentConfig;
 use crate::skills::SkillsManager;
 use bifrost_skills::SkillRegistry;
 
@@ -18,13 +16,20 @@ use bifrost_skills::SkillRegistry;
 ///
 /// Priority:
 /// 1. `override_prompt` (per-turn override)
-/// 2. Built-in prompt + config instructions + AGENTS.md + skills
+/// 2. Built-in prompt + pre-loaded user instructions + skills
 pub fn build_system_prompt(
     config: &AgentConfig,
     override_prompt: Option<&str>,
     work_dir_override: Option<&str>,
+    user_instructions: Option<&str>,
 ) -> String {
-    build_system_prompt_with_skill_registry(config, override_prompt, work_dir_override, None)
+    build_system_prompt_with_skill_registry(
+        config,
+        override_prompt,
+        work_dir_override,
+        None,
+        user_instructions,
+    )
 }
 
 pub fn build_system_prompt_with_skill_registry(
@@ -32,6 +37,7 @@ pub fn build_system_prompt_with_skill_registry(
     override_prompt: Option<&str>,
     work_dir_override: Option<&str>,
     registry: Option<&SkillRegistry>,
+    user_instructions: Option<&str>,
 ) -> String {
     if let Some(custom) = override_prompt {
         return custom.to_string();
@@ -141,20 +147,11 @@ If you need to write a plan, only write high quality plans, not low quality ones
         shell = shell,
     );
 
-    // Append user instructions from config
-    if let Some(ref instructions) = config.instructions {
-        prompt.push_str("\n\n## User Instructions\n\n");
-        prompt.push_str(instructions);
-    }
-
-    // Append AGENTS.md instructions
-    let agents_md_manager = AgentsMdManager::new(config);
-    let home_dir = agent_home_dir();
-    if let Some(agents_instructions) =
-        agents_md_manager.load_instructions(&work_dir, Some(&home_dir))
-    {
+    // Append pre-loaded user instructions (AGENTS.md + config instructions,
+    // resolved once at session creation, matching Codex's behavior).
+    if let Some(instructions) = user_instructions {
         prompt.push_str("\n\n## Project Instructions\n\n");
-        prompt.push_str(&agents_instructions);
+        prompt.push_str(instructions);
     }
 
     // Append skills instructions (loaded via SkillsManager from all scopes).
@@ -241,6 +238,7 @@ mod tests {
             None,
             Some(dir.path().to_str().unwrap()),
             Some(&registry),
+            None, // no user instructions in this test
         );
 
         assert!(prompt.contains("## Available Skills"));

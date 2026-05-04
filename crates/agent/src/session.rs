@@ -98,6 +98,11 @@ pub struct AgentSession {
     /// for final TurnResult.plan_steps and IM card rendering.
     pub current_plan: Option<Vec<crate::tools::update_plan::PlanStep>>,
 
+    /// Pre-loaded user instructions (AGENTS.md + config instructions).
+    /// Resolved once at session creation time, matching Codex's behavior.
+    /// Reused across all turns in this session.
+    pub user_instructions: Option<String>,
+
     /// How many times the runtime has reminded the model to close an unfinished
     /// plan before allowing the final answer to return.
     pub plan_repair_attempts: u8,
@@ -135,6 +140,7 @@ impl AgentSession {
             guide_channel: None,
             title: None,
             current_plan: None,
+            user_instructions: None,
             plan_repair_attempts: 0,
             plan_sender: None,
         }
@@ -145,6 +151,21 @@ impl AgentSession {
         session.work_dir = work_dir;
         session.attach_default_skill_registry();
         session
+    }
+
+    /// Load user instructions (AGENTS.md + config instructions) once at session
+    /// creation time, matching Codex's behavior. The result is stored on the
+    /// session and reused across all turns.
+    pub fn load_user_instructions(&mut self, config: &crate::config::AgentConfig) {
+        let work_dir = self
+            .work_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.resolve_work_dir());
+        let home_dir = crate::config::agent_home_dir();
+        let manager = crate::agents_md::AgentsMdManager::new(config);
+        self.user_instructions =
+            manager.user_instructions(&work_dir, Some(&home_dir), config.instructions.as_deref());
     }
 
     pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
@@ -186,6 +207,9 @@ impl AgentSession {
         self.history_version = self.history_version.saturating_add(1);
         self.current_plan = None;
         self.plan_repair_attempts = 0;
+        // Invalidate cached user instructions so they are reloaded on next turn
+        // (e.g. after switch_workdir changes the project context).
+        self.user_instructions = None;
         // Mark that memory should be skipped for the next turn
         self.memory_cleared = true;
         // Drop the recorder so a new file will be created for the fresh session
@@ -1169,12 +1193,21 @@ pub async fn run_turn_with_mcp(
         }
     }
 
+    // Lazily load user instructions on first turn (matching Codex's once-per-session
+    // loading). Subsequent turns reuse the cached value.
+    if session.user_instructions.is_none() {
+        session.load_user_instructions(config);
+    }
+
     // Build system prompt
+    // Uses pre-loaded user_instructions from session (loaded once at creation,
+    // matching Codex's behavior).
     let system_prompt = prompt::build_system_prompt_with_skill_registry(
         config,
         system_prompt_override,
         session.work_dir.as_deref(),
         session.skill_registry.as_deref(),
+        session.user_instructions.as_deref(),
     );
 
     // Add user message to history

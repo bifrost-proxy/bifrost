@@ -1,29 +1,30 @@
-//! AGENTS.md loading and discovery system.
+//! AGENTS.md discovery and user instruction assembly.
 //!
-//! Discovers and loads AGENTS.md files from:
-//! 1. Agent home directory (`~/.bifrost-agent/AGENTS.md`)
-//! 2. Project root directory hierarchy (from root to cwd)
-//! 3. Local override file (`AGENTS.override.md`)
+//! Aligned with Codex's agents_md.rs behavior:
+//!
+//! 1. Determine the project root by walking upwards from cwd until a
+//!    `project_root_markers` entry is found. Default marker: `.git`.
+//!    If no marker is found, only cwd is considered.
+//! 2. Collect every AGENTS.md from project root down to cwd (inclusive),
+//!    checking `AGENTS.override.md` first in each directory.
+//! 3. All files share a single global byte budget (`project_doc_max_bytes`).
+//! 4. Global instructions from agent home dir are loaded separately.
 
 use crate::config::AgentConfig;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
+/// Default filename scanned for AGENTS.md instructions.
 pub const DEFAULT_AGENTS_MD_FILENAME: &str = "AGENTS.md";
+/// Preferred local override for AGENTS.md instructions.
 pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
-pub const AGENTS_MD_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
-/// Markers used to detect project root.
-const PROJECT_ROOT_MARKERS: &[&str] = &[
-    ".git",
-    "Cargo.toml",
-    "package.json",
-    "go.mod",
-    "pyproject.toml",
-    "setup.py",
-    ".hg",
-    "Makefile",
-];
+/// Default project root marker (matching Codex's default: `.git` only).
+const DEFAULT_PROJECT_ROOT_MARKERS: &[&str] = &[".git"];
+
+/// When both config instructions and AGENTS.md docs are present, they are
+/// concatenated with this separator (matching Codex).
+const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 
 /// Manages AGENTS.md discovery and loading.
 pub struct AgentsMdManager {
@@ -36,14 +37,7 @@ impl AgentsMdManager {
         let fallback_filenames = config
             .project_doc_fallback_filenames
             .clone()
-            .unwrap_or_else(|| {
-                vec![
-                    DEFAULT_AGENTS_MD_FILENAME.to_string(),
-                    "agents.md".to_string(),
-                    "CLAUDE.md".to_string(),
-                    "CODING_GUIDELINES.md".to_string(),
-                ]
-            });
+            .unwrap_or_default();
 
         Self {
             project_doc_max_bytes: config.get_project_doc_max_bytes(),
@@ -51,94 +45,199 @@ impl AgentsMdManager {
         }
     }
 
-    /// Load all AGENTS.md files from home and project hierarchy.
-    /// Returns concatenated content with separators, or None if nothing found.
-    pub fn load_instructions(&self, work_dir: &Path, home_dir: Option<&Path>) -> Option<String> {
+    /// Load global instructions from agent home directory.
+    /// Checks `AGENTS.override.md` first, then `AGENTS.md` (matching Codex).
+    pub fn load_global_instructions(home_dir: &Path) -> Option<String> {
+        for candidate in [LOCAL_AGENTS_MD_FILENAME, DEFAULT_AGENTS_MD_FILENAME] {
+            let path = home_dir.join(candidate);
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    debug!(path = %path.display(), "loaded global AGENTS.md from home dir");
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Combine configured user instructions and AGENTS.md content into a
+    /// single model-visible instruction string (matching Codex's
+    /// `user_instructions` method).
+    ///
+    /// Called once at session creation time. The result is stored on the
+    /// session and reused across turns.
+    pub fn user_instructions(
+        &self,
+        work_dir: &Path,
+        home_dir: Option<&Path>,
+        config_instructions: Option<&str>,
+    ) -> Option<String> {
+        let agents_md_docs = self.read_agents_md(work_dir);
+
+        let mut output = String::new();
+
+        // 1. Global instructions from home dir
+        if let Some(home) = home_dir {
+            if let Some(global) = Self::load_global_instructions(home) {
+                output.push_str(&global);
+            }
+        }
+
+        // 2. Config-level instructions
+        if let Some(instructions) = config_instructions {
+            if !output.is_empty() {
+                output.push_str(AGENTS_MD_SEPARATOR);
+            }
+            output.push_str(instructions);
+        }
+
+        // 3. Project AGENTS.md docs
+        match agents_md_docs {
+            Some(docs) => {
+                if !output.is_empty() {
+                    output.push_str(AGENTS_MD_SEPARATOR);
+                }
+                output.push_str(&docs);
+            }
+            None => {}
+        }
+
+        if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        }
+    }
+
+    /// Read and concatenate all AGENTS.md files from project root to cwd,
+    /// respecting the global byte budget (matching Codex's `read_agents_md`).
+    fn read_agents_md(&self, work_dir: &Path) -> Option<String> {
+        if self.project_doc_max_bytes == 0 {
+            return None;
+        }
+
+        let paths = self.discover_files(work_dir);
+        if paths.is_empty() {
+            return None;
+        }
+
+        let mut remaining = self.project_doc_max_bytes;
         let mut parts: Vec<String> = Vec::new();
 
-        // 1. Load from agent home directory
-        if let Some(home) = home_dir {
-            if let Some(content) = self.load_file_from_dir(home) {
-                debug!(path = %home.display(), "loaded AGENTS.md from home dir");
-                parts.push(format!(
-                    "# Instructions from {}\n\n{}",
-                    home.display(),
-                    content
-                ));
+        for path in paths {
+            if remaining == 0 {
+                break;
             }
-        }
 
-        // 2. Load from project hierarchy (root → cwd)
-        let discovered = self.discover_files(work_dir);
-        for path in &discovered {
-            if let Some(content) = self.read_and_truncate(path) {
-                debug!(path = %path.display(), "loaded project AGENTS.md");
-                parts.push(format!(
-                    "# Instructions from {}\n\n{}",
-                    path.display(),
-                    content
-                ));
+            if !path.is_file() {
+                continue;
             }
-        }
 
-        // 3. Load local override
-        let override_path = work_dir.join(LOCAL_AGENTS_MD_FILENAME);
-        if let Some(content) = self.read_and_truncate(&override_path) {
-            debug!(path = %override_path.display(), "loaded AGENTS.override.md");
-            parts.push(format!("# Local override instructions\n\n{}", content));
+            let mut data = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+
+            if data.is_empty() {
+                continue;
+            }
+
+            if data.len() > remaining {
+                warn!(
+                    path = %path.display(),
+                    size = data.len(),
+                    remaining = remaining,
+                    "AGENTS.md exceeds remaining budget, truncating"
+                );
+                data.truncate(remaining);
+            }
+
+            let consumed = data.len();
+            let text = String::from_utf8_lossy(&data).to_string();
+            if !text.trim().is_empty() {
+                parts.push(text);
+                remaining = remaining.saturating_sub(consumed);
+            }
         }
 
         if parts.is_empty() {
             None
         } else {
-            Some(parts.join("\n\n---\n\n"))
+            Some(parts.join("\n\n"))
         }
     }
 
-    /// Discover AGENTS.md files from project root to cwd.
+    /// Discover AGENTS.md file paths from project root to cwd.
+    ///
+    /// Matching Codex's approach:
+    /// - Walk from cwd upward to project root, collecting dirs
+    /// - Reverse to get root→cwd order
+    /// - In each dir, check `AGENTS.override.md` first, then `AGENTS.md`,
+    ///   then configured fallback filenames
     fn discover_files(&self, work_dir: &Path) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-
         let project_root = self.find_project_root(work_dir);
-        let start = project_root.as_deref().unwrap_or(work_dir);
 
-        // Walk from project root to work_dir, collecting any AGENTS.md found
-        let mut current = start.to_path_buf();
-        let work_dir_canonical = work_dir.to_path_buf();
-
-        loop {
-            if let Some(found) = self.find_doc_in_dir(&current) {
-                // Avoid duplicates
-                if !files.contains(&found) {
-                    files.push(found);
-                }
-            }
-
-            if current == work_dir_canonical {
-                break;
-            }
-
-            // Move towards work_dir
-            // If work_dir is a subdirectory of current, go one level deeper
-            if let Ok(relative) = work_dir_canonical.strip_prefix(&current) {
-                if let Some(next_component) = relative.components().next() {
-                    current = current.join(next_component);
-                } else {
+        // Collect directories from cwd up to project root (matching Codex's approach)
+        let search_dirs: Vec<PathBuf> = if let Some(ref root) = project_root {
+            let mut dirs = Vec::new();
+            let mut cursor = work_dir.to_path_buf();
+            loop {
+                dirs.push(cursor.clone());
+                if cursor == *root {
                     break;
                 }
-            } else {
-                break;
+                match cursor.parent() {
+                    Some(parent) => cursor = parent.to_path_buf(),
+                    None => break,
+                }
+            }
+            dirs.reverse(); // root → cwd order
+            dirs
+        } else {
+            vec![work_dir.to_path_buf()]
+        };
+
+        let candidate_filenames = self.candidate_filenames();
+        let mut found: Vec<PathBuf> = Vec::new();
+
+        for dir in search_dirs {
+            for name in &candidate_filenames {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    found.push(candidate);
+                    break; // first match in this dir wins
+                }
             }
         }
 
-        files
+        found
+    }
+
+    /// Build the ordered list of candidate filenames for each directory.
+    /// Matching Codex: `AGENTS.override.md` → `AGENTS.md` → configured fallbacks.
+    fn candidate_filenames(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::with_capacity(2 + self.fallback_filenames.len());
+        names.push(LOCAL_AGENTS_MD_FILENAME);
+        names.push(DEFAULT_AGENTS_MD_FILENAME);
+        for candidate in &self.fallback_filenames {
+            let candidate = candidate.as_str();
+            if candidate.is_empty() {
+                continue;
+            }
+            if !names.contains(&candidate) {
+                names.push(candidate);
+            }
+        }
+        names
     }
 
     /// Find project root by looking for marker files/dirs.
+    /// Matching Codex: default marker is `.git` only.
     fn find_project_root(&self, start: &Path) -> Option<PathBuf> {
         let mut current = start.to_path_buf();
         loop {
-            for marker in PROJECT_ROOT_MARKERS {
+            for marker in DEFAULT_PROJECT_ROOT_MARKERS {
                 if current.join(marker).exists() {
                     return Some(current);
                 }
@@ -146,51 +245,6 @@ impl AgentsMdManager {
             if !current.pop() {
                 return None;
             }
-        }
-    }
-
-    /// Look for a doc file in a directory using fallback filenames.
-    fn find_doc_in_dir(&self, dir: &Path) -> Option<PathBuf> {
-        for filename in &self.fallback_filenames {
-            let path = dir.join(filename);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None
-    }
-
-    /// Load a doc file from a directory using fallback filenames.
-    fn load_file_from_dir(&self, dir: &Path) -> Option<String> {
-        let path = self.find_doc_in_dir(dir)?;
-        self.read_and_truncate(&path)
-    }
-
-    /// Read a file and truncate to max bytes if needed.
-    /// Uses Vec<u8> truncate + from_utf8_lossy to avoid UTF-8 boundary panics
-    /// (matching Codex's approach in agents_md.rs).
-    fn read_and_truncate(&self, path: &Path) -> Option<String> {
-        match std::fs::read(path) {
-            Ok(data) => {
-                if data.is_empty() {
-                    return None;
-                }
-                let data = if data.len() > self.project_doc_max_bytes {
-                    warn!(
-                        path = %path.display(),
-                        size = data.len(),
-                        max = self.project_doc_max_bytes,
-                        "AGENTS.md exceeds max size, truncating"
-                    );
-                    let mut truncated = data;
-                    truncated.truncate(self.project_doc_max_bytes);
-                    truncated
-                } else {
-                    data
-                };
-                Some(String::from_utf8_lossy(&data).into_owned())
-            }
-            Err(_) => None,
         }
     }
 }
@@ -205,9 +259,39 @@ mod tests {
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
         assert_eq!(manager.project_doc_max_bytes, 32768);
-        assert!(manager
-            .fallback_filenames
-            .contains(&"AGENTS.md".to_string()));
+        // Default fallback_filenames is empty (configured fallbacks only)
+        assert!(manager.fallback_filenames.is_empty());
+    }
+
+    #[test]
+    fn test_candidate_filenames_order() {
+        // With no configured fallbacks, order is: override → AGENTS.md
+        let config = AgentConfig::default();
+        let manager = AgentsMdManager::new(&config);
+        let names = manager.candidate_filenames();
+        assert_eq!(names, vec!["AGENTS.override.md", "AGENTS.md"]);
+    }
+
+    #[test]
+    fn test_candidate_filenames_with_configured_fallbacks() {
+        let config = AgentConfig {
+            project_doc_fallback_filenames: Some(vec![
+                "CLAUDE.md".to_string(),
+                "CODING_GUIDELINES.md".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let manager = AgentsMdManager::new(&config);
+        let names = manager.candidate_filenames();
+        assert_eq!(
+            names,
+            vec![
+                "AGENTS.override.md",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "CODING_GUIDELINES.md"
+            ]
+        );
     }
 
     #[test]
@@ -215,9 +299,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Create a project root marker
-        fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
-        // Create an AGENTS.md
+        // Create a project root marker (.git only, matching Codex default)
+        fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("AGENTS.md"), "# Project Instructions").unwrap();
 
         let config = AgentConfig::default();
@@ -229,45 +312,95 @@ mod tests {
     }
 
     #[test]
-    fn test_load_instructions_basic() {
+    fn test_discover_files_override_takes_priority() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("AGENTS.md"), "base").unwrap();
+        fs::write(root.join("AGENTS.override.md"), "override").unwrap();
+
+        let config = AgentConfig::default();
+        let manager = AgentsMdManager::new(&config);
+        let files = manager.discover_files(root);
+
+        // Override should win over AGENTS.md in same directory
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], root.join("AGENTS.override.md"));
+    }
+
+    #[test]
+    fn test_user_instructions_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("AGENTS.md"), "Hello from AGENTS.md").unwrap();
 
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
-        let instructions = manager.load_instructions(root, None);
+        let instructions = manager.user_instructions(root, None, None);
 
         assert!(instructions.is_some());
         assert!(instructions.unwrap().contains("Hello from AGENTS.md"));
     }
 
     #[test]
-    fn test_load_instructions_with_override() {
+    fn test_user_instructions_with_config_instructions() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join("Cargo.toml"), "").unwrap();
-        fs::write(root.join("AGENTS.md"), "Base instructions").unwrap();
-        fs::write(root.join("AGENTS.override.md"), "Override instructions").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("AGENTS.md"), "Project doc").unwrap();
 
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
-        let instructions = manager.load_instructions(root, None).unwrap();
+        let instructions = manager
+            .user_instructions(root, None, Some("User config instructions"))
+            .unwrap();
 
-        assert!(instructions.contains("Base instructions"));
-        assert!(instructions.contains("Override instructions"));
+        assert!(instructions.contains("User config instructions"));
+        assert!(instructions.contains("Project doc"));
+        assert!(instructions.contains("--- project-doc ---"));
     }
 
     #[test]
-    fn test_load_instructions_none_when_empty() {
+    fn test_user_instructions_none_when_empty() {
         let dir = tempfile::tempdir().unwrap();
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
-        let instructions = manager.load_instructions(dir.path(), None);
+        let instructions = manager.user_instructions(dir.path(), None, None);
         assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn test_global_budget_shared_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+
+        fs::create_dir(root.join(".git")).unwrap();
+        // 600 bytes each, budget = 1000
+        fs::write(root.join("AGENTS.md"), "x".repeat(600)).unwrap();
+        fs::write(sub.join("AGENTS.md"), "y".repeat(600)).unwrap();
+
+        let config = AgentConfig {
+            project_doc_max_bytes: Some(1000),
+            ..Default::default()
+        };
+        let manager = AgentsMdManager::new(&config);
+        let instructions = manager.user_instructions(&sub, None, None).unwrap();
+
+        // First file (600 bytes) consumed, second file truncated to 400 bytes
+        assert!(instructions.contains("xxx"));
+        assert!(instructions.contains("yyy"));
+        // Total content should be bounded by budget
+        let total_xy: usize = instructions
+            .chars()
+            .filter(|c| *c == 'x' || *c == 'y')
+            .count();
+        assert!(total_xy <= 1000);
     }
 
     #[test]
@@ -276,7 +409,7 @@ mod tests {
         let root = dir.path();
 
         let large_content = "x".repeat(50000);
-        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("AGENTS.md"), &large_content).unwrap();
 
         let config = AgentConfig {
@@ -284,19 +417,20 @@ mod tests {
             ..Default::default()
         };
         let manager = AgentsMdManager::new(&config);
-        let instructions = manager.load_instructions(root, None).unwrap();
+        let instructions = manager.user_instructions(root, None, None).unwrap();
 
-        // The content should be truncated (plus some header text)
-        assert!(instructions.len() < 2000);
+        // Content should be truncated to budget
+        assert!(instructions.len() <= 1000);
     }
 
     #[test]
-    fn test_find_project_root() {
+    fn test_find_project_root_git_only() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let sub = root.join("src").join("deep");
         fs::create_dir_all(&sub).unwrap();
-        fs::write(root.join("Cargo.toml"), "").unwrap();
+        // .git is the only default marker (matching Codex)
+        fs::create_dir(root.join(".git")).unwrap();
 
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
@@ -306,17 +440,90 @@ mod tests {
     }
 
     #[test]
+    fn test_no_project_root_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Cargo.toml alone should NOT be treated as project root (Codex uses .git only)
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+
+        let config = AgentConfig::default();
+        let manager = AgentsMdManager::new(&config);
+        let found = manager.find_project_root(root);
+
+        // Should not find root based on Cargo.toml alone
+        // (unless there's a .git somewhere above in the real filesystem)
+        // This test verifies the marker list change
+        assert!(found.is_none() || found.unwrap() != root.to_path_buf());
+    }
+
+    #[test]
     fn test_fallback_filenames() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join("Cargo.toml"), "").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("CLAUDE.md"), "Claude instructions").unwrap();
+
+        let config = AgentConfig {
+            project_doc_fallback_filenames: Some(vec!["CLAUDE.md".to_string()]),
+            ..Default::default()
+        };
+        let manager = AgentsMdManager::new(&config);
+        let instructions = manager.user_instructions(root, None, None).unwrap();
+
+        assert!(instructions.contains("Claude instructions"));
+    }
+
+    #[test]
+    fn test_zero_budget_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("AGENTS.md"), "content").unwrap();
+
+        let config = AgentConfig {
+            project_doc_max_bytes: Some(0),
+            ..Default::default()
+        };
+        let manager = AgentsMdManager::new(&config);
+        // Project docs should be None when budget is 0
+        let instructions = manager.user_instructions(root, None, None);
+        assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn test_global_instructions_from_home() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+
+        fs::write(home.path().join("AGENTS.md"), "Global instructions").unwrap();
 
         let config = AgentConfig::default();
         let manager = AgentsMdManager::new(&config);
-        let instructions = manager.load_instructions(root, None).unwrap();
+        let instructions = manager
+            .user_instructions(work.path(), Some(home.path()), None)
+            .unwrap();
 
-        assert!(instructions.contains("Claude instructions"));
+        assert!(instructions.contains("Global instructions"));
+    }
+
+    #[test]
+    fn test_override_preferred_in_home_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+
+        fs::write(home.path().join("AGENTS.md"), "base global").unwrap();
+        fs::write(home.path().join("AGENTS.override.md"), "override global").unwrap();
+
+        let config = AgentConfig::default();
+        let manager = AgentsMdManager::new(&config);
+        let instructions = manager
+            .user_instructions(work.path(), Some(home.path()), None)
+            .unwrap();
+
+        // Override should be used, not base
+        assert!(instructions.contains("override global"));
+        assert!(!instructions.contains("base global"));
     }
 }

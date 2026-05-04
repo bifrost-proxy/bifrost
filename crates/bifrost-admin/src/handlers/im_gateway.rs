@@ -2600,7 +2600,11 @@ async fn handle_agent(
         let work_dir = config.resolve_work_dir();
         let home_dir = bifrost_agent::config::agent_home_dir();
         let agents_md_manager = bifrost_agent::agents_md::AgentsMdManager::new(&config);
-        let content = agents_md_manager.load_instructions(&work_dir, Some(&home_dir));
+        let content = agents_md_manager.user_instructions(
+            &work_dir,
+            Some(&home_dir),
+            config.instructions.as_deref(),
+        );
         return json_response(&serde_json::json!({
             "content": content,
             "work_dir": work_dir.display().to_string(),

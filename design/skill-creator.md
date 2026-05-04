@@ -37,6 +37,35 @@ Bifrost Agent Loop 目前对 "skill" 的支持是**被动只读发现**：
 - 不做多版本并行 active（只保留一个 active + 归档历史）。
 - 不做 Skill 级 RBAC（单 installation 范围内所有调用同权）。
 
+### 1.4 Codex 任务巡检专用 Skill 设计补充
+
+为减少后续排查 `.codex-tasks/` 时反复走弯路，需要补充一个仓库级只读 Skill：`codex-task-inspector`。
+
+目标：
+
+1. 让 Agent 在用户提到“检查 Codex 任务 / 看看 Codex 状态 / 查异步任务进展 / 汇总 .codex-tasks”时自动触发统一流程。
+2. 固化 `.codex-tasks/` 的排查顺序，优先回答“本地进程是否还活着、最近报告是什么、CI 轮询是否有失败/仍在跑”。
+3. 避免每次都先读错文件、重复猜测任务来源，降低对历史上下文的依赖。
+4. 保持只读，不直接修改 `.codex-tasks/` 内容，也不自动清理 pid / log / report 文件。
+
+统一排查流程约束：
+
+1. **先看本地进程**：读取 `.codex-tasks/*.pid` 并用 `ps` 判断是否仍在运行；如果全部 `NOT_RUNNING`，必须明确告诉用户“本地 Codex 任务已停止”。
+2. **再看任务产物**：读取 `.codex-tasks/*-last.md`、必要时补充 `*.jsonl` / `*.meta` / `*-report-*.md`，提取最新结论和阻塞原因。
+3. **最后看 CI 轮询**：如果存在 `*.log`（尤其 `skill-creator-ci-poll.log`），优先读取尾部，输出 still running / completed / failure 三类状态。
+4. **输出必须分层**：至少分为“本地 Codex 进程”“任务产物摘要”“CI 状态”“建议下一步”四段，避免把本地任务与 CI job 混为一谈。
+5. **禁止误判**：不能把 `.codex-tasks` 文件存在视为任务仍在运行；必须以 PID + `ps` 结果为准。
+6. **建议动作有限定**：默认只建议“继续查失败原因”或“整理状态表”，不要直接假设要修代码或重跑任务。
+
+测试方案补充：
+
+- 设计文档对应新增 `human_tests/codex-task-inspector.md`。
+- 覆盖场景至少包括：
+  - 仅从 pid 判断本地任务已停止；
+  - 同时识别 `*-last.md` 的已完成结论；
+  - 从 CI poll 日志识别正在运行与失败中的 job；
+  - 最终输出不混淆“本地进程状态”和“CI 状态”。
+
 ---
 
 ## 2. 架构总览
