@@ -68,6 +68,34 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if json.get("request_timeout_secs").is_none() {
                     return Err("Expected 'request_timeout_secs' field in agent config".to_string());
                 }
+                if json.get("request_timeout_secs").and_then(|v| v.as_u64()) != Some(600) {
+                    return Err(format!(
+                        "Expected request_timeout_secs: 600, got: {:?}",
+                        json.get("request_timeout_secs")
+                    ));
+                }
+                if json.get("shell_timeout_secs").and_then(|v| v.as_u64()) != Some(600) {
+                    return Err(format!(
+                        "Expected shell_timeout_secs: 600, got: {:?}",
+                        json.get("shell_timeout_secs")
+                    ));
+                }
+                if json.get("max_turn_iterations").and_then(|v| v.as_u64()) != Some(1000) {
+                    return Err(format!(
+                        "Expected max_turn_iterations: 1000, got: {:?}",
+                        json.get("max_turn_iterations")
+                    ));
+                }
+                if json
+                    .get("background_terminal_max_timeout")
+                    .and_then(|v| v.as_u64())
+                    != Some(600_000)
+                {
+                    return Err(format!(
+                        "Expected background_terminal_max_timeout: 600000, got: {:?}",
+                        json.get("background_terminal_max_timeout")
+                    ));
+                }
 
                 Ok(())
             },

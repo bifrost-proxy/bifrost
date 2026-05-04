@@ -88,11 +88,11 @@ pub struct AgentConfig {
     pub project_doc_fallback_filenames: Option<Vec<String>>,
 
     // -- Runtime settings --
-    /// Shell command timeout in seconds (default 30).
+    /// Shell command timeout in seconds (default 600 / 10m, closer to Codex-style interactive shell defaults).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_timeout_secs: Option<u64>,
 
-    /// Max turn iterations (default 20).
+    /// Max turn iterations (default 1000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turn_iterations: Option<u32>,
 
@@ -108,7 +108,7 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_output_token_limit: Option<usize>,
 
-    /// Request timeout in seconds (default 120).
+    /// Request timeout in seconds (default 600 / 10m, closer to Codex-style model request defaults).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
 
@@ -132,7 +132,7 @@ pub struct AgentConfig {
 
     // -- Background terminal --
     /// Maximum poll window for background terminal output (write_stdin), in ms.
-    /// Default: 300000 (5 minutes).
+    /// Default: 600000 (10 minutes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_terminal_max_timeout: Option<u64>,
 }
@@ -195,10 +195,10 @@ pub struct McpServerConfig {
     // Common
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Startup timeout in seconds (default 30).
+    /// Startup timeout in seconds (default 600 / 10m).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_timeout_sec: Option<u64>,
-    /// Tool call timeout in seconds (default 60).
+    /// Tool call timeout in seconds (default 600 / 10m).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_timeout_sec: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,15 +335,15 @@ impl AgentConfig {
     pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 16384;
     pub const DEFAULT_MAX_HISTORY: u32 = 50;
     pub const DEFAULT_SESSION_TTL: u64 = 3600;
-    pub const DEFAULT_REQUEST_TIMEOUT: u64 = 120;
-    pub const DEFAULT_SHELL_TIMEOUT: u64 = 30;
-    pub const DEFAULT_MAX_TURN_ITERATIONS: u32 = 20;
+    pub const DEFAULT_REQUEST_TIMEOUT: u64 = 600;
+    pub const DEFAULT_SHELL_TIMEOUT: u64 = 600;
+    pub const DEFAULT_MAX_TURN_ITERATIONS: u32 = 1000;
     /// Default auto-compact threshold as a percentage of context window (90%),
     /// matching Codex's behavior of `(context_window * 9) / 10`.
     pub const DEFAULT_COMPACT_THRESHOLD_PERCENT: i64 = 90;
     pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32768;
     pub const DEFAULT_MODEL: &'static str = "gpt-5.4-2026-03-05";
-    pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
+    pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 600_000;
     /// Default tool output token limit (matching Codex DEFAULT_MAX_OUTPUT_TOKENS).
     pub const DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT: usize = 10_000;
 }
@@ -1109,7 +1109,10 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.get_model(), "gpt-5.4-2026-03-05");
         assert_eq!(config.get_max_completion_tokens(), 16384);
-        assert_eq!(config.get_shell_timeout_secs(), 30);
+        assert_eq!(config.get_request_timeout_secs(), 600);
+        assert_eq!(config.get_shell_timeout_secs(), 600);
+        assert_eq!(config.get_max_turn_iterations(), 1000);
+        assert_eq!(config.get_background_terminal_max_timeout(), 600_000);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::im_gateway::{
     ImRouteStore, ImRunStore, ImScheduleStore, ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
+use bifrost_agent::SessionDetail;
 
 // ---------------------------------------------------------------------------
 // ImGatewayService
@@ -182,6 +183,96 @@ impl ImGatewayService {
                 }
             }
         }
+
+        // Kick off the background supervisor that periodically retries
+        // providers whose long connection has fallen into a Disconnected /
+        // Failed state. Fire-and-forget; the task stays alive for the
+        // lifetime of the service.
+        self.clone().spawn_reconnect_supervisor();
+    }
+
+    /// Spawn a background task that periodically re-scans all providers and
+    /// attempts to reconnect any whose long connection is currently
+    /// Disconnected or Failed.
+    ///
+    /// This acts as a last-resort safety net: the long-connection task
+    /// itself retries internally with exponential backoff, but if its task
+    /// ever exits (e.g. due to an unexpected shutdown signal or a panic
+    /// caught elsewhere) the ConnectionManager would otherwise be stuck.
+    fn spawn_reconnect_supervisor(self: Arc<Self>) {
+        use crate::im_gateway::types::ConnectionState;
+        const SUPERVISOR_INTERVAL_SECS: u64 = 60;
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(SUPERVISOR_INTERVAL_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate tick — auto_connect_providers already ran.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let statuses = self.connection_manager.list_statuses();
+                for (pid, st) in statuses {
+                    match st.state {
+                        ConnectionState::Disconnected | ConnectionState::Failed => {
+                            let Some(provider) = self.provider_store.get(&pid) else {
+                                debug!(provider_id = %pid, "supervisor: provider no longer configured, skipping");
+                                continue;
+                            };
+                            let Some(app_secret) = provider.secret_ref.clone() else {
+                                continue;
+                            };
+                            if app_secret.is_empty() {
+                                continue;
+                            }
+                            info!(
+                                provider_id = %pid,
+                                prev_state = ?st.state,
+                                "supervisor: attempting reconnect"
+                            );
+                            let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
+                            let feishu = self.connection_manager.feishu_provider().clone();
+                            let provider_for_loop = provider.clone();
+                            let event_store = self.event_store.clone();
+                            let message_log_store = self.message_log_store.clone();
+                            let route_store = self.route_store.clone();
+                            let agent_config_store = self.agent_config_store.clone();
+                            let agent_client = self.agent_client.clone();
+                            let agent_tools = self.agent_tools.clone();
+                            let agent_session_manager = self.agent_session_manager.clone();
+                            let queue_manager = self.queue_manager.clone();
+                            tokio::spawn(async move {
+                                run_event_loop(
+                                    rx,
+                                    feishu,
+                                    provider_for_loop,
+                                    event_store,
+                                    message_log_store,
+                                    route_store,
+                                    agent_config_store,
+                                    agent_client,
+                                    agent_tools,
+                                    agent_session_manager,
+                                    queue_manager,
+                                )
+                                .await;
+                            });
+                            if let Err(e) = self
+                                .connection_manager
+                                .start_connection(&provider, &app_secret, tx)
+                                .await
+                            {
+                                warn!(
+                                    provider_id = %pid,
+                                    error = %e,
+                                    "supervisor: reconnect attempt failed, will retry next tick"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -737,6 +828,22 @@ async fn run_event_loop(
                                 &provider,
                                 &event,
                                 &message_log_store,
+                                &agent_session_manager,
+                            )
+                            .await;
+                            continue;
+                        }
+
+                        // /status — handle directly without entering agent pipeline
+                        if msg.text.trim() == "/status" {
+                            let detail = agent_session_manager.get_session_detail(&session_key);
+                            let reply = build_im_status_text(detail.as_ref());
+                            send_agent_reply(
+                                &feishu,
+                                &provider,
+                                &event,
+                                &reply,
+                                &message_log_store,
                             )
                             .await;
                             continue;
@@ -805,8 +912,17 @@ async fn run_event_loop(
                         &provider,
                         &event,
                         &message_log_store,
+                        &agent_session_manager,
                     )
                     .await;
+                    continue;
+                }
+
+                // /status — handle directly without entering agent pipeline
+                if message_text.trim() == "/status" {
+                    let detail = agent_session_manager.get_session_detail(&session_key);
+                    let reply = build_im_status_text(detail.as_ref());
+                    send_agent_reply(&feishu, &provider, &event, &reply, &message_log_store).await;
                     continue;
                 }
 
@@ -846,6 +962,7 @@ async fn run_event_loop(
 /// Handle an incoming message when the target session is already busy.
 ///
 /// Behavior:
+/// - `/status`: show session status (simplified when busy) or busy status
 /// - `/q <text>`: push message to FIFO queue, reply with queue status
 /// - `/rq <N>`: remove queued message #N, reply with updated queue status
 /// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
@@ -857,8 +974,39 @@ async fn handle_busy_message(
     provider: &ImProviderConfig,
     event: &ImEvent,
     message_log_store: &Arc<ImMessageLogStore>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
 ) {
     let trimmed = msg_text.trim();
+
+    // /status — show session status or busy indicator
+    if trimmed == "/status" {
+        // Try to get session detail from idle sessions
+        if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
+            let real = detail
+                .total_tokens_used
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            let reply = format!(
+                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲",
+                detail.message_count, detail.estimated_tokens, real, detail.compaction_count, detail.history_version
+            );
+            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+        } else {
+            // Session is currently being processed (taken out of the pool)
+            let queue_items = queue_manager.queue_status(session_key);
+            let queue_info = if queue_items.is_empty() {
+                "无排队消息".to_string()
+            } else {
+                format!("{} 条排队消息", queue_items.len())
+            };
+            let reply = format!(
+                "会话状态:\n- 状态: 🔵 正在处理中\n- 排队: {}\n\n请等待当前任务完成后再查询详细状态。",
+                queue_info
+            );
+            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+        }
+        return;
+    }
 
     // /q <text> — queue mode
     if let Some(rest) = trimmed.strip_prefix("/q ") {
@@ -924,6 +1072,26 @@ async fn handle_busy_message(
                 .await;
             }
         }
+        return;
+    }
+
+    // Other builtin commands that need session state — defer until session is free
+    if matches!(
+        trimmed,
+        "/clear" | "/reset" | "/undo" | "/compact" | "/resume" | "/skill"
+    ) || trimmed.starts_with("/undo ")
+        || trimmed.starts_with("/skill ")
+    {
+        let reply = format!(
+            "⏳ Agent 正在处理中，{} 命令需要等待当前任务完成后执行。\n\n\
+             可用操作:\n\
+             - /q <消息> — 排队消息\n\
+             - /rq <序号> — 取消排队\n\
+             - /status — 查看状态\n\
+             - /help — 查看帮助",
+            trimmed.split_whitespace().next().unwrap_or(trimmed)
+        );
+        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
         return;
     }
 
@@ -1146,6 +1314,7 @@ async fn handle_concurrent_event_during_chat(
             provider,
             event,
             message_log_store,
+            agent_session_manager,
         )
         .await;
     } else {
@@ -1159,6 +1328,7 @@ async fn handle_concurrent_event_during_chat(
                 provider,
                 event,
                 message_log_store,
+                agent_session_manager,
             )
             .await;
         } else {
@@ -2394,6 +2564,15 @@ async fn handle_agent(
         return json_response(&providers);
     }
 
+    // GET /agent/tools — list all built-in agent tools
+    if rest == "/tools" {
+        if req.method() != Method::GET {
+            return method_not_allowed();
+        }
+        let tools = service.agent_tools.definitions();
+        return json_response(&serde_json::json!({ "tools": tools }));
+    }
+
     if let Some(skills_rest) = rest.strip_prefix("/skills") {
         return crate::handlers::agent_skills::handle_agent_skills(req, service, skills_rest).await;
     }
@@ -2688,7 +2867,8 @@ async fn handle_agent(
             return json_response(&serde_json::json!({
                 "success": true,
                 "response": response,
-                "tool_calls": []
+                "tool_calls": [],
+                "plan_steps": null
             }));
         }
 
@@ -2702,7 +2882,8 @@ async fn handle_agent(
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
-                    "tool_calls": []
+                    "tool_calls": [],
+                    "plan_steps": null
                 }));
             }
         };
@@ -2768,7 +2949,8 @@ async fn handle_agent(
             Ok(turn_result) => json_response(&serde_json::json!({
                 "success": true,
                 "response": turn_result.response,
-                "tool_calls": turn_result.tool_calls_log
+                "tool_calls": turn_result.tool_calls_log,
+                "plan_steps": turn_result.plan_steps
             })),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
         }
@@ -3154,6 +3336,26 @@ fn build_plan_card(
             }]
         }
     })
+}
+
+/// Build a status text for IM display.
+/// Shows detailed status if session exists, otherwise shows a "new session" placeholder.
+fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
+    match detail {
+        Some(d) => {
+            let real = d
+                .total_tokens_used
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            format!(
+                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲",
+                d.message_count, d.estimated_tokens, real, d.compaction_count, d.history_version
+            )
+        }
+        None => {
+            "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
+        }
+    }
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

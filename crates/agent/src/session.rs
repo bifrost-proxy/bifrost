@@ -93,6 +93,15 @@ pub struct AgentSession {
     /// Displayed in the Feishu card header instead of "Bifrost AI".
     pub title: Option<String>,
 
+    /// Current task plan owned by the runtime for this session.
+    /// Updated whenever update_plan succeeds, and used as the source of truth
+    /// for final TurnResult.plan_steps and IM card rendering.
+    pub current_plan: Option<Vec<crate::tools::update_plan::PlanStep>>,
+
+    /// How many times the runtime has reminded the model to close an unfinished
+    /// plan before allowing the final answer to return.
+    pub plan_repair_attempts: u8,
+
     /// Channel to push real-time plan updates to IM (e.g., for Feishu card rendering).
     /// Each message carries (plan_steps, current_session_title) so the card always
     /// reflects the latest title even when set_title is called mid-turn.
@@ -125,6 +134,8 @@ impl AgentSession {
             memory_cleared: false,
             guide_channel: None,
             title: None,
+            current_plan: None,
+            plan_repair_attempts: 0,
             plan_sender: None,
         }
     }
@@ -173,6 +184,8 @@ impl AgentSession {
         self.total_tokens_used = None;
         self.last_response_tokens = None;
         self.history_version = self.history_version.saturating_add(1);
+        self.current_plan = None;
+        self.plan_repair_attempts = 0;
         // Mark that memory should be skipped for the next turn
         self.memory_cleared = true;
         // Drop the recorder so a new file will be created for the fresh session
@@ -1188,11 +1201,14 @@ pub async fn run_turn_with_mcp(
     // Ensure work_dir exists
     let _ = std::fs::create_dir_all(&work_dir);
     let mut tool_calls_log: Vec<crate::types::ToolCallLog> = Vec::new();
-    let mut last_plan_steps: Option<Vec<crate::tools::update_plan::PlanStep>> = None;
     let max_iterations = config.get_max_turn_iterations() as usize;
     let tool_output_limit = config
         .tool_output_token_limit
         .unwrap_or(AgentConfig::DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT);
+
+    // Reset plan from previous turn so stale steps are not returned if the
+    // model does not call update_plan in this turn.
+    session.current_plan = None;
 
     info!(
         session_key = %session.session_key,
@@ -1403,6 +1419,20 @@ pub async fn run_turn_with_mcp(
 
         // Check if model wants to call tools
         if response.tool_calls.is_empty() {
+            if session
+                .current_plan
+                .as_ref()
+                .is_some_and(|plan| plan_has_unfinished_steps(plan))
+                && session.plan_repair_attempts < 2
+            {
+                session.plan_repair_attempts = session.plan_repair_attempts.saturating_add(1);
+                session.history.push(ChatMessage::system(
+                    "You already have an active task plan. Before concluding, call update_plan to reflect the final task state. If the work is complete, mark all steps as completed.",
+                ));
+                session.touch();
+                continue;
+            }
+
             // Model finished — extract text response
             let content = response
                 .content
@@ -1439,7 +1469,7 @@ pub async fn run_turn_with_mcp(
                 tool_calls_log,
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
-                plan_steps: last_plan_steps,
+                plan_steps: session.current_plan.clone(),
             });
         }
 
@@ -1589,18 +1619,10 @@ pub async fn run_turn_with_mcp(
         if let Some(steps) = tool_calls_log
             .iter()
             .rfind(|l| l.tool_name == "update_plan" && l.success)
-            .and_then(|l| l.result.strip_prefix("UPDATE_PLAN:"))
-            .and_then(|json| {
-                match serde_json::from_str::<crate::tools::update_plan::UpdatePlanArgs>(json) {
-                    Ok(args) => Some(args.plan),
-                    Err(e) => {
-                        warn!(error = %e, "failed to parse update_plan args");
-                        None
-                    }
-                }
-            })
+            .and_then(|l| extract_plan_steps_from_tool_result(&l.result))
         {
-            last_plan_steps = Some(steps.clone());
+            session.current_plan = Some(steps.clone());
+            session.plan_repair_attempts = 0;
             // Push real-time plan update to IM channel (include current title)
             if let Some(ref sender) = session.plan_sender {
                 if let Err(e) = sender.send((steps, session.title.clone())) {
@@ -1721,6 +1743,30 @@ fn telemetry_preview(output: &str) -> String {
     } else {
         truncated
     }
+}
+
+fn extract_plan_steps_from_tool_result(
+    result: &str,
+) -> Option<Vec<crate::tools::update_plan::PlanStep>> {
+    result.strip_prefix("UPDATE_PLAN:").and_then(|json| {
+        match serde_json::from_str::<crate::tools::update_plan::UpdatePlanArgs>(json) {
+            Ok(args) => Some(args.plan),
+            Err(e) => {
+                warn!(error = %e, "failed to parse update_plan args");
+                None
+            }
+        }
+    })
+}
+
+fn plan_has_unfinished_steps(plan: &[crate::tools::update_plan::PlanStep]) -> bool {
+    plan.iter().any(|step| {
+        matches!(
+            step.status,
+            crate::tools::update_plan::PlanStepStatus::Pending
+                | crate::tools::update_plan::PlanStepStatus::InProgress
+        )
+    })
 }
 
 /// Truncate tool output to stay within a token budget.
@@ -1904,10 +1950,17 @@ mod tests {
         session.add_user_message("hello");
         session.compaction_count = 3;
         session.total_tokens_used = Some(50000);
+        session.current_plan = Some(vec![crate::tools::update_plan::PlanStep {
+            step: "Do work".to_string(),
+            status: crate::tools::update_plan::PlanStepStatus::InProgress,
+        }]);
+        session.plan_repair_attempts = 1;
         session.clear();
         assert!(session.history.is_empty());
         assert_eq!(session.compaction_count, 0);
         assert!(session.total_tokens_used.is_none());
+        assert!(session.current_plan.is_none());
+        assert_eq!(session.plan_repair_attempts, 0);
         assert!(
             session.memory_cleared,
             "memory_cleared should be set after clear"
@@ -2132,6 +2185,58 @@ mod tests {
         assert_eq!(session.history.len(), 4); // summary + 3 remaining
         assert_eq!(session.history[0].content.as_deref(), Some("SUMMARY"));
         assert_eq!(session.history[1].content.as_deref(), Some("msg2"));
+    }
+
+    #[test]
+    fn test_extract_plan_steps_from_tool_result_valid() {
+        let result = r#"UPDATE_PLAN:{"plan":[{"step":"Inspect files","status":"completed"},{"step":"Write summary","status":"in_progress"}],"explanation":"Progress update"}"#;
+        let steps = extract_plan_steps_from_tool_result(result).expect("should parse");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step, "Inspect files");
+        assert_eq!(
+            steps[0].status,
+            crate::tools::update_plan::PlanStepStatus::Completed
+        );
+        assert_eq!(
+            steps[1].status,
+            crate::tools::update_plan::PlanStepStatus::InProgress
+        );
+    }
+
+    #[test]
+    fn test_extract_plan_steps_from_tool_result_invalid() {
+        assert!(extract_plan_steps_from_tool_result("NOT_UPDATE_PLAN:{}").is_none());
+        assert!(extract_plan_steps_from_tool_result("UPDATE_PLAN:{invalid-json}").is_none());
+    }
+
+    #[test]
+    fn test_plan_has_unfinished_steps_false_when_all_completed() {
+        let plan = vec![
+            crate::tools::update_plan::PlanStep {
+                step: "A".to_string(),
+                status: crate::tools::update_plan::PlanStepStatus::Completed,
+            },
+            crate::tools::update_plan::PlanStep {
+                step: "B".to_string(),
+                status: crate::tools::update_plan::PlanStepStatus::Completed,
+            },
+        ];
+        assert!(!plan_has_unfinished_steps(&plan));
+    }
+
+    #[test]
+    fn test_plan_has_unfinished_steps_true_for_pending_or_in_progress() {
+        let pending_plan = vec![crate::tools::update_plan::PlanStep {
+            step: "A".to_string(),
+            status: crate::tools::update_plan::PlanStepStatus::Pending,
+        }];
+        assert!(plan_has_unfinished_steps(&pending_plan));
+
+        let in_progress_plan = vec![crate::tools::update_plan::PlanStep {
+            step: "B".to_string(),
+            status: crate::tools::update_plan::PlanStepStatus::InProgress,
+        }];
+        assert!(plan_has_unfinished_steps(&in_progress_plan));
     }
 
     #[test]

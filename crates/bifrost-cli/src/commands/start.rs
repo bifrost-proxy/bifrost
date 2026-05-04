@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -401,7 +401,7 @@ async fn spawn_managed_proxy_task(
     admin_state: Arc<AdminState>,
     push_manager: Arc<PushManager>,
     access_control: bifrost_admin::SharedAccessControl,
-) -> bifrost_core::Result<tokio::task::JoinHandle<()>> {
+) -> bifrost_core::Result<tokio::task::JoinHandle<bifrost_core::Result<()>>> {
     let addr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| bifrost_core::BifrostError::Config(format!("Invalid address: {}", e)))?;
@@ -415,13 +415,29 @@ async fn spawn_managed_proxy_task(
     let listener = server.bind(addr).await?;
 
     Ok(tokio::spawn(async move {
-        if let Err(error) = server.run_with_listener(listener).await {
-            tracing::error!("Managed proxy listener exited with error: {}", error);
-        }
+        server.run_with_listener(listener).await
     }))
 }
 
-fn abort_listener_after_grace_period(handle: tokio::task::JoinHandle<()>) {
+fn listener_task_error(
+    result: std::result::Result<bifrost_core::Result<()>, tokio::task::JoinError>,
+) -> bifrost_core::BifrostError {
+    match result {
+        Ok(Ok(())) => bifrost_core::BifrostError::Network(
+            "managed proxy listener exited unexpectedly".to_string(),
+        ),
+        Ok(Err(error)) => error,
+        Err(error) if error.is_cancelled() => bifrost_core::BifrostError::Network(
+            "managed proxy listener was cancelled unexpectedly".to_string(),
+        ),
+        Err(error) => bifrost_core::BifrostError::Network(format!(
+            "managed proxy listener task failed: {}",
+            error
+        )),
+    }
+}
+
+fn abort_listener_after_grace_period(handle: tokio::task::JoinHandle<bifrost_core::Result<()>>) {
     tokio::spawn(async move {
         tokio::time::sleep(PORT_REBIND_OLD_LISTENER_GRACE_PERIOD).await;
         handle.abort();
@@ -1351,32 +1367,23 @@ pub fn run_foreground(
                 daemon_mode: false,
             });
 
-            tokio::select! {
-                _ = wait_for_shutdown_signal() => {
-                    info!("Received shutdown signal");
-                    println!("\nShutting down...");
-                },
-                _ = async {
-                    #[cfg(unix)]
-                    {
-                        let Ok(mut sigterm) = tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::terminate(),
-                        ) else {
-                            std::future::pending::<()>().await;
-                            return;
+            let shutdown_signal = wait_for_shutdown_signal();
+            tokio::pin!(shutdown_signal);
+            loop {
+                tokio::select! {
+                    listener_result = &mut listener_task => {
+                        return Err(listener_task_error(listener_result));
+                    },
+                    _ = &mut shutdown_signal => {
+                        info!("Received shutdown signal");
+                        println!("\nShutting down...");
+                        break;
+                    },
+                    request = port_rebind_rx.recv() => {
+                        let Some(PortRebindRequest { expected_port, response_tx }) = request else {
+                            break;
                         };
-                        sigterm.recv().await;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    info!("Received SIGTERM");
-                    println!("\nShutting down...");
-                },
-                _ = async {
-                    while let Some(PortRebindRequest { expected_port, response_tx }) = port_rebind_rx.recv().await {
+
                         if base_config.socks5_port.is_some() {
                             let _ = response_tx.send(Err(
                                 "dynamic port rebind is not supported when --socks5-port is enabled".to_string()
@@ -1469,7 +1476,7 @@ pub fn run_foreground(
                         }));
                         abort_listener_after_grace_period(old_task);
                     }
-                } => {}
+                }
             }
 
             listener_task.abort();
@@ -1597,11 +1604,23 @@ pub fn run_daemon(
 ) -> bifrost_core::Result<()> {
     use nix::unistd::{chdir, dup2, fork, setsid, ForkResult};
     use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
 
     use crate::process::get_pid_file;
 
     let bifrost_dir = config_manager.data_dir().to_path_buf();
     std::fs::create_dir_all(&bifrost_dir)?;
+    let (mut ready_rx, mut ready_tx) = UnixStream::pair().map_err(|e| {
+        bifrost_core::BifrostError::Config(format!("Failed to create daemon readiness pipe: {}", e))
+    })?;
+    ready_rx
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| {
+            bifrost_core::BifrostError::Config(format!(
+                "Failed to configure daemon readiness timeout: {}",
+                e
+            ))
+        })?;
 
     println!("Starting Bifrost proxy in daemon mode...");
     if config.enable_socks {
@@ -1626,10 +1645,41 @@ pub fn run_daemon(
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
-            println!("Daemon started with PID: {}", child);
-            Ok(())
+            drop(ready_tx);
+            let mut status = [0_u8; 1];
+            match ready_rx.read_exact(&mut status) {
+                Ok(()) if status[0] == b'1' => {
+                    println!("Daemon started with PID: {}", child);
+                    Ok(())
+                }
+                Ok(()) => Err(bifrost_core::BifrostError::Config(
+                    "Daemon reported an unknown readiness status".to_string(),
+                )),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Err(bifrost_core::BifrostError::Network(format!(
+                        "Daemon did not become ready within 30s (PID: {})",
+                        child
+                    )))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    Err(bifrost_core::BifrostError::Network(format!(
+                        "Daemon exited before the proxy listener became ready (PID: {})",
+                        child
+                    )))
+                }
+                Err(error) => Err(bifrost_core::BifrostError::Network(format!(
+                    "Failed while waiting for daemon readiness (PID: {}): {}",
+                    child, error
+                ))),
+            }
         }
         Ok(ForkResult::Child) => {
+            drop(ready_rx);
             setsid().map_err(|e| {
                 bifrost_core::BifrostError::Config(format!("Failed to create new session: {}", e))
             })?;
@@ -1965,7 +2015,7 @@ pub fn run_daemon(
                     let system_proxy_port = config.port;
                     let server = ProxyServer::new(config)
                         .with_access_control(access_control)
-                        .with_tls_config(tls_config)
+                        .with_tls_config(tls_config.clone())
                         .with_admin_state(admin_state)
                         .with_rules(resolver.clone());
 
@@ -2025,7 +2075,7 @@ pub fn run_daemon(
                         config_manager_for_resolver.clone(),
                         push_manager.clone(),
                     );
-                    let server = server.with_push_manager(push_manager);
+                    let server = server.with_push_manager(push_manager.clone());
 
                     let _metrics_task = start_metrics_collector_task(metrics_collector, 1);
 
@@ -2050,12 +2100,30 @@ pub fn run_daemon(
                         daemon_mode: true,
                     });
 
-                    if let Err(e) = server.run().await {
-                        eprintln!("Server error: {}", e);
-                    }
+                    let listener_config = server.config().clone();
+                    let listener_access_control = server.access_control().clone();
+                    let mut listener_task = spawn_managed_proxy_task(
+                        listener_config,
+                        resolver.clone(),
+                        tls_config.clone(),
+                        admin_state_arc,
+                        push_manager,
+                        listener_access_control,
+                    )
+                    .await?;
+
+                    ready_tx.write_all(b"1").map_err(|e| {
+                        bifrost_core::BifrostError::Config(format!(
+                            "Failed to notify daemon readiness: {}",
+                            e
+                        ))
+                    })?;
+                    drop(ready_tx);
+
+                    let listener_result = (&mut listener_task).await;
 
                     rules_watcher_task.abort();
-                    Ok(())
+                    Err(listener_task_error(listener_result))
                 }
                 => result,
                 };

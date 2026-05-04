@@ -2,140 +2,89 @@
 
 ## 功能模块说明
 
-`update_plan` 是 Agent 内置工具，允许模型在执行复杂任务时结构化地记录和更新计划步骤（TODO/checklist）。每个步骤有 `pending` / `in_progress` / `completed` 三种状态。
+本模块验证 Agent `update_plan` 从“本轮局部信号”升级为“runtime 持有的 session 级状态”后的真实行为，重点覆盖：
 
-**核心特性**：计划通过飞书卡片实时推送给用户。当 Agent 在 turn 执行过程中多次调用 `update_plan` 时，首次推送创建一张新的飞书卡片，后续调用通过 PATCH API 更新同一张卡片（而非每次新建），实现进度的实时刷新。最终回复卡片中也会包含计划面板。
+1. `/_bifrost/api/im/agent/chat` 最终响应会返回 `plan_steps`
+2. 当模型尝试在计划未收口时直接结束回答，runtime 会强制插入补救提示，要求再次调用 `update_plan`
+3. 计划收口后，最终返回的 `plan_steps` 全部为 `completed`
+
+本次真实场景测试以**真实 Bifrost 进程 + 真实 Admin API + 本地 mock model server** 方式执行，禁止仅用 grep / 静态检查代替。
 
 ## 前置条件
 
-1. 启动 Bifrost 服务：
+1. 当前目录位于仓库根目录：`/Users/eden/work/github/bifrost`
+2. 本地已具备 Rust 构建环境
+3. 测试端口避开正式环境 `9900`，统一使用临时端口
+4. 启动 Bifrost 时必须带 `--no-system-proxy`
+
+## 测试用例列表
+
+### TC-UP-01：工具注册接口暴露 update_plan
+
+**操作步骤**：
+1. 构建二进制：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
    ```
-2. 已配置 IM Gateway Provider（飞书机器人）并连接
-3. Agent 已启用（`im/agent/config` API enabled=true）
-
-## 测试用例
-
-### TC-UP-01: update_plan 工具注册验证
-
-**操作步骤**：
-1. 调用 API 获取 Agent 工具列表：
+2. 使用临时数据目录启动 Bifrost：
    ```bash
-   curl -s http://localhost:8800/_bifrost/api/im/agent/tools | jq '.tools[] | select(.function.name == "update_plan")'
+   TEST_DIR=$(mktemp -d)
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start \
+     --host 127.0.0.1 \
+     -p 18881 \
+     --unsafe-ssl \
+     --no-system-proxy
    ```
-
-**预期结果**：
-- 返回 `update_plan` 工具定义
-- 包含 `plan` (array, required) 和 `explanation` (string, optional) 参数
-- description 包含 "TODO/checklist" 或 "task plan"
-
-### TC-UP-02: Agent 对话触发 plan 实时推送
-
-**操作步骤**：
-1. 通过飞书向 Agent 发送一条需要多步骤的任务，例如：
-   ```
-   请帮我完成以下三个任务：1. 列出当前目录文件 2. 读取 README.md 3. 总结内容
-   ```
-2. 在 Agent 执行过程中观察飞书消息
-
-**预期结果**：
-- Agent 调用 `update_plan` 后，飞书中出现一张独立的计划卡片
-- 卡片 header subtitle 显示 `📋 任务计划（X/Y）`
-- 卡片 body 中每个步骤显示对应状态 emoji：⏳ pending、🔄 in_progress、✅ completed
-- 当 Agent 再次调用 `update_plan` 时，同一张卡片被更新（PATCH），而非新建另一张卡片
-- 最终回复卡片中也包含 `📋 任务计划（X/Y）` 折叠面板
-
-### TC-UP-03: API 直接调用 Agent 验证 plan_steps 返回
-
-**操作步骤**：
-1. 通过 Agent chat API 发送消息，验证 plan_steps 出现在返回中：
+3. 在另一个 shell 调用工具列表接口：
    ```bash
-   curl -s -X POST http://localhost:8800/_bifrost/api/im/agent/chat \
-     -H "Content-Type: application/json" \
-     -d '{"session_key":"test-plan","message":"请制定一个计划来：1. 查看当前目录 2. 查找所有 .md 文件 3. 总结发现"}' | jq .
+   curl -fsS --noproxy '*' http://127.0.0.1:18881/_bifrost/api/im/agent/tools | jq '.tools[] | select(.function.name == "update_plan")'
    ```
+4. 停止步骤 2 启动的 Bifrost 进程，并删除临时目录。
 
 **预期结果**：
-- 返回 JSON 包含 `success: true`
-- `response` 字段有内容
-- `tool_calls` 数组可能包含 `update_plan` 调用记录
+- 接口返回 `update_plan` 工具定义
+- 工具参数中包含 `plan`
+- 工具描述中包含 TODO/checklist 或 task plan 语义
 
-### TC-UP-04: 单元测试全部通过
-
-**操作步骤**：
-```bash
-cargo test -p bifrost-agent -- update_plan
-```
-
-**预期结果**：
-- 6 个测试全部通过：
-  - `test_valid_arguments`
-  - `test_with_explanation`
-  - `test_invalid_status`
-  - `test_multiple_in_progress_rejected`
-  - `test_empty_plan_rejected`
-  - `test_update_plan_signal`
-
-### TC-UP-05: 编译检查无警告
+### TC-UP-02：runtime 在真实 API 对话中强制收口未完成计划
 
 **操作步骤**：
-```bash
-cargo clippy -p bifrost-agent -p bifrost-admin -- -D warnings
-```
-
-**预期结果**：
-- 无 clippy 警告
-- 编译成功
-
-### TC-UP-06: plan_sender channel 集成验证
-
-**操作步骤**：
-1. 验证 `AgentSession` 结构体包含 `plan_sender` 字段：
+1. 运行黑盒 API 回归脚本：
    ```bash
-   grep -n "plan_sender" crates/agent/src/session.rs
+   e2e-tests/tests/test_update_plan_human_api.sh
    ```
-2. 验证 turn loop 中 UPDATE_PLAN 信号解析和 channel 推送逻辑：
-   ```bash
-   grep -n "UPDATE_PLAN\|plan_sender" crates/agent/src/session.rs
-   ```
+2. 该脚本内部会完成以下动作：
+   - 启动本地 mock model server
+   - `cargo build --bin bifrost`
+   - 用临时数据目录启动真实 Bifrost 进程
+   - PATCH `/_bifrost/api/im-gateway/agent` 指向 mock provider
+   - 调用 `POST /_bifrost/api/im-gateway/agent/chat`
+   - 校验 mock 模型先提交未完成计划、随后试图直接结束、再被 runtime 强制要求补一次 `update_plan`
 
 **预期结果**：
-- `plan_sender` 字段定义为 `Option<tokio::sync::mpsc::UnboundedSender<Vec<PlanStep>>>`
-- turn loop 中在检测到 `update_plan` 工具调用成功后，解析 `UPDATE_PLAN:{json}` 前缀并推送到 channel
-- 推送失败时仅 debug 日志，不中断 turn
+- 脚本输出 `PASS`
+- `/_bifrost/api/im-gateway/agent/chat` 最终响应包含 `plan_steps`
+- `plan_steps` 中所有步骤状态均为 `completed`
+- `tool_calls` 中至少出现两次 `update_plan`
+- 可以证明真正生效的是 runtime gate，而不是模型第一次就碰巧收口
 
-### TC-UP-07: patch_card API 集成验证
+### TC-UP-03：Agent 侧 helper 回归测试通过
 
 **操作步骤**：
-1. 验证 `FeishuProvider` 包含 `patch_card` 方法：
+1. 执行本次新增/修改的 helper 单元测试：
    ```bash
-   grep -n "patch_card" crates/bifrost-admin/src/im_gateway/feishu.rs
+   cargo test -p bifrost-agent --lib test_extract_plan_steps_from_tool_result
+   cargo test -p bifrost-agent --lib test_plan_has_unfinished_steps
+   cargo test -p bifrost-agent --lib test_session_clear_resets_all
    ```
 
 **预期结果**：
-- `patch_card` 方法接受 `config`, `message_id`, `card` 参数
-- 使用 PATCH `/im/v1/messages/{message_id}` API
-- msg_type 为 `"interactive"`，content 为卡片 JSON 字符串
-
-### TC-UP-08: plan listener spawn 验证（同一卡片更新机制）
-
-**操作步骤**：
-1. 验证 `im_gateway.rs` 中 plan listener spawn 逻辑：
-   ```bash
-   grep -n "plan_card_msg_id\|plan_rx\|plan_tx\|build_plan_card" crates/bifrost-admin/src/handlers/im_gateway.rs
-   ```
-
-**预期结果**：
-- 在 `process_agent_chat` 中创建 `plan_tx`/`plan_rx` unbounded channel
-- `plan_tx` 设置到 `session.plan_sender`
-- spawn 异步任务监听 `plan_rx`
-- 首次收到 steps 时通过 `send_card` 发送新卡片，保存 `message_id` 到 `plan_card_msg_id`
-- 后续收到 steps 时通过 `patch_card` 更新同一张卡片（使用已保存的 `message_id`）
-- `build_plan_card` 函数生成 Card 2.0 JSON，包含 `update_multi: true`
+- `extract_plan_steps_from_tool_result` 能正确解析 `UPDATE_PLAN:` 输出并拒绝非法输入
+- `plan_has_unfinished_steps` 能正确识别 `pending` / `in_progress`
+- `AgentSession::clear()` 会重置 `current_plan` 与 `plan_repair_attempts`
 
 ## 清理步骤
 
-```bash
-rm -rf ./.bifrost-test
-```
+1. 删除测试过程中创建的临时目录
+2. 确认没有残留的 mock model server 或 bifrost 进程
+3. 如需再次执行，可直接重新运行上述命令

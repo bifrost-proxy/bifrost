@@ -114,10 +114,10 @@ struct McpToolInfo {
 const MAX_JSONRPC_LINE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Default per-request / tool-call timeout when config omits one.
-const DEFAULT_TOOL_TIMEOUT_SEC: u64 = 60;
+const DEFAULT_TOOL_TIMEOUT_SEC: u64 = 600;
 
 /// Default startup timeout (initialize + tools/list).
-const DEFAULT_STARTUP_TIMEOUT_SEC: u64 = 30;
+const DEFAULT_STARTUP_TIMEOUT_SEC: u64 = 600;
 
 /// Graceful shutdown timeout per server.
 const SHUTDOWN_TIMEOUT_MS: u64 = 500;
@@ -1248,6 +1248,12 @@ mod tests {
             let manager = McpManager::new(&configs).await;
             assert!(manager.list_tools().is_empty());
         });
+    }
+
+    #[test]
+    fn test_mcp_default_timeout_constants_match_runtime_policy() {
+        assert_eq!(DEFAULT_STARTUP_TIMEOUT_SEC, 600);
+        assert_eq!(DEFAULT_TOOL_TIMEOUT_SEC, 600);
     }
 
     #[test]

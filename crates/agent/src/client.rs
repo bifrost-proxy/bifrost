@@ -21,10 +21,7 @@ impl Default for AgentClient {
 impl AgentClient {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .build()
-                .unwrap_or_default(),
+            http: reqwest::Client::builder().build().unwrap_or_default(),
         }
     }
 

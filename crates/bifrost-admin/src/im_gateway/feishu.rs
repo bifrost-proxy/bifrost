@@ -27,6 +27,13 @@ const TOKEN_REFRESH_AHEAD_SECS: u64 = 300; // 5 minutes before expiry
 const MAX_BACKOFF_SECS: u64 = 60;
 const INITIAL_BACKOFF_SECS: u64 = 1;
 const WS_PING_INTERVAL_SECS: u64 = 90;
+/// Maximum time we're willing to wait for *any* server-originated traffic
+/// (event / pong / server-initiated ping) before considering the connection
+/// silently dead and forcing a reconnect. Must be strictly larger than the
+/// server-advertised ping interval so a single dropped pong doesn't trip it.
+const WS_SERVER_SILENCE_TIMEOUT_SECS: u64 = 180;
+/// How often the silence watchdog wakes up to re-check `last_server_msg_at`.
+const WS_SILENCE_CHECK_INTERVAL_SECS: u64 = 15;
 
 // ---------------------------------------------------------------------------
 // Protobuf Frame types for Feishu WebSocket binary protocol
@@ -705,6 +712,7 @@ pub async fn start_long_connection(
     let provider_id = config.id.clone();
     let mut backoff_secs = INITIAL_BACKOFF_SECS;
     let mut reconnect_count: u32 = 0;
+    let mut total_connects: u32 = 0;
 
     loop {
         info!(provider_id = %provider_id, reconnect_count, "starting feishu long connection");
@@ -713,6 +721,27 @@ pub async fn start_long_connection(
             ConnectionLoopResult::Shutdown => {
                 info!(provider_id = %provider_id, "feishu long connection shutdown requested");
                 return;
+            }
+            ConnectionLoopResult::ConnectedThenDisconnected(err) => {
+                // We successfully entered the ws event loop at least once, so
+                // reset backoff — treat this as the "first failure" of a
+                // freshly-connected session rather than compounding onto the
+                // previous reconnect streak.
+                total_connects = total_connects.saturating_add(1);
+                backoff_secs = INITIAL_BACKOFF_SECS;
+                reconnect_count += 1;
+                warn!(
+                    provider_id = %provider_id,
+                    error = %err,
+                    backoff_secs,
+                    reconnect_count,
+                    total_connects,
+                    "feishu long connection dropped after being connected, will reconnect"
+                );
+                if wait_with_shutdown(&mut shutdown_rx, Duration::from_secs(backoff_secs)).await {
+                    info!(provider_id = %provider_id, "shutdown during reconnect backoff");
+                    return;
+                }
             }
             ConnectionLoopResult::Disconnected(err) => {
                 reconnect_count += 1;
@@ -724,14 +753,20 @@ pub async fn start_long_connection(
                     "feishu long connection disconnected, will reconnect"
                 );
 
-                // Wait with backoff, but check for shutdown
-                let delay = Duration::from_secs(backoff_secs);
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {},
-                    _ = &mut shutdown_rx => {
-                        info!(provider_id = %provider_id, "shutdown during reconnect backoff");
-                        return;
-                    }
+                if reconnect_count == 5 || reconnect_count.is_multiple_of(20) {
+                    // Elevate visibility for operators watching tail -f logs —
+                    // repeated early failures often indicate bad credentials,
+                    // DNS issues, or network egress being blocked.
+                    error!(
+                        provider_id = %provider_id,
+                        reconnect_count,
+                        last_error = %err,
+                        "feishu long connection has failed to establish repeatedly"
+                    );
+                }
+                if wait_with_shutdown(&mut shutdown_rx, Duration::from_secs(backoff_secs)).await {
+                    info!(provider_id = %provider_id, "shutdown during reconnect backoff");
+                    return;
                 }
 
                 // Exponential backoff: 1, 2, 4, 8, ..., max 60s
@@ -741,8 +776,36 @@ pub async fn start_long_connection(
     }
 }
 
+/// Sleep for `delay`, waking early only if an explicit `send(())` arrives on
+/// `shutdown_rx`. Dropping the sender is **not** treated as a shutdown; in
+/// that case the function simply finishes the sleep. Returns `true` iff an
+/// explicit shutdown was received.
+async fn wait_with_shutdown(shutdown_rx: &mut oneshot::Receiver<()>, delay: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        res = &mut *shutdown_rx => {
+            match res {
+                Ok(()) => true,
+                Err(_) => {
+                    // Sender was dropped. Replace the receiver with a never-
+                    // ready one so subsequent waits don't busy-loop returning
+                    // Err immediately, then fall through.
+                    let (_leak, rx) = oneshot::channel::<()>();
+                    *shutdown_rx = rx;
+                    false
+                }
+            }
+        }
+    }
+}
+
 enum ConnectionLoopResult {
     Shutdown,
+    /// The ws successfully entered the message loop and later dropped.
+    /// Backoff should be reset when handling this variant.
+    ConnectedThenDisconnected(String),
+    /// The ws never made it into the message loop this iteration
+    /// (endpoint fetch / handshake / auth failed).
     Disconnected(String),
 }
 
@@ -780,26 +843,68 @@ async fn run_connection_loop(
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
+    // Track the last moment we observed any server-originated traffic. Used
+    // by the silence watchdog below to detect a silently-dead TCP connection
+    // that neither errors out nor closes cleanly.
+    let mut last_server_msg_at = std::time::Instant::now();
+
     // Step 3: Message loop with protobuf ping heartbeat
     let mut ping_interval = tokio::time::interval(Duration::from_secs(endpoint.ping_interval_secs));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut silence_check =
+        tokio::time::interval(Duration::from_secs(WS_SILENCE_CHECK_INTERVAL_SECS));
+    silence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
-            _ = &mut *shutdown_rx => {
-                let _ = ws_write.close().await;
-                return ConnectionLoopResult::Shutdown;
+            res = &mut *shutdown_rx => {
+                match res {
+                    Ok(()) => {
+                        let _ = ws_write.close().await;
+                        return ConnectionLoopResult::Shutdown;
+                    }
+                    Err(_) => {
+                        // Sender was dropped — NOT a genuine shutdown. Swap
+                        // in a never-ready receiver so this select arm doesn't
+                        // busy-loop on repeated Err returns, then continue
+                        // servicing the ws.
+                        let (_leak, rx) = oneshot::channel::<()>();
+                        *shutdown_rx = rx;
+                        debug!(
+                            provider_id = %config.id,
+                            "shutdown_tx was dropped; keeping connection alive and ignoring"
+                        );
+                        continue;
+                    }
+                }
             }
             _ = ping_interval.tick() => {
                 // Send protobuf-encoded ping frame
                 let ping_data = build_ping_frame(service_id);
                 if let Err(e) = ws_write.send(Message::Binary(ping_data.into())).await {
-                    return ConnectionLoopResult::Disconnected(format!("ping send failed: {}", e));
+                    return ConnectionLoopResult::ConnectedThenDisconnected(
+                        format!("ping send failed: {}", e)
+                    );
+                }
+            }
+            _ = silence_check.tick() => {
+                let elapsed = last_server_msg_at.elapsed();
+                if elapsed > Duration::from_secs(WS_SERVER_SILENCE_TIMEOUT_SECS) {
+                    warn!(
+                        provider_id = %config.id,
+                        silence_secs = elapsed.as_secs(),
+                        "no server traffic within watchdog window; forcing reconnect"
+                    );
+                    let _ = ws_write.close().await;
+                    return ConnectionLoopResult::ConnectedThenDisconnected(
+                        "server silence watchdog timeout".to_string(),
+                    );
                 }
             }
             msg = ws_read.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
+                        last_server_msg_at = std::time::Instant::now();
                         match PbFrame::decode(data.as_ref()) {
                             Ok(frame) => {
                                 let method = frame.method;
@@ -834,7 +939,7 @@ async fn run_connection_loop(
                                         // Send response frame back
                                         let resp = build_response_frame(&frame, success);
                                         if let Err(e) = ws_write.send(Message::Binary(resp.into())).await {
-                                            return ConnectionLoopResult::Disconnected(
+                                            return ConnectionLoopResult::ConnectedThenDisconnected(
                                                 format!("response send failed: {}", e)
                                             );
                                         }
@@ -847,27 +952,38 @@ async fn run_connection_loop(
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
+                        last_server_msg_at = std::time::Instant::now();
                         debug!(provider_id = %config.id, len = text.len(), "received unexpected text message");
                     }
                     Some(Ok(Message::Ping(data))) => {
+                        last_server_msg_at = std::time::Instant::now();
                         if let Err(e) = ws_write.send(Message::Pong(data)).await {
-                            return ConnectionLoopResult::Disconnected(format!("pong send failed: {}", e));
+                            return ConnectionLoopResult::ConnectedThenDisconnected(
+                                format!("pong send failed: {}", e)
+                            );
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
+                        last_server_msg_at = std::time::Instant::now();
                         // WebSocket-level pong, ignore
                     }
                     Some(Ok(Message::Close(_))) => {
-                        return ConnectionLoopResult::Disconnected("server sent close frame".to_string());
+                        return ConnectionLoopResult::ConnectedThenDisconnected(
+                            "server sent close frame".to_string()
+                        );
                     }
                     Some(Ok(Message::Frame(_))) => {
                         // Raw frame, ignore
                     }
                     Some(Err(e)) => {
-                        return ConnectionLoopResult::Disconnected(format!("websocket error: {}", e));
+                        return ConnectionLoopResult::ConnectedThenDisconnected(
+                            format!("websocket error: {}", e)
+                        );
                     }
                     None => {
-                        return ConnectionLoopResult::Disconnected("websocket stream ended".to_string());
+                        return ConnectionLoopResult::ConnectedThenDisconnected(
+                            "websocket stream ended".to_string()
+                        );
                     }
                 }
             }

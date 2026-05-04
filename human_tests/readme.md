@@ -10,7 +10,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 25 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证，以及 status 活跃规则摘要 |
+| [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 27 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证、status 活跃规则摘要，以及 listener 失败退出与 daemon readiness 回归 |
 | [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 的 start 参考区块同步、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 45 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器和 lineProps |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
@@ -146,14 +146,15 @@
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 9 | SessionQueueManager 单元测试（11项）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
 | [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
-| [update-plan.md](./update-plan.md) | Update Plan 工具 | 8 | update_plan 工具注册、Agent 对话触发 plan 实时推送、API plan_steps 返回、单元测试、clippy、plan_sender channel 集成、patch_card API 集成、plan listener spawn 同一卡片更新机制 |
+| [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
+| [agent-loop-timeouts.md](./agent-loop-timeouts.md) | Agent Loop Runtime Limits | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证默认 600 秒级超时、1000 次迭代上限，以及 35+ 次工具调用不会在 30 次时提前中断 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
 | [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
 | [agent-skills-admin-cli.md](./agent-skills-admin-cli.md) | Agent Skills Admin and CLI | 3 | Skill import multipart/bytes 接口、AgentSkillError 错误码分层、IM CLI secret 缺失错误 |
 
 ---
 
-**总计：82 个测试文件，1515 个测试用例**
+**总计：83 个测试文件，1518 个测试用例**
 
 ## 工作流程
 

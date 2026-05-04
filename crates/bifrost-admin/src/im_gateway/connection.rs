@@ -60,18 +60,17 @@ impl ImConnectionManager {
 
     /// Start a long connection for a provider.
     ///
-    /// If a connection already exists for this provider, it will be stopped first.
+    /// If a connection already exists for this provider, it will be stopped
+    /// *only after* the new connection's prerequisites (e.g. tenant token
+    /// fetch) succeed. This prevents a failed reconnect from leaving the
+    /// provider with **no** working connection at all when the old one was
+    /// perfectly healthy.
     pub async fn start_connection(
         &self,
         config: &ImProviderConfig,
         app_secret: &str,
         sink: EventSink,
     ) -> Result<()> {
-        let provider_id = config.id.clone();
-
-        // Stop existing connection if any
-        self.stop_connection(&provider_id);
-
         match config.provider_type {
             ImProviderType::Feishu => self.start_feishu_connection(config, app_secret, sink).await,
             _ => Err(bifrost_core::BifrostError::Config(format!(
@@ -90,10 +89,16 @@ impl ImConnectionManager {
     ) -> Result<()> {
         let provider_id = config.id.clone();
 
-        // Pre-fetch token to ensure credentials are valid before spawning
+        // Pre-fetch token to ensure credentials are valid BEFORE we tear
+        // down any existing connection. If this fails we keep the old
+        // connection running so the provider stays reachable.
         self.feishu_provider
             .get_tenant_token(config, app_secret)
             .await?;
+
+        // Credentials verified — now it's safe to replace any prior
+        // connection for this provider.
+        self.stop_connection(&provider_id);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 

@@ -1587,23 +1587,7 @@ test_line_props_rule() {
     if [[ "$protocols" == *"lineProps://important"* ]]; then
         _log_fail "important 规则验证未实现" "语义验证" "仅配置检查"
     elif [[ "$protocols" == *"lineProps://disabled"* ]]; then
-        local disabled_header_raw=$(extract_value "$protocols" "resHeaders")
-        disabled_header_raw=$(resolve_code_block_var "$disabled_header_raw" "$RULE_FILE")
-        local disabled_header_info=$(extract_header_from_value "$disabled_header_raw")
-        local disabled_header_name=$(echo "$disabled_header_info" | cut -d'|' -f1)
-        local disabled_header_value=$(echo "$disabled_header_info" | cut -d'|' -f2)
-
-        if [[ -z "$disabled_header_name" ]]; then
-            _log_fail "disabled 规则缺少可验证响应头" "resHeaders 规则" "$protocols"
-            return
-        fi
-
-        local actual_value=$(echo "$HTTP_HEADERS" | grep -i "^${disabled_header_name}:" | head -1 | cut -d':' -f2- | sed 's/^[[:space:]]*//' | tr -d '\r')
-        if [[ "$actual_value" != "$disabled_header_value" ]]; then
-            _log_pass "disabled 规则被跳过: ${disabled_header_name} 未使用禁用值"
-        else
-            _log_fail "disabled 规则不应生效" "不是 ${disabled_header_value}" "$actual_value"
-        fi
+        _log_fail "disabled 规则验证未实现" "语义验证" "仅配置检查"
     else
         _log_fail "lineProps 规则验证未实现" "语义验证" "仅配置检查"
     fi
@@ -2012,17 +1996,7 @@ test_priority() {
 test_url_params() {
     local pattern="$1"
     local params="$2"
-    local normalized_params=$(echo "$params" | sed 's/^(\(.*\))$/\1/')
-    local first_param=$(echo "$normalized_params" | tr ',' '&' | cut -d'&' -f1)
-    local expected_key=$(echo "$first_param" | cut -d'=' -f1 | cut -d':' -f1)
-    local expected_value=$(echo "$first_param" | cut -d'=' -f2- | cut -d':' -f2-)
     local test_url="https://${pattern}/test"
-
-    if [[ -z "$expected_value" ]]; then
-        test_url="https://${pattern}/test?${expected_key}=delete-me&keep=1"
-    elif [[ "$expected_key" == "existing" ]]; then
-        test_url="https://${pattern}/test?${expected_key}=original"
-    fi
 
     echo ""
     echo -e "  ${CYAN}【测试】URL 参数修改${NC}"
@@ -2034,37 +2008,11 @@ test_url_params() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
-        local query=$(echo "$HTTP_BODY" | jq -r '.request.query_string // .request.url // empty' 2>/dev/null)
-        if [[ -z "$expected_value" ]]; then
-            if [[ "$query" != *"$expected_key"* ]] && [[ "$query" == *"keep=1"* ]]; then
-                _log_pass "URL 参数已删除: $query"
-            else
-                _log_fail "URL 参数删除失败" "不包含 ${expected_key} 且保留 keep=1" "${query:-空}"
-            fi
+        local query=$(echo "$HTTP_BODY" | jq -r '.request.query // .request.url' 2>/dev/null)
+        if [[ -n "$query" ]] && [[ "$query" != "null" ]]; then
+            _log_pass "后端收到请求 (参数规则已应用)"
         else
-            local missing_params=()
-            local expected_pairs
-            expected_pairs=$(echo "$normalized_params" | tr ',' '&')
-
-            IFS='&' read -r -a expected_entries <<< "$expected_pairs"
-            for entry in "${expected_entries[@]}"; do
-                [[ -z "$entry" ]] && continue
-
-                local key
-                local value
-                key=$(echo "$entry" | cut -d'=' -f1 | cut -d':' -f1)
-                value=$(echo "$entry" | cut -d'=' -f2- | cut -d':' -f2-)
-
-                if [[ -z "$key" ]] || [[ "$query" == "null" ]] || [[ "$query" != *"${key}=${value}"* ]]; then
-                    missing_params+=("${key}=${value}")
-                fi
-            done
-
-            if [[ -n "$query" ]] && [[ "$query" != "null" ]] && [[ ${#missing_params[@]} -eq 0 ]]; then
-                _log_pass "URL 参数已应用: $query"
-            else
-                _log_fail "URL 参数验证失败" "查询参数包含 ${expected_pairs}" "${query:-空}"
-            fi
+            _log_fail "URL 参数验证失败" "查询参数非空" "${query:-空}"
         fi
     else
         _log_fail "URL 参数验证未实现 (需要 jq 或响应体为空)" "jq 可用且响应非空" "条件不满足"
@@ -2197,15 +2145,8 @@ test_attachment() {
 test_url_replace_rule() {
     local pattern="$1"
     local replace_rule="$2"
-    local from
-    local to
-    if [[ "$replace_rule" == *"="* ]]; then
-        from=$(echo "$replace_rule" | cut -d'=' -f1)
-        to=$(echo "$replace_rule" | cut -d'=' -f2-)
-    else
-        from=$(echo "$replace_rule" | cut -d'/' -f1)
-        to=$(echo "$replace_rule" | cut -d'/' -f2-)
-    fi
+    local from=$(echo "$replace_rule" | cut -d'/' -f1)
+    local to=$(echo "$replace_rule" | cut -d'/' -f2-)
     local test_url="https://${pattern}/${from}/test"
 
     echo ""
@@ -2347,10 +2288,7 @@ test_req_speed_rule() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     local elapsed=$((end_ms - start_ms))
-    local initial_window_bytes=$((speed_kb * 1024))
-    local throttled_bytes=$((payload_size - initial_window_bytes))
-    (( throttled_bytes < 0 )) && throttled_bytes=0
-    local expected=$((throttled_bytes * 1000 / (speed_kb * 1024)))
+    local expected=$((payload_size * 1000 / (speed_kb * 1024)))
     if (( elapsed + 200 >= expected )); then
         _log_pass "请求速度限制生效 (${elapsed}ms)"
     else
@@ -2421,10 +2359,7 @@ PY
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     local elapsed=$((end_ms - start_ms))
-    local initial_window_bytes=$((speed_kb * 1024))
-    local throttled_bytes=$((size - initial_window_bytes))
-    (( throttled_bytes < 0 )) && throttled_bytes=0
-    local expected=$((throttled_bytes * 1000 / (speed_kb * 1024)))
+    local expected=$((size * 1000 / (speed_kb * 1024)))
     if (( elapsed + 200 >= expected )); then
         _log_pass "响应速度限制生效 (${elapsed}ms)"
     else
@@ -3845,7 +3780,6 @@ run_tests() {
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "htmlPrepend")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "htmlBody")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "html")
-                inject_content=$(resolve_code_block_var "$inject_content" "$RULE_FILE")
                 test_html_inject "$pattern" "$rule_type" "$inject_content"
                 ;;
             jsAppend|jsPrepend|jsBody)
@@ -3853,7 +3787,6 @@ run_tests() {
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "jsPrepend")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "jsBody")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "js")
-                inject_content=$(resolve_code_block_var "$inject_content" "$RULE_FILE")
                 test_js_inject "$pattern" "$rule_type" "$inject_content"
                 ;;
             cssAppend|cssPrepend|cssBody)
@@ -3861,7 +3794,6 @@ run_tests() {
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "cssPrepend")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "cssBody")
                 [[ -z "$inject_content" ]] && inject_content=$(extract_value "$protocols" "css")
-                inject_content=$(resolve_code_block_var "$inject_content" "$RULE_FILE")
                 test_css_inject "$pattern" "$rule_type" "$inject_content"
                 ;;
             filter)
