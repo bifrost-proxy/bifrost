@@ -73,10 +73,14 @@ pub async fn handle_agent_memories(req: Request<Incoming>, path: &str) -> Respon
         (&Method::GET, "") | (&Method::GET, "/") => handle_list(req).await,
         (&Method::POST, "") | (&Method::POST, "/") => handle_create(req).await,
         (&Method::PATCH, id_path) if id_path.starts_with('/') => {
-            handle_patch(req, id_path.trim_start_matches('/')).await
+            let id = urlencoding::decode(id_path.trim_start_matches('/'))
+                .unwrap_or_else(|_| id_path.trim_start_matches('/').into());
+            handle_patch(req, &id).await
         }
         (&Method::DELETE, id_path) if id_path.starts_with('/') => {
-            handle_delete(id_path.trim_start_matches('/')).await
+            let id = urlencoding::decode(id_path.trim_start_matches('/'))
+                .unwrap_or_else(|_| id_path.trim_start_matches('/').into());
+            handle_delete(&id).await
         }
         _ => method_not_allowed(),
     }

@@ -1279,16 +1279,40 @@ pub fn list_visible_memories(
     search_memory_files("", limit, &root)
 }
 
-/// Remove a memory entry from `MEMORY.md`. Supports:
+/// Remove a memory entry. Supports:
 /// - exact id (`manual-...` or `auto-...`)
 /// - the literal `last` → removes the most recent entry (manual OR auto)
 /// - id prefix (≥8 chars) for convenience
+/// - `file:line` format (e.g. `MEMORY.md:5`) for entries without embedded IDs
 pub fn forget_memory(
     _config: &AgentConfig,
     _session: &AgentSession,
     id_or_last: &str,
 ) -> Result<Option<String>, String> {
     let root = ensure_memory_layout()?;
+
+    // Handle `file:line` format IDs (e.g. "MEMORY.md:5", "memory_summary.md:3")
+    if let Some((file_name, line_str)) = id_or_last.rsplit_once(':') {
+        if let Ok(line_num) = line_str.parse::<usize>() {
+            let allowed = ["MEMORY.md", "memory_summary.md"];
+            if allowed.contains(&file_name) {
+                let path = root.join(file_name);
+                let original = fs::read_to_string(&path)
+                    .map_err(|error| format!("read {}: {error}", path.display()))?;
+                let mut lines = original.lines().map(str::to_string).collect::<Vec<_>>();
+                // line_num is 1-based
+                if line_num >= 1 && line_num <= lines.len() {
+                    lines.remove(line_num - 1);
+                    fs::write(&path, format!("{}\n", lines.join("\n")))
+                        .map_err(|error| format!("write {}: {error}", path.display()))?;
+                    telemetry_event("forget", 1, true, Some(id_or_last));
+                    return Ok(Some(id_or_last.to_string()));
+                }
+                return Ok(None);
+            }
+        }
+    }
+
     let path = root.join("MEMORY.md");
     let original =
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -1355,8 +1379,12 @@ pub fn search_memory_files(
             if !query.is_empty() && !trimmed.to_lowercase().contains(&query) {
                 continue;
             }
+            // Prefer the embedded entry ID (e.g. `manual-...` / `auto-...`)
+            // so that delete/patch APIs can locate the entry correctly.
+            let id =
+                extract_entry_id(trimmed).unwrap_or_else(|| format!("{file_name}:{}", idx + 1));
             entries.push(MemoryFileEntry {
-                id: format!("{file_name}:{}", idx + 1),
+                id,
                 path: file_name.to_string(),
                 content: trimmed.to_string(),
             });
