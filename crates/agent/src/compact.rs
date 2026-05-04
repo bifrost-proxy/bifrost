@@ -52,20 +52,16 @@ pub enum CompactionPhase {
     StandaloneTurn,
 }
 
-/// Controls whether compaction replacement history must include initial context.
+/// Controls whether compaction replacement history includes caller-provided
+/// initial context items.
 ///
-/// Pre-turn/manual compaction uses `DoNotInject`: the next regular turn will
-/// reinject initial context (system prompt) naturally via `build_messages()`.
+/// Pre-turn / manual compaction uses `DoNotInject`: the next regular turn will
+/// naturally reinject the system prompt via `build_messages()`.
 ///
-/// Mid-turn compaction uses `BeforeLastUserMessage` to ensure continuity
-/// within the current turn loop.
-///
-/// Currently both variants behave identically since Bifrost's system prompt is
-/// always prepended at `build_messages()` time, not stored in history. This enum
-/// is defined for parity with Codex and future use when initial context injection
-/// is added to the history layer.
+/// Mid-turn compaction uses `BeforeLastUserMessage`: context items are spliced
+/// into the compacted history immediately before the last real user message,
+/// matching Codex's `insert_initial_context_before_last_real_user_or_summary`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum InitialContextInjection {
     /// Inject initial context before the last user message in compacted history.
     BeforeLastUserMessage,
@@ -115,6 +111,7 @@ const COMPACT_HISTORY_MAX_CHARS: usize = 100_000 * 4; // ~100k tokens
 /// 2. Ask the model to create a handoff summary
 /// 3. Preserve recent user messages for continuity
 /// 4. Rebuild history as: [summary_message, ...recent_user_messages]
+#[allow(clippy::too_many_arguments)]
 pub async fn compact_session(
     client: &AgentClient,
     config: &AgentConfig,
@@ -122,6 +119,8 @@ pub async fn compact_session(
     trigger: CompactionTrigger,
     reason: CompactionReason,
     phase: CompactionPhase,
+    initial_context_injection: InitialContextInjection,
+    initial_context: Vec<ChatMessage>,
 ) -> Result<CompactionResult, String> {
     if session.history.len() < 4 {
         return Ok(CompactionResult::skipped("too few messages"));
@@ -139,6 +138,8 @@ pub async fn compact_session(
         trigger = ?trigger,
         reason = ?reason,
         phase = ?phase,
+        initial_context_injection = ?initial_context_injection,
+        initial_context_items = initial_context.len(),
         "starting session compaction"
     );
 
@@ -201,6 +202,17 @@ pub async fn compact_session(
     // Preserve recent user messages for context continuity
     for msg in &recent_user_messages {
         new_history.push(msg.clone());
+    }
+
+    // Mid-turn injection: place caller-provided context before the last real
+    // user message so the model sees instructions after the compaction summary
+    // but before the most recent user turn (matching Codex's pattern).
+    if matches!(
+        initial_context_injection,
+        InitialContextInjection::BeforeLastUserMessage
+    ) && !initial_context.is_empty()
+    {
+        new_history = insert_initial_context_before_last_user_message(new_history, initial_context);
     }
 
     let (new_history, sanitize_report) = history::sanitize_chat_history(&new_history);
@@ -382,6 +394,60 @@ fn collect_recent_user_messages(history: &[ChatMessage], count: usize) -> Vec<Ch
     history[first_idx..].to_vec()
 }
 
+/// Check if a message is a compaction summary (starts with [`SUMMARY_PREFIX`]).
+fn is_summary_message(msg: &ChatMessage) -> bool {
+    msg.content
+        .as_ref()
+        .is_some_and(|c| c.starts_with(SUMMARY_PREFIX))
+}
+
+/// Insert initial context items before the last real user message in
+/// compacted history.
+///
+/// Placement rules (matching Codex's
+/// `insert_initial_context_before_last_real_user_or_summary`):
+/// 1. Prefer immediately before the last real (non-summary) user message.
+/// 2. If no real user messages remain, insert before the compaction summary.
+/// 3. If nothing matches, append the context items.
+pub fn insert_initial_context_before_last_user_message(
+    mut history: Vec<ChatMessage>,
+    initial_context: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    if initial_context.is_empty() {
+        return history;
+    }
+
+    // Scan backwards for the last real user message and the last summary.
+    let mut last_real_user_idx: Option<usize> = None;
+    let mut last_any_user_idx: Option<usize> = None;
+    for (i, m) in history.iter().enumerate().rev() {
+        if m.role == "user" {
+            if last_any_user_idx.is_none() {
+                last_any_user_idx = Some(i);
+            }
+            if !is_summary_message(m) {
+                last_real_user_idx = Some(i);
+                break;
+            }
+        }
+    }
+
+    let insertion_idx = last_real_user_idx.or(last_any_user_idx);
+
+    match insertion_idx {
+        Some(idx) => {
+            // Splice the context items in before the target message.
+            history.splice(idx..idx, initial_context);
+        }
+        None => {
+            // No user messages at all — append context at the end.
+            history.extend(initial_context);
+        }
+    }
+
+    history
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +556,92 @@ mod tests {
         let result = CompactionResult::skipped("too few");
         assert!(!result.performed);
         assert_eq!(result.reason.as_deref(), Some("too few"));
+    }
+
+    #[test]
+    fn test_is_summary_message() {
+        let summary = ChatMessage::user(&format!("{SUMMARY_PREFIX}some summary"));
+        assert!(is_summary_message(&summary));
+
+        let regular = ChatMessage::user("hello");
+        assert!(!is_summary_message(&regular));
+
+        let assistant = ChatMessage::assistant("reply");
+        assert!(!is_summary_message(&assistant));
+    }
+
+    #[test]
+    fn test_insert_initial_context_before_last_real_user_message() {
+        let history = vec![
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}summary text")),
+            ChatMessage::assistant("reply"),
+            ChatMessage::user("recent question"),
+        ];
+        let context = vec![ChatMessage::system("[context reminder]")];
+
+        let result = insert_initial_context_before_last_user_message(history, context);
+
+        // Context should be inserted before "recent question" (last real user message)
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].role, "user"); // summary
+        assert_eq!(result[1].role, "assistant"); // reply
+        assert_eq!(result[2].role, "system"); // injected context
+        assert_eq!(result[3].content.as_deref(), Some("recent question"));
+    }
+
+    #[test]
+    fn test_insert_initial_context_only_summary() {
+        // When only a summary user message exists, insert before it
+        let history = vec![ChatMessage::user(&format!("{SUMMARY_PREFIX}summary"))];
+        let context = vec![ChatMessage::system("[context]")];
+
+        let result = insert_initial_context_before_last_user_message(history, context);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "system"); // injected context
+        assert!(result[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .starts_with(SUMMARY_PREFIX));
+    }
+
+    #[test]
+    fn test_insert_initial_context_empty_context_is_noop() {
+        let history = vec![ChatMessage::user("hello")];
+        let result = insert_initial_context_before_last_user_message(history.clone(), vec![]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_insert_initial_context_no_user_messages() {
+        // When there are no user messages at all, append to the end
+        let history = vec![ChatMessage::assistant("reply")];
+        let context = vec![ChatMessage::system("[context]")];
+
+        let result = insert_initial_context_before_last_user_message(history, context);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "assistant");
+        assert_eq!(result[1].role, "system");
+    }
+
+    #[test]
+    fn test_insert_initial_context_multiple_context_items() {
+        let history = vec![
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}summary")),
+            ChatMessage::user("question"),
+        ];
+        let context = vec![ChatMessage::system("[ctx1]"), ChatMessage::system("[ctx2]")];
+
+        let result = insert_initial_context_before_last_user_message(history, context);
+
+        // Both context items inserted before "question"
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].role, "user"); // summary
+        assert_eq!(result[1].content.as_deref(), Some("[ctx1]"));
+        assert_eq!(result[2].content.as_deref(), Some("[ctx2]"));
+        assert_eq!(result[3].content.as_deref(), Some("question"));
     }
 }

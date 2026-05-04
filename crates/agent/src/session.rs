@@ -864,6 +864,8 @@ pub async fn run_turn_with_mcp(
             compact::CompactionTrigger::Manual,
             compact::CompactionReason::UserRequested,
             compact::CompactionPhase::StandaloneTurn,
+            compact::InitialContextInjection::DoNotInject,
+            vec![],
         )
         .await
         {
@@ -1159,6 +1161,8 @@ pub async fn run_turn_with_mcp(
             compact::CompactionTrigger::Auto,
             compact::CompactionReason::ContextLimit,
             compact::CompactionPhase::PreTurn,
+            compact::InitialContextInjection::DoNotInject,
+            vec![],
         )
         .await
         {
@@ -1305,6 +1309,8 @@ pub async fn run_turn_with_mcp(
                         compact::CompactionTrigger::Auto,
                         compact::CompactionReason::ContextLimit,
                         compact::CompactionPhase::MidTurn,
+                        compact::InitialContextInjection::BeforeLastUserMessage,
+                        build_mid_turn_initial_context(session),
                     )
                     .await
                     {
@@ -1699,6 +1705,8 @@ pub async fn run_turn_with_mcp(
                 compact::CompactionTrigger::Auto,
                 compact::CompactionReason::ContextLimit,
                 compact::CompactionPhase::MidTurn,
+                compact::InitialContextInjection::BeforeLastUserMessage,
+                build_mid_turn_initial_context(session),
             )
             .await
             {
@@ -1827,6 +1835,28 @@ fn truncate_tool_output(output: &str, max_tokens: usize) -> String {
         "Total output lines: {total_lines}\n\n{}\n\n... [{} characters truncated] ...\n\n{}",
         head, removed, tail
     )
+}
+
+/// Build initial context items for mid-turn compaction injection.
+///
+/// Inserted before the last user message in the compacted history via
+/// [`compact::InitialContextInjection::BeforeLastUserMessage`] to preserve
+/// continuity within the turn loop. The full system prompt is already
+/// prepended by `build_messages()` on every model call, so this provides a
+/// lightweight context reminder rather than duplicating the full prompt.
+///
+/// Extend this when the architecture stores initial context in history
+/// (i.e. when system prompt is no longer prepended at `build_messages()` time).
+fn build_mid_turn_initial_context(session: &AgentSession) -> Vec<ChatMessage> {
+    let work_dir = session.work_dir.as_deref().unwrap_or("(default)");
+    vec![ChatMessage::system(&format!(
+        "[Context after mid-turn compaction]\n\
+         Working directory: {work_dir}\n\
+         Session: {source}\n\
+         Compaction #{count} — continue following system instructions.",
+        source = session.source,
+        count = session.compaction_count + 1,
+    ))]
 }
 
 fn current_time_secs() -> u64 {

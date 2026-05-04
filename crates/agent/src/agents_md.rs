@@ -93,14 +93,11 @@ impl AgentsMdManager {
         }
 
         // 3. Project AGENTS.md docs
-        match agents_md_docs {
-            Some(docs) => {
-                if !output.is_empty() {
-                    output.push_str(AGENTS_MD_SEPARATOR);
-                }
-                output.push_str(&docs);
+        if let Some(docs) = agents_md_docs {
+            if !output.is_empty() {
+                output.push_str(AGENTS_MD_SEPARATOR);
             }
-            None => {}
+            output.push_str(&docs);
         }
 
         if output.is_empty() {
