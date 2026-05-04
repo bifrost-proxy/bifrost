@@ -8,7 +8,7 @@ GitHub Actions 的 Linux cross build job 使用 `cross` 构建 `aarch64-unknown-
 
 - 所有 CI cross build step 显式设置 `CROSS_CONTAINER_ENGINE_NO_BUILDKIT=1`。
 - release workflow 的 cross build step 同步设置同一变量，避免发布路径和 PR CI 配置漂移。
-- `Cross.toml` 保持当前 target pre-build 命令不变；本次修复只约束 cross 的宿主容器构建方式，不改变目标容器内依赖安装逻辑。
+- `Cross.toml` 的 `armv7-unknown-linux-gnueabihf` pre-build 在安装 `clang` / `libclang-dev` 前，将 Ubuntu archive/security 源从 HTTP 切换到 HTTPS，并为 `apt-get` 配置 `Acquire::Retries=5`。
 
 ## 依赖项
 
@@ -26,16 +26,17 @@ GitHub Actions 的 Linux cross build job 使用 `cross` 构建 `aarch64-unknown-
 
 - 静态检查 `.github/workflows/ci.yml` 中 4 个 `cross build` step 均设置 `CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"`。
 - 静态检查 `.github/workflows/release.yml` 的 matrix cross build step 设置 `CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"`。
+- 静态检查 `Cross.toml` 的 armv7 pre-build 会重写 HTTP Ubuntu 源为 HTTPS，并使用 `Acquire::Retries=5` 安装 clang 依赖。
 - 推送后通过 GitHub Actions `CI` workflow 验证 `Linux Build (armv7)` 不再在 Docker buildkit 阶段失败。
 
 ### 真实场景测试
 
-- 更新 `human_tests/ci-cross-build.md`，覆盖 PR CI 与 release workflow 的 cross buildkit 禁用配置。
+- 更新 `human_tests/ci-cross-build.md`，覆盖 PR CI 与 release workflow 的 cross buildkit 禁用配置，以及 armv7 容器内 apt HTTPS/retry 配置。
 - 按用例执行静态检查；云端最终结果以 GitHub Actions `CI` run 全绿为准。
 
 ## 校验要求
 
-- `git diff --check -- .github/workflows/ci.yml .github/workflows/release.yml design/ci-cross-build.md human_tests/ci-cross-build.md human_tests/readme.md`
+- `git diff --check -- .github/workflows/ci.yml .github/workflows/release.yml Cross.toml design/ci-cross-build.md human_tests/ci-cross-build.md human_tests/readme.md`
 - GitHub Actions `CI` workflow 全绿。
 
 ## 文档更新要求

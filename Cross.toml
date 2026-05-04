@@ -6,5 +6,5 @@ passthrough = [
 
 [target.armv7-unknown-linux-gnueabihf]
 pre-build = [
-    "apt-get update && apt-get install -y --no-install-recommends clang libclang-dev || (apt-get update && apt-get install -y --fix-missing --no-install-recommends clang libclang-dev)",
+    "set -eux; sed -i -e 's|http://archive.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' -e 's|http://security.archive.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true; apt-get -o Acquire::Retries=5 update; apt-get -o Acquire::Retries=5 install -y --no-install-recommends clang libclang-dev || (apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends clang libclang-dev)",
 ]
