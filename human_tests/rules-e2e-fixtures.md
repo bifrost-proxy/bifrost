@@ -309,6 +309,36 @@
 - `combination/multi_rules.txt` 中 URL 查询参数修改与 body merge 语义互不混淆，全部断言通过。
 - 不使用正式 9900 端口，不修改系统代理。
 
+### TC-REF-11：Rules CI harness 断言逻辑回归
+
+**操作步骤**：
+1. 执行 `test_rules.sh` 语法检查：
+   ```bash
+   bash -n e2e-tests/test_rules.sh
+   ```
+2. 使用 CI 等价入口执行 rules fixture 全量回归，显式指定非 9900 runner 端口和报告目录：
+   ```bash
+   CARGO_BIN=/opt/homebrew/bin/cargo \
+   NODE_BIN=/Users/eden/.local/share/mise/installs/node/22.22.0/bin/node \
+   PNPM_BIN=/Users/eden/.local/share/mise/installs/pnpm/10.30.3/pnpm \
+   BIFROST_UI_TEST_RUNNER_PORT=18082 \
+   BIFROST_E2E_REPORT_DIR=.e2e-reports/rules-local-fix-$(date +%Y%m%d-%H%M%S) \
+   BIFROST_E2E_RULE_JOBS=4 \
+   BIFROST_E2E_RETRY_FAILED_ONCE=1 \
+   BIFROST_E2E_HTTP_RETRIES=2 \
+   bash scripts/ci/local-ci.sh --skip-static --e2e-only rules
+   ```
+3. 检查报告中的 rules 汇总。
+
+**预期结果**：
+- `test_rules.sh` 语法检查通过。
+- `content_inject/html.txt`、`content_inject/js.txt`、`content_inject/css.txt` 会解析 fenced code block 变量后再断言响应体。
+- `control/enable_disable.txt` 的 `lineProps://disabled` 会验证禁用规则值没有生效，而不是报告“验证未实现”。
+- `request_modify/url_params.txt` 与 `combination/multi_rules.txt` 会按真实 query string 验证 urlParams/params，不把空 query 误判为通过或失败。
+- `advanced/speed.txt` 会按限速初始窗口语义计算预期耗时。
+- rules 全量回归输出 `65 通过 / 0 失败`，总断言失败数为 `0`。
+- 测试使用临时数据目录和非 9900 动态端口，代理启动仍包含 `--no-system-proxy`。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -330,3 +360,4 @@
 - 2026-05-01：通过。补充并执行 TC-REF-06，本地执行 `rg -n 'e2e-windows-rules|timeout-minutes: 90|BIFROST_E2E_SUITE_TIMEOUT: "4800"|BIFROST_E2E_RETRY_BUDGET_SECS: "180"' .github/workflows/ci.yml` 与 `sed -n '860,890p' .github/workflows/ci.yml`，确认 Windows rules job timeout 为 90 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 为 4800 秒，普通 retry budget 仍为 180 秒。Windows x86/aarch64 rules 完整完成情况由后续 CI 复跑验证。
 - 2026-05-03：通过。补充并执行 TC-REF-07；在清理旧 mock server 后，先用同一 base port `18180` 执行 `cargo run -p bifrost-e2e -- --test body_resMerge_add_field --test-timeout 120 --port 18180` 通过，确认早先失败是旧 `ws_echo_server.py 24200` 端口占用；随后执行 `cargo run -p bifrost-e2e -- --test binary_performance_mode_skips_binary_recording --test-timeout 120 --port 18180` 通过，并执行 `cargo run -p bifrost-e2e -- --category body_cache --jobs 1 --test-timeout 120 --port 18180`，5/5 通过。回归确认 `start_with_admin`/`start_with_admin_sync` 启动前清理 `bifrost_e2e_test_*` 数据目录，避免同端口聚合重跑读取旧 traffic.db/body cache。
 - 2026-05-04：通过。补充并执行 TC-REF-08、TC-REF-09、TC-REF-10；执行 `bash -n e2e-tests/test_rules.sh` 通过，执行 `cargo test -p bifrost-proxy utils::url -- --nocapture` 通过，执行 `cargo test -p bifrost-cli test_url_params -- --nocapture` 通过。使用 release 二进制、临时数据目录和非 9900 端口逐个执行 CI 失败清单：`content_inject/html.txt` 8/8、`content_inject/js.txt` 8/8、`content_inject/css.txt` 8/8、`control/enable_disable.txt` 6/6、`advanced/content_type.txt` 8/8、`request_modify/url_params.txt` 12/12、`advanced/speed.txt` 6/6、`template/values.txt` 38/38、`combination/multi_rules.txt` 19/19，全部失败数为 0。确认 tunnel 请求侧规则为功能缺口并已修复；html/js/css、lineProps disabled、speed、部分 URL fixture 断言为测试夹具/预期问题并已修正；`urlParams://key1=value1&key2=value2` 为解析功能缺口并已补齐。
+- 2026-05-04：通过。补充并执行 TC-REF-11；先执行 `bash -n e2e-tests/test_rules.sh` 通过，随后执行 `CARGO_BIN=/opt/homebrew/bin/cargo NODE_BIN=/Users/eden/.local/share/mise/installs/node/22.22.0/bin/node PNPM_BIN=/Users/eden/.local/share/mise/installs/pnpm/10.30.3/pnpm BIFROST_UI_TEST_RUNNER_PORT=18083 BIFROST_E2E_REPORT_DIR=.e2e-reports/rules-human-ref11-20260504-222436 BIFROST_E2E_RULE_JOBS=4 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_HTTP_RETRIES=2 bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`。runner 使用动态共享 mock 端口（HTTP 57607、HTTPS 57608、WS 57609、WSS 57610、SSE 57611、Proxy 57612），代理起始端口 19678，未使用 9900；rules 全量回归 65/65 套件通过，573/573 断言通过，失败数 0，确认 CI harness 对 fenced code block 注入、lineProps disabled、urlParams/urlReplace、speed 初始窗口的断言逻辑恢复正确。
