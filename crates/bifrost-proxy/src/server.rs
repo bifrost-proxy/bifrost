@@ -27,7 +27,7 @@ use hyper::HeaderMap;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{oneshot, RwLock, Semaphore};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tracing::{debug, error, info, warn};
 
@@ -748,6 +748,14 @@ impl ProxyServer {
     }
 
     pub async fn run_with_listener(&self, listener: TcpListener) -> Result<()> {
+        self.run_with_listener_ready(listener, None).await
+    }
+
+    pub async fn run_with_listener_ready(
+        &self,
+        listener: TcpListener,
+        ready_tx: Option<oneshot::Sender<()>>,
+    ) -> Result<()> {
         let addr = listener
             .local_addr()
             .map_err(|e| BifrostError::Network(format!("Failed to get listener address: {}", e)))?;
@@ -772,6 +780,10 @@ impl ProxyServer {
             );
         } else {
             info!("Proxy server listening on {} (HTTP/HTTPS only)", addr);
+        }
+
+        if let Some(ready_tx) = ready_tx {
+            let _ = ready_tx.send(());
         }
 
         if let Some(socks5_port) = self.config.socks5_port {

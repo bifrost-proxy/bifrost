@@ -3,7 +3,7 @@
 use crate::config::AgentConfig;
 use crate::types::{ChatMessage, ModelResponse, TokenUsage, ToolCallMessage, ToolDefinition};
 use bifrost_core::text::truncate_bytes_with_suffix;
-use tracing::{debug, info};
+use tracing::info;
 
 /// HTTP client that calls a Chat Completions endpoint with tool support.
 /// HTTP client that calls a Chat Completions endpoint with tool support.
@@ -56,11 +56,14 @@ impl AgentClient {
             body["reasoning_summary"] = serde_json::json!(summary);
         }
 
-        debug!(
+        info!(
             url = %url,
             model = %effective.model,
             message_count = messages.len(),
             tool_count = tools.len(),
+            api_key_len = effective.api_key.len(),
+            extra_headers_count = effective.extra_headers.len(),
+            use_azure_auth = effective.use_azure_auth,
             "sending chat completion request"
         );
 
@@ -83,11 +86,24 @@ impl AgentClient {
         }
 
         // Send & parse
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        let response = request.json(&body).send().await.map_err(|e| {
+            // Unfold the reqwest error source chain so operators can see the
+            // underlying cause (TLS handshake, DNS resolve, connect refused,
+            // etc.) instead of the generic top-level message.
+            let mut chain = format!("HTTP request failed: {e}");
+            let mut src: &dyn std::error::Error = &e;
+            let mut i = 0usize;
+            while let Some(next) = src.source() {
+                use std::fmt::Write as _;
+                let _ = write!(chain, " | cause[{i}]: {next}");
+                src = next;
+                i += 1;
+                if i >= 8 {
+                    break;
+                }
+            }
+            chain
+        })?;
 
         let status = response.status();
         if !status.is_success() {

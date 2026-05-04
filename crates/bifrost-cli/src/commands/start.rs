@@ -413,10 +413,21 @@ async fn spawn_managed_proxy_task(
         .with_rules(rules)
         .with_push_manager(push_manager);
     let listener = server.bind(addr).await?;
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-    Ok(tokio::spawn(async move {
-        server.run_with_listener(listener).await
-    }))
+    let task = tokio::spawn(async move {
+        server
+            .run_with_listener_ready(listener, Some(ready_tx))
+            .await
+    });
+
+    match ready_rx.await {
+        Ok(()) => Ok(task),
+        Err(_) => {
+            let result = task.await;
+            Err(listener_task_error(result))
+        }
+    }
 }
 
 fn listener_task_error(

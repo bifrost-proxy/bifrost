@@ -589,6 +589,9 @@ PY
 - `foreground.log` 包含同端口 UDP bind 失败相关错误，例如 `Address already in use`。
 - Admin API 请求失败，端口不会呈现半启动状态。
 
+**执行记录**：
+- 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，先占用同端口 UDP 后启动前台服务；断言前台进程退出、Admin API 不可达、日志包含 `Address already in use`，全部通过。
+
 ---
 
 ### TC-CSS-27：daemon 启动必须等待 listener 真正 ready（回归）
@@ -624,6 +627,9 @@ PY
 - 输出包含 listener readiness 失败提示，例如 `before the proxy listener became ready`。
 - 输出不包含 `Daemon started with PID`。
 - Admin API 请求失败，不会出现父进程提前报告 daemon 已启动但端口未监听的状态。
+
+**执行记录**：
+- 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，占用同端口 UDP 后执行 daemon 启动；断言命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，全部通过。脚本汇总 `8/8` 断言通过。
 
 ---
 

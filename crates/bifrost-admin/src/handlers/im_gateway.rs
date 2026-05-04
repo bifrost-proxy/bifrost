@@ -823,12 +823,14 @@ async fn run_event_loop(
                             handle_busy_message(
                                 &msg.text,
                                 &session_key,
-                                &queue_manager,
-                                &feishu,
-                                &provider,
-                                &event,
-                                &message_log_store,
-                                &agent_session_manager,
+                                BusyMessageContext {
+                                    queue_manager: &queue_manager,
+                                    feishu: &feishu,
+                                    provider: &provider,
+                                    event: &event,
+                                    message_log_store: &message_log_store,
+                                    agent_session_manager: &agent_session_manager,
+                                },
                             )
                             .await;
                             continue;
@@ -907,12 +909,14 @@ async fn run_event_loop(
                     handle_busy_message(
                         message_text,
                         &session_key,
-                        &queue_manager,
-                        &feishu,
-                        &provider,
-                        &event,
-                        &message_log_store,
-                        &agent_session_manager,
+                        BusyMessageContext {
+                            queue_manager: &queue_manager,
+                            feishu: &feishu,
+                            provider: &provider,
+                            event: &event,
+                            message_log_store: &message_log_store,
+                            agent_session_manager: &agent_session_manager,
+                        },
                     )
                     .await;
                     continue;
@@ -966,16 +970,22 @@ async fn run_event_loop(
 /// - `/q <text>`: push message to FIFO queue, reply with queue status
 /// - `/rq <N>`: remove queued message #N, reply with updated queue status
 /// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
-async fn handle_busy_message(
-    msg_text: &str,
-    session_key: &str,
-    queue_manager: &Arc<SessionQueueManager>,
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
-    provider: &ImProviderConfig,
-    event: &ImEvent,
-    message_log_store: &Arc<ImMessageLogStore>,
-    agent_session_manager: &Arc<ImAgentSessionManager>,
-) {
+struct BusyMessageContext<'a> {
+    queue_manager: &'a Arc<SessionQueueManager>,
+    feishu: &'a Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &'a ImProviderConfig,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    agent_session_manager: &'a Arc<ImAgentSessionManager>,
+}
+
+async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessageContext<'_>) {
+    let queue_manager = ctx.queue_manager;
+    let feishu = ctx.feishu;
+    let provider = ctx.provider;
+    let event = ctx.event;
+    let message_log_store = ctx.message_log_store;
+    let agent_session_manager = ctx.agent_session_manager;
     let trimmed = msg_text.trim();
 
     // /status — show session status or busy indicator
@@ -1309,12 +1319,14 @@ async fn handle_concurrent_event_during_chat(
         handle_busy_message(
             msg_text,
             session_key,
-            queue_manager,
-            feishu,
-            provider,
-            event,
-            message_log_store,
-            agent_session_manager,
+            BusyMessageContext {
+                queue_manager,
+                feishu,
+                provider,
+                event,
+                message_log_store,
+                agent_session_manager,
+            },
         )
         .await;
     } else {
@@ -1323,12 +1335,14 @@ async fn handle_concurrent_event_during_chat(
             handle_busy_message(
                 msg_text,
                 session_key,
-                queue_manager,
-                feishu,
-                provider,
-                event,
-                message_log_store,
-                agent_session_manager,
+                BusyMessageContext {
+                    queue_manager,
+                    feishu,
+                    provider,
+                    event,
+                    message_log_store,
+                    agent_session_manager,
+                },
             )
             .await;
         } else {

@@ -168,6 +168,9 @@
 - 日志目录下存在 `bifrost*.log` 文件（daemon 模式默认写文件）
 - 终端输出 `PASS: log file created`
 
+**执行记录**：
+- 2026-05-04 执行 `bash e2e-tests/tests/test_daemon_log_level_e2e.sh` 补充验证 daemon 启动 readiness 后 Admin API 可达、代理请求成功、日志文件包含结构化 tracing 行，脚本汇总 `3/3` 断言通过。
+
 ---
 
 ## 清理步骤
