@@ -367,6 +367,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-aarch64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
 
   build-linux-armv7:
@@ -395,6 +396,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-armv7
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
   build-linux-musl-x86:
@@ -423,6 +425,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-x86_64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl
 
   build-linux-musl-aarch64:
@@ -451,6 +454,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-aarch64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-musl
 
   build-cli-macos-aarch64:

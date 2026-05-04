@@ -127,6 +127,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 3 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，避免 armv7 runner 缺少 buildx/buildkit 时失败，并由远端 CI 验证 |
 | [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 18 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片耗时 <5min、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、unsafe_ssl 自带 HTTPS mock fixture 回归、并行 shell 调度器全 PASS 后返回 0 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、remote relay fallback 预构建 binary 复用回归 |
 | [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 4 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E |
 | [skill-loading-e2e.md](./skill-loading-e2e.md) | Skill Loading E2E 一致性 | 11 | 4 scope 加载可见性、优先级覆盖、启用/停用一致性（管理端→消费端）、prompt 注入、slash 命令解析、default_roots 路径对齐、隐藏目录过滤、嵌套发现、单元测试回归 |
