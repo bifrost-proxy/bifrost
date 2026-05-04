@@ -19,7 +19,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - `test_unsafe_ssl_e2e.sh` 不依赖外部共享 HTTPS mock fixture。脚本在当前 `HTTPS_MOCK_PORT` 不可用时自行启动 `e2e-tests/mock_servers/https_echo_server.py`，创建 `unsafe-ssl-fixture.test https://127.0.0.1:<HTTPS_MOCK_PORT>` 转发规则，等待端口就绪后执行 unsafe_ssl false/true/false 三段真实代理请求，并在 EXIT trap 中保留原始退出码后清理自有 mock、规则与 Bifrost。该脚本通过 `ADMIN_CLIENT_START_UNSAFE_SSL=0` 让通用 admin helper 以安全默认启动，避免 CLI 启动参数 `--unsafe-ssl` 掩盖动态配置切换。
 - `admin_client.sh` 复用已有管理端前必须请求 `/api/auth/status` 并校验返回体是 Bifrost 管理端鉴权状态 JSON。CI 并行端口碰撞时，不能把其它本机服务的 200/404 响应误判为已启动的 Bifrost，否则后续规则 API 会命中错误服务。
 - `run_shell_tests_parallel` / `run_shell_batch_parallel` 在所有并行 shell 子用例完成后必须显式 `return 0`。Bash 函数默认返回最后一条命令的状态；如果最后一次循环中 `[[ $running -gt 0 ]]` 为 false，函数会返回 1，在 `set -e` 下导致 CI step 在所有子用例 PASS 后仍失败。
-- `test_replay_rules.sh` 的 SSE replay 长连接回归使用 5s `timeout_ms` 与 8s 存活断言。该用例验证 replay 不会把 `timeout_ms` 当作 SSE body 总时长限制，同时避开 GitHub Actions Linux runner 上曾出现的 10s 客户端连接边界噪声。
+- `test_replay_rules.sh` 的 SSE replay 长连接回归使用 5s `timeout_ms`，并断言收到 `id>=12` 的超时边界后事件。该用例验证 replay 不会把 `timeout_ms` 当作 SSE body 总时长限制，同时允许 GitHub Actions runner 在边界之后提前关闭客户端连接，避免把外部连接噪声误判为功能失败。
 - `test_long_term_memory_human_api.sh` 构建 Bifrost 时设置 `SKIP_FRONTEND_BUILD=1`，避免多个 shell E2E 并行触发 `pnpm build` 重写 `web/dist`，导致 `rust_embed` 在编译时读到临时缺失的 frontend 产物。
 - `test_remote_relay_url_fallback_e2e.sh` 尊重外层 `SKIP_BUILD=true` 与已有 `BIFROST_BIN`。CI shell 入口已经预构建 release binary，单个用例不能再次无条件 release build，否则会在并行 CI 中长时间卡住并超时。
 
@@ -50,14 +50,14 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - 运行 `HTTPS_MOCK_PORT=<空闲端口> PROXY_PORT=<空闲端口> ADMIN_PORT=<同代理端口> BIFROST_DATA_DIR=<临时目录> bash e2e-tests/tests/test_unsafe_ssl_e2e.sh`，断言脚本自行启动 HTTPS mock，unsafe_ssl 动态切换相关 5 个用例全部通过。
 - 运行 `bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 并通过本机非 Bifrost HTTP 服务占用目标端口，断言 `admin_ensure_bifrost` 不会复用错误服务。
 - 运行 `bash -n scripts/run_all_e2e.sh` 并检查 `run_shell_tests_parallel` / `run_shell_batch_parallel` 末尾存在显式 `return 0`，断言并行 shell 调度器不会在全部子用例通过后把空闲轮询条件的 false 状态传播为 suite 失败。
-- 运行 `PROXY_PORT=<空闲端口> MOCK_HTTP_PORT=<空闲端口> MOCK_SSE_PORT=<空闲端口> MOCK_WS_PORT=<空闲端口> BIFROST_DATA_DIR=<临时目录> SERVER_LOG_DIR=<临时目录> SKIP_BUILD=true bash e2e-tests/tests/test_replay_rules.sh`，断言 `SSE Replay with Rules` 在 `timeout_ms=5000` 后仍保持连接并收到 connection/applied_rules。
+- 运行 `PROXY_PORT=<空闲端口> MOCK_HTTP_PORT=<空闲端口> MOCK_SSE_PORT=<空闲端口> MOCK_WS_PORT=<空闲端口> BIFROST_DATA_DIR=<临时目录> SERVER_LOG_DIR=<临时目录> SKIP_BUILD=true bash e2e-tests/tests/test_replay_rules.sh`，断言 `SSE Replay with Rules` 收到 connection/applied_rules，并收到 `id>=12` 的 post-timeout SSE 事件。
 - 运行 `bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 并检查构建命令包含 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，断言该用例不再参与并行 frontend build。
 - 运行 `SKIP_BUILD=true BIFROST_BIN=<已有 release bifrost> bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，断言脚本输出 `Using existing bifrost binary` 且三段 relay fallback 断言全部通过。
 
 ### 真实场景测试
 
-- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、SSE replay timeout 边界回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归，以及 remote relay fallback 跳过重复 release build 回归。
-- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后仍保持连接，long-term memory 用例跳过 frontend build，remote relay fallback 在预构建 binary 存在时不再重复 build。
+- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归，以及 remote relay fallback 跳过重复 release build 回归。
+- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后收到 post-timeout 事件，long-term memory 用例跳过 frontend build，remote relay fallback 在预构建 binary 存在时不再重复 build。
 
 ## 校验要求
 

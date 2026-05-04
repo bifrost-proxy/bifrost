@@ -182,9 +182,9 @@
    ```bash
    bash -n e2e-tests/tests/test_replay_rules.sh
    ```
-2. 检查 SSE replay 回归用例使用 5s timeout 边界和 8s 存活断言：
+2. 检查 SSE replay 回归用例使用 5s timeout 边界和 post-timeout 事件断言：
    ```bash
-   rg -n 'sse/custom\\?count=20&interval=0\\.5|\"timeout_ms\":5000|>=8s alive|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh
+   rg -n 'sse/custom\\?count=20&interval=0\\.5|\"timeout_ms\":5000|id>=12|post-timeout event|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh
    ```
 3. 使用隔离端口与临时数据目录执行 replay rules E2E：
    ```bash
@@ -199,8 +199,8 @@
 
 **预期结果**：
 - 脚本语法检查通过。
-- 第 2 步能定位到 `sse/custom?count=20&interval=0.5`、`"timeout_ms":5000`、`>=8s alive` 与 `kept alive beyond timeout_ms`。
-- `SSE Replay with Rules` 用例输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`。
+- 第 2 步能定位到 `sse/custom?count=20&interval=0.5`、`"timeout_ms":5000`、`id>=12`、`post-timeout event` 与 `kept alive beyond timeout_ms`。
+- `SSE Replay with Rules` 用例输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，或在 macOS CI 边界噪声下输出 `SSE Replay: received post-timeout event before client disconnect`。
 - `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
 - 测试端口不使用 9900，测试数据写入临时目录。
 
@@ -300,6 +300,35 @@
 - 三段 relay 选择断言全部通过，输出 `All remote relay URL fallback assertions passed.`。
 - 测试端口动态分配，不使用 9900，测试数据写入临时目录并在退出时清理。
 
+### TC-CS-18: macOS CI SSE replay post-timeout 连接噪声回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_replay_rules.sh
+   ```
+2. 检查 `test_replay_rules.sh` 在 curl 进程提前退出时会先识别 post-timeout SSE 事件：
+   ```bash
+   rg -n 'received post-timeout event before client disconnect|\"id\":\"\\(1\\[2-9\\]\\|\\[2-9\\]\\[0-9\\]\\+\\)\"|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh
+   ```
+3. 使用隔离端口与临时数据目录执行 replay rules E2E：
+   ```bash
+   TEST_ROOT="$(mktemp -d /tmp/bifrost-replay-ci-noise-human.XXXXXX)"
+   PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 \
+     BIFROST_DATA_DIR="$TEST_ROOT/data" \
+     SERVER_LOG_DIR="$TEST_ROOT/logs" \
+     SKIP_BUILD=true \
+     BIFROST_E2E_REPORT_DIR="$TEST_ROOT/reports" \
+     bash e2e-tests/tests/test_replay_rules.sh
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 第 2 步能定位到 post-timeout 事件兜底断言和失败提示。
+- `SSE Replay with Rules` 不要求连接固定存活到 8s；只要已经收到 `id>=12` 的 timeout 边界后事件，就证明 replay 没有在 `timeout_ms=5000` 截断 SSE body。
+- `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
+- 测试端口不使用 9900，测试数据写入临时目录。
+
 ## 本轮执行记录
 
 测试日期：2026-04-30
@@ -314,6 +343,7 @@
 | TC-CS-15 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 通过；`rg -n 'admin_probe_existing_bifrost\|admin_is_bifrost_admin_response\|/api/auth/status\|Bifrost admin API not available' e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 显示管理端响应结构校验逻辑。随后启动非 Bifrost HTTP 服务占用 `127.0.0.1:18885`，服务对 `/_bifrost/api/auth/status` 返回 OpenAI-like JSON，执行 `ADMIN_PORT=18885 ADMIN_HOST=127.0.0.1 ADMIN_PATH_PREFIX=/_bifrost bash -c 'source e2e-tests/test_utils/admin_client.sh; if admin_probe_existing_bifrost; then exit 1; else exit 0; fi'` 退出码 0，确认 helper 不会误复用错误服务。最后使用 `PROXY_PORT=18886 ADMIN_PORT=18886 HTTPS_MOCK_PORT=18887 BIFROST_DATA_DIR=<临时目录>/data SERVER_LOG_DIR=<临时目录>/logs SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行完整 unsafe_ssl 场景，输出 `Created unsafe_ssl forwarding rule to https://127.0.0.1:18887` 和 `Results: 5/5 passed`，退出码 0；全程未使用 9900。 |
 | TC-CS-16 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 通过；`rg -n 'SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' e2e-tests/tests/test_long_term_memory_human_api.sh` 定位到构建命令。随后执行 `BIFROST_PORT=18888 MOCK_PORT=18889 bash e2e-tests/tests/test_long_term_memory_human_api.sh`，构建日志显示 `Skipping frontend build (SKIP_FRONTEND_BUILD is set)`，脚本完成三段独立 session 写入/读取长期记忆并输出 `[long-term-memory-human-api] PASS`，退出码 0；确认该用例在 CI 并行执行时不触发 frontend build。 |
 | TC-CS-17 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 通过；`rg -n 'SKIP_BUILD\|BIFROST_BIN\|Using existing bifrost binary\|SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost' e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 显示复用已有 binary 的分支和 fallback build 命令。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，输出 `Using existing bifrost binary: /Users/eden/work/github/bifrost/target/release/bifrost`，未输出 `Build bifrost (release)...`，三段 relay 选择断言全部通过并输出 `All remote relay URL fallback assertions passed.`；测试端口动态分配，未使用 9900。 |
+| TC-CS-18 | 通过 | 2026-05-04 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'received post-timeout event before client disconnect\|"id":"\(1\[2-9\]\|\[2-9\]\[0-9\]\+\)"\|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh` 定位到 post-timeout 事件兜底断言和失败提示。随后执行 `PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 BIFROST_DATA_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/data SERVER_LOG_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/logs SKIP_BUILD=true BIFROST_E2E_REPORT_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/reports bash e2e-tests/tests/test_replay_rules.sh`，输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；测试端口 18891-18894，未使用 9900。 |
 
 ## 清理步骤
 

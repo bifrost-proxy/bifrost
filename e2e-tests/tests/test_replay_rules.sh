@@ -602,6 +602,12 @@ EOF
     # 等待超过 timeout_ms，如果此时连接被错误断开（历史问题），curl 会提前退出
     sleep 6
     if ! kill -0 "$curl_pid" 2>/dev/null; then
+        if grep -Eq '"id":"(1[2-9]|[2-9][0-9]+)"' "$out_file"; then
+            _log_pass "SSE Replay: received post-timeout event before client disconnect"
+            passed=$((passed + 1))
+            return
+        fi
+
         _log_fail "SSE Replay: stream was disconnected (timeout?)" ">=8s alive" "exited"
         echo "--- curl stderr ---" >&2
         tail -20 "$err_file" >&2 || true
@@ -617,11 +623,11 @@ EOF
         return
     fi
 
-    if grep -q '"type_":"connection"' "$out_file" && grep -q '"applied_rules":' "$out_file"; then
+    if grep -q '"type_":"connection"' "$out_file" && grep -q '"applied_rules":' "$out_file" && grep -Eq '"id":"(1[2-9]|[2-9][0-9]+)"' "$out_file"; then
         _log_pass "SSE Replay: connection event received and stream kept alive beyond timeout_ms"
         passed=$((passed + 1))
     else
-        _log_fail "SSE Replay: missing connection/applied_rules" "connection + applied_rules" "not found"
+        _log_fail "SSE Replay: missing connection/applied_rules/post-timeout event" "connection + applied_rules + id>=12" "not found"
         echo "--- curl stdout ---" >&2
         tail -40 "$out_file" >&2 || true
         failed=$((failed + 1))
