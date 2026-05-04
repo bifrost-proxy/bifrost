@@ -205,6 +205,43 @@ pub struct McpServerConfig {
     pub enabled_tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_tools: Option<Vec<String>>,
+
+    // Enhanced fields (Codex-compatible)
+    /// Whether this server is required (startup failure is an error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    /// Whether this server supports parallel tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_parallel_tool_calls: Option<bool>,
+    /// Default approval mode for tools from this server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tools_approval_mode: Option<String>,
+    /// OAuth scopes to request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    /// OAuth resource identifier (RFC 8707).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_resource: Option<String>,
+    /// Custom HTTP headers for HTTP transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_headers: Option<HashMap<String, String>>,
+    /// HTTP headers where values are sourced from environment variables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_http_headers: Option<HashMap<String, String>>,
+    /// Per-tool configuration overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<HashMap<String, ToolConfig>>,
+}
+
+/// Per-tool configuration override for MCP servers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    /// Approval mode for this tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    /// Whether this tool is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -551,8 +588,16 @@ impl AgentConfig {
             base_url,
             api_key,
             max_completion_tokens: self.get_max_completion_tokens(),
-            reasoning_effort: self.model_reasoning_effort.clone(),
-            reasoning_summary: self.model_reasoning_summary.clone(),
+            reasoning_effort: self
+                .model_reasoning_effort
+                .as_deref()
+                .filter(|v| !v.eq_ignore_ascii_case("none"))
+                .map(String::from),
+            reasoning_summary: self
+                .model_reasoning_summary
+                .as_deref()
+                .filter(|v| !v.eq_ignore_ascii_case("none"))
+                .map(String::from),
             request_timeout_secs: self.get_request_timeout_secs(),
             extra_headers,
             use_azure_auth,

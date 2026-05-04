@@ -1088,8 +1088,9 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
     // Other builtin commands that need session state — defer until session is free
     if matches!(
         trimmed,
-        "/clear" | "/reset" | "/undo" | "/compact" | "/resume" | "/skill"
+        "/clear" | "/reset" | "/undo" | "/compact" | "/resume" | "/goal" | "/skill"
     ) || trimmed.starts_with("/undo ")
+        || trimmed.starts_with("/goal ")
         || trimmed.starts_with("/skill ")
     {
         let reply = format!(

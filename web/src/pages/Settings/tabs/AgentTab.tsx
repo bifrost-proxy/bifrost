@@ -466,11 +466,11 @@ export default function AgentTab() {
                     onChange={(val) =>
                       handleSelectChange("model_reasoning_effort", val)
                     }
-                    allowClear
                     placeholder="Select"
                     style={{ width: 140 }}
                     size="small"
                     options={[
+                      { label: "None (disabled)", value: "none" },
                       { label: "Low", value: "low" },
                       { label: "Medium", value: "medium" },
                       { label: "High", value: "high" },
@@ -491,11 +491,11 @@ export default function AgentTab() {
                     onChange={(val) =>
                       handleSelectChange("model_reasoning_summary", val)
                     }
-                    allowClear
                     placeholder="Select"
                     style={{ width: 140 }}
                     size="small"
                     options={[
+                      { label: "None (disabled)", value: "none" },
                       { label: "Auto", value: "auto" },
                       { label: "Concise", value: "concise" },
                       { label: "Detailed", value: "detailed" },

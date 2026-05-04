@@ -14,6 +14,7 @@ pub enum BuiltinCommand {
     Remember,
     Memories,
     Forget,
+    Goal,
     Skill,
 }
 
@@ -74,6 +75,7 @@ impl SlashCommandRouter {
         router.register_builtin("/remember", BuiltinCommand::Remember);
         router.register_builtin("/memories", BuiltinCommand::Memories);
         router.register_builtin("/forget", BuiltinCommand::Forget);
+        router.register_builtin("/goal", BuiltinCommand::Goal);
         router.register_builtin("/skill", BuiltinCommand::Skill);
         router
     }
@@ -185,6 +187,9 @@ fn builtin_description(cmd: &BuiltinCommand) -> &'static str {
         BuiltinCommand::Remember => "保存一条长期记忆，用法: /remember <text>",
         BuiltinCommand::Memories => "列出当前可见的所有长期记忆",
         BuiltinCommand::Forget => "删除一条长期记忆，用法: /forget <id|last>",
+        BuiltinCommand::Goal => {
+            "管理当前目标，用法: /goal [show|set <objective>|set --budget N <objective>|complete]"
+        }
         BuiltinCommand::Skill => "启动 Skill Creator，创建或编辑 skill",
     }
 }
@@ -264,6 +269,7 @@ mod tests {
         assert!(text.contains("/remember"));
         assert!(text.contains("/memories"));
         assert!(text.contains("/forget"));
+        assert!(text.contains("/goal"));
         assert!(text.contains("/skill"));
     }
 

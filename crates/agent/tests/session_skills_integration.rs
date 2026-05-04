@@ -32,3 +32,21 @@ async fn new_with_work_dir_attaches_skill_registry_for_skill_list() {
     assert!(result.response.contains("Skill 命令:"));
     assert!(result.response.contains("/weather"));
 }
+
+#[tokio::test]
+async fn goal_slash_command_runs_through_session_router() {
+    let mut session = AgentSession::new("goal-session");
+    let result = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session,
+        &ToolRegistry::with_defaults(1),
+        "/goal set --budget 128 finish the p1 work",
+        None,
+    )
+    .await
+    .expect("run turn");
+
+    assert!(result.response.contains("finish the p1 work"));
+    assert!(result.response.contains("\"active\""));
+}

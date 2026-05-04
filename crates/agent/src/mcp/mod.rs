@@ -31,6 +31,13 @@
 //! - Input schemas are sanity-checked; invalid schemas degrade to
 //!   `{"type":"object"}` so a misbehaving server cannot brick a whole turn.
 
+pub mod approval;
+pub mod elicitation;
+pub mod oauth;
+pub mod resources;
+pub mod session;
+pub mod types;
+
 use crate::config::McpServerConfig;
 use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
 use futures::future::join_all;
@@ -1243,6 +1250,14 @@ mod tests {
                     tool_timeout_sec: None,
                     enabled_tools: None,
                     disabled_tools: None,
+                    required: None,
+                    supports_parallel_tool_calls: None,
+                    default_tools_approval_mode: None,
+                    scopes: None,
+                    oauth_resource: None,
+                    http_headers: None,
+                    env_http_headers: None,
+                    tools: None,
                 },
             );
             let manager = McpManager::new(&configs).await;
@@ -1316,6 +1331,14 @@ mod tests {
                     tool_timeout_sec: Some(1),
                     enabled_tools: None,
                     disabled_tools: None,
+                    required: None,
+                    supports_parallel_tool_calls: None,
+                    default_tools_approval_mode: None,
+                    scopes: None,
+                    oauth_resource: None,
+                    http_headers: None,
+                    env_http_headers: None,
+                    tools: None,
                 },
             );
             let manager = McpManager::new(&configs).await;

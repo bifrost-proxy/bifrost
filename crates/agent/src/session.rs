@@ -1016,6 +1016,31 @@ pub async fn run_turn_with_mcp(
         });
     }
 
+    if let Dispatch::Builtin {
+        command: BuiltinCommand::Goal,
+        ref args,
+    } = slash_dispatch
+    {
+        if let Some(ref mut rec) = recorder {
+            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                warn!(error = %e, "failed to record user message");
+            }
+        }
+        let work_dir = session
+            .work_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.resolve_work_dir());
+        let response = handle_goal_command(args, tools, &work_dir).await;
+        return Ok(TurnResult {
+            response,
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+            title_updated: None,
+            plan_steps: None,
+        });
+    }
+
     // /status — show session state (token usage, compaction count, etc.)
     if matches!(
         slash_dispatch,
@@ -1750,6 +1775,64 @@ pub async fn run_turn_with_mcp(
         "agent turn exceeded max iterations"
     );
     Err(format!("exceeded maximum iterations ({max_iterations})"))
+}
+
+async fn handle_goal_command(
+    args: &str,
+    tools: &ToolRegistry,
+    work_dir: &std::path::Path,
+) -> String {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "show" || trimmed == "status" {
+        return tools.execute("get_goal", "{}", work_dir).await.output;
+    }
+
+    if trimmed == "complete" {
+        return tools
+            .execute("update_goal", r#"{"status":"complete"}"#, work_dir)
+            .await
+            .output;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("set ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return "用法: /goal [show|set <objective>|set --budget N <objective>|complete]"
+                .to_string();
+        }
+
+        let (token_budget, objective) = if let Some(without_flag) = rest.strip_prefix("--budget ") {
+            let without_flag = without_flag.trim();
+            let Some((budget, objective)) = without_flag.split_once(char::is_whitespace) else {
+                return "用法: /goal set --budget <N> <objective>".to_string();
+            };
+            let Ok(token_budget) = budget.parse::<u64>() else {
+                return "goal budget 必须是正整数。".to_string();
+            };
+            (Some(token_budget), objective.trim())
+        } else {
+            (None, rest)
+        };
+
+        if objective.is_empty() {
+            return "goal objective 不能为空。".to_string();
+        }
+
+        return tools
+            .execute(
+                "create_goal",
+                &serde_json::json!({
+                    "objective": objective,
+                    "token_budget": token_budget,
+                })
+                .to_string(),
+                work_dir,
+            )
+            .await
+            .output;
+    }
+
+    "用法: /goal [show|set <objective>|set --budget N <objective>|complete]".to_string()
 }
 
 // ---------------------------------------------------------------------------

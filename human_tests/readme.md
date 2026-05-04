@@ -148,15 +148,22 @@
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 9 | SessionQueueManager 单元测试（11项）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
 | [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
+| [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 5 | `/goal` 显式入口、Goal 生命周期、Codex 风格 `apply_patch`、raw patch body 兼容、PTY 会话复用与交互输入、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
 | [agent-loop-timeouts.md](./agent-loop-timeouts.md) | Agent Loop Runtime Limits | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证默认 600 秒级超时、1000 次迭代上限，以及 35+ 次工具调用不会在 30 次时提前中断 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
 | [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
 | [agent-skills-admin-cli.md](./agent-skills-admin-cli.md) | Agent Skills Admin and CLI | 3 | Skill import multipart/bytes 接口、AgentSkillError 错误码分层、IM CLI secret 缺失错误 |
 
+### Agent MCP 协议模块测试
+
+| 文件 | 功能模块 | 测试用例数 | 说明 |
+|------|---------|-----------|------|
+| [mcp-elicitation-resources.md](./mcp-elicitation-resources.md) | MCP Elicitation 与 Resources 协议 | 11 | 类型序列化、策略判断、Handler 行为、PauseState RAII、工具定义、trait 解耦、缓存行为、错误处理 |
+
 ---
 
-**总计：83 个测试文件，1518 个测试用例**
+**总计：85 个测试文件，1534 个测试用例**
 
 ## 工作流程
 

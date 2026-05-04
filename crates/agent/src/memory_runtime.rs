@@ -22,11 +22,17 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 const MEMORY_SUMMARY_TOKEN_LIMIT_CHARS: usize = 24_000;
-const MEMORY_EXTRACT_USER_LIMIT_CHARS: usize = 6_000;
-const MEMORY_EXTRACT_ASSISTANT_LIMIT_CHARS: usize = 6_000;
-const MEMORY_CONSOLIDATION_INPUT_LIMIT_CHARS: usize = 60_000;
 const DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 512;
 const AUTO_MEMORY_MAX_ITEMS: usize = 8;
+
+/// Approximate bytes per token, aligned with Codex `APPROX_BYTES_PER_TOKEN = 4`.
+const APPROX_BYTES_PER_TOKEN: usize = 4;
+/// Approximate token budget for Phase 1 user message input (~1500 tokens ≈ 6000 bytes).
+const MEMORY_EXTRACT_USER_LIMIT_TOKENS: usize = 1_500;
+/// Approximate token budget for Phase 1 assistant message input (~1500 tokens ≈ 6000 bytes).
+const MEMORY_EXTRACT_ASSISTANT_LIMIT_TOKENS: usize = 1_500;
+/// Approximate token budget for Phase 2 consolidation input (~15000 tokens ≈ 60000 bytes).
+const MEMORY_CONSOLIDATION_INPUT_LIMIT_TOKENS: usize = 15_000;
 
 /// Timeout budgets for background memory jobs. These are independent of the
 /// user-visible request timeout so that a slow consolidation run does not
@@ -44,7 +50,7 @@ const MEMORY_CONSOLIDATION_FAILURE_LIMIT: usize = 5;
 const MEMORY_SKILLS_SUBDIR: &str = "_memory";
 
 use crate::memory_prompts::{
-    CONSOLIDATION_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, READ_PATH_TEMPLATE,
+    CONSOLIDATION_SYSTEM_PROMPT, EXTRACT_INPUT_TEMPLATE, EXTRACT_SYSTEM_PROMPT, READ_PATH_TEMPLATE,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +179,54 @@ fn truncate_chars(input: &str, limit: usize) -> String {
     output
 }
 
+/// Approximate token count for a UTF-8 string using `bytes / 4` heuristic.
+/// Aligned with Codex `APPROX_BYTES_PER_TOKEN = 4`.
+fn approx_token_count(text: &str) -> usize {
+    text.len().saturating_add(APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN
+}
+
+/// Truncate text to approximately `max_tokens` tokens, preserving the beginning
+/// and end. Middle content is replaced with a `…N tokens truncated…` marker.
+/// Aligned with Codex `truncate_middle_with_token_budget`.
+fn truncate_middle_approx_tokens(text: &str, max_tokens: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if max_tokens == 0 {
+        let total = approx_token_count(text);
+        return format!("…{total} tokens truncated…");
+    }
+    let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let total_tokens = approx_token_count(text);
+    // Reserve ~40 bytes for the truncation marker
+    let keep_bytes = max_bytes.saturating_sub(40);
+    let left_budget = keep_bytes / 2;
+    let right_budget = keep_bytes - left_budget;
+    // Find char boundary for left portion
+    let mut left_end = left_budget.min(text.len());
+    while left_end > 0 && !text.is_char_boundary(left_end) {
+        left_end -= 1;
+    }
+    // Find char boundary for right portion
+    let mut right_start = text.len().saturating_sub(right_budget);
+    while right_start < text.len() && !text.is_char_boundary(right_start) {
+        right_start += 1;
+    }
+    if right_start <= left_end {
+        right_start = left_end;
+    }
+    let removed_tokens = total_tokens.saturating_sub(max_tokens);
+    format!(
+        "{}…{} tokens truncated…{}",
+        &text[..left_end],
+        removed_tokens,
+        &text[right_start..]
+    )
+}
+
 /// Build the model-visible memory instruction message.
 pub fn recall_system_message(
     config: &AgentConfig,
@@ -189,14 +243,17 @@ pub fn recall_system_message(
 
 #[derive(Debug, Deserialize)]
 struct ExtractedMemories {
+    /// Legacy field: individual memory lines (backward compat with old prompt format)
+    #[serde(default)]
     memories: Vec<String>,
+    /// Structured raw memory document (Codex-aligned: YAML frontmatter + task-grouped body)
+    #[serde(default)]
+    raw_memory: Option<String>,
     /// Rollout summary — task-level description of what happened
     #[serde(default)]
-    #[allow(dead_code)]
     rollout_summary: Option<String>,
     /// Filesystem-safe slug for the session (≤80 chars)
     #[serde(default)]
-    #[allow(dead_code)]
     rollout_slug: Option<String>,
 }
 
@@ -422,12 +479,19 @@ async fn auto_extract_after_turn_inner(
         extract_config.model = Some(model.trim().to_string());
     }
 
-    let prompt = format!(
-        "Session: {}\n\nUser message:\n{}\n\nAssistant response:\n{}",
-        session_key,
-        truncate_chars(user_message, MEMORY_EXTRACT_USER_LIMIT_CHARS),
-        truncate_chars(assistant_message, MEMORY_EXTRACT_ASSISTANT_LIMIT_CHARS)
-    );
+    let prompt = EXTRACT_INPUT_TEMPLATE
+        .replace("{session_key}", session_key)
+        .replace(
+            "{user_message}",
+            &truncate_middle_approx_tokens(user_message, MEMORY_EXTRACT_USER_LIMIT_TOKENS),
+        )
+        .replace(
+            "{assistant_message}",
+            &truncate_middle_approx_tokens(
+                assistant_message,
+                MEMORY_EXTRACT_ASSISTANT_LIMIT_TOKENS,
+            ),
+        );
     let response = client
         .chat_completion(
             &extract_config,
@@ -442,11 +506,25 @@ async fn auto_extract_after_turn_inner(
         .content
         .or(response.reasoning_content)
         .unwrap_or_default();
-    let memories = parse_extracted_memories(&content);
+    let extracted = parse_extracted_memories(&content);
     let mut wrote_memory = false;
-    for memory in memories.into_iter().take(AUTO_MEMORY_MAX_ITEMS) {
-        remember_auto_from_session_key(session_key, &memory)?;
+
+    // New path: Codex-style structured output (raw_memory + rollout_summary)
+    if extracted
+        .raw_memory
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        write_codex_style_extraction(session_key, &extracted)?;
         wrote_memory = true;
+    }
+
+    // Legacy fallback: individual memory lines
+    if !wrote_memory {
+        for memory in extracted.memories.iter().take(AUTO_MEMORY_MAX_ITEMS) {
+            remember_auto_from_session_key(session_key, memory)?;
+            wrote_memory = true;
+        }
     }
     if wrote_memory {
         // Run retention opportunistically before consolidation so the phase-2
@@ -496,26 +574,32 @@ fn bump_phase2_failure(reason: &str) {
     }
 }
 
-fn parse_extracted_memories(content: &str) -> Vec<String> {
+fn parse_extracted_memories(content: &str) -> ExtractedMemories {
     let trimmed = strip_markdown_fences(content.trim());
-    let parsed = serde_json::from_str::<ExtractedMemories>(trimmed)
+    let mut extracted = serde_json::from_str::<ExtractedMemories>(trimmed)
         .or_else(|_| {
             extract_balanced_json(trimmed)
                 .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))
                 .and_then(serde_json::from_str::<ExtractedMemories>)
         })
-        .map(|payload| payload.memories)
-        .unwrap_or_else(|_| parse_memory_lines(trimmed));
+        .unwrap_or_else(|_| ExtractedMemories {
+            memories: parse_memory_lines(trimmed),
+            raw_memory: None,
+            rollout_summary: None,
+            rollout_slug: None,
+        });
 
+    // Deduplicate and normalize the legacy memories field
     let mut output = Vec::new();
-    for memory in parsed {
+    for memory in std::mem::take(&mut extracted.memories) {
         let memory = normalize_memory_line(&memory);
-        if memory.is_empty() || output.iter().any(|existing| existing == &memory) {
+        if memory.is_empty() || output.iter().any(|existing: &String| existing == &memory) {
             continue;
         }
         output.push(memory);
     }
-    output
+    extracted.memories = output;
+    extracted
 }
 
 /// Strip a leading ```json / ```JSON / ``` fence and its trailing ``` if
@@ -599,6 +683,81 @@ fn normalize_memory_line(line: &str) -> String {
         .trim_matches('"')
         .trim()
         .to_string()
+}
+
+/// Write Codex-style Phase 1 extraction output:
+///   - `rollout_summary` → `rollout_summaries/<slug>.md`
+///   - `raw_memory` → appended to `raw_memories.md`
+///   - brief summary line → appended to `memory_summary.md`
+fn write_codex_style_extraction(
+    session_key: &str,
+    extracted: &ExtractedMemories,
+) -> Result<(), String> {
+    let root = ensure_memory_layout()?;
+    let now = now_secs();
+    let slug = extracted
+        .rollout_slug
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(sanitize_id)
+        .unwrap_or_else(|| sanitize_id(session_key));
+
+    // 1. Write rollout_summary to rollout_summaries/<slug>.md
+    let rollout_file = if let Some(ref summary) = extracted.rollout_summary {
+        if !summary.trim().is_empty() {
+            let filename = format!("{slug}.md");
+            let path = root.join("rollout_summaries").join(&filename);
+            let content = format!(
+                "session: {session_key}\nupdated_at_unix: {now}\nrollout_slug: {slug}\n\n{}\n",
+                summary.trim()
+            );
+            fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+            info!(rollout_slug = %slug, "wrote rollout summary");
+            filename
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // 2. Append raw_memory to raw_memories.md
+    if let Some(ref raw_mem) = extracted.raw_memory {
+        if !raw_mem.trim().is_empty() {
+            let raw_path = root.join("raw_memories.md");
+            let current = fs::read_to_string(&raw_path).unwrap_or_default();
+            if current.contains("No raw memories yet.") {
+                fs::write(&raw_path, "# Raw Memories\n\n")
+                    .map_err(|e| format!("reset {}: {e}", raw_path.display()))?;
+            }
+            append_line(
+                &raw_path,
+                &format!(
+                    "## Session `{session_key}`\nsource: auto_extract\nsession: {session_key}\nrollout_slug: {slug}\nrollout_summary_file: {rollout_file}\nupdated_at_unix: {now}\n\n{}\n\n",
+                    raw_mem.trim()
+                ),
+            )?;
+        }
+    }
+
+    // 3. Append brief summary line to memory_summary.md
+    let brief = extracted
+        .rollout_summary
+        .as_deref()
+        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+        .map(|l| l.trim_start_matches('#').trim())
+        .unwrap_or("auto-extracted memory");
+    let summary_path = root.join("memory_summary.md");
+    append_line(&summary_path, &format!("- {brief}\n"))?;
+
+    info!(
+        rollout_slug = %slug,
+        has_raw_memory = extracted.raw_memory.is_some(),
+        has_rollout_summary = extracted.rollout_summary.is_some(),
+        "codex-style extraction written"
+    );
+    telemetry_event("auto_extract.codex_write", 1, true, Some(&slug));
+    Ok(())
 }
 
 fn remember_auto_from_session_key(
@@ -923,7 +1082,7 @@ fn build_phase2_input(root: &Path, max_raw_memories: usize) -> Result<Phase2Inpu
     total_input_count.hash(&mut hasher);
     Ok(Phase2Input {
         input_hash: format!("{:016x}", hasher.finish()),
-        prompt: truncate_chars(&prompt, MEMORY_CONSOLIDATION_INPUT_LIMIT_CHARS),
+        prompt: truncate_middle_approx_tokens(&prompt, MEMORY_CONSOLIDATION_INPUT_LIMIT_TOKENS),
         processed_input_count,
         total_input_count,
         has_more_inputs,
@@ -934,14 +1093,12 @@ fn parse_raw_memory_sections(raw: &str) -> Vec<RawMemorySection> {
     let mut sections = Vec::new();
     let mut current = String::new();
     for line in raw.lines() {
-        if line.starts_with("## Memory `")
-            && !current.trim().is_empty()
-            && current.trim() != "# Raw Memories"
-        {
+        let is_section_header = line.starts_with("## Memory `") || line.starts_with("## Session `");
+        if is_section_header && !current.trim().is_empty() && current.trim() != "# Raw Memories" {
             sections.push(raw_memory_section_from_content(std::mem::take(
                 &mut current,
             )));
-        } else if line.starts_with("## Memory `") && current.trim() == "# Raw Memories" {
+        } else if is_section_header && current.trim() == "# Raw Memories" {
             current.clear();
         }
         current.push_str(line);
@@ -1645,24 +1802,56 @@ mod tests {
 
     #[test]
     fn parse_extracted_memories_accepts_json_and_dedupes() {
-        let memories = parse_extracted_memories(
+        let extracted = parse_extracted_memories(
             r#"{"memories":["Prefer file-backed memory", "Prefer file-backed memory", ""]}"#,
         );
-        assert_eq!(memories, vec!["Prefer file-backed memory"]);
+        assert_eq!(extracted.memories, vec!["Prefer file-backed memory"]);
     }
 
     #[test]
     fn parse_extracted_memories_strips_markdown_fences() {
-        let memories =
+        let extracted =
             parse_extracted_memories("```json\n{\"memories\":[\"hello from fenced block\"]}\n```");
-        assert_eq!(memories, vec!["hello from fenced block"]);
+        assert_eq!(extracted.memories, vec!["hello from fenced block"]);
     }
 
     #[test]
     fn parse_extracted_memories_handles_prose_wrapped_json() {
         let content = "Here is the JSON you asked for:\n```\n{\n  \"memories\": [\"nested { brace } inside\"]\n}\n```\nHope this helps!";
-        let memories = parse_extracted_memories(content);
-        assert_eq!(memories, vec!["nested { brace } inside"]);
+        let extracted = parse_extracted_memories(content);
+        assert_eq!(extracted.memories, vec!["nested { brace } inside"]);
+    }
+
+    #[test]
+    fn parse_extracted_memories_codex_format_with_raw_memory() {
+        let content = serde_json::json!({
+            "rollout_summary": "# Fixed a bug\n\n## Task 1: bug fix\nOutcome: success",
+            "rollout_slug": "fix-auth-bug",
+            "raw_memory": "---\ndescription: Fixed auth bug\ntask: fix auth\n---\n### Task 1: fix auth\nReusable knowledge:\n- Check token expiry first"
+        })
+        .to_string();
+        let extracted = parse_extracted_memories(&content);
+        assert!(extracted.raw_memory.is_some());
+        assert_eq!(extracted.rollout_slug.as_deref(), Some("fix-auth-bug"));
+        assert!(extracted
+            .rollout_summary
+            .as_deref()
+            .unwrap()
+            .contains("Fixed a bug"));
+        assert!(extracted
+            .raw_memory
+            .as_deref()
+            .unwrap()
+            .contains("Check token expiry"));
+    }
+
+    #[test]
+    fn parse_extracted_memories_noop_returns_empty() {
+        let content = r#"{"rollout_summary":"","rollout_slug":"","raw_memory":""}"#;
+        let extracted = parse_extracted_memories(content);
+        assert!(extracted.memories.is_empty());
+        assert_eq!(extracted.raw_memory.as_deref(), Some(""));
+        assert_eq!(extracted.rollout_slug.as_deref(), Some(""));
     }
 
     #[test]
@@ -2015,5 +2204,90 @@ mod tests {
         let content = fs::read_to_string(&path).expect("telemetry file");
         assert!(content.contains("\"event\":\"unit.test\""));
         assert!(content.contains("\"value\":42"));
+    }
+
+    #[test]
+    fn approx_token_count_matches_codex_heuristic() {
+        // 4 bytes per token
+        assert_eq!(approx_token_count(""), 0);
+        assert_eq!(approx_token_count("a"), 1); // ceil(1/4)
+        assert_eq!(approx_token_count("abcd"), 1); // 4/4
+        assert_eq!(approx_token_count("abcde"), 2); // ceil(5/4)
+        assert_eq!(approx_token_count("abcdefgh"), 2); // 8/4
+    }
+
+    #[test]
+    fn truncate_middle_approx_tokens_short_input_unchanged() {
+        let text = "hello world"; // 11 bytes = ~3 tokens
+        let result = truncate_middle_approx_tokens(text, 10);
+        assert_eq!(result, text); // well under budget
+    }
+
+    #[test]
+    fn truncate_middle_approx_tokens_long_input_truncated() {
+        let text = "a".repeat(1000); // 1000 bytes = 250 tokens
+        let result = truncate_middle_approx_tokens(&text, 50);
+        assert!(result.len() < text.len());
+        assert!(result.contains("tokens truncated"));
+        // Should preserve start and end
+        assert!(result.starts_with("aaa"));
+        assert!(result.ends_with("aaa"));
+    }
+
+    #[test]
+    fn truncate_middle_approx_tokens_empty_input() {
+        assert_eq!(truncate_middle_approx_tokens("", 100), "");
+    }
+
+    #[test]
+    fn truncate_middle_approx_tokens_zero_budget() {
+        let result = truncate_middle_approx_tokens("hello", 0);
+        assert!(result.contains("tokens truncated"));
+    }
+
+    #[test]
+    fn write_codex_style_extraction_creates_artifacts() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _guard = EnvGuard::set_agent_home(temp.path());
+        ensure_memory_layout().expect("layout");
+        let extracted = ExtractedMemories {
+            memories: vec![],
+            raw_memory: Some(
+                "---\ndescription: test\ntask: fix\n---\n### Task 1\nReusable: check first"
+                    .to_string(),
+            ),
+            rollout_summary: Some("# Fixed auth\n\n## Task 1: fix\nOutcome: success".to_string()),
+            rollout_slug: Some("fix-auth-bug".to_string()),
+        };
+        write_codex_style_extraction("test-session", &extracted).expect("write");
+
+        // Check rollout_summaries
+        let rollout_path = memory_root()
+            .join("rollout_summaries")
+            .join("fix-auth-bug.md");
+        assert!(rollout_path.exists());
+        let rollout = fs::read_to_string(&rollout_path).unwrap();
+        assert!(rollout.contains("session: test-session"));
+        assert!(rollout.contains("Fixed auth"));
+
+        // Check raw_memories.md
+        let raw = fs::read_to_string(memory_root().join("raw_memories.md")).unwrap();
+        assert!(raw.contains("## Session `test-session`"));
+        assert!(raw.contains("rollout_slug: fix-auth-bug"));
+        assert!(raw.contains("check first"));
+
+        // Check memory_summary.md
+        let summary = fs::read_to_string(memory_root().join("memory_summary.md")).unwrap();
+        assert!(summary.contains("Fixed auth"));
+    }
+
+    #[test]
+    fn parse_raw_memory_sections_handles_session_header() {
+        let raw = "# Raw Memories\n\n## Session `s1`\nsource: auto_extract\nrollout_slug: slug1\n\ncontent1\n\n## Session `s2`\nsource: auto_extract\nrollout_slug: slug2\n\ncontent2\n\n";
+        let sections = parse_raw_memory_sections(raw);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].content.contains("content1"));
+        assert!(sections[1].content.contains("content2"));
     }
 }
