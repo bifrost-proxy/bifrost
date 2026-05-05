@@ -24,7 +24,7 @@ use crate::im_gateway::{
     ImRouteStore, ImRunStore, ImScheduleStore, ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
-use bifrost_agent::SessionDetail;
+use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 
 // ---------------------------------------------------------------------------
 // ImGatewayService
@@ -1074,14 +1074,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
     if trimmed == "/status" {
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
-            let real = detail
-                .total_tokens_used
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "N/A".to_string());
-            let reply = format!(
-                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲",
-                detail.message_count, detail.estimated_tokens, real, detail.compaction_count, detail.history_version
-            );
+            let reply = build_im_status_text(Some(&detail));
             send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
         } else {
             // Session is currently being processed (taken out of the pool)
@@ -1661,6 +1654,84 @@ async fn process_agent_chat(
         }
     };
 
+    // ── Goal-based auto-continuation loop ────────────────────────────────
+    // If the turn completed successfully and the goal is still active,
+    // send the intermediate response and automatically trigger another turn
+    // with the continuation prompt. This prevents the session from appearing
+    // "idle" while the agent has unfinished work.
+    const MAX_GOAL_CONTINUATIONS: usize = 25;
+    let mut result = result;
+    let mut continuation_count = 0;
+
+    while let Ok(ref turn_result) = result {
+        if !turn_result.goal_needs_continuation || continuation_count >= MAX_GOAL_CONTINUATIONS {
+            break;
+        }
+        continuation_count += 1;
+
+        info!(
+            session_key = %session_key,
+            continuation = continuation_count,
+            goal_objective = ?turn_result.goal_objective,
+            "goal still active, auto-continuing"
+        );
+
+        // Send intermediate response to user so they see progress
+        if !turn_result.response.is_empty() {
+            send_agent_reply_with_plan(
+                feishu,
+                provider,
+                event,
+                &turn_result.response,
+                turn_result.plan_steps.as_deref(),
+                &turn_result.tool_calls_log,
+                session.title.as_deref(),
+                message_log_store,
+            )
+            .await;
+        }
+
+        // Get continuation prompt from goal system
+        let continuation_msg = match bifrost_agent::tools::goal::get_continuation_prompt(&session) {
+            Some(prompt) => prompt,
+            None => break, // Goal no longer active after sending response
+        };
+
+        // Run another turn with the continuation prompt
+        let cont_result = crate::im_gateway::run_turn_with_mcp(
+            agent_client,
+            agent_config,
+            &mut session,
+            agent_tools,
+            None, // MCP already consumed
+            &continuation_msg,
+            system_prompt_override,
+            recorder.as_mut(),
+        )
+        .await;
+
+        match cont_result {
+            Ok(r) => result = Ok(r),
+            Err(e) => {
+                warn!(
+                    session_key = %session_key,
+                    continuation = continuation_count,
+                    error = %e,
+                    "goal continuation turn failed, stopping"
+                );
+                break;
+            }
+        }
+    }
+
+    if continuation_count > 0 {
+        info!(
+            session_key = %session_key,
+            total_continuations = continuation_count,
+            "goal continuation loop completed"
+        );
+    }
+
     // Put the recorder back into the session so it persists across turns.
     // Skip this if session was cleared during the turn (/clear drops the recorder
     // deliberately so a new file will be created for the fresh session).
@@ -1968,6 +2039,166 @@ async fn send_agent_reply_with_title(
     match send_result {
         Ok(_) => debug!("agent reply sent successfully"),
         Err(e) => error!(error = %e, "failed to send agent reply"),
+    }
+}
+
+/// Send an agent reply with plan progress and tool calls panel (for goal continuation).
+/// This sends a card similar to the final response rendering but can be called mid-continuation.
+#[allow(clippy::too_many_arguments)]
+async fn send_agent_reply_with_plan(
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_text: &str,
+    plan_steps: Option<&[PlanStep]>,
+    tool_calls_log: &[ToolCallLog],
+    title: Option<&str>,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let target_open_id = provider
+        .owner_open_id
+        .as_deref()
+        .or(event.source.user_id.as_deref())
+        .unwrap_or("");
+    if target_open_id.is_empty() {
+        error!("no target open_id to send agent reply");
+        return;
+    }
+
+    let reply_target = crate::im_gateway::types::ImTarget {
+        id: "__agent_reply__".to_string(),
+        provider_id: provider.id.clone(),
+        display_name: "Agent Reply".to_string(),
+        enabled: true,
+        receive_id_type: "open_id".to_string(),
+        receive_id: target_open_id.to_string(),
+        default_msg_type: "interactive".to_string(),
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let converted_text =
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(reply_text);
+    let mut elements = vec![serde_json::json!({
+        "tag": "markdown",
+        "content": converted_text,
+        "element_id": "agent_reply"
+    })];
+
+    // Add plan progress panel if present
+    if let Some(steps) = plan_steps {
+        let completed = steps
+            .iter()
+            .filter(|s| matches!(s.status, bifrost_agent::PlanStepStatus::Completed))
+            .count();
+        let total = steps.len();
+        let mut plan_md = String::new();
+        for s in steps {
+            plan_md.push_str(&format!("{} {}\n", s.status.emoji(), s.step));
+        }
+        elements.push(serde_json::json!({
+            "tag": "collapsible_panel",
+            "expanded": true,
+            "background_color": "grey",
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": format!("📋 任务计划（{}/{}）", completed, total)
+                }
+            },
+            "vertical_spacing": "2px",
+            "padding": "4px 8px 4px 8px",
+            "elements": [{
+                "tag": "markdown",
+                "content": plan_md
+            }]
+        }));
+    }
+
+    // Add tool calls panel if present
+    if !tool_calls_log.is_empty() {
+        let mut tool_md = String::new();
+        for log in tool_calls_log {
+            let icon = if log.success { "✅" } else { "❌" };
+            tool_md.push_str(&format!("{} `{}`\n", icon, log.tool_name));
+            let result_preview = truncate_str(&log.result, 500);
+            tool_md.push_str(&format!("```\n{}\n```\n", result_preview));
+        }
+        elements.push(serde_json::json!({
+            "tag": "collapsible_panel",
+            "expanded": false,
+            "background_color": "grey",
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": format!("🔧 工具调用记录（{}次）", tool_calls_log.len())
+                }
+            },
+            "vertical_spacing": "2px",
+            "padding": "4px 8px 4px 8px",
+            "elements": [{
+                "tag": "markdown",
+                "content": tool_md
+            }]
+        }));
+    }
+
+    let card_title = title.unwrap_or("Bifrost AI");
+    let card = serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true
+        },
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": card_title
+            }
+        },
+        "body": {
+            "elements": elements
+        }
+    });
+
+    let send_result = feishu
+        .send_card(
+            provider,
+            &reply_target,
+            card,
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await;
+
+    let (status, message_id, error_msg) = match &send_result {
+        Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
+        Err(e) => (MessageStatus::Failed, None, Some(e.to_string())),
+    };
+    let log = ImMessageLog {
+        id: uuid_short(),
+        provider_id: provider.id.clone(),
+        direction: MessageDirection::Outbound,
+        status,
+        timestamp: now_ms(),
+        target_id: Some("__agent_reply__".to_string()),
+        target_name: Some("Agent Reply".to_string()),
+        message_id,
+        msg_type: Some("interactive".to_string()),
+        content_preview: Some(truncate_str(reply_text, 200)),
+        trigger: Some("agent_continuation".to_string()),
+        error: error_msg,
+        sender_open_id: None,
+        event_id: Some(event.event_id.clone()),
+        reaction_added: None,
+    };
+    if let Err(e) = message_log_store.add(log) {
+        error!(error = %e, "failed to store agent outbound message log");
+    }
+
+    match send_result {
+        Ok(_) => debug!("agent reply with plan sent successfully"),
+        Err(e) => error!(error = %e, "failed to send agent reply with plan"),
     }
 }
 
@@ -3489,9 +3720,16 @@ fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
                 .total_tokens_used
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| "N/A".to_string());
+            let goal_info = match (&d.goal_status, &d.goal_objective) {
+                (Some(status), Some(objective)) => {
+                    let obj_preview = truncate_str(objective, 80);
+                    format!("\n- 目标状态: {status}\n- 目标: {obj_preview}")
+                }
+                _ => String::new(),
+            };
             format!(
-                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲",
-                d.message_count, d.estimated_tokens, real, d.compaction_count, d.history_version
+                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                d.message_count, d.estimated_tokens, real, d.compaction_count, d.history_version, goal_info
             )
         }
         None => {

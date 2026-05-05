@@ -205,4 +205,8 @@ pub struct TurnResult {
     pub title_updated: Option<String>,
     /// If the agent updated the task plan during this turn.
     pub plan_steps: Option<Vec<PlanStep>>,
+    /// Whether the active goal still needs continuation after this turn.
+    pub goal_needs_continuation: bool,
+    /// The objective of the active goal, if any.
+    pub goal_objective: Option<String>,
 }

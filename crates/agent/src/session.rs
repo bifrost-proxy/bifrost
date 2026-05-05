@@ -550,6 +550,10 @@ impl AgentSessionManager {
     pub fn get_session_detail(&self, session_key: &str) -> Option<SessionDetail> {
         self.sessions.get(session_key).map(|r| {
             let s = r.value();
+            let (goal_status, goal_objective) = match &s.current_goal {
+                Some(g) => (Some(format!("{:?}", g.status)), Some(g.objective.clone())),
+                None => (None, None),
+            };
             SessionDetail {
                 session_key: s.session_key.clone(),
                 user_id: s.user_id.clone(),
@@ -576,6 +580,8 @@ impl AgentSessionManager {
                         }),
                     })
                     .collect(),
+                goal_status,
+                goal_objective,
             }
         })
     }
@@ -625,6 +631,10 @@ pub struct SessionDetail {
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
     pub messages: Vec<SessionMessage>,
+    /// Current goal status (if any).
+    pub goal_status: Option<String>,
+    /// Current goal objective (if any).
+    pub goal_objective: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -777,6 +787,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         Dispatch::RunSkill { record, invocation } => {
@@ -793,6 +805,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
@@ -812,6 +826,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -834,6 +850,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -859,6 +877,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -882,6 +902,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         match compact::compact_session(
@@ -925,6 +947,8 @@ pub async fn run_turn_with_mcp(
                     work_dir_switched: None,
                     title_updated: None,
                     plan_steps: None,
+                    goal_needs_continuation: false,
+                    goal_objective: None,
                 });
             }
             Ok(result) => {
@@ -937,6 +961,8 @@ pub async fn run_turn_with_mcp(
                     work_dir_switched: None,
                     title_updated: None,
                     plan_steps: None,
+                    goal_needs_continuation: false,
+                    goal_objective: None,
                 });
             }
             Err(e) => {
@@ -963,6 +989,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         let record = memory::remember_explicit(config, session, args.trim())?;
@@ -972,6 +1000,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1007,6 +1037,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1028,6 +1060,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         let response = match memory::forget_memory(config, session, args.trim())? {
@@ -1040,6 +1074,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1060,6 +1096,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1091,6 +1129,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1148,6 +1188,8 @@ pub async fn run_turn_with_mcp(
                         work_dir_switched: None,
                         title_updated: None,
                         plan_steps: None,
+                        goal_needs_continuation: false,
+                        goal_objective: None,
                     });
                 }
                 Ok(_) => {
@@ -1174,6 +1216,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1216,6 +1260,8 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                goal_needs_continuation: false,
+                goal_objective: None,
             });
         }
         return Ok(TurnResult {
@@ -1224,6 +1270,8 @@ pub async fn run_turn_with_mcp(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
         });
     }
 
@@ -1557,6 +1605,8 @@ pub async fn run_turn_with_mcp(
                                     work_dir_switched: None,
                                     title_updated: None,
                                     plan_steps: None,
+                                    goal_needs_continuation: false,
+                                    goal_objective: None,
                                 });
                             }
                             crate::tools::goal::goal_runtime_apply(
@@ -1600,6 +1650,8 @@ pub async fn run_turn_with_mcp(
                             work_dir_switched: None,
                             title_updated: None,
                             plan_steps: None,
+                            goal_needs_continuation: false,
+                            goal_objective: None,
                         });
                     }
                     crate::tools::goal::goal_runtime_apply(
@@ -1764,6 +1816,15 @@ pub async fn run_turn_with_mcp(
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
                 plan_steps: session.current_plan.clone(),
+                goal_needs_continuation: session
+                    .current_goal
+                    .as_ref()
+                    .is_some_and(|g| g.status == crate::tools::goal::GoalStatus::Active),
+                goal_objective: session
+                    .current_goal
+                    .as_ref()
+                    .filter(|g| g.status == crate::tools::goal::GoalStatus::Active)
+                    .map(|g| g.objective.clone()),
             });
         }
 
@@ -1896,6 +1957,8 @@ pub async fn run_turn_with_mcp(
                     work_dir_switched: Some(new_dir),
                     title_updated: None,
                     plan_steps: None,
+                    goal_needs_continuation: false,
+                    goal_objective: None,
                 });
             }
         }
