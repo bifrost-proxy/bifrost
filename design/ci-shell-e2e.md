@@ -16,6 +16,8 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - GitHub Actions E2E 日志路径使用隐藏目录 `.e2e-reports/` 与 `.bifrost-e2e-ci/`；上传失败日志 artifact 时必须设置 `include-hidden-files: true`，否则 action 会跳过这些路径并导致失败后无 artifact 可查。
 - `scripts/run_all_e2e.sh` 的失败原因提取优先匹配真实断言、Playwright/JS 错误和 panic；cleanup 尾巴（例如 `Preserving failed test root`）只作为日志上下文，不能作为最终失败原因。
 - `test_cli_offline_commands_e2e.sh` 的 help 文案断言必须使用扩展正则（`grep -E`）或多个 `-e` 模式表达 alternation；禁止在默认 BRE 模式下使用 `\|`，否则 Linux shard 可能把实际存在的 `rename` / `NEW_NAME` 文案误判为缺失。
+- `test_cli_offline_commands_e2e.sh` 的命令输出断言不能使用 `echo "$result" | grep -q`。在 `pipefail` 下，`grep -q` 匹配后提前退出会让 `echo` 收到 SIGPIPE，导致 Linux shard 把实际存在的 help 文案误判为失败。应使用 `grep ... <<<"$result"` 等非管道输入。
+- GitHub Actions 的 `Dump failed suite logs` 诊断步骤在 `bash -e -o pipefail` 下不能让 `find | head` 管道状态传播为 step 失败；日志枚举只用于诊断，必须对 head 早退导致的 SIGPIPE 容错，保证失败日志 artifact 上传步骤继续执行。
 - `test_unsafe_ssl_e2e.sh` 不依赖外部共享 HTTPS mock fixture。脚本在当前 `HTTPS_MOCK_PORT` 不可用时自行启动 `e2e-tests/mock_servers/https_echo_server.py`，创建 `unsafe-ssl-fixture.test https://127.0.0.1:<HTTPS_MOCK_PORT>` 转发规则，等待端口就绪后执行 unsafe_ssl false/true/false 三段真实代理请求，并在 EXIT trap 中保留原始退出码后清理自有 mock、规则与 Bifrost。该脚本通过 `ADMIN_CLIENT_START_UNSAFE_SSL=0` 让通用 admin helper 以安全默认启动，避免 CLI 启动参数 `--unsafe-ssl` 掩盖动态配置切换。
 - `admin_client.sh` 复用已有管理端前必须请求 `/api/auth/status` 并校验返回体是 Bifrost 管理端鉴权状态 JSON。CI 并行端口碰撞时，不能把其它本机服务的 200/404 响应误判为已启动的 Bifrost，否则后续规则 API 会命中错误服务。
 - `run_shell_tests_parallel` / `run_shell_batch_parallel` 在所有并行 shell 子用例完成后必须显式 `return 0`。Bash 函数默认返回最后一条命令的状态；如果最后一次循环中 `[[ $running -gt 0 ]]` 为 false，函数会返回 1，在 `set -e` 下导致 CI step 在所有子用例 PASS 后仍失败。
@@ -48,6 +50,8 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - 运行 `BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 bash scripts/ci/run-e2e-shell.sh`，覆盖 shard 3 并行 shell 包装与 DevTools page bridge 用例。
 - 静态检查 `.github/workflows/ci.yml` 中所有上传 `.e2e-reports/` / `.bifrost-e2e-ci/` 的 E2E artifact 步骤均包含 `include-hidden-files: true`。
 - 运行 `bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，断言 `rule rename --help`、`rule reorder --help`、`script rename --help` 与其它 help 关键字匹配全部通过，最终汇总为 `105/105` PASS。
+- 运行 `rg -n 'echo "\$[A-Za-z_][A-Za-z0-9_]*" \| grep -[A-Za-z]+' e2e-tests/tests/test_cli_offline_commands_e2e.sh`，断言脚本中不再存在 `echo | grep -q` 输出断言；运行 `SKIP_BUILD=true BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 验证 `system-proxy enable --help` 不再触发 Broken pipe 误判。
+- 静态检查 `.github/workflows/ci.yml` 的 `Dump failed suite logs` 步骤，断言所有 `find "$BIFROST_E2E_REPORT_DIR" ... | head` 与 `find "$BIFROST_DATA_DIR" ... | head` 管道均带有 `|| true` 容错。
 - 运行 `HTTPS_MOCK_PORT=<空闲端口> PROXY_PORT=<空闲端口> ADMIN_PORT=<同代理端口> BIFROST_DATA_DIR=<临时目录> bash e2e-tests/tests/test_unsafe_ssl_e2e.sh`，断言脚本自行启动 HTTPS mock，unsafe_ssl 动态切换相关 5 个用例全部通过。
 - 运行 `bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 并通过本机非 Bifrost HTTP 服务占用目标端口，断言 `admin_ensure_bifrost` 不会复用错误服务。
 - 运行 `bash -n scripts/run_all_e2e.sh` 并检查 `run_shell_tests_parallel` / `run_shell_batch_parallel` 末尾存在显式 `return 0`，断言并行 shell 调度器不会在全部子用例通过后把空闲轮询条件的 false 状态传播为 suite 失败。
@@ -58,7 +62,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 
 ### 真实场景测试
 
-- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、remote relay fallback 跳过重复 release build 回归，以及 Linux shell E2E Playwright 依赖安装超时预算回归。
+- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、CLI offline `echo | grep -q` Broken pipe 回归、失败日志 dump `find | head` pipefail 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、remote relay fallback 跳过重复 release build 回归，以及 Linux shell E2E Playwright 依赖安装超时预算回归。
 - 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后收到 post-timeout 事件，long-term memory 用例跳过 frontend build，remote relay fallback 在预构建 binary 存在时不再重复 build，Linux shell E2E timeout 与实际 Playwright 安装成本匹配。
 
 ## 校验要求

@@ -159,15 +159,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -243,15 +243,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -297,15 +297,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -555,15 +555,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -641,15 +641,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -697,15 +697,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -933,15 +933,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -997,15 +997,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
