@@ -493,6 +493,7 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
 #[derive(Debug, Clone, Default)]
 pub struct SessionRuntimeState {
     pub current_goal: Option<GoalState>,
+    pub total_tokens_used: Option<u64>,
 }
 
 pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, String> {
@@ -512,6 +513,8 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
             _ => {}
         }
     }
+
+    state.total_tokens_used = Some(scan_session_summary(path).total_tokens);
 
     Ok(state)
 }
@@ -1045,6 +1048,7 @@ mod tests {
             goal_id: "goal-1".to_string(),
             objective: "finish codex parity".to_string(),
             status: crate::tools::goal::GoalStatus::Complete,
+            pause_reason: None,
             token_budget: Some(1000),
             created_at: 1,
             updated_at: 2,
@@ -1061,6 +1065,7 @@ mod tests {
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert_eq!(state.current_goal, Some(goal));
+        assert_eq!(state.total_tokens_used, Some(0));
     }
 
     #[test]
@@ -1071,6 +1076,7 @@ mod tests {
             goal_id: "goal-2".to_string(),
             objective: "temporary goal".to_string(),
             status: crate::tools::goal::GoalStatus::Active,
+            pause_reason: None,
             token_budget: None,
             created_at: 1,
             updated_at: 1,
@@ -1090,6 +1096,26 @@ mod tests {
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert!(state.current_goal.is_none());
+        assert_eq!(state.total_tokens_used, Some(0));
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_restores_total_tokens_from_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goal-runtime-tokens.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"done","tokens":120}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"session_end","session_key":"s","content":{"total_tokens":150}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        assert_eq!(state.current_goal, None);
+        assert_eq!(state.total_tokens_used, Some(150));
     }
 
     #[test]

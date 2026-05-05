@@ -11,7 +11,7 @@ move_to: ("*** Move To: " | "*** Move to: ") filename LF
 first_change: change_context? change_line+ eof_line?
 contextual_change: change_context change_line+ eof_line?
 change_context: "@@" /[^\n]*/ LF
-change_line: ("+" | "-" | " ") /[^\n]*/ LF
+change_line: ("+" | "-" | " ") /[^\n]*/ LF | LF
 eof_line: "*** End of File" LF
 
 filename: /[^\n]+/

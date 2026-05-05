@@ -15,6 +15,7 @@ use crate::memory_extensions;
 use crate::memory_prompts::CONSOLIDATION_SYSTEM_PROMPT;
 use crate::types::ChatMessage;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -65,15 +66,7 @@ pub(crate) async fn run_phase2_consolidation(
         return Ok(());
     }
 
-    let mut consolidation_config = config.clone();
-    if let Some(model) = config
-        .get_memories_config()
-        .consolidation_model
-        .as_ref()
-        .filter(|model| !model.trim().is_empty())
-    {
-        consolidation_config.model = Some(model.trim().to_string());
-    }
+    let consolidation_config = build_consolidation_agent_config(config);
 
     let mode_prefix = format!("Phase 2 mode: {}\n\n", phase2_mode);
     let extensions_section = if extensions_ctx.is_empty() {
@@ -344,6 +337,43 @@ pub(crate) fn apply_consolidated_memory(
 #[cfg(test)]
 pub(crate) fn phase2_input_hash(root: &Path) -> Result<String, String> {
     Ok(build_phase2_input(root, DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION)?.input_hash)
+}
+
+/// Build an isolated agent configuration for Phase 2 consolidation.
+///
+/// Mirrors Codex's `agent::get_config()` in `phase2.rs`:
+/// - `ephemeral = true` — not persisted
+/// - `generate_memories = false` — prevent recursive memory generation
+/// - `use_memories = false` — don't load memories into consolidation agent
+/// - `mcp_servers = empty` — no external tools
+/// - `skills = disabled` — consolidation agent only uses its own tools
+fn build_consolidation_agent_config(config: &AgentConfig) -> AgentConfig {
+    let consolidation_model = config.get_memories_config().consolidation_model.clone();
+    let mut agent_config = config.clone();
+
+    // Core isolation: prevent recursive memory generation (Codex: generate_memories = false)
+    agent_config.ephemeral = true;
+    agent_config.memories = Some(crate::config::MemoriesConfig {
+        generate_memories: Some(false),
+        use_memories: Some(false),
+        ..config.get_memories_config()
+    });
+
+    // Disable all external integrations (Codex: mcp_servers = allow_only(empty))
+    agent_config.mcp_servers = HashMap::new();
+
+    // Disable skills (consolidation agent only uses read_file/write_file/list_files)
+    agent_config.skills = None;
+
+    // Use consolidation-specific model if configured
+    if let Some(model) = consolidation_model
+        .as_ref()
+        .filter(|m| !m.trim().is_empty())
+    {
+        agent_config.model = Some(model.trim().to_string());
+    }
+
+    agent_config
 }
 
 pub(crate) fn phase2_input_limit(config: &AgentConfig) -> usize {

@@ -294,7 +294,10 @@ fn parse_update_chunk(
         }
 
         // Parse line based on prefix.
-        if let Some(rest) = line.strip_prefix('-') {
+        if line.is_empty() {
+            old_lines.push(String::new());
+            new_lines.push(String::new());
+        } else if let Some(rest) = line.strip_prefix('-') {
             old_lines.push(rest.to_string());
         } else if let Some(rest) = line.strip_prefix('+') {
             new_lines.push(rest.to_string());
@@ -561,6 +564,29 @@ println!(\"bad\");
                 assert!(chunks[0].change_context.is_none());
                 assert_eq!(chunks[0].old_lines, vec!["old();"]);
                 assert_eq!(chunks[0].new_lines, vec!["new();"]);
+            }
+            _ => panic!("expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_allows_empty_context_line_inside_hunk() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@ fn main() {
+
+-old();
++new();
+*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        match &hunks[0] {
+            Hunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].old_lines[0], "");
+                assert_eq!(chunks[0].new_lines[0], "");
+                assert_eq!(chunks[0].old_lines[1], "old();");
+                assert_eq!(chunks[0].new_lines[1], "new();");
             }
             _ => panic!("expected UpdateFile"),
         }

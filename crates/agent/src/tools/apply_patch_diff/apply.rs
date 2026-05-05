@@ -244,9 +244,17 @@ fn compute_replacements(
         } else {
             // Verify old_lines match the file content.
             let available = file_lines.len().saturating_sub(match_start);
-            let match_count = old_line_count.min(available);
+            if available < old_line_count {
+                return Err(ApplyError::OldLinesNotMatch {
+                    file: file_path.to_path_buf(),
+                    context: chunk
+                        .change_context
+                        .clone()
+                        .unwrap_or_else(|| "<no @@ context>".to_string()),
+                });
+            }
 
-            for j in 0..match_count {
+            for j in 0..old_line_count {
                 let file_line = file_lines[match_start + j].trim();
                 let expected = chunk.old_lines[j].trim();
                 if file_line != expected {
@@ -264,7 +272,7 @@ fn compute_replacements(
                 }
             }
 
-            match_start + match_count
+            match_start + old_line_count
         };
 
         replacements.push(Replacement {
@@ -283,6 +291,9 @@ fn compute_replacements(
 fn seek_line_block(lines: &[&str], pattern: &[String], start: usize) -> Option<usize> {
     if pattern.is_empty() {
         return Some(lines.len());
+    }
+    if start > lines.len() || pattern.len() > lines.len().saturating_sub(start) {
+        return None;
     }
 
     let pattern_trimmed: Vec<&str> = pattern.iter().map(|line| line.trim()).collect();
@@ -443,6 +454,24 @@ mod tests {
         let result = apply_patch(dir.path(), &hunks).unwrap();
         assert_eq!(result.modified.len(), 1);
         assert_eq!(read_file(dir.path(), "main.rs"), "new();\nkeep();\n");
+    }
+
+    #[test]
+    fn test_apply_update_rejects_partial_old_lines_match() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "main.rs", "fn main() {\nonly-one-line\n}\n");
+        let hunks = vec![Hunk::UpdateFile {
+            path: PathBuf::from("main.rs"),
+            move_path: None,
+            chunks: vec![UpdateFileChunk {
+                change_context: Some("fn main() {".to_string()),
+                old_lines: vec!["only-one-line".to_string(), "missing-line".to_string()],
+                new_lines: vec!["new-line".to_string()],
+                is_end_of_file: false,
+            }],
+        }];
+        let err = apply_patch(dir.path(), &hunks).unwrap_err();
+        assert!(matches!(err, ApplyError::OldLinesNotMatch { .. }));
     }
 
     #[test]

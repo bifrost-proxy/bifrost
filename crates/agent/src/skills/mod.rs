@@ -27,15 +27,25 @@
 //! via `include_dir!` — that concern is orthogonal to the loader and remains
 //! in this module because it is agent-crate-specific packaging.
 
+pub mod mentions;
+pub mod render;
+
 use crate::config::{agent_home_dir, user_home_dir, SkillsConfig};
 use bifrost_skills::{ScopeRoot, SkillStore};
 use include_dir::{Dir, DirEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
+
+pub use self::mentions::{
+    build_skill_injections, extract_skill_mentions, resolve_mentioned_skills, SkillMentions,
+};
+pub use self::render::{
+    default_skill_metadata_budget, render_skill_lines, SkillMetadataBudget, SkillRenderReport,
+};
 
 pub const SKILLS_DIR_NAME: &str = "skills";
 pub const AGENTS_DIR_NAME: &str = ".agents";
@@ -181,6 +191,177 @@ pub struct SkillMetadata {
     pub prompt_content: String,
     pub path: PathBuf,
     pub scope: SkillScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<SkillInterface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<SkillDependencies>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SkillPolicy>,
+}
+
+/// Visual and UX metadata for skill presentation in IDE/UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInterface {
+    pub display_name: Option<String>,
+    pub short_description: Option<String>,
+    pub icon_small: Option<PathBuf>,
+    pub icon_large: Option<PathBuf>,
+    pub brand_color: Option<String>,
+    pub default_prompt: Option<String>,
+}
+
+/// Declared tool dependencies for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillDependencies {
+    pub tools: Vec<SkillToolDependency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillToolDependency {
+    pub r#type: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Policy controlling skill invocation behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SkillPolicy {
+    /// Whether this skill can be triggered implicitly by description matching.
+    /// Defaults to true when None.
+    pub allow_implicit_invocation: Option<bool>,
+    /// Product restrictions (empty = available in all products).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub products: Vec<String>,
+}
+
+/// Structured outcome from skill loading, matching Codex's `SkillLoadOutcome`.
+#[derive(Debug, Clone, Default)]
+pub struct SkillLoadOutcome {
+    pub skills: Vec<SkillMetadata>,
+    pub errors: Vec<SkillLoadError>,
+    pub disabled_paths: HashSet<PathBuf>,
+    pub skill_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillLoadError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl SkillLoadOutcome {
+    /// Skills allowed for implicit invocation (enabled + policy allows).
+    pub fn allowed_skills_for_implicit_invocation(&self) -> Vec<&SkillMetadata> {
+        self.skills
+            .iter()
+            .filter(|skill| {
+                !self.disabled_paths.contains(&skill.path)
+                    && skill
+                        .policy
+                        .as_ref()
+                        .and_then(|p| p.allow_implicit_invocation)
+                        .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    /// Collect all environment variable dependencies declared by active skills.
+    ///
+    /// Returns a map of env var name → list of skill names that require it.
+    /// Matches Codex's dependency resolution behavior in `core/skills.rs`.
+    pub fn collect_env_dependencies(&self) -> HashMap<String, Vec<String>> {
+        let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        for skill in &self.skills {
+            if self.disabled_paths.contains(&skill.path) {
+                continue;
+            }
+            if let Some(ref skill_deps) = skill.dependencies {
+                for tool_dep in &skill_deps.tools {
+                    if tool_dep.r#type == "env" {
+                        deps.entry(tool_dep.value.clone())
+                            .or_default()
+                            .push(skill.name.clone());
+                    }
+                }
+            }
+        }
+        deps
+    }
+
+    /// Check which declared env dependencies are missing from the environment.
+    ///
+    /// Returns tuples of (env_var_name, requiring_skill_names) for vars not set.
+    pub fn missing_env_dependencies(&self) -> Vec<(String, Vec<String>)> {
+        self.collect_env_dependencies()
+            .into_iter()
+            .filter(|(var, _)| std::env::var(var).is_err())
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Implicit Skill Invocation Detection
+// ---------------------------------------------------------------------------
+
+/// Result of implicit skill invocation detection.
+#[derive(Debug, Clone)]
+pub struct ImplicitSkillMatch {
+    pub skill_name: String,
+    pub skill_path: PathBuf,
+    pub match_reason: ImplicitMatchReason,
+}
+
+/// Reason an implicit skill invocation was detected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImplicitMatchReason {
+    /// A command executed matched a script inside the skill's directory.
+    ScriptInSkillDir,
+    /// The command path is within a skill's directory tree.
+    CommandInSkillDir,
+}
+
+/// Detect whether a command execution implicitly invokes a skill.
+///
+/// Matches Codex's `detect_implicit_skill_invocation_for_command` behavior.
+/// Checks if the command path falls within any skill's directory.
+pub fn detect_implicit_skill_invocation(
+    command: &str,
+    outcome: &SkillLoadOutcome,
+) -> Option<ImplicitSkillMatch> {
+    let command_path = Path::new(command.split_whitespace().next()?);
+
+    for skill in &outcome.skills {
+        if outcome.disabled_paths.contains(&skill.path) {
+            continue;
+        }
+        // Check if command is within the skill's directory
+        if let Some(skill_dir) = skill.path.parent() {
+            if command_path.starts_with(skill_dir) {
+                let reason = if command_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| n == "scripts")
+                {
+                    ImplicitMatchReason::ScriptInSkillDir
+                } else {
+                    ImplicitMatchReason::CommandInSkillDir
+                };
+                return Some(ImplicitSkillMatch {
+                    skill_name: skill.name.clone(),
+                    skill_path: skill.path.clone(),
+                    match_reason: reason,
+                });
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +491,68 @@ impl SkillsManager {
         skills
     }
 
+    /// Load all skills and return a structured outcome with errors and metadata.
+    pub fn load_skills_with_outcome(&self, work_dir: &Path) -> SkillLoadOutcome {
+        let roots = self.scope_roots(work_dir);
+        let root_paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
+        let store = SkillStore::new(roots);
+
+        let records = match store.read_all() {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(error = %error, "failed to read skills via SkillStore");
+                return SkillLoadOutcome {
+                    skills: Vec::new(),
+                    errors: vec![SkillLoadError {
+                        path: PathBuf::from("<store>"),
+                        message: error.to_string(),
+                    }],
+                    disabled_paths: HashSet::new(),
+                    skill_roots: root_paths,
+                };
+            }
+        };
+
+        let mut disabled_paths = HashSet::new();
+        let mut skills = Vec::new();
+
+        for record in records {
+            if !record.enabled {
+                disabled_paths.insert(record.skill_md_path.clone());
+                continue;
+            }
+            if let Some(meta) = project_record(&record) {
+                skills.push(meta);
+            }
+        }
+
+        // Apply user-configured disable overlay
+        if let Some(config) = self.config.as_ref() {
+            let disabled: HashSet<&str> = config
+                .config
+                .iter()
+                .filter(|e| !e.enabled)
+                .map(|e| e.name.as_str())
+                .collect();
+            if !disabled.is_empty() {
+                skills.retain(|s| !disabled.contains(s.name.as_str()));
+            }
+        }
+
+        debug!(
+            count = skills.len(),
+            work_dir = %work_dir.display(),
+            "loaded skills with outcome"
+        );
+
+        SkillLoadOutcome {
+            skills,
+            errors: Vec::new(),
+            disabled_paths,
+            skill_roots: root_paths,
+        }
+    }
+
     /// Filter skills based on config enable/disable settings.
     fn filter_skills(&self, skills: &mut Vec<SkillMetadata>) {
         let Some(config) = self.config.as_ref() else {
@@ -328,11 +571,26 @@ impl SkillsManager {
 
     /// Build the skills instruction text for the system prompt.
     ///
-    /// Includes both the skill description and the full prompt content (body of SKILL.md),
-    /// matching Codex's behavior of injecting skill prompts into system instructions.
+    /// Uses progressive disclosure: only outputs name + description + file path.
+    /// The model can read the SKILL.md via `read_file` when it decides to use a skill.
+    /// This is backwards-compatible with the original signature (returns String).
     pub fn build_skills_instructions(&self, skills: &[SkillMetadata]) -> String {
+        let (text, _report) = self.build_skills_instructions_budgeted(skills, None);
+        text
+    }
+
+    /// Build the skills instruction text for the system prompt using progressive disclosure.
+    ///
+    /// Instead of injecting the full SKILL.md body, only outputs name + description + file path.
+    /// The model can read the SKILL.md via `read_file` when it decides to use a skill.
+    /// Descriptions are truncated proportionally when the budget is tight.
+    pub fn build_skills_instructions_budgeted(
+        &self,
+        skills: &[SkillMetadata],
+        budget: Option<SkillMetadataBudget>,
+    ) -> (String, Option<SkillRenderReport>) {
         if skills.is_empty() {
-            return String::new();
+            return (String::new(), None);
         }
 
         let include = self
@@ -342,25 +600,26 @@ impl SkillsManager {
             .unwrap_or(true);
 
         if !include {
-            return String::new();
+            return (String::new(), None);
         }
 
-        let mut output = String::from("\n## Available Skills\n\n");
-        output.push_str(
-            "The following skills are available. Each provides specialized capabilities.\n\n",
-        );
+        let budget = budget.unwrap_or(SkillMetadataBudget::Characters(
+            render::default_char_budget(),
+        ));
+        let (skill_lines, report) = render_skill_lines(skills, budget);
 
-        for skill in skills {
-            output.push_str(&format!("### {}\n", skill.name));
-            output.push_str(&format!("{}\n", skill.description));
-            // Inject skill prompt content (the body of SKILL.md)
-            if !skill.prompt_content.is_empty() {
-                output.push_str(&format!("\n{}\n", skill.prompt_content));
-            }
+        let mut output = String::from("\n## Skills\n");
+        output.push_str(render::SKILLS_INTRO);
+        output.push_str("\n### Available skills\n");
+        for line in &skill_lines {
+            output.push_str(line);
             output.push('\n');
         }
+        output.push_str("\n### How to use skills\n");
+        output.push_str(render::SKILLS_HOW_TO_USE);
+        output.push('\n');
 
-        output
+        (output, Some(report))
     }
 }
 
@@ -438,6 +697,9 @@ fn project_record(record: &bifrost_skills::SkillRecord) -> Option<SkillMetadata>
         prompt_content,
         path: record.skill_md_path.clone(),
         scope: record.effective_scope.clone(),
+        interface: None,
+        dependencies: None,
+        policy: None,
     })
 }
 
@@ -611,6 +873,9 @@ Do something useful.
             prompt_content: "Prompt body".to_string(),
             path: PathBuf::from("/tmp/test"),
             scope: SkillScope::Repo,
+            interface: None,
+            dependencies: None,
+            policy: None,
         }];
 
         let manager = SkillsManager::new(None);
@@ -818,6 +1083,9 @@ Do something useful.
                 prompt_content: String::new(),
                 path: PathBuf::from("/dev/null"),
                 scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
             },
             SkillMetadata {
                 name: "drop".to_string(),
@@ -826,10 +1094,311 @@ Do something useful.
                 prompt_content: String::new(),
                 path: PathBuf::from("/dev/null"),
                 scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
             },
         ];
         manager.filter_skills(&mut skills);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "keep");
+    }
+
+    #[test]
+    fn test_load_skills_with_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let skill_dir = root
+            .join(AGENTS_DIR_NAME)
+            .join(SKILLS_DIR_NAME)
+            .join("outcome-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join(SKILL_FILENAME),
+            "---\nname: outcome-skill\ndescription: Test outcome\n---\nBody",
+        )
+        .unwrap();
+
+        let agent_home = dir.path().join("fake-agent-home");
+        let user_home = dir.path().join("fake-user-home");
+        fs::create_dir_all(&agent_home).unwrap();
+        fs::create_dir_all(&user_home).unwrap();
+        let manager = SkillsManager::with_overrides(None, agent_home, user_home);
+        let outcome = manager.load_skills_with_outcome(root);
+
+        assert_eq!(outcome.skills.len(), 1);
+        assert_eq!(outcome.skills[0].name, "outcome-skill");
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.skill_roots.len(), 4);
+    }
+
+    #[test]
+    fn test_skill_load_outcome_implicit_invocation_filter() {
+        let outcome = SkillLoadOutcome {
+            skills: vec![
+                SkillMetadata {
+                    name: "allowed".to_string(),
+                    description: "d".into(),
+                    short_description: None,
+                    prompt_content: String::new(),
+                    path: PathBuf::from("/a"),
+                    scope: SkillScope::Repo,
+                    interface: None,
+                    dependencies: None,
+                    policy: None,
+                },
+                SkillMetadata {
+                    name: "blocked".to_string(),
+                    description: "d".into(),
+                    short_description: None,
+                    prompt_content: String::new(),
+                    path: PathBuf::from("/b"),
+                    scope: SkillScope::Repo,
+                    interface: None,
+                    dependencies: None,
+                    policy: Some(SkillPolicy {
+                        allow_implicit_invocation: Some(false),
+                        products: Vec::new(),
+                    }),
+                },
+            ],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            skill_roots: Vec::new(),
+        };
+
+        let allowed = outcome.allowed_skills_for_implicit_invocation();
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].name, "allowed");
+    }
+
+    #[test]
+    fn test_budgeted_instructions_returns_report() {
+        let skills = vec![SkillMetadata {
+            name: "test".to_string(),
+            description: "A skill".to_string(),
+            short_description: None,
+            prompt_content: String::new(),
+            path: PathBuf::from("/test/SKILL.md"),
+            scope: SkillScope::Repo,
+            interface: None,
+            dependencies: None,
+            policy: None,
+        }];
+
+        let manager = SkillsManager::new(None);
+        let (text, report) = manager.build_skills_instructions_budgeted(&skills, None);
+        assert!(text.contains("test"));
+        assert!(text.contains("A skill"));
+        let report = report.unwrap();
+        assert_eq!(report.total_count, 1);
+        assert_eq!(report.included_count, 1);
+    }
+
+    #[test]
+    fn test_collect_env_dependencies() {
+        let outcome = SkillLoadOutcome {
+            skills: vec![
+                SkillMetadata {
+                    name: "api-skill".to_string(),
+                    description: "needs key".into(),
+                    short_description: None,
+                    prompt_content: String::new(),
+                    path: PathBuf::from("/a/SKILL.md"),
+                    scope: SkillScope::Repo,
+                    interface: None,
+                    dependencies: Some(SkillDependencies {
+                        tools: vec![SkillToolDependency {
+                            r#type: "env".to_string(),
+                            value: "API_KEY".to_string(),
+                            description: None,
+                            transport: None,
+                            command: None,
+                            url: None,
+                        }],
+                    }),
+                    policy: None,
+                },
+                SkillMetadata {
+                    name: "other-skill".to_string(),
+                    description: "also needs key".into(),
+                    short_description: None,
+                    prompt_content: String::new(),
+                    path: PathBuf::from("/b/SKILL.md"),
+                    scope: SkillScope::Repo,
+                    interface: None,
+                    dependencies: Some(SkillDependencies {
+                        tools: vec![SkillToolDependency {
+                            r#type: "env".to_string(),
+                            value: "API_KEY".to_string(),
+                            description: None,
+                            transport: None,
+                            command: None,
+                            url: None,
+                        }],
+                    }),
+                    policy: None,
+                },
+            ],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            skill_roots: Vec::new(),
+        };
+
+        let deps = outcome.collect_env_dependencies();
+        assert_eq!(deps.len(), 1);
+        let skills = deps.get("API_KEY").unwrap();
+        assert_eq!(skills.len(), 2);
+        assert!(skills.contains(&"api-skill".to_string()));
+        assert!(skills.contains(&"other-skill".to_string()));
+    }
+
+    #[test]
+    fn test_collect_env_dependencies_skips_disabled() {
+        let mut disabled = HashSet::new();
+        disabled.insert(PathBuf::from("/a/SKILL.md"));
+
+        let outcome = SkillLoadOutcome {
+            skills: vec![SkillMetadata {
+                name: "disabled-skill".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/a/SKILL.md"),
+                scope: SkillScope::Repo,
+                interface: None,
+                dependencies: Some(SkillDependencies {
+                    tools: vec![SkillToolDependency {
+                        r#type: "env".to_string(),
+                        value: "SECRET".to_string(),
+                        description: None,
+                        transport: None,
+                        command: None,
+                        url: None,
+                    }],
+                }),
+                policy: None,
+            }],
+            errors: Vec::new(),
+            disabled_paths: disabled,
+            skill_roots: Vec::new(),
+        };
+
+        let deps = outcome.collect_env_dependencies();
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_implicit_invocation_script_in_skill_dir() {
+        let outcome = SkillLoadOutcome {
+            skills: vec![SkillMetadata {
+                name: "my-skill".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/project/.agents/skills/my-skill/SKILL.md"),
+                scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
+            }],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            skill_roots: Vec::new(),
+        };
+
+        // Command within the skill's scripts/ dir
+        let result = detect_implicit_skill_invocation(
+            "/project/.agents/skills/my-skill/scripts/run.sh",
+            &outcome,
+        );
+        assert!(result.is_some());
+        let m = result.unwrap();
+        assert_eq!(m.skill_name, "my-skill");
+        assert_eq!(m.match_reason, ImplicitMatchReason::ScriptInSkillDir);
+    }
+
+    #[test]
+    fn test_detect_implicit_invocation_command_in_skill_dir() {
+        let outcome = SkillLoadOutcome {
+            skills: vec![SkillMetadata {
+                name: "my-skill".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/project/.agents/skills/my-skill/SKILL.md"),
+                scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
+            }],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            skill_roots: Vec::new(),
+        };
+
+        // Command directly in skill dir (not scripts/)
+        let result = detect_implicit_skill_invocation(
+            "/project/.agents/skills/my-skill/tool --arg",
+            &outcome,
+        );
+        assert!(result.is_some());
+        let m = result.unwrap();
+        assert_eq!(m.skill_name, "my-skill");
+        assert_eq!(m.match_reason, ImplicitMatchReason::CommandInSkillDir);
+    }
+
+    #[test]
+    fn test_detect_implicit_invocation_no_match() {
+        let outcome = SkillLoadOutcome {
+            skills: vec![SkillMetadata {
+                name: "my-skill".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/project/.agents/skills/my-skill/SKILL.md"),
+                scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
+            }],
+            errors: Vec::new(),
+            disabled_paths: HashSet::new(),
+            skill_roots: Vec::new(),
+        };
+
+        // Unrelated command
+        let result = detect_implicit_skill_invocation("ls -la /tmp", &outcome);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_implicit_invocation_skips_disabled() {
+        let mut disabled = HashSet::new();
+        disabled.insert(PathBuf::from("/project/.agents/skills/my-skill/SKILL.md"));
+
+        let outcome = SkillLoadOutcome {
+            skills: vec![SkillMetadata {
+                name: "my-skill".to_string(),
+                description: "d".into(),
+                short_description: None,
+                prompt_content: String::new(),
+                path: PathBuf::from("/project/.agents/skills/my-skill/SKILL.md"),
+                scope: SkillScope::Repo,
+                interface: None,
+                dependencies: None,
+                policy: None,
+            }],
+            errors: Vec::new(),
+            disabled_paths: disabled,
+            skill_roots: Vec::new(),
+        };
+
+        let result = detect_implicit_skill_invocation(
+            "/project/.agents/skills/my-skill/scripts/run.sh",
+            &outcome,
+        );
+        assert!(result.is_none());
     }
 }

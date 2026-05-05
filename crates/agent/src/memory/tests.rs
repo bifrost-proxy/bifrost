@@ -663,11 +663,14 @@ fn execute_phase2_tool_list_files_works() {
 fn sanitize_relative_path_prevents_traversal() {
     let root = Path::new("/tmp/memory");
     let safe = sanitize_relative_path(root, "../../../etc/passwd");
-    assert_eq!(safe, root.join("etc/passwd"));
+    assert_eq!(safe, Some(root.join("etc/passwd")));
     let safe2 = sanitize_relative_path(root, "a/../b/./c");
-    assert_eq!(safe2, root.join("a/b/c"));
+    assert_eq!(safe2, Some(root.join("a/b/c")));
     let safe3 = sanitize_relative_path(root, "/absolute/path");
-    assert_eq!(safe3, root.join("absolute/path"));
+    assert_eq!(safe3, Some(root.join("absolute/path")));
+    // Empty path returns root
+    let safe4 = sanitize_relative_path(root, "");
+    assert_eq!(safe4, Some(root.to_path_buf()));
 }
 
 #[test]

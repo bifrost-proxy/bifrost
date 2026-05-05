@@ -1123,6 +1123,8 @@ pub async fn run_turn_with_mcp(
                     session.history = messages;
                     if let Ok(runtime_state) = persistence::load_session_runtime_state(&candidate) {
                         session.current_goal = runtime_state.current_goal;
+                        session.total_tokens_used = runtime_state.total_tokens_used;
+                        crate::tools::goal::reactivate_interrupted_goal(session);
                     }
                     session.history_version = session.history_version.saturating_add(1);
                     return Ok(TurnResult {
@@ -1417,14 +1419,38 @@ pub async fn run_turn_with_mcp(
                             Err(e2) if is_context_window_error(&e2) => {
                                 // Compact wasn't enough, fall through to trim loop
                                 warn!("still over context limit after compact, starting trim loop");
-                                trim_loop_retry(client, config, session, &system_prompt, &tool_defs)
-                                    .await?
+                                match trim_loop_retry(
+                                    client,
+                                    config,
+                                    session,
+                                    &system_prompt,
+                                    &tool_defs,
+                                )
+                                .await
+                                {
+                                    Ok(r) => r,
+                                    Err(e3) => {
+                                        crate::tools::goal::pause_goal_for_interrupt(session);
+                                        return Err(e3);
+                                    }
+                                }
                             }
-                            Err(e2) => return Err(e2),
+                            Err(e2) => {
+                                crate::tools::goal::pause_goal_for_interrupt(session);
+                                return Err(e2);
+                            }
                         }
                     } else {
                         // Compact didn't run or failed, go straight to trim loop
-                        trim_loop_retry(client, config, session, &system_prompt, &tool_defs).await?
+                        match trim_loop_retry(client, config, session, &system_prompt, &tool_defs)
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e3) => {
+                                crate::tools::goal::pause_goal_for_interrupt(session);
+                                return Err(e3);
+                            }
+                        }
                     }
                 } else if is_retryable_error(&e) {
                     // Transient error — exponential backoff retry (up to 5 attempts)
@@ -1476,6 +1502,7 @@ pub async fn run_turn_with_mcp(
                                     last_err
                                 ));
                                 session.add_assistant_message(&partial_response);
+                                crate::tools::goal::pause_goal_for_interrupt(session);
                                 return Ok(TurnResult {
                                     response: partial_response,
                                     tool_calls_log,
@@ -1484,6 +1511,7 @@ pub async fn run_turn_with_mcp(
                                     plan_steps: None,
                                 });
                             }
+                            crate::tools::goal::pause_goal_for_interrupt(session);
                             return Err(last_err);
                         }
                     }
@@ -1507,6 +1535,7 @@ pub async fn run_turn_with_mcp(
                             e
                         ));
                         session.add_assistant_message(&partial_response);
+                        crate::tools::goal::pause_goal_for_interrupt(session);
                         return Ok(TurnResult {
                             response: partial_response,
                             tool_calls_log,
@@ -1515,6 +1544,7 @@ pub async fn run_turn_with_mcp(
                             plan_steps: None,
                         });
                     }
+                    crate::tools::goal::pause_goal_for_interrupt(session);
                     return Err(e);
                 }
             }
@@ -1821,6 +1851,7 @@ pub async fn run_turn_with_mcp(
         max_iterations,
         "agent turn exceeded max iterations"
     );
+    crate::tools::goal::pause_goal_for_interrupt(session);
     Err(format!("exceeded maximum iterations ({max_iterations})"))
 }
 

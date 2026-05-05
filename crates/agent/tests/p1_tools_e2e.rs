@@ -31,6 +31,8 @@ async fn goal_tools_work_end_to_end() {
     assert!(created.success, "{}", created.output);
     assert!(created.output.contains("close the p1 gap"));
     assert!(created.output.contains("\"active\""));
+    assert!(created.output.contains("\"threadId\": \"goal-e2e\""));
+    assert!(created.output.contains("\"goalId\":"));
     assert!(created.output.contains("\"remainingTokens\": 2048"));
 
     session.total_tokens_used = Some(512);

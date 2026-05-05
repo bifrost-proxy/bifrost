@@ -56,7 +56,10 @@ pub(crate) fn execute_phase2_tool(root: &Path, tool_name: &str, arguments: &str)
                 Some(p) => p,
                 None => return r#"{"error":"missing path argument"}"#.to_string(),
             };
-            let path = sanitize_relative_path(root, relative);
+            let path = match sanitize_relative_path(root, relative) {
+                Some(p) => p,
+                None => return r#"{"error":"path escapes memory workspace"}"#.to_string(),
+            };
             match fs::read_to_string(&path) {
                 Ok(content) => {
                     serde_json::json!({"content": content, "path": relative}).to_string()
@@ -77,7 +80,10 @@ pub(crate) fn execute_phase2_tool(root: &Path, tool_name: &str, arguments: &str)
                 Some(c) => c,
                 None => return r#"{"error":"missing content argument"}"#.to_string(),
             };
-            let path = sanitize_relative_path(root, relative);
+            let path = match sanitize_relative_path(root, relative) {
+                Some(p) => p,
+                None => return r#"{"error":"path escapes memory workspace"}"#.to_string(),
+            };
             if let Some(parent) = path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
                     return format!(r#"{{"error":"create directory failed: {e}"}}"#);
@@ -94,7 +100,10 @@ pub(crate) fn execute_phase2_tool(root: &Path, tool_name: &str, arguments: &str)
                 Err(e) => return format!(r#"{{"error":"invalid arguments: {e}"}}"#),
             };
             let relative = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            let path = sanitize_relative_path(root, relative);
+            let path = match sanitize_relative_path(root, relative) {
+                Some(p) => p,
+                None => return r#"{"error":"path escapes memory workspace"}"#.to_string(),
+            };
             match fs::read_dir(&path) {
                 Ok(entries) => {
                     let files: Vec<serde_json::Value> = entries
@@ -115,12 +124,22 @@ pub(crate) fn execute_phase2_tool(root: &Path, tool_name: &str, arguments: &str)
 }
 
 /// Sanitize a relative path to prevent path traversal attacks.
-pub(crate) fn sanitize_relative_path(root: &Path, relative: &str) -> PathBuf {
+/// Returns `None` if the resulting path would escape the memory root.
+pub(crate) fn sanitize_relative_path(root: &Path, relative: &str) -> Option<PathBuf> {
     let cleaned = relative
         .replace('\\', "/")
         .split('/')
         .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
         .collect::<Vec<_>>()
         .join("/");
-    root.join(cleaned)
+    if cleaned.is_empty() {
+        return Some(root.to_path_buf());
+    }
+    let resolved = root.join(&cleaned);
+    // Defense-in-depth: verify the resolved path is actually under root
+    // (handles edge cases like symlinks or platform-specific behavior)
+    if !resolved.starts_with(root) {
+        return None;
+    }
+    Some(resolved)
 }

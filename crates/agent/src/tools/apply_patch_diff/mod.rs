@@ -6,8 +6,8 @@
 //! - Update File: apply context-based diff chunks
 //! - Move To: rename files during update
 //!
-//! This complements the simpler `apply_patch` (search-and-replace) tool
-//! with a more precise, multi-file diff format.
+//! This is the Codex-style `apply_patch` implementation used for precise,
+//! multi-file structured edits.
 
 pub mod apply;
 pub mod parser;
