@@ -8,8 +8,8 @@ source "$REPO_DIR/e2e-tests/test_utils/assert.sh"
 
 cd "$REPO_DIR"
 
-BIFROST_PORT="${BIFROST_PORT:-18895}"
-MOCK_PORT="${MOCK_PORT:-18896}"
+BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-18895}}"
+MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-18896}}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"

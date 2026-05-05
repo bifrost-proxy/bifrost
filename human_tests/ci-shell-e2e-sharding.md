@@ -374,6 +374,45 @@
 - 第 4 步输出 `dump pipefail guards: 24`，覆盖 8 个 `Dump failed suite logs` 步骤中的 report/data 目录枚举和 tail 文件列表枚举。
 - 该回归只读取 CLI help 与 workflow YAML，不启动 Bifrost，不使用 9900 端口，不修改系统代理。
 
+### TC-CS-21: Agent/IM human-api 并行端口隔离回归
+
+**操作步骤**：
+1. 执行相关 shell 用例语法检查：
+   ```bash
+   bash -n \
+     e2e-tests/tests/test_agent_builtin_status_runtime.sh \
+     e2e-tests/tests/test_im_guide_queue_human_api.sh \
+     e2e-tests/tests/test_long_term_memory_human_api.sh \
+     e2e-tests/tests/test_update_plan_human_api.sh \
+     e2e-tests/tests/test_agent_loop_runtime_limits.sh
+   ```
+2. 检查这些会自启动 Bifrost 与 mock model 的脚本优先消费并行调度器端口：
+   ```bash
+   rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' \
+     e2e-tests/tests/test_agent_builtin_status_runtime.sh \
+     e2e-tests/tests/test_im_guide_queue_human_api.sh \
+     e2e-tests/tests/test_long_term_memory_human_api.sh \
+     e2e-tests/tests/test_update_plan_human_api.sh \
+     e2e-tests/tests/test_agent_loop_runtime_limits.sh
+   ```
+3. 用 CI 调度器风格端口执行 guide/queue 黑盒真实链路：
+   ```bash
+   ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 \
+     bash e2e-tests/tests/test_im_guide_queue_human_api.sh
+   ```
+4. 用另一组 CI 调度器风格端口执行 `/status` 运行中指标黑盒真实链路：
+   ```bash
+   ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 \
+     bash e2e-tests/tests/test_agent_builtin_status_runtime.sh
+   ```
+
+**预期结果**：
+- 第 1 步所有脚本语法检查通过。
+- 第 2 步每个脚本均能匹配到 `ADMIN_PORT` 与 `MOCK_HTTP_PORT` 回退表达式，证明并行 shell 调度器分配的端口会覆盖固定本地默认端口。
+- 第 3 步输出 `starting bifrost on 18111`、`configuring agent mock provider`、`[im-guide-queue-human-api] PASS`，不再因为与其它并行用例争抢 `18897/18898` 出现 `curl: (52) Empty reply from server`。
+- 第 4 步输出 `starting bifrost on 18121`、`configuring agent mock provider`、`[agent-builtin-status-runtime] PASS`，运行中 `/status` 指标仍通过。
+- 两个真实链路均使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
+
 ## 本轮执行记录
 
 测试日期：2026-05-05
@@ -391,6 +430,7 @@
 | TC-CS-18 | 通过 | 2026-05-04 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'received post-timeout event before client disconnect\|"id":"\(1\[2-9\]\|\[2-9\]\[0-9\]\+\)"\|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh` 定位到 post-timeout 事件兜底断言和失败提示。随后执行 `PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 BIFROST_DATA_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/data SERVER_LOG_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/logs SKIP_BUILD=true BIFROST_E2E_REPORT_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/reports bash e2e-tests/tests/test_replay_rules.sh`，输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；测试端口 18891-18894，未使用 9900。 |
 | TC-CS-19 | 通过 | 2026-05-05 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 30`；`rg -n 'e2e-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-20 | 通过 | 2026-05-05 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'echo "\$[A-Za-z_][A-Za-z0-9_]*" \| grep -[A-Za-z]+' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `system-proxy enable --help` 正确显示且无 Broken pipe；Ruby 静态检查 `.github/workflows/ci.yml` 输出 `dump pipefail guards: 24`，确认 8 个失败日志 dump 步骤均对 `find \| head` 管道做容错。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-21 | 通过 | 2026-05-06 本轮执行：`bash -n e2e-tests/tests/test_agent_builtin_status_runtime.sh e2e-tests/tests/test_im_guide_queue_human_api.sh e2e-tests/tests/test_long_term_memory_human_api.sh e2e-tests/tests/test_update_plan_human_api.sh e2e-tests/tests/test_agent_loop_runtime_limits.sh` 通过；`rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-\|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' ...` 显示 5 个脚本均优先消费并行调度器端口。随后执行 `ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，输出 `starting bifrost on 18111` 与 `[im-guide-queue-human-api] PASS`；执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，输出 `starting bifrost on 18121` 与 `[agent-builtin-status-runtime] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与非 9900 端口，未复现 CI 中 `curl: (52) Empty reply from server` 的端口碰撞症状。 |
 
 ## 清理步骤
 
