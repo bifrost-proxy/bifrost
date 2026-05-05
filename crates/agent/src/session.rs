@@ -1626,6 +1626,48 @@ pub async fn run_turn_with_mcp(
                 continue;
             }
 
+            // Guide-mode final check: if a guide message arrived while the model
+            // was generating its final response (no tool calls), the mid-turn
+            // checkpoint (after tool execution) never consumed it. Check here
+            // before ending the turn so the message is not silently lost.
+            let guide_at_end = session
+                .guide_channel
+                .as_ref()
+                .and_then(|ch| ch.lock().unwrap().take());
+            if let Some(guide_msg) = guide_at_end {
+                info!(
+                    session_key = %session.session_key,
+                    guide_msg_len = guide_msg.len(),
+                    "guide message found at turn end, continuing iteration"
+                );
+                // Keep the model's final text as assistant message before injecting guide
+                let content = response
+                    .content
+                    .or(response.reasoning_content)
+                    .unwrap_or_default();
+                if !content.is_empty() {
+                    session.add_assistant_message(&content);
+                    if let Some(ref mut rec) = recorder {
+                        let response_tokens =
+                            response.usage.as_ref().map(|usage| usage.total_tokens);
+                        if let Err(e) = rec.record_assistant_message_with_tokens(
+                            &session.session_key,
+                            &content,
+                            response_tokens,
+                        ) {
+                            warn!(error = %e, "failed to record assistant message (guide inject)");
+                        }
+                    }
+                }
+                session.add_user_message(&guide_msg);
+                if let Some(ref mut rec) = recorder {
+                    if let Err(e) = rec.record_user_message(&session.session_key, &guide_msg) {
+                        warn!(error = %e, "failed to record guide message at turn end");
+                    }
+                }
+                continue;
+            }
+
             // Model finished — extract text response
             let content = response
                 .content

@@ -1323,22 +1323,7 @@ async fn run_agent_chat_with_interleave(
             }
         }
 
-        // After turn completes, first check for unconsumed guide message.
-        // The guide_channel is only consumed inside the turn loop after tool calls.
-        // If the model's last response was finish_reason=stop (no tool calls), the
-        // guide message is never consumed. We must drain it here to avoid silent loss.
-        let unconsumed_guide = guide_channel.lock().unwrap().take();
-        if let Some(guide_msg) = unconsumed_guide {
-            info!(
-                session_key = %session_key,
-                guide_msg_len = guide_msg.len(),
-                "processing unconsumed guide message after turn completed"
-            );
-            current_msg = guide_msg;
-            continue;
-        }
-
-        // Then check for queued messages
+        // After turn completes, check for queued messages
         match queue_manager.pop_queue(session_key) {
             Some(next_msg) => {
                 let remaining = queue_manager.queue_status(session_key).len();
@@ -2963,6 +2948,11 @@ async fn handle_agent(
             system_prompt: Option<String>,
             #[serde(default)]
             work_dir: Option<String>,
+            /// Inject a guide message into guide_channel before starting the turn.
+            /// Used to test the scenario where a user sends a message while the
+            /// agent is finishing its turn (guide_channel drain at turn end).
+            #[serde(default)]
+            guide_message: Option<String>,
         }
         let body: ChatRequest = match read_body_json(req).await {
             Ok(v) => v,
@@ -3004,6 +2994,12 @@ async fn handle_agent(
             }
         };
         session.source = "api".to_string();
+        // If guide_message is provided, inject into guide_channel to simulate
+        // a message arriving during the final model response (turn end scenario).
+        if let Some(ref guide_msg) = body.guide_message {
+            let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(guide_msg.clone())));
+            session.guide_channel = Some(channel);
+        }
         // Initialize MCP from config for test endpoint (mirrors event loop behavior)
         let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
         let mcp_opt: Option<&mut ImMcpManager> = if mcp_manager.list_tools().is_empty() {
