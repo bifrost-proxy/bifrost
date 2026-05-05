@@ -63,8 +63,9 @@ Do not rely on intent, partial progress, elapsed effort, memory of earlier work,
 Do not call update_goal unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work."#;
 
 /// Status of a goal.
+/// Uses camelCase serialization to match Codex protocol ThreadGoalStatus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub enum GoalStatus {
     Active,
     Paused,
@@ -950,7 +951,7 @@ mod tests {
         account_goal_runtime_progress(&mut session);
 
         let result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
-        assert!(result.output.contains("\"status\": \"budget_limited\""));
+        assert!(result.output.contains("\"status\": \"budgetLimited\""));
         assert!(result.output.contains("\"tokensUsed\": 30"));
     }
 
@@ -1206,7 +1207,7 @@ mod tests {
 
         // Goal should be BudgetLimited.
         let result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
-        assert!(result.output.contains("\"status\": \"budget_limited\""));
+        assert!(result.output.contains("\"status\": \"budgetLimited\""));
     }
 
     #[test]
@@ -1237,7 +1238,7 @@ mod tests {
 
         // Goal should still be BudgetLimited.
         let result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
-        assert!(result.output.contains("\"status\": \"budget_limited\""));
+        assert!(result.output.contains("\"status\": \"budgetLimited\""));
     }
 
     #[test]
@@ -1266,6 +1267,6 @@ mod tests {
 
         // Goal should still transition to BudgetLimited.
         let result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
-        assert!(result.output.contains("\"status\": \"budget_limited\""));
+        assert!(result.output.contains("\"status\": \"budgetLimited\""));
     }
 }

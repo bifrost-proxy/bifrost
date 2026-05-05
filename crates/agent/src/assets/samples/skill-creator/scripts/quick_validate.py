@@ -131,11 +131,6 @@ def validate_skill(skill_path):
                     "Consider moving content to references/."
                 )
 
-    # Check directory structure (informational)
-    agents_yaml = skill_path / "agents" / "openai.yaml"
-    if not agents_yaml.exists():
-        warnings.append("No agents/openai.yaml found (recommended for UI metadata)")
-
     if errors:
         return False, errors, warnings
     return True, [], warnings
