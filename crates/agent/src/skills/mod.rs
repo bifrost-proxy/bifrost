@@ -883,6 +883,11 @@ Do something useful.
 
         assert!(instructions.contains("test-skill"));
         assert!(instructions.contains("Does testing"));
+        assert!(instructions.contains("/tmp/test"));
+        assert!(
+            !instructions.contains("Prompt body"),
+            "base skill prompt uses progressive disclosure and must not eagerly inject SKILL.md body"
+        );
     }
 
     #[test]

@@ -34,16 +34,16 @@ pub enum GoalPauseReason {
 /// User-visible goal snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Goal {
+pub struct ThreadGoal {
     pub thread_id: String,
     pub goal_id: String,
     pub objective: String,
     pub status: GoalStatus,
-    pub token_budget: Option<u64>,
-    pub tokens_used: u64,
-    pub time_used_seconds: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
+    pub token_budget: Option<i64>,
+    pub tokens_used: i64,
+    pub time_used_seconds: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// Session-owned goal runtime state.
@@ -86,7 +86,7 @@ struct UpdateGoalArgs {
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoalToolResponse {
-    goal: Option<Goal>,
+    goal: Option<ThreadGoal>,
     remaining_tokens: Option<i64>,
     completion_budget_report: Option<String>,
 }
@@ -95,6 +95,21 @@ struct GoalToolResponse {
 enum CompletionBudgetReport {
     Include,
     Omit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalAbortReason {
+    Interrupted,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalRuntimeEvent {
+    ThreadResumed,
+    MaybeContinueIfIdle,
+    ToolCompleted,
+    TurnFinished,
+    TaskAborted { reason: GoalAbortReason },
 }
 
 impl GoalState {
@@ -167,18 +182,18 @@ impl GoalState {
         self.active_started_at = Some(now);
     }
 
-    fn snapshot(&self, thread_id: &str, total_tokens_used: u64, now: u64) -> Goal {
+    fn snapshot(&self, thread_id: &str, total_tokens_used: u64, now: u64) -> ThreadGoal {
         let (tokens_used, time_used_seconds) = self.current_usage(total_tokens_used, now);
-        Goal {
+        ThreadGoal {
             thread_id: thread_id.to_string(),
             goal_id: self.goal_id.clone(),
             objective: self.objective.clone(),
             status: self.status,
-            token_budget: self.token_budget,
-            tokens_used,
-            time_used_seconds,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            token_budget: self.token_budget.map(|budget| budget as i64),
+            tokens_used: tokens_used as i64,
+            time_used_seconds: time_used_seconds as i64,
+            created_at: self.created_at as i64,
+            updated_at: self.updated_at as i64,
         }
     }
 
@@ -326,6 +341,22 @@ pub fn account_goal_runtime_progress(session: &mut AgentSession) {
     let total_tokens_used = session.total_tokens_used.unwrap_or(0);
     if goal.account_progress(total_tokens_used, now) {
         persist_goal_state(session);
+    }
+}
+
+pub fn goal_runtime_apply(session: &mut AgentSession, event: GoalRuntimeEvent) {
+    match event {
+        GoalRuntimeEvent::ThreadResumed | GoalRuntimeEvent::MaybeContinueIfIdle => {
+            reactivate_interrupted_goal(session);
+        }
+        GoalRuntimeEvent::ToolCompleted | GoalRuntimeEvent::TurnFinished => {
+            account_goal_runtime_progress(session);
+        }
+        GoalRuntimeEvent::TaskAborted { reason } => {
+            if reason == GoalAbortReason::Interrupted {
+                pause_goal_for_interrupt(session);
+            }
+        }
     }
 }
 
@@ -490,7 +521,7 @@ fn goal_response(session: &AgentSession, report_mode: CompletionBudgetReport) ->
         .map(|goal| goal.snapshot(&session.session_key, total_tokens_used, now));
     let remaining_tokens = goal.as_ref().and_then(|goal| {
         goal.token_budget
-            .map(|budget| (budget as i64 - goal.tokens_used as i64).max(0))
+            .map(|budget| (budget - goal.tokens_used).max(0))
     });
     let completion_budget_report = match report_mode {
         CompletionBudgetReport::Include => goal
@@ -520,7 +551,7 @@ fn goal_response(session: &AgentSession, report_mode: CompletionBudgetReport) ->
     }
 }
 
-fn completion_budget_report(goal: &Goal) -> Option<String> {
+fn completion_budget_report(goal: &ThreadGoal) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(budget) = goal.token_budget {
         parts.push(format!("tokens used: {} of {budget}", goal.tokens_used));
@@ -727,6 +758,34 @@ mod tests {
         reactivate_interrupted_goal(&mut session);
         session.total_tokens_used = Some(40);
         account_goal_runtime_progress(&mut session);
+        let resumed = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
+        assert!(resumed.output.contains("\"status\": \"active\""));
+        assert!(resumed.output.contains("\"tokensUsed\": 30"));
+    }
+
+    #[test]
+    fn goal_runtime_event_model_handles_resume_abort_and_turn_progress() {
+        let mut session = make_session();
+        session.total_tokens_used = Some(10);
+        let _ = execute_goal_tool(
+            &mut session,
+            CREATE_GOAL_TOOL_NAME,
+            r#"{"objective":"Event driven goal","token_budget":100}"#,
+        );
+
+        session.total_tokens_used = Some(25);
+        goal_runtime_apply(
+            &mut session,
+            GoalRuntimeEvent::TaskAborted {
+                reason: GoalAbortReason::Interrupted,
+            },
+        );
+        let paused = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
+        assert!(paused.output.contains("\"status\": \"paused\""));
+
+        goal_runtime_apply(&mut session, GoalRuntimeEvent::ThreadResumed);
+        session.total_tokens_used = Some(40);
+        goal_runtime_apply(&mut session, GoalRuntimeEvent::TurnFinished);
         let resumed = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
         assert!(resumed.output.contains("\"status\": \"active\""));
         assert!(resumed.output.contains("\"tokensUsed\": 30"));

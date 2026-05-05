@@ -4,7 +4,7 @@
 
 验证 Skill 系统的加载和消费一致性。Skill 有两套入口：
 - **管理端**：`SkillStore` / `SkillRegistry`（skills crate）— WebUI API 管理 Skill 的 CRUD 和启用/停用
-- **消费端**：`SkillsManager`（agent crate）— Agent 运行时加载 Skill 并注入到系统 prompt
+- **消费端**：`SkillsManager`（agent crate）— Agent 运行时加载 Skill 元信息并注入到系统 prompt；完整 `SKILL.md` body 采用按需读取，不在基础 prompt 中 eager 注入
 
 两套系统必须对 4 层 scope（Repo > User > Global > System）的路径、优先级、启用/停用状态保持一致。
 
@@ -52,13 +52,23 @@
 
 - **预期结果**：3 个测试全部 PASS
 
-### TC-SL-06：Prompt 注入一致性（测试 10-11）
+### TC-SL-06：Prompt 渐进式披露一致性（测试 10-11）
 
-验证启用的 skill 注入 prompt、停用的不注入：
+验证启用的 skill 元信息注入 prompt、完整 body 不 eager 注入，停用的 skill 不注入：
 - `skill_loading_enabled_skill_appears_in_prompt`
 - `skill_loading_disabled_skill_excluded_from_prompt`
 
-- **预期结果**：2 个测试全部 PASS
+- **操作步骤**：
+  1. 执行 `cargo run --bin bifrost-e2e -- --test skill_loading_enabled_skill_appears_in_prompt`
+  2. 执行 `cargo run --bin bifrost-e2e -- --test skill_loading_disabled_skill_excluded_from_prompt`
+- **预期结果**：
+  - 启用 skill 的 prompt 包含 skill name、description 和 `SKILL.md` path。
+  - 启用 skill 的 prompt 不包含完整 body 文本 `Use this tool to do amazing things.`。
+  - 停用 skill 的 name/body 均不出现在 prompt 中。
+  - 2 个测试全部 PASS。
+- **实际结果（2026-05-05）**：
+  - `cargo run --bin bifrost-e2e -- --test skill_loading_enabled_skill_appears_in_prompt`：PASS。
+  - `cargo run --bin bifrost-e2e -- --test skill_loading_disabled_skill_excluded_from_prompt`：PASS。
 
 ### TC-SL-07：Slash 命令解析（测试 12-13）
 

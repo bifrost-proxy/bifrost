@@ -424,7 +424,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         // ---- Prompt injection tests ----
         TestCase::standalone(
             "skill_loading_enabled_skill_appears_in_prompt",
-            "Enabled skill content is injected into system prompt via build_skills_instructions",
+            "Enabled skill metadata is injected into system prompt via build_skills_instructions",
             "skill_loading",
             || async move {
                 let env = TestEnv::new("prompt_inject")?;
@@ -446,8 +446,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if !instructions.contains("Prompt tool") {
                     return Err("Prompt does not contain skill description".to_string());
                 }
-                if !instructions.contains("Use this tool to do amazing things.") {
-                    return Err("Prompt does not contain skill body".to_string());
+                if !instructions.contains(env.repo_skills_dir().to_string_lossy().as_ref()) {
+                    return Err("Prompt does not contain skill path".to_string());
+                }
+                if instructions.contains("Use this tool to do amazing things.") {
+                    return Err("Prompt should not eagerly contain skill body".to_string());
                 }
 
                 Ok(())

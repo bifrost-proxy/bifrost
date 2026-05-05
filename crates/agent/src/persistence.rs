@@ -118,11 +118,23 @@ impl ConversationRecorder {
         session_key: &str,
         content: &str,
     ) -> Result<(), String> {
+        self.record_assistant_message_with_tokens(session_key, content, None)
+    }
+
+    pub fn record_assistant_message_with_tokens(
+        &mut self,
+        session_key: &str,
+        content: &str,
+        tokens: Option<u64>,
+    ) -> Result<(), String> {
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::ASSISTANT_MESSAGE.to_string(),
             session_key: session_key.to_string(),
-            content: serde_json::json!({ "message": content }),
+            content: serde_json::json!({
+                "message": content,
+                "tokens": tokens,
+            }),
         })
     }
 
@@ -1116,6 +1128,19 @@ mod tests {
         let state = load_session_runtime_state(&path).unwrap();
         assert_eq!(state.current_goal, None);
         assert_eq!(state.total_tokens_used, Some(150));
+    }
+
+    #[test]
+    fn test_record_assistant_message_with_tokens_updates_runtime_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "assistant-tokens");
+        recorder
+            .record_assistant_message_with_tokens("assistant-tokens", "done", Some(42))
+            .unwrap();
+        recorder.close();
+
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert_eq!(state.total_tokens_used, Some(42));
     }
 
     #[test]

@@ -1124,7 +1124,10 @@ pub async fn run_turn_with_mcp(
                     if let Ok(runtime_state) = persistence::load_session_runtime_state(&candidate) {
                         session.current_goal = runtime_state.current_goal;
                         session.total_tokens_used = runtime_state.total_tokens_used;
-                        crate::tools::goal::reactivate_interrupted_goal(session);
+                        crate::tools::goal::goal_runtime_apply(
+                            session,
+                            crate::tools::goal::GoalRuntimeEvent::ThreadResumed,
+                        );
                     }
                     session.history_version = session.history_version.saturating_add(1);
                     return Ok(TurnResult {
@@ -1214,6 +1217,16 @@ pub async fn run_turn_with_mcp(
             title_updated: None,
             plan_steps: None,
         });
+    }
+
+    // A normal new user turn resumes an interrupted goal, matching Codex's
+    // thread-resume behavior more closely than keeping the goal paused until
+    // an explicit /resume slash command.
+    if !trimmed.starts_with('/') {
+        crate::tools::goal::goal_runtime_apply(
+            session,
+            crate::tools::goal::GoalRuntimeEvent::MaybeContinueIfIdle,
+        );
     }
 
     // Pre-turn compaction: check using real tokens if available, else estimate
@@ -1430,13 +1443,24 @@ pub async fn run_turn_with_mcp(
                                 {
                                     Ok(r) => r,
                                     Err(e3) => {
-                                        crate::tools::goal::pause_goal_for_interrupt(session);
+                                        crate::tools::goal::goal_runtime_apply(
+                                            session,
+                                            crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                                reason:
+                                                    crate::tools::goal::GoalAbortReason::Interrupted,
+                                            },
+                                        );
                                         return Err(e3);
                                     }
                                 }
                             }
                             Err(e2) => {
-                                crate::tools::goal::pause_goal_for_interrupt(session);
+                                crate::tools::goal::goal_runtime_apply(
+                                    session,
+                                    crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                        reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                                    },
+                                );
                                 return Err(e2);
                             }
                         }
@@ -1447,7 +1471,12 @@ pub async fn run_turn_with_mcp(
                         {
                             Ok(r) => r,
                             Err(e3) => {
-                                crate::tools::goal::pause_goal_for_interrupt(session);
+                                crate::tools::goal::goal_runtime_apply(
+                                    session,
+                                    crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                        reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                                    },
+                                );
                                 return Err(e3);
                             }
                         }
@@ -1502,7 +1531,12 @@ pub async fn run_turn_with_mcp(
                                     last_err
                                 ));
                                 session.add_assistant_message(&partial_response);
-                                crate::tools::goal::pause_goal_for_interrupt(session);
+                                crate::tools::goal::goal_runtime_apply(
+                                    session,
+                                    crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                        reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                                    },
+                                );
                                 return Ok(TurnResult {
                                     response: partial_response,
                                     tool_calls_log,
@@ -1511,7 +1545,12 @@ pub async fn run_turn_with_mcp(
                                     plan_steps: None,
                                 });
                             }
-                            crate::tools::goal::pause_goal_for_interrupt(session);
+                            crate::tools::goal::goal_runtime_apply(
+                                session,
+                                crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                    reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                                },
+                            );
                             return Err(last_err);
                         }
                     }
@@ -1535,7 +1574,12 @@ pub async fn run_turn_with_mcp(
                             e
                         ));
                         session.add_assistant_message(&partial_response);
-                        crate::tools::goal::pause_goal_for_interrupt(session);
+                        crate::tools::goal::goal_runtime_apply(
+                            session,
+                            crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                            },
+                        );
                         return Ok(TurnResult {
                             response: partial_response,
                             tool_calls_log,
@@ -1544,7 +1588,12 @@ pub async fn run_turn_with_mcp(
                             plan_steps: None,
                         });
                     }
-                    crate::tools::goal::pause_goal_for_interrupt(session);
+                    crate::tools::goal::goal_runtime_apply(
+                        session,
+                        crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                            reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                        },
+                    );
                     return Err(e);
                 }
             }
@@ -1553,7 +1602,10 @@ pub async fn run_turn_with_mcp(
         // Track real token usage from API response
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.total_tokens);
-            crate::tools::goal::account_goal_runtime_progress(session);
+            crate::tools::goal::goal_runtime_apply(
+                session,
+                crate::tools::goal::GoalRuntimeEvent::TurnFinished,
+            );
         }
 
         // Check if model wants to call tools
@@ -1577,13 +1629,21 @@ pub async fn run_turn_with_mcp(
                 .content
                 .or(response.reasoning_content)
                 .unwrap_or_default();
-            crate::tools::goal::account_goal_runtime_progress(session);
+            crate::tools::goal::goal_runtime_apply(
+                session,
+                crate::tools::goal::GoalRuntimeEvent::TurnFinished,
+            );
 
             session.add_assistant_message(&content);
 
             // Record assistant message
             if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.record_assistant_message(&session.session_key, &content) {
+                let response_tokens = response.usage.as_ref().map(|usage| usage.total_tokens);
+                if let Err(e) = rec.record_assistant_message_with_tokens(
+                    &session.session_key,
+                    &content,
+                    response_tokens,
+                ) {
                     warn!(error = %e, "failed to record assistant message");
                 }
             }
@@ -1710,7 +1770,10 @@ pub async fn run_turn_with_mcp(
 
             // Add tool result to history
             session.add_tool_result(&tc.id, &output);
-            crate::tools::goal::account_goal_runtime_progress(session);
+            crate::tools::goal::goal_runtime_apply(
+                session,
+                crate::tools::goal::GoalRuntimeEvent::ToolCompleted,
+            );
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
@@ -1851,7 +1914,12 @@ pub async fn run_turn_with_mcp(
         max_iterations,
         "agent turn exceeded max iterations"
     );
-    crate::tools::goal::pause_goal_for_interrupt(session);
+    crate::tools::goal::goal_runtime_apply(
+        session,
+        crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+            reason: crate::tools::goal::GoalAbortReason::Interrupted,
+        },
+    );
     Err(format!("exceeded maximum iterations ({max_iterations})"))
 }
 

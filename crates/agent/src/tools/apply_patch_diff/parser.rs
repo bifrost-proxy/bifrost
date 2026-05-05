@@ -158,6 +158,10 @@ fn parse_add_file(path: &str, lines: &[&str], start: usize) -> Result<(Hunk, usi
         if is_hunk_marker(line) {
             break;
         }
+        if line.trim().is_empty() {
+            i += 1;
+            continue;
+        }
         let Some(stripped) = line.strip_prefix('+') else {
             return Err(PatchError::ParseError {
                 line: i + 1,
@@ -587,6 +591,52 @@ println!(\"bad\");
                 assert_eq!(chunks[0].new_lines[0], "");
                 assert_eq!(chunks[0].old_lines[1], "old();");
                 assert_eq!(chunks[0].new_lines[1], "new();");
+            }
+            _ => panic!("expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_skips_blank_separator_after_header() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/main.rs
+
+@@ fn main() {
+-old();
++new();
+*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        match &hunks[0] {
+            Hunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].change_context.as_deref(), Some("fn main() {"));
+                assert_eq!(chunks[0].old_lines, vec!["old();"]);
+                assert_eq!(chunks[0].new_lines, vec!["new();"]);
+            }
+            _ => panic!("expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_skips_blank_separator_between_chunks() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@ fn one() {
+-old_one();
++new_one();
+
+@@ fn two() {
+-old_two();
++new_two();
+*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        match &hunks[0] {
+            Hunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 2);
+                assert_eq!(chunks[0].change_context.as_deref(), Some("fn one() {"));
+                assert_eq!(chunks[1].change_context.as_deref(), Some("fn two() {"));
             }
             _ => panic!("expected UpdateFile"),
         }

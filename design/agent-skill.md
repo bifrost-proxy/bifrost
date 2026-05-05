@@ -134,11 +134,17 @@ Agent runtime 必须在 `AgentSession::new_with_work_dir` 构造出的真实 ses
 
 System prompt 末尾追加一个有界 `## Available Skills` digest：每个 enabled skill 一行 `- <name>: <description_one_line>`，总长度不超过 4KB；当前缺少使用次数和最近使用时间统计时按名称稳定排序，后续有统计字段后可提升排序策略。
 
+Skill prompt 加载采用渐进式披露：基础 system prompt 只包含 enabled skill 的名称、description 和 `SKILL.md` 路径，不直接注入 `SKILL.md` body。模型在用户显式提及 skill 或根据 description 判定需要使用 skill 时，再按路径读取完整 `SKILL.md`。对应回归要求：
+
+- `SkillsManager::build_skills_instructions` 输出必须包含 enabled skill 的 name / description / file path。
+- 同一输出不得 eager 注入 `prompt_content`，避免大量 skill body 抢占上下文。
+- `skill_loading_enabled_skill_appears_in_prompt` E2E 用例验证上述 metadata 注入与 body 不注入契约。
+
 长期记忆 append 使用 `fs2::FileExt::lock_exclusive()` 对目标文件加 advisory exclusive lock，保护多个本地 session 同时追加 `MEMORY.md` 或 `raw_memories.md` 时不会出现行交错。
 
 验证计划：
 
-- 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill。
+- 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill；`test_build_skills_instructions` 验证 base prompt 包含 skill metadata 且不 eager 注入 body。
 - 真实场景测试：新增 `human_tests/agent-runtime-review-fixes.md`，包含 TC-ARF-01 到 TC-ARF-03，逐条执行并记录实际结果。
 
 ### Admin import 与 CLI secret 回归（feat/agent review fixpass）

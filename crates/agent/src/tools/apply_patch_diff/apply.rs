@@ -217,15 +217,19 @@ fn compute_replacements(
     for chunk in chunks {
         let old_line_count = chunk.old_lines.len();
         let match_start =
-            if let Some(change_context) = chunk.change_context.as_deref() {
+            if old_line_count == 0 {
+                if file_lines.last().is_some_and(|line| line.is_empty()) {
+                    file_lines.len().saturating_sub(1)
+                } else {
+                    file_lines.len()
+                }
+            } else if let Some(change_context) = chunk.change_context.as_deref() {
                 let context_idx = seek_sequence(file_lines, change_context, search_start)
                     .ok_or_else(|| ApplyError::ContextNotFound {
                         file: file_path.to_path_buf(),
                         context: change_context.to_string(),
                     })?;
                 context_idx + 1
-            } else if old_line_count == 0 {
-                file_lines.len()
             } else {
                 seek_line_block(file_lines, &chunk.old_lines, search_start).ok_or_else(|| {
                     ApplyError::OldLinesNotMatch {
@@ -472,6 +476,28 @@ mod tests {
         }];
         let err = apply_patch(dir.path(), &hunks).unwrap_err();
         assert!(matches!(err, ApplyError::OldLinesNotMatch { .. }));
+    }
+
+    #[test]
+    fn test_apply_insert_without_old_lines_appends_at_eof_even_with_context() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "main.rs", "before();\nanchor();\n");
+        let hunks = vec![Hunk::UpdateFile {
+            path: PathBuf::from("main.rs"),
+            move_path: None,
+            chunks: vec![UpdateFileChunk {
+                change_context: Some("anchor();".to_string()),
+                old_lines: vec![],
+                new_lines: vec!["inserted();".to_string()],
+                is_end_of_file: false,
+            }],
+        }];
+        let result = apply_patch(dir.path(), &hunks).unwrap();
+        assert_eq!(result.modified.len(), 1);
+        assert_eq!(
+            read_file(dir.path(), "main.rs"),
+            "before();\nanchor();\ninserted();\n"
+        );
     }
 
     #[test]
