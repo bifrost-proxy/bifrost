@@ -1936,7 +1936,7 @@ if (webuiNetworkRows.length !== 1) {
 }
 const devtoolsUrlBeforeNetworkDetail = adminPage.url();
 await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
 const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
 const networkTableBox = await adminPage.getByTestId('devtools-network-traffic-table').boundingBox();
@@ -1977,7 +1977,7 @@ const bridgeOnlyDetailRow = adminPage
   .first();
 await bridgeOnlyDetailRow.waitFor({ timeout: 8000 });
 await bridgeOnlyDetailRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-query').getByText('foo').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-request-headers').getByText(/x-bifrost-fallback-header/i).waitFor({ timeout: 8000 });
@@ -2001,7 +2001,7 @@ const bridgeOnlyTagRow = adminPage
   .first();
 await bridgeOnlyTagRow.waitFor({ timeout: 8000 });
 await bridgeOnlyTagRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
 await adminPage.unroute('**/_bifrost/api/traffic/**');
@@ -2022,7 +2022,7 @@ const uiTrafficEnrichRow = adminPage
   .first();
 await uiTrafficEnrichRow.waitFor({ timeout: 8000 });
 await uiTrafficEnrichRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
 await panelSearch.fill('');
 await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');

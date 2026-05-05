@@ -979,8 +979,10 @@ async function findTrafficForDevtoolsRequestWithRetry(
   clientReqId: string,
   isCurrent: () => boolean,
 ): Promise<string> {
+  const maxAttempts = 40;
+  const retryDelayMs = 250;
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (!isCurrent()) {
       throw new Error("Network detail request was replaced.");
     }
@@ -988,8 +990,8 @@ async function findTrafficForDevtoolsRequestWithRetry(
       return await findTrafficForDevtoolsRequest(clientReqId);
     } catch (error) {
       lastError = error;
-      if (attempt === 9) break;
-      await sleep(200);
+      if (attempt === maxAttempts - 1) break;
+      await sleep(retryDelayMs);
     }
   }
   throw lastError instanceof Error

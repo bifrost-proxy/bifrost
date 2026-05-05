@@ -289,6 +289,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 ### 真实场景测试
 
 - 更新并执行 `human_tests/chrome-devtools-remote-control.md`
+- 回归执行 `TC-CDP-41`：确认 Network 行点击后 WebUI 在 CI/macOS 慢落库场景中最多等待约 10 秒查询 `client_req_id -> traffic id`，映射完成后展示 TrafficDetail 而不是过早固定为 fallback
 - 回归执行 `TC-CDP-42`：确认 Console 对象摘要在 CI/macOS WebUI 时序下可以稳定展开到 `nested` / `items` 属性，且复制 raw 内容仍包含结构化对象字段
 - 同步更新 `human_tests/readme.md` 索引
 

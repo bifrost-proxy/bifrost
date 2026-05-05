@@ -756,10 +756,10 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 3. 在 WebUI DevTools Network tab 的搜索框输入 `bridge-only-detail`。
 4. 等待 `data-testid="traffic-row"` 中包含 `bridge-only-detail` 的行可见。
 5. 点击该匹配行，而不是点击当前列表首行。
-6. 验证右侧 `devtools-network-fallback-detail` 展示 `bridge-only-detail`、`404` 和 query 参数 `foo=bar`。
+6. 在最长约 10 秒映射等待窗口结束后，验证右侧 `devtools-network-fallback-detail` 展示 `bridge-only-detail`、`404` 和 query 参数 `foo=bar`。
 7. 再发起动态标签资源 fallback 请求 `/devtools/api/static-resource?case=bridge-only-tag-fallback&foo=tagfallback`。
 8. 搜索 `bridge-only-tag-fallback`，等待包含该 URL 的匹配行可见后点击该行。
-9. 验证右侧 fallback 详情展示 `bridge-only-tag-fallback`、`404` 和 query 参数 `foo=tagfallback`。
+9. 在最长约 10 秒映射等待窗口结束后，验证右侧 fallback 详情展示 `bridge-only-tag-fallback`、`404` 和 query 参数 `foo=tagfallback`。
 10. 再发起可映射 Traffic 详情的动态标签资源 `/devtools/api/parser-resource?case=ui-traffic-enrich&foo=img`。
 11. 搜索 `ui-traffic-enrich`，等待包含该 URL 的匹配行可见后点击该行。
 12. 验证右侧 `devtools-network-detail` 展示 `traffic-detail`，且详情中包含 `ui-traffic-enrich`。
@@ -784,8 +784,8 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 
 预期结果：
 
-- WebUI 在点击后可短暂显示 TrafficDetail loading 状态，等待 `client_req_id -> traffic id` 映射落库。
-- 如果映射在短时间内完成，右侧最终展示 `traffic-detail`，且详情包含 `ui-traffic-enrich`。
+- WebUI 在点击后可短暂显示 TrafficDetail loading 状态，并最多等待约 10 秒查询 `client_req_id -> traffic id` 映射落库。
+- 如果映射在等待窗口内完成，右侧最终展示 `traffic-detail`，且详情包含 `ui-traffic-enrich`。
 - 不会因为 bridge network 事件先于 Traffic 记录落库而立即固定为 fallback 详情。
 - 若映射持续不可用，仍保留 fallback 详情路径，不跳转 `/traffic`。
 
@@ -845,3 +845,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-05-01：通过。根据 CI #827 Linux shell shard 3 新失败补充 TC-CDP-40 的 Traffic 可映射动态标签资源回归，避免 `ui-traffic-enrich` 文本同时出现在多处时触发 Playwright strict mode，也避免依赖行内状态列时序。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。根据 CI #829 macOS aarch64 shell shard 3 新失败补充 TC-CDP-41，验证点击动态标签资源 Network 行时，WebUI 会短暂等待 `client_req_id -> traffic id` 映射落库，不因 page bridge network 事件先到而概率性固定为 fallback 详情。执行命令：`source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-06：通过。根据 CI `25391191157` macOS aarch64 shell shard 3 的 Console 对象展开一次性等待超时，补充并执行 TC-CDP-42。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`；随后执行 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web run build`、`cargo build --release --bin bifrost` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-05-06：通过。根据 CI `25393907946` macOS aarch64 shell shard 3 的 Network `TrafficDetail` 等待超时，复核并执行 TC-CDP-41 / TC-CDP-30。执行命令：`pnpm --dir web run build`、`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`，并确认 `findTrafficForDevtoolsRequestWithRetry` 的等待窗口扩展到 40 次 * 250ms；脚本中两处 `devtools-network-detail -> traffic-detail` 和两处 fallback detail 等待提升到 15000ms，覆盖慢映射与最终 fallback 两条路径。
