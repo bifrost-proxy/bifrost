@@ -4,6 +4,7 @@ use crate::assertions::assert_status;
 use crate::{ProxyInstance, TestCase};
 use bifrost_admin::{AdminState, ImGatewayService};
 use bifrost_agent::config::{AgentConfig, ModelProviderConfig};
+use bifrost_agent::memory_prompts::{CONSOLIDATION_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT};
 use bifrost_agent::persistence::{load_conversation, ConversationRecorder};
 use bifrost_agent::session::{run_turn, run_turn_with_mcp, AgentSession};
 use bifrost_agent::ToolRegistry;
@@ -808,14 +809,10 @@ impl ChatCompletionMock {
                                 );
                             }
 
-                            let is_memory_extract = request_messages_contain(
-                                &body,
-                                "You extract durable memories from a Bifrost Agent conversation",
-                            );
-                            let is_memory_consolidation = request_messages_contain(
-                                &body,
-                                "Bifrost memory consolidation agent",
-                            );
+                            let is_memory_extract =
+                                request_messages_contain(&body, EXTRACT_SYSTEM_PROMPT);
+                            let is_memory_consolidation =
+                                request_messages_contain(&body, CONSOLIDATION_SYSTEM_PROMPT);
                             let consumes_auto_memory = request_messages_contain(&body, "## Memory")
                                 && request_messages_contain(&body, "MEM-AUTO-42")
                                 && request_messages_contain(
@@ -838,9 +835,15 @@ impl ChatCompletionMock {
                                 && !is_memory_extract
                                 && !is_memory_consolidation;
                             let message = if is_memory_extract {
+                                let content = json!({
+                                    "rollout_summary": "# Auto memory source\n\n## Task 1: remember project code\nOutcome: success\n\nReusable knowledge:\n- User's Bifrost project code is MEM-AUTO-42.",
+                                    "rollout_slug": "auto-memory-source",
+                                    "raw_memory": "---\ndescription: User's Bifrost project code is MEM-AUTO-42.\ntask: remember_project_code\ntask_group: /Users/eden/work/github/bifrost\ntask_outcome: success\ncwd: /Users/eden/work/github/bifrost\nkeywords: MEM-AUTO-42, auto memory, bifrost\n---\n\n### Task 1: remember project code\n\ntask: remember_project_code\ntask_group: bifrost agent memory\ntask_outcome: success\n\nReusable knowledge:\n- User's Bifrost project code is MEM-AUTO-42.\n"
+                                })
+                                .to_string();
                                 json!({
                                     "role": "assistant",
-                                    "content": "{\"memories\":[\"User's Bifrost project code is MEM-AUTO-42.\"]}"
+                                    "content": content
                                 })
                             } else if is_memory_consolidation {
                                 json!({

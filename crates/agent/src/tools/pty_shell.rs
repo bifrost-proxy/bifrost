@@ -357,7 +357,9 @@ impl ToolHandler for PtyShellTool {
 
 fn extract_exit_code(text: &str, sentinel_prefix: &str) -> Option<i32> {
     text.lines().find_map(|line| {
-        line.strip_prefix(sentinel_prefix)
+        let start = line.find(sentinel_prefix)?;
+        line[start..]
+            .strip_prefix(sentinel_prefix)
             .and_then(|value| value.trim().parse::<i32>().ok())
     })
 }

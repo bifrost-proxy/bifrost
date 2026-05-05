@@ -79,7 +79,9 @@ cargo build --bin bifrost
 - 测试临时 `agent/memory/` 下没有 `memories.sqlite`。
 
 实际结果：
-- 已执行 `bash e2e-tests/tests/test_long_term_memory_remember_recall.sh`，编译通过，但当前 Codex 沙箱禁止 mock Chat Completions 监听端口，`bind mock chat server: Operation not permitted (os error 1)`，业务断言未进入。需在允许本地监听端口的环境复跑。
+- 通过。2026-05-05 执行 `CARGO_TARGET_DIR=target/ci-fix BIFROST_E2E_RUNNER_JOBS=1 bash e2e-tests/tests/test_long_term_memory_remember_recall.sh`：
+  - `im_gateway_agent_long_term_memory_remember_recall` passed，mock 请求包含 Codex-style read-path instructions 与预置 summary。
+  - `im_gateway_agent_auto_memory_new_session_consumes` passed，自动生成记忆后新 session 消费 `MEM-AUTO-42`，且未创建 `memories.sqlite`。
 
 ### TC-LTM-06 Admin API 文件追加与列表
 
@@ -154,7 +156,7 @@ cargo build --bin bifrost
    `{"session_key":"human-memory-consumer-1","message":"这是新的独立 session。请只根据长期记忆回答：我是谁？"}`
 7. 第三个独立 session 再调用同一对话接口：
    `{"session_key":"human-memory-consumer-2","message":"再开一个新的独立 session。请只根据长期记忆回答：我是谁？"}`
-8. 检查 mock 模型请求日志是否包含 `Bifrost memory consolidation agent`、`## Memory`、`MEMORY.md (searchable registry; primary file to query)` 和 `独孤怼怼`。
+8. 检查 mock 模型请求日志是否包含 `Memory Writing Agent: Phase 2`、`## Memory`、`MEMORY.md (searchable registry; primary file to query)` 和 `独孤怼怼`。
 
 预期结果：
 - 第一轮对话结束后自动抽取记忆，并触发无数据库 Phase 2 consolidation。
@@ -183,6 +185,27 @@ cargo build --bin bifrost
   - `agent/memory/memories.sqlite` 不存在
   - 第二 session `phase2-consumer-1` 与第三 session `phase2-consumer-2` 均返回 `你是独孤怼怼。`
   - mock 请求日志显示 `consolidate=True`、`extract=True`、`memory_prompt=True has_memory=True asks_identity=True`，确认真实触发 Phase 2，并在新 session 注入 `## Memory` 后消费摘要。
+
+### TC-LTM-10 回归：自动记忆 E2E mock 与当前 Phase 1/Phase 2 Prompt 对齐
+
+操作步骤：
+1. 运行：
+   `CARGO_TARGET_DIR=target/ci-fix BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_auto_memory_new_session_consumes --test-timeout 120 --port 18882`
+2. 观察 mock Chat Completions 请求识别逻辑是否进入 Phase 1 抽取与 Phase 2 consolidation 分支。
+3. 检查测试输出中的内存文件落地、consolidation 和新 session 消费断言。
+
+预期结果：
+- Phase 1 请求按当前 `EXTRACT_SYSTEM_PROMPT` 被识别，mock 返回 `rollout_summary`、`rollout_slug`、`raw_memory` JSON，内容包含 `MEM-AUTO-42`。
+- Phase 2 请求按当前 `CONSOLIDATION_SYSTEM_PROMPT` 被识别，`phase-2 memory consolidation completed` 出现在日志中。
+- `memory_summary.md`、`MEMORY.md`、`raw_memories.md` 和 `rollout_summaries/` 均落地并包含 `MEM-AUTO-42`。
+- 新 session 请求注入 Codex-style memory read-path instructions，并返回包含 `MEM-AUTO-42` 的答案。
+
+实际结果：
+- 通过。2026-05-05 执行该命令 passed，日志显示：
+  - `codex-style extraction written rollout_slug=auto-memory-source has_raw_memory=true has_rollout_summary=true`
+  - `phase-2 memory consolidation completed`
+  - `memory read instructions injected`
+  - `im_gateway_agent_auto_memory_new_session_consumes` 1/1 passed。
 
 ## 清理步骤
 

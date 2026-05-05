@@ -42,6 +42,7 @@
   - `session_id`
   - `exit_indicator`
   - `exit_code`
+- `exit_code` 解析不能假设 sentinel 位于行首；交互式 zsh/bash 可能把 prompt 与 sentinel 放在同一行，解析时需在行内查找 sentinel 前缀。
 
 ## 与 Codex 的剩余差异
 
@@ -59,6 +60,7 @@
   - `test_apply_rejects_absolute_path`
   - `test_apply_diff_tool_accepts_raw_patch_body`
 - `pty_shell`：
+  - `test_pty_shell_simple_command`
   - `test_pty_shell_reports_non_zero_exit_code`
   - `test_pty_shell_interactive_mode_returns_running`
   - `test_write_stdin_to_session`
@@ -77,6 +79,7 @@
 
 - 新增 `human_tests/agent-p1-tools.md`
 - 覆盖 `/goal`、IM/会话入口、`apply_patch`、PTY 交互链路
+- 覆盖交互式 shell prompt 前缀不影响 `exit_code` 解析的回归
 - 按文档逐条执行并记录结果
 
 ## 校验要求

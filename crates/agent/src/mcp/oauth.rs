@@ -223,11 +223,21 @@ pub struct KeyringTokenStore;
 impl KeyringTokenStore {
     /// Compute the keyring entry username from server name and URL.
     ///
-    /// Uses SHA-256 of the URL, truncated to 16 hex chars, matching
-    /// Codex's `compute_store_key` algorithm.
+    /// Matches Codex's `compute_store_key` algorithm exactly:
+    /// 1. Build JSON payload: `{"type":"http","url":"<url>","headers":{}}`
+    /// 2. SHA-256 the serialized JSON string
+    /// 3. Take first 16 hex chars (8 bytes)
+    /// 4. Format as `"{server_name}|{prefix}"`
     fn compute_key(server_name: &str, url: &str) -> String {
+        // Build the same JSON payload structure as Codex
+        let payload = serde_json::json!({
+            "type": "http",
+            "url": url,
+            "headers": {}
+        });
+        let serialized = serde_json::to_string(&payload).unwrap_or_default();
         let mut hasher = Sha256::new();
-        hasher.update(url.as_bytes());
+        hasher.update(serialized.as_bytes());
         let hash = hasher.finalize();
         // Take first 8 bytes (16 hex chars), matching Codex's sha_256_prefix
         let prefix: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
@@ -287,8 +297,18 @@ impl KeyringTokenStore {
 
     /// Check if keyring is available on this system.
     pub fn is_available() -> bool {
-        // Try creating a test entry — if the platform backend is missing, this fails.
-        keyring::Entry::new(KEYRING_SERVICE, "__bifrost_test__").is_ok()
+        // Entry creation can succeed even when the platform backend cannot
+        // actually persist/read credentials (for example headless Linux CI).
+        let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, "__bifrost_probe__") else {
+            return false;
+        };
+        let probe = "__bifrost_keyring_available__";
+        if entry.set_password(probe).is_err() {
+            return false;
+        }
+        let available = entry.get_password().is_ok_and(|value| value == probe);
+        let _ = entry.delete_credential();
+        available
     }
 }
 
@@ -310,7 +330,19 @@ pub fn save_oauth_tokens_with_mode(
         OAuthCredentialsStoreMode::Auto => {
             #[cfg(feature = "keyring-store")]
             if KeyringTokenStore::is_available() {
-                return KeyringTokenStore::save(tokens);
+                match KeyringTokenStore::save(tokens)
+                    .and_then(|_| KeyringTokenStore::load(&tokens.server_name, &tokens.url))
+                {
+                    Ok(Some(loaded)) if loaded.access_token == tokens.access_token => {
+                        return Ok(());
+                    }
+                    Ok(_) => {
+                        warn!("keyring save verification failed, falling back to file storage");
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "keyring save failed, falling back to file storage");
+                    }
+                }
             }
             OAuthTokenStore::new(data_dir).save(tokens)
         }

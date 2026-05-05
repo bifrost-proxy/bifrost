@@ -64,6 +64,15 @@ mkdir -p ./.bifrost-test
 - **预期结果**: 测试通过；本轮 Goal、`apply_patch`、PTY 与 `/goal` 接入不会破坏 `bifrost-agent` 既有能力。
 - **本次执行结果**: 待执行。
 
+### TC-APT-06: PTY exit_code 解析兼容交互式 shell prompt 前缀
+
+- **操作步骤**:
+  ```bash
+  cargo test -p bifrost-agent tools::pty_shell::tests::test_pty_shell -- --nocapture
+  ```
+- **预期结果**: 测试通过；当交互式 shell 将 prompt 与 sentinel 输出放在同一行时，`shell_pty` 仍能解析 `exit_code: 0` 与 `exit_code: 1`。
+- **本次执行结果**: 通过。2026-05-05 执行后 PTY shell 指定单测均 passed。
+
 ## 清理步骤
 
 ```bash
