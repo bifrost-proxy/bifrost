@@ -1323,7 +1323,11 @@ async fn run_agent_chat_with_interleave(
             }
         }
 
-        // After turn completes, check for queued messages
+        // After turn completes, check for queued messages.
+        // Pop the next message from queue and process it as a new turn.
+        // The session layer also supports `pending_messages` for inline queue
+        // drain (used by `/agent/chat` API for testing), but in the IM event loop
+        // we process one message per outer iteration to maintain interleave support.
         match queue_manager.pop_queue(session_key) {
             Some(next_msg) => {
                 let remaining = queue_manager.queue_status(session_key).len();
@@ -1333,7 +1337,6 @@ async fn run_agent_chat_with_interleave(
                     remaining_queue = remaining,
                     "processing next queued message"
                 );
-                // Notify user which queued message is being processed
                 let preview = truncate_str(&next_msg, 80);
                 let notice = if remaining > 0 {
                     format!("📋 正在处理排队消息: {preview}\n（剩余 {remaining} 条排队）")
@@ -1342,10 +1345,8 @@ async fn run_agent_chat_with_interleave(
                 };
                 send_agent_reply(feishu, provider, initial_event, &notice, message_log_store).await;
                 current_msg = next_msg;
-                // Continue the loop to process the next queued message
             }
             None => {
-                // No more queued messages, clean up and exit
                 queue_manager.clear_session(session_key);
                 break;
             }
@@ -2953,6 +2954,11 @@ async fn handle_agent(
             /// agent is finishing its turn (guide_channel drain at turn end).
             #[serde(default)]
             guide_message: Option<String>,
+            /// Inject messages into the pending queue before starting the turn.
+            /// Used to test queued message processing. Each message will be
+            /// processed sequentially within the same `run_turn_with_mcp` call.
+            #[serde(default)]
+            queue_messages: Vec<String>,
         }
         let body: ChatRequest = match read_body_json(req).await {
             Ok(v) => v,
@@ -3000,6 +3006,13 @@ async fn handle_agent(
             if !guide_msg.is_empty() {
                 let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(guide_msg.clone())));
                 session.guide_channel = Some(channel);
+            }
+        }
+        // If queue_messages is provided, inject into session's pending_messages
+        // to simulate queued messages arriving during agent processing.
+        for msg in &body.queue_messages {
+            if !msg.trim().is_empty() {
+                session.pending_messages.push_back(msg.clone());
             }
         }
         // Initialize MCP from config for test endpoint (mirrors event loop behavior)

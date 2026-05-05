@@ -94,6 +94,13 @@ pub struct AgentSession {
     /// If a message is present, it is appended to history before the next model call.
     pub guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
 
+    /// Pending message queue. When the turn loop finishes (model returns stop
+    /// with no tool calls and no guide message), it checks this queue. If there
+    /// are messages pending, the next one is popped and processed as a new user
+    /// message within the same `run_turn_with_mcp` call, avoiding the need for
+    /// the outer loop in the IM handler to drive queue drain.
+    pub pending_messages: std::collections::VecDeque<String>,
+
     /// Session title (intent/topic) set by the agent via set_title tool.
     /// Displayed in the Feishu card header instead of "Bifrost AI".
     pub title: Option<String>,
@@ -148,6 +155,7 @@ impl AgentSession {
             skill_authoring: SkillAuthoringHub::new(),
             memory_cleared: false,
             guide_channel: None,
+            pending_messages: std::collections::VecDeque::new(),
             title: None,
             current_plan: None,
             current_goal: None,
@@ -1667,6 +1675,45 @@ pub async fn run_turn_with_mcp(
                     }
                 }
                 continue;
+            }
+
+            // Pending queue check: if messages are queued (e.g. from IM interleave),
+            // pop the next one and continue the turn loop instead of returning.
+            if let Some(queued_msg) = session.pending_messages.pop_front() {
+                if !queued_msg.trim().is_empty() {
+                    info!(
+                        session_key = %session.session_key,
+                        queued_msg_len = queued_msg.len(),
+                        remaining_queue = session.pending_messages.len(),
+                        "processing queued message from pending_messages"
+                    );
+                    // Keep the model's final text as assistant message
+                    let content = response
+                        .content
+                        .or(response.reasoning_content)
+                        .unwrap_or_default();
+                    if !content.is_empty() {
+                        session.add_assistant_message(&content);
+                        if let Some(ref mut rec) = recorder {
+                            let response_tokens =
+                                response.usage.as_ref().map(|usage| usage.total_tokens);
+                            if let Err(e) = rec.record_assistant_message_with_tokens(
+                                &session.session_key,
+                                &content,
+                                response_tokens,
+                            ) {
+                                warn!(error = %e, "failed to record assistant message (queue)");
+                            }
+                        }
+                    }
+                    session.add_user_message(&queued_msg);
+                    if let Some(ref mut rec) = recorder {
+                        if let Err(e) = rec.record_user_message(&session.session_key, &queued_msg) {
+                            warn!(error = %e, "failed to record queued message");
+                        }
+                    }
+                    continue;
+                }
             }
 
             // Model finished — extract text response
