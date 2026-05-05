@@ -1021,7 +1021,7 @@ rm -rf ./.bifrost-test
 - **预期结果**:
   - `success: true`
   - `tool_calls` 数组中包含 `tool_name: "create_goal"` 的调用
-  - create_goal 的 result 包含 JSON：`status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`
+  - create_goal 的 result 包含 JSON：`status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`, `threadId`，且不暴露内部 `goalId`
   - response 文本描述了 goal 的创建结果
 - **执行记录（2026-05-05）**: PASS — 模型成功调用 create_goal，返回 `status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`, `remainingTokens: 5000`
 
@@ -1036,10 +1036,10 @@ rm -rf ./.bifrost-test
   ```
 - **预期结果**:
   - `tool_calls` 包含 `tool_name: "get_goal"`
-  - goal 的 `status` 变为 `"budget_limited"`（因为 turn token 消耗已超过 budget 5000）
+  - goal 的 `status` 变为 `"budgetLimited"`（因为 turn token 消耗已超过 budget 5000）
   - `tokensUsed` > `tokenBudget`
   - `remainingTokens: 0`
-- **执行记录（2026-05-05）**: PASS — get_goal 返回 `status: "budget_limited"`, `tokensUsed: 33531`, `tokenBudget: 5000`, `remainingTokens: 0`
+- **执行记录（2026-05-05）**: PASS — get_goal 返回 `status: "budgetLimited"`, `tokensUsed: 33531`, `tokenBudget: 5000`, `remainingTokens: 0`
 
 ### TC-IMA-77: Goal 模式 - update_goal 标记完成与 completionBudgetReport
 
@@ -1099,9 +1099,9 @@ rm -rf ./.bifrost-test
     -d '{"message": "/goal resume", "session_key": "e2e-goal-pause"}'
   ```
 - **预期结果**:
-  - goal 的 status 恢复（如果 token 已超 budget 则为 `"budget_limited"`，否则为 `"active"`）
+  - goal 的 status 恢复（如果 token 已超 budget 则为 `"budgetLimited"`，否则为 `"active"`）
   - tool_calls 为空
-- **执行记录（2026-05-05）**: PASS — resume 后 `status: "budget_limited"`（因 tokensUsed 16695 > budget 10000）
+- **执行记录（2026-05-05）**: PASS — resume 后 `status: "budgetLimited"`（因 tokensUsed 16695 > budget 10000）
 
 ### TC-IMA-81: Goal 模式 - Session 隔离验证
 
@@ -1127,7 +1127,7 @@ rm -rf ./.bifrost-test
 - **预期结果**:
   - `success: true`
   - `tool_calls` 包含 `create_goal`、`shell` 或 `write_file` 等工具调用
-  - goal 最终被标记为 `complete`（或 `budget_limited`）
+  - goal 最终被标记为 `complete`（或 `budgetLimited`）
   - `/tmp/bifrost-e2e-test/hello.txt` 文件被创建且内容为 "Hello World"
 - **清理**: `rm -rf /tmp/bifrost-e2e-test`
 - **执行记录（2026-05-05）**: PASS — 模型调用了 create_goal → shell → write_file → read_file → update_goal(complete)，文件内容验证正确

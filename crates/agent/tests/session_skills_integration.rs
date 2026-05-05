@@ -89,7 +89,7 @@ async fn goal_slash_command_runs_through_session_router() {
     assert!(result.response.contains("finish the p1 work"));
     assert!(result.response.contains("\"status\": \"active\""));
     assert!(result.response.contains("\"threadId\": \"goal-session\""));
-    assert!(result.response.contains("\"goalId\":"));
+    assert!(!result.response.contains("\"goalId\":"));
     assert!(result.response.contains("\"remainingTokens\": 128"));
 }
 

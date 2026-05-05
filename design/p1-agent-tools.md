@@ -13,6 +13,7 @@
 ### Goal
 
 - 工具层位于 `crates/agent/src/tools/goal.rs`，统一由 `GoalManager` 持有状态。
+- Goal 工具对外返回 Codex `ThreadGoal` 兼容快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
 - 会话入口位于 `crates/agent/src/slash.rs` 与 `crates/agent/src/session.rs`：
   - `/goal`
   - `/goal show`
@@ -69,11 +70,11 @@
 ### E2E 测试
 
 - 新增 `crates/agent/tests/p1_tools_e2e.rs`：
-  - goal 生命周期黑盒验证
+  - goal 生命周期黑盒验证，断言响应包含 `threadId` 且不暴露内部 `goalId`
   - `apply_patch` 多文件 patch 黑盒验证
   - PTY 会话复用 + 交互输入黑盒验证
 - 扩展 `crates/agent/tests/session_skills_integration.rs`：
-  - `/goal set --budget ...` 通过 session slash router 黑盒验证
+  - `/goal set --budget ...` 通过 session slash router 黑盒验证，保持 ThreadGoal 输出契约
 
 ### 真实场景测试
 

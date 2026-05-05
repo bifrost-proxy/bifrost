@@ -25,8 +25,8 @@ mkdir -p ./.bifrost-test
   ```bash
   CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent --test session_skills_integration goal_slash_command_runs_through_session_router -- --nocapture
   ```
-- **预期结果**: 测试通过；`/goal set --budget 128 finish the p1 work` 返回 active goal，响应包含 objective 与 `"active"`。
-- **本次执行结果**: 待执行。
+- **预期结果**: 测试通过；`/goal set --budget 128 finish the p1 work` 返回 active goal，响应包含 objective、`"active"` 与 `threadId`，且不暴露内部 `goalId`。
+- **本次执行结果**: 通过。2026-05-05 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent --test session_skills_integration goal_slash_command_runs_through_session_router -- --nocapture`，结果 `1 passed`；响应契约验证为包含 `threadId` 且不包含内部 `goalId`。
 
 ### TC-APT-02: `apply_patch` 支持 Codex 风格结构化 patch
 
@@ -35,7 +35,7 @@ mkdir -p ./.bifrost-test
   CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent apply_patch_tool_works_end_to_end -- --nocapture
   ```
 - **预期结果**: 测试通过；`apply_patch` 能处理 `*** Begin Patch` patch，支持 `*** Move to:`，完成 update + move + add + delete，且最终只保留 patch 后文件状态。
-- **本次执行结果**: 待执行。
+- **本次执行结果**: 通过。2026-05-05 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent --test p1_tools_e2e goal_tools_work_end_to_end -- --nocapture`，结果 `1 passed`；goal 生命周期黑盒验证确认 create/get/update 正常，且 create_goal 输出不暴露内部 `goalId`。
 
 ### TC-APT-03: `apply_patch` 兼容 raw patch body 与关键语法边界
 
@@ -61,7 +61,7 @@ mkdir -p ./.bifrost-test
   ```bash
   CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent -- --nocapture
   ```
-- **预期结果**: 测试通过；本轮 Goal、`apply_patch`、PTY 与 `/goal` 接入不会破坏 `bifrost-agent` 既有能力。
+- **预期结果**: 测试通过；本轮 Goal、`apply_patch`、PTY 与 `/goal` 接入不会破坏 `bifrost-agent` 既有能力；Goal 工具响应保持 ThreadGoal 契约（`threadId` 可见、内部 `goalId` 不暴露、budget limited 状态为 `budgetLimited`）。
 - **本次执行结果**: 待执行。
 
 ### TC-APT-06: PTY exit_code 解析兼容交互式 shell prompt 前缀
