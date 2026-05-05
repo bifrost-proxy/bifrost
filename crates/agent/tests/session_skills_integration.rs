@@ -48,5 +48,37 @@ async fn goal_slash_command_runs_through_session_router() {
     .expect("run turn");
 
     assert!(result.response.contains("finish the p1 work"));
-    assert!(result.response.contains("\"active\""));
+    assert!(result.response.contains("\"status\": \"active\""));
+    assert!(result.response.contains("\"remainingTokens\": 128"));
+}
+
+#[tokio::test]
+async fn goal_slash_command_is_session_scoped() {
+    let mut session_a = AgentSession::new("goal-session-a");
+    let mut session_b = AgentSession::new("goal-session-b");
+    let tools = ToolRegistry::with_defaults(1);
+
+    let set_goal = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session_a,
+        &tools,
+        "/goal set isolate session a",
+        None,
+    )
+    .await
+    .expect("set goal");
+    assert!(set_goal.response.contains("isolate session a"));
+
+    let show_other = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session_b,
+        &tools,
+        "/goal show",
+        None,
+    )
+    .await
+    .expect("show goal");
+    assert!(show_other.response.contains("\"goal\": null"));
 }

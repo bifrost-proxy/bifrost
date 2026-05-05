@@ -1,4 +1,7 @@
-use bifrost_agent::ToolRegistry;
+use bifrost_agent::tools::goal::{
+    execute_goal_tool, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
+};
+use bifrost_agent::{AgentSession, ToolRegistry};
 use std::fs;
 
 fn session_id_from_output(output: &str) -> String {
@@ -12,31 +15,38 @@ fn session_id_from_output(output: &str) -> String {
 
 #[tokio::test]
 async fn goal_tools_work_end_to_end() {
-    let registry = ToolRegistry::with_defaults(5);
-    let work_dir = tempfile::tempdir().expect("work dir");
+    let mut session = AgentSession::new("goal-e2e");
+    session.total_tokens_used = Some(64);
 
-    let initial = registry.execute("get_goal", "{}", work_dir.path()).await;
+    let initial = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").expect("get goal");
     assert!(initial.success);
-    assert_eq!(initial.output, "no goal set");
+    assert!(initial.output.contains("\"goal\": null"));
 
-    let created = registry
-        .execute(
-            "create_goal",
-            r#"{"objective":"close the p1 gap","token_budget":2048}"#,
-            work_dir.path(),
-        )
-        .await;
+    let created = execute_goal_tool(
+        &mut session,
+        CREATE_GOAL_TOOL_NAME,
+        r#"{"objective":"close the p1 gap","token_budget":2048}"#,
+    )
+    .expect("create goal");
     assert!(created.success, "{}", created.output);
     assert!(created.output.contains("close the p1 gap"));
     assert!(created.output.contains("\"active\""));
+    assert!(created.output.contains("\"remainingTokens\": 2048"));
 
-    let updated = registry
-        .execute("update_goal", r#"{"status":"complete"}"#, work_dir.path())
-        .await;
+    session.total_tokens_used = Some(512);
+    let updated = execute_goal_tool(
+        &mut session,
+        UPDATE_GOAL_TOOL_NAME,
+        r#"{"status":"complete"}"#,
+    )
+    .expect("update goal");
     assert!(updated.success, "{}", updated.output);
     assert!(updated.output.contains("\"complete\""));
+    assert!(updated
+        .output
+        .contains("Goal achieved. Report final budget usage to the user"));
 
-    let final_goal = registry.execute("get_goal", "{}", work_dir.path()).await;
+    let final_goal = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").expect("get goal");
     assert!(final_goal.success);
     assert!(final_goal.output.contains("\"complete\""));
 }
@@ -118,9 +128,9 @@ async fn pty_tools_work_end_to_end() {
         .execute(
             "shell_pty",
             &serde_json::json!({
-                "command": "python3 -u -c 'import sys; print(sys.stdin.readline().strip())'",
+                "command": "python3 -u -c 'import sys; print(\"ready\"); print(sys.stdin.readline().strip())'",
                 "wait_for_completion": false,
-                "yield_time_ms": 300,
+                "yield_time_ms": 5000,
             })
             .to_string(),
             work_dir.path(),
@@ -128,6 +138,7 @@ async fn pty_tools_work_end_to_end() {
         .await;
     assert!(interactive.success, "{}", interactive.output);
     assert!(interactive.output.contains("exit_indicator: running"));
+    assert!(interactive.output.contains("ready"));
     let interactive_session_id = session_id_from_output(&interactive.output);
 
     let stdin_result = registry

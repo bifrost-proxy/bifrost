@@ -98,6 +98,10 @@ pub struct AgentSession {
     /// for final TurnResult.plan_steps and IM card rendering.
     pub current_plan: Option<Vec<crate::tools::update_plan::PlanStep>>,
 
+    /// Current goal owned by this session.
+    /// Scoped per session to avoid cross-session goal leakage.
+    pub current_goal: Option<crate::tools::goal::GoalState>,
+
     /// Pre-loaded user instructions (AGENTS.md + config instructions).
     /// Resolved once at session creation time, matching Codex's behavior.
     /// Reused across all turns in this session.
@@ -140,6 +144,7 @@ impl AgentSession {
             guide_channel: None,
             title: None,
             current_plan: None,
+            current_goal: None,
             user_instructions: None,
             plan_repair_attempts: 0,
             plan_sender: None,
@@ -206,6 +211,7 @@ impl AgentSession {
         self.last_response_tokens = None;
         self.history_version = self.history_version.saturating_add(1);
         self.current_plan = None;
+        self.current_goal = None;
         self.plan_repair_attempts = 0;
         // Invalidate cached user instructions so they are reloaded on next turn
         // (e.g. after switch_workdir changes the project context).
@@ -1026,12 +1032,7 @@ pub async fn run_turn_with_mcp(
                 warn!(error = %e, "failed to record user message");
             }
         }
-        let work_dir = session
-            .work_dir
-            .clone()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| config.resolve_work_dir());
-        let response = handle_goal_command(args, tools, &work_dir).await;
+        let response = handle_goal_command(session, args).await;
         return Ok(TurnResult {
             response,
             tool_calls_log: Vec::new(),
@@ -1567,7 +1568,13 @@ pub async fn run_turn_with_mcp(
                 }
             }
 
-            let result = if mcp
+            let result = if let Some(result) = crate::tools::goal::execute_goal_tool(
+                session,
+                &tc.function.name,
+                &tc.function.arguments,
+            ) {
+                result
+            } else if mcp
                 .as_ref()
                 .is_some_and(|m| m.is_mcp_tool(&tc.function.name))
             {
@@ -1777,21 +1784,22 @@ pub async fn run_turn_with_mcp(
     Err(format!("exceeded maximum iterations ({max_iterations})"))
 }
 
-async fn handle_goal_command(
-    args: &str,
-    tools: &ToolRegistry,
-    work_dir: &std::path::Path,
-) -> String {
+async fn handle_goal_command(session: &mut AgentSession, args: &str) -> String {
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "show" || trimmed == "status" {
-        return tools.execute("get_goal", "{}", work_dir).await.output;
+        return crate::tools::goal::execute_goal_tool(session, "get_goal", "{}")
+            .expect("get_goal handler")
+            .output;
     }
 
     if trimmed == "complete" {
-        return tools
-            .execute("update_goal", r#"{"status":"complete"}"#, work_dir)
-            .await
-            .output;
+        return crate::tools::goal::execute_goal_tool(
+            session,
+            "update_goal",
+            r#"{"status":"complete"}"#,
+        )
+        .expect("update_goal handler")
+        .output;
     }
 
     if let Some(rest) = trimmed.strip_prefix("set ") {
@@ -1818,18 +1826,17 @@ async fn handle_goal_command(
             return "goal objective 不能为空。".to_string();
         }
 
-        return tools
-            .execute(
-                "create_goal",
-                &serde_json::json!({
-                    "objective": objective,
-                    "token_budget": token_budget,
-                })
-                .to_string(),
-                work_dir,
-            )
-            .await
-            .output;
+        return crate::tools::goal::execute_goal_tool(
+            session,
+            "create_goal",
+            &serde_json::json!({
+                "objective": objective,
+                "token_budget": token_budget,
+            })
+            .to_string(),
+        )
+        .expect("create_goal handler")
+        .output;
     }
 
     "用法: /goal [show|set <objective>|set --budget N <objective>|complete]".to_string()

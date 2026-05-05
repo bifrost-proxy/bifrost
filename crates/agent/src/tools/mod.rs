@@ -76,11 +76,6 @@ impl ToolRegistry {
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
         registry.register(Arc::new(update_plan::UpdatePlanTool));
         registry.register(Arc::new(set_title::SetTitleTool));
-        // Goal tracking tools
-        let goal_manager = Arc::new(goal::GoalManager::new());
-        registry.register(Arc::new(goal::GetGoalTool::new(goal_manager.clone())));
-        registry.register(Arc::new(goal::CreateGoalTool::new(goal_manager.clone())));
-        registry.register(Arc::new(goal::UpdateGoalTool::new(goal_manager)));
         // Codex-compatible structured patch tool
         registry.register(Arc::new(apply_patch_diff::ApplyDiffTool));
         // PTY shell tools (persistent sessions)
@@ -95,7 +90,8 @@ impl ToolRegistry {
 
     /// Get tool definitions for the model API `tools` parameter.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut definitions: Vec<_> = self
+            .tools
             .values()
             .map(|h| ToolDefinition {
                 tool_type: "function".to_string(),
@@ -105,7 +101,9 @@ impl ToolRegistry {
                     parameters: Some(h.parameters_schema()),
                 },
             })
-            .collect()
+            .collect();
+        definitions.extend(goal::goal_tool_definitions());
+        definitions
     }
 
     /// Execute a tool by name with the given arguments.
@@ -121,6 +119,8 @@ impl ToolRegistry {
 
     /// List all registered tool names.
     pub fn tool_names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        let mut names: Vec<_> = self.tools.keys().cloned().collect();
+        names.extend(goal::goal_tool_names().into_iter().map(str::to_string));
+        names
     }
 }

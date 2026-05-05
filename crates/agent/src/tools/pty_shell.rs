@@ -449,8 +449,24 @@ impl ToolHandler for WriteStdinTool {
             }
         }
 
-        // Wait for output.
-        tokio::time::sleep(Duration::from_millis(yield_time_ms)).await;
+        // Poll until output arrives or the yield budget is exhausted. A single
+        // fixed sleep is flaky under heavy test/runtime load.
+        let deadline = Instant::now() + Duration::from_millis(yield_time_ms);
+        loop {
+            let has_output = {
+                let stdout_buf = session.stdout_buffer.lock().await;
+                if !stdout_buf.to_bytes().is_empty() {
+                    true
+                } else {
+                    let stderr_buf = session.stderr_buffer.lock().await;
+                    !stderr_buf.to_bytes().is_empty()
+                }
+            };
+            if has_output || Instant::now() >= deadline || !session.is_alive().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
 
         // Collect output.
         let stdout_text = {
@@ -683,13 +699,14 @@ mod tests {
 
         // Create a session with a foreground command that reads from stdin.
         let args = serde_json::json!({
-            "command": "python3 -u -c 'import sys; print(sys.stdin.readline().strip())'",
+            "command": "python3 -u -c 'import sys; print(\"ready\"); print(sys.stdin.readline().strip())'",
             "wait_for_completion": false,
-            "yield_time_ms": 500
+            "yield_time_ms": 5000
         });
         let result = pty_tool.execute(&args.to_string(), &tmp_dir()).await;
         assert!(result.success);
         assert!(result.output.contains("exit_indicator: running"));
+        assert!(result.output.contains("ready"));
 
         let session_id = result
             .output
