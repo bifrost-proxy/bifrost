@@ -789,12 +789,21 @@ async fn run_event_loop(
     let mut dedup = EventDedup::new();
 
     while let Some(event) = rx.recv().await {
-        // Deduplication: skip events we've already processed (e.g. re-delivered
-        // by the server after a reconnection).
-        if !event.event_id.is_empty() && dedup.is_duplicate(&event.event_id) {
+        // Deduplication: per Feishu docs, use message_id for idempotency
+        // ("如有幂等需求请使用 message_id 去重，不要依赖 event_id").
+        // Falls back to event_id for non-message events.
+        let dedup_key = event
+            .source
+            .message_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&event.event_id);
+
+        if !dedup_key.is_empty() && dedup.is_duplicate(dedup_key) {
             debug!(
                 provider_id = %event.provider_id,
                 event_id = %event.event_id,
+                message_id = ?event.source.message_id,
                 "dropping duplicate event"
             );
             continue;
