@@ -78,8 +78,7 @@ fn is_fd_limit_error(_err: &std::io::Error) -> bool {
 
 fn log_connection_serve_error(peer_addr: SocketAddr, err: &hyper::Error) {
     let err_debug = format!("{err:?}");
-    let is_noisy_disconnect =
-        err_debug.contains("IncompleteMessage") || err.to_string().contains("message completed");
+    let is_noisy_disconnect = is_noisy_connection_close(&err_debug, &err.to_string());
 
     if !is_noisy_disconnect {
         error!("Error serving connection from {}: {:?}", peer_addr, err);
@@ -98,12 +97,16 @@ fn log_connection_serve_error(peer_addr: SocketAddr, err: &hyper::Error) {
         _ => {
             let suppressed = std::mem::take(&mut state.suppressed);
             state.last_log_at = Some(now);
-            warn!(
+            debug!(
                 "Noisy connection close from {}: {:?} (suppressed {} similar events in last {:?})",
                 peer_addr, err, suppressed, NOISY_CONN_ERROR_LOG_INTERVAL
             );
         }
     }
+}
+
+fn is_noisy_connection_close(err_debug: &str, err_display: &str) -> bool {
+    err_debug.contains("IncompleteMessage") || err_display.contains("message completed")
 }
 
 fn should_defer_client_process_resolution(
@@ -2053,6 +2056,18 @@ fn convert_admin_response(
 mod tests {
     use super::*;
     use bifrost_tls::{generate_root_ca, init_crypto_provider, DynamicCertGenerator, SniResolver};
+
+    #[test]
+    fn test_incomplete_message_is_treated_as_noisy_connection_close() {
+        assert!(is_noisy_connection_close(
+            "hyper::Error(IncompleteMessage)",
+            "connection closed before message completed"
+        ));
+        assert!(!is_noisy_connection_close(
+            "hyper::Error(Parse(Version))",
+            "invalid HTTP version"
+        ));
+    }
 
     #[test]
     fn test_proxy_config_default() {

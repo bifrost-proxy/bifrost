@@ -69,6 +69,28 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if json.get("request_timeout_secs").is_none() {
                     return Err("Expected 'request_timeout_secs' field in agent config".to_string());
                 }
+                if json
+                    .get("default_base_instructions")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| v.contains("Bifrost Agent"))
+                    .is_none()
+                {
+                    return Err(format!(
+                        "Expected default_base_instructions to include built-in prompt, got: {:?}",
+                        json.get("default_base_instructions")
+                    ));
+                }
+                if json
+                    .get("effective_base_instructions")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| v.contains("Bifrost Agent"))
+                    .is_none()
+                {
+                    return Err(format!(
+                        "Expected effective_base_instructions to fall back to built-in prompt, got: {:?}",
+                        json.get("effective_base_instructions")
+                    ));
+                }
                 if json.get("request_timeout_secs").and_then(|v| v.as_u64()) != Some(600) {
                     return Err(format!(
                         "Expected request_timeout_secs: 600, got: {:?}",
@@ -120,7 +142,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "enabled": false,
                     "model": "test-model-e2e",
                     "base_url": "https://test.example.com",
-                    "api_key": "test-api-key-e2e"
+                    "api_key": "test-api-key-e2e",
+                    "base_instructions": "Base prompt e2e",
+                    "developer_instructions": "Developer prompt e2e",
+                    "user_instructions": "User prompt e2e"
                 });
 
                 let patch_response = client
@@ -171,6 +196,32 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         json.get("enabled")
                     ));
                 }
+                if json.get("base_instructions").and_then(|v| v.as_str())
+                    != Some("Base prompt e2e")
+                {
+                    return Err(format!("Expected base_instructions to be patched, got: {json}"));
+                }
+                if json.get("developer_instructions").and_then(|v| v.as_str())
+                    != Some("Developer prompt e2e")
+                {
+                    return Err(format!(
+                        "Expected developer_instructions to be patched, got: {json}"
+                    ));
+                }
+                if json.get("user_instructions").and_then(|v| v.as_str())
+                    != Some("User prompt e2e")
+                {
+                    return Err(format!("Expected user_instructions to be patched, got: {json}"));
+                }
+                if json
+                    .get("effective_base_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Base prompt e2e")
+                {
+                    return Err(format!(
+                        "Expected effective_base_instructions to use override, got: {json}"
+                    ));
+                }
                 if json.get("model").and_then(|v| v.as_str()) != Some("test-model-e2e") {
                     return Err(format!(
                         "Expected model: 'test-model-e2e', got: {:?}",
@@ -199,6 +250,344 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         "Expected api_key: 'test-api-key-e2e', got: {:?}",
                         provider.get("http_headers")
                     ));
+                }
+
+                let clear_response = client
+                    .patch(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/im-gateway/agent",
+                        port
+                    ))
+                    .json(&serde_json::json!({
+                        "base_instructions": "",
+                        "developer_instructions": "",
+                        "user_instructions": ""
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH clear agent instructions failed: {e}"))?;
+                assert_status(&clear_response, 200)?;
+                let cleared: serde_json::Value = clear_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse cleared agent config failed: {e}"))?;
+                if !cleared.get("base_instructions").is_none_or(|v| v.is_null())
+                    || !cleared
+                        .get("developer_instructions")
+                        .is_none_or(|v| v.is_null())
+                    || !cleared.get("user_instructions").is_none_or(|v| v.is_null())
+                    || !cleared
+                        .get("effective_base_instructions")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|v| v.contains("Bifrost Agent"))
+                {
+                    return Err(format!(
+                        "Expected empty strings to clear instruction overrides, got: {cleared}"
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "im_gateway_provider_agent_config_overrides",
+            "Validate IM Provider create/PATCH persists provider-level agent work_dir and instructions",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let create_body = serde_json::json!({
+                    "id": "agent-config-provider",
+                    "provider_type": "feishu",
+                    "display_name": "Agent Config Provider",
+                    "enabled": true,
+                    "event_connection_enabled": true,
+                    "event_types": [],
+                    "agent_config": {
+                        "work_dir": "/tmp/provider-workdir",
+                        "base_instructions": "Provider prompt",
+                        "developer_instructions": "Provider developer prompt",
+                        "user_instructions": "Provider user prompt"
+                    }
+                });
+                let create_response = client
+                    .post(format!("{base}/providers"))
+                    .json(&create_body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST provider failed: {e}"))?;
+                assert_status(&create_response, 200)?;
+
+                let get_response = client
+                    .get(format!("{base}/providers/agent-config-provider"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET provider failed: {e}"))?;
+                assert_status(&get_response, 200)?;
+                let created: serde_json::Value = get_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse provider JSON failed: {e}"))?;
+                if created.get("secret_ref").is_some() {
+                    return Err(format!("Provider response leaked secret_ref: {created}"));
+                }
+                if created
+                    .pointer("/agent_config/work_dir")
+                    .and_then(|v| v.as_str())
+                    != Some("/tmp/provider-workdir")
+                {
+                    return Err(format!(
+                        "Expected provider work_dir override, got: {created}"
+                    ));
+                }
+                if created
+                    .pointer("/agent_config/base_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider prompt")
+                {
+                    return Err(format!(
+                        "Expected provider instructions override, got: {created}"
+                    ));
+                }
+                if created
+                    .pointer("/agent_config/developer_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider developer prompt")
+                {
+                    return Err(format!(
+                        "Expected provider developer instructions override, got: {created}"
+                    ));
+                }
+                if created
+                    .pointer("/agent_config/user_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider user prompt")
+                {
+                    return Err(format!(
+                        "Expected provider user instructions override, got: {created}"
+                    ));
+                }
+
+                let patch_body = serde_json::json!({
+                    "agent_config": {
+                        "work_dir": "/tmp/provider-patched",
+                        "base_instructions": "Provider prompt patched",
+                        "developer_instructions": "Provider developer patched",
+                        "user_instructions": "Provider user patched"
+                    }
+                });
+                let patch_response = client
+                    .patch(format!("{base}/providers/agent-config-provider"))
+                    .json(&patch_body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH provider failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let patched: serde_json::Value = client
+                    .get(format!("{base}/providers/agent-config-provider"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET patched provider failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse patched provider failed: {e}"))?;
+                if patched
+                    .pointer("/agent_config/work_dir")
+                    .and_then(|v| v.as_str())
+                    != Some("/tmp/provider-patched")
+                {
+                    return Err(format!("Expected patched work_dir, got: {patched}"));
+                }
+                if patched
+                    .pointer("/agent_config/base_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider prompt patched")
+                {
+                    return Err(format!("Expected patched instructions, got: {patched}"));
+                }
+                if patched
+                    .pointer("/agent_config/developer_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider developer patched")
+                {
+                    return Err(format!("Expected patched developer instructions, got: {patched}"));
+                }
+                if patched
+                    .pointer("/agent_config/user_instructions")
+                    .and_then(|v| v.as_str())
+                    != Some("Provider user patched")
+                {
+                    return Err(format!("Expected patched user instructions, got: {patched}"));
+                }
+
+                let clear_base_response = client
+                    .patch(format!("{base}/providers/agent-config-provider"))
+                    .json(&serde_json::json!({
+                        "agent_config": {
+                            "base_instructions": null
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH provider clear base failed: {e}"))?;
+                assert_status(&clear_base_response, 200)?;
+                let cleared_base: serde_json::Value = client
+                    .get(format!("{base}/providers/agent-config-provider"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET provider after base clear failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse provider after base clear failed: {e}"))?;
+                if cleared_base.pointer("/agent_config/base_instructions").is_some()
+                    || cleared_base
+                        .pointer("/agent_config/developer_instructions")
+                        .and_then(|v| v.as_str())
+                        != Some("Provider developer patched")
+                    || cleared_base
+                        .pointer("/agent_config/user_instructions")
+                        .and_then(|v| v.as_str())
+                        != Some("Provider user patched")
+                {
+                    return Err(format!(
+                        "Expected clearing provider base to preserve developer/user, got: {cleared_base}"
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "im_gateway_agent_chat_codex_prompt_layers",
+            "Validate POST /api/im-gateway/agent/chat sends Codex-style system/developer/user prompt layers",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let patch_response = client
+                    .patch(format!("{base}/agent"))
+                    .json(&serde_json::json!({
+                        "enabled": true,
+                        "model": "mock-model",
+                        "model_provider": "mock",
+                        "base_instructions": "PROMPT_SPLIT_BASE_OK",
+                        "developer_instructions": "PROMPT_SPLIT_DEVELOPER_OK",
+                        "user_instructions": "PROMPT_SPLIT_USER_OK",
+                        "max_turn_iterations": 4,
+                        "request_timeout_secs": 20,
+                        "memories": {
+                            "use_memories": false,
+                            "generate_memories": false
+                        },
+                        "model_providers": {
+                            "mock": {
+                                "name": "Mock",
+                                "base_url": mock.url(),
+                                "api_key": "test"
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH agent config failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let chat_response = client
+                    .post(format!("{base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": "prompt-split-e2e",
+                        "message": "PROMPT_SPLIT_CHAT_E2E",
+                        "work_dir": std::env::current_dir()
+                            .map_err(|e| format!("current_dir failed: {e}"))?
+                            .display()
+                            .to_string()
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST agent chat failed: {e}"))?;
+                assert_status(&chat_response, 200)?;
+                let chat_json: serde_json::Value = chat_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse chat response failed: {e}"))?;
+                if chat_json.get("success").and_then(|v| v.as_bool()) != Some(true)
+                    || !chat_json
+                        .get("response")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .contains("PROMPT_SPLIT_CHAT_E2E_OK")
+                {
+                    return Err(format!("Expected prompt split chat success, got: {chat_json}"));
+                }
+
+                let sessions: serde_json::Value = client
+                    .get(format!("{base}/agent/sessions"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET sessions failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse sessions failed: {e}"))?;
+                let session = sessions
+                    .get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("session_key").and_then(|v| v.as_str())
+                                == Some("prompt-split-e2e")
+                        })
+                    })
+                    .ok_or_else(|| format!("prompt split session missing: {sessions}"))?;
+                if session.get("message_count").and_then(|v| v.as_u64()) != Some(2) {
+                    return Err(format!("Expected chat session to record 2 messages, got: {session}"));
+                }
+
+                let requests = mock.requests.lock();
+                let request = requests
+                    .last()
+                    .ok_or_else(|| "mock did not receive chat request".to_string())?;
+                let messages = request
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| format!("mock request missing messages: {request}"))?;
+                let roles: Vec<&str> = messages
+                    .iter()
+                    .filter_map(|message| message.get("role").and_then(|value| value.as_str()))
+                    .collect();
+                if roles.get(0..4) != Some(&["system", "developer", "user", "user"][..]) {
+                    return Err(format!("Expected Codex-style roles, got: {roles:?}"));
+                }
+                let joined = messages
+                    .iter()
+                    .filter_map(|message| message.get("content").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for needle in [
+                    "PROMPT_SPLIT_BASE_OK",
+                    "PROMPT_SPLIT_DEVELOPER_OK",
+                    "PROMPT_SPLIT_USER_OK",
+                    "PROMPT_SPLIT_CHAT_E2E",
+                ] {
+                    if !joined.contains(needle) {
+                        return Err(format!("Prompt split request missing {needle}: {messages:?}"));
+                    }
                 }
 
                 Ok(())
@@ -358,6 +747,121 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         "Expected provider_id: 'test-provider', got: {:?}",
                         route.get("provider_id")
                     ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "im_gateway_agent_model_request_uses_bifrost_proxy",
+            "Validate Agent model HTTP requests are proxied through the running Bifrost port and recorded in Traffic",
+            "admin",
+            || async move {
+                let proxy_port = pick_unused_port()?;
+                let mock = ChatCompletionMock::start().await?;
+                let mock_host = "model-proxy.test";
+                let mock_base_url = format!("http://{mock_host}/chat/completions");
+                let host_rule = format!("{mock_host} host://127.0.0.1:{}", mock.port);
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(proxy_port, vec![host_rule.as_str()], false, true)
+                        .await
+                        .map_err(|e| format!("failed to start Bifrost proxy: {e}"))?;
+
+                let mut config = AgentConfig {
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    request_timeout_secs: Some(20),
+                    ..AgentConfig::default()
+                };
+                config.model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock_base_url),
+                        env_key: None,
+                        api_key: None,
+                        http_headers: Some(HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer test".to_string(),
+                        )])),
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+
+                let client = bifrost_agent::AgentClient::new_with_bifrost_proxy(proxy_port);
+                let expected_proxy_url = format!("http://127.0.0.1:{proxy_port}");
+                if client.model_proxy_url() != Some(expected_proxy_url.as_str()) {
+                    return Err(format!(
+                        "expected agent model proxy to target Bifrost port {proxy_port}, got {:?}",
+                        client.model_proxy_url()
+                    ));
+                }
+
+                let tools = ToolRegistry::new();
+                let mut session = AgentSession::new("model-proxy-e2e");
+                let result = run_turn(
+                    &client,
+                    &config,
+                    &mut session,
+                    &tools,
+                    "hello through bifrost proxy",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("proxied turn failed: {e}"))?;
+                if result.response.is_empty() {
+                    return Err("expected model response from proxied request".to_string());
+                }
+
+                let direct = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("failed to create direct client: {e}"))?;
+                let host_filter = mock_host.to_string();
+                let list_url = format!(
+                    "http://127.0.0.1:{proxy_port}/_bifrost/api/traffic?limit=20&host_contains={}",
+                    urlencoding::encode(&host_filter)
+                );
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let traffic_json: serde_json::Value = direct
+                        .get(&list_url)
+                        .send()
+                        .await
+                        .map_err(|e| format!("traffic list request failed: {e}"))?
+                        .json()
+                        .await
+                        .map_err(|e| format!("traffic list decode failed: {e}"))?;
+                    let records = traffic_json
+                        .get("records")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| format!("traffic response missing records: {traffic_json}"))?;
+                    let found = records.iter().any(|record| {
+                        record
+                            .get("h")
+                            .and_then(|v| v.as_str())
+                            .map(|host| host.contains(&host_filter))
+                            .unwrap_or(false)
+                            && record
+                                .get("m")
+                                .and_then(|v| v.as_str())
+                                .map(|method| method == "POST")
+                                .unwrap_or(false)
+                    });
+                    if found {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out waiting for proxied model request traffic record; host_filter={host_filter}; traffic={traffic_json}"
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
                 Ok(())
@@ -819,6 +1323,37 @@ impl ChatCompletionMock {
                                     &body,
                                     "新的对话。请根据长期记忆回答我的 Bifrost 项目代号",
                                 );
+                            let is_prompt_split_e2e =
+                                request_messages_contain(&body, "PROMPT_SPLIT_BASE_OK")
+                                    && request_messages_contain(&body, "PROMPT_SPLIT_DEVELOPER_OK")
+                                    && request_messages_contain(&body, "PROMPT_SPLIT_USER_OK")
+                                    && request_messages_contain(&body, "PROMPT_SPLIT_CHAT_E2E")
+                                    && body
+                                        .get("messages")
+                                        .and_then(|value| value.as_array())
+                                        .map(|messages| {
+                                            messages
+                                                .first()
+                                                .and_then(|m| m.get("role"))
+                                                .and_then(|r| r.as_str())
+                                                == Some("system")
+                                                && messages
+                                                    .get(1)
+                                                    .and_then(|m| m.get("role"))
+                                                    .and_then(|r| r.as_str())
+                                                    == Some("developer")
+                                                && messages
+                                                    .get(2)
+                                                    .and_then(|m| m.get("role"))
+                                                    .and_then(|r| r.as_str())
+                                                    == Some("user")
+                                                && messages
+                                                    .get(3)
+                                                    .and_then(|m| m.get("role"))
+                                                    .and_then(|r| r.as_str())
+                                                    == Some("user")
+                                        })
+                                        .unwrap_or(false);
                             let has_tools = body
                                 .get("tools")
                                 .and_then(|value| value.as_array())
@@ -854,6 +1389,11 @@ impl ChatCompletionMock {
                                 json!({
                                     "role": "assistant",
                                     "content": "我从长期记忆中读取到项目代号是 MEM-AUTO-42。"
+                                })
+                            } else if is_prompt_split_e2e {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "PROMPT_SPLIT_CHAT_E2E_OK"
                                 })
                             } else if should_call_tool {
                                 json!({
@@ -965,7 +1505,10 @@ async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminSt
         .await
         .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
     let data_dir = std::env::temp_dir().join(format!("bifrost_e2e_im_gateway_agent_{port}"));
-    admin_state.set_im_gateway_service(Arc::new(ImGatewayService::new(&data_dir)));
+    admin_state.set_im_gateway_service(Arc::new(ImGatewayService::new_with_agent_proxy_port(
+        &data_dir,
+        Some(port),
+    )));
     Ok((proxy, admin_state))
 }
 

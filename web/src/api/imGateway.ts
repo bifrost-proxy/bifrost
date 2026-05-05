@@ -20,6 +20,13 @@ export interface ImProviderConfig {
   owner_open_id?: string;
   event_connection_enabled: boolean;
   event_types: string[];
+  agent_config?: {
+    work_dir?: string;
+    instructions?: string;
+    base_instructions?: string;
+    developer_instructions?: string;
+    user_instructions?: string;
+  };
   created_at: number;
   updated_at: number;
 }

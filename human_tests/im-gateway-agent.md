@@ -611,8 +611,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - `tool_calls` 中包含 `switch_workdir` 工具调用，`success: true`
   - `response` 包含 "已切换工作目录到"
+  - IM 通道最终回复包含最新工作路径提示：`当前工作路径: <REPO_ROOT>`
   - GET /sessions 中该 session 的 `work_dir` 更新为 `<REPO_ROOT>`
   - `message_count` 为 0（历史已清空）
+  - 后续 Agent Loop 会从 `<REPO_ROOT>` 重新加载 AGENTS.md 与 repo-local skills
 
 ### TC-IMA-48: switch_workdir 工具 - 无效路径拒绝
 
@@ -647,6 +649,210 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - Modal 中显示 "Working Directory" 字段
   - 带 work_dir 的 session 显示完整路径
   - 不带 work_dir 的 session 显示 "Using default from config"
+
+### TC-IMA-51: IM Provider 创建时配置 Agent 基础配置
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/providers \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "id": "agent-config-provider",
+      "provider_type": "feishu",
+      "display_name": "Agent Config Provider",
+      "enabled": true,
+      "event_connection_enabled": true,
+      "event_types": [],
+      "agent_config": {
+        "work_dir": "<REPO_ROOT>",
+        "base_instructions": "Only answer with the phrase PROVIDER_PROMPT_OK.",
+        "developer_instructions": "Provider developer policy OK.",
+        "user_instructions": "Provider user notes OK."
+      }
+    }'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider | jq '.agent_config'
+  ```
+- **预期结果**:
+  - Provider 创建成功
+  - GET Provider 返回 `agent_config.work_dir` 等于 `<REPO_ROOT>`
+  - GET Provider 返回 `agent_config.base_instructions` 包含 `PROVIDER_PROMPT_OK`
+  - GET Provider 返回 `agent_config.developer_instructions` 包含 `Provider developer policy OK`
+  - GET Provider 返回 `agent_config.user_instructions` 包含 `Provider user notes OK`
+  - GET Provider 不再把新字段归一化为旧 `agent_config.instructions`
+  - 响应不包含明文 `secret_ref`
+
+### TC-IMA-52: IM Provider Agent 基础配置动态修改
+
+- **操作步骤**:
+  ```bash
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "agent_config": {
+        "work_dir": "<USER_HOME>",
+        "base_instructions": "Only answer with the phrase PROVIDER_PROMPT_PATCHED.",
+        "developer_instructions": "Provider developer policy PATCHED.",
+        "user_instructions": "Provider user notes PATCHED."
+      }
+    }'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider | jq '.agent_config'
+  ```
+- **预期结果**:
+  - PATCH 返回 `success: true`
+  - GET Provider 返回 `agent_config.work_dir` 等于 `<USER_HOME>`
+  - GET Provider 返回 `agent_config.base_instructions` 包含 `PROVIDER_PROMPT_PATCHED`
+  - GET Provider 返回 `agent_config.developer_instructions` 包含 `Provider developer policy PATCHED`
+  - GET Provider 返回 `agent_config.user_instructions` 包含 `Provider user notes PATCHED`
+  - 修改立即写入 provider store；不需要重启服务
+
+### TC-IMA-53: WebUI Add/Edit IM Provider - Agent 配置字段
+
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=im-gateway`
+  2. 点击 Connections 区域的 Add Provider
+  3. 检查弹窗包含 "Agent Working Directory"、"Base Instructions / System Prompt"、"Developer Instructions"、"User Instructions"
+  4. 检查这些字段展示默认 Agent 配置作为继承值；字段留空表示继承数据目录默认配置
+  5. 对已有 provider 点击 Edit
+  6. 检查 Edit 弹窗只读展示 Provider ID、Type、App ID、Secret、Connection Mode
+  7. 检查 Edit 弹窗同样展示默认 Agent 配置；已有 Provider 覆盖值显示在输入框中
+  8. 修改 Display Name、Enabled、Owner Open ID、Agent Working Directory 与三层 Instructions 后保存
+  9. 通过 GET Provider API 验证保存结果
+- **预期结果**:
+  - Add IM Provider 弹窗允许手动配置 Agent Working Directory 与三层 instructions
+  - Provider 卡片展示 Status、App ID、Secret、Owner、Connection Mode、Provider Enabled、Agent Work Dir、Agent Base Prompt 与 Agent Developer/User 配置状态
+  - Add/Edit 中空的 Agent 配置字段表示继承默认值；用户输入后才保存为单 Provider 覆盖
+  - Edit 弹窗不允许修改连接配置（App ID、App Secret、Provider Type、Connection Mode）
+  - Edit 后 PATCH 生效，GET Provider API 返回最新非连接配置和 `agent_config`
+  - 亮色和暗色主题下字段可读、按钮可识别
+- **回归执行记录（2026-05-05）**: PASS — 使用真实浏览器打开 Settings → IM Gateway，对已有 `clear-regression-provider` 点击图标 Edit，清空 `Base Instructions / System Prompt` 后保存；GET `/providers/clear-regression-provider` 返回的 `agent_config` 不再包含 `base_instructions`，同时保留 `developer_instructions = "PROVIDER_DEV_KEEP"`、`user_instructions = "PROVIDER_USER_KEEP"` 与 `work_dir = "/tmp/clear-regression"`，验证单字段清空不会被省略为“保留旧值”。
+
+### TC-IMA-53A: 新建 IM Provider 的 agent_config 经 IM 事件链路生效
+
+- **操作步骤**:
+  1. 创建带 Provider 级 Agent 配置的新 IM Provider：
+     - `agent_config.work_dir = <REPO_ROOT>`
+     - `agent_config.base_instructions` 包含 `IM_PROVIDER_BASE_OK`
+     - `agent_config.developer_instructions` 包含 `IM_PROVIDER_DEV_OK`
+     - `agent_config.user_instructions` 包含 `IM_PROVIDER_USER_OK`
+  2. 将全局 Agent 配置设置为不同 marker：`GLOBAL_BASE_SHOULD_NOT_APPEAR`、`GLOBAL_DEV_SHOULD_NOT_APPEAR`、`GLOBAL_USER_SHOULD_NOT_APPEAR`。
+  3. 构造来自该 Provider owner 的 IM inbound message：`IM_PROVIDER_CHAT_MARKER 请只回复 IM_PROVIDER_CONFIG_OK`。
+  4. 将事件送入与 Feishu 长连接相同的 `run_event_loop` 处理链路，并让 Chat Completions 指向本地 mock server。
+  5. 检查 mock 捕获的模型请求 messages。
+- **预期结果**:
+  - IM event loop 会为该 Provider 构造独立 session key 并进入 Agent chat，而不是只停留在 Provider 配置存储层。
+  - 模型请求 `messages[0].role == "system"`，内容包含 `IM_PROVIDER_BASE_OK`。
+  - 模型请求 `messages[1].role == "developer"`，内容包含 `IM_PROVIDER_DEV_OK`。
+  - 模型请求 `messages[2].role == "user"`，内容包含 `IM_PROVIDER_USER_OK`。
+  - 最后一条用户消息包含 `IM_PROVIDER_CHAT_MARKER`。
+  - 请求中不包含任何全局 fallback marker，证明新建 Provider 的 `agent_config` 覆盖在 IM 链路实际生效。
+- **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat --quiet`，测试创建 `new-im-provider-config` Provider 并向 `run_event_loop` 注入 IM inbound event；mock Chat Completions 捕获到 roles 为 `system/developer/user/...` 的模型请求，包含 `IM_PROVIDER_BASE_OK`、`IM_PROVIDER_DEV_OK`、`IM_PROVIDER_USER_OK`、`IM_PROVIDER_CHAT_MARKER`，且不包含 `GLOBAL_*_SHOULD_NOT_APPEAR`。
+
+### TC-IMA-53B: IM Provider 当前配置与会话重开后的 work_dir 生效回归
+
+- **操作步骤**:
+  1. 创建 Provider `persist-workdir-provider`，初始 `agent_config.work_dir = /old`，并配置 `base_instructions = keep provider prompt`。
+  2. 模拟 IM 对话中 `switch_workdir` 成功返回 `/new/workdir` 后的持久化路径，读取 Provider API。
+  3. 对同一 session 执行 `/clear` 或 `/reset` 后，修改 Provider `agent_config.work_dir` 为另一个有效目录。
+  4. 重新发起同一 IM session 的下一轮消息。
+- **预期结果**:
+  - Provider API / WebUI Provider 卡片展示的 `Agent Work Dir` 从 `/old` 更新为 `/new/workdir`。
+  - 原 Provider 的 `base_instructions/developer_instructions/user_instructions` 不会因为 work_dir 回写被清空。
+  - `/clear` 或 `/reset` 后的空 session 会按照最新 Provider `agent_config.work_dir` 重新初始化；后续 Agent Loop 从该目录加载 AGENTS.md 与 repo-local skills。
+  - IM 长连接不需要重连；事件循环每次消息都读取 Provider store 最新配置，而不是沿用连接启动时的旧 provider snapshot。
+- **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin provider_switch_workdir_persists_provider_agent_override -- --nocapture` 与 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat -- --nocapture`；前者验证 `switch_workdir` 后 Provider `agent_config.work_dir` 持久化且保留 prompt 覆盖，后者验证 IM event loop 使用 Provider store 中的最新配置进入模型请求，而不是使用连接启动时传入的旧 provider snapshot。
+
+### TC-IMA-54: Agent 全局 Codex-style 指令配置与默认 Base Prompt 展示
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq '{default_base_instructions, effective_base_instructions, base_instructions, developer_instructions, user_instructions}'
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "base_instructions": "GLOBAL_BASE_PROMPT_OK",
+      "developer_instructions": "GLOBAL_DEVELOPER_PROMPT_OK",
+      "user_instructions": "GLOBAL_USER_PROMPT_OK"
+    }' | jq '{effective_base_instructions, base_instructions, developer_instructions, user_instructions}'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/instructions | jq .
+  ```
+- **预期结果**:
+  - 初始 GET 返回 `default_base_instructions`，内容包含内置 Bifrost Agent prompt
+  - 未设置 `base_instructions` 时，`effective_base_instructions` 等于 `default_base_instructions`
+  - PATCH 后 `base_instructions` 与 `effective_base_instructions` 均为 `GLOBAL_BASE_PROMPT_OK`
+  - PATCH 后 `developer_instructions` 为 `GLOBAL_DEVELOPER_PROMPT_OK`
+  - PATCH 后 `/agent/instructions` 只包含 `GLOBAL_USER_PROMPT_OK` 与 AGENTS.md，不包含 `GLOBAL_BASE_PROMPT_OK`，验证 base prompt 不再重复注入 user instructions
+- **执行记录（2026-05-05）**: PASS — 使用 `BIFROST_DATA_DIR=./.bifrost-human-prompt cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy` 启动最新代码；GET `/agent` 返回 `default_base_instructions` 且包含 `Bifrost Agent`，PATCH 后 `base_instructions`、`developer_instructions`、`user_instructions` 与 `effective_base_instructions` 均按预期返回；GET `/agent/instructions` 只包含 `GLOBAL_USER_PROMPT_OK` 和 AGENTS.md/project-doc 内容，不重复注入 base prompt。
+- **回归执行记录（2026-05-05）**: PASS — 针对 WebUI “无法修改/无法清空”问题，使用 `BIFROST_DATA_DIR=./.bifrost-clear-regression cargo run --bin bifrost -- start -p 18870 --unsafe-ssl --no-system-proxy` 启动最新代码；通过真实浏览器打开 Settings → Agent，依次填写 `BASE_MODIFY_OK`、`DEV_MODIFY_OK`、`USER_MODIFY_OK`，等待自动保存后 GET `/agent` 返回三项新值；随后在 WebUI 清空三个 textarea，GET `/agent` 返回 `base_instructions/developer_instructions/user_instructions = null`，`effective_base_instructions` 回退并包含 `Bifrost Agent`，页面输入框未恢复旧值。
+- **真实模型回归执行记录（2026-05-05）**: PASS — 执行 `source ~/.zshrc` 后确认 `MODELHUB_AK` 存在，使用 `RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn' BIFROST_DATA_DIR=./.bifrost-real-chat cargo run --bin bifrost -- start -p 18871 --unsafe-ssl --no-system-proxy` 启动真实 Bifrost；通过真实 WebUI 写入 `REAL_BASE_MODIFY_OK`、`REAL_DEV_MODIFY_OK`、`REAL_USER_MODIFY_OK` 后 GET `/agent` 可读回；调用 `/agent/chat` 走默认 `aidp_crawl` provider 和真实模型 `gpt-5.4-2026-03-05`，用户消息 `REAL_CHAT_MARKER 请只回复 REAL_CHAT_OK` 返回 `REAL_CHAT_OK`；服务日志包含 `invoking agent chat api` 与 `agent chat api completed`；Session JSONL `./.bifrost-real-chat/agent/sessions/2026/05/05/session-real-model-webui-prompt-session-1777993659.jsonl` 记录 `session_start`、`user_message`、`assistant_message`；随后在同一真实 WebUI 清空三段 textarea，GET `/agent` 返回三项为 `null`，`effective_base_instructions` 回退到内置 `Bifrost Agent`。
+
+### TC-IMA-54B: WebUI instruction 长文本大窗口编辑回归
+
+- **操作步骤**:
+  1. 使用临时数据目录和非正式端口启动最新 Bifrost：
+     ```bash
+     BIFROST_DATA_DIR=./.bifrost-human-instruction-modal \
+       cargo run --bin bifrost -- start -p 18872 --unsafe-ssl --no-system-proxy
+     ```
+  2. 用真实浏览器打开 `http://127.0.0.1:18872/_bifrost/settings?tab=agent`
+  3. 检查 "Base Instructions / System Prompt"、"Developer Instructions"、"User Instructions" 只展示短预览和 Edit 按钮，页面中不出现行内 textarea，也不再展示独立的 "Default Base Instructions (read-only)" 区块。
+  4. 点击 "Base Instructions / System Prompt" 的 Edit 按钮，在弹出的大窗口中点击 "Copy default into editor"，确认默认 Base Instructions 被复制到 textarea 后追加 `MODAL_BASE_OK` 并点击 OK。
+  5. 分别点击 Developer/User Instructions 的 Edit 按钮，在大窗口中输入 `MODAL_DEV_OK`、`MODAL_USER_OK` 并点击 OK。
+  6. 通过 API 验证保存结果：
+     ```bash
+     curl -s http://127.0.0.1:18872/_bifrost/api/im-gateway/agent \
+       | jq '{base_instructions, developer_instructions, user_instructions}'
+     ```
+  7. 打开 `http://127.0.0.1:18872/_bifrost/settings?tab=im-gateway`，创建或编辑一个测试 provider。
+  8. 在 IM Provider 表单中检查三段 instruction 同样只展示短预览和 Edit 按钮；点击 Base Instructions 的 Edit，在大窗口中点击 "Copy inherited into editor"，确认继承值被复制到 textarea 后追加 `PROVIDER_MODAL_BASE_OK` 并保存 provider。
+  9. 通过 GET Provider API 验证 `agent_config.base_instructions` 为 `PROVIDER_MODAL_BASE_OK`。
+- **预期结果**:
+  - Agent 全局三段 instruction 不在页面行内展开长 textarea，且不再额外展示只读 Default Base Instructions 块。
+  - Base Instructions 编辑弹窗可一键复制默认值到编辑草稿，并支持继续修改后保存。
+  - 每段可编辑 instruction 都通过 Edit 按钮打开大尺寸弹窗编辑；保存后短预览立即更新。
+  - GET `/im-gateway/agent` 返回 `MODAL_BASE_OK`、`MODAL_DEV_OK`、`MODAL_USER_OK`。
+  - IM Provider Add/Edit 表单中的 instruction 也通过大尺寸弹窗编辑；保存后 GET Provider API 返回最新 `agent_config` 覆盖值。
+  - 亮色和暗色主题下预览、Edit 按钮、弹窗标题、textarea 内容均清晰可读。
+- **执行记录（2026-05-05）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings (Agent 三层 instructions 使用大窗口编辑|IM Provider instructions 使用大窗口编辑后保存覆盖值)"`，真实 Chromium 打开 Settings → Agent/IM Gateway；验证 Agent 页面三段 instruction 只有短预览 + Edit 按钮，页面不含行内 textarea，也不再展示 `Default Base Instructions (read-only)`；Base Instructions 弹窗中点击 `Copy default into editor` 后 textarea 填入默认值，可继续追加内容并 PATCH `base_instructions`；IM Provider Edit 弹窗中 Base Instructions 通过大窗口编辑后保存，PATCH payload 的 `agent_config.base_instructions` 为最新值。两条新增 UI 回归均通过。
+
+### TC-IMA-54A: Agent chat 接口端到端验证 Codex-style prompt 分层、日志与 Session 记录
+
+- **操作步骤**:
+  1. 使用临时数据目录和非正式端口启动最新 Bifrost：
+     ```bash
+     RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn' \
+       BIFROST_DATA_DIR=./.bifrost-human-prompt \
+       cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy
+     ```
+  2. 启动本地 OpenAI-compatible mock server，记录 `/chat/completions` 请求 body。
+  3. PATCH `/im-gateway/agent`，设置：
+     - `model_provider = "mock"`
+     - `base_instructions` 包含 `GLOBAL_BASE_PROMPT_OK`
+     - `developer_instructions` 包含 `GLOBAL_DEVELOPER_PROMPT_OK`
+     - `user_instructions` 包含 `GLOBAL_USER_PROMPT_OK`
+     - `model_providers.mock.base_url` 指向本地 mock server
+  4. 调用 chat 接口：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18868/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "session_key": "human-prompt-live-session-log-check-info",
+         "message": "END_TO_END_CHAT_PROMPT_MARKER 请确认 info 日志可观测。",
+         "work_dir": "<REPO_ROOT>"
+       }'
+     ```
+  5. 检查 mock 捕获到的 Chat Completions request：
+     - `messages[0].role == "system"` 且包含 `GLOBAL_BASE_PROMPT_OK`
+     - `messages[1].role == "developer"` 且包含 `GLOBAL_DEVELOPER_PROMPT_OK`
+     - `messages[2].role == "user"` 且包含 `GLOBAL_USER_PROMPT_OK` 与 AGENTS.md/project-doc/environment context
+     - 最后一条用户消息包含 `END_TO_END_CHAT_PROMPT_MARKER`
+  6. 检查服务日志包含 `invoking agent chat api` 与 `agent chat api completed`，并带有 `session_key`、`message_len`、`response_len`、`tool_call_count` 字段。
+  7. 检查 `agent/sessions/YYYY/MM/DD/session-<session_key>-*.jsonl` 记录 `session_start`、`user_message`、`assistant_message`。
+- **预期结果**:
+  - chat API 返回 `success: true`，response 来自 mock 且确认角色顺序为 `system,developer,user,user`
+  - 上游模型请求包含 base/developer/user 三层配置和用户消息 marker
+  - Bifrost info 日志可观测到 chat API 开始与完成
+  - Session JSONL 记录包含 `session_start.content.base_instructions`、用户消息和助手消息
+- **执行记录（2026-05-05）**: PASS — chat API 返回 `CHAT_E2E_OK roles=system,developer,user,user`；mock 捕获请求显示 roles 为 `["system","developer","user","user"]`，且 `has_base/has_developer/has_user/has_chat_marker` 全为 `true`；Session 文件 `./.bifrost-human-prompt/agent/sessions/2026/05/05/session-human-prompt-live-session-after-restart-1777992451.jsonl` 包含 `session_start`、`user_message`、`assistant_message`；以 `RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn'` 启动后，服务日志包含 `invoking agent chat api` 和 `agent chat api completed`。
 
 ## 边界测试与回归验证
 
@@ -1131,3 +1337,63 @@ rm -rf ./.bifrost-test
   - `/tmp/bifrost-e2e-test/hello.txt` 文件被创建且内容为 "Hello World"
 - **清理**: `rm -rf /tmp/bifrost-e2e-test`
 - **执行记录（2026-05-05）**: PASS — 模型调用了 create_goal → shell → write_file → read_file → update_goal(complete)，文件内容验证正确
+
+### TC-IMA-83: Agent 模型请求默认进入 Bifrost Traffic
+
+- **操作步骤**:
+  1. 使用非 9900 端口和临时数据目录启动真实 Bifrost：
+     ```bash
+     BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18883 --unsafe-ssl --no-system-proxy
+     ```
+  2. 启动一个本地 OpenAI-compatible mock Chat Completions 服务，记录请求。
+  3. 将 Agent 配置 PATCH 到 mock 服务：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18883/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{"model":"mock-model","model_provider":"mock","model_providers":{"mock":{"base_url":"http://127.0.0.1:<mock_port>/chat/completions","http_headers":{"Authorization":"Bearer test"}}}}'
+     ```
+  4. 通过 Agent Chat API 触发一次模型请求：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18883/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key":"agent-proxy-human","message":"hello via proxy"}'
+     ```
+  5. 查询 Traffic：
+     ```bash
+     curl -s "http://127.0.0.1:18883/_bifrost/api/traffic?limit=20&host_contains=127.0.0.1:<mock_port>" | jq '.records[] | {m,h,u,s}'
+     ```
+- **预期结果**:
+  - Agent Chat API 返回 `success: true`，response 来自 mock 模型。
+  - mock 服务收到 Chat Completions POST 请求。
+  - Traffic 中出现一条 `POST` 到 `127.0.0.1:<mock_port>` 的记录，说明 Agent 底层模型请求默认经当前 Bifrost 端口代理发出。
+  - 启动命令包含 `--no-system-proxy`，不会污染本机正式系统代理。
+- **执行记录（2026-05-05）**:
+  - 自动化真实链路回归 `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。用例通过 `model-proxy.test host://127.0.0.1:<mock_port>` 规则把外部模型 host 转到本地 mock，Agent 请求经 Bifrost 端口代理后在 Traffic 中出现 `POST model-proxy.test` 记录。
+  - 真实模型 + TLS 拦截回归 `source ~/.zshrc; BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start --host 127.0.0.1 -p 18883 --unsafe-ssl --no-system-proxy --intercept-include search.bytedance.net` 后调用 `/api/im-gateway/agent/chat`：PASS。Agent Chat 返回 `success: true`，Traffic 出现 `REQ-69fa0d05-000003`，`POST https://search.bytedance.net/gpt/openapi/online/multimodal/crawl`，`status=200`，`protocol=https`，`is_tunnel=false`，request body 文件 61531 bytes、response body 文件 493 bytes。验证 Agent 已信任当前 Bifrost CA，不再因 `UnknownIssuer` 在 TLS 拦截下失败。
+
+### TC-IMA-84: Agent 设置页左侧导航按 URL 切换独立编辑卡片
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-agent-nav cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy
+    ```
+  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/settings?tab=agent`
+- **操作步骤**:
+  1. 确认 Agent 设置页左侧显示卡片导航，包含 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions。
+  2. 确认默认只渲染 `General` 编辑卡片，其他卡片未同时出现在右侧。
+  3. 点击左侧导航中的 `MCP Servers`。
+  4. 确认右侧只渲染 `MCP Servers` 编辑卡片，且 `MCP Servers` 导航项显示当前高亮状态。
+  5. 确认浏览器 URL 包含 `agentSection=mcp-servers`。
+  6. 刷新页面，确认仍恢复到 `MCP Servers` 编辑卡片。
+  7. 点击左侧导航中的 `Runtime`。
+  8. 确认右侧只渲染 `Runtime Settings` 编辑卡片，且 URL 更新为 `agentSection=runtime`。
+  9. 切换到暗色主题后重复点击 `MCP Servers` 与 `Runtime`。
+- **预期结果**:
+  - 左侧导航始终可见并固定在左侧区域，不跟随右侧内容滚动。
+  - 点击导航项后右侧独立渲染对应编辑卡片，不再把所有卡片堆在一个长页面中。
+  - 当前导航项通过高亮和 `aria-current="true"` 标记。
+  - URL 中的 `agentSection` 能记录当前卡片，页面刷新后恢复到同一卡片。
+  - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
+  - 窄屏下导航退化为顶部横向滚动，不挤压编辑卡片内容。
+- **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Agent 左侧导航按 URL 切换独立编辑卡片"` 通过；验证默认仅渲染 General、点击 MCP Servers/Runtime 后只渲染对应卡片、URL `agentSection` 记录并刷新恢复、暗色主题下继续切换可读且 `aria-current` 正确。

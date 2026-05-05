@@ -1215,7 +1215,10 @@ pub fn run_foreground(
             // Initialize IM Gateway service
             let im_gateway_data_dir = shared_config_manager.data_dir().to_path_buf();
             let im_gateway_service = std::sync::Arc::new(
-                bifrost_admin::ImGatewayService::new(&im_gateway_data_dir),
+                bifrost_admin::ImGatewayService::new_with_agent_proxy_port(
+                    &im_gateway_data_dir,
+                    Some(config.port),
+                ),
             );
             let admin_state = admin_state.with_im_gateway_service(im_gateway_service);
 
@@ -1972,7 +1975,10 @@ pub fn run_daemon(
                     // Initialize IM Gateway service (daemon mode)
                     let im_gateway_data_dir = shared_config_manager.data_dir().to_path_buf();
                     let im_gateway_service = std::sync::Arc::new(
-                        bifrost_admin::ImGatewayService::new(&im_gateway_data_dir),
+                        bifrost_admin::ImGatewayService::new_with_agent_proxy_port(
+                            &im_gateway_data_dir,
+                            Some(config.port),
+                        ),
                     );
                     let admin_state = admin_state.with_im_gateway_service(im_gateway_service);
 

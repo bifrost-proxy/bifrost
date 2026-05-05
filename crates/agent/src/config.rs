@@ -44,10 +44,24 @@ pub struct AgentConfig {
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderConfig>,
 
-    // -- System instructions --
-    /// Instructions text (Codex's "instructions" field).
+    // -- Prompt instructions --
+    /// Deprecated alias for `base_instructions` (Codex's `instructions` field).
+    ///
+    /// Kept for existing config.toml / JSON files and older WebUI clients.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+
+    /// Base/system instructions override. When set, replaces the built-in model prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+
+    /// Developer instructions appended as a separate developer section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+
+    /// User-provided instructions combined with AGENTS.md project docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_instructions: Option<String>,
 
     // -- Model parameters --
     /// Reasoning effort ("low", "medium", "high").
@@ -380,6 +394,7 @@ impl AgentConfig {
     pub const DEFAULT_COMPACT_THRESHOLD_PERCENT: i64 = 90;
     pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32768;
     pub const DEFAULT_MODEL: &'static str = "gpt-5.4-2026-03-05";
+    pub const DEFAULT_MODEL_CONTEXT_WINDOW: i64 = 250_000;
     pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 600_000;
     /// Default tool output token limit (matching Codex DEFAULT_MAX_OUTPUT_TOKENS).
     pub const DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT: usize = 10_000;
@@ -393,9 +408,12 @@ impl Default for AgentConfig {
             model_provider: Some("aidp_crawl".to_string()),
             model_providers: HashMap::new(),
             instructions: None,
+            base_instructions: None,
+            developer_instructions: None,
+            user_instructions: None,
             model_reasoning_effort: Some("medium".to_string()),
             model_reasoning_summary: Some("auto".to_string()),
-            model_context_window: Some(200_000),
+            model_context_window: Some(Self::DEFAULT_MODEL_CONTEXT_WINDOW),
             model_auto_compact_token_limit: None,
             max_completion_tokens: Some(Self::DEFAULT_MAX_COMPLETION_TOKENS),
             mcp_servers: HashMap::new(),
@@ -1016,6 +1034,11 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
             merged
         },
         instructions: overlay.instructions.or(base.instructions),
+        base_instructions: overlay.base_instructions.or(base.base_instructions),
+        developer_instructions: overlay
+            .developer_instructions
+            .or(base.developer_instructions),
+        user_instructions: overlay.user_instructions.or(base.user_instructions),
         model_reasoning_effort: overlay
             .model_reasoning_effort
             .or(base.model_reasoning_effort),
@@ -1157,6 +1180,11 @@ mod tests {
         assert_eq!(config.get_request_timeout_secs(), 600);
         assert_eq!(config.get_shell_timeout_secs(), 600);
         assert_eq!(config.get_max_turn_iterations(), 1000);
+        assert_eq!(
+            config.model_context_window,
+            Some(AgentConfig::DEFAULT_MODEL_CONTEXT_WINDOW)
+        );
+        assert_eq!(config.get_compact_threshold_tokens(), 225_000);
         assert_eq!(config.get_background_terminal_max_timeout(), 600_000);
     }
 

@@ -11,7 +11,7 @@ export const DEFAULTS = {
   model_provider: "aidp_crawl",
   model_reasoning_effort: "medium",
   model_reasoning_summary: "auto",
-  model_context_window: 200_000,
+  model_context_window: 250_000,
   // When null/undefined, backend derives from context_window × 90% (Codex-compatible).
   model_auto_compact_token_limit: undefined as number | undefined,
   max_completion_tokens: 16_384,
@@ -99,6 +99,11 @@ export interface AgentConfig {
   model_provider?: string;
   model_providers: Record<string, Record<string, unknown>>;
   instructions?: string;
+  base_instructions?: string;
+  developer_instructions?: string;
+  user_instructions?: string;
+  default_base_instructions?: string;
+  effective_base_instructions?: string;
   model_reasoning_effort?: string;
   model_reasoning_summary?: string;
   model_context_window?: number;

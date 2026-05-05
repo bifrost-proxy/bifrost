@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -6,6 +8,7 @@ import {
   Descriptions,
   Empty,
   Form,
+  Grid,
   Input,
   Modal,
   Popconfirm,
@@ -25,6 +28,7 @@ import {
   ApiOutlined,
   CloudOutlined,
   DeleteOutlined,
+  EditOutlined,
   HistoryOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -34,6 +38,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import * as imGatewayApi from "../../../api/imGateway";
+import { get } from "../../../api/client";
 import type {
   ImProviderConfig,
   ImTarget,
@@ -43,8 +48,30 @@ import type {
   ImEvent,
   ConnectionStatus,
 } from "../../../api/imGateway";
+import type { AgentConfig } from "./agent/types";
+import LongTextModalField from "./agent/LongTextModalField";
 
 const { Text } = Typography;
+const { useBreakpoint } = Grid;
+
+type ImGatewaySectionId =
+  | "connections"
+  | "targets"
+  | "routes"
+  | "schedules"
+  | "history";
+
+const IM_GATEWAY_SECTION_NAV: Array<{
+  id: ImGatewaySectionId;
+  label: string;
+  icon: ReactNode;
+}> = [
+  { id: "connections", label: "Connections", icon: <ApiOutlined /> },
+  { id: "targets", label: "Targets", icon: <SendOutlined /> },
+  { id: "routes", label: "Routes", icon: <RocketOutlined /> },
+  { id: "schedules", label: "Schedules", icon: <CloudOutlined /> },
+  { id: "history", label: "History", icon: <HistoryOutlined /> },
+];
 
 // ─── Connections Panel ───────────────────────────────────────────────────────
 
@@ -62,6 +89,9 @@ function ConnectionsPanel({
     Record<string, ConnectionStatus>
   >({});
   const [addModalOpen, setAddModalOpen] = useState(false);
+  const [editingProvider, setEditingProvider] =
+    useState<ImProviderConfig | null>(null);
+  const [agentDefaults, setAgentDefaults] = useState<AgentConfig | null>(null);
   const [form] = Form.useForm();
 
   const fetchStatuses = useCallback(async () => {
@@ -76,6 +106,14 @@ function ConnectionsPanel({
     setStatusMap(map);
   }, [providers]);
 
+  const fetchAgentDefaults = useCallback(async () => {
+    try {
+      setAgentDefaults(await get<AgentConfig>("/im-gateway/agent"));
+    } catch {
+      setAgentDefaults(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (providers.length === 0) return;
     const timer = window.setTimeout(() => {
@@ -84,17 +122,127 @@ function ConnectionsPanel({
     return () => window.clearTimeout(timer);
   }, [providers, fetchStatuses]);
 
-  const handleAdd = async () => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void fetchAgentDefaults();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchAgentDefaults]);
+
+  const inheritedWorkDir = agentDefaults?.work_dir || "Process working directory";
+  const inheritedBaseInstructions =
+    agentDefaults?.base_instructions ||
+    agentDefaults?.instructions ||
+    agentDefaults?.default_base_instructions ||
+    "Built-in default Agent prompt";
+  const inheritedDeveloperInstructions =
+    agentDefaults?.developer_instructions || "No global developer instructions";
+  const inheritedUserInstructions =
+    agentDefaults?.user_instructions || "No global user instructions";
+
+  const normalizeProviderValues = (
+    values: Record<string, unknown>,
+    clearEmptyAgentConfig: boolean,
+  ) => {
+    const payload: Record<string, unknown> = { ...values };
+    const agentConfig = values.agent_config as
+      | {
+          work_dir?: string;
+          instructions?: string;
+          base_instructions?: string;
+          developer_instructions?: string;
+          user_instructions?: string;
+        }
+      | undefined;
+    const workDir = agentConfig?.work_dir?.trim();
+    const baseInstructions =
+      agentConfig?.base_instructions?.trim() || agentConfig?.instructions?.trim();
+    const developerInstructions = agentConfig?.developer_instructions?.trim();
+    const userInstructions = agentConfig?.user_instructions?.trim();
+    if (clearEmptyAgentConfig) {
+      if (workDir || baseInstructions || developerInstructions || userInstructions) {
+        payload.agent_config = {
+          work_dir: workDir || null,
+          base_instructions: baseInstructions || null,
+          developer_instructions: developerInstructions || null,
+          user_instructions: userInstructions || null,
+        };
+      } else {
+        payload.agent_config = null;
+      }
+      return payload;
+    }
+    if (workDir || baseInstructions || developerInstructions || userInstructions) {
+      payload.agent_config = {
+        ...(workDir ? { work_dir: workDir } : {}),
+        ...(baseInstructions ? { base_instructions: baseInstructions } : {}),
+        ...(developerInstructions ? { developer_instructions: developerInstructions } : {}),
+        ...(userInstructions ? { user_instructions: userInstructions } : {}),
+      };
+    } else {
+      delete payload.agent_config;
+    }
+    return payload;
+  };
+
+  const openAddModal = () => {
+    setEditingProvider(null);
+    form.resetFields();
+    form.setFieldsValue({
+      provider_type: "feishu",
+      enabled: true,
+      event_connection_enabled: true,
+    });
+    setAddModalOpen(true);
+  };
+
+  const openEditModal = (provider: ImProviderConfig) => {
+    setEditingProvider(provider);
+    form.setFieldsValue({
+      ...provider,
+      app_secret: undefined,
+      agent_config: {
+        work_dir: provider.agent_config?.work_dir,
+        base_instructions:
+          provider.agent_config?.base_instructions || provider.agent_config?.instructions,
+        developer_instructions: provider.agent_config?.developer_instructions,
+        user_instructions: provider.agent_config?.user_instructions,
+      },
+    });
+    setAddModalOpen(true);
+  };
+
+  const handleSaveProvider = async () => {
     try {
       const values = await form.validateFields();
-      await imGatewayApi.createProvider(values);
-      message.success("Provider created");
+      if (editingProvider) {
+        const payload = normalizeProviderValues(
+          {
+            display_name: values.display_name,
+            enabled: values.enabled,
+            owner_open_id: values.owner_open_id,
+            agent_config: values.agent_config,
+          },
+          true,
+        );
+        await imGatewayApi.updateProvider(
+          editingProvider.id,
+          payload as Partial<ImProviderConfig>,
+        );
+        message.success("Provider updated");
+      } else {
+        await imGatewayApi.createProvider(
+          normalizeProviderValues(values, false) as Partial<ImProviderConfig>,
+        );
+        message.success("Provider created");
+      }
       setAddModalOpen(false);
+      setEditingProvider(null);
       form.resetFields();
       onRefresh();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error("Failed to create provider");
+      message.error("Failed to save provider");
     }
   };
 
@@ -151,7 +299,7 @@ function ConnectionsPanel({
           <Button
             type="primary"
             icon={<PlusOutlined />}
-            onClick={() => setAddModalOpen(true)}
+            onClick={openAddModal}
           >
             Add Provider
           </Button>
@@ -182,6 +330,14 @@ function ConnectionsPanel({
                 }
                 extra={
                   <Space>
+                    <Tooltip title="Edit">
+                      <Button
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={() => openEditModal(p)}
+                        data-testid={`settings-im-provider-edit-${p.id}`}
+                      />
+                    </Tooltip>
                     <Switch
                       size="small"
                       checked={p.enabled}
@@ -232,6 +388,32 @@ function ConnectionsPanel({
                       ? "Long Connection"
                       : "Webhook"}
                   </Descriptions.Item>
+                  <Descriptions.Item label="Provider Enabled">
+                    {p.enabled ? <Tag color="green">Enabled</Tag> : <Tag>Disabled</Tag>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Agent Work Dir">
+                    {p.agent_config?.work_dir ? (
+                      <Text code style={{ fontSize: 11 }}>
+                        {p.agent_config.work_dir}
+                      </Text>
+                    ) : (
+                      <Text type="secondary">Global default</Text>
+                    )}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Agent Base Prompt">
+                    {p.agent_config?.base_instructions || p.agent_config?.instructions ? (
+                      <Tag color="blue">Configured</Tag>
+                    ) : (
+                      <Text type="secondary">Global default</Text>
+                    )}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Agent Developer/User">
+                    {p.agent_config?.developer_instructions || p.agent_config?.user_instructions ? (
+                      <Tag color="purple">Configured</Tag>
+                    ) : (
+                      <Text type="secondary">Global default</Text>
+                    )}
+                  </Descriptions.Item>
                   {status?.reconnect_count != null &&
                     status.reconnect_count > 0 && (
                       <Descriptions.Item label="Reconnects">
@@ -253,57 +435,153 @@ function ConnectionsPanel({
       )}
 
       <Modal
-        title="Add IM Provider"
+        title={editingProvider ? "Edit IM Provider" : "Add IM Provider"}
         open={addModalOpen}
-        onOk={handleAdd}
+        onOk={handleSaveProvider}
         onCancel={() => {
           setAddModalOpen(false);
+          setEditingProvider(null);
           form.resetFields();
         }}
-        okText="Create"
+        okText={editingProvider ? "Save" : "Create"}
       >
         <Form form={form} layout="vertical">
-          <Form.Item
-            name="id"
-            label="Provider ID"
-            rules={[{ required: true, message: "Required" }]}
-          >
-            <Input placeholder="e.g. feishu-main" />
-          </Form.Item>
-          <Form.Item
-            name="provider_type"
-            label="Type"
-            initialValue="feishu"
-            rules={[{ required: true, message: "Required" }]}
-          >
-            <Select
-              placeholder="Select provider type"
-              options={[
-                { label: "Feishu", value: "feishu" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              前往{" "}
-              <a
-                href="https://open.larkoffice.com/page/launcher?from=backend_oneclick"
-                target="_blank"
-                rel="noopener noreferrer"
+          {editingProvider ? (
+            <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="Provider ID">
+                <Text code>{editingProvider.id}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Type">
+                <Tag>{editingProvider.provider_type}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="App ID">
+                <Text code>
+                  {editingProvider.app_id
+                    ? `${editingProvider.app_id.slice(0, 8)}***`
+                    : "-"}
+                </Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Secret">
+                {editingProvider.secret_configured ? (
+                  <Tag color="green">Configured</Tag>
+                ) : (
+                  <Tag color="red">Not Set</Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="Connection Mode">
+                {editingProvider.event_connection_enabled
+                  ? "Long Connection"
+                  : "Webhook"}
+              </Descriptions.Item>
+            </Descriptions>
+          ) : (
+            <>
+              <Form.Item
+                name="id"
+                label="Provider ID"
+                rules={[{ required: true, message: "Required" }]}
               >
-                飞书开放平台
-              </a>
-              {" "}一键创建机器人应用并获取 App ID 和 App Secret。
-            </Text>
-          </Form.Item>
+                <Input placeholder="e.g. feishu-main" />
+              </Form.Item>
+              <Form.Item
+                name="provider_type"
+                label="Type"
+                initialValue="feishu"
+                rules={[{ required: true, message: "Required" }]}
+              >
+                <Select
+                  placeholder="Select provider type"
+                  options={[{ label: "Feishu", value: "feishu" }]}
+                />
+              </Form.Item>
+              <Form.Item>
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  前往{" "}
+                  <a
+                    href="https://open.larkoffice.com/page/launcher?from=backend_oneclick"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    飞书开放平台
+                  </a>{" "}
+                  一键创建机器人应用并获取 App ID 和 App Secret。
+                </Text>
+              </Form.Item>
+            </>
+          )}
           <Form.Item name="display_name" label="Display Name">
             <Input placeholder="Optional display name" />
           </Form.Item>
-          <Form.Item name="app_id" label="App ID">
-            <Input placeholder="Application ID" />
+          <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+            <Switch />
           </Form.Item>
-          <Form.Item name="app_secret" label="App Secret">
-            <Input.Password placeholder="Application secret (stored securely)" />
+          <Form.Item name="owner_open_id" label="Owner Open ID">
+            <Input placeholder="Optional owner open_id" />
+          </Form.Item>
+          {!editingProvider && (
+            <>
+              <Form.Item name="app_id" label="App ID">
+                <Input placeholder="Application ID" />
+              </Form.Item>
+              <Form.Item name="app_secret" label="App Secret">
+                <Input.Password placeholder="Application secret (stored securely)" />
+              </Form.Item>
+            </>
+          )}
+          <Form.Item
+            name={["agent_config", "work_dir"]}
+            label="Agent Working Directory"
+            extra={
+              <Text type="secondary">
+                Inherits: <Text code>{inheritedWorkDir}</Text>. Enter a value to override for this
+                provider.
+              </Text>
+            }
+          >
+            <Input placeholder={inheritedWorkDir} />
+          </Form.Item>
+          <Form.Item
+            name={["agent_config", "base_instructions"]}
+            extra={
+              <Text type="secondary">
+                Inherits the global base instructions when empty. Enter text to override for this provider.
+              </Text>
+            }
+          >
+            <LongTextModalField
+              label="Base Instructions / System Prompt"
+              placeholder={inheritedBaseInstructions}
+              testId="settings-im-provider-base-instructions"
+              copyPlaceholderLabel="Copy inherited into editor"
+            />
+          </Form.Item>
+          <Form.Item
+            name={["agent_config", "developer_instructions"]}
+            extra={
+              <Text type="secondary">
+                Inherits: {inheritedDeveloperInstructions}. Enter text to override for this provider.
+              </Text>
+            }
+          >
+            <LongTextModalField
+              label="Developer Instructions"
+              placeholder={inheritedDeveloperInstructions}
+              testId="settings-im-provider-developer-instructions"
+            />
+          </Form.Item>
+          <Form.Item
+            name={["agent_config", "user_instructions"]}
+            extra={
+              <Text type="secondary">
+                Inherits: {inheritedUserInstructions}. Enter text to override for this provider.
+              </Text>
+            }
+          >
+            <LongTextModalField
+              label="User Instructions"
+              placeholder={inheritedUserInstructions}
+              testId="settings-im-provider-user-instructions"
+            />
           </Form.Item>
           <Form.Item
             name="event_connection_enabled"
@@ -1012,7 +1290,14 @@ function HistoryPanel({
 // ─── Main Tab Component ──────────────────────────────────────────────────────
 
 export default function ImGatewayTab() {
-  const [activeSubTab, setActiveSubTab] = useState("connections");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sectionFromUrl = searchParams.get("imGatewaySection");
+  const activeSection =
+    IM_GATEWAY_SECTION_NAV.find((section) => section.id === sectionFromUrl)?.id ??
+    "connections";
+  const { token } = theme.useToken();
+  const screens = useBreakpoint();
+  const isCompactNav = !screens.lg;
 
   const [providers, setProviders] = useState<ImProviderConfig[]>([]);
   const [targets, setTargets] = useState<ImTarget[]>([]);
@@ -1025,7 +1310,7 @@ export default function ImGatewayTab() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      switch (activeSubTab) {
+      switch (activeSection) {
         case "connections":
           setProviders(await imGatewayApi.listProviders());
           break;
@@ -1060,99 +1345,157 @@ export default function ImGatewayTab() {
     } finally {
       setLoading(false);
     }
-  }, [activeSubTab]);
+  }, [activeSection]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  const subTabItems = [
-    {
-      key: "connections",
-      label: (
-        <span>
-          <ApiOutlined /> Connections
-        </span>
-      ),
-      children: (
+  const handleSelectSection = useCallback(
+    (section: ImGatewaySectionId) => {
+      setLoading(false);
+      setSearchParams(
+        (prev) => {
+          prev.set("imGatewaySection", section);
+          return prev;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const nav = (
+    <nav
+      aria-label="IM Gateway settings sections"
+      data-testid="im-gateway-section-nav"
+      style={{
+        display: "flex",
+        flexDirection: isCompactNav ? "row" : "column",
+        gap: 6,
+        overflowX: isCompactNav ? "auto" : undefined,
+        padding: isCompactNav ? "0 0 4px" : 0,
+      }}
+    >
+      {IM_GATEWAY_SECTION_NAV.map((section) => {
+        const active = activeSection === section.id;
+        return (
+          <button
+            key={section.id}
+            type="button"
+            data-testid={`im-gateway-nav-${section.id}`}
+            aria-current={active ? "true" : undefined}
+            onClick={() => handleSelectSection(section.id)}
+            style={{
+              width: isCompactNav ? "auto" : "100%",
+              minWidth: isCompactNav ? 118 : undefined,
+              border: `1px solid ${
+                active ? token.colorPrimaryBorder : token.colorBorderSecondary
+              }`,
+              borderRadius: 6,
+              background: active ? token.colorPrimaryBg : token.colorBgContainer,
+              color: active ? token.colorPrimaryText : token.colorTextSecondary,
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: 12,
+              fontWeight: active ? 600 : 400,
+              lineHeight: "18px",
+              padding: "7px 10px",
+              textAlign: "left",
+              whiteSpace: "nowrap",
+              transition: "background 0.2s, border-color 0.2s, color 0.2s",
+            }}
+          >
+            <Space size={6}>
+              {section.icon}
+              <span>{section.label}</span>
+            </Space>
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  const content = (() => {
+    switch (activeSection) {
+      case "connections":
+        return (
+          <div data-testid="im-gateway-section-connections">
         <ConnectionsPanel
           providers={providers}
           loading={loading}
           onRefresh={fetchData}
         />
-      ),
-    },
-    {
-      key: "targets",
-      label: (
-        <span>
-          <SendOutlined /> Targets
-        </span>
-      ),
-      children: (
+          </div>
+        );
+      case "targets":
+        return (
+          <div data-testid="im-gateway-section-targets">
         <TargetsPanel
           targets={targets}
           providers={providers}
           loading={loading}
           onRefresh={fetchData}
         />
-      ),
-    },
-    {
-      key: "routes",
-      label: (
-        <span>
-          <RocketOutlined /> Routes
-        </span>
-      ),
-      children: (
+          </div>
+        );
+      case "routes":
+        return (
+          <div data-testid="im-gateway-section-routes">
         <RoutesPanel routes={routes} loading={loading} onRefresh={fetchData} />
-      ),
-    },
-    {
-      key: "schedules",
-      label: (
-        <span>
-          <CloudOutlined /> Schedules
-        </span>
-      ),
-      children: (
+          </div>
+        );
+      case "schedules":
+        return (
+          <div data-testid="im-gateway-section-schedules">
         <SchedulesPanel
           schedules={schedules}
           loading={loading}
           onRefresh={fetchData}
         />
-      ),
-    },
-    {
-      key: "history",
-      label: (
-        <span>
-          <HistoryOutlined /> History
-        </span>
-      ),
-      children: (
+          </div>
+        );
+      case "history":
+        return (
+          <div data-testid="im-gateway-section-history">
         <HistoryPanel
           events={events}
           runs={runs}
           loading={loading}
           onRefresh={fetchData}
         />
-      ),
-    },
-  ];
+          </div>
+        );
+    }
+  })();
 
   return (
-    <div>
-      <Tabs
-        activeKey={activeSubTab}
-        onChange={(key) => {
-          setLoading(false);
-          setActiveSubTab(key);
+    <div
+      data-testid="im-gateway-layout"
+      style={{ height: "100%", minHeight: 0, overflow: "hidden" }}
+    >
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: isCompactNav ? "1fr" : "168px minmax(0, 1fr)",
+          gap: 16,
+          height: "100%",
+          minHeight: 0,
         }}
-        items={subTabItems}
-        size="small"
-      />
+      >
+        <div>{nav}</div>
+        <div
+          data-testid="im-gateway-section-content"
+          style={{
+            minHeight: 0,
+            overflowY: "auto",
+            overflowX: "hidden",
+            paddingRight: isCompactNav ? 0 : 4,
+          }}
+        >
+          {content}
+        </div>
+      </div>
     </div>
   );
 }

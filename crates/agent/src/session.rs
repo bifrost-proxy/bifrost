@@ -21,6 +21,10 @@ use crate::memory;
 use crate::persistence;
 use crate::persistence::ConversationRecorder;
 use crate::prompt;
+use crate::session_status::{
+    config_context_window_tokens, context_usage_percent, refresh_active_turn_status,
+    ActiveTurnProgress, ActiveTurnStatus, ActiveTurnStatusHandle,
+};
 use crate::skill_authoring::SkillAuthoringHub;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
@@ -114,10 +118,15 @@ pub struct AgentSession {
     /// Scoped per session to avoid cross-session goal leakage.
     pub current_goal: Option<crate::tools::goal::GoalState>,
 
-    /// Pre-loaded user instructions (AGENTS.md + config instructions).
+    /// Pre-loaded user instructions (AGENTS.md + config user_instructions).
     /// Resolved once at session creation time, matching Codex's behavior.
     /// Reused across all turns in this session.
     pub user_instructions: Option<String>,
+
+    /// Resolved base/system instructions for this session.
+    /// When no per-turn route override is present, this is resolved once and
+    /// reused so later config changes do not silently alter an active session.
+    pub resolved_base_instructions: Option<String>,
 
     /// How many times the runtime has reminded the model to close an unfinished
     /// plan before allowing the final answer to return.
@@ -132,6 +141,11 @@ pub struct AgentSession {
             Option<String>,
         )>,
     >,
+
+    /// Shared runtime status for the turn currently executing this session.
+    /// The session manager keeps another handle while the session is checked
+    /// out, so `/status` can inspect progress without taking the session lock.
+    pub active_turn_status: Option<ActiveTurnStatusHandle>,
 }
 
 impl AgentSession {
@@ -160,8 +174,10 @@ impl AgentSession {
             current_plan: None,
             current_goal: None,
             user_instructions: None,
+            resolved_base_instructions: None,
             plan_repair_attempts: 0,
             plan_sender: None,
+            active_turn_status: None,
         }
     }
 
@@ -172,7 +188,20 @@ impl AgentSession {
         session
     }
 
-    /// Load user instructions (AGENTS.md + config instructions) once at session
+    /// Reinitialize this session around a new working directory.
+    ///
+    /// Switching project roots changes both AGENTS.md discovery and repo-local
+    /// skills, so this deliberately clears conversation state and rebuilds the
+    /// skill registry from the new directory.
+    pub fn reinitialize_work_dir(&mut self, work_dir: String) {
+        self.work_dir = Some(work_dir);
+        self.clear();
+        self.slash_router = SlashCommandRouter::with_default_builtins();
+        self.skill_registry = None;
+        self.attach_default_skill_registry();
+    }
+
+    /// Load user instructions (AGENTS.md + config user_instructions) once at session
     /// creation time, matching Codex's behavior. The result is stored on the
     /// session and reused across all turns.
     pub fn load_user_instructions(&mut self, config: &crate::config::AgentConfig) {
@@ -183,8 +212,11 @@ impl AgentSession {
             .unwrap_or_else(|| config.resolve_work_dir());
         let home_dir = crate::config::agent_home_dir();
         let manager = crate::agents_md::AgentsMdManager::new(config);
-        self.user_instructions =
-            manager.user_instructions(&work_dir, Some(&home_dir), config.instructions.as_deref());
+        self.user_instructions = manager.user_instructions(
+            &work_dir,
+            Some(&home_dir),
+            config.user_instructions.as_deref(),
+        );
     }
 
     pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
@@ -237,6 +269,7 @@ impl AgentSession {
         // Invalidate cached user instructions so they are reloaded on next turn
         // (e.g. after switch_workdir changes the project context).
         self.user_instructions = None;
+        self.resolved_base_instructions = None;
         // Mark that memory should be skipped for the next turn
         self.memory_cleared = true;
         // Drop the recorder so a new file will be created for the fresh session
@@ -296,7 +329,7 @@ impl AgentSession {
     }
 
     /// Track token usage from an API response.
-    fn track_token_usage(&mut self, total_tokens: u64) {
+    pub(crate) fn track_token_usage(&mut self, total_tokens: u64) {
         self.last_response_tokens = Some(total_tokens);
         self.total_tokens_used = Some(
             self.total_tokens_used
@@ -333,14 +366,11 @@ impl AgentSession {
     /// while preserving the compaction summary (first message after compaction).
     fn build_messages(
         &self,
-        system_prompt: &str,
+        prompt_prefix: &[ChatMessage],
         memory_message: Option<&ChatMessage>,
         max_history: u32,
     ) -> Vec<ChatMessage> {
-        let mut messages = Vec::new();
-        if !system_prompt.is_empty() {
-            messages.push(ChatMessage::system(system_prompt));
-        }
+        let mut messages = prompt_prefix.to_vec();
         if let Some(memory_message) = memory_message {
             messages.push(memory_message.clone());
         }
@@ -418,6 +448,7 @@ pub struct AgentSessionManager {
     sessions: DashMap<String, AgentSession>,
     /// Tracks session keys that are currently being processed by a turn loop.
     active_sessions: DashSet<String>,
+    active_turn_statuses: DashMap<String, ActiveTurnStatusHandle>,
     session_ttl_secs: u64,
 }
 
@@ -426,8 +457,20 @@ impl AgentSessionManager {
         Self {
             sessions: DashMap::new(),
             active_sessions: DashSet::new(),
+            active_turn_statuses: DashMap::new(),
             session_ttl_secs,
         }
+    }
+
+    fn create_active_turn_status(&self, session_key: &str) -> ActiveTurnStatusHandle {
+        let handle = Arc::new(std::sync::Mutex::new(ActiveTurnStatus::new(session_key)));
+        self.active_turn_statuses
+            .insert(session_key.to_string(), Arc::clone(&handle));
+        handle
+    }
+
+    fn attach_active_turn_status(&self, session_key: &str, session: &mut AgentSession) {
+        session.active_turn_status = Some(self.create_active_turn_status(session_key));
     }
 
     /// Check if a session is currently being processed by a turn loop.
@@ -440,10 +483,13 @@ impl AgentSessionManager {
     /// Marks the session as active (busy).
     pub fn take_session(&self, session_key: &str) -> AgentSession {
         self.active_sessions.insert(session_key.to_string());
-        self.sessions
+        let mut session = self
+            .sessions
             .remove(session_key)
             .map(|(_, s)| s)
-            .unwrap_or_else(|| AgentSession::new(session_key))
+            .unwrap_or_else(|| AgentSession::new(session_key));
+        self.attach_active_turn_status(session_key, &mut session);
+        session
     }
 
     /// Try to take a session. Returns `None` if the session is currently
@@ -453,11 +499,12 @@ impl AgentSessionManager {
         if !self.active_sessions.insert(session_key.to_string()) {
             return None; // already active
         }
-        let session = self
+        let mut session = self
             .sessions
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key));
+        self.attach_active_turn_status(session_key, &mut session);
         Some(session)
     }
 
@@ -468,10 +515,13 @@ impl AgentSessionManager {
         work_dir: Option<String>,
     ) -> AgentSession {
         self.active_sessions.insert(session_key.to_string());
-        self.sessions
+        let mut session = self
+            .sessions
             .remove(session_key)
             .map(|(_, s)| s)
-            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir))
+            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir));
+        self.attach_active_turn_status(session_key, &mut session);
+        session
     }
 
     /// Try to take a session with a specific work_dir. Returns `None` if busy.
@@ -483,20 +533,24 @@ impl AgentSessionManager {
         if !self.active_sessions.insert(session_key.to_string()) {
             return None;
         }
-        let session = self
+        let mut session = self
             .sessions
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir));
+        self.attach_active_turn_status(session_key, &mut session);
         Some(session)
     }
 
     /// Return a session to the manager after a turn completes.
     /// Also removes the session from the active set.
     pub fn return_session(&self, session: AgentSession) {
+        let mut session = session;
         let key = session.session_key.clone();
+        session.active_turn_status = None;
         self.sessions.insert(key.clone(), session);
         self.active_sessions.remove(&key);
+        self.active_turn_statuses.remove(&key);
     }
 
     /// Release a session from the active set without returning it.
@@ -504,6 +558,7 @@ impl AgentSessionManager {
     /// the session from being permanently marked as busy.
     pub fn release_active(&self, session_key: &str) {
         self.active_sessions.remove(session_key);
+        self.active_turn_statuses.remove(session_key);
     }
 
     /// Remove expired sessions.
@@ -539,11 +594,21 @@ impl AgentSessionManager {
     /// Clear a specific session.
     pub fn clear_session(&self, session_key: &str) {
         self.sessions.remove(session_key);
+        self.active_turn_statuses.remove(session_key);
+        self.active_sessions.remove(session_key);
     }
 
     /// Clear all sessions.
     pub fn clear_all_sessions(&self) {
         self.sessions.clear();
+        self.active_turn_statuses.clear();
+        self.active_sessions.clear();
+    }
+
+    pub fn get_active_turn_status(&self, session_key: &str) -> Option<ActiveTurnStatus> {
+        self.active_turn_statuses
+            .get(session_key)
+            .and_then(|handle| handle.lock().ok().map(|status| status.clone()))
     }
 
     /// Get detailed info for a specific session (including message history).
@@ -1120,10 +1185,27 @@ pub async fn run_turn_with_mcp(
             .map(|t| t.to_string())
             .unwrap_or_else(|| "N/A".to_string());
         let mcp_tool_count = mcp.as_ref().map(|m| m.list_tools().len()).unwrap_or(0);
+        let context_window = config_context_window_tokens(config);
+        let context_usage = context_usage_percent(est, context_window)
+            .map(|percent| format!("{percent:.1}%"))
+            .unwrap_or_else(|| "N/A".to_string());
+        let context_window_text = context_window
+            .map(|window| window.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let work_dir_text = session.work_dir.as_deref().unwrap_or("N/A");
         return Ok(TurnResult {
             response: format!(
-                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: {}",
-                session.history.len(), est, real, session.compaction_count, session.history_version, mcp_tool_count
+                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({})\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: {}",
+                work_dir_text,
+                session.history.len(),
+                est,
+                real,
+                est,
+                context_window_text,
+                context_usage,
+                session.compaction_count,
+                session.history_version,
+                mcp_tool_count
             ),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
@@ -1172,6 +1254,7 @@ pub async fn run_turn_with_mcp(
                     if let Ok(runtime_state) = persistence::load_session_runtime_state(&candidate) {
                         session.current_goal = runtime_state.current_goal;
                         session.total_tokens_used = runtime_state.total_tokens_used;
+                        session.resolved_base_instructions = runtime_state.base_instructions;
                         crate::tools::goal::goal_runtime_apply(
                             session,
                             crate::tools::goal::GoalRuntimeEvent::ThreadResumed,
@@ -1349,16 +1432,28 @@ pub async fn run_turn_with_mcp(
         session.load_user_instructions(config);
     }
 
-    // Build system prompt
-    // Uses pre-loaded user_instructions from session (loaded once at creation,
-    // matching Codex's behavior).
-    let system_prompt = prompt::build_system_prompt_with_skill_registry(
+    let base_instructions = if let Some(route_base_prompt) = system_prompt_override {
+        route_base_prompt.to_string()
+    } else if let Some(existing) = session.resolved_base_instructions.clone() {
+        existing
+    } else {
+        let resolved = prompt::resolve_base_instructions_text(config, None);
+        session.resolved_base_instructions = Some(resolved.clone());
+        resolved
+    };
+
+    // Build Codex-style prompt prefix:
+    // system(base instructions) + developer sections + contextual user sections.
+    // Route-level `system_prompt_override` is treated as a base prompt override,
+    // not as a full prompt replacement, so tools/skills/AGENTS/env still apply.
+    let prompt_messages = prompt::build_prompt_messages_with_skill_registry(
         config,
-        system_prompt_override,
+        &base_instructions,
         session.work_dir.as_deref(),
         session.skill_registry.as_deref(),
         session.user_instructions.as_deref(),
     );
+    let prompt_prefix = prompt_messages.prefix;
 
     // Add user message to history
     session.add_user_message(user_message);
@@ -1372,6 +1467,8 @@ pub async fn run_turn_with_mcp(
 
     // Merge tool definitions: local tools + MCP tools
     let mut tool_defs = tools.definitions();
+    let local_tool_count = tool_defs.len();
+    let mcp_tool_count = mcp.as_ref().map(|m| m.list_tools().len()).unwrap_or(0);
     if let Some(ref mcp_mgr) = mcp {
         tool_defs.extend(mcp_mgr.list_tools());
     }
@@ -1392,6 +1489,18 @@ pub async fn run_turn_with_mcp(
     // Reset plan from previous turn so stale steps are not returned if the
     // model does not call update_plan in this turn.
     session.current_plan = None;
+    refresh_active_turn_status(
+        session,
+        config,
+        ActiveTurnProgress {
+            state: "starting",
+            current_loop_iteration: 0,
+            completed_loop_iterations: 0,
+            max_loop_iterations: config.get_max_turn_iterations(),
+            local_tool_count,
+            mcp_tool_count,
+        },
+    );
 
     info!(
         session_key = %session.session_key,
@@ -1417,9 +1526,21 @@ pub async fn run_turn_with_mcp(
     for iteration in 0..max_iterations {
         // Build messages with history limit enforcement
         let messages = session.build_messages(
-            &system_prompt,
+            &prompt_prefix,
             memory_message.as_ref(),
             config.get_max_history_messages(),
+        );
+        refresh_active_turn_status(
+            session,
+            config,
+            ActiveTurnProgress {
+                state: "model_request",
+                current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                completed_loop_iterations: u32::try_from(iteration).unwrap_or(u32::MAX),
+                max_loop_iterations: config.get_max_turn_iterations(),
+                local_tool_count,
+                mcp_tool_count,
+            },
         );
 
         debug!(
@@ -1482,7 +1603,7 @@ pub async fn run_turn_with_mcp(
                     // Step 2: If compact worked, retry once
                     if compacted {
                         let retry_messages = session.build_messages(
-                            &system_prompt,
+                            &prompt_prefix,
                             memory_message.as_ref(),
                             config.get_max_history_messages(),
                         );
@@ -1498,7 +1619,7 @@ pub async fn run_turn_with_mcp(
                                     client,
                                     config,
                                     session,
-                                    &system_prompt,
+                                    &prompt_prefix,
                                     &tool_defs,
                                 )
                                 .await
@@ -1528,7 +1649,7 @@ pub async fn run_turn_with_mcp(
                         }
                     } else {
                         // Compact didn't run or failed, go straight to trim loop
-                        match trim_loop_retry(client, config, session, &system_prompt, &tool_defs)
+                        match trim_loop_retry(client, config, session, &prompt_prefix, &tool_defs)
                             .await
                         {
                             Ok(r) => r,
@@ -1669,6 +1790,18 @@ pub async fn run_turn_with_mcp(
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.total_tokens);
         }
+        refresh_active_turn_status(
+            session,
+            config,
+            ActiveTurnProgress {
+                state: "model_response",
+                current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                max_loop_iterations: config.get_max_turn_iterations(),
+                local_tool_count,
+                mcp_tool_count,
+            },
+        );
 
         // Check if model wants to call tools
         if response.tool_calls.is_empty() {
@@ -1834,6 +1967,18 @@ pub async fn run_turn_with_mcp(
             tool_count = response.tool_calls.len(),
             "model requested tool calls"
         );
+        refresh_active_turn_status(
+            session,
+            config,
+            ActiveTurnProgress {
+                state: "tool_calls",
+                current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                max_loop_iterations: config.get_max_turn_iterations(),
+                local_tool_count,
+                mcp_tool_count,
+            },
+        );
 
         // Record the assistant message with tool calls
         session.add_assistant_tool_calls(&response.tool_calls);
@@ -1924,6 +2069,18 @@ pub async fn run_turn_with_mcp(
 
             // Add tool result to history
             session.add_tool_result(&tc.id, &output);
+            refresh_active_turn_status(
+                session,
+                config,
+                ActiveTurnProgress {
+                    state: "tool_calls",
+                    current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                    completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                    max_loop_iterations: config.get_max_turn_iterations(),
+                    local_tool_count,
+                    mcp_tool_count,
+                },
+            );
             // Codex-aligned: skip ToolCompleted accounting for update_goal (the goal
             // handler itself fires ToolCompletedGoal with suppressed steering).
             if tc.name() != crate::tools::goal::UPDATE_GOAL_TOOL_NAME {
@@ -1946,8 +2103,7 @@ pub async fn run_turn_with_mcp(
                     new_work_dir = %new_dir,
                     "switching session work directory"
                 );
-                session.work_dir = Some(new_dir.clone());
-                session.clear();
+                session.reinitialize_work_dir(new_dir.clone());
                 return Ok(TurnResult {
                     response: format!(
                         "已切换工作目录到: {}\n\n会话历史已清空，已重新加载项目配置。",
@@ -2327,7 +2483,7 @@ async fn trim_loop_retry(
     client: &crate::client::AgentClient,
     config: &crate::config::AgentConfig,
     session: &mut AgentSession,
-    system_prompt: &str,
+    prompt_prefix: &[ChatMessage],
     tool_defs: &[crate::types::ToolDefinition],
 ) -> Result<crate::types::ModelResponse, String> {
     const MAX_TRIM_ITERATIONS: usize = 10;
@@ -2348,7 +2504,7 @@ async fn trim_loop_retry(
         );
 
         let retry_messages =
-            session.build_messages(system_prompt, None, config.get_max_history_messages());
+            session.build_messages(prompt_prefix, None, config.get_max_history_messages());
         match client
             .chat_completion(config, &retry_messages, tool_defs)
             .await
@@ -2472,7 +2628,8 @@ mod tests {
             session.add_user_message(&format!("msg {i}"));
         }
         // Limit to 5 messages
-        let messages = session.build_messages("system", None, 5);
+        let prefix = vec![ChatMessage::system("system")];
+        let messages = session.build_messages(&prefix, None, 5);
         // 1 system + 5 history = 6
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
@@ -2490,7 +2647,8 @@ mod tests {
             session.add_user_message(&format!("msg {i}"));
         }
         // Limit to 5 messages
-        let messages = session.build_messages("system", None, 5);
+        let prefix = vec![ChatMessage::system("system")];
+        let messages = session.build_messages(&prefix, None, 5);
         // 1 system + 1 summary + 4 recent = 6
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
@@ -2506,7 +2664,8 @@ mod tests {
         for i in 0..5 {
             session.add_user_message(&format!("msg {i}"));
         }
-        let messages = session.build_messages("system", None, 0); // 0 = no limit
+        let prefix = vec![ChatMessage::system("system")];
+        let messages = session.build_messages(&prefix, None, 0); // 0 = no limit
         assert_eq!(messages.len(), 6); // 1 system + 5 history
     }
 
@@ -2517,7 +2676,8 @@ mod tests {
         session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
         session.add_tool_result("call-1", "[file] Cargo.toml");
 
-        let messages = session.build_messages("system", None, 1);
+        let prefix = vec![ChatMessage::system("system")];
+        let messages = session.build_messages(&prefix, None, 1);
 
         assert_eq!(messages.len(), 1);
     }

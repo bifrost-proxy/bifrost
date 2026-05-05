@@ -1766,11 +1766,19 @@ impl RemoteInvokeWorker {
     }
 
     async fn dispatch_sse_event(&self, event_name: &str, data: &str) {
-        info!(
-            event = %event_name,
-            data_len = data.len(),
-            "dispatching SSE event"
-        );
+        if event_name == "ping" {
+            debug!(
+                event = %event_name,
+                data_len = data.len(),
+                "dispatching SSE event"
+            );
+        } else {
+            info!(
+                event = %event_name,
+                data_len = data.len(),
+                "dispatching SSE event"
+            );
+        }
 
         match event_name {
             "client_hello_ack" => {

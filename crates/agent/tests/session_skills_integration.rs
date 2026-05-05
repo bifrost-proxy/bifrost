@@ -73,6 +73,58 @@ async fn new_with_work_dir_attaches_skill_registry_for_skill_list() {
 }
 
 #[tokio::test]
+async fn reinitialize_work_dir_reloads_repo_local_skills_for_new_session_context() {
+    let first_work_dir = tempfile::tempdir().expect("first work dir");
+    let second_work_dir = tempfile::tempdir().expect("second work dir");
+
+    let first_skill_dir = first_work_dir.path().join(".agents/skills/first");
+    fs::create_dir_all(&first_skill_dir).expect("first skill dir");
+    fs::write(
+        first_skill_dir.join("SKILL.md"),
+        "---\nname: first\ndescription: First helper\nslash_command: /first\n---\n# First",
+    )
+    .expect("first skill md");
+
+    let second_skill_dir = second_work_dir.path().join(".agents/skills/second");
+    fs::create_dir_all(&second_skill_dir).expect("second skill dir");
+    fs::write(
+        second_skill_dir.join("SKILL.md"),
+        "---\nname: second\ndescription: Second helper\nslash_command: /second\n---\n# Second",
+    )
+    .expect("second skill md");
+
+    let mut session = AgentSession::new_with_work_dir(
+        "skill-session",
+        Some(first_work_dir.path().to_string_lossy().to_string()),
+    );
+    session
+        .history
+        .push(bifrost_agent::types::ChatMessage::user("old context"));
+    let second_work_dir_string = second_work_dir.path().to_string_lossy().to_string();
+    session.reinitialize_work_dir(second_work_dir_string.clone());
+
+    assert!(session.history.is_empty());
+    assert_eq!(
+        session.work_dir.as_deref(),
+        Some(second_work_dir_string.as_str())
+    );
+
+    let result = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session,
+        &ToolRegistry::with_defaults(1),
+        "/skill list",
+        None,
+    )
+    .await
+    .expect("run turn");
+
+    assert!(result.response.contains("/second"));
+    assert!(!result.response.contains("/first"));
+}
+
+#[tokio::test]
 async fn goal_slash_command_runs_through_session_router() {
     let mut session = AgentSession::new("goal-session");
     let result = run_turn(

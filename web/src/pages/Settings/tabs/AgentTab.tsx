@@ -10,6 +10,7 @@ import {
   Col,
   Divider,
   Empty,
+  Grid,
   Input,
   InputNumber,
   Row,
@@ -21,6 +22,7 @@ import {
   Tooltip,
   Typography,
   message,
+  theme,
 } from "antd";
 import {
   ReloadOutlined,
@@ -45,9 +47,33 @@ import SkillsSection from "./agent/SkillsSection";
 import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
 import SessionDetailPage from "./agent/SessionDetailPage";
 import MemoriesSection from "./agent/MemoriesSection";
+import LongTextModalField from "./agent/LongTextModalField";
 
 const { Text } = Typography;
-const { TextArea } = Input;
+const { useBreakpoint } = Grid;
+
+type AgentSectionId =
+  | "general"
+  | "model"
+  | "runtime"
+  | "history"
+  | "memories"
+  | "skills"
+  | "memory-records"
+  | "mcp-servers"
+  | "sessions";
+
+const AGENT_SECTION_NAV: Array<{ id: AgentSectionId; label: string }> = [
+  { id: "general", label: "General" },
+  { id: "model", label: "Model" },
+  { id: "runtime", label: "Runtime" },
+  { id: "history", label: "History" },
+  { id: "memories", label: "Memories" },
+  { id: "skills", label: "Skills" },
+  { id: "memory-records", label: "Memory Records" },
+  { id: "mcp-servers", label: "MCP Servers" },
+  { id: "sessions", label: "Sessions" },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -55,7 +81,12 @@ export default function AgentTab() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [activeSection, setActiveSection] = useState<AgentSectionId>("general");
   const updateTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const pendingFieldValues = useRef<Record<string, unknown>>({});
+  const { token } = theme.useToken();
+  const screens = useBreakpoint();
+  const isCompactNav = !screens.lg;
 
   const fetchConfig = useCallback(async () => {
     setLoading(true);
@@ -92,11 +123,24 @@ export default function AgentTab() {
 
   const patchField = useCallback(
     async (field: string, value: unknown) => {
+      pendingFieldValues.current[field] = value;
       try {
         const updated = await patch<AgentConfig>(`${BASE}/agent`, {
           [field]: value,
         });
-        setConfig(updated);
+        setConfig((prev) => {
+          const next = { ...updated } as AgentConfig;
+          if (Object.is(pendingFieldValues.current[field], value)) {
+            delete pendingFieldValues.current[field];
+          }
+          for (const [pendingField, pendingValue] of Object.entries(
+            pendingFieldValues.current,
+          )) {
+            (next as unknown as Record<string, unknown>)[pendingField] =
+              pendingValue === null ? undefined : pendingValue;
+          }
+          return prev ? next : updated;
+        });
         message.success(`Updated ${field.replace(/_/g, " ")}`);
       } catch {
         message.error(`Failed to update ${field.replace(/_/g, " ")}`);
@@ -109,6 +153,7 @@ export default function AgentTab() {
     (field: string, value: unknown, delay = 600) => {
       const existing = updateTimers.current[field];
       if (existing) clearTimeout(existing);
+      pendingFieldValues.current[field] = value;
       updateTimers.current[field] = setTimeout(() => {
         patchField(field, value);
       }, delay);
@@ -162,6 +207,31 @@ export default function AgentTab() {
   const selectedSession = searchParams.get("session");
   const sessionView = (searchParams.get("view") || "active") as "active" | "history";
   const historyFilePath = searchParams.get("historyPath") || undefined;
+  const sectionFromUrl = searchParams.get("agentSection");
+
+  useEffect(() => {
+    const nextSection = AGENT_SECTION_NAV.find(
+      (section) => section.id === sectionFromUrl,
+    )?.id;
+    setActiveSection(nextSection ?? "general");
+  }, [sectionFromUrl]);
+
+  const handleSelectSection = useCallback(
+    (section: AgentSectionId) => {
+      setActiveSection(section);
+      setSearchParams(
+        (prev) => {
+          prev.set("agentSection", section);
+          prev.delete("session");
+          prev.delete("view");
+          prev.delete("historyPath");
+          return prev;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
 
   const handleOpenSession = useCallback(
     (sessionKey: string, view: "active" | "history", filePath?: string) => {
@@ -210,11 +280,89 @@ export default function AgentTab() {
     );
   }
 
+  const nav = (
+    <nav
+      aria-label="Agent settings sections"
+      data-testid="agent-settings-section-nav"
+      style={{
+        height: isCompactNav ? undefined : "100%",
+        zIndex: 1,
+        display: "flex",
+        flexDirection: isCompactNav ? "row" : "column",
+        gap: 6,
+        overflowX: isCompactNav ? "auto" : undefined,
+        padding: isCompactNav ? "0 0 4px" : 0,
+      }}
+    >
+      {AGENT_SECTION_NAV.map((section) => {
+        const active = activeSection === section.id;
+        return (
+          <button
+            key={section.id}
+            type="button"
+            data-testid={`agent-settings-nav-${section.id}`}
+            aria-current={active ? "true" : undefined}
+            onClick={() => handleSelectSection(section.id)}
+            style={{
+              width: isCompactNav ? "auto" : "100%",
+              minWidth: isCompactNav ? 112 : undefined,
+              border: `1px solid ${
+                active ? token.colorPrimaryBorder : token.colorBorderSecondary
+              }`,
+              borderRadius: 6,
+              background: active ? token.colorPrimaryBg : token.colorBgContainer,
+              color: active ? token.colorPrimaryText : token.colorTextSecondary,
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: 12,
+              fontWeight: active ? 600 : 400,
+              lineHeight: "18px",
+              padding: "7px 10px",
+              textAlign: "left",
+              whiteSpace: "nowrap",
+              transition: "background 0.2s, border-color 0.2s, color 0.2s",
+            }}
+          >
+            {section.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+
   return (
-    <div>
-      <Row gutter={[16, 16]}>
+    <div
+      data-testid="agent-settings-layout"
+      style={{
+        height: "100%",
+        minHeight: 0,
+        overflow: "hidden",
+      }}
+    >
+      <Row gutter={[16, 16]} align="top" style={{ height: "100%", minHeight: 0 }}>
+        <Col xs={24} lg={5} xl={4}>
+          {nav}
+        </Col>
+        <Col xs={24} lg={19} xl={20} style={{ height: "100%", minHeight: 0 }}>
+          <div
+            data-testid="agent-settings-section-content"
+            style={{
+              height: "100%",
+              minHeight: 0,
+              overflowY: "auto",
+              overflowX: "hidden",
+              paddingRight: isCompactNav ? 0 : 4,
+            }}
+          >
+            <Row gutter={[16, 16]}>
         {/* General Settings */}
-        <Col xs={24}>
+        {activeSection === "general" && (
+        <Col
+          xs={24}
+          id="agent-settings-general"
+          data-agent-section="general"
+          data-testid="agent-settings-section-general"
+        >
           <Card
             title={
               <Space>
@@ -277,25 +425,50 @@ export default function AgentTab() {
 
               <Divider style={{ margin: "12px 0" }} />
 
-              <Text>Instructions / System Prompt</Text>
-              <TextArea
-                value={config.instructions || ""}
-                onChange={(e) =>
-                  handleStringChange("instructions", e.target.value)
-                }
-                placeholder="System prompt instructions for the agent..."
-                rows={5}
-                style={{ fontFamily: "monospace", fontSize: 12 }}
+              <LongTextModalField
+                label="Base Instructions / System Prompt"
+                value={config.base_instructions ?? config.instructions ?? ""}
+                onChange={(value) => handleStringChange("base_instructions", value)}
+                placeholder={config.default_base_instructions || "Built-in default Agent prompt"}
+                description="Overrides the built-in base prompt. Leave empty to inherit the default; use the editor button to copy the default into a custom draft."
+                testId="settings-agent-base-instructions"
+                copyPlaceholderLabel="Copy default into editor"
               />
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Custom system prompt to guide agent behavior
-              </Text>
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <LongTextModalField
+                label="Developer Instructions"
+                value={config.developer_instructions || ""}
+                onChange={(value) => handleStringChange("developer_instructions", value)}
+                placeholder="Developer-level policy appended after the base prompt..."
+                description="Appended as a developer instructions section without replacing the base prompt."
+                testId="settings-agent-developer-instructions"
+              />
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <LongTextModalField
+                label="User Instructions"
+                value={config.user_instructions || ""}
+                onChange={(value) => handleStringChange("user_instructions", value)}
+                placeholder="User/AGENTS-style instructions combined with AGENTS.md..."
+                description="Combined with AGENTS.md and injected as user instructions."
+                testId="settings-agent-user-instructions"
+              />
             </Space>
           </Card>
         </Col>
+        )}
 
         {/* Model Configuration */}
-        <Col xs={24}>
+        {activeSection === "model" && (
+        <Col
+          xs={24}
+          id="agent-settings-model"
+          data-agent-section="model"
+          data-testid="agent-settings-section-model"
+        >
           <Card
             title={
               <Space>
@@ -616,9 +789,16 @@ export default function AgentTab() {
             </Space>
           </Card>
         </Col>
+        )}
 
         {/* Runtime Settings */}
-        <Col xs={24}>
+        {activeSection === "runtime" && (
+        <Col
+          xs={24}
+          id="agent-settings-runtime"
+          data-agent-section="runtime"
+          data-testid="agent-settings-section-runtime"
+        >
           <Card
             title={
               <Space>
@@ -785,9 +965,16 @@ export default function AgentTab() {
             </Space>
           </Card>
         </Col>
+        )}
 
         {/* History & Session */}
-        <Col xs={24}>
+        {activeSection === "history" && (
+        <Col
+          xs={24}
+          id="agent-settings-history"
+          data-agent-section="history"
+          data-testid="agent-settings-section-history"
+        >
           <Card
             title={
               <Space>
@@ -880,9 +1067,16 @@ export default function AgentTab() {
             </Space>
           </Card>
         </Col>
+        )}
 
         {/* Memories */}
-        <Col xs={24}>
+        {activeSection === "memories" && (
+        <Col
+          xs={24}
+          id="agent-settings-memories"
+          data-agent-section="memories"
+          data-testid="agent-settings-section-memories"
+        >
           <Card
             title={
               <Space>
@@ -1115,9 +1309,16 @@ export default function AgentTab() {
             </Space>
           </Card>
         </Col>
+        )}
 
         {/* Skills */}
-        <Col xs={24}>
+        {activeSection === "skills" && (
+        <Col
+          xs={24}
+          id="agent-settings-skills"
+          data-agent-section="skills"
+          data-testid="agent-settings-section-skills"
+        >
           <Card
             title={
               <Space>
@@ -1130,9 +1331,16 @@ export default function AgentTab() {
             <SkillsSection />
           </Card>
         </Col>
+        )}
 
-        {/* MCP Servers */}
-        <Col xs={24}>
+        {/* Memory Records */}
+        {activeSection === "memory-records" && (
+        <Col
+          xs={24}
+          id="agent-settings-memory-records"
+          data-agent-section="memory-records"
+          data-testid="agent-settings-section-memory-records"
+        >
           <Card
             title={
               <Space>
@@ -1145,9 +1353,16 @@ export default function AgentTab() {
             <MemoriesSection />
           </Card>
         </Col>
+        )}
 
         {/* MCP Servers */}
-        <Col xs={24}>
+        {activeSection === "mcp-servers" && (
+        <Col
+          xs={24}
+          id="agent-settings-mcp-servers"
+          data-agent-section="mcp-servers"
+          data-testid="agent-settings-section-mcp-servers"
+        >
           <Card
             title={
               <Space>
@@ -1164,9 +1379,16 @@ export default function AgentTab() {
             />
           </Card>
         </Col>
+        )}
 
         {/* Sessions (Unified — Active + History) */}
-        <Col xs={24}>
+        {activeSection === "sessions" && (
+        <Col
+          xs={24}
+          id="agent-settings-sessions"
+          data-agent-section="sessions"
+          data-testid="agent-settings-section-sessions"
+        >
           <Card
             title={
               <Space>
@@ -1178,6 +1400,10 @@ export default function AgentTab() {
           >
             <UnifiedSessionsSection onOpenSession={handleOpenSession} />
           </Card>
+        </Col>
+        )}
+            </Row>
+          </div>
         </Col>
       </Row>
     </div>

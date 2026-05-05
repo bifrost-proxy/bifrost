@@ -170,6 +170,9 @@ pub async fn compact_session(
     let response = client
         .chat_completion(config, &summary_messages, &[])
         .await?;
+    if let Some(ref usage) = response.usage {
+        session.track_token_usage(usage.total_tokens);
+    }
 
     let summary = response
         .content

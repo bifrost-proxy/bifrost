@@ -1304,7 +1304,10 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path)
             .expect("failed to create auth db");
-        let im_gateway_service = Arc::new(ImGatewayService::new(&temp_dir));
+        let im_gateway_service = Arc::new(ImGatewayService::new_with_agent_proxy_port(
+            &temp_dir,
+            Some(port),
+        ));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -1503,7 +1506,10 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db2 = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path2)
             .expect("failed to create auth db");
-        let im_gateway_service = Arc::new(ImGatewayService::new(&temp_dir));
+        let im_gateway_service = Arc::new(ImGatewayService::new_with_agent_proxy_port(
+            &temp_dir,
+            Some(port),
+        ));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)

@@ -33,6 +33,16 @@ impl ChatMessage {
         }
     }
 
+    pub fn developer(content: &str) -> Self {
+        Self {
+            role: "developer".to_string(),
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
     pub fn user(content: &str) -> Self {
         Self {
             role: "user".to_string(),

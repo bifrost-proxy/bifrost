@@ -71,7 +71,7 @@ impl AgentsMdManager {
         &self,
         work_dir: &Path,
         home_dir: Option<&Path>,
-        config_instructions: Option<&str>,
+        config_user_instructions: Option<&str>,
     ) -> Option<String> {
         let agents_md_docs = self.read_agents_md(work_dir);
 
@@ -84,8 +84,8 @@ impl AgentsMdManager {
             }
         }
 
-        // 2. Config-level instructions
-        if let Some(instructions) = config_instructions {
+        // 2. Config-level user instructions
+        if let Some(instructions) = config_user_instructions {
             if !output.is_empty() {
                 output.push_str(AGENTS_MD_SEPARATOR);
             }

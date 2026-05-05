@@ -24,7 +24,7 @@
 | [cli-group.md](./cli-group.md) | CLI Group 管理 | 15 | group list/show、group rule list/show/add/update/enable/disable/delete，以及 Group CLI mock 单测并发稳定性回归 |
 | [cli-import-export.md](./cli-import-export.md) | CLI 导入导出与杂项 | 27 | export/import、metrics、sync、version-check、upgrade、completions、install-skill，含 version-check 空输出与 install-skill 更多 agent 兼容回归验证，以及 version-check redirect 优先与 HTML highlights 降级验证 |
 | [port-conflict-restart.md](./port-conflict-restart.md) | 端口冲突检测与自动重启 | 6 | 端口占用检测、进程信息显示、交互式终止确认、--yes 自动确认、PID 检测兼容性、非交互端口冲突早于系统代理摘要回归 |
-| [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 6 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、显式指定覆盖 |
+| [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 7 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、显式指定覆盖，以及默认 info 日志隐藏常态连接生命周期噪声 |
 
 ### Web UI 测试
 
@@ -133,7 +133,7 @@
 | [skill-loading-e2e.md](./skill-loading-e2e.md) | Skill Loading E2E 一致性 | 11 | 4 scope 加载可见性、优先级覆盖、启用/停用一致性（管理端→消费端）、prompt 渐进式披露（metadata 注入、body 按需读取）、slash 命令解析、default_roots 路径对齐、隐藏目录过滤、嵌套发现、单元测试回归 |
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
 | [codex-task-dispatch.md](./codex-task-dispatch.md) | Codex 异步任务派发 | 5 | 后台启动 Codex 任务、watch 最近任务、prompt 缺失报错、PATH 隔离无 codex 报错、同名任务历史产物不覆盖 |
-| [codex-task-inspector.md](./codex-task-inspector.md) | Codex 任务巡检 Skill | 5 | 优先按 rollout/session id 走 `~/.codex`（权威 jsonl）；仅在明确指向仓库追踪文件时走 `.codex-tasks`：PID 存活判断、`*-last.md` 结论提取、CI poll 运行中/失败识别，以及本地状态与 CI 状态分层汇总 |
+| [codex-task-inspector.md](./codex-task-inspector.md) | Codex 任务巡检 Skill | 6 | 先探测 Codex 实际数据目录（优先 `CODEX_HOME`，否则 `$HOME/.codex`），再按 rollout/session id 读取权威 jsonl；仅在明确指向仓库追踪文件时走 `.codex-tasks`：PID 存活判断、`*-last.md` 结论提取、CI poll 运行中/失败识别，以及本地状态与 CI 状态分层汇总 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
@@ -142,12 +142,12 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 30 | Settings Tab、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
-| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 82 | Agent 配置 API（获取/更新/禁用启用）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、飞书卡片折叠面板（工具调用记录默认折叠 collapsible_panel、无工具调用不显示折叠面板）、Session Title 落库（set_title 工具持久化 JSONL title_updated 事件、sessions/all API 返回 title、飞书卡片 header 使用 title、WebUI Title 列展示）、Goal 模式（create_goal 工具触发、get_goal 状态查询与 budget 超限自动转换、update_goal 标记完成与 completionBudgetReport、/goal 命令查看状态、/goal pause 暂停、/goal resume 恢复、Session 隔离验证、工具调用与 token accounting）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call、API Key 写入保持 Azure header 认证） |
+| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 31 | Settings Tab、左侧二级导航、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
+| [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 91 | Agent 配置 API（获取/更新/禁用启用）、Codex-style 三层指令配置（base/developer/user，含默认 base prompt 展示、chat 接口 prompt 分层、日志与 Session JSONL 记录验证、WebUI 长文本大窗口编辑，以及 Provider 新建/修改覆盖）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、Agent 设置页左侧卡片导航与 URL 恢复、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、Provider 级 Agent 基础配置（创建时配置 work_dir/instructions、动态 PATCH 修改、WebUI Add/Edit 配置入口、新建 Provider 的 agent_config 经 IM event loop 进入模型请求、switch_workdir 回写 Provider work_dir、/clear 后重开按最新 Provider 配置初始化）、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、飞书卡片折叠面板（工具调用记录默认折叠 collapsible_panel、无工具调用不显示折叠面板）、Session Title 落库（set_title 工具持久化 JSONL title_updated 事件、sessions/all API 返回 title、飞书卡片 header 使用 title、WebUI Title 列展示）、Goal 模式（create_goal 工具触发、get_goal 状态查询与 budget 超限自动转换、update_goal 标记完成与 completionBudgetReport、/goal 命令查看状态、/goal pause 暂停、/goal resume 恢复、Session 隔离验证、工具调用与 token accounting）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call、API Key 写入保持 Azure header 认证、Agent 模型请求默认经当前 Bifrost 端口代理并进入 Traffic） |
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 13 | SessionQueueManager 单元测试（13项，含 turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
-| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 19 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应 |
+| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 20 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标和默认 250k context window |
 | [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 6 | `/goal` 显式入口、Goal 生命周期、Codex 风格 `apply_patch`、raw patch body 兼容、PTY 会话复用与交互输入、交互式 shell prompt 前缀下 exit_code 解析、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
 | [agent-loop-timeouts.md](./agent-loop-timeouts.md) | Agent Loop Runtime Limits | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证默认 600 秒级超时、1000 次迭代上限，以及 35+ 次工具调用不会在 30 次时提前中断 |
@@ -164,7 +164,7 @@
 
 ---
 
-**总计：86 个测试文件，1538 个测试用例**
+**总计：86 个测试文件，1541 个测试用例**
 
 ## 工作流程
 

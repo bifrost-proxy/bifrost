@@ -38,6 +38,7 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 **预期结果**：
 - `success: true`
 - response 包含"会话状态:"
+- response 包含"工作路径:"
 - response 包含"消息数: 0"（新会话）
 - response 包含"估算 token"、"API 累计 token"、"压缩次数"、"历史版本"、"MCP 工具数"
 
@@ -207,6 +208,26 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 
 **预期结果**：
 - `/status` 正常返回会话状态信息（不再返回忙碌提示）
+
+### TC-BC-20: /status 在 Agent Loop 运行中返回实时指标
+
+**操作步骤**：
+1. 使用临时数据目录启动 Bifrost：`BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy`
+2. 将 Agent 配置为一个会延迟 3 秒返回的 mock Chat Completions provider。
+3. 发送一条普通消息，使用 session_key="tc-bc-20"，保持请求仍在执行中。
+4. 在第 3 步请求未完成时，发送 `{"message": "/status", "session_key": "tc-bc-20"}`。
+5. 等待第 3 步请求完成，再次发送 `/status`。
+
+**预期结果**：
+- 运行中 `/status` 返回 `success: true`
+- response 包含"会话状态:"、"正在处理中"、"工作路径:"、"Loop:"、"实时 token:"、"Context 用量:"、"压缩次数:"
+- response 不再只是"Agent 正在处理中，请稍后再试。"
+- JSON 响应包含 `active_status` 对象，且 `active_status.current_loop_iteration >= 1`
+- `active_status.work_dir` 等于当前 session 的工作目录（未显式传入时允许为 `null`）
+- `active_status.max_loop_iterations` 等于当前 Agent 配置的迭代上限
+- 未显式配置 `model_context_window` 时，`active_status.context_window_tokens` 等于 `250000`
+- `active_status.context_usage_percent` 为可读数值或 `null`（仅当未配置 context window 时允许为 `null`）
+- 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"
 
 ## 清理步骤
 

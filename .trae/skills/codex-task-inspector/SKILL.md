@@ -1,20 +1,20 @@
 ---
 name: codex-task-inspector
-description: Inspect Codex async task progress from the correct data directory. Use when the user asks to check Codex status, inspect async task progress, summarize task state, or determine whether local Codex workers are still running. Prefer Codex default data dir (~/.codex) when given a rollout/session id; use repo .codex-tasks only when the request explicitly targets it.
+description: "Inspect Codex async task progress from the correct data directory. Use when the user asks to check Codex status, inspect async task progress, summarize task state, or determine whether local Codex workers are still running. Always detect the active Codex data dir first: prefer CODEX_HOME when set, otherwise fall back to $HOME/.codex; only use repo .codex-tasks when the user explicitly targets it."
 ---
 
 # Codex Task Inspector
 
-用于统一检查 Codex 异步任务状态，避免把“仓库里的任务跟踪文件（`.codex-tasks/`）”与“Codex 默认数据目录（`~/.codex`）里的 session/rollout 日志”混为一谈。
+用于统一检查 Codex 异步任务状态，避免把“仓库里的任务跟踪文件（`.codex-tasks/`）”与“Codex 实际数据目录里的 session/rollout 日志”混为一谈。
 
 ## 关键纠错（高频踩坑）
 
-当用户提供类似 `019df414-...` 这种 **rollout/session id** 并询问“任务进展”，**默认应优先检查 `~/.codex`**：
+当用户提供类似 `019df414-...` 这种 **rollout/session id** 并询问“任务进展”，**默认应优先检查探测出的 Codex 数据目录**：
 
-- ✅ `~/.codex/sessions/YYYY/MM/DD/rollout-...-<id>.jsonl`（权威事实来源：含 task_complete、命令执行、CI watch 记录）
+- ✅ `<detected_codex_dir>/sessions/YYYY/MM/DD/rollout-...-<id>.jsonl`（权威事实来源：含 task_complete、命令执行、CI watch 记录）
 - ⚠️ `.codex-tasks/` 只在用户明确说“看仓库里的 .codex-tasks 跟踪”或你确定该任务是由仓库派发器写入 `.codex-tasks/` 时才用
 
-如果你先去 `.codex-tasks/` 导致找不到 id，这是误判路径；应立即切换到 `~/.codex` 再查。
+如果你先去 `.codex-tasks/` 导致找不到 id，这是误判路径；应立即切换到探测出的 Codex 数据目录再查。
 
 ## 适用场景
 
@@ -38,24 +38,45 @@ description: Inspect Codex async task progress from the correct data directory. 
 
 ### 第 0 步：先选对数据目录（必须）
 
-**输入信号 → 选路由：**
+#### 0.0 先探测 Codex 实际数据目录
 
-- 用户给的是 `019...` 这种 rollout/session id，或明确说“去 Codex 默认数据目录” → **走 `~/.codex`**
-- 用户明确说“看这个仓库 `.codex-tasks`” → 走 **`.codex-tasks/`**
+无论最终是否会落到 `.codex-tasks/`，先明确当前机器上的 Codex 数据目录，避免把 `~/.codex` 当成硬编码事实。
 
-#### 0.1 在 `~/.codex` 按 rollout/session id 定位日志
-
-优先在 `~/.codex/sessions/` 下找 `rollout-*-<id>.jsonl`：
+优先运行：
 
 ```bash
-RID='019df414-235e-74e3-be4b-84f883e0ea17'
+python3 .agents/skills/codex-task-inspector/scripts/detect_codex_data_dir.py
+```
+
+解读规则：
+
+- `selected_source=env:CODEX_HOME` → 说明当前应优先看 `CODEX_HOME`
+- `selected_source=default:$HOME/.codex` → 说明当前使用默认回退目录
+- `markers` 里若存在 `config_toml/sessions_dir/session_index/history/state_db`，可作为“这是活跃 Codex home”的旁证
+
+只有当用户明确要求检查仓库 `.codex-tasks/` 时，才切换到仓库路径；否则都先以探测结果为准。
+
+**输入信号 → 选路由：**
+
+- 用户给的是 `019...` 这种 rollout/session id，或明确说“去 Codex 默认数据目录” → **走探测出的 Codex 数据目录**
+- 用户明确说“看这个仓库 `.codex-tasks`” → 走 **`.codex-tasks/`**
+
+#### 0.1 在探测出的 Codex 数据目录按 rollout/session id 定位日志
+
+优先在 `<detected_codex_dir>/sessions/` 下找 `rollout-*-<id>.jsonl`：
+
+```bash
+export RID='019df414-235e-74e3-be4b-84f883e0ea17'
+export CODEX_DIR="$(python3 .agents/skills/codex-task-inspector/scripts/detect_codex_data_dir.py | python3 -c 'import json,sys; print(json.load(sys.stdin)["selected_path"])')"
 python3 - <<'PY'
-import os, glob
-rid=os.environ['RID']
-base=os.path.expanduser('~/.codex/sessions')
-paths=glob.glob(f"{base}/**/rollout-*-{rid}.jsonl", recursive=True)
+import glob
+import os
+
+rid = os.environ['RID']
+base = os.path.join(os.environ['CODEX_DIR'], 'sessions')
+paths = glob.glob(f"{base}/**/rollout-*-{rid}.jsonl", recursive=True)
 for p in sorted(paths):
-  print(p)
+    print(p)
 PY
 ```
 
@@ -63,7 +84,12 @@ PY
 
 #### 0.2 从 jsonl 里读最终结论
 
-`task_complete` 的 `last_agent_message` 是最直接的任务总结；如需“是否仍在跑”，看最后的事件时间戳 + 是否还有后续 `exec_command_*`。
+优先寻找最终完成事件；当前 rollout 日志里常见形态是：
+
+- `event_msg.payload.type == "task_complete"`
+- 或等效的最终完成记录
+
+其中的 `last_agent_message` 是最直接的任务总结；如需“是否仍在跑”，看最后的事件时间戳 + 是否还有后续 `exec_command_*`。
 
 ---
 

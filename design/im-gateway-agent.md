@@ -81,6 +81,56 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - MCP tool 与本地 tool 共用同一 ChatMessage invariant
 - 多轮对话后的 max history 裁剪
 
+## `/status` 运行中可观测指标
+
+### 背景
+
+旧实现中，Agent turn 执行时 session 会从 `AgentSessionManager.sessions` 中取出，`/status` 无法读取真实 session，只能返回“Agent 正在处理中”。这会让用户在长工具循环、长模型请求或自动压缩期间无法判断任务是否仍在推进，也看不到 token 与 context 的消耗趋势。
+
+### 方案
+
+`AgentSessionManager` 在 `take_session*` / `try_take_session*` 成功时创建 `ActiveTurnStatus` 共享快照，并把同一个 handle 注入到被取出的 `AgentSession.active_turn_status`。执行中的 turn loop 不需要重新持有 manager，只在关键阶段更新 session 内的 handle；manager 通过 `get_active_turn_status(session_key)` 暴露只读 clone。
+
+快照字段：
+
+- `current_loop_iteration`：当前正在执行的 Agent loop 序号，从 1 开始。
+- `completed_loop_iterations`：已收到模型响应并完成 accounting 的 loop 次数。
+- `max_loop_iterations`：本次 turn 的迭代上限。
+- `last_response_tokens` / `total_tokens_used`：最近一次 API 响应 token 与 session 级 API 累计 token，包含 compaction 模型调用。
+- `estimated_context_tokens` / `context_window_tokens` / `context_usage_percent`：基于当前 history 的粗略 token 估算、配置中的 context window 和占比；未显式配置时默认 context window 为 250,000 tokens。
+- `compaction_count`：当前 session 累计压缩次数。
+- `work_dir`：当前 session 工作路径；用于确认 Agent 实际在哪个项目上下文中执行。
+- `message_count` / `history_version` / `local_tool_count` / `mcp_tool_count`：辅助定位当前上下文与工具规模。
+
+更新时机：
+
+1. turn 开始后立即写入 `starting` 快照。
+2. 每次构造 messages 并发起模型请求前写入 `model_request`，此时可看到当前 loop。
+3. 每次模型响应后写入 `model_response`，同步最新 token usage。
+4. 进入工具调用批次和每个工具结果入 history 后写入 `tool_calls`，同步 context 估算增长。
+5. 自动或手动压缩成功后由已有 session 字段反映 `compaction_count` 与 token 累计。
+
+### 接入面
+
+- API `POST /_bifrost/api/im-gateway/agent/chat`：当同 session 忙碌且请求消息为 `/status` 时，不再返回通用忙碌提示，而是返回 `response` 文本与结构化 `active_status`。
+- IM guide/queue 忙碌路径：`/status` 优先展示 `ActiveTurnStatus`，并附加当前排队消息数量。
+- 空闲 `/status` 保持原有会话状态输出，同时补充 `工作路径` 与 `Context 用量` 字段。
+
+### 测试方案
+
+- 单元测试：验证 `AgentConfig::default()` 的 `model_context_window` 为 250,000，默认 auto-compact threshold 为 225,000；验证 context 占比计算、运行中 status 文本包含 loop、实时 token、Context 用量和压缩次数。
+- E2E 测试：使用真实 Bifrost + mock Chat Completions 服务，构造一次阻塞模型请求；同 session 并发发送 `/status`，不在 PATCH 中显式配置 `model_context_window`，断言返回运行中指标和结构化 `active_status.context_window_tokens == 250000`，不再只是通用忙碌提示。
+- 真实场景测试：更新 `human_tests/agent-builtin-commands.md` 的 `/status` 运行中指标用例，增加默认 context window 250,000 的断言；按文档使用临时数据目录、`--no-system-proxy` 和真实 API 请求逐条执行关键用例。
+
+### 校验要求
+
+- `cargo test -p bifrost-agent session::tests::test_active_turn_status`
+- `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+- `bash scripts/ci/local-ci.sh --skip-e2e`
+
 ## 关键组件
 
 ### 1. ImAgentConfig - 全局配置
@@ -111,6 +161,77 @@ pub struct ImAgentConfig {
 ```
 
 **配置持久化**：通过 `ImAgentConfigStore` 存储为 JSON 文件（`im_agent_config.json`），支持热更新。
+
+### 1.1 Provider 级 Agent 基础配置覆盖
+
+IM Provider 支持可选 `agent_config`，用于给不同 IM 通道绑定不同的 Agent 基础运行上下文：
+
+```json
+{
+  "agent_config": {
+    "work_dir": "/Users/eden/work/github/bifrost",
+    "base_instructions": "Provider-specific base system prompt",
+    "developer_instructions": "Provider-specific developer policy",
+    "user_instructions": "Provider-specific AGENTS-style user notes"
+  }
+}
+```
+
+字段语义：
+
+- `work_dir`：Provider 默认工作目录。来自该 Provider 的新 Agent session 会以该目录初始化；未配置时回退到全局 Agent `work_dir`。
+- `base_instructions`：Codex-style base/system instructions。配置后覆盖内置默认 Agent prompt；旧字段 `instructions` / `default_system_prompt` 仅作为兼容别名写入该字段。
+- `developer_instructions`：Codex-style developer instructions。不会覆盖 base prompt，而是作为独立 `<developer_instructions>` section 追加到模型可见系统上下文。
+- `user_instructions`：Codex-style user/AGENTS instructions。会与全局 home AGENTS.md、项目 AGENTS.md 合并后放入 `<user_instructions>`；不会再复用 `base_instructions`，避免同一 prompt 重复注入。
+
+Base/system instructions 优先级：
+
+1. Route `AgentChat.system_prompt`
+2. Provider `agent_config.base_instructions`（兼容 `agent_config.instructions`）
+3. 全局 Agent `base_instructions`（兼容全局 `instructions` / `default_system_prompt`）
+4. 内置默认 Agent prompt
+
+Developer/user instructions 优先级：
+
+- Provider `agent_config.developer_instructions` / `agent_config.user_instructions` 非空时覆盖同名全局字段。
+- 全局 `developer_instructions` / `user_instructions` 为空时对应 section 不注入。
+- AGENTS.md 始终按最终 `work_dir` 发现并追加到 user instructions。
+
+工作目录优先级：
+
+1. 已存在且仍有历史上下文的 session 自己的 `work_dir`
+2. Provider `agent_config.work_dir`（包括 IM 对话中通过 `switch_workdir` 成功切换后回写的值）
+3. 全局 Agent `work_dir`
+4. 进程当前目录
+
+动态修改：
+
+- `PATCH /_bifrost/api/im-gateway/providers/{id}` 支持热更新 `agent_config`，无需重启 Bifrost 或重新连接 Provider。
+- 空字符串或 `null` 会清除对应字段；`agent_config: null` 会清除整个 Provider 级覆盖。
+- WebUI Edit Provider 保存时必须对被清空的单字段发送 `null`，不能省略字段；省略字段表示“保持当前 Provider 覆盖值不变”。
+- Instructions 在后续 turn 进入 Agent 时按最新 Provider 配置合成；已有且仍有历史上下文的 session 的显式工作目录保持不变，避免运行中任务被静默切换目录。
+- `/clear` 或 `/reset` 后的空 session 会重新按当前 Provider `agent_config.work_dir` 初始化，确保用户在 WebUI 修改 Provider 配置后重开 IM 对话立即生效。
+- Agent 初始化必须从最终 `work_dir` 创建 session，使 AGENTS.md 与 repo-local skills 都从该目录加载。
+- Agent 通过 `switch_workdir` 明确切换目录时，运行时会清空旧会话、重新挂载 skills/AGENTS.md 上下文，将最新目录持久化到当前 Provider `agent_config.work_dir`，并在 IM 回复中通知最新工作路径。
+- IM 长连接事件循环每次处理消息时从 Provider store 重新读取最新 Provider 配置，避免连接启动时的旧 provider snapshot 导致 WebUI 修改后不生效。
+
+WebUI：
+
+- Settings → Agent 提供 Base Instructions、Developer Instructions、User Instructions 三个明确入口。
+- Settings → Agent 的三段 instruction 不做行内 textarea 编辑；页面只展示短预览与 Edit 按钮，点击后在大尺寸弹窗中编辑长文本，保存时采用本地草稿优先：自动保存响应返回时不能覆盖用户仍在编辑的最新输入；清空内容会 PATCH 空字符串并清除覆盖值。
+- Base Instructions / System Prompt 为空并继承默认值时，编辑弹窗必须提供将默认值复制到编辑草稿的按钮，支持用户以默认 prompt 为基础继续修改。
+- Settings → Agent 不再单独展示 `Default Base Instructions (read-only)` 块；默认 Base Prompt 只作为 Base Instructions 编辑弹窗中的可复制草稿来源出现。
+- Settings → Agent 左侧提供二级卡片导航，覆盖 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions；点击导航项只在右侧独立渲染当前编辑卡片，并用 `aria-current` 标记当前卡片。
+- Agent 设置页导航必须使用 URL 查询参数 `agentSection` 记录当前二级卡片，刷新或复制链接后恢复到同一卡片；进入 Session 详情时继续使用现有 `session/view/historyPath` 参数。
+- Agent 设置页导航必须使用主题 token / CSS 变量兼容亮色与暗色主题；桌面端左侧导航固定在自身列，只有右侧当前卡片内容区允许滚动，窄屏退化为顶部横向滚动导航，不遮挡编辑卡片内容。
+- Settings → IM Gateway → Add/Edit IM Provider 支持手动填写 Agent Working Directory、Base Instructions、Developer Instructions、User Instructions。
+- Settings → IM Gateway → Add/Edit IM Provider 的三段 Provider 级 instruction 同样使用短预览 + Edit 按钮 + 大尺寸弹窗编辑，避免在 Provider 表单里嵌入大段 textarea。
+- Provider 级 Base Instructions 继承全局默认值时，编辑弹窗必须提供将继承值复制到编辑草稿的按钮，支持按 Provider 定制后保存覆盖值。
+- Provider 卡片展示当前 Provider 是否配置了 Agent Work Dir / Base / Developer / User instructions。
+- Provider 卡片展示连接状态、连接配置摘要、Owner、启用状态和 Agent 基础配置摘要。
+- Provider 卡片提供 Edit 入口，可动态修改非连接配置（Display Name、Enabled、Owner Open ID、Agent Working Directory、Base/Developer/User Instructions）。
+- Add/Edit Provider 表单会展示数据目录默认 Agent `work_dir` 与三层 instructions 作为继承值；字段留空表示继承默认值，用户填写后才在单个 Provider 上形成覆盖。
+- Edit 入口只读展示 Provider ID、Type、App ID、Secret 状态和连接模式；连接凭据与连接模式只能在 Add IM Provider 创建时填写，避免误改已经建立的 IM 连接。
 
 ### 2. ImAgentConfigStore - 配置存储
 
@@ -504,6 +625,9 @@ tracing = "0.1"
 | Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
 | Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `queue_messages`，验证 turn-end guide drain、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
+| Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
+| WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
+| Provider agent_config 进入 IM 事件链路 | `im_event_loop_uses_provider_agent_config_for_agent_chat` 创建带 Provider 级 base/developer/user instructions 的新 Provider，注入 IM inbound event，断言 Chat Completions 请求使用 Provider 配置且不泄漏全局 fallback marker |
 
 ### 真实场景测试（human_tests）
 
@@ -523,6 +647,15 @@ tracing = "0.1"
 | TC-GQ-05 | queued FIFO drain 黑盒回归 | 通过 `/agent/chat` 注入 `queue_messages`，验证在同一次 `run_turn_with_mcp` 中按 FIFO 逐条继续处理 |
 | TC-GQ-06 | guide 优先于 queue | 同时注入 `guide_message` 与 `queue_messages`，验证处理顺序为 initial → guide → queued FIFO |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
+| TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
+| TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
+| TC-IMA-53A | 新建 IM Provider 的 agent_config 经 IM 事件链路生效 | Provider 创建时配置 base/developer/user/work_dir 后，IM inbound event 进入 `run_event_loop` 时模型请求使用 Provider 级配置而非全局 fallback |
+
+## Agent 模型请求代理
+
+IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模型提供方：真实 CLI 启动和 E2E `ProxyInstance::start_with_admin` 都使用 `ImGatewayService::new_with_agent_proxy_port(data_dir, Some(port))` 创建服务，底层 `AgentClient::new_with_bifrost_proxy_and_ca(port, data_dir/certs/ca.crt)` 会把 Chat Completions 请求代理到 `http://127.0.0.1:<port>`，并只把当前 Bifrost CA 加入 Agent 自己的 reqwest trust store。这样模型请求、响应、状态码和耗时会落入现有 Traffic 记录；对模型域名启用 TLS intercept 时，Agent 不会因为 Bifrost 签发的拦截证书报 `UnknownIssuer`。
+
+库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
 
 ## 扩展性考虑
 

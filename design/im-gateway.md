@@ -115,7 +115,7 @@ Settings
 
 ### IM Gateway Tab 内部结构
 
-建议内部使用二级页签：
+内部使用左侧二级导航，每次只在右侧渲染当前面板，并通过 URL 查询参数 `imGatewaySection` 记录当前面板：
 
 ```text
 IM Gateway
@@ -125,6 +125,8 @@ IM Gateway
   - Schedules
   - History
 ```
+
+刷新或复制链接后应恢复到同一个二级面板，例如 `Settings?tab=im-gateway&imGatewaySection=routes` 直接打开 Routes。桌面端左侧二级导航固定在自身列，右侧面板内容独立滚动；窄屏下导航退化为顶部横向滚动导航。
 
 #### Connections
 
@@ -453,13 +455,13 @@ Remote WebUI / CLI 共同要求：
 │ Settings                                                                     │
 ├──────────────┬───────────────────────────────────────────────────────────────┤
 │ Proxy        │ IM Gateway                                                    │
-│ Certificate  │ ┌───────────────────────────────────────────────────────────┐ │
-│ TLS          │ │ Connections | Targets | Routes | Schedules | History      │ │
-│ Remote Invoke│ └───────────────────────────────────────────────────────────┘ │
-│ IM Gateway ◀ │                                                               │
-│ Performance  │  [current tab content]                                        │
-│ Access       │                                                               │
-│ Appearance   │                                                               │
+│ Certificate  │ ┌──────────────┬────────────────────────────────────────────┐ │
+│ TLS          │ │ Connections  │ [current section content]                  │ │
+│ Remote Invoke│ │ Targets      │                                            │ │
+│ IM Gateway ◀ │ │ Routes       │                                            │ │
+│ Performance  │ │ Schedules    │                                            │ │
+│ Access       │ │ History      │                                            │ │
+│ Appearance   │ └──────────────┴────────────────────────────────────────────┘ │
 │ Metrics      │                                                               │
 │ Sync         │                                                               │
 └──────────────┴───────────────────────────────────────────────────────────────┘
@@ -468,7 +470,8 @@ Remote WebUI / CLI 共同要求：
 布局原则：
 
 - 左侧复用 Settings 现有一级 Tab 导航。
-- 右侧 `IM Gateway` 内容顶部使用二级 tabs。
+- 右侧 `IM Gateway` 内容使用左侧二级导航，不使用顶部 tabs；当前项以 `aria-current="true"` 标记。
+- `imGatewaySection` URL 参数负责恢复 Connections / Targets / Routes / Schedules / History 当前面板。
 - 页面不再嵌套大卡片；只对 provider、target、route、schedule 这类重复项使用紧凑 card 或表格行。
 - 所有 secret 只显示 configured / missing，不显示可复制明文。
 

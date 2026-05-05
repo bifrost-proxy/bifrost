@@ -70,5 +70,5 @@ pub fn recall_system_message(
     }
     let message = build_memory_read_instructions()?;
     info!(memory_root = %memory_root().display(), "memory read instructions injected");
-    Some(ChatMessage::system(&message))
+    Some(ChatMessage::developer(&message))
 }

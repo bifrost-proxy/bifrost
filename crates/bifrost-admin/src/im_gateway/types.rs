@@ -29,6 +29,25 @@ pub enum ImProviderType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImProviderAgentConfig {
+    /// Provider-specific default working directory for agent sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    /// Deprecated alias for provider-specific base instructions / system prompt override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Provider-specific base/system instructions override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    /// Provider-specific developer instructions override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+    /// Provider-specific user instructions override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImProviderConfig {
     pub id: String,
     pub provider_type: ImProviderType,
@@ -49,6 +68,8 @@ pub struct ImProviderConfig {
     pub event_connection_enabled: bool,
     #[serde(default)]
     pub event_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<ImProviderAgentConfig>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]

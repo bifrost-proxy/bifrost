@@ -492,6 +492,7 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
 pub struct SessionRuntimeState {
     pub current_goal: Option<GoalState>,
     pub total_tokens_used: Option<u64>,
+    pub base_instructions: Option<String>,
 }
 
 pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, String> {
@@ -500,6 +501,14 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
 
     for event in events {
         match event.event_type.as_str() {
+            event_types::SESSION_START if state.base_instructions.is_none() => {
+                state.base_instructions = event
+                    .content
+                    .get("base_instructions")
+                    .and_then(|v| v.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string);
+            }
             event_types::GOAL_UPDATED => {
                 let goal: GoalState = serde_json::from_value(event.content)
                     .map_err(|e| format!("parse goal state: {e}"))?;

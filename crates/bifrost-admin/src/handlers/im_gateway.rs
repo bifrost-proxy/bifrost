@@ -15,8 +15,8 @@ use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody
 use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
-    ImEvent, ImMessageLog, ImProviderConfig, ImRoute, ImRouteAction, ImSchedule, ImTarget,
-    MessageDirection, MessageStatus,
+    ImEvent, ImMessageLog, ImProviderAgentConfig, ImProviderConfig, ImRoute, ImRouteAction,
+    ImSchedule, ImTarget, MessageDirection, MessageStatus,
 };
 use crate::im_gateway::{
     ImAgentClient, ImAgentConfigStore, ImAgentSessionManager, ImAgentToolRegistry,
@@ -48,6 +48,10 @@ pub struct ImGatewayService {
 
 impl ImGatewayService {
     pub fn new(data_dir: &std::path::Path) -> Self {
+        Self::new_with_agent_proxy_port(data_dir, None)
+    }
+
+    pub fn new_with_agent_proxy_port(data_dir: &std::path::Path, proxy_port: Option<u16>) -> Self {
         // Install embedded system skills on startup (idempotent, fingerprint-checked)
         bifrost_agent::install_system_skills();
 
@@ -59,6 +63,10 @@ impl ImGatewayService {
         let agent_tools = Arc::new(ImAgentToolRegistry::with_defaults(
             agent_config.get_shell_timeout_secs(),
         ));
+        let ca_cert_path = data_dir.join("certs").join("ca.crt");
+        let agent_client = proxy_port
+            .map(|port| ImAgentClient::new_with_bifrost_proxy_and_ca(port, Some(&ca_cert_path)))
+            .unwrap_or_default();
         Self {
             provider_store: Arc::new(ImProviderStore::new(data_dir)),
             target_store: Arc::new(ImTargetStore::new(data_dir)),
@@ -69,7 +77,7 @@ impl ImGatewayService {
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
             connection_manager: Arc::new(ImConnectionManager::new()),
             agent_config_store,
-            agent_client: Arc::new(ImAgentClient::new()),
+            agent_client: Arc::new(agent_client),
             agent_tools,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
                 agent_config.get_session_ttl_secs(),
@@ -144,6 +152,7 @@ impl ImGatewayService {
             let event_store = self.event_store.clone();
             let message_log_store = self.message_log_store.clone();
             let route_store = self.route_store.clone();
+            let provider_store = self.provider_store.clone();
             let agent_config_store = self.agent_config_store.clone();
             let agent_client = self.agent_client.clone();
             let agent_tools = self.agent_tools.clone();
@@ -157,6 +166,7 @@ impl ImGatewayService {
                     event_store,
                     message_log_store,
                     route_store,
+                    provider_store,
                     agent_config_store,
                     agent_client,
                     agent_tools,
@@ -236,6 +246,7 @@ impl ImGatewayService {
                             let event_store = self.event_store.clone();
                             let message_log_store = self.message_log_store.clone();
                             let route_store = self.route_store.clone();
+                            let provider_store = self.provider_store.clone();
                             let agent_config_store = self.agent_config_store.clone();
                             let agent_client = self.agent_client.clone();
                             let agent_tools = self.agent_tools.clone();
@@ -249,6 +260,7 @@ impl ImGatewayService {
                                     event_store,
                                     message_log_store,
                                     route_store,
+                                    provider_store,
                                     agent_config_store,
                                     agent_client,
                                     agent_tools,
@@ -348,6 +360,7 @@ async fn handle_providers(
                     config.created_at = now;
                 }
                 config.updated_at = now;
+                normalize_provider_agent_config(&mut config);
                 match service.provider_store.add(config) {
                     Ok(()) => json_response(&serde_json::json!({"success": true})),
                     Err(e) => error_response(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -507,6 +520,7 @@ async fn handle_provider_connect(
     let event_store = service.event_store.clone();
     let message_log_store = service.message_log_store.clone();
     let route_store = service.route_store.clone();
+    let provider_store = service.provider_store.clone();
     let agent_config_store = service.agent_config_store.clone();
     let agent_client = service.agent_client.clone();
     let agent_tools = service.agent_tools.clone();
@@ -520,6 +534,7 @@ async fn handle_provider_connect(
             event_store,
             message_log_store,
             route_store,
+            provider_store,
             agent_config_store,
             agent_client,
             agent_tools,
@@ -625,6 +640,50 @@ fn build_session_key(provider_id: &str, user_id: Option<&str>) -> String {
     format!("{provider_id}:{user}")
 }
 
+fn effective_agent_config_for_provider(
+    base: &crate::im_gateway::agent::ImAgentConfig,
+    provider: &ImProviderConfig,
+) -> crate::im_gateway::agent::ImAgentConfig {
+    let mut config = base.clone();
+    if let Some(agent_config) = provider.agent_config.as_ref() {
+        if let Some(work_dir) = agent_config
+            .work_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            config.work_dir = Some(work_dir.to_string());
+        }
+        if let Some(instructions) = agent_config
+            .base_instructions
+            .as_deref()
+            .or(agent_config.instructions.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            config.base_instructions = Some(instructions.to_string());
+            config.instructions = None;
+        }
+        if let Some(instructions) = agent_config
+            .developer_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            config.developer_instructions = Some(instructions.to_string());
+        }
+        if let Some(instructions) = agent_config
+            .user_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            config.user_instructions = Some(instructions.to_string());
+        }
+    }
+    config
+}
+
 // ---------------------------------------------------------------------------
 // Event Deduplication
 // ---------------------------------------------------------------------------
@@ -695,6 +754,7 @@ async fn run_event_loop(
     event_store: Arc<ImEventStore>,
     message_log_store: Arc<ImMessageLogStore>,
     route_store: Arc<ImRouteStore>,
+    provider_store: Arc<ImProviderStore>,
     agent_config_store: Arc<ImAgentConfigStore>,
     agent_client: Arc<ImAgentClient>,
     agent_tools: Arc<ImAgentToolRegistry>,
@@ -789,6 +849,19 @@ async fn run_event_loop(
     let mut dedup = EventDedup::new();
 
     while let Some(event) = rx.recv().await {
+        let provider = provider_store
+            .get(&event.provider_id)
+            .unwrap_or_else(|| provider.clone());
+
+        if !provider.enabled {
+            info!(
+                provider_id = %event.provider_id,
+                event_id = %event.event_id,
+                "dropping inbound event because provider is disabled"
+            );
+            continue;
+        }
+
         // Deduplication: per Feishu docs, use message_id for idempotency
         // ("如有幂等需求请使用 message_id 去重，不要依赖 event_id").
         // Falls back to event_id for non-message events.
@@ -942,6 +1015,7 @@ async fn run_event_loop(
                             &mut rx,
                             &feishu,
                             &provider,
+                            &provider_store,
                             &event,
                             &agent_client,
                             &agent_config_store,
@@ -1016,6 +1090,7 @@ async fn run_event_loop(
                     &mut rx,
                     &feishu,
                     &provider,
+                    &provider_store,
                     &event,
                     &agent_client,
                     &agent_config_store,
@@ -1075,6 +1150,19 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
             let reply = build_im_status_text(Some(&detail));
+            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+        } else if let Some(status) = agent_session_manager.get_active_turn_status(session_key) {
+            let queue_items = queue_manager.queue_status(session_key);
+            let queue_info = if queue_items.is_empty() {
+                "无排队消息".to_string()
+            } else {
+                format!("{} 条排队消息", queue_items.len())
+            };
+            let reply = format!(
+                "{}\n- 排队: {}",
+                bifrost_agent::format_active_turn_status_text(&status),
+                queue_info
+            );
             send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
         } else {
             // Session is currently being processed (taken out of the pool)
@@ -1231,6 +1319,7 @@ async fn run_agent_chat_with_interleave(
     rx: &mut mpsc::UnboundedReceiver<ImEvent>,
     feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
     provider: &ImProviderConfig,
+    provider_store: &Arc<ImProviderStore>,
     initial_event: &ImEvent,
     agent_client: &Arc<ImAgentClient>,
     agent_config_store: &Arc<ImAgentConfigStore>,
@@ -1246,18 +1335,23 @@ async fn run_agent_chat_with_interleave(
     // Set up the guide channel before starting the turn
     let guide_channel = queue_manager.get_or_create_guide_channel(session_key);
 
-    let agent_config = agent_config_store.load();
     let mut current_msg = initial_message.to_string();
 
     // Queue drain loop: process initial message, then drain queued messages
     loop {
+        let current_provider = provider_store
+            .get(&provider.id)
+            .unwrap_or_else(|| provider.clone());
+        let agent_config =
+            effective_agent_config_for_provider(&agent_config_store.load(), &current_provider);
         // Clone into a local so the future borrows the local, not `current_msg`.
         let msg_for_turn = current_msg.clone();
 
         // Run agent chat with interleaved event processing
         let chat_future = AssertUnwindSafe(process_agent_chat(
             feishu,
-            provider,
+            &current_provider,
+            provider_store,
             initial_event,
             agent_client,
             &agent_config,
@@ -1303,13 +1397,14 @@ async fn run_agent_chat_with_interleave(
                     // Handle concurrent event while chat is running
                     handle_concurrent_event_during_chat(
                         &event,
-                        provider,
+                        &current_provider,
                         session_key,
                         queue_manager,
                         feishu,
                         message_log_store,
                         agent_session_manager,
                         agent_config_store,
+                        provider_store,
                     )
                     .await;
                 }
@@ -1351,7 +1446,14 @@ async fn run_agent_chat_with_interleave(
                 } else {
                     format!("📋 正在处理排队消息: {preview}")
                 };
-                send_agent_reply(feishu, provider, initial_event, &notice, message_log_store).await;
+                send_agent_reply(
+                    feishu,
+                    &current_provider,
+                    initial_event,
+                    &notice,
+                    message_log_store,
+                )
+                .await;
                 current_msg = next_msg;
             }
             None => {
@@ -1377,7 +1479,21 @@ async fn handle_concurrent_event_during_chat(
     message_log_store: &Arc<ImMessageLogStore>,
     agent_session_manager: &Arc<ImAgentSessionManager>,
     agent_config_store: &Arc<ImAgentConfigStore>,
+    provider_store: &Arc<ImProviderStore>,
 ) {
+    let provider = provider_store
+        .get(&event.provider_id)
+        .unwrap_or_else(|| provider.clone());
+
+    if !provider.enabled {
+        debug!(
+            event_id = %event.event_id,
+            provider_id = %event.provider_id,
+            "dropping concurrent event because provider is disabled"
+        );
+        return;
+    }
+
     // Security check: only process messages from the owner
     if let Some(ref owner_id) = provider.owner_open_id {
         let sender_id = event.source.user_id.as_deref().unwrap_or("");
@@ -1400,11 +1516,12 @@ async fn handle_concurrent_event_during_chat(
     // Check if this event is for the currently active session
     if session_key == active_session_key {
         // Session-free commands are still instant
-        let agent_config = agent_config_store.load();
+        let agent_config =
+            effective_agent_config_for_provider(&agent_config_store.load(), &provider);
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, msg_text, &agent_config)
         {
-            send_agent_reply(feishu, provider, event, &response, message_log_store).await;
+            send_agent_reply(feishu, &provider, event, &response, message_log_store).await;
             return;
         }
         // Route through guide/queue mode
@@ -1414,7 +1531,7 @@ async fn handle_concurrent_event_during_chat(
             BusyMessageContext {
                 queue_manager,
                 feishu,
-                provider,
+                provider: &provider,
                 event,
                 message_log_store,
                 agent_session_manager,
@@ -1430,7 +1547,7 @@ async fn handle_concurrent_event_during_chat(
                 BusyMessageContext {
                     queue_manager,
                     feishu,
-                    provider,
+                    provider: &provider,
                     event,
                     message_log_store,
                     agent_session_manager,
@@ -1443,7 +1560,7 @@ async fn handle_concurrent_event_during_chat(
             let _ = queue_manager.push_queue(&session_key, msg_text.to_string());
             send_agent_reply(
                 feishu,
-                provider,
+                &provider,
                 event,
                 "⏳ 消息已排队，将在当前任务完成后处理。",
                 message_log_store,
@@ -1458,6 +1575,7 @@ async fn handle_concurrent_event_during_chat(
 async fn process_agent_chat(
     feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
     provider: &ImProviderConfig,
+    provider_store: &Arc<ImProviderStore>,
     event: &ImEvent,
     agent_client: &Arc<ImAgentClient>,
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
@@ -1493,7 +1611,9 @@ async fn process_agent_chat(
     // ── Busy check ───────────────────────────────────────────────────────
     // If another turn loop is already processing this session, reject early
     // instead of creating a duplicate empty session.
-    let mut session = match session_manager.try_take_session(session_key) {
+    let mut session = match session_manager
+        .try_take_session_with_work_dir(session_key, agent_config.work_dir.clone())
+    {
         Some(s) => s,
         None => {
             info!(
@@ -1506,6 +1626,26 @@ async fn process_agent_chat(
             return;
         }
     };
+    if session.history.is_empty() {
+        if let Some(work_dir) = agent_config
+            .work_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if session.work_dir.as_deref() != Some(work_dir) {
+                session.reinitialize_work_dir(work_dir.to_string());
+            }
+        } else if session.work_dir.is_none() {
+            if let Some(work_dir) = agent_config.work_dir.clone() {
+                session.reinitialize_work_dir(work_dir);
+            }
+        }
+    } else if session.work_dir.is_none() {
+        if let Some(work_dir) = agent_config.work_dir.clone() {
+            session.reinitialize_work_dir(work_dir);
+        }
+    }
     session.source = "feishu".to_string();
     session.guide_channel = guide_channel;
 
@@ -1590,6 +1730,7 @@ async fn process_agent_chat(
                         "model": agent_config.model,
                         "provider": agent_config.model_provider,
                         "source": "feishu",
+                        "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(agent_config, None),
                     }),
                 );
                 Some(rec)
@@ -1751,6 +1892,7 @@ async fn process_agent_chat(
     // Separate main response and tool calls for card rendering
     let (main_response, tool_calls_panel, plan_steps) = match result {
         Ok(turn_result) => {
+            let mut response = turn_result.response;
             // Log work_dir switch if it happened
             if let Some(ref new_dir) = turn_result.work_dir_switched {
                 info!(
@@ -1758,6 +1900,8 @@ async fn process_agent_chat(
                     new_work_dir = %new_dir,
                     "session work directory switched via agent tool"
                 );
+                persist_provider_agent_work_dir(provider_store, &provider.id, new_dir);
+                response.push_str(&format!("\n\n当前工作路径: `{new_dir}`"));
             }
             // Build tool calls info for collapsible panel
             let panel = if !turn_result.tool_calls_log.is_empty() {
@@ -1773,7 +1917,7 @@ async fn process_agent_chat(
                 None
             };
             let plan = turn_result.plan_steps;
-            (turn_result.response, panel, plan)
+            (response, panel, plan)
         }
         Err(e) => {
             error!(
@@ -2881,7 +3025,7 @@ async fn handle_agent(
         return match *req.method() {
             Method::GET => {
                 let config = service.agent_config_store.load();
-                json_response(&config)
+                json_response(&agent_config_response(config))
             }
             Method::PATCH => {
                 let patch: serde_json::Value = match read_body_json(req).await {
@@ -2891,7 +3035,7 @@ async fn handle_agent(
                 let mut config = service.agent_config_store.load();
                 apply_agent_config_patch(&mut config, &patch);
                 match service.agent_config_store.save(&config) {
-                    Ok(()) => json_response(&config),
+                    Ok(()) => json_response(&agent_config_response(config)),
                     Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
                 }
             }
@@ -2933,7 +3077,7 @@ async fn handle_agent(
         let content = agents_md_manager.user_instructions(
             &work_dir,
             Some(&home_dir),
-            config.instructions.as_deref(),
+            config.user_instructions.as_deref(),
         );
         return json_response(&serde_json::json!({
             "content": content,
@@ -3217,6 +3361,12 @@ async fn handle_agent(
         let session_key = body
             .session_key
             .unwrap_or_else(|| "test-session".to_string());
+        info!(
+            session_key = %session_key,
+            message_len = body.message.len(),
+            has_system_prompt_override = body.system_prompt.is_some(),
+            "invoking agent chat api"
+        );
 
         // ── Session-free command fast path ──────────────────────────────
         if let Some(response) =
@@ -3237,6 +3387,20 @@ async fn handle_agent(
         {
             Some(s) => s,
             None => {
+                if body.message.trim() == "/status" {
+                    if let Some(status) = service
+                        .agent_session_manager
+                        .get_active_turn_status(&session_key)
+                    {
+                        return json_response(&serde_json::json!({
+                            "success": true,
+                            "response": bifrost_agent::format_active_turn_status_text(&status),
+                            "active_status": status,
+                            "tool_calls": [],
+                            "plan_steps": null
+                        }));
+                    }
+                }
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
@@ -3292,6 +3456,7 @@ async fn handle_agent(
                             "model": config.model,
                             "provider": config.model_provider,
                             "source": "api",
+                            "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(&config, None),
                         }),
                     );
                     Some(rec)
@@ -3319,16 +3484,67 @@ async fn handle_agent(
         }
         service.agent_session_manager.return_session(session);
         match result {
-            Ok(turn_result) => json_response(&serde_json::json!({
-                "success": true,
-                "response": turn_result.response,
-                "tool_calls": turn_result.tool_calls_log,
-                "plan_steps": turn_result.plan_steps
-            })),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            Ok(turn_result) => {
+                info!(
+                    session_key = %session_key,
+                    response_len = turn_result.response.len(),
+                    tool_call_count = turn_result.tool_calls_log.len(),
+                    "agent chat api completed"
+                );
+                json_response(&serde_json::json!({
+                    "success": true,
+                    "response": turn_result.response,
+                    "tool_calls": turn_result.tool_calls_log,
+                    "plan_steps": turn_result.plan_steps
+                }))
+            }
+            Err(e) => {
+                error!(
+                    session_key = %session_key,
+                    error = %e,
+                    "agent chat api failed"
+                );
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
+            }
         }
     } else {
         error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
+    }
+}
+
+fn agent_config_response(config: crate::im_gateway::agent::ImAgentConfig) -> serde_json::Value {
+    let default_base_instructions = bifrost_agent::prompt::default_base_instructions();
+    let effective_base_instructions = config
+        .base_instructions
+        .as_deref()
+        .or(config.instructions.as_deref())
+        .unwrap_or(default_base_instructions)
+        .to_string();
+    let mut value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "default_base_instructions".to_string(),
+            serde_json::Value::String(default_base_instructions.to_string()),
+        );
+        obj.insert(
+            "effective_base_instructions".to_string(),
+            serde_json::Value::String(effective_base_instructions),
+        );
+    }
+    value
+}
+
+fn patch_optional_string(target: &mut Option<String>, patch: &serde_json::Value, keys: &[&str]) {
+    let Some(value) = keys.iter().find_map(|key| patch.get(*key)) else {
+        return;
+    };
+    if value.is_null() {
+        *target = None;
+        return;
+    }
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        *target = (!text.is_empty()).then(|| text.to_string());
     }
 }
 
@@ -3376,12 +3592,23 @@ fn apply_agent_config_patch(
             config.model_auto_compact_token_limit = Some(v);
         }
     }
-    if let Some(prompt) = patch
-        .get("instructions")
-        .or_else(|| patch.get("default_system_prompt"))
-        .and_then(|v| v.as_str())
-    {
-        config.instructions = Some(prompt.to_string());
+    patch_optional_string(&mut config.base_instructions, patch, &["base_instructions"]);
+    if patch.get("base_instructions").is_some() {
+        config.instructions = None;
+    }
+    patch_optional_string(
+        &mut config.developer_instructions,
+        patch,
+        &["developer_instructions"],
+    );
+    patch_optional_string(&mut config.user_instructions, patch, &["user_instructions"]);
+    if patch.get("instructions").is_some() || patch.get("default_system_prompt").is_some() {
+        patch_optional_string(
+            &mut config.base_instructions,
+            patch,
+            &["instructions", "default_system_prompt"],
+        );
+        config.instructions = None;
     }
     if let Some(max_hist) = patch.get("max_history_messages").and_then(|v| v.as_u64()) {
         config.max_history_messages = Some(u32::try_from(max_hist).unwrap_or(u32::MAX));
@@ -3727,9 +3954,16 @@ fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
                 }
                 _ => String::new(),
             };
+            let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
             format!(
-                "会话状态:\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
-                d.message_count, d.estimated_tokens, real, d.compaction_count, d.history_version, goal_info
+                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                work_dir,
+                d.message_count,
+                d.estimated_tokens,
+                real,
+                d.compaction_count,
+                d.history_version,
+                goal_info
             )
         }
         None => {
@@ -3797,6 +4031,7 @@ fn sanitize_provider(provider: &ImProviderConfig) -> serde_json::Value {
         "owner_open_id": provider.owner_open_id,
         "event_connection_enabled": provider.event_connection_enabled,
         "event_types": provider.event_types,
+        "agent_config": provider.agent_config,
         "created_at": provider.created_at,
         "updated_at": provider.updated_at,
     })
@@ -3833,7 +4068,157 @@ fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Val
     if let Some(owner) = patch.get("owner_open_id").and_then(|v| v.as_str()) {
         provider.owner_open_id = Some(owner.to_string());
     }
+    if let Some(agent_config_value) = patch.get("agent_config") {
+        if agent_config_value.is_null() {
+            provider.agent_config = None;
+        } else if let Some(agent_config_obj) = agent_config_value.as_object() {
+            let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
+                work_dir: None,
+                instructions: None,
+                base_instructions: None,
+                developer_instructions: None,
+                user_instructions: None,
+            });
+            if let Some(work_dir_value) = agent_config_obj.get("work_dir") {
+                if work_dir_value.is_null() {
+                    agent_config.work_dir = None;
+                } else if let Some(work_dir) = work_dir_value.as_str() {
+                    let work_dir = work_dir.trim();
+                    agent_config.work_dir = (!work_dir.is_empty()).then(|| work_dir.to_string());
+                }
+            }
+            if let Some(instructions_value) = agent_config_obj.get("instructions") {
+                if instructions_value.is_null() {
+                    agent_config.instructions = None;
+                    agent_config.base_instructions = None;
+                } else if let Some(instructions) = instructions_value.as_str() {
+                    let instructions = instructions.trim();
+                    agent_config.base_instructions =
+                        (!instructions.is_empty()).then(|| instructions.to_string());
+                    agent_config.instructions = None;
+                }
+            }
+            apply_provider_agent_config_string(
+                &mut agent_config.base_instructions,
+                agent_config_obj.get("base_instructions"),
+            );
+            apply_provider_agent_config_string(
+                &mut agent_config.developer_instructions,
+                agent_config_obj.get("developer_instructions"),
+            );
+            apply_provider_agent_config_string(
+                &mut agent_config.user_instructions,
+                agent_config_obj.get("user_instructions"),
+            );
+            if agent_config.work_dir.is_none()
+                && agent_config.instructions.is_none()
+                && agent_config.base_instructions.is_none()
+                && agent_config.developer_instructions.is_none()
+                && agent_config.user_instructions.is_none()
+            {
+                provider.agent_config = None;
+            }
+        }
+    }
+    normalize_provider_agent_config(provider);
     provider.updated_at = now_ms();
+}
+
+fn persist_provider_agent_work_dir(
+    provider_store: &Arc<ImProviderStore>,
+    provider_id: &str,
+    work_dir: &str,
+) {
+    let work_dir = work_dir.trim();
+    if work_dir.is_empty() {
+        return;
+    }
+
+    let Some(mut provider) = provider_store.get(provider_id) else {
+        warn!(
+            provider_id = %provider_id,
+            work_dir = %work_dir,
+            "failed to persist switched work_dir because provider was not found"
+        );
+        return;
+    };
+
+    let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
+        work_dir: None,
+        instructions: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    if agent_config.work_dir.as_deref() == Some(work_dir) {
+        return;
+    }
+    agent_config.work_dir = Some(work_dir.to_string());
+    normalize_provider_agent_config(&mut provider);
+    if let Err(error) = provider_store.update(provider) {
+        warn!(
+            provider_id = %provider_id,
+            work_dir = %work_dir,
+            error = %error,
+            "failed to persist switched provider work_dir"
+        );
+    }
+}
+
+fn normalize_provider_agent_config(provider: &mut ImProviderConfig) {
+    let Some(agent_config) = provider.agent_config.as_mut() else {
+        return;
+    };
+    agent_config.work_dir = agent_config
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    agent_config.base_instructions = agent_config
+        .base_instructions
+        .as_deref()
+        .or(agent_config.instructions.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    agent_config.instructions = None;
+    agent_config.developer_instructions = agent_config
+        .developer_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    agent_config.user_instructions = agent_config
+        .user_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if agent_config.work_dir.is_none()
+        && agent_config.base_instructions.is_none()
+        && agent_config.developer_instructions.is_none()
+        && agent_config.user_instructions.is_none()
+    {
+        provider.agent_config = None;
+    }
+}
+
+fn apply_provider_agent_config_string(
+    target: &mut Option<String>,
+    value: Option<&serde_json::Value>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    if value.is_null() {
+        *target = None;
+        return;
+    }
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        *target = (!text.is_empty()).then(|| text.to_string());
+    }
 }
 
 fn apply_target_patch(target: &mut ImTarget, patch: &serde_json::Value) {
@@ -3937,5 +4322,378 @@ fn parse_session_filename(filename: &str) -> (String, u64) {
         (key.to_string(), ts)
     } else {
         (name.to_string(), 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::im_gateway::types::ImProviderType;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct EnvGuard {
+        old_agent_home: Option<String>,
+        old_data_dir: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set_data_dir(data_dir: &std::path::Path) -> Self {
+            let old_agent_home = std::env::var("BIFROST_AGENT_HOME").ok();
+            let old_data_dir = std::env::var("BIFROST_DATA_DIR").ok();
+            std::env::remove_var("BIFROST_AGENT_HOME");
+            std::env::set_var("BIFROST_DATA_DIR", data_dir);
+            Self {
+                old_agent_home,
+                old_data_dir,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.old_agent_home.as_deref() {
+                Some(value) => std::env::set_var("BIFROST_AGENT_HOME", value),
+                None => std::env::remove_var("BIFROST_AGENT_HOME"),
+            }
+            match self.old_data_dir.as_deref() {
+                Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+                None => std::env::remove_var("BIFROST_DATA_DIR"),
+            }
+        }
+    }
+
+    struct TestChatCompletionMock {
+        port: u16,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl TestChatCompletionMock {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock chat server");
+            let port = listener.local_addr().expect("mock local addr").port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_server = Arc::clone(&requests);
+
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let io = TokioIo::new(stream);
+                    let requests = Arc::clone(&requests_for_server);
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req: Request<Incoming>| {
+                            let requests = Arc::clone(&requests);
+                            async move {
+                                let body_bytes = req
+                                    .into_body()
+                                    .collect()
+                                    .await
+                                    .map(|body| body.to_bytes())
+                                    .unwrap_or_else(|_| Bytes::new());
+                                let body: serde_json::Value =
+                                    serde_json::from_slice(&body_bytes).unwrap_or_default();
+                                requests.lock().expect("requests lock").push(body);
+                                let response = serde_json::json!({
+                                    "choices": [{
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": "IM_PROVIDER_CONFIG_OK"
+                                        },
+                                        "finish_reason": "stop"
+                                    }],
+                                    "usage": {
+                                        "prompt_tokens": 10,
+                                        "completion_tokens": 4,
+                                        "total_tokens": 14
+                                    }
+                                });
+                                Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(Bytes::from(response.to_string())))
+                                        .unwrap(),
+                                )
+                            }
+                        });
+                        let _ = http1::Builder::new().serve_connection(io, service).await;
+                    });
+                }
+            });
+
+            Self { port, requests }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/chat/completions", self.port)
+        }
+    }
+
+    fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
+        body.get("messages")
+            .and_then(|messages| messages.as_array())
+            .map(|messages| {
+                messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(|content| content.as_str())
+                        .map(|content| content.contains(needle))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn request_message_role(body: &serde_json::Value, idx: usize) -> Option<&str> {
+        body.get("messages")?
+            .as_array()?
+            .get(idx)?
+            .get("role")?
+            .as_str()
+    }
+
+    fn test_provider() -> ImProviderConfig {
+        ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Main".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("cli_xxx".to_string()),
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn provider_agent_config_patch_sets_and_clears_overrides() {
+        let mut provider = test_provider();
+
+        apply_provider_patch(
+            &mut provider,
+            &serde_json::json!({
+                "agent_config": {
+                    "work_dir": " /tmp/bifrost-im ",
+                    "instructions": " Provider prompt "
+                }
+            }),
+        );
+
+        let agent_config = provider.agent_config.as_ref().expect("agent_config");
+        assert_eq!(agent_config.work_dir.as_deref(), Some("/tmp/bifrost-im"));
+        assert_eq!(
+            agent_config.base_instructions.as_deref(),
+            Some("Provider prompt")
+        );
+
+        apply_provider_patch(
+            &mut provider,
+            &serde_json::json!({
+                "agent_config": {
+                    "work_dir": null,
+                    "instructions": ""
+                }
+            }),
+        );
+
+        assert!(provider.agent_config.is_none());
+    }
+
+    #[test]
+    fn provider_agent_config_overrides_base_agent_config() {
+        let base = crate::im_gateway::agent::ImAgentConfig {
+            work_dir: Some("/global".to_string()),
+            base_instructions: Some("global prompt".to_string()),
+            developer_instructions: Some("global developer".to_string()),
+            user_instructions: Some("global user".to_string()),
+            ..Default::default()
+        };
+
+        let mut provider = test_provider();
+        provider.agent_config = Some(ImProviderAgentConfig {
+            work_dir: Some("/provider".to_string()),
+            instructions: Some("provider prompt".to_string()),
+            base_instructions: None,
+            developer_instructions: Some("provider developer".to_string()),
+            user_instructions: Some("provider user".to_string()),
+        });
+
+        let effective = effective_agent_config_for_provider(&base, &provider);
+        assert_eq!(effective.work_dir.as_deref(), Some("/provider"));
+        assert_eq!(
+            effective.base_instructions.as_deref(),
+            Some("provider prompt")
+        );
+        assert_eq!(effective.instructions.as_deref(), None);
+        assert_eq!(
+            effective.developer_instructions.as_deref(),
+            Some("provider developer")
+        );
+        assert_eq!(
+            effective.user_instructions.as_deref(),
+            Some("provider user")
+        );
+    }
+
+    #[test]
+    fn provider_switch_workdir_persists_provider_agent_override() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+        let mut provider = test_provider();
+        provider.id = "persist-workdir-provider".to_string();
+        provider.agent_config = Some(ImProviderAgentConfig {
+            work_dir: Some("/old".to_string()),
+            instructions: None,
+            base_instructions: Some("keep provider prompt".to_string()),
+            developer_instructions: None,
+            user_instructions: None,
+        });
+        store.add(provider).expect("add provider");
+
+        persist_provider_agent_work_dir(&store, "persist-workdir-provider", " /new/workdir ");
+
+        let updated = store.get("persist-workdir-provider").expect("provider");
+        let agent_config = updated.agent_config.expect("agent_config");
+        assert_eq!(agent_config.work_dir.as_deref(), Some("/new/workdir"));
+        assert_eq!(
+            agent_config.base_instructions.as_deref(),
+            Some("keep provider prompt")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+        let mock = TestChatCompletionMock::start().await;
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let mut base_config = service.agent_config_store.load();
+        base_config.enabled = true;
+        base_config.model = Some("mock-model".to_string());
+        base_config.model_provider = Some("mock".to_string());
+        base_config.work_dir = Some(std::env::current_dir().unwrap().display().to_string());
+        base_config.base_instructions = Some("GLOBAL_BASE_SHOULD_NOT_APPEAR".to_string());
+        base_config.developer_instructions = Some("GLOBAL_DEV_SHOULD_NOT_APPEAR".to_string());
+        base_config.user_instructions = Some("GLOBAL_USER_SHOULD_NOT_APPEAR".to_string());
+        base_config.max_turn_iterations = Some(1);
+        base_config.model_providers.insert(
+            "mock".to_string(),
+            bifrost_agent::config::ModelProviderConfig {
+                name: Some("Mock".to_string()),
+                base_url: Some(mock.url()),
+                env_key: None,
+                api_key: None,
+                http_headers: Some(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer test".to_string(),
+                )])),
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+        service
+            .agent_config_store
+            .save(&base_config)
+            .expect("save base agent config");
+
+        let mut provider = test_provider();
+        provider.id = "new-im-provider-config".to_string();
+        provider.owner_open_id = Some("owner-open-id".to_string());
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        let mut provider_in_store = provider.clone();
+        provider_in_store.agent_config = Some(ImProviderAgentConfig {
+            work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
+            instructions: None,
+            base_instructions: Some(
+                "IM_PROVIDER_BASE_OK: answer IM_PROVIDER_CONFIG_OK".to_string(),
+            ),
+            developer_instructions: Some("IM_PROVIDER_DEV_OK".to_string()),
+            user_instructions: Some("IM_PROVIDER_USER_OK".to_string()),
+        });
+        service
+            .provider_store
+            .add(provider_in_store)
+            .expect("add current provider config to store");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop(
+            rx,
+            Arc::clone(service.connection_manager.feishu_provider()),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.agent_client),
+            Arc::clone(&service.agent_tools),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.queue_manager),
+        ));
+
+        tx.send(ImEvent {
+            event_id: "evt-im-provider-agent-config".to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("chat-id".to_string()),
+                user_id: Some("owner-open-id".to_string()),
+                message_id: None,
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: "IM_PROVIDER_CHAT_MARKER 请只回复 IM_PROVIDER_CONFIG_OK".to_string(),
+                mentions: Vec::new(),
+                raw_type: Some("text".to_string()),
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        })
+        .expect("send IM event");
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("event loop timed out")
+            .expect("event loop task panicked");
+
+        let requests = mock.requests.lock().expect("requests lock");
+        let request = requests.first().expect("mock received chat request");
+        assert_eq!(request_message_role(request, 0), Some("system"));
+        assert_eq!(request_message_role(request, 1), Some("developer"));
+        assert_eq!(request_message_role(request, 2), Some("user"));
+        assert!(request_messages_contain(request, "IM_PROVIDER_BASE_OK"));
+        assert!(request_messages_contain(request, "IM_PROVIDER_DEV_OK"));
+        assert!(request_messages_contain(request, "IM_PROVIDER_USER_OK"));
+        assert!(request_messages_contain(request, "IM_PROVIDER_CHAT_MARKER"));
+        assert!(!request_messages_contain(
+            request,
+            "GLOBAL_BASE_SHOULD_NOT_APPEAR"
+        ));
+        assert!(!request_messages_contain(
+            request,
+            "GLOBAL_DEV_SHOULD_NOT_APPEAR"
+        ));
+        assert!(!request_messages_contain(
+            request,
+            "GLOBAL_USER_SHOULD_NOT_APPEAR"
+        ));
     }
 }

@@ -229,3 +229,27 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 - **操作步骤**: 执行 `cargo run --bin bifrost -- -p 8800 im schedule logs test-schedule-1`
 - **预期结果**: 显示执行记录，含 run_id、status、duration、exit_code
+
+### TC-IMG-31: Settings IM Gateway 左侧导航按 URL 切换独立面板
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-nav cargo run --bin bifrost -- start -p 18885 --unsafe-ssl --no-system-proxy
+    ```
+  - 浏览器打开 `http://127.0.0.1:18885/_bifrost/settings?tab=im-gateway`
+- **操作步骤**:
+  1. 确认 IM Gateway 页面左侧显示二级导航，包含 Connections、Targets、Routes、Schedules、History。
+  2. 确认默认只渲染 `Connections` 面板，不再显示顶部二级 Tabs。
+  3. 点击左侧导航中的 `Routes`。
+  4. 确认右侧只渲染 `Routes` 面板，且 URL 包含 `imGatewaySection=routes`。
+  5. 刷新页面，确认仍恢复到 `Routes` 面板。
+  6. 点击左侧导航中的 `History`，确认右侧渲染 `History` 面板；History 面板内部仍保留 Events / Runs 小 Tabs。
+  7. 切换到暗色主题后点击 `Targets`。
+- **预期结果**:
+  - 左侧二级导航固定在 IM Gateway 内容区左侧，不跟随右侧面板内容滚动。
+  - 点击导航项后右侧独立渲染对应面板，不再把二级入口放在顶部 Tabs 中。
+  - 当前导航项通过高亮和 `aria-current="true"` 标记。
+  - URL 中的 `imGatewaySection` 能记录当前面板，页面刷新后恢复到同一面板。
+  - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
+- **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings IM Gateway 左侧导航按 URL 切换独立面板"` 通过；验证默认仅渲染 Connections、无顶部 Connections 二级 Tab、点击 Routes/History/Targets 后只渲染对应面板、URL `imGatewaySection` 记录并刷新恢复、暗色主题下继续切换且 `aria-current` 正确。
