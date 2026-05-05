@@ -1633,7 +1633,8 @@ pub async fn run_turn_with_mcp(
             let guide_at_end = session
                 .guide_channel
                 .as_ref()
-                .and_then(|ch| ch.lock().unwrap().take());
+                .and_then(|ch| ch.lock().unwrap().take())
+                .filter(|msg| !msg.trim().is_empty());
             if let Some(guide_msg) = guide_at_end {
                 info!(
                     session_key = %session.session_key,

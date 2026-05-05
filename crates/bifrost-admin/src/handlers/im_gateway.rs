@@ -2997,8 +2997,10 @@ async fn handle_agent(
         // If guide_message is provided, inject into guide_channel to simulate
         // a message arriving during the final model response (turn end scenario).
         if let Some(ref guide_msg) = body.guide_message {
-            let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(guide_msg.clone())));
-            session.guide_channel = Some(channel);
+            if !guide_msg.is_empty() {
+                let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(guide_msg.clone())));
+                session.guide_channel = Some(channel);
+            }
         }
         // Initialize MCP from config for test endpoint (mirrors event loop behavior)
         let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
