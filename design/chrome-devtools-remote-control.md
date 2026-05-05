@@ -279,7 +279,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后
 - 验证 CI 中所有会被 DevTools shell E2E 下载使用的 release binary 必须包含真实 WebUI 前端资源，当前包括 Linux `build-e2e` artifact 与 macOS aarch64 CLI artifact；DevTools shell E2E 不允许使用 `Frontend not built` 占位页作为通过条件
 - 验证 Storage 行内新增/编辑/删除后目标页真实读到新值
-- 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染
+- 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染；对象展开断言按真实用户点击语义重试直到 `nested` / `items` 属性可见，避免 CI 中 WebUI snapshot/live 更新时序造成一次性 locator 假超时
 - 验证 Bridge 主要经由 WebSocket 通信
 - 验证页面切换后显示对应 DOM；目标页刷新后无需退出重进
 - 验证 fetch/prefetch HTML 不产生幽灵目标
@@ -289,7 +289,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 ### 真实场景测试
 
 - 更新并执行 `human_tests/chrome-devtools-remote-control.md`
-- 回归执行 `TC-CDP-21`：确认 HTTP fixture 下 `/devtools/api/ping`、`/devtools/api/static-resource`、`/devtools/api/meta` 均为 200，且 DevTools 页面不因 HTTP fixture 404 卡在等待状态
+- 回归执行 `TC-CDP-42`：确认 Console 对象摘要在 CI/macOS WebUI 时序下可以稳定展开到 `nested` / `items` 属性，且复制 raw 内容仍包含结构化对象字段
 - 同步更新 `human_tests/readme.md` 索引
 
 ## 校验要求

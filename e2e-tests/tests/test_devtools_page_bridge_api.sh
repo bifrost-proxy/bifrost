@@ -2134,9 +2134,31 @@ if (plainLogColor === 'rgb(196, 29, 29)' || plainLogColor === 'rgb(255, 0, 0)') 
 }
 await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).first().waitFor({ timeout: 8000 });
 const objectRow = adminPage.getByTestId('devtools-console-row-log').filter({ hasText: 'bifrost-console-object-ready' }).first();
-await objectRow.getByTestId('devtools-console-expand-value').last().click();
-await objectRow.getByText('nested:', { exact: true }).waitFor({ timeout: 8000 });
-await objectRow.getByText('items:', { exact: true }).waitFor({ timeout: 8000 });
+const waitForExpandedConsoleObject = async (row, labels, timeoutMs = 12000) => {
+  const deadline = Date.now() + timeoutMs;
+  let lastText = '';
+  let lastError = '';
+  while (Date.now() < deadline) {
+    const visible = await Promise.all(labels.map((label) =>
+      row.getByText(label, { exact: true }).first().isVisible().catch(() => false),
+    ));
+    if (visible.every(Boolean)) {
+      return;
+    }
+    lastText = await row.textContent().catch(() => '');
+    const toggles = row.getByTestId('devtools-console-expand-value');
+    const toggleCount = await toggles.count();
+    if (toggleCount === 0) {
+      break;
+    }
+    await toggles.nth(toggleCount - 1).click({ timeout: 1000 }).catch((error) => {
+      lastError = error instanceof Error ? error.message : String(error);
+    });
+    await adminPage.waitForTimeout(250);
+  }
+  throw new Error(`AV-CDP-36 failed: expanded console object labels did not become visible ${JSON.stringify({ labels, lastText, lastError })}`);
+};
+await waitForExpandedConsoleObject(objectRow, ['nested:', 'items:']);
 const objectPreviewBox = await objectRow.getByText(/Object \{.*pageId/).boundingBox();
 const nestedBox = await objectRow.getByText('nested:', { exact: true }).boundingBox();
 if (!objectPreviewBox || !nestedBox || nestedBox.x < objectPreviewBox.x + 10) {

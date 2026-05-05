@@ -789,6 +789,24 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 不会因为 bridge network 事件先于 Traffic 记录落库而立即固定为 fallback 详情。
 - 若映射持续不可用，仍保留 fallback 详情路径，不跳转 `/traffic`。
 
+### TC-CDP-42：Console 对象展开点击在 CI 时序下稳定
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 让目标页输出 `console.log('bifrost-console-object-ready', { pageId: 'basic', nested: { answer: 42 }, items: ['alpha', 'beta'] })`。
+3. 打开 WebUI DevTools 详情页并切换到 `Console` tab。
+4. 找到包含 `bifrost-console-object-ready` 的 `devtools-console-row-log`。
+5. 点击对象摘要的展开按钮；如果 WebUI snapshot/live 更新时序让属性行尚未出现，按同一行内最后一个展开按钮重试，直到 `nested:` 与 `items:` 同时可见或超时。
+6. 点击该行复制按钮并读取剪贴板。
+
+预期结果：
+
+- Console 行默认展示 `Object { ... }` 摘要。
+- 展开后同一行内稳定显示 `nested:` 与 `items:`，不会因一次点击后 UI 重渲染导致 locator 假超时。
+- `nested:` 属性行缩进在对象摘要下方，对象展开树仍保持对齐。
+- 剪贴板 raw 内容包含 `bifrost-console-object-ready` 与 `"nested"`。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -826,3 +844,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-05-01：通过。补充并执行 TC-CDP-40，验证 DevTools Network 搜索后点击包含目标业务 URL 的具体虚拟列表行，避免 macOS shell shard 中 fallback detail 点击到旧首行。首次执行因当前 worktree 的 `mise.toml` 未信任导致 fixture server 未启动；执行 `mise trust <USER_HOME>/work/github/bifrost-devtools-avcdp39/mise.toml` 后重跑通过。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。根据 CI #827 Linux shell shard 3 新失败补充 TC-CDP-40 的 Traffic 可映射动态标签资源回归，避免 `ui-traffic-enrich` 文本同时出现在多处时触发 Playwright strict mode，也避免依赖行内状态列时序。执行命令：`source ~/.zshrc && SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-01：通过。根据 CI #829 macOS aarch64 shell shard 3 新失败补充 TC-CDP-41，验证点击动态标签资源 Network 行时，WebUI 会短暂等待 `client_req_id -> traffic id` 映射落库，不因 page bridge network 事件先到而概率性固定为 fallback 详情。执行命令：`source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
+- 2026-05-06：通过。根据 CI `25391191157` macOS aarch64 shell shard 3 的 Console 对象展开一次性等待超时，补充并执行 TC-CDP-42。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`；随后执行 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web run build`、`cargo build --release --bin bifrost` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
