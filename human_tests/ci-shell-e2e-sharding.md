@@ -329,22 +329,21 @@
 - `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
 - 测试端口不使用 9900，测试数据写入临时目录。
 
-### TC-CS-19: Linux shell E2E Playwright 安装预算回归
+### TC-CS-19: Linux/macOS shell E2E timeout 预算回归
 
 **操作步骤**：
-1. 解析 `.github/workflows/ci.yml`，确认 Linux `e2e-shell` job 的 timeout：
+1. 解析 `.github/workflows/ci.yml`，确认 Linux `e2e-shell` 与 macOS `e2e-macos-shell` job 的 timeout：
    ```bash
-   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); raise "linux timeout mismatch" unless workflow["jobs"]["e2e-shell"]["timeout-minutes"] == 60; raise "mac timeout mismatch" unless workflow["jobs"]["e2e-macos-shell"]["timeout-minutes"] == 30; puts "linux e2e-shell timeout is 60; macOS e2e-shell timeout remains 30"'
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); raise "linux timeout mismatch" unless workflow["jobs"]["e2e-shell"]["timeout-minutes"] == 60; raise "mac timeout mismatch" unless workflow["jobs"]["e2e-macos-shell"]["timeout-minutes"] == 60; puts "linux and macOS e2e-shell timeouts are 60"'
    ```
-2. 检查 Linux shell E2E 仍安装 Playwright chromium headless shell 与 Linux 依赖：
+2. 检查 Linux/macOS shell E2E job 都使用 60 分钟 timeout，且 Linux shell E2E 仍安装 Playwright chromium headless shell 与 Linux 依赖：
    ```bash
-   rg -n 'e2e-shell:|timeout-minutes: 60|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml
+   rg -n 'e2e-shell:|e2e-macos-shell:|timeout-minutes: 60|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml
    ```
 
 **预期结果**：
-- YAML 解析通过，Linux `e2e-shell` timeout 为 60 分钟。
-- macOS `e2e-shell-macos` timeout 保持 30 分钟，避免扩大未受影响平台预算。
-- 第 2 步能定位到 Linux shell E2E 的 Playwright `--with-deps` 安装步骤，证明 timeout 增加覆盖的正是 apt 依赖安装会侵占 job 预算的路径。
+- YAML 解析通过，Linux `e2e-shell` 与 macOS `e2e-macos-shell` timeout 均为 60 分钟。
+- 第 2 步能定位到两个 shell E2E job、60 分钟 timeout 和 Linux shell E2E 的 Playwright `--with-deps` 安装步骤，证明 timeout 预算覆盖 Linux 依赖安装和 macOS shard 真实运行/归档成本。
 - 该回归不启动 Bifrost，不使用 9900 端口，不修改系统代理。
 
 ### TC-CS-20: CLI offline 输出断言与失败日志 dump pipefail 回归
@@ -428,7 +427,7 @@
 | TC-CS-16 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 通过；`rg -n 'SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' e2e-tests/tests/test_long_term_memory_human_api.sh` 定位到构建命令。随后执行 `BIFROST_PORT=18888 MOCK_PORT=18889 bash e2e-tests/tests/test_long_term_memory_human_api.sh`，构建日志显示 `Skipping frontend build (SKIP_FRONTEND_BUILD is set)`，脚本完成三段独立 session 写入/读取长期记忆并输出 `[long-term-memory-human-api] PASS`，退出码 0；确认该用例在 CI 并行执行时不触发 frontend build。 |
 | TC-CS-17 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 通过；`rg -n 'SKIP_BUILD\|BIFROST_BIN\|Using existing bifrost binary\|SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost' e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 显示复用已有 binary 的分支和 fallback build 命令。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，输出 `Using existing bifrost binary: /Users/eden/work/github/bifrost/target/release/bifrost`，未输出 `Build bifrost (release)...`，三段 relay 选择断言全部通过并输出 `All remote relay URL fallback assertions passed.`；测试端口动态分配，未使用 9900。 |
 | TC-CS-18 | 通过 | 2026-05-04 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'received post-timeout event before client disconnect\|"id":"\(1\[2-9\]\|\[2-9\]\[0-9\]\+\)"\|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh` 定位到 post-timeout 事件兜底断言和失败提示。随后执行 `PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 BIFROST_DATA_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/data SERVER_LOG_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/logs SKIP_BUILD=true BIFROST_E2E_REPORT_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/reports bash e2e-tests/tests/test_replay_rules.sh`，输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；测试端口 18891-18894，未使用 9900。 |
-| TC-CS-19 | 通过 | 2026-05-05 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 30`；`rg -n 'e2e-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
+| TC-CS-19 | 通过 | 2026-05-06 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 60`；`rg -n 'e2e-shell:\|e2e-macos-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux/macOS shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-20 | 通过 | 2026-05-05 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'echo "\$[A-Za-z_][A-Za-z0-9_]*" \| grep -[A-Za-z]+' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `system-proxy enable --help` 正确显示且无 Broken pipe；Ruby 静态检查 `.github/workflows/ci.yml` 输出 `dump pipefail guards: 24`，确认 8 个失败日志 dump 步骤均对 `find \| head` 管道做容错。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-21 | 通过 | 2026-05-06 本轮执行：`bash -n e2e-tests/tests/test_agent_builtin_status_runtime.sh e2e-tests/tests/test_im_guide_queue_human_api.sh e2e-tests/tests/test_long_term_memory_human_api.sh e2e-tests/tests/test_update_plan_human_api.sh e2e-tests/tests/test_agent_loop_runtime_limits.sh` 通过；`rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-\|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' ...` 显示 5 个脚本均优先消费并行调度器端口。随后执行 `ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，输出 `starting bifrost on 18111` 与 `[im-guide-queue-human-api] PASS`；执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，输出 `starting bifrost on 18121` 与 `[agent-builtin-status-runtime] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与非 9900 端口，未复现 CI 中 `curl: (52) Empty reply from server` 的端口碰撞症状。 |
 

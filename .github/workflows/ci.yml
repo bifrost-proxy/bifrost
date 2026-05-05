@@ -580,7 +580,7 @@ jobs:
     name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
