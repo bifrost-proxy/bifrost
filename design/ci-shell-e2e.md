@@ -22,6 +22,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - `test_replay_rules.sh` 的 SSE replay 长连接回归使用 5s `timeout_ms`，并断言收到 `id>=12` 的超时边界后事件。该用例验证 replay 不会把 `timeout_ms` 当作 SSE body 总时长限制，同时允许 GitHub Actions runner 在边界之后提前关闭客户端连接，避免把外部连接噪声误判为功能失败。
 - `test_long_term_memory_human_api.sh` 构建 Bifrost 时设置 `SKIP_FRONTEND_BUILD=1`，避免多个 shell E2E 并行触发 `pnpm build` 重写 `web/dist`，导致 `rust_embed` 在编译时读到临时缺失的 frontend 产物。
 - `test_remote_relay_url_fallback_e2e.sh` 尊重外层 `SKIP_BUILD=true` 与已有 `BIFROST_BIN`。CI shell 入口已经预构建 release binary，单个用例不能再次无条件 release build，否则会在并行 CI 中长时间卡住并超时。
+- Linux `E2E Shell` job 的 GitHub Actions `timeout-minutes` 与 Linux rules/runner 对齐为 60 分钟。该 job 需要在每个 shard 里安装 Playwright `chromium-headless-shell` 及 Linux 依赖；当 Ubuntu apt 源短时变慢时，依赖安装可能明显侵占 30 分钟预算，导致 shell 用例尚未执行完就被 workflow 取消。
 
 ## 依赖项
 
@@ -53,11 +54,12 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - 运行 `PROXY_PORT=<空闲端口> MOCK_HTTP_PORT=<空闲端口> MOCK_SSE_PORT=<空闲端口> MOCK_WS_PORT=<空闲端口> BIFROST_DATA_DIR=<临时目录> SERVER_LOG_DIR=<临时目录> SKIP_BUILD=true bash e2e-tests/tests/test_replay_rules.sh`，断言 `SSE Replay with Rules` 收到 connection/applied_rules，并收到 `id>=12` 的 post-timeout SSE 事件。
 - 运行 `bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 并检查构建命令包含 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，断言该用例不再参与并行 frontend build。
 - 运行 `SKIP_BUILD=true BIFROST_BIN=<已有 release bifrost> bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，断言脚本输出 `Using existing bifrost binary` 且三段 relay fallback 断言全部通过。
+- 静态解析 `.github/workflows/ci.yml`，断言 Linux `e2e-shell` job 的 `timeout-minutes` 为 60，macOS `e2e-macos-shell` 保持 30，避免只扩大未受影响平台的运行预算。
 
 ### 真实场景测试
 
-- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归，以及 remote relay fallback 跳过重复 release build 回归。
-- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后收到 post-timeout 事件，long-term memory 用例跳过 frontend build，remote relay fallback 在预构建 binary 存在时不再重复 build。
+- 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、remote relay fallback 跳过重复 release build 回归，以及 Linux shell E2E Playwright 依赖安装超时预算回归。
+- 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后收到 post-timeout 事件，long-term memory 用例跳过 frontend build，remote relay fallback 在预构建 binary 存在时不再重复 build，Linux shell E2E timeout 与实际 Playwright 安装成本匹配。
 
 ## 校验要求
 

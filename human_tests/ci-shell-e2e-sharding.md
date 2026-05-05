@@ -329,9 +329,27 @@
 - `test_replay_rules.sh` 全部 21 个用例通过，退出码为 0。
 - 测试端口不使用 9900，测试数据写入临时目录。
 
+### TC-CS-19: Linux shell E2E Playwright 安装预算回归
+
+**操作步骤**：
+1. 解析 `.github/workflows/ci.yml`，确认 Linux `e2e-shell` job 的 timeout：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); raise "linux timeout mismatch" unless workflow["jobs"]["e2e-shell"]["timeout-minutes"] == 60; raise "mac timeout mismatch" unless workflow["jobs"]["e2e-macos-shell"]["timeout-minutes"] == 30; puts "linux e2e-shell timeout is 60; macOS e2e-shell timeout remains 30"'
+   ```
+2. 检查 Linux shell E2E 仍安装 Playwright chromium headless shell 与 Linux 依赖：
+   ```bash
+   rg -n 'e2e-shell:|timeout-minutes: 60|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml
+   ```
+
+**预期结果**：
+- YAML 解析通过，Linux `e2e-shell` timeout 为 60 分钟。
+- macOS `e2e-shell-macos` timeout 保持 30 分钟，避免扩大未受影响平台预算。
+- 第 2 步能定位到 Linux shell E2E 的 Playwright `--with-deps` 安装步骤，证明 timeout 增加覆盖的正是 apt 依赖安装会侵占 job 预算的路径。
+- 该回归不启动 Bifrost，不使用 9900 端口，不修改系统代理。
+
 ## 本轮执行记录
 
-测试日期：2026-04-30
+测试日期：2026-05-05
 
 | 用例 | 结果 | 实际结果 |
 |------|------|----------|
@@ -344,6 +362,7 @@
 | TC-CS-16 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_long_term_memory_human_api.sh` 通过；`rg -n 'SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' e2e-tests/tests/test_long_term_memory_human_api.sh` 定位到构建命令。随后执行 `BIFROST_PORT=18888 MOCK_PORT=18889 bash e2e-tests/tests/test_long_term_memory_human_api.sh`，构建日志显示 `Skipping frontend build (SKIP_FRONTEND_BUILD is set)`，脚本完成三段独立 session 写入/读取长期记忆并输出 `[long-term-memory-human-api] PASS`，退出码 0；确认该用例在 CI 并行执行时不触发 frontend build。 |
 | TC-CS-17 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 通过；`rg -n 'SKIP_BUILD\|BIFROST_BIN\|Using existing bifrost binary\|SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost' e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 显示复用已有 binary 的分支和 fallback build 命令。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`，输出 `Using existing bifrost binary: /Users/eden/work/github/bifrost/target/release/bifrost`，未输出 `Build bifrost (release)...`，三段 relay 选择断言全部通过并输出 `All remote relay URL fallback assertions passed.`；测试端口动态分配，未使用 9900。 |
 | TC-CS-18 | 通过 | 2026-05-04 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'received post-timeout event before client disconnect\|"id":"\(1\[2-9\]\|\[2-9\]\[0-9\]\+\)"\|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh` 定位到 post-timeout 事件兜底断言和失败提示。随后执行 `PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 BIFROST_DATA_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/data SERVER_LOG_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/logs SKIP_BUILD=true BIFROST_E2E_REPORT_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/reports bash e2e-tests/tests/test_replay_rules.sh`，输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；测试端口 18891-18894，未使用 9900。 |
+| TC-CS-19 | 通过 | 2026-05-05 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 30`；`rg -n 'e2e-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 
 ## 清理步骤
 
