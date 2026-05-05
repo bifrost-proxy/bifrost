@@ -145,7 +145,7 @@ impl ConversationRecorder {
         tool_name: &str,
         arguments: &str,
     ) -> Result<(), String> {
-        self.record_tool_call_with_id(session_key, tool_name, arguments, "function", None)
+        self.record_tool_call_with_id(session_key, tool_name, arguments, None)
     }
 
     /// Record a tool call event with the provider's tool call id.
@@ -154,7 +154,6 @@ impl ConversationRecorder {
         session_key: &str,
         tool_name: &str,
         arguments: &str,
-        call_type: &str,
         call_id: Option<&str>,
     ) -> Result<(), String> {
         self.record(ConversationEvent {
@@ -163,7 +162,7 @@ impl ConversationRecorder {
             session_key: session_key.to_string(),
             content: serde_json::json!({
                 "call_id": call_id,
-                "call_type": call_type,
+                "call_type": "function",
                 "tool_name": tool_name,
                 "arguments": arguments,
             }),
@@ -412,11 +411,6 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
-                let call_type = event
-                    .content
-                    .get("call_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("function");
                 let call_id = event
                     .content
                     .get("call_id")
@@ -424,19 +418,11 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("recovered-tool-call-{recovered_tool_call_count}"));
-                let tool_call = if call_type == "custom" {
-                    ToolCallMessage::custom_call(
-                        call_id.clone(),
-                        tool_name.to_string(),
-                        arguments.to_string(),
-                    )
-                } else {
-                    ToolCallMessage::function_call(
-                        call_id.clone(),
-                        tool_name.to_string(),
-                        arguments.to_string(),
-                    )
-                };
+                let tool_call = ToolCallMessage::function_call(
+                    call_id.clone(),
+                    tool_name.to_string(),
+                    arguments.to_string(),
+                );
                 if !pending_tool_calls.contains_key(&call_id) {
                     pending_tool_call_order.push_back(call_id.clone());
                 }
@@ -851,7 +837,6 @@ mod tests {
                 "resume-valid",
                 "list_directory",
                 r#"{"path":"."}"#,
-                "function",
                 Some("call-real-id"),
             )
             .unwrap();

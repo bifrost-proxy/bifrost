@@ -23,7 +23,6 @@ use std::path::Path;
 use tracing::{info, warn};
 
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
-const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("tool_apply_patch.lark");
 
 /// Tool that applies structured diff patches to files.
 pub struct ApplyDiffTool;
@@ -171,11 +170,19 @@ impl ToolHandler for ApplyDiffTool {
 }
 
 pub fn apply_patch_tool_definition() -> crate::types::ToolDefinition {
-    crate::types::ToolDefinition::custom_grammar(
+    crate::types::ToolDefinition::function(
         APPLY_PATCH_TOOL_NAME.to_string(),
-        "Use the `apply_patch` tool to edit files. This is a FREEFORM grammar-backed tool, so do not wrap the patch in JSON.".to_string(),
-        "lark".to_string(),
-        APPLY_PATCH_LARK_GRAMMAR.to_string(),
+        "Apply a patch to modify files. The `patch` parameter should contain the full patch content in the unified diff format starting with `*** Begin Patch` and ending with `*** End Patch`.".to_string(),
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "The patch content in the structured diff format. Must start with '*** Begin Patch' and end with '*** End Patch'."
+                }
+            },
+            "required": ["patch"]
+        })),
     )
 }
 
@@ -232,14 +239,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_patch_tool_definition_is_custom_grammar() {
+    fn test_apply_patch_tool_definition_is_function() {
         let tool = apply_patch_tool_definition();
-        assert_eq!(tool.tool_type, "custom");
+        assert_eq!(tool.tool_type, "function");
         assert_eq!(tool.name(), APPLY_PATCH_TOOL_NAME);
-        let format = tool.format.expect("custom format");
-        assert_eq!(format.format_type, "grammar");
-        assert_eq!(format.syntax, "lark");
-        assert!(format.definition.contains("*** Begin Patch"));
+        let func = tool.function.expect("function definition");
+        assert!(func.parameters.is_some());
     }
 
     #[tokio::test]

@@ -1229,6 +1229,12 @@ pub async fn run_turn_with_mcp(
         );
     }
 
+    // Signal turn started for goal accounting baseline snapshot.
+    crate::tools::goal::goal_runtime_apply(
+        session,
+        crate::tools::goal::GoalRuntimeEvent::TurnStarted,
+    );
+
     // Pre-turn compaction: check using real tokens if available, else estimate
     if compact::should_compact(session, config) {
         info!(
@@ -1602,10 +1608,6 @@ pub async fn run_turn_with_mcp(
         // Track real token usage from API response
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.total_tokens);
-            crate::tools::goal::goal_runtime_apply(
-                session,
-                crate::tools::goal::GoalRuntimeEvent::TurnFinished,
-            );
         }
 
         // Check if model wants to call tools
@@ -1631,7 +1633,9 @@ pub async fn run_turn_with_mcp(
                 .unwrap_or_default();
             crate::tools::goal::goal_runtime_apply(
                 session,
-                crate::tools::goal::GoalRuntimeEvent::TurnFinished,
+                crate::tools::goal::GoalRuntimeEvent::TurnFinished {
+                    turn_completed: true,
+                },
             );
 
             session.add_assistant_message(&content);
@@ -1697,7 +1701,6 @@ pub async fn run_turn_with_mcp(
                     &session.session_key,
                     tc.name(),
                     tc.arguments(),
-                    &tc.call_type,
                     Some(&tc.id),
                 ) {
                     warn!(error = %e, "failed to record tool call");
@@ -1770,10 +1773,14 @@ pub async fn run_turn_with_mcp(
 
             // Add tool result to history
             session.add_tool_result(&tc.id, &output);
-            crate::tools::goal::goal_runtime_apply(
-                session,
-                crate::tools::goal::GoalRuntimeEvent::ToolCompleted,
-            );
+            // Codex-aligned: skip ToolCompleted accounting for update_goal (the goal
+            // handler itself fires ToolCompletedGoal with suppressed steering).
+            if tc.name() != crate::tools::goal::UPDATE_GOAL_TOOL_NAME {
+                crate::tools::goal::goal_runtime_apply(
+                    session,
+                    crate::tools::goal::GoalRuntimeEvent::ToolCompleted,
+                );
+            }
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
@@ -1931,6 +1938,12 @@ async fn handle_goal_command(session: &mut AgentSession, args: &str) -> String {
             .output;
     }
 
+    // External mutation starting: flush accounting before we modify goal state.
+    crate::tools::goal::goal_runtime_apply(
+        session,
+        crate::tools::goal::GoalRuntimeEvent::ExternalMutationStarting,
+    );
+
     if trimmed == "complete" {
         return crate::tools::goal::execute_goal_tool(
             session,
@@ -1942,19 +1955,27 @@ async fn handle_goal_command(session: &mut AgentSession, args: &str) -> String {
     }
 
     if trimmed == "pause" {
-        return crate::tools::goal::set_goal_status(
+        crate::tools::goal::goal_runtime_apply(
             session,
-            crate::tools::goal::GoalStatus::Paused,
-        )
-        .output;
+            crate::tools::goal::GoalRuntimeEvent::ExternalSet {
+                status: crate::tools::goal::GoalStatus::Paused,
+            },
+        );
+        return crate::tools::goal::execute_goal_tool(session, "get_goal", "{}")
+            .expect("get_goal handler")
+            .output;
     }
 
     if trimmed == "resume" {
-        return crate::tools::goal::set_goal_status(
+        crate::tools::goal::goal_runtime_apply(
             session,
-            crate::tools::goal::GoalStatus::Active,
-        )
-        .output;
+            crate::tools::goal::GoalRuntimeEvent::ExternalSet {
+                status: crate::tools::goal::GoalStatus::Active,
+            },
+        );
+        return crate::tools::goal::execute_goal_tool(session, "get_goal", "{}")
+            .expect("get_goal handler")
+            .output;
     }
 
     if let Some(rest) = trimmed.strip_prefix("set ") {

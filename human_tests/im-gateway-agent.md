@@ -1009,3 +1009,125 @@ rm -rf ./.bifrost-test
   - 运行时仍按 `api-key` header 使用 Azure/MODELHUB 认证，不退化成 Bearer 认证
 - **执行记录（2026-05-03）**:
   - 自动化真实链路回归 `cargo run -p bifrost-e2e -- --test im_gateway_agent_config_patch --test-timeout 120 --port 18180`：PASS，PATCH 后 GET 可见 `model_providers.aidp_crawl.api_key = "test-api-key-e2e"`，且 `http_headers.api-key = "test-api-key-e2e"`，保持 Azure/MODELHUB `api-key` header 认证路径
+
+### TC-IMA-75: Goal 模式 - create_goal 工具触发
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "请创建一个 goal，目标是：实现一个简单的计算器功能，token budget 设为 5000", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `success: true`
+  - `tool_calls` 数组中包含 `tool_name: "create_goal"` 的调用
+  - create_goal 的 result 包含 JSON：`status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`
+  - response 文本描述了 goal 的创建结果
+- **执行记录（2026-05-05）**: PASS — 模型成功调用 create_goal，返回 `status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`, `remainingTokens: 5000`
+
+### TC-IMA-76: Goal 模式 - get_goal 状态查询与 budget 超限自动转换
+
+- **前置条件**: TC-IMA-75 已创建 goal 且 session 已消耗 token
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "查看当前 goal 的状态", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 包含 `tool_name: "get_goal"`
+  - goal 的 `status` 变为 `"budget_limited"`（因为 turn token 消耗已超过 budget 5000）
+  - `tokensUsed` > `tokenBudget`
+  - `remainingTokens: 0`
+- **执行记录（2026-05-05）**: PASS — get_goal 返回 `status: "budget_limited"`, `tokensUsed: 33531`, `tokenBudget: 5000`, `remainingTokens: 0`
+
+### TC-IMA-77: Goal 模式 - update_goal 标记完成与 completionBudgetReport
+
+- **前置条件**: TC-IMA-76 的 session 中 goal 已存在
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "请将 goal 标记为 complete", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 包含 `tool_name: "update_goal"`
+  - update_goal 的 arguments 包含 `status: "complete"`
+  - result 中 goal 的 `status: "complete"`
+  - result 中 `completionBudgetReport` 非 null，包含 token 和时间使用统计
+- **执行记录（2026-05-05）**: PASS — update_goal 返回 `status: "complete"`, `completionBudgetReport: "Goal achieved. Report final budget usage to the user: tokens used: 67548 of 5000; time used: 30 seconds."`
+
+### TC-IMA-78: Goal 模式 - /goal 命令查看状态
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 为空数组（/goal 是内置命令，不经过 LLM）
+  - response 包含 goal 的 JSON 状态（含 threadId, objective, status, tokenBudget 等字段）
+- **执行记录（2026-05-05）**: PASS — 直接返回 goal JSON，`status: "complete"`, tool_calls 为空
+
+### TC-IMA-79: Goal 模式 - /goal pause 暂停
+
+- **前置条件**: 新会话中已创建 active goal
+- **操作步骤**:
+  ```bash
+  # 先创建 goal
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "创建一个 goal: 编写文档，token budget 10000", "session_key": "e2e-goal-pause"}'
+  # 暂停
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal pause", "session_key": "e2e-goal-pause"}'
+  ```
+- **预期结果**:
+  - 暂停响应中 goal 的 `status: "paused"`
+  - tool_calls 为空
+- **执行记录（2026-05-05）**: PASS — `/goal pause` 返回 `status: "paused"`, `tokensUsed: 16695`
+
+### TC-IMA-80: Goal 模式 - /goal resume 恢复
+
+- **前置条件**: TC-IMA-79 已暂停 goal
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal resume", "session_key": "e2e-goal-pause"}'
+  ```
+- **预期结果**:
+  - goal 的 status 恢复（如果 token 已超 budget 则为 `"budget_limited"`，否则为 `"active"`）
+  - tool_calls 为空
+- **执行记录（2026-05-05）**: PASS — resume 后 `status: "budget_limited"`（因 tokensUsed 16695 > budget 10000）
+
+### TC-IMA-81: Goal 模式 - Session 隔离验证
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal", "session_key": "e2e-goal-isolation-new-session"}'
+  ```
+- **预期结果**:
+  - response 包含 `"goal": null`
+  - 新 session 中不存在其他 session 的 goal
+- **执行记录（2026-05-05）**: PASS — 新 session 返回 `goal: null, remainingTokens: null`
+
+### TC-IMA-82: Goal 模式 - 工具调用与 token accounting
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "创建一个 goal: 在 /tmp 下创建一个 hello.txt 文件并写入 Hello World，token budget 设为 50000。然后立即执行这个任务。", "session_key": "e2e-goal-tools", "work_dir": "/tmp/bifrost-e2e-test"}'
+  ```
+- **预期结果**:
+  - `success: true`
+  - `tool_calls` 包含 `create_goal`、`shell` 或 `write_file` 等工具调用
+  - goal 最终被标记为 `complete`（或 `budget_limited`）
+  - `/tmp/bifrost-e2e-test/hello.txt` 文件被创建且内容为 "Hello World"
+- **清理**: `rm -rf /tmp/bifrost-e2e-test`
+- **执行记录（2026-05-05）**: PASS — 模型调用了 create_goal → shell → write_file → read_file → update_goal(complete)，文件内容验证正确

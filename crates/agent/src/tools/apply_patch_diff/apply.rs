@@ -10,7 +10,7 @@ use super::parser::{Hunk, UpdateFileChunk};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -174,8 +174,31 @@ pub fn apply_patch(work_dir: &Path, hunks: &[Hunk]) -> Result<ApplyResult, Apply
 
 // ─── Core Algorithms ─────────────────────────────────────────────────────────
 
+/// Normalise common Unicode punctuation to ASCII equivalents so that diffs
+/// authored with plain ASCII characters can still be applied to source files
+/// containing typographic dashes / quotes / non-breaking spaces.
+fn unicode_normalize(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            // Various dash / hyphen code-points → ASCII '-'
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            // Fancy single quotes → '\''
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            // Fancy double quotes → '"'
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            // Non-breaking space and other odd spaces → normal space
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 /// Find the line index where `pattern` appears in `lines`, starting from `start`.
-/// Uses multi-level matching: exact → trimmed → contains.
+/// Uses Codex-aligned four-level matching: exact → trim_end → trim → Unicode normalise.
+/// Does NOT use substring `contains` matching.
 pub fn seek_sequence(lines: &[&str], pattern: &str, start: usize) -> Option<usize> {
     let pattern_trimmed = pattern.trim();
     if pattern_trimmed.is_empty() {
@@ -183,21 +206,31 @@ pub fn seek_sequence(lines: &[&str], pattern: &str, start: usize) -> Option<usiz
         return Some(start);
     }
 
-    // Level 1: exact match after trimming both sides.
+    // Level 1: exact match.
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        if *line == pattern {
+            return Some(idx);
+        }
+    }
+
+    // Level 2: trim_end match (ignore trailing whitespace).
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        if line.trim_end() == pattern.trim_end() {
+            return Some(idx);
+        }
+    }
+
+    // Level 3: trim both sides.
     for (idx, line) in lines.iter().enumerate().skip(start) {
         if line.trim() == pattern_trimmed {
             return Some(idx);
         }
     }
 
-    // Level 2: contains match (fuzzy).
+    // Level 4: Unicode normalisation (typographic chars → ASCII equivalents).
+    let pattern_normalised = unicode_normalize(pattern_trimmed);
     for (idx, line) in lines.iter().enumerate().skip(start) {
-        if line.contains(pattern_trimmed) {
-            debug!(
-                idx,
-                pattern = pattern_trimmed,
-                "seek_sequence: fuzzy contains match"
-            );
+        if unicode_normalize(line.trim()) == pattern_normalised {
             return Some(idx);
         }
     }
@@ -231,12 +264,27 @@ fn compute_replacements(
                     })?;
                 context_idx + 1
             } else {
-                seek_line_block(file_lines, &chunk.old_lines, search_start).ok_or_else(|| {
-                    ApplyError::OldLinesNotMatch {
+                // When is_end_of_file is set, prefer matching from the end of the file
+                // (mirrors Codex's `eof` parameter in seek_sequence).
+                let effective_start =
+                    if chunk.is_end_of_file && file_lines.len() >= chunk.old_lines.len() {
+                        file_lines.len() - chunk.old_lines.len()
+                    } else {
+                        search_start
+                    };
+                seek_line_block(file_lines, &chunk.old_lines, effective_start)
+                    .or_else(|| {
+                        // Fallback: if EOF-preferring search didn't find it, try from normal start
+                        if effective_start != search_start {
+                            seek_line_block(file_lines, &chunk.old_lines, search_start)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| ApplyError::OldLinesNotMatch {
                         file: file_path.to_path_buf(),
                         context: "<no @@ context>".to_string(),
-                    }
-                })?
+                    })?
             };
 
         // Determine the end of the replacement range.
@@ -292,6 +340,8 @@ fn compute_replacements(
     Ok(replacements)
 }
 
+/// Find a multi-line block pattern in file lines. Uses Codex-aligned four-level matching:
+/// exact → trim_end → trim → Unicode normalise.
 fn seek_line_block(lines: &[&str], pattern: &[String], start: usize) -> Option<usize> {
     if pattern.is_empty() {
         return Some(lines.len());
@@ -300,18 +350,52 @@ fn seek_line_block(lines: &[&str], pattern: &[String], start: usize) -> Option<u
         return None;
     }
 
-    let pattern_trimmed: Vec<&str> = pattern.iter().map(|line| line.trim()).collect();
-    for idx in start..=lines.len().saturating_sub(pattern.len()) {
-        let matches = pattern_trimmed
+    let end = lines.len().saturating_sub(pattern.len());
+
+    // Level 1: exact match.
+    for idx in start..=end {
+        if pattern
             .iter()
             .enumerate()
-            .all(|(offset, expected)| lines[idx + offset].trim() == *expected);
-        if matches {
+            .all(|(offset, expected)| lines[idx + offset] == expected.as_str())
+        {
             return Some(idx);
         }
     }
 
-    None
+    // Level 2: trim_end match.
+    for idx in start..=end {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| lines[idx + offset].trim_end() == expected.trim_end())
+        {
+            return Some(idx);
+        }
+    }
+
+    // Level 3: trim both sides.
+    for idx in start..=end {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| lines[idx + offset].trim() == expected.trim())
+        {
+            return Some(idx);
+        }
+    }
+
+    // Level 4: Unicode normalisation.
+    let pattern_normalised: Vec<String> = pattern
+        .iter()
+        .map(|p| unicode_normalize(p.trim()))
+        .collect();
+    (start..=end).find(|&idx| {
+        pattern_normalised
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| unicode_normalize(lines[idx + offset].trim()) == *expected)
+    })
 }
 
 /// Apply replacements in reverse order to preserve line indices.
@@ -534,6 +618,24 @@ mod tests {
         let lines = vec!["  fn main() {  ", "    hello();"];
         // Trimmed match should work.
         assert_eq!(seek_sequence(&lines, "fn main() {", 0), Some(0));
+    }
+
+    #[test]
+    fn test_seek_sequence_does_not_use_contains() {
+        // Codex-aligned: seek_sequence must NOT match via substring contains.
+        let lines = vec!["fn some_function() {", "    call_helper();", "}"];
+        // "function" is a substring of "some_function" but must NOT match.
+        assert_eq!(seek_sequence(&lines, "function", 0), None);
+        // "call" is a substring of "call_helper();" but must NOT match.
+        assert_eq!(seek_sequence(&lines, "call", 0), None);
+    }
+
+    #[test]
+    fn test_seek_sequence_unicode_normalise() {
+        // Codex-aligned: typographic chars should be normalised to ASCII.
+        let lines = vec!["let x \u{2014} 42;"];
+        // Pattern uses ASCII dash, should still match via Unicode normalisation.
+        assert_eq!(seek_sequence(&lines, "let x - 42;", 0), Some(0));
     }
 
     #[test]
