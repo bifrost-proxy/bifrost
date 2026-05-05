@@ -207,6 +207,24 @@ cargo build --bin bifrost
   - `memory read instructions injected`
   - `im_gateway_agent_auto_memory_new_session_consumes` 1/1 passed。
 
+### TC-LTM-11 回归：真实对话 shell E2E mock 与当前 Phase 1/Phase 2 Prompt 对齐
+
+操作步骤：
+1. 运行：
+   `BIFROST_PORT=18883 MOCK_PORT=18884 bash e2e-tests/tests/test_long_term_memory_human_api.sh`
+2. 观察 mock Chat Completions 请求识别逻辑是否进入当前 Phase 1 抽取与 Phase 2 consolidation 分支。
+3. 检查脚本输出的 memory 文件断言、Phase 2 状态断言和跨独立 session 消费断言。
+
+预期结果：
+- Phase 1 请求按当前 `Memory Writing Agent: Phase 1` prompt 被识别，mock 返回 `rollout_summary`、`rollout_slug`、`raw_memory` JSON，内容包含 `独孤怼怼`。
+- Phase 2 请求按当前 `Memory Writing Agent: Phase 2` prompt 被识别，`MEMORY.md` 中最终条目 `source` 为 `phase2_consolidated`。
+- 系统 prompt 构建过程中技能摘要 UTF-8 安全裁剪，不会因中文 skill 描述在真实对话 API 中 panic。
+- `raw_memories.md` 保留 `source: auto_extract`。
+- 第二个和第三个全新 session 的响应都包含 `独孤怼怼`。
+
+实际结果：
+- 通过。2026-05-05 执行该命令 passed，脚本输出 `[long-term-memory-human-api] PASS`，并验证 `memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.phase2_state.json`、`rollout_summaries/` 和跨独立 session 读取均符合预期。
+
 ## 清理步骤
 
 ```bash

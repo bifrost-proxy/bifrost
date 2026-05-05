@@ -199,11 +199,25 @@ fn build_skill_registry_digest(registry: &SkillRegistry) -> String {
     if hidden > 0 {
         let more = format!("- ... ({hidden} more hidden)\n");
         if output.len() + more.len() > SKILL_DIGEST_CHAR_LIMIT {
-            output.truncate(SKILL_DIGEST_CHAR_LIMIT.saturating_sub(more.len()));
+            truncate_to_char_boundary(
+                &mut output,
+                SKILL_DIGEST_CHAR_LIMIT.saturating_sub(more.len()),
+            );
         }
         output.push_str(&more);
     }
     output
+}
+
+fn truncate_to_char_boundary(output: &mut String, max_len: usize) {
+    if output.len() <= max_len {
+        return;
+    }
+    let mut boundary = max_len;
+    while boundary > 0 && !output.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    output.truncate(boundary);
 }
 
 #[cfg(test)]
@@ -245,5 +259,38 @@ mod tests {
         assert!(prompt.contains("- alpha: alpha"));
         assert!(prompt.contains("- beta: beta"));
         assert!(prompt.contains("- gamma: gamma"));
+    }
+
+    #[test]
+    fn skill_registry_digest_truncates_on_utf8_boundary() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
+            SkillScope::Repo,
+            dir.path(),
+        )]));
+        for index in 0..200 {
+            let name = format!("skill-{index}");
+            let manifest = SkillManifest::minimal_inline(
+                &name,
+                "中文说明中文说明中文说明中文说明中文说明",
+                SkillScope::Repo,
+            );
+            store
+                .commit(SkillDraft {
+                    manifest,
+                    skill_md: format!(
+                        "---\nname: {name}\ndescription: 中文说明中文说明中文说明中文说明中文说明\n---\n# {name}"
+                    ),
+                    draft_dir: None,
+                    assets: Vec::new(),
+                })
+                .unwrap();
+        }
+        let registry = SkillRegistry::without_watcher(store).unwrap();
+
+        let digest = build_skill_registry_digest(&registry);
+
+        assert!(digest.is_char_boundary(digest.len()));
+        assert!(digest.contains("more hidden"));
     }
 }

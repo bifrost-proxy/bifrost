@@ -132,7 +132,8 @@ E2E 测试：
 - `e2e-tests/tests/test_long_term_memory_remember_recall.sh`：预置文件记忆，断言模型请求包含 Codex-style read-path instructions。
   - 自动记忆用例的 mock Chat Completions 服务必须用实际 `EXTRACT_SYSTEM_PROMPT` / `CONSOLIDATION_SYSTEM_PROMPT` 常量识别 Phase 1/Phase 2 请求，避免 prompt 文案演进后落入普通对话兜底响应。
 - `e2e-tests/tests/test_long_term_memory_human_api.sh`：启动真实 Bifrost 和 OpenAI-compatible mock，使用对话接口创建多个独立 session，验证“请记住我是独孤怼怼”自动沉淀并在新 session 消费。
-  - mock 同时验证自动抽取请求和 Phase 2 consolidation 请求。
+  - mock 同时验证自动抽取请求和 Phase 2 consolidation 请求；请求识别必须匹配当前 `Memory Writing Agent: Phase 1` / `Memory Writing Agent: Phase 2` prompt 文案，并返回当前 Phase 1 的 `rollout_summary` / `rollout_slug` / `raw_memory` JSON 结构。
+  - 真实对话路径会构造系统 prompt 和技能摘要，技能摘要裁剪必须保持 UTF-8 字符边界，避免中文 skill 描述触发 `String::truncate` panic。
   - 断言 `MEMORY.md` 中最终来源为 `phase2_consolidated`，`raw_memories.md` 保留 `source: auto_extract` 追溯材料。
   - 断言 `.phase2_state.json` 记录 bounded input 元数据：`processed_input_count`、`total_input_count`、`has_more_inputs`。
 

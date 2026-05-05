@@ -85,9 +85,13 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(content, str):
                 texts.append(content)
         joined = "\n".join(texts)
-        if "You extract durable memories from a Bifrost Agent conversation" in joined:
-            content = json.dumps({"memories": ["用户自称是独孤怼怼。"]}, ensure_ascii=False)
-        elif "Bifrost memory consolidation agent" in joined:
+        if "Memory Writing Agent: Phase 1" in joined:
+            content = json.dumps({
+                "rollout_summary": "# Human memory source\n\n## Task 1: remember user name\nOutcome: success\n\nReusable knowledge:\n- 用户自称是独孤怼怼。",
+                "rollout_slug": "human-memory-source",
+                "raw_memory": "---\ndescription: 用户自称是独孤怼怼。\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\ncwd: /Users/eden/work/github/bifrost\nkeywords: 独孤怼怼, human memory, bifrost\n---\n\n### Task 1: remember user name\n\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\n\nReusable knowledge:\n- 用户自称是独孤怼怼。\n",
+            }, ensure_ascii=False)
+        elif "Memory Writing Agent: Phase 2" in joined:
             content = json.dumps({
                 "memory_summary": "- 用户自称是独孤怼怼。",
                 "memory": "# Memory\n\n- 用户自称是独孤怼怼。\n  source: phase2_consolidated",
@@ -182,7 +186,7 @@ assert_contains "$(cat "$MEMORY_FILE")" "source: phase2_consolidated" "MEMORY.md
 assert_contains "$(cat "$MEMORY_FILE")" "独孤怼怼" "MEMORY.md content"
 assert_contains "$(cat "$RAW_FILE")" "source: auto_extract" "raw_memories.md source"
 assert_contains "$(cat "$RAW_FILE")" "独孤怼怼" "raw_memories.md content"
-assert_contains "$(cat "$MOCK_LOG")" "Bifrost memory consolidation agent" "mock request log"
+assert_contains "$(cat "$MOCK_LOG")" "Memory Writing Agent: Phase 2" "mock request log"
 python3 - "$PHASE2_STATE_FILE" <<'PY'
 import json
 import sys
