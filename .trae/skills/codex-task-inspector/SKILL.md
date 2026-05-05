@@ -1,11 +1,20 @@
 ---
 name: codex-task-inspector
-description: Inspect Codex async task progress from .codex-tasks. Use when the user asks to check Codex status, inspect async task progress, summarize .codex-tasks, determine whether local Codex workers are still running, or distinguish local task state from CI poll status.
+description: Inspect Codex async task progress from the correct data directory. Use when the user asks to check Codex status, inspect async task progress, summarize task state, or determine whether local Codex workers are still running. Prefer Codex default data dir (~/.codex) when given a rollout/session id; use repo .codex-tasks only when the request explicitly targets it.
 ---
 
 # Codex Task Inspector
 
-用于统一检查仓库内 `.codex-tasks/` 的 Codex 异步任务状态，避免重复走弯路。
+用于统一检查 Codex 异步任务状态，避免把“仓库里的任务跟踪文件（`.codex-tasks/`）”与“Codex 默认数据目录（`~/.codex`）里的 session/rollout 日志”混为一谈。
+
+## 关键纠错（高频踩坑）
+
+当用户提供类似 `019df414-...` 这种 **rollout/session id** 并询问“任务进展”，**默认应优先检查 `~/.codex`**：
+
+- ✅ `~/.codex/sessions/YYYY/MM/DD/rollout-...-<id>.jsonl`（权威事实来源：含 task_complete、命令执行、CI watch 记录）
+- ⚠️ `.codex-tasks/` 只在用户明确说“看仓库里的 .codex-tasks 跟踪”或你确定该任务是由仓库派发器写入 `.codex-tasks/` 时才用
+
+如果你先去 `.codex-tasks/` 导致找不到 id，这是误判路径；应立即切换到 `~/.codex` 再查。
 
 ## 适用场景
 
@@ -27,9 +36,40 @@ description: Inspect Codex async task progress from .codex-tasks. Use when the u
 
 ## 标准检查顺序
 
+### 第 0 步：先选对数据目录（必须）
+
+**输入信号 → 选路由：**
+
+- 用户给的是 `019...` 这种 rollout/session id，或明确说“去 Codex 默认数据目录” → **走 `~/.codex`**
+- 用户明确说“看这个仓库 `.codex-tasks`” → 走 **`.codex-tasks/`**
+
+#### 0.1 在 `~/.codex` 按 rollout/session id 定位日志
+
+优先在 `~/.codex/sessions/` 下找 `rollout-*-<id>.jsonl`：
+
+```bash
+RID='019df414-235e-74e3-be4b-84f883e0ea17'
+python3 - <<'PY'
+import os, glob
+rid=os.environ['RID']
+base=os.path.expanduser('~/.codex/sessions')
+paths=glob.glob(f"{base}/**/rollout-*-{rid}.jsonl", recursive=True)
+for p in sorted(paths):
+  print(p)
+PY
+```
+
+若直接匹配不到，可扩大为内容扫描（注意控制扫描数量，按 mtime 取最近 N 个文件即可）。
+
+#### 0.2 从 jsonl 里读最终结论
+
+`task_complete` 的 `last_agent_message` 是最直接的任务总结；如需“是否仍在跑”，看最后的事件时间戳 + 是否还有后续 `exec_command_*`。
+
+---
+
 ### 第一步：检查本地 Codex 进程
 
-先看 `.codex-tasks/*.pid`，逐个用 `ps` 判断进程是否仍存活。
+如果走 `.codex-tasks/` 路径：先看 `.codex-tasks/*.pid`，逐个用 `ps` 判断进程是否仍存活。
 
 推荐命令：
 

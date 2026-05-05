@@ -1523,6 +1523,7 @@ pub async fn run_turn_with_mcp(
         // Track real token usage from API response
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.total_tokens);
+            crate::tools::goal::account_goal_runtime_progress(session);
         }
 
         // Check if model wants to call tools
@@ -1546,6 +1547,7 @@ pub async fn run_turn_with_mcp(
                 .content
                 .or(response.reasoning_content)
                 .unwrap_or_default();
+            crate::tools::goal::account_goal_runtime_progress(session);
 
             session.add_assistant_message(&content);
 
@@ -1678,6 +1680,7 @@ pub async fn run_turn_with_mcp(
 
             // Add tool result to history
             session.add_tool_result(&tc.id, &output);
+            crate::tools::goal::account_goal_runtime_progress(session);
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
@@ -1839,10 +1842,26 @@ async fn handle_goal_command(session: &mut AgentSession, args: &str) -> String {
         .output;
     }
 
+    if trimmed == "pause" {
+        return crate::tools::goal::set_goal_status(
+            session,
+            crate::tools::goal::GoalStatus::Paused,
+        )
+        .output;
+    }
+
+    if trimmed == "resume" {
+        return crate::tools::goal::set_goal_status(
+            session,
+            crate::tools::goal::GoalStatus::Active,
+        )
+        .output;
+    }
+
     if let Some(rest) = trimmed.strip_prefix("set ") {
         let rest = rest.trim();
         if rest.is_empty() {
-            return "用法: /goal [show|set <objective>|set --budget N <objective>|complete]"
+            return "用法: /goal [show|set <objective>|set --budget N <objective>|pause|resume|complete]"
                 .to_string();
         }
 
@@ -1876,7 +1895,8 @@ async fn handle_goal_command(session: &mut AgentSession, args: &str) -> String {
         .output;
     }
 
-    "用法: /goal [show|set <objective>|set --budget N <objective>|complete]".to_string()
+    "用法: /goal [show|set <objective>|set --budget N <objective>|pause|resume|complete]"
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

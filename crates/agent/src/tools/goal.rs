@@ -8,6 +8,7 @@ use crate::session::AgentSession;
 use crate::types::{ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
 pub const CREATE_GOAL_TOOL_NAME: &str = "create_goal";
@@ -18,6 +19,8 @@ pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
     Active,
+    Paused,
+    BudgetLimited,
     Complete,
 }
 
@@ -37,11 +40,21 @@ pub struct Goal {
 /// Session-owned goal runtime state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalState {
+    #[serde(default)]
+    pub(crate) goal_id: String,
     pub(crate) objective: String,
     pub(crate) status: GoalStatus,
     pub(crate) token_budget: Option<u64>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
+    #[serde(default)]
+    pub(crate) accumulated_tokens_used: u64,
+    #[serde(default)]
+    pub(crate) accumulated_time_used_seconds: u64,
+    #[serde(default)]
+    pub(crate) active_total_tokens_baseline: Option<u64>,
+    #[serde(default)]
+    pub(crate) active_started_at: Option<u64>,
     pub(crate) start_total_tokens: u64,
     pub(crate) completed_total_tokens: Option<u64>,
     pub(crate) completed_time_used_seconds: Option<u64>,
@@ -76,24 +89,74 @@ enum CompletionBudgetReport {
 impl GoalState {
     fn new(objective: String, token_budget: Option<u64>, total_tokens_used: u64, now: u64) -> Self {
         Self {
+            goal_id: Uuid::new_v4().to_string(),
             objective,
             status: GoalStatus::Active,
             token_budget,
             created_at: now,
             updated_at: now,
+            accumulated_tokens_used: 0,
+            accumulated_time_used_seconds: 0,
+            active_total_tokens_baseline: Some(total_tokens_used),
+            active_started_at: Some(now),
             start_total_tokens: total_tokens_used,
             completed_total_tokens: None,
             completed_time_used_seconds: None,
         }
     }
 
+    fn is_accounting_active(&self) -> bool {
+        matches!(self.status, GoalStatus::Active | GoalStatus::BudgetLimited)
+    }
+
+    fn current_usage(&self, total_tokens_used: u64, now: u64) -> (u64, u64) {
+        if self.status == GoalStatus::Complete {
+            return (
+                self.completed_total_tokens
+                    .unwrap_or(self.accumulated_tokens_used),
+                self.completed_time_used_seconds
+                    .unwrap_or(self.accumulated_time_used_seconds),
+            );
+        }
+
+        let mut tokens_used = self.accumulated_tokens_used;
+        let mut time_used_seconds = self.accumulated_time_used_seconds;
+
+        if self.is_accounting_active() {
+            if let Some(baseline) = self.active_total_tokens_baseline {
+                tokens_used =
+                    tokens_used.saturating_add(total_tokens_used.saturating_sub(baseline));
+            } else {
+                tokens_used = tokens_used
+                    .saturating_add(total_tokens_used.saturating_sub(self.start_total_tokens));
+            }
+
+            if let Some(started_at) = self.active_started_at {
+                time_used_seconds =
+                    time_used_seconds.saturating_add(now.saturating_sub(started_at));
+            } else {
+                time_used_seconds =
+                    time_used_seconds.saturating_add(now.saturating_sub(self.created_at));
+            }
+        }
+
+        (tokens_used, time_used_seconds)
+    }
+
+    fn bootstrap_legacy_accounting(&mut self, total_tokens_used: u64, now: u64) {
+        if !self.is_accounting_active() || self.active_total_tokens_baseline.is_some() {
+            return;
+        }
+
+        let (tokens_used, time_used_seconds) = self.current_usage(total_tokens_used, now);
+        self.accumulated_tokens_used = tokens_used;
+        self.accumulated_time_used_seconds = time_used_seconds;
+        self.active_total_tokens_baseline = Some(total_tokens_used);
+        self.active_started_at = Some(now);
+    }
+
     fn snapshot(&self, total_tokens_used: u64, now: u64) -> Goal {
-        let tokens_used = self
-            .completed_total_tokens
-            .unwrap_or_else(|| total_tokens_used.saturating_sub(self.start_total_tokens));
-        let time_used_seconds = self
-            .completed_time_used_seconds
-            .unwrap_or_else(|| now.saturating_sub(self.created_at));
+        let (tokens_used, time_used_seconds) = self.current_usage(total_tokens_used, now);
         Goal {
             objective: self.objective.clone(),
             status: self.status,
@@ -105,12 +168,62 @@ impl GoalState {
         }
     }
 
+    fn account_progress(&mut self, total_tokens_used: u64, now: u64) -> bool {
+        if !self.is_accounting_active() {
+            return false;
+        }
+
+        self.bootstrap_legacy_accounting(total_tokens_used, now);
+
+        let baseline = self
+            .active_total_tokens_baseline
+            .unwrap_or(total_tokens_used);
+        let active_started_at = self.active_started_at.unwrap_or(now);
+        self.accumulated_tokens_used = self
+            .accumulated_tokens_used
+            .saturating_add(total_tokens_used.saturating_sub(baseline));
+        self.accumulated_time_used_seconds = self
+            .accumulated_time_used_seconds
+            .saturating_add(now.saturating_sub(active_started_at));
+        self.active_total_tokens_baseline = Some(total_tokens_used);
+        self.active_started_at = Some(now);
+
+        if self.status == GoalStatus::Active
+            && self
+                .token_budget
+                .is_some_and(|budget| self.accumulated_tokens_used >= budget)
+        {
+            self.status = GoalStatus::BudgetLimited;
+            self.updated_at = now;
+            return true;
+        }
+
+        false
+    }
+
+    fn pause(&mut self, total_tokens_used: u64, now: u64) {
+        self.account_progress(total_tokens_used, now);
+        self.status = GoalStatus::Paused;
+        self.updated_at = now;
+        self.active_total_tokens_baseline = None;
+        self.active_started_at = None;
+    }
+
+    fn resume(&mut self, total_tokens_used: u64, now: u64) {
+        self.status = GoalStatus::Active;
+        self.updated_at = now;
+        self.active_total_tokens_baseline = Some(total_tokens_used);
+        self.active_started_at = Some(now);
+    }
+
     fn mark_complete(&mut self, total_tokens_used: u64, now: u64) {
+        self.account_progress(total_tokens_used, now);
         self.status = GoalStatus::Complete;
         self.updated_at = now;
-        self.completed_total_tokens =
-            Some(total_tokens_used.saturating_sub(self.start_total_tokens));
-        self.completed_time_used_seconds = Some(now.saturating_sub(self.created_at));
+        self.active_total_tokens_baseline = None;
+        self.active_started_at = None;
+        self.completed_total_tokens = Some(self.accumulated_tokens_used);
+        self.completed_time_used_seconds = Some(self.accumulated_time_used_seconds);
     }
 }
 
@@ -184,7 +297,60 @@ pub fn execute_goal_tool(
     }
 }
 
-fn handle_get_goal(session: &AgentSession) -> ToolResult {
+pub fn account_goal_runtime_progress(session: &mut AgentSession) {
+    let Some(goal) = session.current_goal.as_mut() else {
+        return;
+    };
+    let now = current_time_secs();
+    let total_tokens_used = session.total_tokens_used.unwrap_or(0);
+    if goal.account_progress(total_tokens_used, now) {
+        persist_goal_state(session);
+    }
+}
+
+pub fn set_goal_status(session: &mut AgentSession, status: GoalStatus) -> ToolResult {
+    let now = current_time_secs();
+    let total_tokens_used = session.total_tokens_used.unwrap_or(0);
+    let Some(goal) = session.current_goal.as_mut() else {
+        return ToolResult {
+            success: false,
+            output: "no goal exists to update".to_string(),
+        };
+    };
+
+    match status {
+        GoalStatus::Paused => {
+            if goal.status == GoalStatus::Complete {
+                return ToolResult {
+                    success: false,
+                    output: "cannot pause a completed goal".to_string(),
+                };
+            }
+            goal.pause(total_tokens_used, now);
+        }
+        GoalStatus::Active => {
+            if goal.status == GoalStatus::Complete {
+                return ToolResult {
+                    success: false,
+                    output: "cannot resume a completed goal".to_string(),
+                };
+            }
+            goal.resume(total_tokens_used, now);
+        }
+        GoalStatus::BudgetLimited | GoalStatus::Complete => {
+            return ToolResult {
+                success: false,
+                output: "unsupported manual goal status transition".to_string(),
+            };
+        }
+    }
+
+    persist_goal_state(session);
+    goal_response(session, CompletionBudgetReport::Omit)
+}
+
+fn handle_get_goal(session: &mut AgentSession) -> ToolResult {
+    account_goal_runtime_progress(session);
     goal_response(session, CompletionBudgetReport::Omit)
 }
 
@@ -222,13 +388,7 @@ fn handle_create_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         total_tokens_used,
         now,
     ));
-    if let Some(goal) = session.current_goal.as_ref() {
-        if let Some(recorder) = session.recorder.as_mut() {
-            if let Err(error) = recorder.record_goal_updated(&session.session_key, goal) {
-                warn!(error = %error, "failed to record goal update");
-            }
-        }
-    }
+    persist_goal_state(session);
 
     info!(session_key = %session.session_key, objective, "goal created");
     goal_response(session, CompletionBudgetReport::Omit)
@@ -254,22 +414,21 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
 
     let now = current_time_secs();
     let total_tokens_used = session.total_tokens_used.unwrap_or(0);
-    let Some(goal) = session.current_goal.as_mut() else {
-        return ToolResult {
-            success: false,
-            output: "no goal exists to update".to_string(),
+    let goal_objective = {
+        let Some(goal) = session.current_goal.as_mut() else {
+            return ToolResult {
+                success: false,
+                output: "no goal exists to update".to_string(),
+            };
         };
-    };
 
-    goal.mark_complete(total_tokens_used, now);
-    if let Some(recorder) = session.recorder.as_mut() {
-        if let Err(error) = recorder.record_goal_updated(&session.session_key, goal) {
-            warn!(error = %error, "failed to record goal update");
-        }
-    }
+        goal.mark_complete(total_tokens_used, now);
+        goal.objective.clone()
+    };
+    persist_goal_state(session);
     info!(
         session_key = %session.session_key,
-        objective = %goal.objective,
+        objective = %goal_objective,
         "goal marked complete"
     );
     goal_response(session, CompletionBudgetReport::Include)
@@ -329,6 +488,17 @@ fn completion_budget_report(goal: &Goal) -> Option<String> {
             "Goal achieved. Report final budget usage to the user: {}.",
             parts.join("; ")
         ))
+    }
+}
+
+fn persist_goal_state(session: &mut AgentSession) {
+    let Some(goal) = session.current_goal.as_ref() else {
+        return;
+    };
+    if let Some(recorder) = session.recorder.as_mut() {
+        if let Err(error) = recorder.record_goal_updated(&session.session_key, goal) {
+            warn!(error = %error, "failed to record goal update");
+        }
     }
 }
 
@@ -439,6 +609,54 @@ mod tests {
             .output
             .contains("Goal achieved. Report final budget usage to the user"));
         assert!(result.output.contains("tokens used: 30 of 100"));
+    }
+
+    #[test]
+    fn goal_transitions_to_budget_limited_after_accounting() {
+        let mut session = make_session();
+        session.total_tokens_used = Some(10);
+        let _ = execute_goal_tool(
+            &mut session,
+            CREATE_GOAL_TOOL_NAME,
+            r#"{"objective":"Complete this task","token_budget":25}"#,
+        );
+
+        session.total_tokens_used = Some(40);
+        account_goal_runtime_progress(&mut session);
+
+        let result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
+        assert!(result.output.contains("\"status\": \"budget_limited\""));
+        assert!(result.output.contains("\"tokensUsed\": 30"));
+    }
+
+    #[test]
+    fn paused_goal_freezes_usage_until_resumed() {
+        let mut session = make_session();
+        session.total_tokens_used = Some(50);
+        let _ = execute_goal_tool(
+            &mut session,
+            CREATE_GOAL_TOOL_NAME,
+            r#"{"objective":"Pause and resume","token_budget":500}"#,
+        );
+
+        session.total_tokens_used = Some(80);
+        let pause_result = set_goal_status(&mut session, GoalStatus::Paused);
+        assert!(pause_result.success);
+        assert!(pause_result.output.contains("\"status\": \"paused\""));
+        assert!(pause_result.output.contains("\"tokensUsed\": 30"));
+
+        session.total_tokens_used = Some(120);
+        let paused_result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
+        assert!(paused_result.output.contains("\"tokensUsed\": 30"));
+
+        let resume_result = set_goal_status(&mut session, GoalStatus::Active);
+        assert!(resume_result.success);
+        session.total_tokens_used = Some(150);
+        account_goal_runtime_progress(&mut session);
+
+        let resumed_result = execute_goal_tool(&mut session, GET_GOAL_TOOL_NAME, "{}").unwrap();
+        assert!(resumed_result.output.contains("\"status\": \"active\""));
+        assert!(resumed_result.output.contains("\"tokensUsed\": 60"));
     }
 
     #[test]

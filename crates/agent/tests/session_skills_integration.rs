@@ -82,3 +82,45 @@ async fn goal_slash_command_is_session_scoped() {
     .expect("show goal");
     assert!(show_other.response.contains("\"goal\": null"));
 }
+
+#[tokio::test]
+async fn goal_slash_command_pause_and_resume_updates_status() {
+    let mut session = AgentSession::new("goal-session-pause-resume");
+    let tools = ToolRegistry::with_defaults(1);
+
+    let created = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session,
+        &tools,
+        "/goal set --budget 64 verify pause resume",
+        None,
+    )
+    .await
+    .expect("create goal");
+    assert!(created.response.contains("\"status\": \"active\""));
+
+    let paused = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session,
+        &tools,
+        "/goal pause",
+        None,
+    )
+    .await
+    .expect("pause goal");
+    assert!(paused.response.contains("\"status\": \"paused\""));
+
+    let resumed = run_turn(
+        &AgentClient::new(),
+        &AgentConfig::default(),
+        &mut session,
+        &tools,
+        "/goal resume",
+        None,
+    )
+    .await
+    .expect("resume goal");
+    assert!(resumed.response.contains("\"status\": \"active\""));
+}

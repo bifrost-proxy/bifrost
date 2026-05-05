@@ -188,7 +188,7 @@ fn builtin_description(cmd: &BuiltinCommand) -> &'static str {
         BuiltinCommand::Memories => "列出当前可见的所有长期记忆",
         BuiltinCommand::Forget => "删除一条长期记忆，用法: /forget <id|last>",
         BuiltinCommand::Goal => {
-            "管理当前目标，用法: /goal [show|set <objective>|set --budget N <objective>|complete]"
+            "管理当前目标，用法: /goal [show|set <objective>|set --budget N <objective>|pause|resume|complete]"
         }
         BuiltinCommand::Skill => "启动 Skill Creator，创建或编辑 skill",
     }

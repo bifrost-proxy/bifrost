@@ -1,5 +1,5 @@
 use base64::Engine;
-use bifrost_agent::memory_runtime;
+use bifrost_agent::memory;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -94,11 +94,11 @@ async fn handle_list(req: Request<Incoming>) -> Response<BoxBody> {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid query: {error}"));
         }
     };
-    let root = match memory_runtime::ensure_memory_layout() {
+    let root = match memory::ensure_memory_layout() {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    match memory_runtime::search_memory_files(
+    match memory::search_memory_files(
         params.query.as_deref().unwrap_or(""),
         params.limit.unwrap_or(100),
         &root,
@@ -118,7 +118,7 @@ async fn handle_create(req: Request<Incoming>) -> Response<BoxBody> {
     }
     let mut session = bifrost_agent::AgentSession::new("admin-api");
     session.source = "admin-api".to_string();
-    match memory_runtime::remember_explicit(
+    match memory::remember_explicit(
         &bifrost_agent::AgentConfig::default(),
         &session,
         &body.content,
@@ -140,7 +140,7 @@ async fn handle_patch(req: Request<Incoming>, id: &str) -> Response<BoxBody> {
         return error_response(StatusCode::BAD_REQUEST, "content must not be empty");
     }
     let session = bifrost_agent::AgentSession::new("admin-api");
-    match memory_runtime::replace_memory(
+    match memory::replace_memory(
         &bifrost_agent::AgentConfig::default(),
         &session,
         id,
@@ -158,7 +158,7 @@ async fn handle_patch(req: Request<Incoming>, id: &str) -> Response<BoxBody> {
 
 async fn handle_delete(id: &str) -> Response<BoxBody> {
     let session = bifrost_agent::AgentSession::new("admin-api");
-    match memory_runtime::forget_memory(&bifrost_agent::AgentConfig::default(), &session, id) {
+    match memory::forget_memory(&bifrost_agent::AgentConfig::default(), &session, id) {
         Ok(Some(id)) => json_response(&serde_json::json!({ "deleted": true, "id": id })),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "memory entry not found"),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
@@ -170,11 +170,11 @@ async fn handle_search(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(body) => body,
         Err(resp) => return resp,
     };
-    let root = match memory_runtime::ensure_memory_layout() {
+    let root = match memory::ensure_memory_layout() {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
-    match memory_runtime::search_memory_files(
+    match memory::search_memory_files(
         body.query.as_deref().unwrap_or(""),
         body.limit.unwrap_or(50),
         &root,
@@ -195,7 +195,7 @@ async fn handle_import(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(body) => body,
         Err(resp) => return resp,
     };
-    let root = match memory_runtime::ensure_memory_layout() {
+    let root = match memory::ensure_memory_layout() {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
@@ -312,7 +312,7 @@ async fn handle_import(req: Request<Incoming>) -> Response<BoxBody> {
 /// API. Callers that need a raw blob can pipe the decoded bytes through
 /// `base64 -d | tar -xz`.
 async fn handle_export() -> Response<BoxBody> {
-    let root = match memory_runtime::ensure_memory_layout() {
+    let root = match memory::ensure_memory_layout() {
         Ok(root) => root,
         Err(error) => return memory_store_error(error),
     };
@@ -418,7 +418,7 @@ fn is_safe_relative(path: &Path) -> bool {
 }
 
 async fn handle_stats() -> Response<BoxBody> {
-    match memory_runtime::memory_stats() {
+    match memory::memory_stats() {
         Ok(stats) => json_response(&stats),
         Err(error) => memory_store_error(error),
     }

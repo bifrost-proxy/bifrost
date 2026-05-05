@@ -1042,11 +1042,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime");
         let goal = GoalState {
+            goal_id: "goal-1".to_string(),
             objective: "finish codex parity".to_string(),
             status: crate::tools::goal::GoalStatus::Complete,
             token_budget: Some(1000),
             created_at: 1,
             updated_at: 2,
+            accumulated_tokens_used: 275,
+            accumulated_time_used_seconds: 33,
+            active_total_tokens_baseline: None,
+            active_started_at: None,
             start_total_tokens: 100,
             completed_total_tokens: Some(275),
             completed_time_used_seconds: Some(33),
@@ -1063,11 +1068,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime-clear");
         let goal = GoalState {
+            goal_id: "goal-2".to_string(),
             objective: "temporary goal".to_string(),
             status: crate::tools::goal::GoalStatus::Active,
             token_budget: None,
             created_at: 1,
             updated_at: 1,
+            accumulated_tokens_used: 0,
+            accumulated_time_used_seconds: 0,
+            active_total_tokens_baseline: Some(0),
+            active_started_at: Some(1),
             start_total_tokens: 0,
             completed_total_tokens: None,
             completed_time_used_seconds: None,

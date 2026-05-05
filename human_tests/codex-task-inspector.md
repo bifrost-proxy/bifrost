@@ -2,7 +2,14 @@
 
 ## 功能模块说明
 
-`codex-task-inspector` 是一个仓库级只读 skill，用于统一检查 `.codex-tasks/` 下的 Codex 异步任务进展，避免把本地 pid、任务报告和 CI poll 状态混为一谈。
+`codex-task-inspector` 是一个仓库级只读 skill，用于统一检查 Codex 异步任务进展。
+
+**关键点**：
+
+- 当用户给的是 **rollout/session id（如 `019...`）** 并问“任务进展”，应优先检查 **Codex 默认数据目录 `~/.codex`**（session/rollout jsonl 是权威来源）。
+- 只有当用户明确指向“仓库内任务跟踪文件”时，才检查 `.codex-tasks/`。
+
+本用例覆盖“误用 `.codex-tasks` 导致找不到任务”的回归，确保后续不再重复这个错误。
 
 ## 前置条件
 
@@ -18,6 +25,18 @@ ls .codex-tasks
 - `*.log`
 
 ## 测试用例列表
+
+### TC-CTI-00：rollout/session id 必须走 ~/.codex（回归用例）
+
+- **操作步骤**：
+  1. 选取一个已知 rollout id（例如 `019df414-235e-74e3-be4b-84f883e0ea17`，或你本机存在的任意 id）
+  2. 在 `~/.codex/sessions` 下定位 `rollout-*-<id>.jsonl`
+  3. 读取 jsonl 最后一条 `task_complete` 的 `last_agent_message`（或等效的最终状态）
+- **预期结果**：
+  - 能在 `~/.codex` 中定位到该 id 的日志文件
+  - 能明确给出任务是否已完成、最终结论、以及最后更新时间
+  - 不会因为仓库里 `.codex-tasks/` 不存在对应文件而误判“没有进展/还在跑”
+
 
 ### TC-CTI-01：本地 pid 状态与任务文件解耦
 
@@ -61,3 +80,17 @@ ls .codex-tasks
 ## 清理步骤
 
 本测试为只读检查，无需清理。
+
+## 执行记录
+
+- TC-CTI-00：通过（2026-05-05）
+  - 实际结果：在 `~/.codex/sessions/**/rollout-*-019df414-235e-74e3-be4b-84f883e0ea17.jsonl` 成功定位到 1 个匹配文件；读取到 `task_complete` 且首行结论为“CI 已处理到全绿。”
+- TC-CTI-01：通过（2026-05-05）
+  - 实际结果：`.codex-tasks/*.pid` 中列出的 pid 均为 `NOT_RUNNING`；即使 `.codex-tasks/` 目录仍有大量文件，也不会误判任务仍在运行。
+- TC-CTI-02：通过（2026-05-05）
+  - 实际结果：从最近 5 个 `*-last.md` 提取到了明确的首行结论（含“已完成”“push 失败（github.com 解析失败）”等），可稳定用于摘要。
+- TC-CTI-03：通过（2026-05-05）
+  - 实际结果：从 `skill-creator-ci-poll.log` 尾部识别到 `completed/failure`（E2E Shell Linux shard 3/3）与多个 `in_progress/pending` job；并将其归类为 CI 状态，不与本地 pid 混淆。
+- TC-CTI-04：通过（2026-05-05）
+  - 实际结果：最终汇总按四段输出（本地进程/产物摘要/CI 状态/下一步建议）组织，且建议不越界。
+

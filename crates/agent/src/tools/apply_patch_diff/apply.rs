@@ -215,16 +215,25 @@ fn compute_replacements(
     let mut search_start: usize = 0;
 
     for chunk in chunks {
-        // Locate the context line.
-        let context_idx = seek_sequence(file_lines, &chunk.change_context, search_start)
-            .ok_or_else(|| ApplyError::ContextNotFound {
-                file: file_path.to_path_buf(),
-                context: chunk.change_context.clone(),
-            })?;
-
-        // Match old_lines starting from the line AFTER the context line.
-        let match_start = context_idx + 1;
         let old_line_count = chunk.old_lines.len();
+        let match_start =
+            if let Some(change_context) = chunk.change_context.as_deref() {
+                let context_idx = seek_sequence(file_lines, change_context, search_start)
+                    .ok_or_else(|| ApplyError::ContextNotFound {
+                        file: file_path.to_path_buf(),
+                        context: change_context.to_string(),
+                    })?;
+                context_idx + 1
+            } else if old_line_count == 0 {
+                file_lines.len()
+            } else {
+                seek_line_block(file_lines, &chunk.old_lines, search_start).ok_or_else(|| {
+                    ApplyError::OldLinesNotMatch {
+                        file: file_path.to_path_buf(),
+                        context: "<no @@ context>".to_string(),
+                    }
+                })?
+            };
 
         // Determine the end of the replacement range.
         let end_line = if chunk.is_end_of_file {
@@ -247,7 +256,10 @@ fn compute_replacements(
                     );
                     return Err(ApplyError::OldLinesNotMatch {
                         file: file_path.to_path_buf(),
-                        context: chunk.change_context.clone(),
+                        context: chunk
+                            .change_context
+                            .clone()
+                            .unwrap_or_else(|| "<no @@ context>".to_string()),
                     });
                 }
             }
@@ -266,6 +278,25 @@ fn compute_replacements(
     }
 
     Ok(replacements)
+}
+
+fn seek_line_block(lines: &[&str], pattern: &[String], start: usize) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(lines.len());
+    }
+
+    let pattern_trimmed: Vec<&str> = pattern.iter().map(|line| line.trim()).collect();
+    for idx in start..=lines.len().saturating_sub(pattern.len()) {
+        let matches = pattern_trimmed
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| lines[idx + offset].trim() == *expected);
+        if matches {
+            return Some(idx);
+        }
+    }
+
+    None
 }
 
 /// Apply replacements in reverse order to preserve line indices.
@@ -349,7 +380,7 @@ mod tests {
             path: PathBuf::from("main.rs"),
             move_path: None,
             chunks: vec![UpdateFileChunk {
-                change_context: "fn main() {".to_string(),
+                change_context: Some("fn main() {".to_string()),
                 old_lines: vec!["    println!(\"old\");".to_string()],
                 new_lines: vec!["    println!(\"new\");".to_string()],
                 is_end_of_file: false,
@@ -375,13 +406,13 @@ mod tests {
             move_path: None,
             chunks: vec![
                 UpdateFileChunk {
-                    change_context: "fn foo() {".to_string(),
+                    change_context: Some("fn foo() {".to_string()),
                     old_lines: vec!["    old_foo();".to_string()],
                     new_lines: vec!["    new_foo();".to_string()],
                     is_end_of_file: false,
                 },
                 UpdateFileChunk {
-                    change_context: "fn bar() {".to_string(),
+                    change_context: Some("fn bar() {".to_string()),
                     old_lines: vec!["    old_bar();".to_string()],
                     new_lines: vec!["    new_bar();".to_string()],
                     is_end_of_file: false,
@@ -396,6 +427,25 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_update_without_explicit_context_marker() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "main.rs", "old();\nkeep();\n");
+        let hunks = vec![Hunk::UpdateFile {
+            path: PathBuf::from("main.rs"),
+            move_path: None,
+            chunks: vec![UpdateFileChunk {
+                change_context: None,
+                old_lines: vec!["old();".to_string()],
+                new_lines: vec!["new();".to_string()],
+                is_end_of_file: false,
+            }],
+        }];
+        let result = apply_patch(dir.path(), &hunks).unwrap();
+        assert_eq!(result.modified.len(), 1);
+        assert_eq!(read_file(dir.path(), "main.rs"), "new();\nkeep();\n");
+    }
+
+    #[test]
     fn test_apply_move_file() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "old.rs", "fn test() {\n    v1();\n}\n");
@@ -403,7 +453,7 @@ mod tests {
             path: PathBuf::from("old.rs"),
             move_path: Some(PathBuf::from("new.rs")),
             chunks: vec![UpdateFileChunk {
-                change_context: "fn test() {".to_string(),
+                change_context: Some("fn test() {".to_string()),
                 old_lines: vec!["    v1();".to_string()],
                 new_lines: vec!["    v2();".to_string()],
                 is_end_of_file: false,
@@ -449,7 +499,7 @@ mod tests {
                 path: PathBuf::from("existing.txt"),
                 move_path: None,
                 chunks: vec![UpdateFileChunk {
-                    change_context: "line1".to_string(),
+                    change_context: Some("line1".to_string()),
                     old_lines: vec!["line2".to_string()],
                     new_lines: vec!["modified_line2".to_string()],
                     is_end_of_file: false,
@@ -475,7 +525,7 @@ mod tests {
             path: PathBuf::from("eof.rs"),
             move_path: None,
             chunks: vec![UpdateFileChunk {
-                change_context: "fn main() {".to_string(),
+                change_context: Some("fn main() {".to_string()),
                 old_lines: vec![],
                 new_lines: vec!["    new1();".to_string(), "    new2();".to_string()],
                 is_end_of_file: true,
@@ -519,7 +569,7 @@ mod tests {
             path: PathBuf::from("test.rs"),
             move_path: None,
             chunks: vec![UpdateFileChunk {
-                change_context: "fn nonexistent() {".to_string(),
+                change_context: Some("fn nonexistent() {".to_string()),
                 old_lines: vec!["    something();".to_string()],
                 new_lines: vec!["    other();".to_string()],
                 is_end_of_file: false,

@@ -49,7 +49,7 @@ pub enum Hunk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateFileChunk {
     /// The context line used to locate where to apply changes (from @@ marker).
-    pub change_context: String,
+    pub change_context: Option<String>,
     /// Lines from the original file (context + removed lines).
     pub old_lines: Vec<String>,
     /// Lines for the new file (context + added lines).
@@ -217,14 +217,13 @@ fn parse_update_file(
             break;
         }
         if is_change_context_marker(line) {
-            let (chunk, next_i) = parse_update_chunk(lines, i)?;
+            let (chunk, next_i) = parse_update_chunk(lines, i, false)?;
             chunks.push(chunk);
             i = next_i;
         } else {
-            return Err(PatchError::ParseError {
-                line: i + 1,
-                message: format!("unexpected line in Update File section: {line}"),
-            });
+            let (chunk, next_i) = parse_update_chunk(lines, i, chunks.is_empty())?;
+            chunks.push(chunk);
+            i = next_i;
         }
     }
 
@@ -249,24 +248,41 @@ fn parse_update_file(
 fn parse_update_chunk(
     lines: &[&str],
     start: usize,
+    allow_missing_context: bool,
 ) -> Result<(UpdateFileChunk, usize), PatchError> {
     let context_line = lines[start];
-    let change_context = context_line
-        .strip_prefix(CHANGE_CONTEXT_MARKER_BARE)
-        .unwrap_or("")
-        .trim_start()
-        .to_string();
+    let (change_context, mut i) = if context_line == CHANGE_CONTEXT_MARKER_BARE {
+        (None, start + 1)
+    } else if let Some(context) = context_line.strip_prefix(CHANGE_CONTEXT_MARKER) {
+        (Some(context.to_string()), start + 1)
+    } else if allow_missing_context {
+        (None, start)
+    } else {
+        return Err(PatchError::ParseError {
+            line: start + 1,
+            message: format!(
+                "Expected update hunk to start with a @@ context marker, got: '{}'",
+                context_line
+            ),
+        });
+    };
 
     let mut old_lines = Vec::new();
     let mut new_lines = Vec::new();
     let mut is_end_of_file = false;
-    let mut i = start + 1;
+    let mut parsed_lines = 0usize;
 
     while i < lines.len() {
         let line = lines[i];
 
         // Check for EOF marker.
         if line == EOF_MARKER {
+            if parsed_lines == 0 {
+                return Err(PatchError::ParseError {
+                    line: i + 1,
+                    message: "Update hunk does not contain any lines".to_string(),
+                });
+            }
             is_end_of_file = true;
             i += 1;
             break;
@@ -287,13 +303,26 @@ fn parse_update_chunk(
             old_lines.push(rest.to_string());
             new_lines.push(rest.to_string());
         } else {
-            return Err(PatchError::ParseError {
-                line: i + 1,
-                message: format!("update hunk lines must start with space, '+', or '-': {line}"),
-            });
+            if parsed_lines == 0 {
+                return Err(PatchError::ParseError {
+                    line: i + 1,
+                    message: format!(
+                        "Unexpected line found in update hunk: '{line}'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)"
+                    ),
+                });
+            }
+            break;
         }
 
+        parsed_lines += 1;
         i += 1;
+    }
+
+    if parsed_lines == 0 {
+        return Err(PatchError::ParseError {
+            line: start + 1,
+            message: "Update hunk does not contain any lines".to_string(),
+        });
     }
 
     Ok((
@@ -386,7 +415,7 @@ mod tests {
                 assert_eq!(path, &PathBuf::from("src/main.rs"));
                 assert!(move_path.is_none());
                 assert_eq!(chunks.len(), 1);
-                assert_eq!(chunks[0].change_context, "fn main() {");
+                assert_eq!(chunks[0].change_context.as_deref(), Some("fn main() {"));
                 assert_eq!(
                     chunks[0].old_lines,
                     vec!["    println!(\"Hello, world!\");"]
@@ -424,7 +453,7 @@ println!(\"bad\");
         let err = parse_patch(patch).unwrap_err();
         assert!(err
             .to_string()
-            .contains("update hunk lines must start with space, '+', or '-'"));
+            .contains("Unexpected line found in update hunk"));
     }
 
     #[test]
@@ -444,8 +473,8 @@ println!(\"bad\");
         match &hunks[0] {
             Hunk::UpdateFile { chunks, .. } => {
                 assert_eq!(chunks.len(), 2);
-                assert_eq!(chunks[0].change_context, "fn foo() {");
-                assert_eq!(chunks[1].change_context, "fn bar() {");
+                assert_eq!(chunks[0].change_context.as_deref(), Some("fn foo() {"));
+                assert_eq!(chunks[1].change_context.as_deref(), Some("fn bar() {"));
             }
             _ => panic!("expected UpdateFile"),
         }
@@ -509,7 +538,27 @@ println!(\"bad\");
         match &hunks[0] {
             Hunk::UpdateFile { chunks, .. } => {
                 assert_eq!(chunks.len(), 1);
-                assert!(chunks[0].change_context.is_empty());
+                assert!(chunks[0].change_context.is_none());
+                assert_eq!(chunks[0].old_lines, vec!["old();"]);
+                assert_eq!(chunks[0].new_lines, vec!["new();"]);
+            }
+            _ => panic!("expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_allows_first_chunk_without_context_marker() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/main.rs
+-old();
++new();
+*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        match &hunks[0] {
+            Hunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 1);
+                assert!(chunks[0].change_context.is_none());
                 assert_eq!(chunks[0].old_lines, vec!["old();"]);
                 assert_eq!(chunks[0].new_lines, vec!["new();"]);
             }
