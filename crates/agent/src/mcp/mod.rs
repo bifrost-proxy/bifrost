@@ -132,6 +132,11 @@ const SHUTDOWN_TIMEOUT_MS: u64 = 500;
 /// Max concurrent server startups.
 const STARTUP_CONCURRENCY: usize = 8;
 
+/// Codex threshold for switching MCP tools to deferred loading.
+///
+/// Codex uses `>= 100`, not `> 100`.
+pub(crate) const DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD: usize = 100;
+
 /// Tool-name regex per OpenAI function-calling constraint:
 /// `^[a-zA-Z0-9_-]{1,64}$`.
 fn is_valid_tool_name(name: &str) -> bool {
@@ -658,6 +663,12 @@ pub struct McpManager {
     tool_routing: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct McpToolExposure {
+    pub direct_tools: Vec<ToolDefinition>,
+    pub deferred_tools: Vec<ToolDefinition>,
+}
+
 impl McpManager {
     /// Create a new McpManager. Enabled servers start **concurrently** with
     /// bounded parallelism; individual failures are logged and skipped without
@@ -733,6 +744,15 @@ impl McpManager {
             .values()
             .flat_map(|conn| conn.tools.iter().cloned())
             .collect()
+    }
+
+    /// Return Codex-style direct/deferred MCP exposure.
+    ///
+    /// Bifrost does not yet have Codex App connector explicit-enablement
+    /// metadata, so once the MCP tool count reaches the Codex threshold all MCP
+    /// tools are deferred and made discoverable through `tool_search`.
+    pub fn tool_exposure(&self) -> McpToolExposure {
+        mcp_tool_exposure_from_definitions(self.list_tools())
     }
 
     /// Call a tool on the routed MCP server.
@@ -836,6 +856,20 @@ impl McpManager {
         });
         join_all(futs).await;
         self.tool_routing.clear();
+    }
+}
+
+pub(crate) fn mcp_tool_exposure_from_definitions(tools: Vec<ToolDefinition>) -> McpToolExposure {
+    if tools.len() >= DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD {
+        McpToolExposure {
+            direct_tools: Vec::new(),
+            deferred_tools: tools,
+        }
+    } else {
+        McpToolExposure {
+            direct_tools: tools,
+            deferred_tools: Vec::new(),
+        }
     }
 }
 
@@ -1162,6 +1196,46 @@ mod tests {
         // Deterministic hash suffix
         let s2 = sanitise_server_prefix("a_very_long_server_name_that_exceeds_budget", 30);
         assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn mcp_tool_exposure_keeps_below_threshold_direct() {
+        let tools = (0..(DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD - 1))
+            .map(|idx| {
+                ToolDefinition::function(
+                    format!("mcp_test__tool_{idx}"),
+                    "test tool".to_string(),
+                    Some(serde_json::json!({"type":"object"})),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let exposure = mcp_tool_exposure_from_definitions(tools);
+        assert_eq!(
+            exposure.direct_tools.len(),
+            DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD - 1
+        );
+        assert!(exposure.deferred_tools.is_empty());
+    }
+
+    #[test]
+    fn mcp_tool_exposure_defers_at_codex_threshold() {
+        let tools = (0..DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD)
+            .map(|idx| {
+                ToolDefinition::function(
+                    format!("mcp_test__tool_{idx}"),
+                    "test tool".to_string(),
+                    Some(serde_json::json!({"type":"object"})),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let exposure = mcp_tool_exposure_from_definitions(tools);
+        assert!(exposure.direct_tools.is_empty());
+        assert_eq!(
+            exposure.deferred_tools.len(),
+            DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD
+        );
     }
 
     #[test]

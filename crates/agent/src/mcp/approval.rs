@@ -550,12 +550,12 @@ pub struct ToolExposure {
 impl ToolExposure {
     /// Calculate tool exposure from all available tools.
     ///
-    /// If total tools <= threshold, all are direct.
+    /// If total tools < threshold, all are direct.
     /// Otherwise, first N tools are direct, rest are deferred.
     pub fn calculate(all_tools: Vec<ToolInfo>) -> Self {
         let total = all_tools.len();
 
-        if total <= DEFERRED_LOADING_THRESHOLD {
+        if total < DEFERRED_LOADING_THRESHOLD {
             // All tools directly available
             ToolExposure {
                 direct_tools: all_tools,
@@ -569,15 +569,9 @@ impl ToolExposure {
                 "MCP tool count exceeds threshold, enabling deferred loading"
             );
 
-            // Split: first N tools are direct, rest are deferred
-            let (direct, deferred): (Vec<_>, Vec<_>) = all_tools
-                .into_iter()
-                .enumerate()
-                .partition(|(i, _)| *i < DEFERRED_LOADING_THRESHOLD);
-
             ToolExposure {
-                direct_tools: direct.into_iter().map(|(_, t)| t).collect(),
-                deferred_tools: deferred.into_iter().map(|(_, t)| t).collect(),
+                direct_tools: Vec::new(),
+                deferred_tools: all_tools,
                 deferred_loading_active: true,
             }
         }
@@ -589,7 +583,7 @@ impl ToolExposure {
     pub fn calculate_with_priority(all_tools: Vec<ToolInfo>, priority_servers: &[String]) -> Self {
         let total = all_tools.len();
 
-        if total <= DEFERRED_LOADING_THRESHOLD {
+        if total < DEFERRED_LOADING_THRESHOLD {
             return ToolExposure {
                 direct_tools: all_tools,
                 deferred_tools: Vec::new(),
@@ -666,7 +660,7 @@ impl ToolExposure {
         }
 
         Some(serde_json::json!({
-            "name": "mcp__search_tools",
+            "name": "tool_search",
             "description": format!(
                 "Search for additional MCP tools. There are {} tools available that are not directly listed. Use this to find specific tools by name or description.",
                 self.deferred_tools.len()
@@ -1077,8 +1071,8 @@ mod tests {
         let exposure = ToolExposure::calculate(tools);
 
         assert!(exposure.deferred_loading_active);
-        assert_eq!(exposure.direct_tools.len(), DEFERRED_LOADING_THRESHOLD);
-        assert_eq!(exposure.deferred_tools.len(), 50);
+        assert_eq!(exposure.direct_tools.len(), 0);
+        assert_eq!(exposure.deferred_tools.len(), 150);
         assert_eq!(exposure.total_count(), 150);
         assert!(exposure.search_tool_definition().is_some());
     }
@@ -1091,9 +1085,11 @@ mod tests {
 
         let exposure = ToolExposure::calculate(tools);
 
-        // Exactly at threshold = no deferred loading
-        assert!(!exposure.deferred_loading_active);
-        assert_eq!(exposure.direct_tools.len(), DEFERRED_LOADING_THRESHOLD);
+        // Codex defers when the count is exactly at the 100-tool threshold.
+        assert!(exposure.deferred_loading_active);
+        assert_eq!(exposure.direct_tools.len(), 0);
+        assert_eq!(exposure.deferred_tools.len(), DEFERRED_LOADING_THRESHOLD);
+        assert!(exposure.search_tool_definition().is_some());
     }
 
     #[test]
@@ -1173,7 +1169,7 @@ mod tests {
 
         let def = exposure.search_tool_definition().unwrap();
 
-        assert_eq!(def["name"], "mcp__search_tools");
+        assert_eq!(def["name"], "tool_search");
         assert!(def["description"].as_str().unwrap().contains("1 tools"));
     }
 

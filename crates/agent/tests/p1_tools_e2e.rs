@@ -2,6 +2,11 @@ use base64::Engine;
 use bifrost_agent::tools::goal::{
     execute_goal_tool, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
 };
+use bifrost_agent::tools::tool_search::{
+    parse_loadable_tool_definitions, ToolSearchEntry, ToolSearchTool,
+};
+use bifrost_agent::tools::ToolHandler;
+use bifrost_agent::types::ToolDefinition;
 use bifrost_agent::{AgentSession, ToolRegistry};
 use std::fs;
 
@@ -249,16 +254,35 @@ async fn view_image_tool_works_end_to_end() {
 }
 
 #[tokio::test]
-async fn tool_search_lists_core_tools() {
+async fn tool_search_is_hidden_without_deferred_tools() {
     let registry = ToolRegistry::with_defaults(5);
+    assert!(!registry
+        .tool_names()
+        .iter()
+        .any(|name| name == "tool_search"));
+    assert!(!registry
+        .definitions()
+        .iter()
+        .any(|definition| definition.name() == "tool_search"));
+}
+
+#[tokio::test]
+async fn tool_search_returns_deferred_mcp_tools() {
+    let deferred = ToolDefinition::function(
+        "mcp_test__exec_command".to_string(),
+        "Run a command on the MCP side".to_string(),
+        Some(serde_json::json!({"type":"object"})),
+    );
+    let tool = ToolSearchTool::new(vec![ToolSearchEntry::new(
+        deferred.clone(),
+        "MCP tools: test",
+    )]);
     let work_dir = tempfile::tempdir().expect("work dir");
-    let result = registry
-        .execute(
-            "tool_search",
-            r#"{"query":"exec command","limit":5}"#,
-            work_dir.path(),
-        )
+    let result = tool
+        .execute(r#"{"query":"exec command","limit":5}"#, work_dir.path())
         .await;
     assert!(result.success, "{}", result.output);
-    assert!(result.output.contains("exec_command"));
+    let loaded = parse_loadable_tool_definitions(&result.output);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].name(), deferred.name());
 }

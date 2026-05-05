@@ -27,10 +27,16 @@ use crate::session_status::{
 };
 use crate::skill_authoring::SkillAuthoringHub;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
+use crate::tools::tool_search::{
+    parse_loadable_tool_definitions, tool_search_definition, ToolSearchEntry, ToolSearchTool,
+    TOOL_SEARCH_TOOL_NAME,
+};
+use crate::tools::ToolHandler;
 use crate::tools::ToolRegistry;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
 use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -1505,13 +1511,46 @@ pub async fn run_turn_with_mcp_multimodal(
         }
     }
 
-    // Merge tool definitions: local tools + MCP tools
+    // Merge tool definitions: local tools + direct MCP tools. Codex-style
+    // deferred MCP tools are available through turn-scoped `tool_search`.
     let mut tool_defs = tools.definitions();
     let local_tool_count = tool_defs.len();
+    let mut visible_tool_names = tool_defs
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<HashSet<_>>();
+    let mut tool_search_entries = Vec::new();
     let mcp_tool_count = mcp.as_ref().map(|m| m.list_tools().len()).unwrap_or(0);
     if let Some(ref mcp_mgr) = mcp {
-        tool_defs.extend(mcp_mgr.list_tools());
+        let exposure = mcp_mgr.tool_exposure();
+        for definition in exposure.direct_tools {
+            visible_tool_names.insert(definition.name().to_string());
+            tool_defs.push(definition);
+        }
+        tool_search_entries.extend(exposure.deferred_tools.into_iter().map(|definition| {
+            let source = definition
+                .name()
+                .split_once("__")
+                .map(|(prefix, _)| format!("MCP tools: {prefix}"))
+                .unwrap_or_else(|| "MCP tools".to_string());
+            ToolSearchEntry::new(definition, source)
+        }));
     }
+    let tool_search_tool = if tool_search_entries.is_empty() {
+        None
+    } else {
+        let definition = tool_search_definition(&tool_search_entries);
+        visible_tool_names.insert(definition.name().to_string());
+        tool_defs.push(definition);
+        Some(ToolSearchTool::new(tool_search_entries))
+    };
+    info!(
+        local_tools = local_tool_count,
+        mcp_tools = mcp_tool_count,
+        visible_tools = tool_defs.len(),
+        tool_search_visible = tool_search_tool.is_some(),
+        "assembled agent tool definitions"
+    );
 
     let work_dir = session
         .work_dir
@@ -2047,6 +2086,15 @@ pub async fn run_turn_with_mcp_multimodal(
                 crate::tools::goal::execute_goal_tool(session, tc.name(), tc.arguments())
             {
                 result
+            } else if tc.name() == TOOL_SEARCH_TOOL_NAME {
+                match tool_search_tool.as_ref() {
+                    Some(tool) => tool.execute(tc.arguments(), &work_dir).await,
+                    None => crate::types::ToolResult {
+                        success: false,
+                        output: "tool_search is unavailable because no deferred tools are active"
+                            .to_string(),
+                    },
+                }
             } else if mcp.as_ref().is_some_and(|m| m.is_mcp_tool(tc.name())) {
                 // Route to MCP server
                 match mcp.as_mut() {
@@ -2074,6 +2122,18 @@ pub async fn run_turn_with_mcp_multimodal(
                 output_preview = %telemetry_preview(&result.output),
                 "tool call completed"
             );
+
+            if tc.name() == TOOL_SEARCH_TOOL_NAME && result.success {
+                for definition in parse_loadable_tool_definitions(&result.output) {
+                    if visible_tool_names.insert(definition.name().to_string()) {
+                        debug!(
+                            tool = %definition.name(),
+                            "loaded deferred tool definition from tool_search"
+                        );
+                        tool_defs.push(definition);
+                    }
+                }
+            }
 
             // Apply tool output token limit truncation with 1.2x serialization
             // budget (matching Codex's policy * 1.2) to account for JSON escaping

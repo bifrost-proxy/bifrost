@@ -11,7 +11,8 @@
 //! - `write_stdin`: Write to PTY session stdin
 //! - `view_image`: Load local image files as data URLs
 //! - `request_user_input`: Validate Codex-style user input requests
-//! - `tool_search`: Search registered local tools
+//! - `tool_search`: turn-scoped deferred tool discovery (registered only when
+//!   deferred tools exist)
 //! - `get_goal`/`create_goal`/`update_goal`: Goal tracking system for task management
 
 pub mod apply_patch_diff;
@@ -73,28 +74,6 @@ impl ToolRegistry {
         self.tools.insert(handler.name().to_string(), handler);
     }
 
-    fn tool_summaries(&self) -> Vec<tool_search::ToolSummary> {
-        let mut summaries: Vec<_> = self
-            .tools
-            .values()
-            .map(|handler| tool_search::ToolSummary {
-                name: handler.name().to_string(),
-                description: handler.description().to_string(),
-                parameters: handler.parameters_schema(),
-            })
-            .collect();
-        summaries.extend(goal::goal_tool_definitions().into_iter().map(|definition| {
-            let function = definition.function.expect("goal tools are functions");
-            tool_search::ToolSummary {
-                name: function.name,
-                description: function.description,
-                parameters: function.parameters.unwrap_or_else(|| serde_json::json!({})),
-            }
-        }));
-        summaries.sort_by(|left, right| left.name.cmp(&right.name));
-        summaries
-    }
-
     /// Create a registry with all built-in tools.
     pub fn with_defaults(shell_timeout_secs: u64) -> Self {
         let mut registry = Self::new();
@@ -121,9 +100,6 @@ impl ToolRegistry {
             session_manager.clone(),
         )));
         registry.register(Arc::new(pty_shell::WriteStdinTool::new(session_manager)));
-        registry.register(Arc::new(tool_search::ToolSearchTool::new(
-            registry.tool_summaries(),
-        )));
         registry
     }
 
