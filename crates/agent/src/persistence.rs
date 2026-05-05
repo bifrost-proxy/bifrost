@@ -4,7 +4,8 @@
 //! `{data_dir}/sessions/YYYY/MM/DD/session-{session_key}-{timestamp}.jsonl`
 
 use crate::history;
-use crate::types::{ChatMessage, FunctionCallInfo, ToolCallMessage};
+use crate::tools::goal::GoalState;
+use crate::types::{ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
@@ -36,6 +37,8 @@ pub mod event_types {
     pub const MCP_TOOLS_LOADED: &str = "mcp_tools_loaded";
     pub const SKILLS_LOADED: &str = "skills_loaded";
     pub const TITLE_UPDATED: &str = "title_updated";
+    pub const GOAL_UPDATED: &str = "goal_updated";
+    pub const GOAL_CLEARED: &str = "goal_cleared";
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +133,7 @@ impl ConversationRecorder {
         tool_name: &str,
         arguments: &str,
     ) -> Result<(), String> {
-        self.record_tool_call_with_id(session_key, tool_name, arguments, None)
+        self.record_tool_call_with_id(session_key, tool_name, arguments, "function", None)
     }
 
     /// Record a tool call event with the provider's tool call id.
@@ -139,6 +142,7 @@ impl ConversationRecorder {
         session_key: &str,
         tool_name: &str,
         arguments: &str,
+        call_type: &str,
         call_id: Option<&str>,
     ) -> Result<(), String> {
         self.record(ConversationEvent {
@@ -147,6 +151,7 @@ impl ConversationRecorder {
             session_key: session_key.to_string(),
             content: serde_json::json!({
                 "call_id": call_id,
+                "call_type": call_type,
                 "tool_name": tool_name,
                 "arguments": arguments,
             }),
@@ -235,6 +240,29 @@ impl ConversationRecorder {
             event_type: event_types::TITLE_UPDATED.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({ "title": title }),
+        })
+    }
+
+    pub fn record_goal_updated(
+        &mut self,
+        session_key: &str,
+        goal: &GoalState,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::GOAL_UPDATED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::to_value(goal)
+                .map_err(|e| format!("serialize goal state: {e}"))?,
+        })
+    }
+
+    pub fn record_goal_cleared(&mut self, session_key: &str) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::GOAL_CLEARED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({}),
         })
     }
 
@@ -372,6 +400,11 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
+                let call_type = event
+                    .content
+                    .get("call_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("function");
                 let call_id = event
                     .content
                     .get("call_id")
@@ -379,13 +412,18 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("recovered-tool-call-{recovered_tool_call_count}"));
-                let tool_call = ToolCallMessage {
-                    id: call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: FunctionCallInfo {
-                        name: tool_name.to_string(),
-                        arguments: arguments.to_string(),
-                    },
+                let tool_call = if call_type == "custom" {
+                    ToolCallMessage::custom_call(
+                        call_id.clone(),
+                        tool_name.to_string(),
+                        arguments.to_string(),
+                    )
+                } else {
+                    ToolCallMessage::function_call(
+                        call_id.clone(),
+                        tool_name.to_string(),
+                        arguments.to_string(),
+                    )
                 };
                 if !pending_tool_calls.contains_key(&call_id) {
                     pending_tool_call_order.push_back(call_id.clone());
@@ -450,6 +488,32 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
     }
 
     Ok(events)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionRuntimeState {
+    pub current_goal: Option<GoalState>,
+}
+
+pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, String> {
+    let events = load_conversation_events(path)?;
+    let mut state = SessionRuntimeState::default();
+
+    for event in events {
+        match event.event_type.as_str() {
+            event_types::GOAL_UPDATED => {
+                let goal: GoalState = serde_json::from_value(event.content)
+                    .map_err(|e| format!("parse goal state: {e}"))?;
+                state.current_goal = Some(goal);
+            }
+            event_types::GOAL_CLEARED => {
+                state.current_goal = None;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(state)
 }
 
 /// Summary of a session file extracted from scanning events.
@@ -772,6 +836,7 @@ mod tests {
                 "resume-valid",
                 "list_directory",
                 r#"{"path":"."}"#,
+                "function",
                 Some("call-real-id"),
             )
             .unwrap();
@@ -856,12 +921,12 @@ mod tests {
 
         assert_eq!(messages.len(), 5);
         assert_eq!(
-            messages[1].tool_calls.as_ref().unwrap()[0].function.name,
+            messages[1].tool_calls.as_ref().unwrap()[0].name(),
             "read_file"
         );
         assert_eq!(messages[2].content.as_deref(), Some("cargo content"));
         assert_eq!(
-            messages[3].tool_calls.as_ref().unwrap()[0].function.name,
+            messages[3].tool_calls.as_ref().unwrap()[0].name(),
             "list_directory"
         );
         assert_eq!(messages[4].content.as_deref(), Some("directory content"));
@@ -970,6 +1035,51 @@ mod tests {
         for event in &events {
             assert!(event.timestamp > 0);
         }
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_restores_latest_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime");
+        let goal = GoalState {
+            objective: "finish codex parity".to_string(),
+            status: crate::tools::goal::GoalStatus::Complete,
+            token_budget: Some(1000),
+            created_at: 1,
+            updated_at: 2,
+            start_total_tokens: 100,
+            completed_total_tokens: Some(275),
+            completed_time_used_seconds: Some(33),
+        };
+        recorder.record_goal_updated("goal-runtime", &goal).unwrap();
+        recorder.close();
+
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert_eq!(state.current_goal, Some(goal));
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_respects_goal_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime-clear");
+        let goal = GoalState {
+            objective: "temporary goal".to_string(),
+            status: crate::tools::goal::GoalStatus::Active,
+            token_budget: None,
+            created_at: 1,
+            updated_at: 1,
+            start_total_tokens: 0,
+            completed_total_tokens: None,
+            completed_time_used_seconds: None,
+        };
+        recorder
+            .record_goal_updated("goal-runtime-clear", &goal)
+            .unwrap();
+        recorder.record_goal_cleared("goal-runtime-clear").unwrap();
+        recorder.close();
+
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert!(state.current_goal.is_none());
     }
 
     #[test]

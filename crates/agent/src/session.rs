@@ -17,10 +17,11 @@ use crate::compact;
 use crate::config::AgentConfig;
 use crate::history;
 use crate::mcp::McpManager;
-use crate::memory_runtime;
+use crate::memory;
 use crate::persistence;
 use crate::persistence::ConversationRecorder;
 use crate::prompt;
+use crate::skill_authoring::SkillAuthoringHub;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
 use crate::types::{ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
@@ -79,6 +80,10 @@ pub struct AgentSession {
 
     /// Shared skill registry attached to this session.
     pub skill_registry: Option<Arc<SkillRegistry>>,
+
+    /// Hub tracking in-flight `/skill` authoring state machines, keyed by
+    /// `session_key`. Populated lazily by the `/skill` handler.
+    pub skill_authoring: SkillAuthoringHub,
 
     /// When true, skip memory injection for this turn (set by /clear, reset after use).
     /// This prevents the model from "remembering" prior context immediately after a clear.
@@ -140,6 +145,7 @@ impl AgentSession {
             recorder: None,
             slash_router: SlashCommandRouter::with_default_builtins(),
             skill_registry: None,
+            skill_authoring: SkillAuthoringHub::new(),
             memory_cleared: false,
             guide_channel: None,
             title: None,
@@ -205,6 +211,13 @@ impl AgentSession {
     }
 
     pub fn clear(&mut self) {
+        if self.current_goal.is_some() {
+            if let Some(recorder) = self.recorder.as_mut() {
+                if let Err(error) = recorder.record_goal_cleared(&self.session_key) {
+                    warn!(error = %error, "failed to record goal clear");
+                }
+            }
+        }
         self.history.clear();
         self.compaction_count = 0;
         self.total_tokens_used = None;
@@ -371,7 +384,7 @@ impl AgentSession {
                         .as_ref()
                         .map(|tcs| {
                             tcs.iter()
-                                .map(|tc| tc.function.arguments.len() + tc.function.name.len())
+                                .map(|tc| tc.arguments().len() + tc.name().len())
                                 .sum::<usize>()
                         })
                         .unwrap_or(0)
@@ -550,7 +563,7 @@ impl AgentSessionManager {
                         content: m.content.clone().unwrap_or_default(),
                         tool_calls: m.tool_calls.as_ref().map(|tc| {
                             tc.iter()
-                                .map(|t| format!("{}({})", t.function.name, t.function.arguments))
+                                .map(|t| format!("{}({})", t.name(), t.arguments()))
                                 .collect()
                         }),
                     })
@@ -639,7 +652,7 @@ pub fn handle_session_free_command(
             }
             // Build a minimal session for remember_explicit (only needs session_key)
             let stub = AgentSession::new(session_key);
-            match memory_runtime::remember_explicit(config, &stub, args.trim()) {
+            match memory::remember_explicit(config, &stub, args.trim()) {
                 Ok(record) => Some(format!("已记住长期记忆: {}", record.id)),
                 Err(e) => Some(format!("保存记忆失败: {e}")),
             }
@@ -649,7 +662,7 @@ pub fn handle_session_free_command(
             ..
         } => {
             let stub = AgentSession::new(session_key);
-            match memory_runtime::list_visible_memories(config, &stub, 20) {
+            match memory::list_visible_memories(config, &stub, 20) {
                 Ok(records) if records.is_empty() => Some("当前 scope 没有长期记忆。".to_string()),
                 Ok(records) => {
                     let mut lines = vec!["当前可见长期记忆文件条目:".to_string()];
@@ -672,7 +685,7 @@ pub fn handle_session_free_command(
                 return Some("用法: /forget <id|last>".to_string());
             }
             let stub = AgentSession::new(session_key);
-            match memory_runtime::forget_memory(config, &stub, args.trim()) {
+            match memory::forget_memory(config, &stub, args.trim()) {
                 Ok(Some(id)) => Some(format!("已忘记长期记忆: {id}")),
                 Ok(None) => Some("没有找到可忘记的长期记忆。".to_string()),
                 Err(e) => Some(format!("删除记忆失败: {e}")),
@@ -944,7 +957,7 @@ pub async fn run_turn_with_mcp(
                 plan_steps: None,
             });
         }
-        let record = memory_runtime::remember_explicit(config, session, args.trim())?;
+        let record = memory::remember_explicit(config, session, args.trim())?;
         return Ok(TurnResult {
             response: format!("已记住长期记忆: {}", record.id),
             tool_calls_log: Vec::new(),
@@ -967,7 +980,7 @@ pub async fn run_turn_with_mcp(
                 warn!(error = %e, "failed to record user message");
             }
         }
-        let records = memory_runtime::list_visible_memories(config, session, 20)?;
+        let records = memory::list_visible_memories(config, session, 20)?;
         let response = if records.is_empty() {
             "当前 scope 没有长期记忆。".to_string()
         } else {
@@ -1009,7 +1022,7 @@ pub async fn run_turn_with_mcp(
                 plan_steps: None,
             });
         }
-        let response = match memory_runtime::forget_memory(config, session, args.trim())? {
+        let response = match memory::forget_memory(config, session, args.trim())? {
             Some(id) => format!("已忘记长期记忆: {id}"),
             None => "没有找到可忘记的长期记忆。".to_string(),
         };
@@ -1108,6 +1121,9 @@ pub async fn run_turn_with_mcp(
                 Ok(messages) if !messages.is_empty() => {
                     let count = messages.len();
                     session.history = messages;
+                    if let Ok(runtime_state) = persistence::load_session_runtime_state(&candidate) {
+                        session.current_goal = runtime_state.current_goal;
+                    }
                     session.history_version = session.history_version.saturating_add(1);
                     return Ok(TurnResult {
                         response: format!(
@@ -1153,9 +1169,36 @@ pub async fn run_turn_with_mcp(
         ref args,
     } = slash_dispatch
     {
-        if args.trim() == "list" {
+        // Route through the authoring hub so `/skill start|draft|commit|cancel`
+        // drives `SkillAuthoringSession` → `SkillStore::commit`, getting
+        // validation, manifest.json, checksum, and `.history` archival for free.
+        let store: Option<Arc<SkillStore>> = session
+            .skill_registry
+            .as_ref()
+            .map(|registry| registry.store());
+        if let Some(store) = store {
+            let outcome = session.skill_authoring.dispatch(
+                &session.session_key,
+                store,
+                session.skill_registry.as_deref(),
+                args,
+            );
+            // Refresh the registry so a freshly committed skill becomes
+            // discoverable via slash commands in the same session.
+            if outcome.committed.is_some() {
+                if let Some(registry) = session.skill_registry.as_ref() {
+                    if let Err(e) = registry.reload_all() {
+                        warn!(error = %e, "failed to reload skill registry after commit");
+                    }
+                }
+            }
+            if let Some(ref mut rec) = recorder {
+                if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                    warn!(error = %e, "failed to record user message");
+                }
+            }
             return Ok(TurnResult {
-                response: session.slash_router.help_text(),
+                response: outcome.response,
                 tool_calls_log: Vec::new(),
                 work_dir_switched: None,
                 title_updated: None,
@@ -1163,7 +1206,7 @@ pub async fn run_turn_with_mcp(
             });
         }
         return Ok(TurnResult {
-            response: "Skill Creator 已启动。请描述要创建或编辑的 skill。".to_string(),
+            response: "Skill registry 尚未初始化，无法创建 skill。".to_string(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
@@ -1291,7 +1334,7 @@ pub async fn run_turn_with_mcp(
         session.memory_cleared = false; // reset for future turns
         None
     } else {
-        memory_runtime::recall_system_message(config, session, user_message)
+        memory::recall_system_message(config, session, user_message)
     };
 
     for iteration in 0..max_iterations {
@@ -1521,7 +1564,7 @@ pub async fn run_turn_with_mcp(
                 "agent turn completed"
             );
 
-            memory_runtime::auto_extract_after_turn(
+            memory::auto_extract_after_turn(
                 std::sync::Arc::new(client.clone()),
                 config.clone(),
                 session.session_key.clone(),
@@ -1551,7 +1594,7 @@ pub async fn run_turn_with_mcp(
         // Execute each tool call
         for tc in &response.tool_calls {
             info!(
-                tool = %tc.function.name,
+                tool = %tc.name(),
                 call_id = %tc.id,
                 "executing tool call"
             );
@@ -1560,27 +1603,23 @@ pub async fn run_turn_with_mcp(
             if let Some(ref mut rec) = recorder {
                 if let Err(e) = rec.record_tool_call_with_id(
                     &session.session_key,
-                    &tc.function.name,
-                    &tc.function.arguments,
+                    tc.name(),
+                    tc.arguments(),
+                    &tc.call_type,
                     Some(&tc.id),
                 ) {
                     warn!(error = %e, "failed to record tool call");
                 }
             }
 
-            let result = if let Some(result) = crate::tools::goal::execute_goal_tool(
-                session,
-                &tc.function.name,
-                &tc.function.arguments,
-            ) {
-                result
-            } else if mcp
-                .as_ref()
-                .is_some_and(|m| m.is_mcp_tool(&tc.function.name))
+            let result = if let Some(result) =
+                crate::tools::goal::execute_goal_tool(session, tc.name(), tc.arguments())
             {
+                result
+            } else if mcp.as_ref().is_some_and(|m| m.is_mcp_tool(tc.name())) {
                 // Route to MCP server
                 match mcp.as_mut() {
-                    Some(m) => match m.call_tool(&tc.function.name, &tc.function.arguments).await {
+                    Some(m) => match m.call_tool(tc.name(), tc.arguments()).await {
                         Ok(r) => r,
                         Err(e) => crate::types::ToolResult {
                             success: false,
@@ -1594,13 +1633,11 @@ pub async fn run_turn_with_mcp(
                 }
             } else {
                 // Route to local tool registry
-                tools
-                    .execute(&tc.function.name, &tc.function.arguments, &work_dir)
-                    .await
+                tools.execute(tc.name(), tc.arguments(), &work_dir).await
             };
 
             debug!(
-                tool = %tc.function.name,
+                tool = %tc.name(),
                 success = result.success,
                 output_len = result.output.len(),
                 output_preview = %telemetry_preview(&result.output),
@@ -1620,8 +1657,8 @@ pub async fn run_turn_with_mcp(
             };
 
             tool_calls_log.push(ToolCallLog {
-                tool_name: tc.function.name.clone(),
-                arguments: tc.function.arguments.clone(),
+                tool_name: tc.name().to_string(),
+                arguments: tc.arguments().to_string(),
                 result: result.output.clone(),
                 success: result.success,
             });
@@ -1630,7 +1667,7 @@ pub async fn run_turn_with_mcp(
             if let Some(ref mut rec) = recorder {
                 if let Err(e) = rec.record_tool_result_with_call_id(
                     &session.session_key,
-                    &tc.function.name,
+                    tc.name(),
                     &result.output,
                     result.success,
                     Some(&tc.id),
@@ -2075,17 +2112,14 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCallInfo, ToolCallMessage};
+    use crate::types::ToolCallMessage;
 
     fn test_tool_call(id: &str) -> ToolCallMessage {
-        ToolCallMessage {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCallInfo {
-                name: "list_directory".to_string(),
-                arguments: r#"{"path":"."}"#.to_string(),
-            },
-        }
+        ToolCallMessage::function_call(
+            id.to_string(),
+            "list_directory".to_string(),
+            r#"{"path":"."}"#.to_string(),
+        )
     }
 
     #[test]

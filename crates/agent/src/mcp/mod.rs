@@ -39,7 +39,7 @@ pub mod session;
 pub mod types;
 
 use crate::config::McpServerConfig;
-use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
+use crate::types::{ToolDefinition, ToolResult};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -698,13 +698,14 @@ impl McpManager {
                         continue;
                     }
                     for tool in &conn.tools {
+                        let tool_name = tool.name().to_string();
                         if manager
                             .tool_routing
-                            .insert(tool.function.name.clone(), name.clone())
+                            .insert(tool_name.clone(), name.clone())
                             .is_some()
                         {
                             warn!(
-                                tool = %tool.function.name,
+                                tool = %tool_name,
                                 server = %name,
                                 "tool name collision across MCP servers; later wins"
                             );
@@ -1077,14 +1078,11 @@ async fn list_tools_from_connection(
 
         let parameters = validate_or_default_schema(server_name, &tool.name, tool.input_schema);
 
-        tool_defs.push(ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: prefixed_name,
-                description: tool.description.unwrap_or_default(),
-                parameters: Some(parameters),
-            },
-        });
+        tool_defs.push(ToolDefinition::function(
+            prefixed_name,
+            tool.description.unwrap_or_default(),
+            Some(parameters),
+        ));
     }
     Ok(tool_defs)
 }

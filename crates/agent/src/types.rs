@@ -80,7 +80,14 @@ pub struct ToolCallMessage {
     pub id: String,
     #[serde(rename = "type")]
     pub call_type: String,
-    pub function: FunctionCallInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom: Option<CustomCallInfo>,
 }
 
 /// Function call details within a tool call.
@@ -90,12 +97,68 @@ pub struct FunctionCallInfo {
     pub arguments: String,
 }
 
+/// Custom/freeform call details within a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomCallInfo {
+    pub name: String,
+    pub input: String,
+}
+
+impl ToolCallMessage {
+    pub fn function_call(id: String, name: String, arguments: String) -> Self {
+        Self {
+            id,
+            call_type: "function".to_string(),
+            function: Some(FunctionCallInfo { name, arguments }),
+            name: None,
+            input: None,
+            custom: None,
+        }
+    }
+
+    pub fn custom_call(id: String, name: String, input: String) -> Self {
+        Self {
+            id,
+            call_type: "custom".to_string(),
+            function: None,
+            name: Some(name),
+            input: Some(input),
+            custom: None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.function
+            .as_ref()
+            .map(|function| function.name.as_str())
+            .or(self.name.as_deref())
+            .or_else(|| self.custom.as_ref().map(|custom| custom.name.as_str()))
+            .unwrap_or("")
+    }
+
+    pub fn arguments(&self) -> &str {
+        self.function
+            .as_ref()
+            .map(|function| function.arguments.as_str())
+            .or(self.input.as_deref())
+            .or_else(|| self.custom.as_ref().map(|custom| custom.input.as_str()))
+            .unwrap_or("")
+    }
+}
+
 /// Tool definition sent to the model in the `tools` parameter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
-    pub function: FunctionDefinition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<CustomToolFormat>,
 }
 
 /// Function schema within a tool definition.
@@ -105,6 +168,62 @@ pub struct FunctionDefinition {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+}
+
+/// Grammar-backed freeform custom tool definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomToolFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+    pub syntax: String,
+    pub definition: String,
+}
+
+impl ToolDefinition {
+    pub fn function(
+        name: String,
+        description: String,
+        parameters: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            tool_type: "function".to_string(),
+            function: Some(FunctionDefinition {
+                name,
+                description,
+                parameters,
+            }),
+            name: None,
+            description: None,
+            format: None,
+        }
+    }
+
+    pub fn custom_grammar(
+        name: String,
+        description: String,
+        syntax: String,
+        definition: String,
+    ) -> Self {
+        Self {
+            tool_type: "custom".to_string(),
+            function: None,
+            name: Some(name),
+            description: Some(description),
+            format: Some(CustomToolFormat {
+                format_type: "grammar".to_string(),
+                syntax,
+                definition,
+            }),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.function
+            .as_ref()
+            .map(|function| function.name.as_str())
+            .or(self.name.as_deref())
+            .unwrap_or("")
+    }
 }
 
 /// Parsed model response with tool call support.

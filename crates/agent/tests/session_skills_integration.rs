@@ -29,7 +29,7 @@ async fn new_with_work_dir_attaches_skill_registry_for_skill_list() {
     .expect("run turn");
 
     assert!(!result.response.contains("未知命令"));
-    assert!(result.response.contains("Skill 命令:"));
+    assert!(result.response.contains("已注册的 skill slash 命令:"));
     assert!(result.response.contains("/weather"));
 }
 

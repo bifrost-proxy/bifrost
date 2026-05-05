@@ -55,18 +55,22 @@ const KEYRING_SERVICE: &str = "bifrost-agent-oauth";
 
 /// Storage mode for OAuth credentials.
 ///
-/// Matches Codex's `OAuthCredentialsStoreMode` with Auto/File/Keyring modes.
+/// Matches Codex's `OAuthCredentialsStoreMode` with Auto/File/Keyring/Ephemeral modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OAuthCredentialsStoreMode {
     /// Automatically choose the best available storage:
     /// keyring if available, file as fallback.
     #[default]
     Auto,
-    /// Always use file-based storage.
+    /// Always use file-based storage (CODEX_HOME/.credentials.json).
+    /// Readable by other applications running as the same user.
     File,
     /// Always use OS keychain (macOS Keychain, Windows Credential Manager, etc.).
     /// Requires the `keyring-store` feature.
     Keyring,
+    /// Store credentials in memory only for the current process.
+    /// Tokens are lost when the process exits.
+    Ephemeral,
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +323,10 @@ pub fn save_oauth_tokens_with_mode(
     mode: OAuthCredentialsStoreMode,
 ) -> anyhow::Result<()> {
     match mode {
+        OAuthCredentialsStoreMode::Ephemeral => {
+            // Ephemeral mode: tokens are only held in memory, never persisted.
+            Ok(())
+        }
         OAuthCredentialsStoreMode::File => OAuthTokenStore::new(data_dir).save(tokens),
         #[cfg(feature = "keyring-store")]
         OAuthCredentialsStoreMode::Keyring => KeyringTokenStore::save(tokens),
@@ -358,6 +366,10 @@ pub fn load_oauth_tokens_with_mode(
     mode: OAuthCredentialsStoreMode,
 ) -> anyhow::Result<Option<StoredOAuthTokens>> {
     match mode {
+        OAuthCredentialsStoreMode::Ephemeral => {
+            // Ephemeral mode: nothing is persisted, always return None.
+            Ok(None)
+        }
         OAuthCredentialsStoreMode::File => OAuthTokenStore::new(data_dir).load(server_name),
         #[cfg(feature = "keyring-store")]
         OAuthCredentialsStoreMode::Keyring => KeyringTokenStore::load(server_name, url),
@@ -375,6 +387,41 @@ pub fn load_oauth_tokens_with_mode(
                 }
             }
             OAuthTokenStore::new(data_dir).load(server_name)
+        }
+    }
+}
+
+/// Delete tokens using the specified storage mode.
+///
+/// Matches Codex's `delete_oauth_tokens` which removes from both keyring and file
+/// to ensure no stale credentials remain.
+#[allow(unused_variables)]
+pub fn delete_oauth_tokens_with_mode(
+    server_name: &str,
+    url: &str,
+    data_dir: &Path,
+    mode: OAuthCredentialsStoreMode,
+) -> anyhow::Result<bool> {
+    match mode {
+        OAuthCredentialsStoreMode::Ephemeral => Ok(false),
+        OAuthCredentialsStoreMode::File => OAuthTokenStore::new(data_dir).delete(server_name),
+        #[cfg(feature = "keyring-store")]
+        OAuthCredentialsStoreMode::Keyring => KeyringTokenStore::delete(server_name, url),
+        #[cfg(not(feature = "keyring-store"))]
+        OAuthCredentialsStoreMode::Keyring => OAuthTokenStore::new(data_dir).delete(server_name),
+        OAuthCredentialsStoreMode::Auto => {
+            // Delete from both keyring and file to match Codex behavior
+            let mut removed = false;
+            #[cfg(feature = "keyring-store")]
+            if KeyringTokenStore::is_available() {
+                if let Ok(true) = KeyringTokenStore::delete(server_name, url) {
+                    removed = true;
+                }
+            }
+            if let Ok(true) = OAuthTokenStore::new(data_dir).delete(server_name) {
+                removed = true;
+            }
+            Ok(removed)
         }
     }
 }

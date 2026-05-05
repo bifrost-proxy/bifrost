@@ -353,9 +353,8 @@ fn format_history_for_compaction(history: &[ChatMessage]) -> String {
                     let calls: Vec<String> = tool_calls
                         .iter()
                         .map(|tc| {
-                            let args =
-                                truncate_chars_with_suffix(&tc.function.arguments, 500, "...");
-                            format!("{}({})", tc.function.name, args)
+                            let args = truncate_chars_with_suffix(tc.arguments(), 500, "...");
+                            format!("{}({})", tc.name(), args)
                         })
                         .collect();
                     parts.push(format!("[{role}]: called tools: {}", calls.join(", ")));
@@ -366,14 +365,17 @@ fn format_history_for_compaction(history: &[ChatMessage]) -> String {
     parts.join("\n")
 }
 
-/// Collect the last N user messages (preserving order).
+/// Collect the last N *real* user messages (preserving order).
+/// Summary messages from prior compactions are excluded to prevent
+/// stale summaries from accumulating across repeated compactions
+/// (matching Codex's `collect_user_messages` filter).
 /// Also includes adjacent assistant/tool messages for context.
 fn collect_recent_user_messages(history: &[ChatMessage], count: usize) -> Vec<ChatMessage> {
-    // Find indices of user messages
+    // Find indices of real user messages (skip compaction summaries)
     let user_indices: Vec<usize> = history
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == "user" && m.content.is_some())
+        .filter(|(_, m)| m.role == "user" && m.content.is_some() && !is_summary_message(m))
         .map(|(i, _)| i)
         .collect();
 
@@ -451,7 +453,7 @@ pub fn insert_initial_context_before_last_user_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCallInfo, ToolCallMessage};
+    use crate::types::ToolCallMessage;
 
     #[test]
     fn test_format_history_basic() {
@@ -492,14 +494,11 @@ mod tests {
             "前".repeat(600)
         );
         let history = vec![ChatMessage::assistant_with_tool_calls(vec![
-            ToolCallMessage {
-                id: "call-1".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCallInfo {
-                    name: "write_file".to_string(),
-                    arguments,
-                },
-            },
+            ToolCallMessage::function_call(
+                "call-1".to_string(),
+                "write_file".to_string(),
+                arguments,
+            ),
         ])];
 
         let formatted = format_history_for_compaction(&history);
@@ -527,19 +526,46 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_recent_user_messages_excludes_summary() {
+        // After a prior compaction the history starts with a summary message.
+        // It must NOT be included in recent_user_messages to prevent stale
+        // summaries accumulating across repeated compactions.
+        let history = vec![
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}previous compaction summary")),
+            ChatMessage::assistant("reply1"),
+            ChatMessage::user("real user question 1"),
+            ChatMessage::assistant("reply2"),
+            ChatMessage::user("real user question 2"),
+        ];
+        let recent = collect_recent_user_messages(&history, 3);
+        // Only real user messages should appear; summary excluded
+        assert!(
+            recent.iter().all(|m| m.role != "user"
+                || !m
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with(SUMMARY_PREFIX)),
+            "summary message leaked into recent_user_messages: {recent:?}"
+        );
+        // The first included message should be "real user question 1"
+        let first_user = recent.iter().find(|m| m.role == "user").unwrap();
+        assert_eq!(first_user.content.as_deref(), Some("real user question 1"));
+    }
+
+    #[test]
     fn test_compaction_preserves_tool_call_tool_result_invariants() {
         let history = vec![
             ChatMessage::user("first"),
             ChatMessage::assistant("reply"),
             ChatMessage::user("inspect"),
-            ChatMessage::assistant_with_tool_calls(vec![crate::types::ToolCallMessage {
-                id: "call-1".to_string(),
-                call_type: "function".to_string(),
-                function: crate::types::FunctionCallInfo {
-                    name: "read_file".to_string(),
-                    arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
-                },
-            }]),
+            ChatMessage::assistant_with_tool_calls(vec![
+                crate::types::ToolCallMessage::function_call(
+                    "call-1".to_string(),
+                    "read_file".to_string(),
+                    r#"{"path":"Cargo.toml"}"#.to_string(),
+                ),
+            ]),
             ChatMessage::tool_result("call-1", "content"),
             ChatMessage::assistant("done"),
         ];

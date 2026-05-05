@@ -5,8 +5,6 @@
 
 use std::path::PathBuf;
 use thiserror::Error;
-use tracing::warn;
-
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 pub const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
@@ -140,8 +138,10 @@ fn parse_hunks(lines: &[&str]) -> Result<Vec<Hunk>, PatchError> {
             hunks.push(hunk);
             i = next_i;
         } else {
-            warn!(line_num = i + 1, line = line, "skipping unrecognized line");
-            i += 1;
+            return Err(PatchError::ParseError {
+                line: i + 1,
+                message: format!("unexpected line outside file section: {line}"),
+            });
         }
     }
 
@@ -158,12 +158,13 @@ fn parse_add_file(path: &str, lines: &[&str], start: usize) -> Result<(Hunk, usi
         if is_hunk_marker(line) {
             break;
         }
-        // Add file lines may have a + prefix (Codex format) or be plain text.
-        if let Some(stripped) = line.strip_prefix('+') {
-            contents.push(stripped.to_string());
-        } else {
-            contents.push(line.to_string());
-        }
+        let Some(stripped) = line.strip_prefix('+') else {
+            return Err(PatchError::ParseError {
+                line: i + 1,
+                message: "Add File lines must start with '+'".to_string(),
+            });
+        };
+        contents.push(stripped.to_string());
         i += 1;
     }
 
@@ -220,14 +221,18 @@ fn parse_update_file(
             chunks.push(chunk);
             i = next_i;
         } else {
-            // Unexpected line in update section, skip.
-            warn!(
-                line_num = i + 1,
-                line = line,
-                "unexpected line in Update File section"
-            );
-            i += 1;
+            return Err(PatchError::ParseError {
+                line: i + 1,
+                message: format!("unexpected line in Update File section: {line}"),
+            });
         }
+    }
+
+    if chunks.is_empty() {
+        return Err(PatchError::ParseError {
+            line: start,
+            message: "Update File section must contain at least one @@ chunk".to_string(),
+        });
     }
 
     Ok((
@@ -281,19 +286,11 @@ fn parse_update_chunk(
             // Context line (space prefix): appears in both old and new.
             old_lines.push(rest.to_string());
             new_lines.push(rest.to_string());
-        } else if line.is_empty() {
-            // Empty line treated as empty context line.
-            old_lines.push(String::new());
-            new_lines.push(String::new());
         } else {
-            // No recognized prefix — treat as context (best effort).
-            warn!(
-                line_num = i + 1,
-                line = line,
-                "line without recognized prefix, treating as context"
-            );
-            old_lines.push(line.to_string());
-            new_lines.push(line.to_string());
+            return Err(PatchError::ParseError {
+                line: i + 1,
+                message: format!("update hunk lines must start with space, '+', or '-': {line}"),
+            });
         }
 
         i += 1;
@@ -401,6 +398,33 @@ mod tests {
             }
             _ => panic!("expected UpdateFile"),
         }
+    }
+
+    #[test]
+    fn test_parse_add_file_requires_plus_prefix() {
+        let patch = "\
+*** Begin Patch
+*** Add File: src/new.rs
+fn main() {}
+*** End Patch";
+        let err = parse_patch(patch).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Add File lines must start with '+'"));
+    }
+
+    #[test]
+    fn test_parse_update_rejects_unprefixed_line() {
+        let patch = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@ fn main() {
+println!(\"bad\");
+*** End Patch";
+        let err = parse_patch(patch).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("update hunk lines must start with space, '+', or '-'"));
     }
 
     #[test]

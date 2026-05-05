@@ -5,7 +5,7 @@
 //! registry.
 
 use crate::session::AgentSession;
-use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
+use crate::types::{ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -35,16 +35,16 @@ pub struct Goal {
 }
 
 /// Session-owned goal runtime state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalState {
-    objective: String,
-    status: GoalStatus,
-    token_budget: Option<u64>,
-    created_at: u64,
-    updated_at: u64,
-    start_total_tokens: u64,
-    completed_total_tokens: Option<u64>,
-    completed_time_used_seconds: Option<u64>,
+    pub(crate) objective: String,
+    pub(crate) status: GoalStatus,
+    pub(crate) token_budget: Option<u64>,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
+    pub(crate) start_total_tokens: u64,
+    pub(crate) completed_total_tokens: Option<u64>,
+    pub(crate) completed_time_used_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,59 +116,50 @@ impl GoalState {
 
 pub fn goal_tool_definitions() -> Vec<ToolDefinition> {
     vec![
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: GET_GOAL_TOOL_NAME.to_string(),
-                description: "Get the current goal for this session, including status, budgets, token and elapsed-time usage, and remaining token budget.".to_string(),
-                parameters: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                })),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: CREATE_GOAL_TOOL_NAME.to_string(),
-                description: format!(
-                    "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when an explicit token budget is requested. Fails if a goal exists; use {UPDATE_GOAL_TOOL_NAME} only for status."
-                ),
-                parameters: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "objective": {
-                            "type": "string",
-                            "description": "Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails."
-                        },
-                        "token_budget": {
-                            "type": "integer",
-                            "description": "Optional positive token budget for the new active goal."
-                        }
+        ToolDefinition::function(
+            GET_GOAL_TOOL_NAME.to_string(),
+            "Get the current goal for this session, including status, budgets, token and elapsed-time usage, and remaining token budget.".to_string(),
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            })),
+        ),
+        ToolDefinition::function(
+            CREATE_GOAL_TOOL_NAME.to_string(),
+            format!(
+                "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when an explicit token budget is requested. Fails if a goal exists; use {UPDATE_GOAL_TOOL_NAME} only for status."
+            ),
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails."
                     },
-                    "required": ["objective"]
-                })),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".to_string(),
-            function: FunctionDefinition {
-                name: UPDATE_GOAL_TOOL_NAME.to_string(),
-                description: "Update the existing goal. Use this tool only to mark the goal achieved. Set status to `complete` only when the objective has actually been achieved and no required work remains. Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work. You cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system. When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.".to_string(),
-                parameters: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "enum": ["complete"],
-                            "description": "Required. Set to complete only when the objective is achieved and no required work remains."
-                        }
-                    },
-                    "required": ["status"]
-                })),
-            },
-        },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Optional positive token budget for the new active goal."
+                    }
+                },
+                "required": ["objective"]
+            })),
+        ),
+        ToolDefinition::function(
+            UPDATE_GOAL_TOOL_NAME.to_string(),
+            "Update the existing goal. Use this tool only to mark the goal achieved. Set status to `complete` only when the objective has actually been achieved and no required work remains. Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work. You cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system. When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.".to_string(),
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["complete"],
+                        "description": "Required. Set to complete only when the objective is achieved and no required work remains."
+                    }
+                },
+                "required": ["status"]
+            })),
+        ),
     ]
 }
 
@@ -231,6 +222,13 @@ fn handle_create_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         total_tokens_used,
         now,
     ));
+    if let Some(goal) = session.current_goal.as_ref() {
+        if let Some(recorder) = session.recorder.as_mut() {
+            if let Err(error) = recorder.record_goal_updated(&session.session_key, goal) {
+                warn!(error = %error, "failed to record goal update");
+            }
+        }
+    }
 
     info!(session_key = %session.session_key, objective, "goal created");
     goal_response(session, CompletionBudgetReport::Omit)
@@ -264,6 +262,11 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
     };
 
     goal.mark_complete(total_tokens_used, now);
+    if let Some(recorder) = session.recorder.as_mut() {
+        if let Err(error) = recorder.record_goal_updated(&session.session_key, goal) {
+            warn!(error = %error, "failed to record goal update");
+        }
+    }
     info!(
         session_key = %session.session_key,
         objective = %goal.objective,

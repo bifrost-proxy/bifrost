@@ -98,17 +98,10 @@ pub fn is_valid_chat_history(messages: &[ChatMessage]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCallInfo, ToolCallMessage};
+    use crate::types::ToolCallMessage;
 
     fn tool_call(id: &str, name: &str) -> ToolCallMessage {
-        ToolCallMessage {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCallInfo {
-                name: name.to_string(),
-                arguments: "{}".to_string(),
-            },
-        }
+        ToolCallMessage::function_call(id.to_string(), name.to_string(), "{}".to_string())
     }
 
     #[test]

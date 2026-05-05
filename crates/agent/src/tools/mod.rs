@@ -20,7 +20,7 @@ pub mod shell;
 pub mod switch_workdir;
 pub mod update_plan;
 
-use crate::types::{FunctionDefinition, ToolDefinition, ToolResult};
+use crate::types::{ToolDefinition, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
@@ -93,13 +93,16 @@ impl ToolRegistry {
         let mut definitions: Vec<_> = self
             .tools
             .values()
-            .map(|h| ToolDefinition {
-                tool_type: "function".to_string(),
-                function: FunctionDefinition {
-                    name: h.name().to_string(),
-                    description: h.description().to_string(),
-                    parameters: Some(h.parameters_schema()),
-                },
+            .map(|h| {
+                if h.name() == apply_patch_diff::APPLY_PATCH_TOOL_NAME {
+                    apply_patch_diff::apply_patch_tool_definition()
+                } else {
+                    ToolDefinition::function(
+                        h.name().to_string(),
+                        h.description().to_string(),
+                        Some(h.parameters_schema()),
+                    )
+                }
             })
             .collect();
         definitions.extend(goal::goal_tool_definitions());

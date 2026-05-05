@@ -22,6 +22,9 @@ use serde::Deserialize;
 use std::path::Path;
 use tracing::{info, warn};
 
+pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
+const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("tool_apply_patch.lark");
+
 /// Tool that applies structured diff patches to files.
 pub struct ApplyDiffTool;
 
@@ -38,7 +41,7 @@ struct ApplyDiffArgs {
 #[async_trait]
 impl ToolHandler for ApplyDiffTool {
     fn name(&self) -> &str {
-        "apply_patch"
+        APPLY_PATCH_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -131,7 +134,7 @@ impl ToolHandler for ApplyDiffTool {
 
         if hunks.is_empty() {
             return ToolResult {
-                success: true,
+                success: false,
                 output: "patch contained no operations".to_string(),
             };
         }
@@ -165,6 +168,15 @@ impl ToolHandler for ApplyDiffTool {
             }
         }
     }
+}
+
+pub fn apply_patch_tool_definition() -> crate::types::ToolDefinition {
+    crate::types::ToolDefinition::custom_grammar(
+        APPLY_PATCH_TOOL_NAME.to_string(),
+        "Use the `apply_patch` tool to edit files. This is a FREEFORM grammar-backed tool, so do not wrap the patch in JSON.".to_string(),
+        "lark".to_string(),
+        APPLY_PATCH_LARK_GRAMMAR.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -219,13 +231,24 @@ mod tests {
         assert!(result.output.contains("parse error"));
     }
 
+    #[test]
+    fn test_apply_patch_tool_definition_is_custom_grammar() {
+        let tool = apply_patch_tool_definition();
+        assert_eq!(tool.tool_type, "custom");
+        assert_eq!(tool.name(), APPLY_PATCH_TOOL_NAME);
+        let format = tool.format.expect("custom format");
+        assert_eq!(format.format_type, "grammar");
+        assert_eq!(format.syntax, "lark");
+        assert!(format.definition.contains("*** Begin Patch"));
+    }
+
     #[tokio::test]
     async fn test_apply_diff_tool_empty_patch() {
         let dir = TempDir::new().unwrap();
         let patch = "*** Begin Patch\n*** End Patch";
         let args = serde_json::json!({ "input": patch });
         let result = ApplyDiffTool.execute(&args.to_string(), dir.path()).await;
-        assert!(result.success);
+        assert!(!result.success);
         assert!(result.output.contains("no operations"));
     }
 

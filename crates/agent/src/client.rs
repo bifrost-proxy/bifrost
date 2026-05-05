@@ -33,6 +33,20 @@ impl AgentClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<ModelResponse, String> {
+        self.chat_completion_with_schema(config, messages, tools, None)
+            .await
+    }
+
+    /// Send a chat completion request with optional JSON Schema structured output constraint.
+    /// When `output_schema` is provided, the model response is constrained to conform to the schema.
+    /// Aligned with Codex Phase 1 structured output pattern.
+    pub async fn chat_completion_with_schema(
+        &self,
+        config: &AgentConfig,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        output_schema: Option<&serde_json::Value>,
+    ) -> Result<ModelResponse, String> {
         let effective = config.resolve_effective_config()?;
         let url = effective.base_url.trim_end_matches('/').to_string();
 
@@ -47,6 +61,18 @@ impl AgentClient {
         if !tools.is_empty() {
             body["tools"] =
                 serde_json::to_value(tools).map_err(|e| format!("serialize tools: {e}"))?;
+        }
+
+        // P2-2: JSON Schema structured output constraint (Codex-aligned)
+        if let Some(schema) = output_schema {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "strict": true,
+                    "schema": schema
+                }
+            });
         }
 
         if let Some(ref effort) = effective.reasoning_effort {
@@ -150,11 +176,29 @@ impl AgentClient {
             .and_then(|c| c.as_str())
             .map(|s| s.to_string());
 
-        // Parse tool calls
-        let tool_calls: Vec<ToolCallMessage> = message
+        // Parse function and custom/freeform tool calls.
+        let mut tool_calls: Vec<ToolCallMessage> = message
             .get("tool_calls")
             .and_then(|tc| serde_json::from_value(tc.clone()).ok())
             .unwrap_or_default();
+        if tool_calls.is_empty() {
+            if let Some(custom_calls) = message.get("custom_tool_calls").and_then(|v| v.as_array())
+            {
+                tool_calls = custom_calls
+                    .iter()
+                    .filter_map(|call| {
+                        let id = call.get("id").and_then(|v| v.as_str())?;
+                        let name = call.get("name").and_then(|v| v.as_str())?;
+                        let input = call.get("input").and_then(|v| v.as_str())?;
+                        Some(ToolCallMessage::custom_call(
+                            id.to_string(),
+                            name.to_string(),
+                            input.to_string(),
+                        ))
+                    })
+                    .collect();
+            }
+        }
 
         // Parse usage
         let usage = resp.get("usage").map(|u| TokenUsage {

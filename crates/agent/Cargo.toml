@@ -25,6 +25,7 @@ thiserror = "2.0"
 dashmap = "6"
 include_dir = "0.7"
 fs2 = "0.4"
+rusqlite = { version = "0.33", features = ["bundled"] }
 futures = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
