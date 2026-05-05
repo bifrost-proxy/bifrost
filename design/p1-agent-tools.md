@@ -39,6 +39,8 @@
 - 实现位于 `crates/agent/src/tools/pty_shell.rs`。
 - 保留持久 session + `write_stdin` 交互。
 - 新增 `wait_for_completion=false` 前台交互模式，允许先返回 `session_id`，再由 `write_stdin` 驱动前台程序。
+- 为了避免 macOS 交互式 shell 启动脚本、prompt 与控制序列污染 sentinel 检测，session 默认改为启动“干净 shell”（zsh 使用 `-f`，bash 使用 `--noprofile --norc`）。
+- stdout/stderr 改为按原始字节块持续读取，而不是按行读取，确保无换行输出、prompt 前缀和前台交互场景都能稳定保留到缓冲区。
 - 输出补齐：
   - `session_id`
   - `exit_indicator`

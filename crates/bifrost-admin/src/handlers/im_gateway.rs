@@ -1323,6 +1323,21 @@ async fn run_agent_chat_with_interleave(
             }
         }
 
+        // After turn completes, drain any unconsumed guide message into the queue
+        // so it's not lost when clear_session removes the guide slot.
+        // This handles the race where a guide message arrives after the session's
+        // turn-end checkpoint but before the select! loop breaks.
+        if let Some(unconsumed) = guide_channel.lock().unwrap().take() {
+            if !unconsumed.trim().is_empty() {
+                info!(
+                    session_key = %session_key,
+                    guide_msg_len = unconsumed.len(),
+                    "draining unconsumed guide message into queue after turn"
+                );
+                let _ = queue_manager.push_queue(session_key, unconsumed);
+            }
+        }
+
         // After turn completes, check for queued messages.
         // Pop the next message from queue and process it as a new turn.
         // The session layer also supports `pending_messages` for inline queue

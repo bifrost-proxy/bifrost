@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
@@ -123,22 +123,39 @@ struct WriteStdinArgs {
 }
 
 /// Detect the appropriate shell for the current system.
-fn detect_shell() -> (&'static str, &'static str) {
+struct ShellSpec {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+fn detect_shell() -> ShellSpec {
     if let Ok(shell) = std::env::var("SHELL") {
         if shell.contains("zsh") {
-            return ("zsh", "-i");
+            return ShellSpec {
+                program: "zsh",
+                args: &["-f"],
+            };
         }
         if shell.contains("bash") {
-            return ("bash", "-i");
+            return ShellSpec {
+                program: "bash",
+                args: &["--noprofile", "--norc"],
+            };
         }
     }
     #[cfg(target_os = "macos")]
     {
-        ("zsh", "-i")
+        ShellSpec {
+            program: "zsh",
+            args: &["-f"],
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ("bash", "-i")
+        ShellSpec {
+            program: "bash",
+            args: &["--noprofile", "--norc"],
+        }
     }
 }
 
@@ -306,12 +323,7 @@ impl ToolHandler for PtyShellTool {
         // Collect output.
         let stdout_text = {
             let stdout_buf = session.stdout_buffer.lock().await;
-            let text = stdout_buf.to_formatted_string();
-            // Remove sentinel line from output.
-            text.lines()
-                .filter(|line| !line.contains(&sentinel_prefix))
-                .collect::<Vec<_>>()
-                .join("\n")
+            strip_sentinel_from_output(&stdout_buf.to_formatted_string(), &sentinel_prefix)
         };
 
         let stderr_text = {
@@ -353,6 +365,17 @@ impl ToolHandler for PtyShellTool {
             output,
         }
     }
+}
+
+fn strip_sentinel_from_output(text: &str, sentinel_prefix: &str) -> String {
+    text.lines()
+        .filter_map(|line| match line.find(sentinel_prefix) {
+            Some(0) => None,
+            Some(index) => Some(line[..index].to_string()),
+            None => Some(line.to_string()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_exit_code(text: &str, sentinel_prefix: &str) -> Option<i32> {
@@ -503,20 +526,21 @@ fn create_session_internal(
     manager: &PtySessionManager,
     work_dir: &Path,
 ) -> Result<Arc<PtySession>, String> {
-    let (shell, _) = detect_shell();
+    let shell = detect_shell();
     let session_id = Uuid::new_v4().to_string();
 
     info!(
         session_id = %session_id,
-        shell = shell,
+        shell = shell.program,
         cwd = %work_dir.display(),
         "creating new PTY session"
     );
 
-    let mut child = Command::new(shell)
-        .arg("-i")
+    let mut child = Command::new(shell.program)
+        .args(shell.args)
         .current_dir(work_dir)
-        .envs(std::env::vars())
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -550,11 +574,20 @@ fn create_session_internal(
     // Spawn background task to read stdout into session's buffer.
     let session_stdout = session.clone();
     tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let mut buf = session_stdout.stdout_buffer.lock().await;
-            buf.push_chunk(line.into_bytes());
-            buf.push_chunk(b"\n".to_vec());
+        let mut stdout = stdout;
+        let mut chunk = vec![0_u8; 4096];
+        loop {
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut buf = session_stdout.stdout_buffer.lock().await;
+                    buf.push_chunk(chunk[..n].to_vec());
+                }
+                Err(error) => {
+                    debug!(%session_stdout.session_id, ?error, "stdout reader task errored");
+                    break;
+                }
+            }
         }
         debug!("stdout reader task ended for session");
     });
@@ -562,11 +595,20 @@ fn create_session_internal(
     // Spawn background task to read stderr into session's buffer.
     let session_stderr = session.clone();
     tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let mut buf = session_stderr.stderr_buffer.lock().await;
-            buf.push_chunk(line.into_bytes());
-            buf.push_chunk(b"\n".to_vec());
+        let mut stderr = stderr;
+        let mut chunk = vec![0_u8; 4096];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut buf = session_stderr.stderr_buffer.lock().await;
+                    buf.push_chunk(chunk[..n].to_vec());
+                }
+                Err(error) => {
+                    debug!(%session_stderr.session_id, ?error, "stderr reader task errored");
+                    break;
+                }
+            }
         }
         debug!("stderr reader task ended for session");
     });
@@ -850,9 +892,9 @@ mod tests {
 
     #[test]
     fn test_detect_shell_returns_valid() {
-        let (shell, flag) = detect_shell();
-        assert!(!shell.is_empty());
-        assert!(!flag.is_empty());
+        let shell = detect_shell();
+        assert!(!shell.program.is_empty());
+        assert!(!shell.args.is_empty());
     }
 
     #[tokio::test]

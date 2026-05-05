@@ -500,10 +500,14 @@ tracing = "0.1"
 | 配置热更新 | PATCH 配置 → 立即生效 |
 | E2E 启动器服务注入回归 | `ProxyInstance::start_with_admin` 启动后 `/api/im-gateway/agent` 与 `/api/im-gateway/routes` 返回 200，确保测试启动路径与真实 CLI 一样注入 `ImGatewayService` |
 | Agent tool history 恢复回归 | `im_gateway_agent_tool_history_resume_regression` 在长期记忆后台调用存在时仍完成首次工具调用、JSONL 恢复和恢复后再次工具调用 |
+| Chat API 长期记忆真实链路 | 运行 `e2e-tests/tests/test_long_term_memory_human_api.sh`，验证 `POST /_bifrost/api/im-gateway/agent/chat` 在真实 Bifrost + mock Chat Completions 下触发自动记忆、Phase 2 consolidation、跨独立 session 消费 |
+| Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
+| Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
+| Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `queue_messages`，验证 turn-end guide drain、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
 
 ### 真实场景测试（human_tests）
 
-**测试用例文档**：`human_tests/im-gateway-agent.md`
+**测试用例文档**：`human_tests/im-gateway-agent.md`、`human_tests/im-guide-queue-mode.md`、`human_tests/long-term-memory.md`
 
 | 用例编号 | 用例名称 | 验证点 |
 |----------|----------|--------|
@@ -515,6 +519,10 @@ tracing = "0.1"
 | TC-AG-06 | 配置更新 | 通过 API 更新配置 → 生效 |
 | TC-IMA-66 | CI E2E 启动器服务注入回归 | 运行 `bifrost-e2e --test im_gateway_agent`，验证新增 Agent API 用例不再返回 503 |
 | TC-IMA-67 | Agent Loop tool message 序列回归 | 运行 `im_gateway_agent_tool_history_resume_regression`，验证恢复后的 turn 仍会执行工具调用 |
+| TC-GQ-04 | turn-end guide drain 黑盒回归 | 通过 `/agent/chat` 注入 `guide_message`，验证模型 stop 后到达的 guide 不会丢失，而是继续同一 turn loop |
+| TC-GQ-05 | queued FIFO drain 黑盒回归 | 通过 `/agent/chat` 注入 `queue_messages`，验证在同一次 `run_turn_with_mcp` 中按 FIFO 逐条继续处理 |
+| TC-GQ-06 | guide 优先于 queue | 同时注入 `guide_message` 与 `queue_messages`，验证处理顺序为 initial → guide → queued FIFO |
+| TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 
 ## 扩展性考虑
 

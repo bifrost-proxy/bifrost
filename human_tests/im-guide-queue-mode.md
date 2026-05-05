@@ -129,6 +129,64 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   ```
 - **预期结果**: 所有测试通过，无编译错误
 
+### TC-GQ-10: `/agent/chat` 注入 `guide_message` 时，turn-end guide 不丢失
+
+- **操作步骤**:
+  1. 启动真实 Bifrost 和 guide/queue 专用 mock provider（使用独立临时数据目录和 `--no-system-proxy`）。
+  2. 调用：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18897/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key":"guide-end-test","message":"先处理 initial","guide_message":"这是 turn 结束前插入的 guide"}' | jq .
+     ```
+- **预期结果**:
+  - `success: true`
+  - 最终 `response` 明确体现 `guide_message` 已在同一次 turn loop 中继续处理
+  - guide 文本不会被静默吞掉
+- **执行记录（2026-05-05）**: PASS — 运行 `bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，`guide-end-test` 返回 `GUIDE_DRAINED: 先处理 initial -> 这是 turn 结束前插入的 guide`，确认 turn-end guide 已被同一次 turn loop 消费
+
+### TC-GQ-11: `/agent/chat` 注入 `queue_messages` 时按 FIFO drain
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:18897/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"queue-test","message":"第一条","queue_messages":["第二条","第三条"]}' | jq .
+  ```
+- **预期结果**:
+  - `success: true`
+  - 最终 `response` 或 `tool_calls` 对应的 mock 顺序能够证明处理顺序为：`第一条 -> 第二条 -> 第三条`
+  - queue 在同一次 `run_turn_with_mcp` 中被继续 drain，而不是只处理第一条
+- **执行记录（2026-05-05）**: PASS — 同一脚本中 `queue-test` 返回 `ORDER: 第一条 -> 第二条 -> 第三条`，确认 `pending_messages` 按 FIFO 顺序连续处理
+
+### TC-GQ-12: `guide_message` 优先于 `queue_messages`
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:18897/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"guide-priority-test","message":"初始消息","guide_message":"guide 插入","queue_messages":["queue-1","queue-2"]}' | jq .
+  ```
+- **预期结果**:
+  - `success: true`
+  - 最终处理顺序为：`初始消息 -> guide 插入 -> queue-1 -> queue-2`
+  - guide 必须先于 queued messages 被消费
+- **执行记录（2026-05-05）**: PASS — `guide-priority-test` 返回 `ORDER: 初始消息 -> guide 插入 -> queue-1 -> queue-2`，确认 turn-end guide 检查先于 pending queue drain 执行
+
+### TC-GQ-13: 空白 `guide_message` 与空白 `queue_messages` 会被忽略
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:18897/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"blank-ignore-test","message":"hello","guide_message":"   ","queue_messages":["","   ","real queued"]}' | jq .
+  ```
+- **预期结果**:
+  - `success: true`
+  - 只有 `real queued` 被继续处理；空白 guide 与空白 queue 项不会进入历史或 pending queue
+  - 最终顺序体现为：`hello -> real queued`
+- **执行记录（2026-05-05）**: PASS — `blank-ignore-test` 返回 `ORDER: hello -> real queued`，确认空白 guide / queue 项未参与后续 turn 处理
+
 ## 清理步骤
 
 ```bash
