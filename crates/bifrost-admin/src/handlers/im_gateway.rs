@@ -615,6 +615,15 @@ async fn handle_provider_messages(
     }
 }
 
+/// Build a session key that is unique per (provider, user) pair.
+///
+/// This ensures that the same user chatting through different bots gets
+/// independent agent sessions, preventing cross-bot history contamination.
+fn build_session_key(provider_id: &str, user_id: Option<&str>) -> String {
+    let user = user_id.unwrap_or("unknown");
+    format!("{provider_id}:{user}")
+}
+
 /// Event processing loop: receives events from the long connection and processes them.
 ///
 /// Security: Only processes messages from the bot owner (owner_open_id).
@@ -811,12 +820,8 @@ async fn run_event_loop(
             if agent_config.enabled {
                 if let Some(ref msg) = event.message {
                     if !msg.text.is_empty() {
-                        let session_key = event
-                            .source
-                            .user_id
-                            .as_deref()
-                            .unwrap_or("unknown")
-                            .to_string();
+                        let session_key =
+                            build_session_key(&event.provider_id, event.source.user_id.as_deref());
 
                         // ── Guide/Queue mode: check if session is busy ──
                         if agent_session_manager.is_session_active(&session_key) {
@@ -897,12 +902,8 @@ async fn run_event_loop(
                 if message_text.is_empty() {
                     continue;
                 }
-                let session_key = event
-                    .source
-                    .user_id
-                    .as_deref()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let session_key =
+                    build_session_key(&event.provider_id, event.source.user_id.as_deref());
 
                 // ── Guide/Queue mode: check if session is busy ──
                 if agent_session_manager.is_session_active(&session_key) {
@@ -1241,7 +1242,22 @@ async fn run_agent_chat_with_interleave(
             }
         }
 
-        // After turn completes, check for queued messages
+        // After turn completes, first check for unconsumed guide message.
+        // The guide_channel is only consumed inside the turn loop after tool calls.
+        // If the model's last response was finish_reason=stop (no tool calls), the
+        // guide message is never consumed. We must drain it here to avoid silent loss.
+        let unconsumed_guide = guide_channel.lock().unwrap().take();
+        if let Some(guide_msg) = unconsumed_guide {
+            info!(
+                session_key = %session_key,
+                guide_msg_len = guide_msg.len(),
+                "processing unconsumed guide message after turn completed"
+            );
+            current_msg = guide_msg;
+            continue;
+        }
+
+        // Then check for queued messages
         match queue_manager.pop_queue(session_key) {
             Some(next_msg) => {
                 let remaining = queue_manager.queue_status(session_key).len();
@@ -1304,14 +1320,14 @@ async fn handle_concurrent_event_during_chat(
         _ => return,
     };
 
-    let session_key = event.source.user_id.as_deref().unwrap_or("unknown");
+    let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
 
     // Check if this event is for the currently active session
     if session_key == active_session_key {
         // Session-free commands are still instant
         let agent_config = agent_config_store.load();
         if let Some(response) =
-            bifrost_agent::handle_session_free_command(session_key, msg_text, &agent_config)
+            bifrost_agent::handle_session_free_command(&session_key, msg_text, &agent_config)
         {
             send_agent_reply(feishu, provider, event, &response, message_log_store).await;
             return;
@@ -1319,7 +1335,7 @@ async fn handle_concurrent_event_during_chat(
         // Route through guide/queue mode
         handle_busy_message(
             msg_text,
-            session_key,
+            &session_key,
             BusyMessageContext {
                 queue_manager,
                 feishu,
@@ -1332,10 +1348,10 @@ async fn handle_concurrent_event_during_chat(
         .await;
     } else {
         // Different session — check if it's also busy
-        if agent_session_manager.is_session_active(session_key) {
+        if agent_session_manager.is_session_active(&session_key) {
             handle_busy_message(
                 msg_text,
-                session_key,
+                &session_key,
                 BusyMessageContext {
                     queue_manager,
                     feishu,
@@ -1349,7 +1365,7 @@ async fn handle_concurrent_event_during_chat(
         } else {
             // Session is free but we can't process it now (MCP is in use).
             // Queue it for later processing.
-            let _ = queue_manager.push_queue(session_key, msg_text.to_string());
+            let _ = queue_manager.push_queue(&session_key, msg_text.to_string());
             send_agent_reply(
                 feishu,
                 provider,
