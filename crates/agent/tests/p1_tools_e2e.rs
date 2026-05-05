@@ -1,3 +1,4 @@
+use base64::Engine;
 use bifrost_agent::tools::goal::{
     execute_goal_tool, CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
 };
@@ -10,6 +11,14 @@ fn session_id_from_output(output: &str) -> String {
         .find(|line| line.starts_with("session_id: "))
         .expect("session_id line")
         .trim_start_matches("session_id: ")
+        .to_string()
+}
+
+fn session_id_from_exec_json(output: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(output).expect("exec json output");
+    value["session_id"]
+        .as_str()
+        .expect("session id")
         .to_string()
 }
 
@@ -157,4 +166,99 @@ async fn pty_tools_work_end_to_end() {
         .await;
     assert!(stdin_result.success, "{}", stdin_result.output);
     assert!(stdin_result.output.contains("hello pty"));
+}
+
+#[tokio::test]
+async fn exec_command_tool_works_end_to_end() {
+    let registry = ToolRegistry::with_defaults(5);
+    let work_dir = tempfile::tempdir().expect("work dir");
+
+    let completed = registry
+        .execute(
+            "exec_command",
+            r#"{"cmd":"printf exec-ok","yield_time_ms":100,"max_output_tokens":1000}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(completed.success, "{}", completed.output);
+    let completed_json: serde_json::Value =
+        serde_json::from_str(&completed.output).expect("completed exec json");
+    assert_eq!(completed_json["exit_code"], 0);
+    assert_eq!(completed_json["output"], "exec-ok");
+    assert!(completed_json["session_id"].is_null());
+
+    let interactive = registry
+        .execute(
+            "exec_command",
+            &serde_json::json!({
+                "cmd": "python3 -u -c 'import sys; print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
+                "tty": true,
+                "yield_time_ms": 5000,
+            })
+            .to_string(),
+            work_dir.path(),
+        )
+        .await;
+    assert!(interactive.success, "{}", interactive.output);
+    assert!(interactive.output.contains("exec-ready"));
+    let session_id = session_id_from_exec_json(&interactive.output);
+
+    let stdin_result = registry
+        .execute(
+            "write_stdin",
+            &serde_json::json!({
+                "session_id": session_id,
+                "chars": "hello exec\n",
+                "yield_time_ms": 1000,
+                "max_output_tokens": 1000,
+            })
+            .to_string(),
+            work_dir.path(),
+        )
+        .await;
+    assert!(stdin_result.success, "{}", stdin_result.output);
+    assert!(stdin_result.output.contains("hello exec"));
+}
+
+#[tokio::test]
+async fn view_image_tool_works_end_to_end() {
+    let registry = ToolRegistry::with_defaults(5);
+    let work_dir = tempfile::tempdir().expect("work dir");
+    fs::write(
+        work_dir.path().join("tiny.png"),
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+            .expect("tiny png"),
+    )
+    .expect("write png");
+
+    let result = registry
+        .execute(
+            "view_image",
+            r#"{"path":"tiny.png","detail":"original"}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(result.success, "{}", result.output);
+    let value: serde_json::Value = serde_json::from_str(&result.output).expect("view image json");
+    assert!(value["image_url"]
+        .as_str()
+        .expect("data url")
+        .starts_with("data:image/png;base64,"));
+    assert_eq!(value["detail"], "original");
+}
+
+#[tokio::test]
+async fn tool_search_lists_core_tools() {
+    let registry = ToolRegistry::with_defaults(5);
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let result = registry
+        .execute(
+            "tool_search",
+            r#"{"query":"exec command","limit":5}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("exec_command"));
 }

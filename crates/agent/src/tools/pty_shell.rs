@@ -117,9 +117,14 @@ struct PtyShellArgs {
 #[derive(Deserialize)]
 struct WriteStdinArgs {
     session_id: String,
-    input: String,
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    chars: Option<String>,
     #[serde(default)]
     yield_time_ms: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
 }
 
 /// Detect the appropriate shell for the current system.
@@ -394,7 +399,7 @@ impl ToolHandler for WriteStdinTool {
     }
 
     fn description(&self) -> &str {
-        "Write arbitrary input to a running PTY session's stdin. Use this to interact with running processes (e.g., answer prompts, send signals via text, provide input to interactive programs)."
+        "Writes characters to an existing exec/PTTY session and returns recent output. Accepts Codex-compatible `chars` and legacy `input`."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -405,16 +410,24 @@ impl ToolHandler for WriteStdinTool {
                     "type": "string",
                     "description": "The session ID to write input to"
                 },
+                "chars": {
+                    "type": "string",
+                    "description": "Bytes to write to stdin (may be empty to poll). Codex-compatible field."
+                },
                 "input": {
                     "type": "string",
-                    "description": "The text to write to the session's stdin"
+                    "description": "Legacy alias for chars."
                 },
                 "yield_time_ms": {
                     "type": "integer",
                     "description": "Time in ms to wait for response after writing (default: 500)"
+                },
+                "max_output_tokens": {
+                    "type": "integer",
+                    "description": "Maximum number of tokens to return. Excess output will be truncated."
                 }
             },
-            "required": ["session_id", "input"]
+            "required": ["session_id"]
         })
     }
 
@@ -429,6 +442,7 @@ impl ToolHandler for WriteStdinTool {
             }
         };
 
+        let input = args.chars.or(args.input).unwrap_or_default();
         let yield_time_ms = args.yield_time_ms.unwrap_or(500);
 
         let session = match self.session_manager.get_session(&args.session_id) {
@@ -443,7 +457,7 @@ impl ToolHandler for WriteStdinTool {
 
         info!(
             session_id = %args.session_id,
-            input_len = args.input.len(),
+            input_len = input.len(),
             "writing to PTY session stdin"
         );
 
@@ -458,9 +472,9 @@ impl ToolHandler for WriteStdinTool {
         }
 
         // Write input to stdin.
-        {
+        if !input.is_empty() {
             let mut stdin = session.stdin.lock().await;
-            if let Err(e) = stdin.write_all(args.input.as_bytes()).await {
+            if let Err(e) = stdin.write_all(input.as_bytes()).await {
                 return ToolResult {
                     success: false,
                     output: format!("failed to write to session stdin: {e}"),
@@ -513,12 +527,30 @@ impl ToolHandler for WriteStdinTool {
         if stdout_text.is_empty() && stderr_text.is_empty() {
             output.push_str("(no output captured)\n");
         }
+        if let Some(max_tokens) = args.max_output_tokens {
+            output = truncate_to_token_budget(&output, max_tokens);
+        }
 
         ToolResult {
             success: true,
             output,
         }
     }
+}
+
+fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+    let max_bytes = max_tokens.saturating_mul(4);
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[... output truncated ...]", &text[..end])
 }
 
 /// Internal helper to create a session with proper shared buffer architecture.

@@ -1,25 +1,135 @@
 //! Chat Completions API types with tool calling support.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::tools::update_plan::PlanStep;
 
 /// A message in the Chat Completions API format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional OpenAI-compatible multimodal content parts.
+    ///
+    /// When present, `content` is serialized as an array of parts instead of a
+    /// plain string. The text is still mirrored in `content` so existing history,
+    /// slash commands, memory, and previews keep working as text-first logic.
+    pub content_parts: Option<Vec<ChatContentPart>>,
+
     pub tool_calls: Option<Vec<ToolCallMessage>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            role: String,
+            #[serde(default)]
+            content: Option<serde_json::Value>,
+            #[serde(default)]
+            tool_calls: Option<Vec<ToolCallMessage>>,
+            #[serde(default)]
+            tool_call_id: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let (content, content_parts) = match wire.content {
+            Some(serde_json::Value::String(text)) => (Some(text), None),
+            Some(serde_json::Value::Array(parts)) => {
+                let parts: Vec<ChatContentPart> =
+                    serde_json::from_value(serde_json::Value::Array(parts))
+                        .map_err(serde::de::Error::custom)?;
+                let text = parts.iter().find_map(|part| match part {
+                    ChatContentPart::Text { text } => Some(text.clone()),
+                    ChatContentPart::ImageUrl { .. } => None,
+                });
+                (text, Some(parts))
+            }
+            Some(other) => {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported chat message content: {other}"
+                )));
+            }
+            None => (None, None),
+        };
+
+        Ok(Self {
+            role: wire.role,
+            content,
+            content_parts,
+            tool_calls: wire.tool_calls,
+            tool_call_id: wire.tool_call_id,
+            name: wire.name,
+        })
+    }
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ChatMessage", 5)?;
+        state.serialize_field("role", &self.role)?;
+        if let Some(parts) = &self.content_parts {
+            state.serialize_field("content", parts)?;
+        } else if let Some(content) = &self.content {
+            state.serialize_field("content", content)?;
+        }
+        if let Some(tool_calls) = &self.tool_calls {
+            state.serialize_field("tool_calls", tool_calls)?;
+        }
+        if let Some(tool_call_id) = &self.tool_call_id {
+            state.serialize_field("tool_call_id", tool_call_id)?;
+        }
+        if let Some(name) = &self.name {
+            state.serialize_field("name", name)?;
+        }
+        state.end()
+    }
+}
+
+/// A user-visible image attached to a chat turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatImageInput {
+    pub mime_type: String,
+    pub data: String,
+}
+
+impl ChatImageInput {
+    pub fn data_url(&self) -> String {
+        if self.data.starts_with("data:") {
+            return self.data.clone();
+        }
+        format!("data:{};base64,{}", self.mime_type, self.data)
+    }
+}
+
+/// OpenAI-compatible chat content part.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ChatImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatImageUrl {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl ChatMessage {
@@ -27,6 +137,7 @@ impl ChatMessage {
         Self {
             role: "system".to_string(),
             content: Some(content.to_string()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -37,6 +148,7 @@ impl ChatMessage {
         Self {
             role: "developer".to_string(),
             content: Some(content.to_string()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -47,6 +159,37 @@ impl ChatMessage {
         Self {
             role: "user".to_string(),
             content: Some(content.to_string()),
+            content_parts: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    pub fn user_with_images(content: &str, images: &[ChatImageInput]) -> Self {
+        if images.is_empty() {
+            return Self::user(content);
+        }
+
+        let mut parts = Vec::new();
+        if !content.trim().is_empty() {
+            parts.push(ChatContentPart::Text {
+                text: content.to_string(),
+            });
+        }
+        for image in images {
+            parts.push(ChatContentPart::ImageUrl {
+                image_url: ChatImageUrl {
+                    url: image.data_url(),
+                    detail: Some("auto".to_string()),
+                },
+            });
+        }
+
+        Self {
+            role: "user".to_string(),
+            content: Some(content.to_string()),
+            content_parts: Some(parts),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -57,6 +200,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_string(),
             content: Some(content.to_string()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -67,6 +211,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_string(),
             content: None,
+            content_parts: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
@@ -77,6 +222,7 @@ impl ChatMessage {
         Self {
             role: "tool".to_string(),
             content: Some(content.to_string()),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
             name: None,
@@ -199,6 +345,36 @@ pub struct ToolCallLog {
     pub arguments: String,
     pub result: String,
     pub success: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_with_images_serializes_openai_content_parts() {
+        let message = ChatMessage::user_with_images(
+            "这张图片是什么？",
+            &[ChatImageInput {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            }],
+        );
+
+        let value = serde_json::to_value(&message).expect("serialize message");
+        let content = value
+            .get("content")
+            .and_then(|value| value.as_array())
+            .expect("content parts");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "这张图片是什么？");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert_eq!(message.content.as_deref(), Some("这张图片是什么？"));
+    }
 }
 
 /// Result of an agent turn (one complete interaction cycle).

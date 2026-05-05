@@ -65,4 +65,4 @@ pub use session_status::{format_active_turn_status_text, ActiveTurnStatus};
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};
 pub use tools::ToolRegistry;
-pub use types::{ChatMessage, ToolCallLog, TurnResult};
+pub use types::{ChatImageInput, ChatMessage, ToolCallLog, TurnResult};

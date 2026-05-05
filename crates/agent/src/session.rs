@@ -28,7 +28,7 @@ use crate::session_status::{
 use crate::skill_authoring::SkillAuthoringHub;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
 use crate::tools::ToolRegistry;
-use crate::types::{ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
+use crate::types::{ChatImageInput, ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
 use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
@@ -343,6 +343,12 @@ impl AgentSession {
         self.touch();
     }
 
+    fn add_user_message_with_images(&mut self, content: &str, images: &[ChatImageInput]) {
+        self.history
+            .push(ChatMessage::user_with_images(content, images));
+        self.touch();
+    }
+
     fn add_assistant_message(&mut self, content: &str) {
         self.history.push(ChatMessage::assistant(content));
         self.touch();
@@ -638,6 +644,10 @@ impl AgentSessionManager {
                     .map(|m| SessionMessage {
                         role: m.role.clone(),
                         content: m.content.clone().unwrap_or_default(),
+                        content_parts: m
+                            .content_parts
+                            .as_ref()
+                            .and_then(|parts| serde_json::to_value(parts).ok()),
                         tool_calls: m.tool_calls.as_ref().map(|tc| {
                             tc.iter()
                                 .map(|t| format!("{}({})", t.name(), t.arguments()))
@@ -675,6 +685,8 @@ pub struct SessionInfo {
 pub struct SessionMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<String>>,
 }
@@ -822,8 +834,34 @@ pub async fn run_turn_with_mcp(
     config: &AgentConfig,
     session: &mut AgentSession,
     tools: &ToolRegistry,
+    mcp: Option<&mut McpManager>,
+    user_message: &str,
+    system_prompt_override: Option<&str>,
+    recorder: Option<&mut ConversationRecorder>,
+) -> Result<TurnResult, String> {
+    run_turn_with_mcp_multimodal(
+        client,
+        config,
+        session,
+        tools,
+        mcp,
+        user_message,
+        &[],
+        system_prompt_override,
+        recorder,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_with_mcp_multimodal(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    tools: &ToolRegistry,
     mut mcp: Option<&mut McpManager>,
     user_message: &str,
+    images: &[ChatImageInput],
     system_prompt_override: Option<&str>,
     mut recorder: Option<&mut ConversationRecorder>,
 ) -> Result<TurnResult, String> {
@@ -1456,11 +1494,13 @@ pub async fn run_turn_with_mcp(
     let prompt_prefix = prompt_messages.prefix;
 
     // Add user message to history
-    session.add_user_message(user_message);
+    session.add_user_message_with_images(user_message, images);
 
     // Record user message
     if let Some(ref mut rec) = recorder {
-        if let Err(e) = rec.record_user_message(&session.session_key, user_message) {
+        if let Err(e) =
+            rec.record_user_message_with_images(&session.session_key, user_message, images)
+        {
             warn!(error = %e, "failed to record user message");
         }
     }

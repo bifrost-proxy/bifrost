@@ -5,7 +5,7 @@
 
 use crate::history;
 use crate::tools::goal::GoalState;
-use crate::types::{ChatMessage, ToolCallMessage};
+use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
@@ -109,6 +109,26 @@ impl ConversationRecorder {
             event_type: event_types::USER_MESSAGE.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({ "message": content }),
+        })
+    }
+
+    pub fn record_user_message_with_images(
+        &mut self,
+        session_key: &str,
+        content: &str,
+        images: &[ChatImageInput],
+    ) -> Result<(), String> {
+        if images.is_empty() {
+            return self.record_user_message(session_key, content);
+        }
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::USER_MESSAGE.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({
+                "message": content,
+                "images": images,
+            }),
         })
     }
 
@@ -389,7 +409,12 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                 pending_tool_calls.clear();
                 pending_tool_call_order.clear();
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
-                    messages.push(ChatMessage::user(msg));
+                    let images: Vec<ChatImageInput> = event
+                        .content
+                        .get("images")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_default();
+                    messages.push(ChatMessage::user_with_images(msg, &images));
                 }
             }
             event_types::ASSISTANT_MESSAGE => {
@@ -780,6 +805,44 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content.as_deref(), Some("hello"));
         assert_eq!(messages[1].content.as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn test_conversation_recorder_persists_user_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "image-session");
+
+        recorder
+            .record_user_message_with_images(
+                "image-session",
+                "describe image",
+                &[ChatImageInput {
+                    mime_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                }],
+            )
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        let images = events[0]
+            .content
+            .get("images")
+            .and_then(|value| value.as_array())
+            .expect("images persisted");
+        assert_eq!(images[0]["mime_type"], "image/png");
+        assert_eq!(images[0]["data"], "aGVsbG8=");
+
+        let messages = load_conversation(recorder.file_path()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.as_deref(), Some("describe image"));
+        assert!(messages[0].content_parts.is_some());
+        let value = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(value["content"][1]["type"], "image_url");
+        assert_eq!(
+            value["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
     }
 
     #[test]

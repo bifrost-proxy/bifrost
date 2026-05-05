@@ -9,6 +9,7 @@ import {
   Col,
   Descriptions,
   Empty,
+  Image,
   Modal,
   Row,
   Space,
@@ -46,6 +47,72 @@ import {
 } from "./types";
 
 const { Text, Title } = Typography;
+
+function extractImageUrlsFromParts(parts: unknown): string[] {
+  if (!Array.isArray(parts)) return [];
+  return parts
+    .map((part) => {
+      if (!part || typeof part !== "object") return null;
+      const record = part as Record<string, unknown>;
+      if (record.type !== "image_url") return null;
+      const imageUrl = record.image_url;
+      if (typeof imageUrl === "string") return imageUrl;
+      if (imageUrl && typeof imageUrl === "object") {
+        const url = (imageUrl as Record<string, unknown>).url;
+        return typeof url === "string" ? url : null;
+      }
+      return null;
+    })
+    .filter((url): url is string => Boolean(url));
+}
+
+function extractPersistedImageUrls(content: Record<string, unknown> | null): string[] {
+  const images = content?.images;
+  if (!Array.isArray(images)) return [];
+  return images
+    .map((image) => {
+      if (!image || typeof image !== "object") return null;
+      const record = image as Record<string, unknown>;
+      const data = record.data;
+      if (typeof data !== "string" || data.length === 0) return null;
+      if (data.startsWith("data:")) return data;
+      const mimeType =
+        typeof record.mime_type === "string" && record.mime_type
+          ? record.mime_type
+          : "image/png";
+      return `data:${mimeType};base64,${data}`;
+    })
+    .filter((url): url is string => Boolean(url));
+}
+
+function MessageImages({ urls }: { urls: string[] }) {
+  if (urls.length === 0) return null;
+  return (
+    <Image.PreviewGroup>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+        {urls.map((url, idx) => (
+          <Image
+            key={`${idx}-${url.slice(0, 32)}`}
+            src={url}
+            alt={`message attachment ${idx + 1}`}
+            width={220}
+            height={180}
+            style={{
+              objectFit: "contain",
+              borderRadius: 6,
+              border: "1px solid var(--ant-color-border, #d9d9d9)",
+              background: "var(--ant-color-bg-container, #ffffff)",
+              cursor: "zoom-in",
+            }}
+            preview={{
+              mask: <ExpandOutlined />,
+            }}
+          />
+        ))}
+      </div>
+    </Image.PreviewGroup>
+  );
+}
 
 /** Clamp text content to N lines; show expand button + modal for full content */
 function ClampedContent({
@@ -450,57 +517,61 @@ export default function SessionDetailPage({
               >
                 {view === "active" ? (
                   sessionDetail?.messages && sessionDetail.messages.length > 0 ? (
-                    sessionDetail.messages.map((msg, idx) => (
-                      <Card
-                        key={idx}
-                        size="small"
-                        style={{
-                          borderColor:
-                            msg.role === "assistant"
-                              ? themeToken.colorPrimaryBorder
-                              : msg.role === "user"
-                                ? themeToken.colorSuccessBorder
-                                : themeToken.colorBorderSecondary,
-                          background:
-                            msg.role === "assistant"
-                              ? themeToken.colorPrimaryBg
-                              : msg.role === "user"
-                                ? themeToken.colorSuccessBg
-                                : undefined,
-                        }}
-                      >
-                        <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                          <Tag
-                            color={
-                              msg.role === "assistant" ? "blue"
-                                : msg.role === "user" ? "green"
-                                : msg.role === "system" ? "purple"
-                                : "default"
-                            }
-                            style={{ fontSize: 11 }}
-                          >
-                            {msg.role}
-                          </Tag>
-                          {msg.content ? (
-                            <ClampedContent title={`${msg.role} message`}>
-                              {msg.content}
-                            </ClampedContent>
-                          ) : (
-                            <Text style={{ fontSize: 12 }}>(empty)</Text>
-                          )}
-                          {msg.tool_calls && msg.tool_calls.length > 0 && (
-                            <div>
-                              <Text type="secondary" style={{ fontSize: 11 }}>Tool calls:</Text>
-                              {msg.tool_calls.map((tc, i) => (
-                                <Text key={i} code style={{ fontSize: 10, display: "block", marginTop: 2 }}>
-                                  {tc}
-                                </Text>
-                              ))}
-                            </div>
-                          )}
-                        </Space>
-                      </Card>
-                    ))
+                    sessionDetail.messages.map((msg, idx) => {
+                      const imageUrls = extractImageUrlsFromParts(msg.content_parts);
+                      return (
+                        <Card
+                          key={idx}
+                          size="small"
+                          style={{
+                            borderColor:
+                              msg.role === "assistant"
+                                ? themeToken.colorPrimaryBorder
+                                : msg.role === "user"
+                                  ? themeToken.colorSuccessBorder
+                                  : themeToken.colorBorderSecondary,
+                            background:
+                              msg.role === "assistant"
+                                ? themeToken.colorPrimaryBg
+                                : msg.role === "user"
+                                  ? themeToken.colorSuccessBg
+                                  : undefined,
+                          }}
+                        >
+                          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                            <Tag
+                              color={
+                                msg.role === "assistant" ? "blue"
+                                  : msg.role === "user" ? "green"
+                                  : msg.role === "system" ? "purple"
+                                  : "default"
+                              }
+                              style={{ fontSize: 11 }}
+                            >
+                              {msg.role}
+                            </Tag>
+                            {msg.content ? (
+                              <ClampedContent title={`${msg.role} message`}>
+                                {msg.content}
+                              </ClampedContent>
+                            ) : (
+                              <Text style={{ fontSize: 12 }}>(empty)</Text>
+                            )}
+                            <MessageImages urls={imageUrls} />
+                            {msg.tool_calls && msg.tool_calls.length > 0 && (
+                              <div>
+                                <Text type="secondary" style={{ fontSize: 11 }}>Tool calls:</Text>
+                                {msg.tool_calls.map((tc, i) => (
+                                  <Text key={i} code style={{ fontSize: 10, display: "block", marginTop: 2 }}>
+                                    {tc}
+                                  </Text>
+                                ))}
+                              </div>
+                            )}
+                          </Space>
+                        </Card>
+                      );
+                    })
                   ) : (
                     <Empty description="No messages" />
                   )
@@ -592,12 +663,18 @@ function HistoryEventCard({
   let bodyContent: React.ReactNode = null;
   if (event.event_type === "user_message" || event.event_type === "assistant_message") {
     const msg = (content?.message as string) || "";
+    const imageUrls = extractPersistedImageUrls(content);
     if (msg) {
       bodyContent = (
-        <ClampedContent title={`${event.event_type} content`}>
-          {msg}
-        </ClampedContent>
+        <>
+          <ClampedContent title={`${event.event_type} content`}>
+            {msg}
+          </ClampedContent>
+          <MessageImages urls={imageUrls} />
+        </>
       );
+    } else if (imageUrls.length > 0) {
+      bodyContent = <MessageImages urls={imageUrls} />;
     }
   } else if (event.event_type === "tool_call") {
     const toolName = (content?.tool_name as string) || "unknown";

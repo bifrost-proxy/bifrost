@@ -14,8 +14,8 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImProviderConfig, ImProviderType,
-    ImTarget, ProviderValidation, SendOptions, SendResult,
+    ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
+    ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions, SendResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -693,6 +693,63 @@ impl FeishuProvider {
         );
         Ok(())
     }
+
+    /// Download an image resource embedded in a Feishu message.
+    pub async fn download_message_image_resource(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        file_key: &str,
+    ) -> Result<(String, Vec<u8>)> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+
+        let url = format!(
+            "{}/im/v1/messages/{}/resources/{}?type=image",
+            base_url, message_id, file_key
+        );
+        debug!(
+            message_id = message_id,
+            file_key = file_key,
+            "downloading feishu message image resource"
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu message image download failed: {}",
+                    e
+                ))
+            })?;
+
+        let status = resp.status();
+        let mime_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("image/png")
+            .to_string();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu message image download error: status={}, body={}",
+                status, body
+            )));
+        }
+        let bytes = resp.bytes().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu message image body read failed: {}",
+                e
+            ))
+        })?;
+        Ok((mime_type, bytes.to_vec()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,18 +1123,45 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Extract text content from message.content (JSON string)
-    let text = message
+    let content_obj = message
         .get("content")
         .and_then(|v| v.as_str())
         .and_then(|content_str| serde_json::from_str::<serde_json::Value>(content_str).ok())
-        .and_then(|content_obj| {
-            content_obj
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Extract text content from message.content. Feishu rich text (`post`)
+    // stores plain text in nested `content` arrays rather than top-level text.
+    let text = extract_feishu_message_text(&content_obj);
+
+    let mut images = Vec::new();
+    if message_type.as_deref() == Some("image") {
+        if let Some(image_key) = content_obj.get("image_key").and_then(|v| v.as_str()) {
+            images.push(ImImageAttachment {
+                file_key: image_key.to_string(),
+                source: ImImageSource::MessageResource,
+                mime_type: None,
+                data_base64: None,
+            });
+        }
+    }
+    collect_rich_text_image_keys(&content_obj, &mut images);
+
+    info!(
+        provider_id = %provider_id,
+        event_id = %event_id,
+        message_id = ?message_id,
+        message_type = ?message_type,
+        text_len = text.len(),
+        image_count = images.len(),
+        image_keys = %images
+            .iter()
+            .map(|image| image.file_key.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        content_keys = %json_object_keys(&content_obj).join(","),
+        content_preview = %bifrost_core::text::truncate_bytes_with_suffix(&content_obj.to_string(), 500, "..."),
+        "normalized feishu inbound message"
+    );
 
     // Extract sender info
     let sender = event.get("sender");
@@ -1110,6 +1194,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         message: Some(ImEventMessage {
             text,
             mentions: Vec::new(),
+            images,
             raw_type: message_type,
         }),
         received_at: now,
@@ -1247,6 +1332,82 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImImageAttachment>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(image_key) = map.get("image_key").and_then(|v| v.as_str()) {
+                if !images.iter().any(|image| image.file_key == image_key) {
+                    images.push(ImImageAttachment {
+                        file_key: image_key.to_string(),
+                        source: ImImageSource::MessageResource,
+                        mime_type: None,
+                        data_base64: None,
+                    });
+                }
+            }
+            for child in map.values() {
+                collect_rich_text_image_keys(child, images);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_rich_text_image_keys(item, images);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_feishu_message_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+        return text.to_string();
+    }
+    let mut parts = Vec::new();
+    collect_feishu_text_nodes(value, &mut parts);
+    parts.join("").trim().to_string()
+}
+
+fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let tag = map.get("tag").and_then(|v| v.as_str());
+            if matches!(tag, Some("text" | "a" | "code_block")) {
+                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                }
+            }
+            if tag == Some("at") {
+                if let Some(text) = map
+                    .get("user_name")
+                    .or_else(|| map.get("user_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    parts.push(text.to_string());
+                }
+            }
+            if tag == Some("br") {
+                parts.push("\n".to_string());
+            }
+            for child in map.values() {
+                collect_feishu_text_nodes(child, parts);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_feishu_text_nodes(item, parts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
+    value
+        .as_object()
+        .map(|map| map.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1289,6 +1450,74 @@ mod tests {
         assert_eq!(msg.text, "/check bifrost");
         assert_eq!(msg.raw_type.as_deref(), Some("text"));
         assert!(event.raw_digest.unwrap().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn test_normalize_feishu_image_message_extracts_resource_key() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_img",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_xxx",
+                    "message_id": "om_img",
+                    "message_type": "image",
+                    "content": "{\"image_key\":\"img_v3_abc\"}"
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_abc"
+                    }
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let msg = event.message.unwrap();
+        assert_eq!(msg.raw_type.as_deref(), Some("image"));
+        assert_eq!(msg.images.len(), 1);
+        assert_eq!(msg.images[0].file_key, "img_v3_abc");
+        assert_eq!(msg.images[0].source, ImImageSource::MessageResource);
+    }
+
+    #[test]
+    fn test_normalize_feishu_post_extracts_text_and_images() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_post_img",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_xxx",
+                    "message_id": "om_post",
+                    "message_type": "post",
+                    "content": serde_json::json!({
+                        "title": "标题",
+                        "content": [[
+                            {"tag": "text", "text": "请看这张图"},
+                            {"tag": "img", "image_key": "img_v3_post"}
+                        ]]
+                    }).to_string()
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_abc"
+                    }
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let msg = event.message.unwrap();
+        assert_eq!(msg.raw_type.as_deref(), Some("post"));
+        assert_eq!(msg.text, "请看这张图");
+        assert_eq!(msg.images.len(), 1);
+        assert_eq!(msg.images[0].file_key, "img_v3_post");
     }
 
     #[test]

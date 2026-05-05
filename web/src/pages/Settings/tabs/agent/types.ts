@@ -148,6 +148,7 @@ export interface SessionInfo {
 export interface SessionMessage {
   role: string;
   content: string;
+  content_parts?: unknown[];
   tool_calls?: string[];
 }
 

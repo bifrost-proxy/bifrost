@@ -6,19 +6,27 @@
 //! - `read_file`: Read file contents (with offset/limit)
 //! - `list_directory`: List directory entries
 //! - `apply_patch`: Apply Codex-compatible structured diff patches
+//! - `exec_command`: Codex-compatible command execution surface
 //! - `pty_shell`: PTY-backed persistent shell sessions with session management
 //! - `write_stdin`: Write to PTY session stdin
+//! - `view_image`: Load local image files as data URLs
+//! - `request_user_input`: Validate Codex-style user input requests
+//! - `tool_search`: Search registered local tools
 //! - `get_goal`/`create_goal`/`update_goal`: Goal tracking system for task management
 
 pub mod apply_patch_diff;
+pub mod exec_command;
 pub mod file_ops;
 pub mod goal;
 pub mod head_tail_buffer;
 pub mod pty_shell;
+pub mod request_user_input;
 pub mod set_title;
 pub mod shell;
 pub mod switch_workdir;
+pub mod tool_search;
 pub mod update_plan;
+pub mod view_image;
 
 use crate::types::{ToolDefinition, ToolResult};
 use async_trait::async_trait;
@@ -65,26 +73,57 @@ impl ToolRegistry {
         self.tools.insert(handler.name().to_string(), handler);
     }
 
+    fn tool_summaries(&self) -> Vec<tool_search::ToolSummary> {
+        let mut summaries: Vec<_> = self
+            .tools
+            .values()
+            .map(|handler| tool_search::ToolSummary {
+                name: handler.name().to_string(),
+                description: handler.description().to_string(),
+                parameters: handler.parameters_schema(),
+            })
+            .collect();
+        summaries.extend(goal::goal_tool_definitions().into_iter().map(|definition| {
+            let function = definition.function.expect("goal tools are functions");
+            tool_search::ToolSummary {
+                name: function.name,
+                description: function.description,
+                parameters: function.parameters.unwrap_or_else(|| serde_json::json!({})),
+            }
+        }));
+        summaries.sort_by(|left, right| left.name.cmp(&right.name));
+        summaries
+    }
+
     /// Create a registry with all built-in tools.
     pub fn with_defaults(shell_timeout_secs: u64) -> Self {
         let mut registry = Self::new();
+        let session_manager = Arc::new(pty_shell::PtySessionManager::new());
         // Existing tools
         registry.register(Arc::new(shell::ShellTool::new(shell_timeout_secs)));
+        registry.register(Arc::new(exec_command::ExecCommandTool::new(
+            shell_timeout_secs,
+            session_manager.clone(),
+        )));
         registry.register(Arc::new(file_ops::WriteFileTool));
         registry.register(Arc::new(file_ops::ReadFileTool));
         registry.register(Arc::new(file_ops::ListDirectoryTool));
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
         registry.register(Arc::new(update_plan::UpdatePlanTool));
         registry.register(Arc::new(set_title::SetTitleTool));
+        registry.register(Arc::new(view_image::ViewImageTool));
+        registry.register(Arc::new(request_user_input::RequestUserInputTool));
         // Codex-compatible structured patch tool
         registry.register(Arc::new(apply_patch_diff::ApplyDiffTool));
         // PTY shell tools (persistent sessions)
-        let session_manager = Arc::new(pty_shell::PtySessionManager::new());
         registry.register(Arc::new(pty_shell::PtyShellTool::new(
             shell_timeout_secs,
             session_manager.clone(),
         )));
         registry.register(Arc::new(pty_shell::WriteStdinTool::new(session_manager)));
+        registry.register(Arc::new(tool_search::ToolSearchTool::new(
+            registry.tool_summaries(),
+        )));
         registry
     }
 

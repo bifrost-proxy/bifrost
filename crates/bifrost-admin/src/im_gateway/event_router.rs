@@ -163,6 +163,7 @@ mod tests {
             message: Some(ImEventMessage {
                 text: text.to_string(),
                 mentions: vec![],
+                images: vec![],
                 raw_type: None,
             }),
             received_at: 1000,

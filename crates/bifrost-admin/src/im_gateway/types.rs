@@ -402,8 +402,29 @@ pub struct ImEventMessage {
     pub text: String,
     #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImImageAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImImageAttachment {
+    pub file_key: String,
+    #[serde(default)]
+    pub source: ImImageSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImImageSource {
+    #[default]
+    MessageResource,
+    UploadedImage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

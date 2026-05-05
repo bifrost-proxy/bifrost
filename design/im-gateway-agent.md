@@ -133,6 +133,75 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 
 ## 关键组件
 
+## 多模态图片理解链路
+
+### 目标
+
+IM Gateway Agent 支持把飞书 IM 中的图片和文本一起传给模型；`POST /_bifrost/api/im-gateway/agent/chat` 也支持同一套图片输入，便于自动化和人工端到端验证。模型配置仍走现有 Agent 配置，API key 按 provider 的默认 `env_key` / 环境变量解析，不在请求里硬编码。
+
+### 实现逻辑
+
+1. 飞书长连接收到 `im.message.receive_v1` 后，`normalize_feishu_event()` 解析 `message.content`：
+   - `message_type=image` 时读取 `image_key`
+   - 富文本内容中递归收集 `image_key`
+   - 统一写入 `ImEventMessage.images`
+2. 进入 Agent 前，IM handler 按飞书“获取消息中的资源文件”接口下载图片：
+   - `GET /im/v1/messages/:message_id/resources/:file_key?type=image`
+   - 使用当前 provider 的 `tenant_access_token`
+   - 从响应头 `Content-Type` 获取 MIME，二进制内容 base64 编码
+   - 单条消息默认最多传入 6 张图片；超过 6 张时记录 warn，并截断为前 6 张，避免请求体和会话记录过大。
+3. Agent runtime 使用 OpenAI-compatible Chat Completions content parts：
+   - 文本 part：`{"type":"text","text":"..."}`
+   - 图片 part：`{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`
+4. 用户图片随会话事件落盘：
+   - JSONL `user_message.content.images` 保存 `{mime_type,data}`，其中 `data` 为 base64 或 data URL。
+   - `load_conversation()` 恢复历史时重建多模态 `ChatMessage`。
+   - active session detail API 返回 `messages[].content_parts`，history event API 返回原始 `content.images`，WebUI Session 详情据此渲染图片缩略图，点击缩略图后可放大预览。
+5. `/agent/chat` 新增请求字段：
+
+```json
+{
+  "message": "请描述这张图片",
+  "images": [
+    {
+      "mime_type": "image/png",
+      "data": "<base64 image bytes 或 data URL>"
+    }
+  ]
+}
+```
+
+纯文本消息继续按字符串 `content` 序列化；只有包含图片时才切换为 content parts，保持历史记录、记忆、内置命令和纯文本模型兼容。
+
+### 失败降级
+
+- 图片资源下载失败时记录 warn，继续把文本消息传给 Agent，不阻塞整条 IM 会话。
+- 事件缺少 `message_id` 时不尝试下载图片，避免把错误 key 传给飞书。
+- 图片数据进入 Agent session JSONL 以便 Session 详情可查看；IM message log preview 仍使用文本摘要，避免消息列表膨胀。
+- `/agent/chat` 与飞书 IM 链路共用 6 张图片上限，超过上限时只传前 6 张并记录 warn。
+
+### 测试方案
+
+- 单元测试：
+  - `bifrost_agent::types::tests::user_with_images_serializes_openai_content_parts` 验证 text + image 被序列化为 OpenAI content parts。
+  - `im_gateway::feishu::tests::test_normalize_feishu_image_message_extracts_resource_key` 验证飞书图片消息提取 `image_key`。
+  - `handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 验证 IM event loop 将图片附件传入模型请求，并验证单条消息超过 6 张时截断为 6 张。
+- E2E 测试：
+  - `im_gateway_agent_chat_multimodal_image_parts` 启动真实 Bifrost admin + mock Chat Completions，通过 `/agent/chat` 发送图片，断言模型请求包含 `image_url` content part，响应包含视觉理解确认，并验证 Session 详情返回持久化图片 content parts。
+- 真实场景测试：
+  - `human_tests/im-gateway-agent.md` 新增 `TC-IMA-85`，使用非 9900 端口、临时数据目录、`--no-system-proxy` 启动真实 Bifrost，配置 mock 多模态模型，通过 `/agent/chat` 发送图片并验证模型收到图片 content part。
+  - `human_tests/im-gateway-agent.md` 新增 `TC-IMA-87`，验证图片数量上限为 6、超出截断并记录 warn，且 WebUI Session 详情图片缩略图可点击放大。
+
+### 校验要求
+
+- `cargo test -p bifrost-agent types::tests::user_with_images_serializes_openai_content_parts`
+- `cargo test -p bifrost-admin im_gateway::feishu::tests::test_normalize_feishu_image_message_extracts_resource_key`
+- `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat`
+- `CARGO_TARGET_DIR=target/im-multimodal-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_multimodal_image_parts --test-timeout 120 --port 18885`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+
 ### 1. ImAgentConfig - 全局配置
 
 ```rust

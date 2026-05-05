@@ -1397,3 +1397,105 @@ rm -rf ./.bifrost-test
   - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
   - 窄屏下导航退化为顶部横向滚动，不挤压编辑卡片内容。
 - **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Agent 左侧导航按 URL 切换独立编辑卡片"` 通过；验证默认仅渲染 General、点击 MCP Servers/Runtime 后只渲染对应卡片、URL `agentSection` 记录并刷新恢复、暗色主题下继续切换可读且 `aria-current` 正确。
+
+### TC-IMA-85: `/agent/chat` 图片多模态理解真实链路
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须显式关闭系统代理：
+    ```bash
+    BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18885 --unsafe-ssl --no-system-proxy
+    ```
+  - 启动 OpenAI-compatible mock Chat Completions 服务；mock 必须记录请求 JSON，并在收到 `image_url` content part 且文本包含 `MULTIMODAL_IMAGE_E2E` 时返回 `MULTIMODAL_IMAGE_E2E_OK`。
+- **操作步骤**:
+  1. 配置 Agent 使用 mock 多模态模型：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18885/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "enabled": true,
+         "model": "mock-vision-model",
+         "model_provider": "mock",
+         "base_instructions": "You can understand images.",
+         "max_turn_iterations": 1,
+         "memories": {"use_memories": false, "generate_memories": false},
+         "model_providers": {
+           "mock": {
+             "name": "Mock",
+             "base_url": "http://127.0.0.1:<mock_port>/chat/completions",
+             "api_key": "test"
+           }
+         }
+       }'
+     ```
+  2. 通过真实 `/agent/chat` API 发送文本 + 图片：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18885/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "session_key": "human-multimodal-image",
+         "message": "MULTIMODAL_IMAGE_E2E 请描述这张图片",
+         "images": [{
+           "mime_type": "image/png",
+           "data": "iVBORw0KGgo="
+         }]
+       }'
+     ```
+  3. 检查响应 JSON 和 mock 收到的请求体。
+  4. 打开 WebUI `Settings → Agent → Sessions`，进入 `human-multimodal-image` Session 详情，或调用：
+     ```bash
+     curl -s http://127.0.0.1:18885/_bifrost/api/im-gateway/agent/sessions/human-multimodal-image
+     ```
+- **预期结果**:
+  - `/agent/chat` 返回 `success: true`。
+  - `response` 包含 `MULTIMODAL_IMAGE_E2E_OK`，证明模型链路消费到了图片输入。
+  - mock 收到的最后一条 user message 的 `content` 是数组，至少包含一个 `{"type":"text"}` part 和一个 `{"type":"image_url"}` part。
+  - `image_url.url` 以 `data:image/png;base64,` 开头。
+  - Session 详情 API 的 user message 包含 `content_parts` 中的 `image_url` part。
+  - WebUI Session 详情中 user message 下方显示图片缩略图，点击缩略图后打开放大预览层。
+  - 会话 JSONL 的 `user_message.content.images` 保存 `{mime_type,data}`，后续历史会话仍可查看图片。
+  - 启动命令包含 `--no-system-proxy`，全程未使用 9900 端口。
+- **清理步骤**:
+  - 停止 Bifrost 进程和 mock 服务。
+  - 删除本用例创建的临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-06）**: PASS — 执行 `CARGO_TARGET_DIR=target/im-multimodal-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_multimodal_image_parts --test-timeout 120 --port 18885` 通过。用例启动真实 Bifrost admin + mock 多模态模型，通过 `/agent/chat` 发送文本和 `image/png` base64 图片，断言 mock 收到 OpenAI-compatible `image_url` content part，接口返回 `MULTIMODAL_IMAGE_E2E_OK`，并验证 Session 详情 API 的 user message 包含持久化 `content_parts.image_url`。
+
+### TC-IMA-86: 飞书富文本 post 图片+文字消息进入 Agent
+
+- **前置条件**:
+  - Feishu `im.message.receive_v1` 事件中的 `message_type` 为 `post`。
+  - `message.content` 使用飞书接收态富文本结构：顶层包含 `title` 和 `content`，其中 `content` 为二维数组，元素可包含 `tag=text/a/at/img/media/code_block`。
+- **操作步骤**:
+  1. 构造一条 `post` 消息，`content` 中包含 `{"tag":"text","text":"请看这张图"}` 和 `{"tag":"img","image_key":"img_v3_post"}`。
+  2. 调用 Feishu 事件归一化逻辑。
+  3. 构造一条图片-only IM event，`text=""` 且 `images` 非空，送入 IM event loop。
+  4. 检查模型 mock 收到的 Chat Completions 请求。
+- **预期结果**:
+  - 归一化后的 `message.text` 为 `请看这张图`，不是空字符串。
+  - 归一化后的 `message.images[0].file_key` 为 `img_v3_post`。
+  - 日志包含 `normalized feishu inbound message`，并输出 `message_type`、`text_len`、`image_count`、`image_keys`、`content_keys`、`content_preview`。
+  - 图片-only 消息不会因为文本为空被跳过；模型请求包含默认图片理解提示和 `image_url` content part。
+  - inbound message log 对图片-only 消息显示 `[图片消息: 1 张]` 预览。
+- **执行记录（2026-05-06）**: PASS — 执行 `cargo test -p bifrost-admin im_gateway::feishu::tests::test_normalize_feishu_post_extracts_text_and_images` 通过，验证接收态 `post` 顶层 `content` 结构能提取文字和图片 key；执行 `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 通过，验证图片-only IM event 不再被空文本短路，会进入 Agent 并携带 `image_url` content part。
+
+### TC-IMA-87: 图片数量上限与 Session 详情放大预览
+
+- **前置条件**:
+  - Agent 已启用，模型使用 OpenAI-compatible Chat Completions mock。
+  - WebUI 可访问 `Settings → Agent → Sessions`。
+- **操作步骤**:
+  1. 通过 `/agent/chat` 或飞书 IM 链路提交 7 张图片的单条消息。
+  2. 检查模型 mock 收到的 Chat Completions 请求。
+  3. 打开对应 Session 详情，查看 active session 的 user message 图片区域。
+  4. 结束会话后从 History session 详情再次查看同一条 user message 图片区域。
+  5. 分别点击 active 和 history 详情中的图片缩略图。
+- **预期结果**:
+  - 模型请求中最多包含 6 个 `image_url` content part。
+  - 超过 6 张时服务日志包含 `too many IM images in one message; truncating images for agent multimodal input` 或 `too many /agent/chat images in one request; truncating images`。
+  - Session 详情 active view 显示图片缩略图，点击后打开放大预览层。
+  - Session 详情 history view 从 JSONL `user_message.content.images` 恢复图片缩略图，点击后同样打开放大预览层。
+  - 图片缩略图和预览层在亮色、暗色主题下均可辨识。
+- **清理步骤**:
+  - 停止 Bifrost 进程和 mock 服务。
+  - 删除本用例创建的临时 `BIFROST_DATA_DIR`。
+  - 清理浏览器测试会话。
+- **执行记录（2026-05-06）**: PASS — 执行 `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 通过，测试构造 7 张图片的 IM event，验证进入模型请求的 `image_url` content part 被截断为 6 张；执行 `pnpm --dir web exec tsc --noEmit` 通过，验证 Session 详情图片缩略图改用 Ant Design `Image.PreviewGroup` 后类型检查通过，active/history 图片均可点击触发内置放大预览。

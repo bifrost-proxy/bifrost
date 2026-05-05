@@ -3,6 +3,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
+use base64::Engine as _;
 use bifrost_core::text::truncate_bytes_with_suffix;
 use futures_util::FutureExt;
 use http_body_util::BodyExt;
@@ -15,8 +16,8 @@ use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody
 use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
-    ImEvent, ImMessageLog, ImProviderAgentConfig, ImProviderConfig, ImRoute, ImRouteAction,
-    ImSchedule, ImTarget, MessageDirection, MessageStatus,
+    ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig, ImProviderConfig, ImRoute,
+    ImRouteAction, ImSchedule, ImTarget, MessageDirection, MessageStatus,
 };
 use crate::im_gateway::{
     ImAgentClient, ImAgentConfigStore, ImAgentSessionManager, ImAgentToolRegistry,
@@ -25,6 +26,9 @@ use crate::im_gateway::{
 };
 use bifrost_agent::persistence::ConversationRecorder;
 use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
+
+const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
+const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
 
 // ---------------------------------------------------------------------------
 // ImGatewayService
@@ -903,7 +907,7 @@ async fn run_event_loop(
                     target_name: None,
                     message_id: event.source.message_id.clone(),
                     msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
-                    content_preview: event.message.as_ref().map(|m| truncate_str(&m.text, 200)),
+                    content_preview: event.message.as_ref().map(inbound_message_preview),
                     trigger: Some("websocket".to_string()),
                     error: Some(format!("rejected: sender {} is not owner", sender_id)),
                     sender_open_id: Some(sender_id.to_string()),
@@ -919,7 +923,10 @@ async fn run_event_loop(
             provider_id = %event.provider_id,
             event_id = %event.event_id,
             event_type = %event.event_type,
-            message_text = ?event.message.as_ref().map(|m| &m.text),
+            message_type = ?event.message.as_ref().and_then(|m| m.raw_type.as_deref()),
+            message_text_len = event.message.as_ref().map(|m| m.text.len()).unwrap_or(0),
+            image_count = event.message.as_ref().map(|m| m.images.len()).unwrap_or(0),
+            has_text = event.message.as_ref().is_some_and(|m| !m.text.trim().is_empty()),
             "received inbound event from owner"
         );
 
@@ -954,7 +961,7 @@ async fn run_event_loop(
             target_name: None,
             message_id: event.source.message_id.clone(),
             msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
-            content_preview: event.message.as_ref().map(|m| truncate_str(&m.text, 200)),
+            content_preview: event.message.as_ref().map(inbound_message_preview),
             trigger: Some("websocket".to_string()),
             error: None,
             sender_open_id: event.source.user_id.clone(),
@@ -973,14 +980,15 @@ async fn run_event_loop(
             let agent_config = agent_config_store.load();
             if agent_config.enabled {
                 if let Some(ref msg) = event.message {
-                    if !msg.text.is_empty() {
+                    if !msg.text.trim().is_empty() || !msg.images.is_empty() {
                         let session_key =
                             build_session_key(&event.provider_id, event.source.user_id.as_deref());
+                        let agent_message = agent_message_text(msg);
 
                         // ── Guide/Queue mode: check if session is busy ──
                         if agent_session_manager.is_session_active(&session_key) {
                             handle_busy_message(
-                                &msg.text,
+                                &agent_message,
                                 &session_key,
                                 BusyMessageContext {
                                     queue_manager: &queue_manager,
@@ -996,7 +1004,7 @@ async fn run_event_loop(
                         }
 
                         // /status — handle directly without entering agent pipeline
-                        if msg.text.trim() == "/status" {
+                        if agent_message.trim() == "/status" {
                             let detail = agent_session_manager.get_session_detail(&session_key);
                             let reply = build_im_status_text(detail.as_ref());
                             send_agent_reply(
@@ -1011,6 +1019,8 @@ async fn run_event_loop(
                         }
 
                         // Session is free — start processing with select! interleaving
+                        let images =
+                            resolve_event_images(&feishu, &provider, &event, &msg.images).await;
                         run_agent_chat_with_interleave(
                             &mut rx,
                             &feishu,
@@ -1023,7 +1033,8 @@ async fn run_event_loop(
                             &agent_session_manager,
                             &queue_manager,
                             &session_key,
-                            &msg.text,
+                            &agent_message,
+                            images,
                             None,
                             &mut mcp_manager,
                             &message_log_store,
@@ -1053,17 +1064,26 @@ async fn run_event_loop(
                 reply_target: _,
                 ..
             } => {
-                let message_text = route_match.message_text.as_deref().unwrap_or("");
-                if message_text.is_empty() {
+                let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
+                let has_images = event
+                    .message
+                    .as_ref()
+                    .is_some_and(|message| !message.images.is_empty());
+                if raw_message_text.trim().is_empty() && !has_images {
                     continue;
                 }
+                let message_text = event
+                    .message
+                    .as_ref()
+                    .map(agent_message_text)
+                    .unwrap_or_else(|| raw_message_text.to_string());
                 let session_key =
                     build_session_key(&event.provider_id, event.source.user_id.as_deref());
 
                 // ── Guide/Queue mode: check if session is busy ──
                 if agent_session_manager.is_session_active(&session_key) {
                     handle_busy_message(
-                        message_text,
+                        &message_text,
                         &session_key,
                         BusyMessageContext {
                             queue_manager: &queue_manager,
@@ -1086,6 +1106,12 @@ async fn run_event_loop(
                     continue;
                 }
 
+                let images = match event.message.as_ref() {
+                    Some(message) => {
+                        resolve_event_images(&feishu, &provider, &event, &message.images).await
+                    }
+                    None => Vec::new(),
+                };
                 run_agent_chat_with_interleave(
                     &mut rx,
                     &feishu,
@@ -1098,7 +1124,8 @@ async fn run_event_loop(
                     &agent_session_manager,
                     &queue_manager,
                     &session_key,
-                    message_text,
+                    &message_text,
+                    images,
                     system_prompt.as_deref(),
                     &mut mcp_manager,
                     &message_log_store,
@@ -1134,6 +1161,88 @@ struct BusyMessageContext<'a> {
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     agent_session_manager: &'a Arc<ImAgentSessionManager>,
+}
+
+async fn resolve_event_images(
+    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    images: &[ImImageAttachment],
+) -> Vec<bifrost_agent::ChatImageInput> {
+    let mut resolved = Vec::new();
+    if images.len() > MAX_AGENT_IMAGES_PER_MESSAGE {
+        warn!(
+            provider_id = %provider.id,
+            event_id = %event.event_id,
+            image_count = images.len(),
+            max_images = MAX_AGENT_IMAGES_PER_MESSAGE,
+            "too many IM images in one message; truncating images for agent multimodal input"
+        );
+    }
+    for image in images.iter().take(MAX_AGENT_IMAGES_PER_MESSAGE) {
+        if let (Some(mime_type), Some(data)) = (&image.mime_type, &image.data_base64) {
+            resolved.push(bifrost_agent::ChatImageInput {
+                mime_type: mime_type.clone(),
+                data: data.clone(),
+            });
+            continue;
+        }
+
+        let Some(message_id) = event.source.message_id.as_deref() else {
+            warn!(
+                provider_id = %provider.id,
+                file_key = %image.file_key,
+                "cannot download IM image because message_id is missing"
+            );
+            continue;
+        };
+        match feishu
+            .download_message_image_resource(provider, message_id, &image.file_key)
+            .await
+        {
+            Ok((mime_type, bytes)) => {
+                info!(
+                    provider_id = %provider.id,
+                    message_id = %message_id,
+                    file_key = %image.file_key,
+                    mime_type = %mime_type,
+                    byte_len = bytes.len(),
+                    "downloaded IM image resource for agent multimodal input"
+                );
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                resolved.push(bifrost_agent::ChatImageInput { mime_type, data });
+            }
+            Err(error) => {
+                warn!(
+                    provider_id = %provider.id,
+                    message_id = %message_id,
+                    file_key = %image.file_key,
+                    error = %error,
+                    "failed to download IM image resource"
+                );
+            }
+        }
+    }
+    resolved
+}
+
+fn agent_message_text(message: &crate::im_gateway::types::ImEventMessage) -> String {
+    let text = message.text.trim();
+    if !text.is_empty() {
+        text.to_string()
+    } else if !message.images.is_empty() {
+        IMAGE_ONLY_AGENT_PROMPT.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn inbound_message_preview(message: &crate::im_gateway::types::ImEventMessage) -> String {
+    if message.text.trim().is_empty() && !message.images.is_empty() {
+        format!("[图片消息: {} 张]", message.images.len())
+    } else {
+        truncate_str(&message.text, 200)
+    }
 }
 
 async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessageContext<'_>) {
@@ -1328,6 +1437,7 @@ async fn run_agent_chat_with_interleave(
     queue_manager: &Arc<SessionQueueManager>,
     session_key: &str,
     initial_message: &str,
+    initial_images: Vec<bifrost_agent::ChatImageInput>,
     system_prompt_override: Option<&str>,
     mcp_manager: &mut ImMcpManager,
     message_log_store: &Arc<ImMessageLogStore>,
@@ -1336,6 +1446,7 @@ async fn run_agent_chat_with_interleave(
     let guide_channel = queue_manager.get_or_create_guide_channel(session_key);
 
     let mut current_msg = initial_message.to_string();
+    let mut current_images = initial_images;
 
     // Queue drain loop: process initial message, then drain queued messages
     loop {
@@ -1346,6 +1457,8 @@ async fn run_agent_chat_with_interleave(
             effective_agent_config_for_provider(&agent_config_store.load(), &current_provider);
         // Clone into a local so the future borrows the local, not `current_msg`.
         let msg_for_turn = current_msg.clone();
+        let images_for_turn = current_images.clone();
+        current_images.clear();
 
         // Run agent chat with interleaved event processing
         let chat_future = AssertUnwindSafe(process_agent_chat(
@@ -1359,6 +1472,7 @@ async fn run_agent_chat_with_interleave(
             agent_session_manager,
             session_key,
             &msg_for_turn,
+            &images_for_turn,
             system_prompt_override,
             Some(mcp_manager),
             message_log_store,
@@ -1583,6 +1697,7 @@ async fn process_agent_chat(
     session_manager: &Arc<ImAgentSessionManager>,
     session_key: &str,
     user_message: &str,
+    images: &[bifrost_agent::ChatImageInput],
     system_prompt_override: Option<&str>,
     mcp: Option<&mut ImMcpManager>,
     message_log_store: &Arc<ImMessageLogStore>,
@@ -1742,13 +1857,14 @@ async fn process_agent_chat(
         None
     };
 
-    let result = crate::im_gateway::run_turn_with_mcp(
+    let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
         agent_client,
         agent_config,
         &mut session,
         agent_tools,
         mcp,
         user_message,
+        images,
         system_prompt_override,
         recorder.as_mut(),
     )
@@ -1766,13 +1882,14 @@ async fn process_agent_chat(
             // Brief delay before retry
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             // Retry without MCP (already consumed) to simplify the call
-            match crate::im_gateway::run_turn_with_mcp(
+            match bifrost_agent::session::run_turn_with_mcp_multimodal(
                 agent_client,
                 agent_config,
                 &mut session,
                 agent_tools,
                 None, // MCP already consumed in first attempt
                 user_message,
+                images,
                 system_prompt_override,
                 recorder.as_mut(),
             )
@@ -3334,6 +3451,8 @@ async fn handle_agent(
         struct ChatRequest {
             message: String,
             #[serde(default)]
+            images: Vec<ChatImageRequest>,
+            #[serde(default)]
             session_key: Option<String>,
             #[serde(default)]
             system_prompt: Option<String>,
@@ -3349,6 +3468,16 @@ async fn handle_agent(
             /// processed sequentially within the same `run_turn_with_mcp` call.
             #[serde(default)]
             queue_messages: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct ChatImageRequest {
+            #[serde(default = "default_chat_image_mime_type")]
+            mime_type: String,
+            /// Base64 image bytes or a data URL.
+            data: String,
+        }
+        fn default_chat_image_mime_type() -> String {
+            "image/png".to_string()
         }
         let body: ChatRequest = match read_body_json(req).await {
             Ok(v) => v,
@@ -3467,13 +3596,32 @@ async fn handle_agent(
         } else {
             None
         };
-        let result = crate::im_gateway::run_turn_with_mcp(
+        let images: Vec<bifrost_agent::ChatImageInput> = body
+            .images
+            .iter()
+            .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+            .filter(|image| !image.data.trim().is_empty())
+            .map(|image| bifrost_agent::ChatImageInput {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+            })
+            .collect();
+        if body.images.len() > MAX_AGENT_IMAGES_PER_MESSAGE {
+            warn!(
+                session_key = %session_key,
+                image_count = body.images.len(),
+                max_images = MAX_AGENT_IMAGES_PER_MESSAGE,
+                "too many /agent/chat images in one request; truncating images"
+            );
+        }
+        let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
             &service.agent_client,
             &config,
             &mut session,
             &service.agent_tools,
             mcp_opt,
             &body.message,
+            &images,
             body.system_prompt.as_deref(),
             recorder.as_mut(),
         )
@@ -4443,14 +4591,62 @@ mod tests {
             .and_then(|messages| messages.as_array())
             .map(|messages| {
                 messages.iter().any(|message| {
-                    message
-                        .get("content")
-                        .and_then(|content| content.as_str())
-                        .map(|content| content.contains(needle))
+                    let Some(content) = message.get("content") else {
+                        return false;
+                    };
+                    if let Some(text) = content.as_str() {
+                        return text.contains(needle);
+                    }
+                    content
+                        .as_array()
+                        .map(|parts| {
+                            parts.iter().any(|part| {
+                                part.get("text")
+                                    .and_then(|value| value.as_str())
+                                    .map(|text| text.contains(needle))
+                                    .unwrap_or(false)
+                            })
+                        })
                         .unwrap_or(false)
                 })
             })
             .unwrap_or(false)
+    }
+
+    fn request_contains_image_url(body: &serde_json::Value) -> bool {
+        request_image_url_count(body) > 0
+    }
+
+    fn request_image_url_count(body: &serde_json::Value) -> usize {
+        body.get("messages")
+            .and_then(|messages| messages.as_array())
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .get("content")
+                            .and_then(|content| content.as_array())
+                            .map(|parts| {
+                                parts
+                                    .iter()
+                                    .filter(|part| {
+                                        part.get("type").and_then(|value| value.as_str())
+                                            == Some("image_url")
+                                            && part
+                                                .pointer("/image_url/url")
+                                                .and_then(|value| value.as_str())
+                                                .is_some_and(|url| {
+                                                    url.starts_with("data:image/png;base64,")
+                                                })
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     fn request_message_role(body: &serde_json::Value, idx: usize) -> Option<&str> {
@@ -4661,6 +4857,7 @@ mod tests {
             message: Some(crate::im_gateway::types::ImEventMessage {
                 text: "IM_PROVIDER_CHAT_MARKER 请只回复 IM_PROVIDER_CONFIG_OK".to_string(),
                 mentions: Vec::new(),
+                images: Vec::new(),
                 raw_type: Some("text".to_string()),
             }),
             received_at: now_ms(),
@@ -4695,5 +4892,109 @@ mod tests {
             request,
             "GLOBAL_USER_SHOULD_NOT_APPEAR"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+        let mock = TestChatCompletionMock::start().await;
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let mut base_config = service.agent_config_store.load();
+        base_config.enabled = true;
+        base_config.model = Some("mock-vision-model".to_string());
+        base_config.model_provider = Some("mock".to_string());
+        base_config.work_dir = Some(std::env::current_dir().unwrap().display().to_string());
+        base_config.max_turn_iterations = Some(1);
+        base_config.model_providers.insert(
+            "mock".to_string(),
+            bifrost_agent::config::ModelProviderConfig {
+                name: Some("Mock".to_string()),
+                base_url: Some(mock.url()),
+                env_key: None,
+                api_key: None,
+                http_headers: Some(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer test".to_string(),
+                )])),
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+        service
+            .agent_config_store
+            .save(&base_config)
+            .expect("save base agent config");
+
+        let mut provider = test_provider();
+        provider.id = "image-provider".to_string();
+        provider.owner_open_id = Some("owner-open-id".to_string());
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        service
+            .provider_store
+            .add(provider.clone())
+            .expect("add provider");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop(
+            rx,
+            Arc::clone(service.connection_manager.feishu_provider()),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.agent_client),
+            Arc::clone(&service.agent_tools),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.queue_manager),
+        ));
+
+        tx.send(ImEvent {
+            event_id: "evt-im-image-agent-chat".to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("chat-id".to_string()),
+                user_id: Some("owner-open-id".to_string()),
+                message_id: Some("om-image".to_string()),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: "".to_string(),
+                mentions: Vec::new(),
+                images: (0..7)
+                    .map(|idx| crate::im_gateway::types::ImImageAttachment {
+                        file_key: format!("img-unit-{idx}"),
+                        source: crate::im_gateway::types::ImImageSource::MessageResource,
+                        mime_type: Some("image/png".to_string()),
+                        data_base64: Some("iVBORw0KGgo=".to_string()),
+                    })
+                    .collect(),
+                raw_type: Some("image".to_string()),
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        })
+        .expect("send IM image event");
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("event loop timed out")
+            .expect("event loop task panicked");
+
+        let requests = mock.requests.lock().expect("requests lock");
+        let request = requests.first().expect("mock received chat request");
+        assert!(request_messages_contain(request, IMAGE_ONLY_AGENT_PROMPT));
+        assert!(request_contains_image_url(request));
+        assert_eq!(
+            request_image_url_count(request),
+            MAX_AGENT_IMAGES_PER_MESSAGE
+        );
     }
 }

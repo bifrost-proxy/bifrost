@@ -640,6 +640,116 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_agent_chat_multimodal_image_parts",
+            "Validate POST /api/im-gateway/agent/chat forwards image attachments as multimodal content parts",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let patch_response = client
+                    .patch(format!("{base}/agent"))
+                    .json(&serde_json::json!({
+                        "enabled": true,
+                        "model": "mock-vision-model",
+                        "model_provider": "mock",
+                        "base_instructions": "You can understand images.",
+                        "max_turn_iterations": 1,
+                        "request_timeout_secs": 20,
+                        "memories": {
+                            "use_memories": false,
+                            "generate_memories": false
+                        },
+                        "model_providers": {
+                            "mock": {
+                                "name": "Mock",
+                                "base_url": mock.url(),
+                                "api_key": "test"
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH agent config failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let chat_response = client
+                    .post(format!("{base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": "multimodal-image-e2e",
+                        "message": "MULTIMODAL_IMAGE_E2E 请描述这张图片",
+                        "images": [{
+                            "mime_type": "image/png",
+                            "data": "iVBORw0KGgo="
+                        }]
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST multimodal agent chat failed: {e}"))?;
+                assert_status(&chat_response, 200)?;
+                let chat_json: serde_json::Value = chat_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse chat response failed: {e}"))?;
+                if chat_json.get("success").and_then(|v| v.as_bool()) != Some(true)
+                    || !chat_json
+                        .get("response")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .contains("MULTIMODAL_IMAGE_E2E_OK")
+                {
+                    return Err(format!("Expected multimodal chat success, got: {chat_json}"));
+                }
+
+                {
+                    let requests = mock.requests.lock();
+                    let request = requests
+                        .last()
+                        .ok_or_else(|| "mock did not receive chat request".to_string())?;
+                    if !request_contains_image_url(request) {
+                        return Err(format!("mock request missing image_url part: {request}"));
+                    }
+                }
+
+                let session_detail: serde_json::Value = client
+                    .get(format!("{base}/agent/sessions/multimodal-image-e2e"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET multimodal session detail failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse multimodal session detail failed: {e}"))?;
+                let user_message = session_detail
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .and_then(|messages| messages.iter().find(|message| {
+                        message.get("role").and_then(|value| value.as_str()) == Some("user")
+                    }))
+                    .ok_or_else(|| format!("multimodal user message missing: {session_detail}"))?;
+                if !user_message
+                    .get("content_parts")
+                    .and_then(|value| value.as_array())
+                    .map(|parts| parts.iter().any(|part| {
+                        part.get("type").and_then(|value| value.as_str()) == Some("image_url")
+                    }))
+                    .unwrap_or(false)
+                {
+                    return Err(format!(
+                        "session detail missing persisted image content parts: {session_detail}"
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_route_create",
             "Validate POST /api/im-gateway/routes creates an AgentChat route and GET verifies it",
             "admin",
@@ -1354,6 +1464,9 @@ impl ChatCompletionMock {
                                                     == Some("user")
                                         })
                                         .unwrap_or(false);
+                            let is_multimodal_e2e =
+                                request_messages_contain(&body, "MULTIMODAL_IMAGE_E2E")
+                                    && request_contains_image_url(&body);
                             let has_tools = body
                                 .get("tools")
                                 .and_then(|value| value.as_array())
@@ -1394,6 +1507,11 @@ impl ChatCompletionMock {
                                 json!({
                                     "role": "assistant",
                                     "content": "PROMPT_SPLIT_CHAT_E2E_OK"
+                                })
+                            } else if is_multimodal_e2e {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "MULTIMODAL_IMAGE_E2E_OK: image understood"
                                 })
                             } else if should_call_tool {
                                 json!({
@@ -1490,10 +1608,45 @@ fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
         .and_then(|value| value.as_array())
         .map(|messages| {
             messages.iter().any(|message| {
+                let Some(content) = message.get("content") else {
+                    return false;
+                };
+                if let Some(text) = content.as_str() {
+                    return text.contains(needle);
+                }
+                content
+                    .as_array()
+                    .map(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("text")
+                                .and_then(|value| value.as_str())
+                                .map(|text| text.contains(needle))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn request_contains_image_url(body: &serde_json::Value) -> bool {
+    body.get("messages")
+        .and_then(|value| value.as_array())
+        .map(|messages| {
+            messages.iter().any(|message| {
                 message
                     .get("content")
-                    .and_then(|value| value.as_str())
-                    .map(|content| content.contains(needle))
+                    .and_then(|value| value.as_array())
+                    .map(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("type").and_then(|value| value.as_str()) == Some("image_url")
+                                && part
+                                    .pointer("/image_url/url")
+                                    .and_then(|value| value.as_str())
+                                    .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+                        })
+                    })
                     .unwrap_or(false)
             })
         })
