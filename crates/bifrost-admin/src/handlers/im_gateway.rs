@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bifrost_core::text::truncate_bytes_with_suffix;
 use futures_util::FutureExt;
@@ -624,6 +625,64 @@ fn build_session_key(provider_id: &str, user_id: Option<&str>) -> String {
     format!("{provider_id}:{user}")
 }
 
+// ---------------------------------------------------------------------------
+// Event Deduplication
+// ---------------------------------------------------------------------------
+
+/// Time-windowed event deduplication filter.
+///
+/// During reconnection, the Feishu server may re-deliver events that were
+/// already processed. This filter uses a bounded queue of recently-seen
+/// event_ids with a TTL to efficiently discard duplicates.
+struct EventDedup {
+    /// Ordered queue of (event_id, first_seen_at) for TTL expiry.
+    window: VecDeque<(String, Instant)>,
+    /// Maximum number of event_ids to retain.
+    max_entries: usize,
+    /// Events older than this duration are evicted.
+    ttl: std::time::Duration,
+}
+
+impl EventDedup {
+    fn new() -> Self {
+        Self {
+            window: VecDeque::with_capacity(512),
+            max_entries: 2048,
+            ttl: std::time::Duration::from_secs(300), // 5 minutes
+        }
+    }
+
+    /// Returns `true` if this event_id is a duplicate (already seen within the
+    /// TTL window). If not a duplicate, records it for future checks.
+    fn is_duplicate(&mut self, event_id: &str) -> bool {
+        self.evict_expired();
+
+        // Check if already seen
+        if self.window.iter().any(|(id, _)| id == event_id) {
+            return true;
+        }
+
+        // Record new event
+        if self.window.len() >= self.max_entries {
+            self.window.pop_front();
+        }
+        self.window
+            .push_back((event_id.to_string(), Instant::now()));
+        false
+    }
+
+    fn evict_expired(&mut self) {
+        let cutoff = Instant::now() - self.ttl;
+        while let Some((_, ts)) = self.window.front() {
+            if *ts < cutoff {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 /// Event processing loop: receives events from the long connection and processes them.
 ///
 /// Security: Only processes messages from the bot owner (owner_open_id).
@@ -727,7 +786,20 @@ async fn run_event_loop(
         }
     }
 
+    let mut dedup = EventDedup::new();
+
     while let Some(event) = rx.recv().await {
+        // Deduplication: skip events we've already processed (e.g. re-delivered
+        // by the server after a reconnection).
+        if !event.event_id.is_empty() && dedup.is_duplicate(&event.event_id) {
+            debug!(
+                provider_id = %event.provider_id,
+                event_id = %event.event_id,
+                "dropping duplicate event"
+            );
+            continue;
+        }
+
         // Security check: only process messages from the owner
         if let Some(ref owner_id) = provider.owner_open_id {
             let sender_id = event.source.user_id.as_deref().unwrap_or("");

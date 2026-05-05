@@ -317,6 +317,53 @@ mod tests {
         assert!(!mgr.remove_queue("nonexistent_session", 1));
     }
 
+    /// Test fix for guide message loss at turn end:
+    /// When a guide message is injected just as the agent turn is finishing
+    /// (model returns finish_reason=stop with no tool calls), the guide_channel
+    /// was never consumed because the consumption checkpoint only runs after
+    /// tool calls. This test verifies the drain-before-clear pattern.
+    #[test]
+    fn test_guide_drain_before_clear_prevents_loss() {
+        let mgr = SessionQueueManager::new();
+
+        // Simulate: turn loop gets channel reference at start
+        let channel = mgr.get_or_create_guide_channel("s1");
+
+        // Simulate: user sends a guide message just as turn is finishing
+        mgr.inject_guide("s1", "请帮我分析这个问题".into());
+
+        // ── The fix: drain guide_channel BEFORE checking queue/clear ──
+        // This is what `run_agent_chat_with_interleave` now does after turn completes.
+        let unconsumed = channel.lock().unwrap().take();
+        assert_eq!(unconsumed.as_deref(), Some("请帮我分析这个问题"));
+
+        // If we had called clear_session without draining first, the message
+        // would have been lost (the old bug).
+        // After draining, clear_session is safe:
+        assert!(channel.lock().unwrap().is_none());
+        mgr.clear_session("s1");
+    }
+
+    /// Test that the drain-then-queue priority works correctly:
+    /// Guide messages take priority over queued messages.
+    #[test]
+    fn test_guide_priority_over_queue_at_turn_end() {
+        let mgr = SessionQueueManager::new();
+        let channel = mgr.get_or_create_guide_channel("s1");
+
+        // Both guide and queue are pending at turn end
+        mgr.inject_guide("s1", "guide_msg".into());
+        mgr.push_queue("s1", "queued_msg".into()).unwrap();
+
+        // Fix logic: first drain guide, then check queue
+        let guide = channel.lock().unwrap().take();
+        assert_eq!(guide.as_deref(), Some("guide_msg"));
+
+        // Queue remains for the next iteration
+        assert_eq!(mgr.pop_queue("s1").as_deref(), Some("queued_msg"));
+        assert!(mgr.pop_queue("s1").is_none());
+    }
+
     /// Test concurrent access from multiple threads.
     #[test]
     fn test_concurrent_access() {
