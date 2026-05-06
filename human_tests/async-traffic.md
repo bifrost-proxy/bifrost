@@ -6,7 +6,7 @@ Async Traffic Writer 将流量记录和后续更新异步写入 traffic 数据�
 
 ## 前置条件
 
-- 在仓库根目录 `/Users/eden/work/github/bifrost` 执行。
+- 在仓库根目录执行。
 - 已安装 Rust toolchain。
 - 本用例不启动 Bifrost 代理，不占用正式 `9900` 端口，不修改系统代理。
 

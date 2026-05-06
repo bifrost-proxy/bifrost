@@ -33,7 +33,7 @@
 ### 单元/脚本验证
 
 - 运行 `python3 .agents/skills/codex-task-inspector/scripts/detect_codex_data_dir.py`
-  - 验证默认场景下返回 `selected_path=/Users/eden/.codex`
+  - 验证默认场景下返回 `selected_path=$HOME/.codex`
   - 验证输出含 `selected_source`、`markers`
 - 运行 `CODEX_HOME=/tmp/codex-home-test python3 .../detect_codex_data_dir.py`
   - 验证优先选择 `CODEX_HOME`
@@ -54,7 +54,7 @@
 
 ## 校验要求
 
-- `python3 /Users/eden/.bifrost/agent/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/codex-task-inspector`
+- `python3 $BIFROST_DATA_DIR/agent/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/codex-task-inspector`
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`

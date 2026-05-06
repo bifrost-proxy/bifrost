@@ -106,11 +106,11 @@ ls .codex-tasks
 ## 执行记录
 
 - TC-CTI-00：通过（2026-05-05）
-  - 实际结果：未设置 `CODEX_HOME` 时，探测脚本返回 `selected_source=default:$HOME/.codex`、`selected_path=/Users/eden/.codex`，并正确带出 `config_toml`、`sessions_dir`、`session_index`、`history`、`state_db` 等 markers。
+  - 实际结果：未设置 `CODEX_HOME` 时，探测脚本返回 `selected_source=default:$HOME/.codex`、`selected_path=$HOME/.codex`，并正确带出 `config_toml`、`sessions_dir`、`session_index`、`history`、`state_db` 等 markers。
 - TC-CTI-01：通过（2026-05-05）
   - 实际结果：设置 `CODEX_HOME=/tmp/codex-home-test` 后，探测脚本返回 `selected_source=env:CODEX_HOME`、`selected_path=/tmp/codex-home-test`、`selected_exists=false`，未错误回退到 `~/.codex`。
 - TC-CTI-02：通过（2026-05-05）
-  - 实际结果：先经探测脚本确认目录为 `/Users/eden/.codex`，再在 `/Users/eden/.codex/sessions/**/rollout-*-019df414-235e-74e3-be4b-84f883e0ea17.jsonl` 成功定位到 1 个匹配文件；读取到 `task_complete` 且首行结论为“CI 已处理到全绿。”
+  - 实际结果：先经探测脚本确认目录为 `$HOME/.codex`，再在 `$HOME/.codex/sessions/**/rollout-*-019df414-235e-74e3-be4b-84f883e0ea17.jsonl` 成功定位到 1 个匹配文件；读取到 `task_complete` 且首行结论为“CI 已处理到全绿。”
 - TC-CTI-03：通过（2026-05-05）
   - 实际结果：`.codex-tasks/*.pid` 中列出的 pid 均为 `NOT_RUNNING`；即使 `.codex-tasks/` 目录仍有大量文件，也不会误判任务仍在运行。
 - TC-CTI-04：通过（2026-05-05）

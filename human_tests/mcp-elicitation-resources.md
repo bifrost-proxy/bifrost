@@ -8,7 +8,7 @@ MCP Elicitation 和 Resources 协议模块为 Bifrost Agent 提供：
 
 ## 前置条件
 
-1. 工作目录：`/Users/eden/work/github/bifrost`
+1. 工作目录：项目根目录
 2. 文件已创建：
    - `crates/agent/src/mcp/elicitation.rs`
    - `crates/agent/src/mcp/resources.rs`

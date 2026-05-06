@@ -238,7 +238,7 @@ IM Provider 支持可选 `agent_config`，用于给不同 IM 通道绑定不同�
 ```json
 {
   "agent_config": {
-    "work_dir": "/Users/eden/work/github/bifrost",
+    "work_dir": "/path/to/your/project",
     "base_instructions": "Provider-specific base system prompt",
     "developer_instructions": "Provider-specific developer policy",
     "user_instructions": "Provider-specific AGENTS-style user notes"

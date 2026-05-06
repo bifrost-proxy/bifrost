@@ -1,8 +1,8 @@
 # Bifrost Long-term Memory 长期方案
 
-## 2026-05-02 方案修订：对齐 Codex 文件记忆
+## 2026-05-02 方案修订：对齐文件化记忆标准
 
-本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆复用 Codex 的文件化 read-path，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
+本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆采用 Codex-style 文件化 read-path 方案，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
 
 ## 目录布局
 
@@ -17,7 +17,7 @@
 - `MEMORY.md`：可搜索的长期记忆索引。
 - `raw_memories.md`：Codex-style 原始记忆汇总，用于后续 consolidation。
 - `rollout_summaries/`：每次自动抽取产生的可追溯摘要。
-- `skills/`：保留 Codex memory skill 目录，用于后续 consolidation 生成/更新 skills。
+- `skills/`：保留 memory skill 目录，用于后续 consolidation 生成/更新 skills。
 - `.phase2_state.json`：无数据库 Phase 2 的 bounded input hash 与处理计数状态，用于判断是否需要再次 consolidation。
 
 禁止创建或依赖 `memories.sqlite`。
@@ -29,7 +29,7 @@ turn 前执行：
 1. 如果 `memories.use_memories == Some(false)`，直接短路。
 2. 确保 `agent/memory/` 布局存在。
 3. 读取 `memory_summary.md`，为空则不注入。
-4. 非空时注入 Codex `read_path.md` 同构 instructions，模型按需决定是否读取 `MEMORY.md`、`rollout_summaries/` 或 `skills/`。
+4. 非空时注入 Codex-style read-path instructions，模型按需决定是否读取 `MEMORY.md`、`rollout_summaries/` 或 `skills/`。
 
 Bifrost 不再在 turn 前做 topK 数据库召回，也不维护 `scope/kind/use_count/FTS` 等数据库字段。
 
@@ -58,7 +58,7 @@ Bifrost 不再在 turn 前做 topK 数据库召回，也不维护 `scope/kind/us
 
 ## Phase 2 Consolidation
 
-Bifrost 不复制 Codex 的 state DB job/lease/watermark 表，而是在 `agent/memory/` 内使用文件状态实现 Phase 2：
+Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使用文件状态实现 Phase 2：
 
 1. 获取 `agent/memory/.phase2.lock` 文件锁；锁存在且未过期时跳过本轮，避免多个 session 同时 consolidation 覆盖彼此结果。
 2. 按 `memories.max_raw_memories_for_consolidation` 选择最近 N 条 raw/rollout 输入；未配置时使用内置默认值，且最小为 1。
@@ -87,7 +87,7 @@ Bifrost 不复制 Codex 的 state DB job/lease/watermark 表，而是在 `agent/
 
 如果模型输出非法 JSON，保留 turn-end append 产生的原始文件，不更新 Phase 2 状态，后续输入变化时可重试。
 
-## Codex 对齐情况
+## 功能对齐情况
 
 已对齐：
 
@@ -97,19 +97,19 @@ Bifrost 不复制 Codex 的 state DB job/lease/watermark 表，而是在 `agent/
 - `generate_memories` 与 `use_memories` 默认开启，显式 `false` 关闭。
 - 自动抽取后跨独立 session 可消费记忆。
 - `disable_on_external_context` 与旧 alias `no_memories_if_mcp_or_web_search` 的配置字段保留。
-- Admin PATCH 接收 Codex memories 配置字段，包括 `min_rate_limit_remaining_percent`。
+- Admin PATCH 接收 Codex-compatible memories 配置字段，包括 `min_rate_limit_remaining_percent`。
 - 无数据库 Phase 2 consolidation：基于 bounded `raw_memories.md`/`rollout_summaries/` 输入重写 `MEMORY.md`、`memory_summary.md`，使用文件锁和原子替换，并支持生成 memory skills。
 
-不复制：
+不实现：
 
-- Codex state DB 中的 stage1/stage2 job、lease、watermark、retry/backoff 表。用户要求 Bifrost 不使用数据库存储记忆。
+- 数据库中的 stage1/stage2 job、lease、watermark、retry/backoff 表。用户要求 Bifrost 不使用数据库存储记忆。
 
 仍未完全对齐，后续可继续补：
 
 - memory root git baseline：Bifrost 当前没有在 `agent/memory/` 下初始化 git，也没有 `phase2_workspace_diff.md`。
-- per-thread `ThreadMemoryMode`：Bifrost 当前是配置级开关，没有 Codex 的 thread metadata `enabled/disabled/polluted`。
+- per-thread `ThreadMemoryMode`：Bifrost 当前是配置级开关，没有 thread metadata `enabled/disabled/polluted`。
 - `disable_on_external_context` 的污染语义：字段存在，但尚未在 MCP/web/search 等外部上下文进入时自动禁用该 session 的 memory generation。
-- memory citation 解析与隐藏：Bifrost 注入 `<oai-mem-citation>` 要求，但还没有 Codex 的 citation parser/telemetry/UI 消费链路。
+- memory citation 解析与隐藏：Bifrost 注入 `<oai-mem-citation>` 要求，但还没有 citation parser/telemetry/UI 消费链路。
 - usage-based retention：Bifrost 当前不维护 `last_usage/use_count`，`max_unused_days` 等字段尚未驱动 pruning；Phase 2 已支持基于最近 N 条 raw/rollout 输入的 bounded selection。
 - rate-limit gating：字段可配置，但自动抽取尚未按 `min_rate_limit_remaining_percent` 跳过低余量窗口。
 
@@ -219,17 +219,17 @@ const MEMORY_SKILLS_SUBDIR: &str = "_memory";
 
 ### 对齐情况更新
 
-已补齐的 Codex 行为：
+已补齐的标准行为：
 
 - usage-based / age-based retention 已落地（`max_unused_days`、`max_rollout_age_days`、`max_rollouts_per_startup`）。
 - memory skills 写路径（与用户 skills 隔离）。
-- 观测维度（通过本地 `.telemetry.jsonl`，不依赖 Codex 的 DB telemetry）。
+- 观测维度（通过本地 `.telemetry.jsonl`，不依赖数据库 telemetry）。
 - 稳健 JSON 解析与抽取熔断。
 
-仍保持不对齐（故意选择）：
+仍保持不实现（故意选择）：
 
-- 不引入 SQLite，不复制 stage1/stage2 job/lease/watermark。
-- 不复用 Codex 的 citation parser / UI，Bifrost 只注入 citation 要求。
+- 不引入 SQLite，不使用 stage1/stage2 job/lease/watermark。
+- 不实现 citation parser / UI，Bifrost 只注入 citation 要求。
 
 ### 迁移说明
 

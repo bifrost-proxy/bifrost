@@ -382,7 +382,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
      ```bash
      curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq .
      ```
-  2. 验证以下 Go DefaultModelConfig() 对应的字段均已正确配置
+  2. 验证以下默认模型配置对应的字段均已正确配置
 - **预期结果**:
   - `model` = `"gpt-5.4-2026-03-05"`
   - `model_provider` = `"aidp_crawl"`

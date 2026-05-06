@@ -12,7 +12,7 @@
 
 ## 前置条件
 
-1. 当前目录位于仓库根目录：`/Users/eden/work/github/bifrost`
+1. 当前目录位于仓库根目录
 2. 本地已具备 Rust 构建环境
 3. 测试端口避开正式环境 `9900`，统一使用临时端口
 4. 启动 Bifrost 时必须带 `--no-system-proxy`

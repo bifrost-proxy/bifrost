@@ -13,7 +13,7 @@
 ### Goal
 
 - 工具层位于 `crates/agent/src/tools/goal.rs`，统一由 `GoalManager` 持有状态。
-- Goal 工具对外返回 Codex `ThreadGoal` 兼容快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
+- Goal 工具对外返回 Codex-compatible `ThreadGoal` 兼容快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
 - 会话入口位于 `crates/agent/src/slash.rs` 与 `crates/agent/src/session.rs`：
   - `/goal`
   - `/goal show`
@@ -47,11 +47,11 @@
   - `exit_code`
 - `exit_code` 解析不能假设 sentinel 位于行首；交互式 zsh/bash 可能把 prompt 与 sentinel 放在同一行，解析时需在行内查找 sentinel 前缀。
 
-## 与 Codex 的剩余差异
+## 后续增强方向
 
-- Goal：当前只实现目标状态与预算字段，还没有像 Codex 那样把 token/time usage 挂到 session runtime 并在完成时回报预算消耗。
-- Apply Patch：运行时已兼容 freeform raw patch，但工具注册层仍是 JSON schema，不是 Codex 那套独立 freeform grammar tool。
-- Shell PTY：当前是“PTY-like”持久 shell，会话与交互能力已覆盖核心场景，但还没有 Codex unified exec 那种完整的 `tty`/`max_output_tokens`/统一输出 schema。
+- Goal：当前只实现目标状态与预算字段，后续可扩展 token/time usage 挂载到 session runtime 并在完成时回报预算消耗。
+- Apply Patch：运行时已兼容 freeform raw patch，后续可考虑独立 freeform grammar tool 注册方式。
+- Shell PTY：当前是"PTY-like"持久 shell，会话与交互能力已覆盖核心场景，后续可扩展完整的 `tty`/`max_output_tokens`/统一输出 schema。
 
 ## 测试方案
 
