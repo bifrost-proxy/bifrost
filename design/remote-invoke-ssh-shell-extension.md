@@ -1244,3 +1244,9 @@ Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无�
 - caller 侧在 SSH connect 成功后会把连接保存进 `{BIFROST_DATA_DIR}/remote-connections.json`，并复用保存的 `caller_fingerprint` 执行后续 `remote status/search/traffic`
 - relay 的 `ssh_connect_result` SSE 事件必须携带 `client_instance_id`，否则 caller 无法完成本地连接落盘与后续命令复用
 - `bifrost-server-v4` 的 `ssh_connect` 挂起态也必须持久化 `caller_info`，否则 `connect-result` 落 SSH grant 时会丢失 `caller_display_name`，导致 WebUI / grant 列表无法展示调用方信息
+
+## 2026-05-06 CI 稳定性补充
+
+- SSH key reset 会轮换 `device_code` 与 route 信息，并通过 `trigger_ssh_route_refresh()` 让 remote invoke worker 断开 SSE 后重新注册。CI 验收必须等待 reset 后的 worker 真实回到 `Connected`，再验证新 `device_code` 的 challenge。
+- macOS arm64 shell shard 在高并发下可能让 reset 后重连超过原来的 60s 窗口；`test_remote_invoke_ssh_e2e.sh` 的 reset 后重连等待放宽为 `BIFROST_E2E_REMOTE_INVOKE_RESET_RECONNECT_TIMEOUT`，默认 180s。
+- 如果 reset 后重连仍超时，E2E 必须输出最后的 remote invoke status、relay log tail 与 Bifrost log tail，避免 CI 只给出 `unknown failure` 或单行等待失败。

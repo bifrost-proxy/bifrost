@@ -221,6 +221,63 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-11：回归 - 响应头误标为 HTML 的 JSON 数据接口不注入 Badge
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-human-badge-json \
+     CARGO_TARGET_DIR=./.bifrost-target-human-badge-json \
+     cargo run --bin bifrost -- start -p 18882 --unsafe-ssl --no-system-proxy --enable-badge-injection
+   ```
+2. 启动一个本地上游服务，返回 `Content-Type: text/html; charset=utf-8` 但 body 是 JSON：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           body = b'{"code":200,"data":{"mode":"slide","challenge_code":99999}}'
+           self.send_response(200)
+           self.send_header("Content-Type", "text/html; charset=utf-8")
+           self.send_header("Content-Length", str(len(body)))
+           self.end_headers()
+           self.wfile.write(body)
+
+       def log_message(self, *_):
+           pass
+
+   ThreadingHTTPServer(("127.0.0.1", 18883), Handler).serve_forever()
+   PY
+   ```
+3. 通过代理请求该误标 JSON 接口：
+   ```bash
+   curl -x http://127.0.0.1:18882 http://127.0.0.1:18883/captcha/get -s -o /tmp/bifrost-badge-mislabeled-json.txt
+   ```
+4. 检查响应内容：
+   ```bash
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+
+   body = Path("/tmp/bifrost-badge-mislabeled-json.txt").read_text()
+   parsed = json.loads(body)
+   assert parsed["code"] == 200
+   assert parsed["data"]["mode"] == "slide"
+   assert "__bifrost_badge__" not in body
+   assert "__bb_copy" not in body
+   print("TC-BHP-11 passed")
+   PY
+   ```
+
+**预期结果**：
+- 响应体仍是可被 `json.loads` 解析的原始 JSON
+- 响应体包含 `{"code":200,...}` 业务数据
+- 响应体不包含 `__bifrost_badge__`、`__bb_panel__`、`__bb_copy` 或任何 Badge 注入片段
+- 该用例覆盖真实请求 `16473` 暴露的场景：响应头声称 `text/html`，但 body 实际是 JSON 数据接口
+
+---
+
 ## 清理步骤
 
 ```bash
@@ -228,5 +285,5 @@ curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-badge-rule -s
 curl -X DELETE http://127.0.0.1:18880/_bifrost/api/rules/badge-html-tag-escaping-regression -s
 curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
-rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html
+rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt
 ```

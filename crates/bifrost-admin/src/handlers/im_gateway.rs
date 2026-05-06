@@ -355,9 +355,18 @@ async fn handle_providers(
                 json_response(&safe)
             }
             Method::POST => {
-                let mut config: ImProviderConfig = match read_body_json(req).await {
+                let payload: serde_json::Value = match read_body_json(req).await {
                     Ok(v) => v,
                     Err(resp) => return resp,
+                };
+                let mut config = match parse_provider_create_payload(payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Invalid request body: {e}"),
+                        );
+                    }
                 };
                 let now = now_ms();
                 if config.created_at == 0 {
@@ -814,9 +823,9 @@ async fn run_event_loop(
             updated_at: 0,
         };
 
-        let online_msg = "你好，Bifrost 助手上线了";
+        let online_msg = build_online_notification_message(&provider);
         let send_result = feishu
-            .send_text(&provider, &online_target, online_msg)
+            .send_text(&provider, &online_target, &online_msg)
             .await;
 
         // Record outbound message log
@@ -3920,10 +3929,8 @@ fn apply_agent_config_patch(
             if !headers.contains_key("api-key") {
                 headers.insert("api-key".to_string(), String::new());
             }
-        } else {
-            if let Some(ref mut headers) = provider.http_headers {
-                headers.remove("api-key");
-            }
+        } else if let Some(ref mut headers) = provider.http_headers {
+            headers.remove("api-key");
         }
     }
     if let Some(retries) = patch.get("request_max_retries").and_then(|v| v.as_u64()) {
@@ -4037,6 +4044,24 @@ fn now_ms() -> u64 {
 fn uuid_short() -> String {
     let id = uuid::Uuid::new_v4();
     id.to_string()[..8].to_string()
+}
+
+fn build_online_notification_message(provider: &ImProviderConfig) -> String {
+    let work_dir = provider
+        .agent_config
+        .as_ref()
+        .and_then(|config| config.work_dir.as_deref())
+        .map(str::trim)
+        .filter(|work_dir| !work_dir.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .ok()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    format!("你好，Bifrost 助手上线了\n工作目录：{work_dir}")
 }
 
 /// Build a Feishu Card 2.0 JSON for real-time plan progress display.
@@ -4183,6 +4208,37 @@ fn sanitize_provider(provider: &ImProviderConfig) -> serde_json::Value {
         "created_at": provider.created_at,
         "updated_at": provider.updated_at,
     })
+}
+
+fn parse_provider_create_payload(
+    mut payload: serde_json::Value,
+) -> std::result::Result<ImProviderConfig, serde_json::Error> {
+    let fallback_display_name = payload
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| id.to_string());
+    let display_name_missing = payload
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .is_none_or(|name| name.trim().is_empty());
+    if display_name_missing {
+        if let Some(display_name) = fallback_display_name {
+            payload["display_name"] = serde_json::Value::String(display_name);
+        }
+    }
+    if let Some(secret) = payload.get("app_secret").and_then(|v| v.as_str()) {
+        if payload
+            .get("secret_ref")
+            .is_none_or(|existing| existing.is_null())
+        {
+            payload["secret_ref"] = serde_json::Value::String(secret.to_string());
+        }
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("app_secret");
+    }
+    serde_json::from_value(payload)
 }
 
 fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Value) {
@@ -4516,6 +4572,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn online_notification_message_uses_provider_work_dir_override() {
+        let mut provider = test_provider();
+        provider.agent_config = Some(ImProviderAgentConfig {
+            work_dir: Some("/custom/im-provider-workdir".to_string()),
+            instructions: None,
+            base_instructions: None,
+            developer_instructions: None,
+            user_instructions: None,
+        });
+
+        let message = build_online_notification_message(&provider);
+
+        assert!(message.starts_with("你好，Bifrost 助手上线了"));
+        assert!(message.contains("工作目录：/custom/im-provider-workdir"));
+    }
+
+    #[test]
+    fn online_notification_message_falls_back_to_process_work_dir() {
+        let cwd = std::env::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string();
+        let provider = test_provider();
+
+        let message = build_online_notification_message(&provider);
+
+        assert!(message.starts_with("你好，Bifrost 助手上线了"));
+        assert!(message.contains("工作目录："));
+        assert!(message.contains(&cwd));
+    }
+
     struct TestChatCompletionMock {
         port: u16,
         requests: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -4707,6 +4795,50 @@ mod tests {
         );
 
         assert!(provider.agent_config.is_none());
+    }
+
+    #[test]
+    fn provider_create_payload_maps_app_secret_without_exposing_it() {
+        let provider = parse_provider_create_payload(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "display_name": "Feishu Main",
+            "enabled": true,
+            "app_id": "cli_xxx",
+            "app_secret": "sk_test_secret",
+            "event_connection_enabled": true,
+            "event_types": []
+        }))
+        .expect("provider create payload should parse");
+
+        assert_eq!(provider.secret_ref.as_deref(), Some("sk_test_secret"));
+        assert_eq!(provider.display_name, "Feishu Main");
+
+        let safe = sanitize_provider(&provider);
+        assert_eq!(
+            safe.get("secret_configured").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(safe.get("secret_ref").is_none());
+        assert!(safe.get("app_secret").is_none());
+        assert!(!safe.to_string().contains("sk_test_secret"));
+    }
+
+    #[test]
+    fn provider_create_payload_defaults_missing_display_name_to_id() {
+        let provider = parse_provider_create_payload(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "enabled": true,
+            "app_id": "cli_xxx",
+            "app_secret": "sk_test_secret",
+            "event_connection_enabled": true,
+            "event_types": []
+        }))
+        .expect("provider create payload should default display_name");
+
+        assert_eq!(provider.display_name, "feishu-main");
+        assert_eq!(provider.secret_ref.as_deref(), Some("sk_test_secret"));
     }
 
     #[test]

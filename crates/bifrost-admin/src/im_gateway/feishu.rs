@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -125,13 +126,20 @@ struct TokenCache {
     expires_at: u64,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TokenCacheKey {
+    base_url: String,
+    app_id: String,
+    secret_digest: String,
+}
+
 // ---------------------------------------------------------------------------
 // Feishu Provider
 // ---------------------------------------------------------------------------
 
 pub struct FeishuProvider {
     http: reqwest::Client,
-    token_cache: RwLock<Option<TokenCache>>,
+    token_cache: RwLock<HashMap<TokenCacheKey, TokenCache>>,
 }
 
 impl Default for FeishuProvider {
@@ -149,7 +157,7 @@ impl FeishuProvider {
 
         Self {
             http,
-            token_cache: RwLock::new(None),
+            token_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -162,6 +170,16 @@ impl FeishuProvider {
             .trim_end_matches('/')
     }
 
+    fn token_cache_key(base_url: &str, app_id: &str, app_secret: &str) -> TokenCacheKey {
+        let secret_digest = digest(&SHA256, app_secret.as_bytes());
+
+        TokenCacheKey {
+            base_url: base_url.to_string(),
+            app_id: app_id.to_string(),
+            secret_digest: hex_encode(secret_digest.as_ref()),
+        }
+    }
+
     /// Get tenant_access_token with caching and early refresh.
     pub async fn get_tenant_token(
         &self,
@@ -169,11 +187,14 @@ impl FeishuProvider {
         app_secret: &str,
     ) -> Result<String> {
         let now = current_timestamp_secs();
+        let base_url = Self::base_url(config);
+        let app_id = config.app_id.as_deref().unwrap_or_default();
+        let cache_key = Self::token_cache_key(base_url, app_id, app_secret);
 
         // Check cache
         {
             let cache = self.token_cache.read();
-            if let Some(ref c) = *cache {
+            if let Some(c) = cache.get(&cache_key) {
                 if now + TOKEN_REFRESH_AHEAD_SECS < c.expires_at {
                     return Ok(c.token.clone());
                 }
@@ -181,15 +202,13 @@ impl FeishuProvider {
         }
 
         // Refresh needed
-        let base_url = Self::base_url(config);
-        let app_id = config.app_id.as_deref().unwrap_or_default();
         let (token, expire) = self.refresh_token(base_url, app_id, app_secret).await?;
 
         let expires_at = now + expire;
         let result = token.clone();
 
         let mut cache = self.token_cache.write();
-        *cache = Some(TokenCache { token, expires_at });
+        cache.insert(cache_key, TokenCache { token, expires_at });
 
         Ok(result)
     }
@@ -1411,6 +1430,34 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_token_cache_key_isolated_by_app_id() {
+        let first = FeishuProvider::token_cache_key(DEFAULT_BASE_URL, "cli_first", "secret");
+        let second = FeishuProvider::token_cache_key(DEFAULT_BASE_URL, "cli_second", "secret");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_token_cache_key_isolated_by_secret() {
+        let first = FeishuProvider::token_cache_key(DEFAULT_BASE_URL, "cli_same", "secret_first");
+        let second = FeishuProvider::token_cache_key(DEFAULT_BASE_URL, "cli_same", "secret_second");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_token_cache_key_isolated_by_base_url() {
+        let first = FeishuProvider::token_cache_key(DEFAULT_BASE_URL, "cli_same", "secret_same");
+        let second = FeishuProvider::token_cache_key(
+            "https://open.larksuite.com/open-apis",
+            "cli_same",
+            "secret_same",
+        );
+
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn test_normalize_feishu_message_receive_event() {

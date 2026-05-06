@@ -77,7 +77,42 @@ build_bifrost() {
 
 start_html_server() {
   echo "[INFO] Starting html server on :${HTML_PORT}"
-  python3 -m http.server "$HTML_PORT" --bind 127.0.0.1 --directory "$HTML_DIR" >/dev/null 2>&1 &
+  python3 - "$HTML_PORT" "$HTML_DIR" <<'PY' >/dev/null 2>&1 &
+import http.server
+import pathlib
+import sys
+
+port = int(sys.argv[1])
+html_dir = pathlib.Path(sys.argv[2])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/mislabeled-json":
+            body = b'{"code":200,"data":{"mode":"slide","challenge_code":99999}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path in ("/", "/index.html"):
+            body = (html_dir / "index.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        self.send_error(404)
+
+    def log_message(self, format, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+server.serve_forever()
+PY
   HTML_PID=$!
 
   for _ in $(seq 1 30); do
@@ -198,6 +233,16 @@ assert_badge_injection() {
   fi
 }
 
+assert_mislabeled_json_not_injected() {
+  local url="http://127.0.0.1:${HTML_PORT}/mislabeled-json"
+
+  fetch_via_proxy "$url"
+  assert_status "200" "$HTTP_STATUS" "Mislabeled JSON request should succeed"
+  assert_body_contains '"code":200' "$HTTP_BODY" "Mislabeled JSON body should be preserved"
+  assert_body_not_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should not be injected into JSON body"
+  assert_body_not_contains "__bb_copy" "$HTTP_BODY" "Badge panel should not be injected into JSON body"
+}
+
 assert_vconsole_rule_is_not_promoted_to_page_script() {
   local url="http://127.0.0.1:${HTML_PORT}/index.html"
 
@@ -225,7 +270,12 @@ start_proxy "${BIFROST_DATA_DIR_BASE}-enabled" --enable-badge-injection
 assert_badge_injection "present" || { print_test_summary || true; exit 1; }
 stop_proxy
 
-echo "[INFO] Case 3: badge merged rules escape </script> in vConsole htmlAppend values"
+echo "[INFO] Case 3: --enable-badge-injection skips mislabeled JSON"
+start_proxy "${BIFROST_DATA_DIR_BASE}-mislabeled-json" --enable-badge-injection
+assert_mislabeled_json_not_injected || { print_test_summary || true; exit 1; }
+stop_proxy
+
+echo "[INFO] Case 4: badge merged rules escape </script> in vConsole htmlAppend values"
 start_proxy "${BIFROST_DATA_DIR_BASE}-escape" --enable-badge-injection
 assert_vconsole_rule_is_not_promoted_to_page_script || { print_test_summary || true; exit 1; }
 stop_proxy

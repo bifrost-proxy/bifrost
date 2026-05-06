@@ -4844,6 +4844,44 @@ PY
 
 ---
 
+### TC-RI-回归-145：SSH key reset 后 worker 重连等待必须覆盖 CI 高并发窗口并输出诊断
+
+**背景**：GitHub Actions `E2E Shell (aarch64-apple-darwin, shard 3/3)` 曾在 `test_remote_invoke_ssh_e2e.sh` 的 `Wait for worker reconnect after reset` 阶段失败。失败前 create/export/reset 均成功，说明问题集中在 reset 后 worker 断开 SSE、重新注册 route、恢复 `Connected` 的等待窗口。原脚本只等待 60s，且失败时缺少最后 status、relay log 与 Bifrost log，导致 CI 归因困难。
+
+**前置条件**：
+- 使用隔离的 local relay / target admin / caller 数据目录
+- target admin 使用随机端口，禁止使用 `9900`
+- target admin 启动参数包含 `--no-system-proxy`
+- 本地具备 `python3`、`curl`、`jq`、`pnpm`、`cargo`
+- 已有 `target/release/bifrost`，或允许脚本自行构建
+
+**操作步骤**：
+1. 执行 SSH key remote invoke E2E：
+   ```bash
+   source ~/.zshrc
+   BIFROST_E2E_REMOTE_INVOKE_RESET_RECONNECT_TIMEOUT=180 \
+     bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+2. 观察脚本创建 SSH key、导出私钥、reset SSH key。
+3. 在 `Wait for worker reconnect after reset` 阶段，确认脚本等待 worker 恢复 `Connected`。
+4. 如果重连超时，确认脚本输出最后的 `/api/remote-invoke/status`、relay log tail 与 Bifrost log tail。
+5. 重连成功后，继续观察新 `device_code` challenge、`remote conn up --ssh-key`、多 caller grant、openCall 与 revoke 验证。
+
+**预期结果**：
+- reset 后 worker 在 180s 窗口内恢复 `Connected`
+- 新 `device_code` 可以拿到 relay challenge，旧 key 不再作为 active route
+- 后续 SSH key connect、grant 复用、remote call、revoke 后 challenge 拒绝均通过
+- 失败时必须输出可诊断日志，不再只显示单行 `Wait for worker reconnect after reset`
+- 全流程使用随机端口与隔离数据目录，未使用 `9900`，未修改系统代理
+
+### TC-RI-回归-145 执行结果（2026-05-06，SSH key reset 后 worker 重连等待）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-145 | ✅ PASS | 2026-05-06 本地按 GitHub Actions 失败 shard 复跑：`BIFROST_E2E_REPORT_DIR=$PWD/.e2e-reports/ci-shard3-repro BIFROST_E2E_SANDBOX_DIR=$PWD/.bifrost-e2e-runs/ci-shard3-repro BIFROST_E2E_SHELL_JOBS=16 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 PYTHONIOENCODING=utf-8 bash scripts/ci/run-e2e-shell.sh`。同一 shard 28 个 shell suite 全部通过，其中 `shell:test_remote_invoke_ssh_e2e.sh` 通过，最终报告 `Total suites : 28 / Passed : 28 / Failed : 0 / Skipped : 0`。随后按新增 180s reset 重连窗口定向执行：`BIFROST_E2E_REPORT_DIR=$PWD/.e2e-reports/remote-invoke-ssh-reset-wait BIFROST_E2E_SANDBOX_DIR=$PWD/.bifrost-e2e-runs/remote-invoke-ssh-reset-wait BIFROST_E2E_REMOTE_INVOKE_RESET_RECONNECT_TIMEOUT=180 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`，验证 create/export/reset SSH key、reset 后 worker 重新 `Connected`、新 `device_code` challenge、SSH grant 复用、remote traffic/search 与 revoke 全部通过。测试使用随机端口与隔离数据目录，未使用 `9900`，未修改系统代理。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

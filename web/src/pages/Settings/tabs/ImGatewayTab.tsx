@@ -38,7 +38,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import * as imGatewayApi from "../../../api/imGateway";
-import { get } from "../../../api/client";
+import { get, normalizeApiErrorMessage } from "../../../api/client";
 import type {
   ImProviderConfig,
   ImTarget,
@@ -216,12 +216,16 @@ function ConnectionsPanel({
     try {
       const values = await form.validateFields();
       if (editingProvider) {
+        const appSecret =
+          typeof values.app_secret === "string" ? values.app_secret.trim() : "";
         const payload = normalizeProviderValues(
           {
             display_name: values.display_name,
             enabled: values.enabled,
+            app_id: values.app_id,
             owner_open_id: values.owner_open_id,
             agent_config: values.agent_config,
+            ...(appSecret ? { app_secret: appSecret } : {}),
           },
           true,
         );
@@ -231,10 +235,17 @@ function ConnectionsPanel({
         );
         message.success("Provider updated");
       } else {
+        const appSecret =
+          typeof values.app_secret === "string" ? values.app_secret.trim() : "";
         await imGatewayApi.createProvider(
           normalizeProviderValues(values, false) as Partial<ImProviderConfig>,
         );
-        message.success("Provider created");
+        if (values.enabled && values.event_connection_enabled && appSecret) {
+          await imGatewayApi.connectProvider(values.id);
+          message.success("Provider created and connected");
+        } else {
+          message.success("Provider created");
+        }
       }
       setAddModalOpen(false);
       setEditingProvider(null);
@@ -242,7 +253,29 @@ function ConnectionsPanel({
       onRefresh();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error("Failed to save provider");
+      message.error(normalizeApiErrorMessage(err, "Failed to save provider"));
+    }
+  };
+
+  const handleConnect = async (id: string) => {
+    try {
+      await imGatewayApi.connectProvider(id);
+      message.success("Provider connected");
+      onRefresh();
+      void fetchStatuses();
+    } catch (err) {
+      message.error(normalizeApiErrorMessage(err, "Failed to connect provider"));
+    }
+  };
+
+  const handleDisconnect = async (id: string) => {
+    try {
+      await imGatewayApi.disconnectProvider(id);
+      message.success("Provider disconnected");
+      onRefresh();
+      void fetchStatuses();
+    } catch (err) {
+      message.error(normalizeApiErrorMessage(err, "Failed to disconnect provider"));
     }
   };
 
@@ -330,6 +363,28 @@ function ConnectionsPanel({
                 }
                 extra={
                   <Space>
+                    {status?.state === "connected" ||
+                    status?.state === "connecting" ||
+                    status?.state === "reconnecting" ? (
+                      <Tooltip title="Disconnect">
+                        <Button
+                          size="small"
+                          icon={<PauseCircleOutlined />}
+                          onClick={() => handleDisconnect(p.id)}
+                          data-testid={`settings-im-provider-disconnect-${p.id}`}
+                        />
+                      </Tooltip>
+                    ) : (
+                      <Tooltip title="Connect">
+                        <Button
+                          size="small"
+                          icon={<PlayCircleOutlined />}
+                          onClick={() => handleConnect(p.id)}
+                          disabled={!p.secret_configured}
+                          data-testid={`settings-im-provider-connect-${p.id}`}
+                        />
+                      </Tooltip>
+                    )}
                     <Tooltip title="Edit">
                       <Button
                         size="small"
@@ -518,16 +573,20 @@ function ConnectionsPanel({
           <Form.Item name="owner_open_id" label="Owner Open ID">
             <Input placeholder="Optional owner open_id" />
           </Form.Item>
-          {!editingProvider && (
-            <>
-              <Form.Item name="app_id" label="App ID">
-                <Input placeholder="Application ID" />
-              </Form.Item>
-              <Form.Item name="app_secret" label="App Secret">
-                <Input.Password placeholder="Application secret (stored securely)" />
-              </Form.Item>
-            </>
-          )}
+          <Form.Item name="app_id" label="App ID">
+            <Input placeholder="Application ID" />
+          </Form.Item>
+          <Form.Item
+            name="app_secret"
+            label="App Secret"
+            extra={
+              editingProvider
+                ? "Leave blank to keep the existing secret. Enter a new value to replace it."
+                : undefined
+            }
+          >
+            <Input.Password placeholder="Application secret (stored securely)" />
+          </Form.Item>
           <Form.Item
             name={["agent_config", "work_dir"]}
             label="Agent Working Directory"
