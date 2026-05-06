@@ -69,10 +69,19 @@
 
 - `reqScript` / `resScript`
 - `decode`
+- `bp` + `decode://bp`
 
 详见：[scripts.md](./scripts.md)（脚本规则）与 [../scripts.md](../scripts.md)（管理端 Scripts 使用与开发指南）
 
-### 6) WebSocket
+### 6) TLS / DevTools / 控制规则
+
+- `tlsIntercept` / `tlsPassthrough`
+- `passthrough` / `tunnel`
+- `devtools`
+
+详见：[../operation.md](../operation.md) 与 [filters.md](./filters.md)
+
+### 7) WebSocket
 
 - `ws` / `wss`
 

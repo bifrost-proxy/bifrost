@@ -17,12 +17,12 @@ Bifrost 会根据 value 的格式自动识别其类型，支持以下 6 种：
 | ----------- | --------------- | ------------------------------- | ------------------------ |
 | 内联值      | 普通字符串      | `127.0.0.1:8080`                | 直接作为操作内容         |
 | 内联参数    | `key=value&...` | `x-proxy=Bifrost&x-test=1`      | 自动解析为键值对         |
-| 小括号内容  | `(content)`     | `({"ec":0})`                    | 括号内容直接作为操作内容 |
+| 小括号内容  | `(content)`     | `({"ec": 0})`                   | 括号内容直接作为操作内容 |
 | Values 引用 | `{key}`         | `{config.json}`                 | 引用 Values 中的内容     |
 | 本地文件    | `/path/to/file` | `<USER_HOME>/mock.json`         | 从本地文件加载内容       |
 | 远程资源    | `http(s)://url` | `https://example.com/data.json` | 从远程 URL 加载内容      |
 
-> ⚠️ **重要**：内联值、内联参数、小括号内容这三种类型的 value **不能包含空格**。规则解析器使用空格分隔多个操作符，value 中的空格会导致解析错误。如需使用包含空格的复杂内容，请使用 **Values 引用**、**本地文件** 或 **远程资源**。
+> ⚠️ **重要**：普通内联值和内联参数仍然不能直接包含空格，因为规则解析器使用空格分隔多个操作符。小括号内容会作为一个整体解析，可以包含空格；多行内容、大段 JSON/HTML/JS/CSS、PAC 脚本仍建议使用 **Values 引用**、**本地文件** 或 **远程资源**。
 
 ### 识别规则
 
@@ -70,13 +70,13 @@ pattern reqCookies://session=abc123&user=test
 当操作内容需要包含特殊字符（如 `/`、`{`）时，使用小括号包裹可避免被误识别：
 
 ```txt
-pattern file://({"ec":0,"data":null})      # JSON 作为响应内容
-pattern reqHeaders://(/User/xxx/yyy.txt)   # 将路径字符串作为请求头值
+pattern file://({"ec": 0, "data": null})    # JSON 作为响应内容
+pattern resBody://(/User/xxx/yyy.txt)      # 将路径字符串作为响应内容
 ```
 
-> 注意：`reqHeaders:///User/xxx/yyy.txt` 会从文件加载内容，而 `reqHeaders://(/User/xxx/yyy.txt)` 会将 `/User/xxx/yyy.txt` 字符串直接设为请求头值
+> 注意：`resBody:///User/xxx/yyy.txt` 会从文件加载内容，而 `resBody://(/User/xxx/yyy.txt)` 会将 `/User/xxx/yyy.txt` 字符串直接作为响应内容
 
-> ⚠️ **值不能包含空格**，空格会被解析器识别为操作符分隔符，导致规则解析错误。如需包含空格或其他复杂内容，请使用 **Values 引用**。
+> 小括号内部可以包含空格，括号外的空格仍用于分隔多个 operation。需要换行或大段内容时，优先使用 **Values 引用**。
 
 ## Values 引用
 
@@ -332,6 +332,7 @@ key1=value1&key2=value2&keyN=valueN
 | `tlsPassthrough` | 禁用 TLS 拦截（直接透传） |
 | `tlsOptions` | 配置 CONNECT 上游 TLS 选项 |
 | `sniCallback` | 配置 SNI 回调元数据（CONNECT 请求） |
+| `devtools` | 为命中的代理页面开启显式 DevTools 控制授权 |
 | `passthrough` | 直连透传，不做任何修改 |
 | `tunnel` | 重定向 CONNECT 隧道目标 |
 | `delete` | 删除/阻断请求 |
@@ -432,6 +433,16 @@ key1=value1&key2=value2&keyN=valueN
 | `reqScript` | 执行请求阶段脚本（同时列于请求修改类） |
 | `resScript` | 执行响应阶段脚本（同时列于响应修改类） |
 | `decode` | 执行解码脚本（请求/响应解码） |
+
+### `devtools`
+
+`devtools://` 是显式授权控制规则，用于让命中的代理页面进入 DevTools 控制面。它不是页面发现机制；页面仍需要先经过 Bifrost 代理，再由规则授权控制资格。
+
+```txt
+https://example.com/ devtools://
+```
+
+该能力应只在明确需要远程控制或调试代理页面时开启。
 
 ### `http3`
 

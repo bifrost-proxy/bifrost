@@ -18,19 +18,19 @@ pattern file://{embedded_name}
 
 ### 基础示例
 
-> ⚠️ **注意**：小括号内不能有空格，JSON 冒号后不要加空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行 JSON/HTML 或大段内容建议使用块变量。
 
 ```bash
 # 返回本地文件
 www.example.com/api/config file:///path/to/config.json
 
-# 返回内联内容（无空格）
-www.example.com/api/status file://({"status":"ok"})
+# 返回内联内容
+www.example.com/api/status file://({"status": "ok"})
 
 # 返回远程文件
 www.example.com/mock file://http://mock-server.com/data.json
 
-# 含空格内容使用块变量
+# 多行内容使用块变量
 www.example.com/api/health file://{health-response}
 ```
 
@@ -51,15 +51,15 @@ www.example.com/api/users file:///mock/users.json
 # 返回静态 HTML
 www.example.com/maintenance file:///static/maintenance.html
 
-# Mock JSON 响应（无空格）
-www.example.com/api/health file://({"healthy":true,"version":"1.0"})
+# Mock JSON 响应
+www.example.com/api/health file://({"healthy": true, "version": "1.0"})
 ```
 
 ### 测试用例
 
 | 测试场景  | 规则                              | 预期                       |
 | --------- | --------------------------------- | -------------------------- |
-| 内联 JSON | `test.com file://({"ok":true})`   | 响应 Body 为 `{"ok":true}` |
+| 内联 JSON | `test.com file://({"ok": true})`  | 响应 Body 为 `{"ok": true}` |
 | 本地文件  | `test.com file:///path/mock.json` | 响应 Body 为文件内容       |
 
 ---
@@ -92,6 +92,7 @@ www.example.com/raw rawfile:///path/to/data.bin
 ```
 pattern tpl://template_content
 pattern tpl://(inline_template)
+pattern tpl://{embedded_template}
 ```
 
 ### 模板变量
@@ -106,24 +107,24 @@ pattern tpl://(inline_template)
 | `${path}`         | 请求路径   |
 | `${method}`       | 请求方法   |
 | `${query.key}`    | URL 参数   |
-| `${headers.name}` | 请求头     |
+| `${reqHeaders.name}` | 请求头 |
 
 ### 示例
 
 > ⚠️ **注意**：
 >
-> 1. 模板字符串必须用反引号包裹才能进行变量替换
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 1. 规则值中直接写模板变量时，需要使用反引号避免解析器提前处理特殊字符。
+> 2. 小括号内容可以包含空格；多行模板建议使用块变量。
 
 ```bash
-# 动态 JSON 响应（无空格）
-www.example.com tpl://`({"time":${now},"id":"${randomUUID}"})`
+# 动态 JSON 响应
+www.example.com tpl://`({"time": ${now}, "id": "${randomUUID}"})`
 
-# JSONP 回调（无空格）
+# JSONP 回调
 www.example.com tpl://`(${query.callback}({"data":"test"}))`
 
-# 回显请求信息（使用块变量处理空格）
-www.example.com tpl://`{echo-tpl}`
+# 回显请求信息（使用块变量）
+www.example.com tpl://{echo-tpl}
 ```
 
 块变量定义：
@@ -138,10 +139,10 @@ www.example.com tpl://`{echo-tpl}`
 
 | 测试场景 | 规则                                               | 预期               |
 | -------- | -------------------------------------------------- | ------------------ |
-| 时间戳   | ``test.com tpl://`({"t":${now}})`  ``              | 响应包含当前时间戳 |
-| UUID     | ``test.com tpl://`({"id":"${randomUUID}"})` ``     | 响应包含有效 UUID  |
-| 请求信息 | ``test.com tpl://`({"path":"${url.pathname}"})` `` | 响应包含请求路径   |
-| JSONP    | ``test.com tpl://`(${query.cb}({}))` ``            | 使用回调函数包装   |
+| 时间戳   | ``test.com tpl://`({"t": ${now}})` ``          | 响应包含当前时间戳 |
+| UUID     | ``test.com tpl://`({"id": "${randomUUID}"})` `` | 响应包含有效 UUID  |
+| 请求信息 | ``test.com tpl://`({"path": "${path}"})` ``     | 响应包含请求路径   |
+| JSONP    | ``test.com tpl://`(${query.cb}({}))` ``         | 使用回调函数包装   |
 
 ---
 
@@ -158,11 +159,11 @@ pattern reqBody://file_path
 
 ### 示例
 
-> ⚠️ **注意**：小括号内不能有空格
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；请求 Body 较长时建议使用文件或块变量。
 
 ```bash
-# 设置 JSON Body（无空格）
-www.example.com reqBody://({"key":"value"})
+# 设置 JSON Body
+www.example.com reqBody://({"key": "value"})
 
 # 从文件读取
 www.example.com reqBody:///path/to/request.json
@@ -175,7 +176,7 @@ www.example.com reqBody://()
 
 | 测试场景  | 规则                           | 预期                   |
 | --------- | ------------------------------ | ---------------------- |
-| 设置 JSON | `test.com reqBody://({"a":1})` | 请求 Body 为 `{"a":1}` |
+| 设置 JSON | `test.com reqBody://({"a": 1})` | 请求 Body 为 `{"a": 1}` |
 | 清空 Body | `test.com reqBody://()`        | 请求 Body 为空         |
 
 ---
@@ -193,11 +194,11 @@ pattern resBody://file_path
 
 ### 示例
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；响应 Body 较长时建议使用文件或块变量。
 
 ```bash
-# 设置响应内容（无空格）
-www.example.com resBody://({"status":"mocked"})
+# 设置响应内容
+www.example.com resBody://({"status": "mocked"})
 
 # 从文件读取
 www.example.com resBody:///path/to/response.json
@@ -205,7 +206,7 @@ www.example.com resBody:///path/to/response.json
 # 设置空响应
 www.example.com resBody://()
 
-# 含空格内容使用块变量
+# 多行内容使用块变量
 www.example.com resBody://{hello-response}
 ```
 
@@ -221,7 +222,7 @@ hello world
 
 | 测试场景  | 规则                               | 预期                       |
 | --------- | ---------------------------------- | -------------------------- |
-| 设置 JSON | `test.com resBody://({"ok":true})` | 响应 Body 为 `{"ok":true}` |
+| 设置 JSON | `test.com resBody://({"ok": true})` | 响应 Body 为 `{"ok": true}` |
 | 设置文本  | `test.com resBody://{hello-txt}`   | 响应 Body 为块变量内容     |
 
 ---
@@ -301,7 +302,7 @@ www.example.com resReplace://(/\d{4}-\d{4}-\d{4}-\d{4}/g=****-****-****-****)
 ### 语法
 
 ```txt
-pattern params://(key:value)            # 小括号格式（无空格）
+pattern params://(key: value)           # 小括号格式（可包含空格）
 pattern params://{varName}              # 引用内嵌值（推荐）
 pattern reqMerge://{varName}            # 兼容旧别名
 ```
@@ -309,13 +310,13 @@ pattern reqMerge://{varName}            # 兼容旧别名
 > ⚠️ **注意**：
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多字段或嵌套字段建议使用块变量
 
 ### 示例
 
 ```bash
-# 小括号格式添加字段（无空格）
-www.example.com params://(version:"2.0")
+# 小括号格式添加字段
+www.example.com params://(version: "2.0")
 
 # 使用模板变量（需要反引号）
 www.example.com params://`(timestamp:${now})`
@@ -337,8 +338,8 @@ meta.source: proxy
 
 | 测试场景 | 规则 | 原始 Body | 预期 Body |
 | --- | --- | --- | --- |
-| 添加字段 | `test.com params://(b:2)` | `{"a": 1}` | `{"a": 1, "b": 2}` |
-| 覆盖字段 | `test.com params://(a:99)` | `{"a": 1}` | `{"a": 99}` |
+| 添加字段 | `test.com params://(b: 2)` | `{"a": 1}` | `{"a": 1, "b": 2}` |
+| 覆盖字段 | `test.com params://(a: 99)` | `{"a": 1}` | `{"a": 99}` |
 
 ---
 
@@ -349,15 +350,15 @@ meta.source: proxy
 ### 语法
 
 ```
-pattern resMerge://(key:value)          # 小括号格式（无空格）
+pattern resMerge://(key: value)         # 小括号格式（可包含空格）
 pattern resMerge://{varName}            # 引用内嵌值（推荐）
 ```
 
 ### 示例
 
 ```bash
-# 小括号格式（无空格）
-www.example.com resMerge://(_proxy:true)
+# 小括号格式
+www.example.com resMerge://(_proxy: true)
 
 # 使用模板变量（需要反引号）
 www.example.com resMerge://`(timestamp:${now})`
@@ -370,7 +371,7 @@ www.example.com resMerge://{res-merge}
 
 | 测试场景 | 规则                            | 原始 Body      | 预期 Body                  |
 | -------- | ------------------------------- | -------------- | -------------------------- |
-| 添加字段 | `test.com resMerge://(extra:1)` | `{"data": []}` | `{"data": [], "extra": 1}` |
+| 添加字段 | `test.com resMerge://(extra: 1)` | `{"data": []}` | `{"data": [], "extra": 1}` |
 
 ---
 
@@ -381,7 +382,7 @@ www.example.com resMerge://{res-merge}
 ### 语法
 
 ```
-pattern reqAppend://(content)           # 小括号格式（无空格）
+pattern reqAppend://(content)           # 小括号格式（可包含空格）
 pattern reqAppend://{varName}           # 引用内嵌值（推荐）
 pattern reqPrepend://(content)
 pattern reqPrepend://{varName}
@@ -389,13 +390,13 @@ pattern reqPrepend://{varName}
 
 ### 示例
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行追加内容建议使用块变量。
 
 ```bash
-# 在末尾追加（无空格内容）
+# 在末尾追加
 www.example.com reqAppend://(\n--appended--)
 
-# 含空格内容使用块变量
+# 多行内容使用块变量
 www.example.com reqAppend://{append-content}
 www.example.com reqPrepend://{prefix-content}
 ```
@@ -422,7 +423,7 @@ prefix:
 ### 语法
 
 ```
-pattern resAppend://(content)           # 小括号格式（无空格）
+pattern resAppend://(content)           # 小括号格式（可包含空格）
 pattern resAppend://{varName}           # 引用内嵌值（推荐）
 pattern resPrepend://(content)
 pattern resPrepend://{varName}
@@ -430,13 +431,13 @@ pattern resPrepend://{varName}
 
 ### 示例
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行追加内容建议使用块变量。
 
 ```bash
-# 无空格内容使用小括号
+# 短内容使用小括号
 www.example.com resAppend://(\n<!--proxy-->)
 
-# 含空格内容使用块变量
+# 多行内容使用块变量
 www.example.com resAppend://{res-append}
 www.example.com resPrepend://{res-prepend}
 ```

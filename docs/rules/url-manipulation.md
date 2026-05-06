@@ -12,14 +12,14 @@
 
 ```
 pattern urlParams://key=value              # 内联格式（单个参数）
-pattern urlParams://(key:value)            # 小括号格式（无空格）
+pattern urlParams://(key: value)           # 小括号格式（可包含空格）
 pattern urlParams://{varName}              # 引用内嵌值（推荐）
 ```
 
 > ⚠️ **注意**：
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多个参数建议使用块变量
 
 ### 基础示例
 
@@ -27,8 +27,8 @@ pattern urlParams://{varName}              # 引用内嵌值（推荐）
 # 内联格式添加单个参数
 www.example.com urlParams://debug=true
 
-# 小括号格式（无空格）
-www.example.com urlParams://(version:2)
+# 小括号格式
+www.example.com urlParams://(version: 2)
 
 # 引用内嵌值（多个参数，推荐）
 www.example.com urlParams://{my-params}

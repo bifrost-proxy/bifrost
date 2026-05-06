@@ -12,13 +12,13 @@
 
 ```
 pattern reqHeaders://key=value                    # 内联格式（单个头）
-pattern reqHeaders://(key1:value1)                # 小括号格式（无空格）
+pattern reqHeaders://(key1: value1)               # 小括号格式（可包含空格）
 pattern reqHeaders://{varName}                    # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
 
 ### 基础示例
 
@@ -26,8 +26,8 @@ pattern reqHeaders://{varName}                    # 引用内嵌值/Values（推
 # 方式1：内联格式设置单个头
 www.example.com reqHeaders://X-Custom-Header=custom-value
 
-# 方式2：小括号格式（无空格）
-www.example.com reqHeaders://(X-Token:abc123)
+# 方式2：小括号格式（可包含空格）
+www.example.com reqHeaders://(X-Token: abc123)
 
 # 方式3：引用内嵌值（推荐，支持空格和多个头）
 www.example.com reqHeaders://{my-headers}
@@ -46,8 +46,8 @@ pattern reqHeaders://{my-headers}
 ### 特殊头部
 
 ```bash
-# 设置 Host 头部（无空格）
-www.example.com reqHeaders://(Host:backend.example.com)
+# 设置 Host 头部
+www.example.com reqHeaders://(Host: backend.example.com)
 
 # 设置 Content-Type
 www.example.com reqHeaders://Content-Type=application/json
@@ -78,7 +78,7 @@ X-Timestamp: ${now}
 | 测试场景 | 规则 | 预期 |
 | -------- | --------------------------------------- | ---- |
 | 内联格式 | `test.com reqHeaders://X-Custom=value` | 请求包含 `X-Custom: value` |
-| 小括号格式 | `test.com reqHeaders://(X-A:1)` | 请求包含 X-A 头部 |
+| 小括号格式 | `test.com reqHeaders://(X-A: 1)` | 请求包含 X-A 头部 |
 | 覆盖已有头部 | `test.com reqHeaders://Accept=text/plain` | Accept 被覆盖 |
 | 模板变量 | ``test.com reqHeaders://`X-Time=${now}` `` | X-Time 包含时间戳 |
 
@@ -220,11 +220,11 @@ www.example.com/api/resource method://DELETE
 
 ```
 pattern reqCookies://name=value              # 内联格式（单个）
-pattern reqCookies://(name:value)            # 小括号格式（无空格）
+pattern reqCookies://(name: value)           # 小括号格式（可包含空格）
 pattern reqCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
 
 ### 示例
 
@@ -232,8 +232,8 @@ pattern reqCookies://{varName}               # 引用内嵌值（推荐）
 # 设置单个 Cookie（内联格式）
 www.example.com reqCookies://session=abc123
 
-# 小括号格式（无空格）
-www.example.com reqCookies://(token:xyz789)
+# 小括号格式
+www.example.com reqCookies://(token: xyz789)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com reqCookies://{my-cookies}
@@ -252,7 +252,7 @@ user_id: 12345
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
 | 内联格式 | `test.com reqCookies://session=abc` | Cookie 包含 session=abc |
-| 小括号格式 | `test.com reqCookies://(a:1)` | Cookie 包含 a=1 |
+| 小括号格式 | `test.com reqCookies://(a: 1)` | Cookie 包含 a=1 |
 
 ---
 

@@ -2658,10 +2658,18 @@ async fn handle_target_by_id(
 
 #[derive(Deserialize)]
 struct SendMessageRequest {
-    target_id: String,
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    target_id: Option<String>,
     #[serde(default = "default_msg_type")]
     msg_type: String,
+    #[serde(default)]
     content: serde_json::Value,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    card: Option<serde_json::Value>,
 }
 
 fn default_msg_type() -> String {
@@ -2681,33 +2689,41 @@ async fn handle_messages_send(
         Err(resp) => return resp,
     };
 
-    let Some(target) = service.target_store.get(&body.target_id) else {
-        return error_response(StatusCode::NOT_FOUND, "Target not found");
+    let resolved = match resolve_send_message_request(service, &body) {
+        Ok(v) => v,
+        Err((status, message)) => return error_response(status, &message),
     };
 
-    let Some(provider) = service.provider_store.get(&target.provider_id) else {
-        return error_response(StatusCode::NOT_FOUND, "Provider not found for target");
-    };
-
-    if !provider.enabled {
+    if !resolved.provider.enabled {
         return error_response(StatusCode::BAD_REQUEST, "Provider is disabled");
     }
 
-    if !target.enabled {
+    if !resolved.target.enabled {
         return error_response(StatusCode::BAD_REQUEST, "Target is disabled");
     }
 
     // Build content preview
-    let content_preview = build_content_preview(&body.msg_type, &body.content);
+    let content_preview = build_content_preview(&body.msg_type, &resolved.content);
 
     // Send via connection manager's feishu provider
     let feishu = service.connection_manager.feishu_provider();
-    let content_str = serde_json::to_string(&body.content).unwrap_or_default();
     let result = if body.msg_type == "text" {
-        feishu.send_text(&provider, &target, &content_str).await
+        let text = resolved
+            .content
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| serde_json::to_string(&resolved.content).unwrap_or_default());
+        feishu
+            .send_text(&resolved.provider, &resolved.target, &text)
+            .await
     } else {
         feishu
-            .send_card(&provider, &target, body.content.clone(), Default::default())
+            .send_card(
+                &resolved.provider,
+                &resolved.target,
+                resolved.content.clone(),
+                Default::default(),
+            )
             .await
     };
 
@@ -2718,12 +2734,12 @@ async fn handle_messages_send(
     };
     let log = ImMessageLog {
         id: uuid_short(),
-        provider_id: provider.id.clone(),
+        provider_id: resolved.provider.id.clone(),
         direction: MessageDirection::Outbound,
         status,
         timestamp: now_ms(),
-        target_id: Some(body.target_id.clone()),
-        target_name: Some(target.display_name.clone()),
+        target_id: Some(resolved.log_target_id),
+        target_name: Some(resolved.log_target_name),
         message_id,
         msg_type: Some(body.msg_type.clone()),
         content_preview,
@@ -2744,6 +2760,113 @@ async fn handle_messages_send(
             &format!("Failed to send message: {e}"),
         ),
     }
+}
+
+#[derive(Debug)]
+struct ResolvedSendMessage {
+    provider: ImProviderConfig,
+    target: ImTarget,
+    log_target_id: String,
+    log_target_name: String,
+    content: serde_json::Value,
+}
+
+fn resolve_send_message_request(
+    service: &ImGatewayService,
+    body: &SendMessageRequest,
+) -> std::result::Result<ResolvedSendMessage, (StatusCode, String)> {
+    let content = normalized_send_content(body)?;
+    let target_id = body.target_id.as_deref().unwrap_or("__owner__");
+
+    if matches!(target_id, "__owner__" | "owner") {
+        let provider_id = body.provider_id.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "provider_id is required when sending to owner".to_string(),
+            )
+        })?;
+        let provider = service.provider_store.get(provider_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Provider '{provider_id}' not found"),
+            )
+        })?;
+        let owner_open_id = provider.owner_open_id.clone().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Provider '{provider_id}' has no owner_open_id"),
+            )
+        })?;
+        let target = ImTarget {
+            id: "__owner__".to_string(),
+            provider_id: provider.id.clone(),
+            display_name: "Owner".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: owner_open_id,
+            default_msg_type: default_msg_type(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        };
+        return Ok(ResolvedSendMessage {
+            provider,
+            target,
+            log_target_id: "__owner__".to_string(),
+            log_target_name: "Owner".to_string(),
+            content,
+        });
+    }
+
+    let target = service.target_store.get(target_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Target '{target_id}' not found"),
+        )
+    })?;
+    if let Some(provider_id) = body.provider_id.as_deref() {
+        if target.provider_id != provider_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Target '{target_id}' does not belong to provider '{provider_id}'"),
+            ));
+        }
+    }
+    let provider = service
+        .provider_store
+        .get(&target.provider_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Provider not found for target".to_string(),
+            )
+        })?;
+    let log_target_id = target.id.clone();
+    let log_target_name = target.display_name.clone();
+    Ok(ResolvedSendMessage {
+        provider,
+        target,
+        log_target_id,
+        log_target_name,
+        content,
+    })
+}
+
+fn normalized_send_content(
+    body: &SendMessageRequest,
+) -> std::result::Result<serde_json::Value, (StatusCode, String)> {
+    if !body.content.is_null() {
+        return Ok(body.content.clone());
+    }
+    if let Some(text) = &body.text {
+        return Ok(serde_json::Value::String(text.clone()));
+    }
+    if let Some(card) = &body.card {
+        return Ok(card.clone());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        "content is required for messages/send".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4761,6 +4884,58 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn send_message_request_resolves_owner_target_from_provider() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let service = ImGatewayService::new(temp_dir.path());
+        let mut provider = test_provider();
+        provider.owner_open_id = Some("ou-owner".to_string());
+        service
+            .provider_store
+            .add(provider)
+            .expect("provider should be saved");
+
+        let body = SendMessageRequest {
+            provider_id: Some("feishu-main".to_string()),
+            target_id: Some("__owner__".to_string()),
+            msg_type: "text".to_string(),
+            content: serde_json::json!("hello"),
+            text: None,
+            card: None,
+        };
+
+        let resolved =
+            resolve_send_message_request(&service, &body).expect("owner target should resolve");
+
+        assert_eq!(resolved.provider.id, "feishu-main");
+        assert_eq!(resolved.target.provider_id, "feishu-main");
+        assert_eq!(resolved.target.receive_id_type, "open_id");
+        assert_eq!(resolved.target.receive_id, "ou-owner");
+        assert_eq!(resolved.log_target_id, "__owner__");
+        assert_eq!(resolved.log_target_name, "Owner");
+        assert_eq!(resolved.content, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn send_message_request_rejects_owner_without_provider() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let service = ImGatewayService::new(temp_dir.path());
+        let body = SendMessageRequest {
+            provider_id: None,
+            target_id: Some("__owner__".to_string()),
+            msg_type: "text".to_string(),
+            content: serde_json::json!("hello"),
+            text: None,
+            card: None,
+        };
+
+        let error = resolve_send_message_request(&service, &body)
+            .expect_err("owner send should require provider");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("provider_id is required"));
     }
 
     #[test]
