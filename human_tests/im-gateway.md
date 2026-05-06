@@ -348,7 +348,48 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - WebUI 显示 `Provider created and connected`。
   - 第 5 步状态响应包含 `state=connected`。
-  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了`。
+  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/Users/eden/work/github/bifrost`。
   - 全流程不需要重启 Bifrost。
   - Provider 列表与消息响应不包含 App Secret 明文。
-- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。本用例后续要求上线通知同时包含 `工作目录：/Users/eden/work/github/bifrost`。
+
+### TC-IMG-35: 同一进程内配置两个飞书机器人均可连接并通知 owner
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-provider-two-bots cargo run --bin bifrost -- start -p 18889 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 浏览器打开 `http://127.0.0.1:18889/_bifrost/settings?tab=im-gateway`。
+  - 准备两个不同且真实可用的飞书应用 App ID 和 App Secret。
+- **操作步骤**:
+  1. 在 WebUI 点击 `Add Provider`。
+  2. 输入第一个唯一 Provider ID，例如 `feishu-two-bots-a`。
+  3. 保持 `Enabled` 开启，填写第一个真实 App ID 与 App Secret，不填写 Display Name。
+  4. 点击 `Create`，等待页面显示创建并连接成功。
+  5. 再次点击 `Add Provider`。
+  6. 输入第二个唯一 Provider ID，例如 `feishu-two-bots-b`。
+  7. 保持 `Enabled` 开启，填写第二个真实 App ID 与 App Secret，不填写 Display Name。
+  8. 点击 `Create`，等待页面显示创建并连接成功。
+  9. 不重启 Bifrost，分别查询两个 Provider 状态：
+     ```bash
+     curl -s http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-a/status
+     curl -s http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-b/status
+     ```
+  10. 分别查询两个 Provider 的消息记录：
+      ```bash
+      curl -s http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-a/messages
+      curl -s http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-b/messages
+      ```
+  11. 执行删除清理：
+      ```bash
+      curl -s -X DELETE http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-a
+      curl -s -X DELETE http://127.0.0.1:18889/_bifrost/api/im-gateway/providers/feishu-two-bots-b
+      ```
+- **预期结果**:
+  - 两次创建后 WebUI 均显示 `Provider created and connected`。
+  - 两个 Provider 的状态响应都包含 `state=connected`，且无需重启 Bifrost。
+  - 两个 Provider 的消息记录都各自包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/Users/eden/work/github/bifrost`。
+  - 两个 Provider 不会串用对方的飞书 token；第二个机器人不会因复用第一个机器人的 token 而发送失败。
+  - Provider 列表、状态与消息响应不包含任何 App Secret 明文。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18889` 和独立数据目录 `.bifrost-test-im-provider-two-bots` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 分别创建两个真实飞书 Provider；两个 Provider 均显示创建并连接成功，状态均为 `connected`；两个 Provider 的 message log 均包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了\n工作目录：/Users/eden/work/github/bifrost`；第二个机器人未复用第一个机器人的 token，响应中未泄露 App Secret；最后删除清理两个 Provider。

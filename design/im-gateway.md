@@ -1798,6 +1798,82 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-05-06 飞书多机器人 Token 缓存隔离修复
+
+### 问题
+
+同一 Bifrost 进程内同时配置两个飞书机器人时，第二个机器人可能连接成功但无法正常发送 owner 通知或后续消息。根因是 `ImConnectionManager` 共享同一个 `FeishuProvider` 实例，而 `FeishuProvider` 原来只有一个全局 `Option<TokenCache>`。第一个机器人刷新 `tenant_access_token` 后，第二个机器人在 token 未过期时会直接复用第一个机器人的 token，导致后续飞书 API 请求以错误应用身份执行。
+
+### 实现逻辑
+
+- 将 `FeishuProvider` 的 token 缓存从单个 `Option<TokenCache>` 改为 `HashMap<TokenCacheKey, TokenCache>`。
+- `TokenCacheKey` 由 `base_url`、`app_id`、`app_secret` 的 SHA-256 指纹组成。
+- `base_url` 隔离飞书国内站、国际站或自定义 OpenAPI 网关；`app_id` 隔离不同机器人应用；`app_secret` 指纹隔离同一 app 的密钥轮换场景。
+- `app_secret` 只参与内存中的摘要计算，不写日志、不进入 API 响应、不以明文形式落入 token cache key。
+
+### 测试方案
+
+- 单元测试：
+  - `test_token_cache_key_isolated_by_app_id` 验证不同 `app_id` 生成不同 token cache key。
+  - `test_token_cache_key_isolated_by_secret` 验证同一 `app_id` 密钥轮换后生成不同 token cache key。
+  - `test_token_cache_key_isolated_by_base_url` 验证不同 Feishu OpenAPI base URL 生成不同 token cache key。
+- E2E 测试：使用临时数据目录和非 9900 端口启动 Bifrost，通过 WebUI/API 创建两个真实飞书 Provider，分别使用不同 AK/SK，断言两个 Provider 均进入 `connected` 状态，并各自产生 `trigger=online`、`status=success` 的 owner 通知记录。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-35`，覆盖同一进程内两个飞书机器人同时配置和立即连接的回归路径。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin test_token_cache_key_isolated -- --nocapture
+cargo test -p bifrost-admin im_gateway -- --nocapture
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-06 Owner 上线通知追加工作目录
+
+### 问题
+
+飞书机器人连接成功后会向 owner 发送 `你好，Bifrost 助手上线了`，但当用户同时在多个仓库或多个 Bifrost 工作区中使用 IM Gateway 时，仅凭这条通知无法判断是哪一个工作区域上线。
+
+### 实现逻辑
+
+- 上线通知文案改为由 `build_online_notification_message()` 统一生成。
+- 文案保留原有开头 `你好，Bifrost 助手上线了`，并追加当前 Bifrost 进程的 `std::env::current_dir()`：
+  ```text
+  你好，Bifrost 助手上线了
+  工作目录：/path/to/workspace
+  ```
+- 飞书实际发送内容和 message log 的 `content_preview` 共用同一份字符串，避免用户收到的通知与后台记录不一致。
+- 如果当前工作目录读取失败，工作目录字段显示 `unknown`，不阻塞上线通知发送。
+
+### 测试方案
+
+- 单元测试：`online_notification_message_includes_current_work_dir` 验证上线文案包含固定开头、`工作目录：` 标签和当前 cwd。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-34` / `TC-IMG-35`，断言 owner 通知 `content_preview` 包含 `工作目录：/Users/eden/work/github/bifrost`。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin online_notification_message_includes_current_work_dir -- --nocapture
+cargo test -p bifrost-admin im_gateway -- --nocapture
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
 ## 2026-05-06 WebUI 创建后立即连接并通知 Owner
 
 ### 问题

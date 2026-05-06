@@ -823,9 +823,9 @@ async fn run_event_loop(
             updated_at: 0,
         };
 
-        let online_msg = "你好，Bifrost 助手上线了";
+        let online_msg = build_online_notification_message();
         let send_result = feishu
-            .send_text(&provider, &online_target, online_msg)
+            .send_text(&provider, &online_target, &online_msg)
             .await;
 
         // Record outbound message log
@@ -4046,6 +4046,14 @@ fn uuid_short() -> String {
     id.to_string()[..8].to_string()
 }
 
+fn build_online_notification_message() -> String {
+    let work_dir = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    format!("你好，Bifrost 助手上线了\n工作目录：{work_dir}")
+}
+
 /// Build a Feishu Card 2.0 JSON for real-time plan progress display.
 ///
 /// Used by the plan listener task: first call creates a new card via send_card,
@@ -4552,6 +4560,20 @@ mod tests {
                 None => std::env::remove_var("BIFROST_DATA_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn online_notification_message_includes_current_work_dir() {
+        let cwd = std::env::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string();
+
+        let message = build_online_notification_message();
+
+        assert!(message.starts_with("你好，Bifrost 助手上线了"));
+        assert!(message.contains("工作目录："));
+        assert!(message.contains(&cwd));
     }
 
     struct TestChatCompletionMock {
