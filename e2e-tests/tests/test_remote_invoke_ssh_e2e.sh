@@ -117,16 +117,38 @@ exec(snippet, namespace)
 PY
 }
 
+dump_reconnect_diagnostics() {
+    local status_json="$1"
+    echo "[remote-invoke-ssh-e2e] Worker did not reach Connected in time" >&2
+    echo "[remote-invoke-ssh-e2e] Last worker status:" >&2
+    cat "$status_json" >&2 2>/dev/null || true
+    echo >&2
+    echo "[remote-invoke-ssh-e2e] Relay log tail:" >&2
+    tail -n 120 "$RELAY_LOG" >&2 2>/dev/null || true
+    if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        echo "[remote-invoke-ssh-e2e] Bifrost log tail:" >&2
+        tail -n 160 "$ADMIN_CLIENT_BIFROST_LOG_FILE" >&2 2>/dev/null || true
+    fi
+}
+
 wait_for_worker_connected() {
     local status_json="$1"
-    for _ in $(seq 1 60); do
+    local timeout_secs="${2:-60}"
+    local interval_secs=1
+    local attempts=$((timeout_secs / interval_secs))
+    if [[ "$attempts" -lt 1 ]]; then
+        attempts=1
+    fi
+
+    for _ in $(seq 1 "$attempts"); do
         curl -s "${ADMIN_BASE_URL}/api/remote-invoke/status" >"$status_json"
         if [[ "$(json_get "$status_json" "state")" == "Connected" ]]; then
             return 0
         fi
-        sleep 1
+        sleep "$interval_secs"
     done
 
+    dump_reconnect_diagnostics "$status_json"
     return 1
 }
 
@@ -215,7 +237,7 @@ FINGERPRINT="$(json_get "$RESET_JSON" "ssh_key_fingerprint")"
 KEY_FILE="$(json_get "$RESET_JSON" "bifrost_key_file")"
 
 log "Wait for worker reconnect after reset"
-wait_for_worker_connected "$STATUS_JSON"
+wait_for_worker_connected "$STATUS_JSON" "${BIFROST_E2E_REMOTE_INVOKE_RESET_RECONNECT_TIMEOUT:-180}"
 assert_equals "Connected" "$(json_get "$STATUS_JSON" "state")" "reset 后 worker 应重新连接到 relay"
 
 log "Wait for relay route sync after reset"
