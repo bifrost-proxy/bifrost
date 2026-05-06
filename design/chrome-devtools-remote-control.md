@@ -67,12 +67,13 @@ pub struct BrowserDebugBroker {
     sessions: RwLock<HashMap<String, DebugSession>>,
     eval_next_id: AtomicU64,
     eval_pending: RwLock<HashMap<String, Vec<BridgeEvalCommand>>>,
-    eval_results: RwLock<HashMap<u64, Result<Value, String>>>,
+    eval_results: RwLock<HashMap<u64, Result<serde_json::Value, String>>>,
     overlay_pending: RwLock<HashMap<String, Vec<BridgeOverlayCommand>>>,
     bridge_senders: RwLock<HashMap<String, mpsc::Sender<BridgeServerMessage>>>,
     session_senders: RwLock<HashMap<String, mpsc::Sender<DevtoolsLiveMessage>>>,
     bridge_seen_seqs: RwLock<HashMap<String, VecDeque<u64>>>,
     evaluate_audit: RwLock<VecDeque<EvaluateAuditRecord>>,
+    evaluate_audit_capacity: usize,
 }
 
 pub enum DebugAdapterKind { PageBridge }
@@ -87,9 +88,10 @@ pub enum BridgeServerMessage {
 }
 
 pub enum DevtoolsLiveMessage {
-    Snapshot { snapshot: Value },
+    Snapshot { snapshot: serde_json::Value },
     Console { message: ConsoleMessage },
     Network { event: NetworkEvent },
+    NodeSelected { node_id: u64 },
     Disconnected { page_id: String, reason: String },
 }
 ```
@@ -199,6 +201,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - Elements：DOM tree 可展开/折叠，标签名/属性名/属性值分色。首个可见节点从 `<html>` 开始，`#document` 仅作为容器。纯空白 text node 过滤。超长属性/文本默认展示 ≤120 字符预览，点击弹窗查看完整内容。节点点击调用 `dom.highlight` 在目标页显示 overlay；点击元素拾取按钮调用 `dom.inspect`，目标页进入鼠标选择模式，hover 时实时高亮，click 时阻止原页面默认点击、退出拾取模式并通过 page bridge WS 上报 `node_selected`，WebUI 收到后展开祖先节点、滚动到对应 DOM row 并设为 selected。
 - Network：复用 Traffic 页面虚拟列表结构和视觉风格。列表展示 page bridge 前端采集事件，并用 Traffic 补全 status、size、duration、headers 与详情。点击行优先通过 `x-bifrost-client-request-id` 或 `__bifrost_client_req_id` 映射到 Traffic 详情，在 DevTools 当前页面内展示 TrafficDetail，不跳转到 `/traffic` 路由；映射查询需要短暂重试，避免目标页 bridge 事件先到、Traffic DB 记录稍后落库时概率性展示 fallback。找不到 Traffic 记录时展示前端已上报的 URL / method / status / type / client request id / query / request headers / response headers / cache hint 等 metadata；标签资源受浏览器安全限制无法读取 header 时，仍保留 status/query/timing 等基础事实。默认不采集 request body 或 response body。
 - Cookies / LocalStorage / SessionStorage：key/value 表格展示，行内新增/编辑/复制/删除。编辑默认可用，不受 mode 限制。
+- Cookies / LocalStorage / SessionStorage 在 400+ 行数据下必须使用有界 DOM 渲染。Storage 面板只挂载视口附近的行，编辑/新增行与虚拟列表 viewport 必须分层布局，避免按钮命中区域被虚拟行覆盖。
 - Console：日志区域在上方滚动，底部多行输入框固定。每条行展示低对比度毫秒级时间。Object/Array 默认摘要，点击展开。支持浏览器标准 `%c` 样式格式化并隐藏样式参数文本。全屏编辑入口使用 JavaScript Monaco editor。执行代码作为 `input` 行、结果作为 `result` 行展示。目标页 JS 抛错以成功 HTTP 响应返回异常详情，WebUI 展示真实 JS error。
 - 面板 tab 右侧提供当前模块搜索框。Elements 搜索自动展开并选中匹配节点；其他面板搜索直接过滤列表并高亮匹配文本。
 - 手动刷新按钮重新读取 scoped snapshot。
@@ -207,7 +210,7 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 
 ## page_bridge 注入脚本
 
-实现于 `crates/bifrost-proxy/src/proxy/http/handler.rs` 中的 `devtools_bridge_script(page_id, token)` 函数。
+实现于 `crates/bifrost-proxy/src/proxy/http/devtools.rs` 中的 `devtools_bridge_script(page_id, token)` 函数。
 
 功能：
 1. 建立 WebSocket 连接到 `/_bifrost/api/devtools/bridge/{page_id}/ws`
@@ -234,7 +237,8 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 |------|------|
 | `crates/bifrost-core/src/protocol.rs` | `Protocol::DevTools` 定义 |
 | `crates/bifrost-proxy/src/server.rs` | `DevtoolsRule` / `DevtoolsMode` / `DevtoolsInjectMode` 结构体 |
-| `crates/bifrost-proxy/src/proxy/http/handler.rs` | 规则解析、注入决策、bridge 脚本生成 |
+| `crates/bifrost-proxy/src/proxy/http/handler.rs` | HTTP 代理主处理逻辑，调用 devtools 模块完成注入决策 |
+| `crates/bifrost-proxy/src/proxy/http/devtools.rs` | DevTools 规则解析、注入决策、bridge 脚本生成 |
 | `crates/bifrost-admin/src/devtools.rs` | `BrowserDebugBroker` 核心逻辑 |
 | `crates/bifrost-admin/src/handlers/devtools.rs` | HTTP/WebSocket 路由处理 |
 | `crates/bifrost-admin/src/router.rs` | `/api/devtools` 路由入口 |
@@ -270,11 +274,12 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 - 验证 Elements 元素拾取模式可以在目标页 hover/click 选中节点，WebUI 自动切换并选中对应 DOM row
 - 验证 Network 使用虚拟列表结构，列表以前端采集事件为准，不重复展示 performance/Traffic 派生记录；点击行在 DevTools 内复用 TrafficDetail 展示；fetch/XHR 的 `x-bifrost-client-request-id` 和安全同源标签资源的 `__bifrost_client_req_id` 均可精确映射 Traffic id，且不会进入上游、Traffic URL 或 Traffic request headers；Service Worker / 跨域标签资源不会被内部 query 污染；浏览器侧 metadata 包含 status、query、request headers、response headers 且默认不采集 body；Traffic 匹配失败时 fallback 详情仍展示发起端基础信息；搜索后必须点击匹配业务 URL 的具体虚拟列表行，禁止点击当前首行，避免 CI 中旧行或虚拟列表复用导致 fallback 详情断言概率性落到其它请求；动态标签资源点击时必须覆盖 bridge 事件先于 Traffic 落库的映射重试路径
 - 验证 WebUI DevTools 详情刷新按钮仅通过 session WS 请求当前 tab snapshot，不触发目标页 reload 或重新发起业务请求
+- 验证 Storage 大列表只渲染视口附近行，LocalStorage / SessionStorage tab 切换不阻塞，且搜索后的行内编辑、复制、删除仍可点击执行
 - 验证 HTTPS/TLS 全截包浏览器代理场景下，Network 中 fetch/XHR 与标签资源请求都能匹配到完整 Traffic 记录
 - 验证 TLS 场景完成后 WebUI 仍可通过稳定侧栏导航属性进入 DevTools tab，且 DevTools 入口顺序仍在 Scripts 之后
 - 验证 CI 中所有会被 DevTools shell E2E 下载使用的 release binary 必须包含真实 WebUI 前端资源，当前包括 Linux `build-e2e` artifact 与 macOS aarch64 CLI artifact；DevTools shell E2E 不允许使用 `Frontend not built` 占位页作为通过条件
 - 验证 Storage 行内新增/编辑/删除后目标页真实读到新值
-- 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染
+- 验证 Console 执行代码展示 input/result 行，JS 抛错展示远端异常详情，`%c` 样式格式化按浏览器 Console 语义渲染；对象展开断言按真实用户点击语义重试直到 `nested` / `items` 属性可见，避免 CI 中 WebUI snapshot/live 更新时序造成一次性 locator 假超时
 - 验证 Bridge 主要经由 WebSocket 通信
 - 验证页面切换后显示对应 DOM；目标页刷新后无需退出重进
 - 验证 fetch/prefetch HTML 不产生幽灵目标
@@ -284,7 +289,8 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 ### 真实场景测试
 
 - 更新并执行 `human_tests/chrome-devtools-remote-control.md`
-- 回归执行 `TC-CDP-21`：确认 HTTP fixture 下 `/devtools/api/ping`、`/devtools/api/static-resource`、`/devtools/api/meta` 均为 200，且 DevTools 页面不因 HTTP fixture 404 卡在等待状态
+- 回归执行 `TC-CDP-41`：确认 Network 行点击后 WebUI 在 CI/macOS 慢落库场景中最多等待约 10 秒查询 `client_req_id -> traffic id`，映射完成后展示 TrafficDetail 而不是过早固定为 fallback
+- 回归执行 `TC-CDP-42`：确认 Console 对象摘要在 CI/macOS WebUI 时序下可以稳定展开到 `nested` / `items` 属性，且复制 raw 内容仍包含结构化对象字段
 - 同步更新 `human_tests/readme.md` 索引
 
 ## 校验要求

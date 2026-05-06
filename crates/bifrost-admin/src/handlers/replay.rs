@@ -354,6 +354,13 @@ async fn execute_replay_unified(
             "WebSocket URLs are not supported via HTTP endpoint. Use the WebSocket endpoint (/api/replay/execute/ws) instead.",
         );
     }
+    // timeout_ms 仅作为错误消息里的参考值，不再通过 reqwest connect_timeout 施加，
+    // 因为历史上在 Linux CI 上观察到 SSE 长连接会在 timeout_ms 边界附近被断开，
+    // 根因疑似 hyper/reqwest 在某些场景下将 connect_timeout 与 body 读取耦合。
+    // SSE 这类流式响应必须允许任意长连接。如需超时控制，应由上游调用方在外部施加。
+    let timeout_ms = unified_req
+        .timeout_ms
+        .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
 
     let unsafe_ssl = state.runtime_config.read().await.unsafe_ssl;
     let client = bifrost_core::direct_reqwest_client_builder()
@@ -385,30 +392,18 @@ async fn execute_replay_unified(
     }
 
     let start_time = std::time::Instant::now();
-    // NOTE: timeout_ms 只用于“连接建立/首包(headers)获取”的超时控制。
-    // 不能用于整个请求生命周期，否则 SSE 这类长连接会在超时后被错误断开。
-    let timeout_ms = unified_req
-        .timeout_ms
-        .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
-    let send_future = req_builder.send();
-    let response = match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        send_future,
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
+    let response = match req_builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
             drop(permit);
+            if e.is_connect() || e.is_timeout() {
+                let error_msg = format!("Request timeout after {}ms", timeout_ms);
+                error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request timed out");
+                return error_response(StatusCode::GATEWAY_TIMEOUT, &error_msg);
+            }
             let error_msg = format!("Request failed: {}", e);
             error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request failed");
             return error_response(StatusCode::BAD_GATEWAY, &error_msg);
-        }
-        Err(_) => {
-            drop(permit);
-            let error_msg = format!("Request timeout after {}ms", timeout_ms);
-            error!(replay_id = %replay_id, error = %error_msg, "[UNIFIED_REPLAY] Request timed out");
-            return error_response(StatusCode::GATEWAY_TIMEOUT, &error_msg);
         }
     };
 
@@ -462,8 +457,15 @@ async fn execute_replay_unified(
         let state_clone = state.clone();
         let replay_id_clone = replay_id.clone();
         let traffic_id_clone = traffic_id.clone();
+        let heartbeat_tx = tx.clone();
 
+        let client_kept = client;
         tokio::spawn(async move {
+            let _client_guard = client_kept; // 保持 reqwest client 在 SSE 流期间存活，避免提前销毁导致连接被回收
+            eprintln!(
+                "[UNIFIED_REPLAY][debug] process_sse_response entering replay_id={}",
+                replay_id_clone
+            );
             let result = process_sse_response(
                 &state_clone,
                 &replay_id_clone,
@@ -473,15 +475,40 @@ async fn execute_replay_unified(
             )
             .await;
             drop(permit);
+            match &result {
+                Ok(()) => eprintln!("[UNIFIED_REPLAY][debug] process_sse_response returned Ok(()) replay_id={} (upstream closed normally)", replay_id_clone),
+                Err(e) => eprintln!("[UNIFIED_REPLAY][debug] process_sse_response returned Err({}) replay_id={}", e, replay_id_clone),
+            }
             if let Err(e) = result {
                 error!(error = %e, replay_id = %replay_id_clone, "[UNIFIED_REPLAY] SSE stream processing failed");
             }
         });
 
+        // SSE 保活心跳：每 2s 发送一次 ":" 注释行，
+        // 防止下游中间盒/客户端在流“空闲”时误判为 EOF 而关闭连接。
+        // 这不会影响上游 body 读取，仅在代理 -> 客户端方向注入心跳帧。
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+            // 首个 tick 是立即触发，跳过以避免与 connection 事件冲突
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if heartbeat_tx.send("__HEARTBEAT__".to_string()).is_err() {
+                    break;
+                }
+            }
+        });
+
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|event| {
-            let mut sse_event = String::from("event: message\n");
-            sse_event.push_str(&format!("data: {}\n", event));
-            sse_event.push('\n');
+            let sse_event = if event == "__HEARTBEAT__" {
+                // SSE 注释行（以 `:` 开头），客户端会忽略但保持连接活跃
+                String::from(": ka\n\n")
+            } else {
+                let mut s = String::from("event: message\n");
+                s.push_str(&format!("data: {}\n", event));
+                s.push('\n');
+                s
+            };
             Ok::<_, hyper::Error>(hyper::body::Frame::data(Bytes::from(sse_event)))
         });
 

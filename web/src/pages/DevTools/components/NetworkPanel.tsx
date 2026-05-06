@@ -3,7 +3,7 @@ import { Empty } from "antd";
 import VirtualTrafficTable from "../../../components/TrafficTable/VirtualTrafficTable";
 import type { DebugNetworkEvent } from "../../../api/devtools";
 import type { TrafficSummary } from "../../../types";
-import { filterBySearch } from "./shared";
+import { filterBySearch } from "./sharedUtils";
 
 const METHOD_COLORS: Record<string, string> = {
   GET: "green",
@@ -95,7 +95,7 @@ function networkDedupeKey(url: string): string {
     parsed.hash = "";
     parsed.searchParams.delete("__bifrost_client_req_id");
     return parsed.href;
-  } catch (_) {
+  } catch {
     return url.replace(/([?&])__bifrost_client_req_id=[^&#]*&?/g, "$1").replace(/[?&]$/, "");
   }
 }

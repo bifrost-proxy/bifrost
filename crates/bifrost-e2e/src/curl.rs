@@ -1,3 +1,4 @@
+use bifrost_core::text::truncate_chars_with_suffix;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -282,11 +283,7 @@ impl CurlResult {
         if self.body.contains(substring) {
             Ok(())
         } else {
-            let preview = if self.body.len() > 200 {
-                format!("{}...", &self.body[..200])
-            } else {
-                self.body.clone()
-            };
+            let preview = truncate_chars_with_suffix(&self.body, 200, "...");
             Err(format!(
                 "Body does not contain '{}', preview: '{}'",
                 substring, preview

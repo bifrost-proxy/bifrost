@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 在仓库根目录 `/Users/eden/work/github/bifrost` 执行。
+- 在仓库根目录 `<REPO_ROOT>` 执行。
 - 测试服务必须使用临时 `BIFROST_DATA_DIR`，禁止使用 9900 端口。
 - 启动 Bifrost 时必须使用 `--no-system-proxy`；本用例不验证系统代理。
 - 需要 `jq`、`python3`、`curl` 可用。

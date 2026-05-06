@@ -83,6 +83,40 @@ fn parse_merge_value(value: &str) -> Option<serde_json::Value> {
     }
 }
 
+fn parse_url_params_value(value: &str) -> Option<Vec<(String, String)>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let content = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let mut params = Vec::new();
+    for part in content.split(['\n', ',', '&']).map(str::trim) {
+        if part.is_empty() {
+            continue;
+        }
+
+        let split = part.split_once('=').or_else(|| part.split_once(':'));
+        if let Some((key, value)) = split {
+            let key = key.trim();
+            if !key.is_empty() {
+                params.push((key.to_string(), value.trim().to_string()));
+            }
+        }
+    }
+
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
+    }
+}
+
 fn parse_redirect_target(value: &str) -> (Option<u16>, String) {
     if let Some((status_part, location)) = value.split_once(':') {
         if status_part.len() == 3 && status_part.chars().all(|c| c.is_ascii_digit()) {
@@ -516,18 +550,14 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ForwardedFor => {
-                result
-                    .req_headers
-                    .push(("x-forwarded-for".to_string(), value.to_string()));
+                result.forwarded_for = Some(value.to_string());
             }
             Protocol::ResCookies => {
                 let parsed_cookies = parse_res_cookies_value(value);
                 result.res_cookies.extend(parsed_cookies);
             }
             Protocol::ResponseFor => {
-                result
-                    .res_headers
-                    .push(("x-bifrost-response-for".to_string(), value.to_string()));
+                result.response_for = Some(value.to_string());
             }
             Protocol::ReqPrepend => {
                 let content = extract_inline_content(value);
@@ -566,7 +596,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::UrlParams => {
-                if let Some(params) = parse_header_value(value) {
+                if let Some(params) = parse_url_params_value(value) {
                     for (k, v) in params {
                         if v.is_empty() {
                             result.delete_url_params.push(k);
@@ -1812,6 +1842,54 @@ x-use-ppe: 1
     }
 
     #[test]
+    fn test_url_params_ampersand_value_splits_pairs() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com urlParams://key1=value1&key2=value2")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.url_params,
+            vec![
+                ("key1".to_string(), "value1".to_string()),
+                ("key2".to_string(), "value2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_url_params_mixed_delimiters_and_delete() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com urlParams://(key_a:val_a,key_b=val_b&remove_me=)")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(resolved
+            .url_params
+            .contains(&("key_a".to_string(), "val_a".to_string())));
+        assert!(resolved
+            .url_params
+            .contains(&("key_b".to_string(), "val_b".to_string())));
+        assert_eq!(resolved.delete_url_params, vec!["remove_me".to_string()]);
+    }
+
+    #[test]
     fn test_merge_trailers_accumulate() {
         let parser = bifrost_core::RuleParser::new();
         let rules = parser
@@ -2003,10 +2081,7 @@ x-use-ppe: 1
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(resolved
-            .req_headers
-            .iter()
-            .any(|(k, v)| k == "x-forwarded-for" && v == "192.168.1.1"));
+        assert_eq!(resolved.forwarded_for.as_deref(), Some("192.168.1.1"));
     }
 
     #[test]
@@ -2023,10 +2098,7 @@ x-use-ppe: 1
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(resolved
-            .res_headers
-            .iter()
-            .any(|(k, v)| k == "x-bifrost-response-for" && v == "test-response"));
+        assert_eq!(resolved.response_for.as_deref(), Some("test-response"));
     }
 
     #[test]

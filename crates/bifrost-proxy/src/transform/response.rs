@@ -22,6 +22,7 @@ pub fn apply_res_rules(
     apply_res_charset(parts, rules, verbose_logging, ctx);
     apply_res_cache(parts, rules, verbose_logging, ctx);
     apply_res_header_replace(parts, rules, verbose_logging, ctx);
+    apply_response_for(parts, rules, verbose_logging, ctx);
 
     if rules.res_cors.is_enabled() {
         apply_res_cors(parts, &rules.res_cors, ctx, verbose_logging, request_origin);
@@ -499,6 +500,34 @@ fn encode_content_disposition_filename(filename: &str) -> String {
         .collect()
 }
 
+fn apply_response_for(
+    parts: &mut Parts,
+    rules: &ResolvedRules,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+) {
+    if let Some(ref response_for) = rules.response_for {
+        let header_name: HeaderName = "x-bifrost-response-for".parse().unwrap();
+        if let Ok(header_value) = response_for.parse::<HeaderValue>() {
+            if verbose_logging {
+                let old_value = parts
+                    .headers
+                    .get(&header_name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| format!("\"{}\"", s))
+                    .unwrap_or_else(|| "(none)".to_string());
+                info!(
+                    "[{}] [RES_RESPONSE_FOR] x-bifrost-response-for : {} -> \"{}\"",
+                    ctx.id_str(),
+                    old_value,
+                    response_for
+                );
+            }
+            parts.headers.insert(header_name, header_value);
+        }
+    }
+}
+
 fn apply_res_trailers(
     parts: &mut Parts,
     rules: &ResolvedRules,
@@ -886,5 +915,27 @@ mod tests {
 
         let cookie = format_set_cookie("test", "value", &options);
         assert_eq!(cookie, "test=value; Path=/; Secure");
+    }
+
+    #[test]
+    fn test_apply_response_for() {
+        let mut parts = create_test_parts();
+        let rules = ResolvedRules {
+            response_for: Some("1.1.1.1".to_string()),
+            ..Default::default()
+        };
+        let ctx = RequestContext::new();
+
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
+
+        assert_eq!(
+            parts
+                .headers
+                .get("x-bifrost-response-for")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1.1.1.1"
+        );
     }
 }

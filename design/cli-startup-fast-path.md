@@ -56,6 +56,27 @@
 - 未显式传参时，默认值仍为 `info`，与 CLI 参数默认行为一致
 - 这样 daemon 模式下的 `bifrost_cli::startup`、规则加载和运行期 tracing 日志不再被硬编码为 `info`
 
+### 2.3 Listener 生命周期与 daemon readiness
+
+- 前台模式不再把 `run_with_listener()` 作为只记录日志的 detached task。
+- `spawn_managed_proxy_task()` 返回 `JoinHandle<Result<()>>`，前台主循环通过 `tokio::select!` 同时监听：
+  - shutdown 信号
+  - 端口重绑请求
+  - proxy listener task 结束
+- 如果 listener task 因 UDP relay bind 失败、accept loop fatal error、panic 等原因提前退出，主流程立即返回错误，避免出现“进程仍在、runtime info 仍在、端口不监听”的假运行状态。
+- daemon 模式在 `fork()` 前创建 readiness pipe；父进程只在子进程完成真实 listener bind 并写入 readiness 信号后才打印 `Daemon started with PID` 并返回 0。
+- 子进程启动失败、listener bind 失败或初始化阶段提前退出时，父进程会收到 pipe EOF/超时并返回非零错误，避免 daemon 模式提前报告启动成功。
+
+### 2.4 默认日志降噪
+
+- 默认 `info` 日志只保留启动阶段、真实错误、用户可感知状态变化和必要的业务事件。
+- 以下常态生命周期事件降级为 `debug`：
+  - 短连接提前关闭导致的 `hyper::Error(IncompleteMessage)`
+  - macOS/短生命周期连接无法反查客户端进程的归因 miss
+  - WebUI push WebSocket 注册、正常关闭和客户端主动关闭
+  - Remote Invoke SSE `ping` 心跳分发
+- 保持真实异常路径的等级不变：HTTP 连接服务错误继续 `error`，WebSocket 协议/IO 错误继续 `warn`，异步进程解析任务失败继续 `warn`，非 ping SSE 事件继续按现有业务日志输出。
+
 ### 3. Frame metadata 落入 SQLite 独立表
 
 - `FrameStore metadata` 不再存储/读取 `frames/*.meta.json`
@@ -103,7 +124,12 @@ CREATE INDEX idx_frame_metadata_closed_updated
 2. 确认服务可以正常监听，且更新提示不会阻塞启动
 3. 使用 `RUST_LOG=info` 观察 `bifrost_cli::startup` 日志，确认能看到阶段耗时与总耗时
 4. 使用 daemon 模式执行 `BIFROST_DATA_DIR=./.bifrost-test-<run-id> cargo run --bin bifrost -- -l debug start -p <PORT> --unsafe-ssl --daemon`，确认文件日志中出现 `DEBUG` 级别输出
-5. 执行与启动链路相关的 E2E / 校验命令，确认无回归
+5. 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`：
+   - 前台启动时占用同端口 UDP，验证 listener task 失败后主进程退出且 admin API 不可达
+   - daemon 启动时占用同端口 UDP，验证父进程返回非零、不会打印 daemon started
+6. 真实场景测试：更新并执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-26 / TC-CSS-27
+7. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-07，验证默认 `info` 日志不再反复输出常态连接关闭、进程归因 miss、WebSocket 正常关闭和 SSE ping
+8. 执行与启动链路相关的 E2E / 校验命令，确认无回归
 
 ## 校验要求（含 rust-project-validate）
 

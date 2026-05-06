@@ -334,7 +334,7 @@ struct ClientTrustRecord {
 修改 `tls_intercept_tunnel_with_cancel()` 和 `tls_intercept_tunnel()` 中的 `TlsAcceptor::accept()` 错误处理：
 
 ```rust
-// 当前代码（crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs:1051-1055）
+// 改造前的代码（已替换，当前实现已按改造后方案执行，见 mod.rs:1034 和 1161）
 let mut client_tls = acceptor
     .accept(TokioIo::new(upgraded))
     .await

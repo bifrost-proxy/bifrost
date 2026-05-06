@@ -555,6 +555,84 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 
 ---
 
+### TC-CSS-26：前台启动时 listener 任务失败必须退出主进程（回归）
+
+**前置条件**：服务未运行，端口 `18930` 未被 TCP 占用。
+
+**操作步骤**：
+1. 使用临时数据目录并先占用同端口 UDP：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   python3 - <<'PY' &
+import socket, time
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 18930))
+while True:
+    time.sleep(1)
+PY
+   UDP_PID=$!
+   ```
+2. 启动前台服务：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost -p 18930 start --skip-cert-check --unsafe-ssl --no-system-proxy >"$TEST_DATA_DIR/foreground.log" 2>&1 &
+   BIFROST_PID=$!
+   ```
+3. 等待最多 8 秒，检查 `BIFROST_PID` 是否已退出。
+4. 验证 Admin API 不可达：
+   ```bash
+   curl -fsS http://127.0.0.1:18930/_bifrost/api/proxy/address
+   ```
+5. 清理 UDP 占用和临时目录。
+
+**预期结果**：
+- 前台 Bifrost 进程在 listener task 失败后自动退出，不会继续假运行。
+- `foreground.log` 包含同端口 UDP bind 失败相关错误，例如 `Address already in use`。
+- Admin API 请求失败，端口不会呈现半启动状态。
+
+**执行记录**：
+- 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，先占用同端口 UDP 后启动前台服务；断言前台进程退出、Admin API 不可达、日志包含 `Address already in use`，全部通过。
+
+---
+
+### TC-CSS-27：daemon 启动必须等待 listener 真正 ready（回归）
+
+**前置条件**：服务未运行，端口 `18930` 未被 TCP 占用。
+
+**操作步骤**：
+1. 使用临时数据目录并先占用同端口 UDP：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   python3 - <<'PY' &
+import socket, time
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 18930))
+while True:
+    time.sleep(1)
+PY
+   UDP_PID=$!
+   ```
+2. 启动 daemon：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost -p 18930 start --daemon --skip-cert-check --unsafe-ssl --no-system-proxy
+   ```
+3. 记录命令退出码和输出。
+4. 验证 Admin API 不可达：
+   ```bash
+   curl -fsS http://127.0.0.1:18930/_bifrost/api/proxy/address
+   ```
+5. 清理 UDP 占用和临时目录。
+
+**预期结果**：
+- daemon 启动命令返回非零退出码。
+- 输出包含 listener readiness 失败提示，例如 `before the proxy listener became ready`。
+- 输出不包含 `Daemon started with PID`。
+- Admin API 请求失败，不会出现父进程提前报告 daemon 已启动但端口未监听的状态。
+
+**执行记录**：
+- 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，占用同端口 UDP 后执行 daemon 启动；断言命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，全部通过。脚本汇总 `8/8` 断言通过。
+
+---
+
 
 ## 清理
 

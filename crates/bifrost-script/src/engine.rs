@@ -180,6 +180,19 @@ impl ScriptEngine {
             )));
         }
 
+        const MAX_SCRIPT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > MAX_SCRIPT_FILE_BYTES {
+                return Err(ScriptError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "script file too large ({} bytes, limit {} bytes)",
+                        meta.len(),
+                        MAX_SCRIPT_FILE_BYTES
+                    ),
+                )));
+            }
+        }
         let content = std::fs::read_to_string(&path)?;
 
         {

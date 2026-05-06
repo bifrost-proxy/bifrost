@@ -9,7 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::debug;
 
 use crate::replay_db::{ReplayGroup, ReplayRequestSummary, MAX_REQUESTS};
 use crate::resource_alerts::build_resource_alerts;
@@ -410,7 +410,7 @@ impl PushManager {
             .entry(client_key)
             .and_modify(|v| v.push(client_id))
             .or_insert_with(|| vec![client_id]);
-        info!(client_id = client_id, "Push client registered");
+        debug!(client_id = client_id, "Push client registered");
         (client, receiver)
     }
 
@@ -425,7 +425,7 @@ impl PushManager {
                     order.retain(|k| k != &client.client_key);
                 }
             }
-            info!(client_id = client_id, "Push client unregistered");
+            debug!(client_id = client_id, "Push client unregistered");
         }
     }
 

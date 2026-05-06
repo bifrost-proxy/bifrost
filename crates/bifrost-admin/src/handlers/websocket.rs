@@ -1,4 +1,5 @@
 use base64::Engine;
+use bifrost_core::text::truncate_chars;
 use futures_util::{SinkExt, StreamExt};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
@@ -6,7 +7,7 @@ use sha1::{Digest, Sha1};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use super::{error_response, BoxBody};
 use crate::push::{
@@ -147,8 +148,8 @@ fn parse_subscription_from_query(query: &str) -> (String, ClientSubscription) {
     }
 
     let mut client_key = client_key.unwrap_or_else(|| "unknown".to_string());
-    if client_key.len() > MAX_ID_LEN {
-        client_key.truncate(MAX_ID_LEN);
+    if client_key.chars().count() > MAX_ID_LEN {
+        client_key = truncate_chars(&client_key, MAX_ID_LEN);
     }
     (client_key, sanitize_subscription(subscription))
 }
@@ -265,7 +266,7 @@ async fn handle_websocket_connection<S>(
                         last_pong_ms_receiver.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                     }
                     Message::Close(_) => {
-                        info!(client_id = client_id, "Client closed connection");
+                        debug!(client_id = client_id, "Client closed connection");
                         break;
                     }
                     _ => {}
@@ -292,7 +293,7 @@ async fn handle_websocket_connection<S>(
     };
 
     push_manager_unregister.unregister_client(client_id);
-    info!(client_id = client_id, "WebSocket connection closed");
+    debug!(client_id = client_id, "WebSocket connection closed");
 }
 
 fn now_ms() -> u64 {

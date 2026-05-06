@@ -1,3 +1,5 @@
+pub mod agent_memories;
+pub mod agent_skills;
 pub mod app_icon;
 pub mod audit;
 pub mod auth;
@@ -9,6 +11,7 @@ pub mod env;
 pub mod frames;
 pub mod group;
 pub mod group_rules;
+pub mod im_gateway;
 pub mod metrics;
 pub mod notification;
 pub mod power;

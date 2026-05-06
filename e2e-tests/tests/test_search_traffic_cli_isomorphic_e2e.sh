@@ -65,6 +65,14 @@ trap cleanup EXIT
 
 build_bifrost() {
     header "Build bifrost release binary"
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+        if [[ ! -x "$BIFROST_BIN" ]]; then
+            echo "SKIP_BUILD=true but bifrost binary is missing: $BIFROST_BIN" >&2
+            exit 1
+        fi
+        log "Skipping build (SKIP_BUILD=true), using existing binary: $BIFROST_BIN"
+        return
+    fi
     (
         cd "$ROOT_DIR"
         cargo build --release --bin bifrost

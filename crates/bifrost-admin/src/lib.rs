@@ -11,6 +11,7 @@ pub mod cors;
 pub mod devtools;
 mod frame_store;
 mod handlers;
+pub mod im_gateway;
 pub mod ip_tls_pending;
 mod metrics;
 pub mod network;
@@ -62,6 +63,7 @@ pub use connection_registry::{
     ConfigChangeEvent, ConnectionInfo, ConnectionRegistry, SharedConnectionRegistry,
 };
 pub use frame_store::{start_frame_cleanup_task, FrameStore, FrameStoreStats, SharedFrameStore};
+pub use handlers::im_gateway::{ImGatewayService, SharedImGatewayService};
 pub use handlers::scripts::ScriptManager;
 pub use handlers::sync::handle_sync_login_callback;
 pub use ip_tls_pending::{IpTlsPendingManager, PendingIpTls, PendingIpTlsEvent};

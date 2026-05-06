@@ -204,7 +204,7 @@ impl ProcessResolver {
             );
         }
 
-        warn!(
+        debug!(
             ?key,
             max_retries, delay_ms, "Failed to resolve client process after retries"
         );
@@ -1060,7 +1060,7 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
             Some(process)
         }
         Ok(None) => {
-            warn!(
+            debug!(
                 peer_addr = %peer_addr,
                 local_addr = %local_addr,
                 max_retries,
@@ -1099,7 +1099,7 @@ pub fn spawn_async_process_resolver<F>(
         let permit = match BACKGROUND_PROCESS_RESOLUTION_SEMAPHORE.acquire().await {
             Ok(permit) => permit,
             Err(_) => {
-                warn!(
+                debug!(
                     record_id,
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,

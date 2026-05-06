@@ -188,7 +188,7 @@ mod tests {
     use super::*;
     use crate::traffic_db::TrafficDbStore;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn make_temp_dir(name: &str) -> std::path::PathBuf {
         let pid = std::process::id();
@@ -196,6 +196,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bifrost-{}-{}-{}", name, pid, ts));
         let _ = std::fs::create_dir_all(&dir);
         dir
+    }
+
+    async fn wait_until<F>(timeout: Duration, mut condition: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if condition() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -218,9 +234,12 @@ mod tests {
         );
         writer.record(record);
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert!(db_store.get_by_id("test-1").is_some());
+        assert!(
+            wait_until(Duration::from_secs(2), || db_store
+                .get_by_id("test-1")
+                .is_some())
+            .await
+        );
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
@@ -246,14 +265,27 @@ mod tests {
         );
         writer.record(record);
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            wait_until(Duration::from_secs(2), || db_store
+                .get_by_id("test-update")
+                .is_some())
+            .await
+        );
 
         writer.update_by_id("test-update", |r| {
             r.status = 200;
             r.duration_ms = 100;
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            wait_until(Duration::from_secs(2), || {
+                db_store
+                    .get_by_id("test-update")
+                    .map(|record| record.status == 200 && record.duration_ms == 100)
+                    .unwrap_or(false)
+            })
+            .await
+        );
 
         let updated = db_store.get_by_id("test-update").unwrap();
         assert_eq!(updated.status, 200);
@@ -285,8 +317,7 @@ mod tests {
             writer.record(record);
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
+        assert!(wait_until(Duration::from_secs(2), || db_store.count() == 100).await);
         assert_eq!(db_store.count(), 100);
 
         drop(writer);

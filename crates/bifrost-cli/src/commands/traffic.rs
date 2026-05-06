@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use bifrost_core::{BifrostError, Result};
+use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use serde::Deserialize;
 use serde_json::Value;
@@ -393,7 +393,12 @@ fn find_id_by_sequence_suffix(port: u16, suffix: &str) -> Result<SeqSuffixResult
         .parse()
         .map_err(|_| BifrostError::Parse(format!("Invalid sequence suffix: {}", suffix)))?;
 
-    let modulus = 10u64.pow(suffix.len() as u32);
+    let Some(modulus) = 10u64.checked_pow(suffix.len() as u32) else {
+        return Err(BifrostError::Parse(format!(
+            "Traffic ID suffix too long: {}",
+            suffix
+        )));
+    };
 
     let mut candidates: Vec<u64> = Vec::new();
     let mut candidate = suffix_val;
@@ -998,11 +1003,7 @@ pub fn render_traffic_detail_value(
                 let protocol = rule.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
                 let value = rule.get("value").and_then(|v| v.as_str()).unwrap_or("");
                 let rule_name = rule.get("rule_name").and_then(|v| v.as_str()).unwrap_or("");
-                let display_value = if value.len() > 60 {
-                    format!("{}...", &value[..57])
-                } else {
-                    value.to_string()
-                };
+                let display_value = truncate_chars_with_suffix(value, 57, "...");
                 if rule_name.is_empty() {
                     println!(
                         "    {dim}•{reset} {yellow}{}{reset} → {}",
@@ -1215,8 +1216,8 @@ fn print_body(body: &Value, use_color: bool) {
     let reset = if use_color { "\x1b[0m" } else { "" };
 
     if let Some(s) = body.as_str() {
-        if s.len() > 2000 {
-            println!("    {}", &s[..2000]);
+        if s.chars().count() > 2000 {
+            println!("    {}", truncate_chars_with_suffix(s, 2000, ""));
             println!("    {dim}... ({} bytes total, truncated){reset}", s.len());
         } else {
             println!("    {}", s);

@@ -6,6 +6,7 @@ use bifrost_core::bifrost_file::{
     RuleFileOptions as BifrostRuleFileOptions, RuleSyncMeta as BifrostRuleSyncMeta,
     RuleSyncStatus as BifrostRuleSyncStatus,
 };
+use bifrost_core::limits::{ensure_file_size_within_limit, MAX_RULE_FILE_BYTES};
 use bifrost_core::{normalize_rule_content, BifrostError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -322,6 +323,7 @@ impl RulesStorage {
         let raw_legacy_path = self.raw_legacy_rule_path(name);
 
         if bifrost_path.exists() {
+            ensure_file_size_within_limit(&bifrost_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&bifrost_path)?;
             let file = BifrostFileParser::parse_rules(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -334,6 +336,7 @@ impl RulesStorage {
             }
             Ok(rule)
         } else if raw_bifrost_path.exists() {
+            ensure_file_size_within_limit(&raw_bifrost_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&raw_bifrost_path)?;
             let file = BifrostFileParser::parse_rules(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -352,6 +355,7 @@ impl RulesStorage {
                 content: String,
                 enabled: bool,
             }
+            ensure_file_size_within_limit(&legacy_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
                 BifrostError::Parse(format!("Failed to parse legacy rule file: {}", e))
@@ -368,6 +372,7 @@ impl RulesStorage {
                 content: String,
                 enabled: bool,
             }
+            ensure_file_size_within_limit(&raw_legacy_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&raw_legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
                 BifrostError::Parse(format!("Failed to parse legacy rule file: {}", e))
@@ -624,6 +629,7 @@ impl RulesStorage {
         let legacy_path = self.legacy_rule_path(name);
 
         if bifrost_path.exists() {
+            ensure_file_size_within_limit(&bifrost_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&bifrost_path)?;
             let raw = BifrostFileParser::parse_raw(&content)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule file: {}", e)))?;
@@ -648,6 +654,7 @@ impl RulesStorage {
                 enabled: bool,
             }
 
+            ensure_file_size_within_limit(&legacy_path, MAX_RULE_FILE_BYTES)?;
             let content = fs::read_to_string(&legacy_path)?;
             let legacy: LegacyRuleFile = serde_json::from_str(&content).map_err(|e| {
                 BifrostError::Parse(format!("Failed to parse legacy rule file: {}", e))

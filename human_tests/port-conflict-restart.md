@@ -176,6 +176,9 @@ CI 曾出现 `test_port_conflict_no_system_proxy_enable.sh` 中端口占用断�
 - 汇总结果为 `Total: 3`、`Passed: 3`、`Failed: 0`
 - 测试不使用 9900 端口，且通过临时 `BIFROST_DATA_DIR` 隔离数据
 
+**执行记录**：
+- 2026-05-04 先执行脚本失败，原因是 `target/release/bifrost` 在本轮 `cargo clean` 后不存在，不属于产品行为失败。随后执行 `cargo build --release --bin bifrost` 构建当前源码，再执行 `bash e2e-tests/tests/test_port_conflict_no_system_proxy_enable.sh`，3/3 断言通过。
+
 ---
 
 ## 清理步骤

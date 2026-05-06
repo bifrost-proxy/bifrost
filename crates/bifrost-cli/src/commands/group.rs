@@ -463,16 +463,23 @@ mod tests {
     use crate::cli::{GroupCommands, GroupRuleCommands};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
+
+    static MOCK_SERVER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct MockServer {
         port: u16,
         shutdown_tx: mpsc::Sender<()>,
         handle: Option<std::thread::JoinHandle<Vec<String>>>,
+        _guard: MutexGuard<'static, ()>,
     }
 
     impl MockServer {
         fn start(responses: Vec<(u16, &str)>) -> Self {
+            let guard = MOCK_SERVER_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("group command mock server lock poisoned");
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -555,6 +562,7 @@ mod tests {
                 port,
                 shutdown_tx,
                 handle: Some(handle),
+                _guard: guard,
             }
         }
 

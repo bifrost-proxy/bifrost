@@ -110,7 +110,14 @@ fn is_subpath(child: &Path, parent: &Path) -> bool {
 }
 
 fn load_doc_at(path: &Path) -> Result<DocumentMut, RootEditError> {
+    const MAX_STORE_FILE_BYTES: u64 = 256 * 1024 * 1024;
     let raw = if path.exists() {
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_STORE_FILE_BYTES {
+            return Err(RootEditError::Io(format!(
+                "file too large: {}",
+                path.display()
+            )));
+        }
         std::fs::read_to_string(path).map_err(|e| RootEditError::Io(e.to_string()))?
     } else {
         String::new()

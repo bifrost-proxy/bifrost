@@ -304,6 +304,382 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
   }
 });
 
+test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }) => {
+  let patchPayload: Record<string, unknown> | null = null;
+  const agentConfig = {
+    enabled: true,
+    work_dir: "/tmp/agent-ui",
+    base_instructions: "",
+    developer_instructions: "Initial developer instructions",
+    user_instructions: "Initial user instructions",
+    default_base_instructions: "Default base prompt\nwith multiple lines",
+    model_providers: {},
+    mcp_servers: {},
+  };
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    if (route.request().method() === "PATCH") {
+      patchPayload = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...agentConfig, ...patchPayload }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await openPage(page, "settings?tab=agent");
+
+  await expect(page.getByTestId("settings-agent-base-instructions-button")).toBeVisible();
+  await expect(page.getByTestId("settings-agent-developer-instructions-button")).toBeVisible();
+  await expect(page.getByTestId("settings-agent-user-instructions-button")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("Default Base Instructions (read-only)");
+  await expect(page.getByTestId("settings-agent-base-instructions-preview")).toContainText(
+    "Default base prompt",
+  );
+  await expect(
+    page.getByTestId("settings-agent-base-instructions").locator("textarea"),
+  ).toHaveCount(0);
+
+  await page.getByTestId("settings-agent-base-instructions-button").click();
+  const editor = page.getByRole("dialog", { name: "Base Instructions / System Prompt" });
+  await expect(editor).toBeVisible();
+  await editor.getByTestId("settings-agent-base-instructions-copy-placeholder").click();
+  await expect(editor.getByTestId("settings-agent-base-instructions-modal-textarea")).toHaveValue(
+    "Default base prompt\nwith multiple lines",
+  );
+  await editor.getByTestId("settings-agent-base-instructions-modal-textarea").fill(
+    "Default base prompt\nwith multiple lines\nEdited base prompt from large modal",
+  );
+  await editor.getByRole("button", { name: "OK" }).click();
+
+  await expect(page.getByTestId("settings-agent-base-instructions-preview")).toContainText(
+    "Default base prompt",
+  );
+  await expect
+    .poll(() => patchPayload?.base_instructions)
+    .toBe("Default base prompt\nwith multiple lines\nEdited base prompt from large modal");
+});
+
+test("Settings Agent 左侧导航按 URL 切换独立编辑卡片", async ({ page }) => {
+  const agentConfig = {
+    enabled: true,
+    work_dir: "/tmp/agent-ui",
+    base_instructions: "Base prompt",
+    developer_instructions: "Developer instructions",
+    user_instructions: "User instructions",
+    default_base_instructions: "Default base prompt",
+    model: "gpt-test",
+    model_provider: "mock",
+    max_completion_tokens: 4096,
+    shell_timeout_secs: 60,
+    max_history_messages: 20,
+    model_providers: {
+      mock: {
+        api_key: "$MODEL_API_KEY",
+        request_max_retries: 1,
+        stream_idle_timeout_ms: 30000,
+        stream_max_retries: 2,
+      },
+    },
+    memories: {
+      generate_memories: true,
+      use_memories: true,
+      disable_on_external_context: false,
+      max_raw_memories_for_consolidation: 100,
+      max_unused_days: 90,
+      max_rollout_age_days: 30,
+    },
+    mcp_servers: {
+      filesystem: {
+        enabled: true,
+        transport: "stdio",
+        command: "mock-mcp",
+      },
+    },
+  };
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "mock",
+          name: "Mock Provider",
+          base_url: "https://model.example.test",
+          env_key: "MODEL_API_KEY",
+        },
+      ]),
+    });
+  });
+
+  await openPage(page, "settings?tab=agent");
+
+  const nav = page.getByTestId("agent-settings-section-nav");
+  await expect(nav).toBeVisible();
+  await expect(page.getByTestId("agent-settings-nav-general")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
+
+  await page.getByTestId("agent-settings-nav-mcp-servers").click();
+  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page).toHaveURL(/agentSection=mcp-servers/);
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
+
+  await page.getByTestId("agent-settings-nav-runtime").click();
+  await expect(page.getByTestId("agent-settings-nav-runtime")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page).toHaveURL(/agentSection=runtime/);
+  await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByTestId("agent-settings-nav-mcp-servers").click();
+  await expect(page).toHaveURL(/agentSection=mcp-servers/);
+  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-runtime")).toHaveCount(0);
+});
+
+test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值", async ({
+  page,
+}) => {
+  let providerPatch: Record<string, unknown> | null = null;
+  const provider = {
+    id: "modal-provider",
+    provider_type: "feishu",
+    display_name: "Modal Provider",
+    enabled: true,
+    app_id: "cli_a123456789",
+    secret_configured: true,
+    owner_open_id: "ou_modal_owner",
+    event_connection_enabled: true,
+    event_types: [],
+    agent_config: {
+      work_dir: "/tmp/provider",
+      base_instructions: "Provider base before edit",
+      developer_instructions: "Provider developer before edit",
+      user_instructions: "Provider user before edit",
+    },
+    created_at: 1,
+    updated_at: 1,
+  };
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/default-agent",
+        default_base_instructions: "Default base inherited",
+        developer_instructions: "Default developer inherited",
+        user_instructions: "Default user inherited",
+        model_providers: {},
+        mcp_servers: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers/modal-provider/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers/modal-provider", async (route) => {
+    if (route.request().method() === "PATCH") {
+      providerPatch = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...provider, ...providerPatch }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(provider),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([provider]),
+    });
+  });
+
+  await openPage(page, "settings?tab=im-gateway");
+  await page.getByTestId("settings-im-provider-edit-modal-provider").click();
+  await expect(page.getByRole("dialog", { name: "Edit IM Provider" })).toBeVisible();
+  await page.getByTestId("settings-im-provider-base-instructions-button").click();
+
+  const editor = page.getByRole("dialog", { name: "Base Instructions / System Prompt" });
+  await expect(editor).toBeVisible();
+  await editor.getByTestId("settings-im-provider-base-instructions-modal-textarea").fill(
+    "Provider base edited from large modal",
+  );
+  await editor.getByRole("button", { name: "OK" }).click();
+
+  await expect(page.getByTestId("settings-im-provider-base-instructions-preview")).toContainText(
+    "Provider base edited from large modal",
+  );
+  await page
+    .getByRole("dialog", { name: "Edit IM Provider" })
+    .getByRole("button", {
+      name: "Save",
+    })
+    .click();
+
+  await expect
+    .poll(() => {
+      const agentConfig = providerPatch?.agent_config as
+        | { base_instructions?: string }
+        | undefined;
+      return agentConfig?.base_instructions;
+    })
+    .toBe("Provider base edited from large modal");
+});
+
+test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/default-agent",
+        model_providers: {},
+        mcp_servers: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers/*/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "provider-nav-1",
+          provider_type: "feishu",
+          display_name: "Nav Provider",
+          enabled: true,
+          app_id: "cli_nav",
+          secret_configured: true,
+          event_connection_enabled: true,
+          event_types: [],
+          created_at: 1,
+          updated_at: 1,
+        },
+      ]),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/targets", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/_bifrost/api/im-gateway/routes", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/_bifrost/api/im-gateway/schedules", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/_bifrost/api/im-gateway/history/events", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/_bifrost/api/im-gateway/history/runs", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await openPage(page, "settings?tab=im-gateway");
+
+  await expect(page.getByTestId("im-gateway-section-nav")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-nav-connections")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("im-gateway-section-connections")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /Connections/ })).toHaveCount(0);
+
+  await page.getByTestId("im-gateway-nav-routes").click();
+  await expect(page).toHaveURL(/imGatewaySection=routes/);
+  await expect(page.getByTestId("im-gateway-nav-routes")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByTestId("im-gateway-nav-routes")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+
+  await page.getByTestId("im-gateway-nav-history").click();
+  await expect(page).toHaveURL(/imGatewaySection=history/);
+  await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /Events/ })).toBeVisible();
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByTestId("im-gateway-nav-targets").click();
+  await expect(page).toHaveURL(/imGatewaySection=targets/);
+  await expect(page.getByTestId("im-gateway-nav-targets")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
+});
+
 test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到同一张状态卡片", async ({
   page,
 }) => {

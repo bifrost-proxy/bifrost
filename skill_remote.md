@@ -228,7 +228,7 @@ bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
 ```bash
 bifrost remote exec --shell-text "ls -la /tmp"
 bifrost remote exec -- ls -la /tmp
-bifrost remote exec --cwd /Users/eden/work/repo --env FOO=bar --shell-text "echo \$FOO"
+bifrost remote exec --cwd <USER_HOME>/work/repo --env FOO=bar --shell-text "echo \$FOO"
 bifrost remote exec --timeout-ms 10000 --shell-text "cargo test 2>&1 | tail -30"
 
 # 长任务 / 大输出：流式 + 写文件 + 断点续传
@@ -331,7 +331,7 @@ bifrost remote file write docs/changelog.md \
 bifrost remote file patch --patch-file ./refactor.diff --output json
 
 # 7. 跑测试（这一步才用 exec）
-bifrost remote exec --cwd /Users/eden/work/github/repo \
+bifrost remote exec --cwd <USER_HOME>/work/github/repo \
   --timeout-ms 300000 --shell-text "cargo test 2>&1 | tail -30"
 ```
 

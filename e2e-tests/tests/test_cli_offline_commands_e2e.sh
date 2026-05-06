@@ -108,7 +108,7 @@ test_rule_reorder_help() {
     local result
     result=$(run_bifrost rule reorder --help)
 
-    if echo "$result" | grep -qiE "reorder|NAMES|names|priority"; then
+    if grep -qiE "reorder|NAMES|names|priority" <<<"$result"; then
         pass "rule reorder --help 正确显示"
     else
         fail "rule reorder --help 异常: $result"
@@ -121,7 +121,7 @@ test_rule_rename_help() {
     local result
     result=$(run_bifrost rule rename --help)
 
-    if echo "$result" | grep -qiE "rename|NEW_NAME|new.name"; then
+    if grep -qiE "rename|NEW_NAME|new.name" <<<"$result"; then
         pass "rule rename --help 正确显示"
     else
         fail "rule rename --help 异常: $result"
@@ -134,7 +134,7 @@ test_script_rename_help() {
     local result
     result=$(run_bifrost script rename --help)
 
-    if echo "$result" | grep -qiE "rename|NEW_NAME|new.name"; then
+    if grep -qiE "rename|NEW_NAME|new.name" <<<"$result"; then
         pass "script rename --help 正确显示"
     else
         fail "script rename --help 异常: $result"
@@ -207,7 +207,7 @@ test_help_all_commands() {
     for cmd in "${commands[@]}"; do
         local result
         result=$(run_bifrost "$cmd" --help)
-        if [[ -n "$result" ]] && ! echo "$result" | grep -qiE "error|panic"; then
+        if [[ -n "$result" ]] && ! grep -qiE "error|panic" <<<"$result"; then
             pass "help: bifrost $cmd --help"
         else
             fail "help: bifrost $cmd --help 失败"
@@ -221,49 +221,49 @@ test_help_new_subcommands() {
     local result
 
     result=$(run_bifrost rule rename --help)
-    if echo "$result" | grep -qiE "rename|new.name|NEW_NAME"; then
+    if grep -qiE "rename|new.name|NEW_NAME" <<<"$result"; then
         pass "help: rule rename --help"
     else
         fail "help: rule rename --help 失败: $result"
     fi
 
     result=$(run_bifrost rule reorder --help)
-    if echo "$result" | grep -qiE "reorder|names|NAMES"; then
+    if grep -qiE "reorder|names|NAMES" <<<"$result"; then
         pass "help: rule reorder --help"
     else
         fail "help: rule reorder --help 失败: $result"
     fi
 
     result=$(run_bifrost script rename --help)
-    if echo "$result" | grep -qiE "rename|new.name|NEW_NAME"; then
+    if grep -qiE "rename|new.name|NEW_NAME" <<<"$result"; then
         pass "help: script rename --help"
     else
         fail "help: script rename --help 失败: $result"
     fi
 
     result=$(run_bifrost metrics --help)
-    if echo "$result" | grep -qiE "metrics|summary|apps|hosts"; then
+    if grep -qiE "metrics|summary|apps|hosts" <<<"$result"; then
         pass "help: metrics --help"
     else
         fail "help: metrics --help 失败: $result"
     fi
 
     result=$(run_bifrost sync --help)
-    if echo "$result" | grep -qiE "sync|status|login|logout"; then
+    if grep -qiE "sync|status|login|logout" <<<"$result"; then
         pass "help: sync --help"
     else
         fail "help: sync --help 失败: $result"
     fi
 
     result=$(run_bifrost export --help)
-    if echo "$result" | grep -qiE "export|rules|values|scripts"; then
+    if grep -qiE "export|rules|values|scripts" <<<"$result"; then
         pass "help: export --help"
     else
         fail "help: export --help 失败: $result"
     fi
 
     result=$(run_bifrost version-check --help)
-    if echo "$result" | grep -qiE "version|check|upgrade"; then
+    if grep -qiE "version|check|upgrade" <<<"$result"; then
         pass "help: version-check --help"
     else
         fail "help: version-check --help 失败: $result"
@@ -278,7 +278,7 @@ test_rule_crud_baseline() {
     run_bifrost rule add crud_test -c "crud.example.com statusCode://200" >/dev/null
     local show_result
     show_result=$(run_bifrost rule show crud_test)
-    if echo "$show_result" | grep -qE "crud.example.com"; then
+    if grep -qE "crud.example.com" <<<"$show_result"; then
         pass "rule add + show 工作正常"
     else
         fail "rule add/show 失败: $show_result"
@@ -286,7 +286,7 @@ test_rule_crud_baseline() {
 
     run_bifrost rule update crud_test -c "crud.example.com statusCode://201" >/dev/null
     show_result=$(run_bifrost rule show crud_test)
-    if echo "$show_result" | grep -qE "201"; then
+    if grep -qE "201" <<<"$show_result"; then
         pass "rule update 工作正常"
     else
         fail "rule update 失败: $show_result"
@@ -301,7 +301,7 @@ test_rule_crud_baseline() {
     run_bifrost rule delete crud_test >/dev/null
     local deleted_result
     deleted_result=$(run_bifrost rule show crud_test)
-    if echo "$deleted_result" | grep -qiE "not found|error|No rule"; then
+    if grep -qiE "not found|error|No rule" <<<"$deleted_result"; then
         pass "rule delete 工作正常"
     else
         fail "rule delete 后仍可查看: $deleted_result"
@@ -316,7 +316,7 @@ test_value_crud_baseline() {
     run_bifrost value add crud_val "hello_world" >/dev/null
     local show_result
     show_result=$(run_bifrost value show crud_val)
-    if echo "$show_result" | grep -qE "hello_world"; then
+    if grep -qE "hello_world" <<<"$show_result"; then
         pass "value add + show 工作正常"
     else
         fail "value add/show 失败: $show_result"
@@ -324,7 +324,7 @@ test_value_crud_baseline() {
 
     run_bifrost value update crud_val "updated_world" >/dev/null
     show_result=$(run_bifrost value show crud_val)
-    if echo "$show_result" | grep -qE "updated_world"; then
+    if grep -qE "updated_world" <<<"$show_result"; then
         pass "value update 工作正常"
     else
         fail "value update 失败: $show_result"
@@ -332,7 +332,7 @@ test_value_crud_baseline() {
 
     local list_result
     list_result=$(run_bifrost value list)
-    if echo "$list_result" | grep -qE "crud_val"; then
+    if grep -qE "crud_val" <<<"$list_result"; then
         pass "value list 包含新增值"
     else
         fail "value list 未包含新增值: $list_result"
@@ -341,7 +341,7 @@ test_value_crud_baseline() {
     run_bifrost value delete crud_val >/dev/null
     local deleted_result
     deleted_result=$(run_bifrost value show crud_val)
-    if echo "$deleted_result" | grep -qiE "not found|error"; then
+    if grep -qiE "not found|error" <<<"$deleted_result"; then
         pass "value delete 工作正常"
     else
         fail "value delete 后仍存在: $deleted_result"
@@ -356,7 +356,7 @@ test_script_crud_baseline() {
     run_bifrost script add request crud_script -c 'log.info("crud test");' >/dev/null
     local show_result
     show_result=$(run_bifrost script show request crud_script)
-    if echo "$show_result" | grep -qE "crud_script"; then
+    if grep -qE "crud_script" <<<"$show_result"; then
         pass "script add + show 工作正常"
     else
         fail "script add/show 失败: $show_result"
@@ -364,7 +364,7 @@ test_script_crud_baseline() {
 
     run_bifrost script update request crud_script -c 'log.info("crud updated");' >/dev/null
     show_result=$(run_bifrost script show request crud_script)
-    if echo "$show_result" | grep -qE "crud updated"; then
+    if grep -qE "crud updated" <<<"$show_result"; then
         pass "script update 工作正常"
     else
         fail "script update 失败: $show_result"
@@ -372,7 +372,7 @@ test_script_crud_baseline() {
 
     local list_result
     list_result=$(run_bifrost script list -t request)
-    if echo "$list_result" | grep -qE "crud_script"; then
+    if grep -qE "crud_script" <<<"$list_result"; then
         pass "script list 包含新增脚本"
     else
         fail "script list 未包含脚本: $list_result"
@@ -380,7 +380,7 @@ test_script_crud_baseline() {
 
     local run_result
     run_result=$(run_bifrost script run request crud_script)
-    if echo "$run_result" | grep -qE "Output:|Logs:|crud updated"; then
+    if grep -qE "Output:|Logs:|crud updated" <<<"$run_result"; then
         pass "script run 工作正常"
     else
         fail "script run 失败: $run_result"
@@ -389,7 +389,7 @@ test_script_crud_baseline() {
     run_bifrost script delete request crud_script >/dev/null
     local deleted_result
     deleted_result=$(run_bifrost script show request crud_script)
-    if echo "$deleted_result" | grep -qiE "not found|error|No script"; then
+    if grep -qiE "not found|error|No script" <<<"$deleted_result"; then
         pass "script delete 工作正常"
     else
         fail "script delete 后仍存在: $deleted_result"
@@ -408,7 +408,7 @@ test_rule_add_from_file() {
     result=$(run_bifrost rule add file_rule -f "$rule_file")
     local show_result
     show_result=$(run_bifrost rule show file_rule)
-    if echo "$show_result" | grep -qE "filrule.example.com"; then
+    if grep -qE "filrule.example.com" <<<"$show_result"; then
         pass "rule add -f 从文件添加成功"
     else
         fail "rule add -f 失败: $show_result"
@@ -424,7 +424,7 @@ test_rule_sync_help() {
 
     local result
     result=$(run_bifrost rule sync --help)
-    if echo "$result" | grep -qiE "sync|remote"; then
+    if grep -qiE "sync|remote" <<<"$result"; then
         pass "rule sync --help 正确显示"
     else
         fail "rule sync --help 异常: $result"
@@ -446,7 +446,7 @@ EOF
 
     local result
     result=$(run_bifrost value import "$import_file")
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qiE "panic"; then
+    if [[ -n "$result" ]] && ! grep -qiE "panic" <<<"$result"; then
         pass "value import 执行成功"
     else
         fail "value import 失败: $result"
@@ -455,7 +455,7 @@ EOF
     local import_txt="${TEST_DATA_DIR}/test_values.txt"
     echo "txt_key=txt_val" > "$import_txt"
     result=$(run_bifrost value import "$import_txt")
-    if ! echo "$result" | grep -qiE "panic"; then
+    if ! grep -qiE "panic" <<<"$result"; then
         pass "value import .txt 执行成功"
     else
         fail "value import .txt 失败: $result"
@@ -470,7 +470,7 @@ test_script_response_type() {
     run_bifrost script add response resp_test -c 'log.info("resp script test");' >/dev/null
     local show_result
     show_result=$(run_bifrost script show response resp_test)
-    if echo "$show_result" | grep -qE "resp_test|resp script test"; then
+    if grep -qE "resp_test|resp script test" <<<"$show_result"; then
         pass "script add response 类型成功"
     else
         fail "script add response 失败: $show_result"
@@ -478,7 +478,7 @@ test_script_response_type() {
 
     local list_result
     list_result=$(run_bifrost script list -t response)
-    if echo "$list_result" | grep -qE "resp_test"; then
+    if grep -qE "resp_test" <<<"$list_result"; then
         pass "script list -t response 正确过滤"
     else
         fail "script list -t response 未过滤到: $list_result"
@@ -494,7 +494,7 @@ test_script_decode_type() {
     run_bifrost script add decode dec_test -c 'ctx.output = { code: "0", data: "test", msg: "" };' >/dev/null
     local show_result
     show_result=$(run_bifrost script show decode dec_test)
-    if echo "$show_result" | grep -qE "dec_test|ctx.output"; then
+    if grep -qE "dec_test|ctx.output" <<<"$show_result"; then
         pass "script add decode 类型成功"
     else
         fail "script add decode 失败: $show_result"
@@ -502,7 +502,7 @@ test_script_decode_type() {
 
     local list_result
     list_result=$(run_bifrost script list -t decode)
-    if echo "$list_result" | grep -qE "dec_test"; then
+    if grep -qE "dec_test" <<<"$list_result"; then
         pass "script list -t decode 正确过滤"
     else
         fail "script list -t decode 未过滤到: $list_result"
@@ -519,7 +519,7 @@ test_script_show_fuzzy() {
 
     local result
     result=$(run_bifrost script show fuzzy_test_script)
-    if echo "$result" | grep -qE "fuzzy_test_script|fuzzy"; then
+    if grep -qE "fuzzy_test_script|fuzzy" <<<"$result"; then
         pass "script show 单参数模糊匹配成功"
     else
         fail "script show 模糊匹配失败: $result"
@@ -533,7 +533,7 @@ test_script_list_all() {
 
     local result
     result=$(run_bifrost script list)
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qiE "panic"; then
+    if [[ -n "$result" ]] && ! grep -qiE "panic" <<<"$result"; then
         pass "script list (全部) 执行成功"
     else
         fail "script list 失败: $result"
@@ -549,7 +549,7 @@ test_script_add_from_file() {
     run_bifrost script add request file_script -f "$script_file" >/dev/null
     local show_result
     show_result=$(run_bifrost script show request file_script)
-    if echo "$show_result" | grep -qE "file_script|from file"; then
+    if grep -qE "file_script|from file" <<<"$show_result"; then
         pass "script add -f 从文件添加成功"
     else
         fail "script add -f 失败: $show_result"
@@ -565,28 +565,28 @@ test_group_help() {
 
     local result
     result=$(run_bifrost group --help)
-    if echo "$result" | grep -qiE "group|list|show|rule"; then
+    if grep -qiE "group|list|show|rule" <<<"$result"; then
         pass "group --help 正确显示"
     else
         fail "group --help 异常: $result"
     fi
 
     result=$(run_bifrost group list --help)
-    if echo "$result" | grep -qiE "list|keyword|limit"; then
+    if grep -qiE "list|keyword|limit" <<<"$result"; then
         pass "group list --help 正确显示"
     else
         fail "group list --help 异常: $result"
     fi
 
     result=$(run_bifrost group show --help)
-    if echo "$result" | grep -qiE "show|group.id|GROUP_ID"; then
+    if grep -qiE "show|group.id|GROUP_ID" <<<"$result"; then
         pass "group show --help 正确显示"
     else
         fail "group show --help 异常: $result"
     fi
 
     result=$(run_bifrost group rule --help)
-    if echo "$result" | grep -qiE "rule|list|show|add|update|delete"; then
+    if grep -qiE "rule|list|show|add|update|delete" <<<"$result"; then
         pass "group rule --help 正确显示"
     else
         fail "group rule --help 异常: $result"
@@ -600,28 +600,28 @@ test_ca_help() {
 
     local result
     result=$(run_bifrost ca --help)
-    if echo "$result" | grep -qiE "ca|install|info|export|generate"; then
+    if grep -qiE "ca|install|info|export|generate" <<<"$result"; then
         pass "ca --help 正确显示"
     else
         fail "ca --help 异常: $result"
     fi
 
     result=$(run_bifrost ca info --help)
-    if echo "$result" | grep -qiE "info|certificate"; then
+    if grep -qiE "info|certificate" <<<"$result"; then
         pass "ca info --help 正确显示"
     else
         fail "ca info --help 异常: $result"
     fi
 
     result=$(run_bifrost ca export --help)
-    if echo "$result" | grep -qiE "export|output|path"; then
+    if grep -qiE "export|output|path" <<<"$result"; then
         pass "ca export --help 正确显示"
     else
         fail "ca export --help 异常: $result"
     fi
 
     result=$(run_bifrost ca generate --help)
-    if echo "$result" | grep -qiE "generate|force"; then
+    if grep -qiE "generate|force" <<<"$result"; then
         pass "ca generate --help 正确显示"
     else
         fail "ca generate --help 异常: $result"
@@ -633,7 +633,7 @@ test_ca_info() {
 
     local result
     result=$(run_bifrost ca info)
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qiE "panic"; then
+    if [[ -n "$result" ]] && ! grep -qiE "panic" <<<"$result"; then
         pass "ca info 执行成功"
     else
         fail "ca info 失败: $result"
@@ -645,7 +645,7 @@ test_ca_generate() {
 
     local result
     result=$(run_bifrost ca generate)
-    if ! echo "$result" | grep -qiE "panic"; then
+    if ! grep -qiE "panic" <<<"$result"; then
         pass "ca generate 执行成功"
     else
         fail "ca generate 失败: $result"
@@ -658,7 +658,7 @@ test_ca_export() {
     local output="${TEST_DATA_DIR}/test_ca.pem"
     local result
     result=$(run_bifrost ca export -o "$output")
-    if [[ -f "$output" ]] || ! echo "$result" | grep -qiE "panic"; then
+    if [[ -f "$output" ]] || ! grep -qiE "panic" <<<"$result"; then
         pass "ca export 执行成功"
     else
         fail "ca export 失败: $result"
@@ -672,21 +672,21 @@ test_system_proxy_help() {
 
     local result
     result=$(run_bifrost system-proxy --help)
-    if echo "$result" | grep -qiE "system.proxy|status|enable|disable"; then
+    if grep -qiE "system.proxy|status|enable|disable" <<<"$result"; then
         pass "system-proxy --help 正确显示"
     else
         fail "system-proxy --help 异常: $result"
     fi
 
     result=$(run_bifrost system-proxy status --help)
-    if echo "$result" | grep -qiE "status"; then
+    if grep -qiE "status" <<<"$result"; then
         pass "system-proxy status --help 正确显示"
     else
         fail "system-proxy status --help 异常: $result"
     fi
 
     result=$(run_bifrost system-proxy enable --help)
-    if echo "$result" | grep -qiE "enable|bypass|host|port"; then
+    if grep -qiE "enable|bypass|host|port" <<<"$result"; then
         pass "system-proxy enable --help 正确显示"
     else
         fail "system-proxy enable --help 异常: $result"
@@ -698,7 +698,7 @@ test_system_proxy_status() {
 
     local result
     result=$(run_bifrost system-proxy status)
-    if ! echo "$result" | grep -qiE "panic"; then
+    if ! grep -qiE "panic" <<<"$result"; then
         pass "system-proxy status 执行成功"
     else
         fail "system-proxy status 失败: $result"
@@ -712,7 +712,7 @@ test_upgrade_help() {
 
     local result
     result=$(run_bifrost upgrade --help)
-    if echo "$result" | grep -qiE "upgrade|yes|version"; then
+    if grep -qiE "upgrade|yes|version" <<<"$result"; then
         pass "upgrade --help 正确显示"
     else
         fail "upgrade --help 异常: $result"
@@ -726,7 +726,7 @@ test_install_skill_help() {
 
     local result
     result=$(run_bifrost install-skill --help)
-    if echo "$result" | grep -qiE "install|skill|tool|claude.code|codex|trae|cursor"; then
+    if grep -qiE "install|skill|tool|claude.code|codex|trae|cursor" <<<"$result"; then
         pass "install-skill --help 正确显示"
     else
         fail "install-skill --help 异常: $result"
@@ -740,7 +740,7 @@ test_version_flag() {
 
     local result
     result=$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -v 2>&1 || true)
-    if echo "$result" | grep -qiE "bifrost|[0-9]\.[0-9]"; then
+    if grep -qiE "bifrost|[0-9]\.[0-9]" <<<"$result"; then
         pass "-v 输出了版本号"
     else
         fail "-v 输出异常: $result"
@@ -774,35 +774,35 @@ test_traffic_help() {
 
     local result
     result=$(run_bifrost traffic --help)
-    if echo "$result" | grep -qiE "traffic|list|get|search|clear"; then
+    if grep -qiE "traffic|list|get|search|clear" <<<"$result"; then
         pass "traffic --help 正确显示"
     else
         fail "traffic --help 异常: $result"
     fi
 
     result=$(run_bifrost traffic list --help)
-    if echo "$result" | grep -qiE "list|limit|cursor|direction|method|status|protocol"; then
+    if grep -qiE "list|limit|cursor|direction|method|status|protocol" <<<"$result"; then
         pass "traffic list --help 含所有过滤参数"
     else
         fail "traffic list --help 参数不全: $result"
     fi
 
     result=$(run_bifrost traffic get --help)
-    if echo "$result" | grep -qiE "get|id|request.body|response.body"; then
+    if grep -qiE "get|id|request.body|response.body" <<<"$result"; then
         pass "traffic get --help 正确显示"
     else
         fail "traffic get --help 异常: $result"
     fi
 
     result=$(run_bifrost traffic search --help)
-    if echo "$result" | grep -qiE "search|keyword|url|headers|body|status|method"; then
+    if grep -qiE "search|keyword|url|headers|body|status|method" <<<"$result"; then
         pass "traffic search --help 正确显示"
     else
         fail "traffic search --help 异常: $result"
     fi
 
     result=$(run_bifrost traffic clear --help)
-    if echo "$result" | grep -qiE "clear|ids|yes"; then
+    if grep -qiE "clear|ids|yes" <<<"$result"; then
         pass "traffic clear --help 正确显示"
     else
         fail "traffic clear --help 异常: $result"
@@ -816,7 +816,7 @@ test_search_help() {
 
     local result
     result=$(run_bifrost search --help)
-    if echo "$result" | grep -qiE "search|keyword|url|headers|body|status|method|protocol"; then
+    if grep -qiE "search|keyword|url|headers|body|status|method|protocol" <<<"$result"; then
         pass "search --help 含所有参数"
     else
         fail "search --help 异常: $result"
@@ -830,21 +830,21 @@ test_import_export_help() {
 
     local result
     result=$(run_bifrost import --help)
-    if echo "$result" | grep -qiE "import|file|detect"; then
+    if grep -qiE "import|file|detect" <<<"$result"; then
         pass "import --help 正确显示"
     else
         fail "import --help 异常: $result"
     fi
 
     result=$(run_bifrost export --help)
-    if echo "$result" | grep -qiE "export|rules|values|scripts"; then
+    if grep -qiE "export|rules|values|scripts" <<<"$result"; then
         pass "export --help 正确显示"
     else
         fail "export --help 异常: $result"
     fi
 
     result=$(run_bifrost export rules --help)
-    if echo "$result" | grep -qiE "rules|names|description|output"; then
+    if grep -qiE "rules|names|description|output" <<<"$result"; then
         pass "export rules --help 正确显示"
     else
         fail "export rules --help 异常: $result"
@@ -858,7 +858,7 @@ test_config_help() {
 
     local result
     result=$(run_bifrost config --help)
-    if echo "$result" | grep -qiE "config|show|get|set|add|remove|reset"; then
+    if grep -qiE "config|show|get|set|add|remove|reset" <<<"$result"; then
         pass "config --help 正确显示"
     else
         fail "config --help 异常: $result"
@@ -867,7 +867,7 @@ test_config_help() {
     local subcommands=("show" "get" "set" "add" "remove" "reset" "clear-cache" "disconnect" "disconnect-by-app" "export" "performance" "websocket")
     for sub in "${subcommands[@]}"; do
         result=$(run_bifrost config "$sub" --help)
-        if [[ -n "$result" ]] && ! echo "$result" | grep -qiE "panic"; then
+        if [[ -n "$result" ]] && ! grep -qiE "panic" <<<"$result"; then
             pass "config $sub --help 正确显示"
         else
             fail "config $sub --help 异常: $result"
@@ -880,16 +880,16 @@ test_remote_command_exec_requires_double_dash_for_argv() {
 
     local result
     result=$(run_bifrost remote exec pwd)
-    if echo "$result" | grep -qE "unexpected argument 'pwd' found"; then
+    if grep -qE "unexpected argument 'pwd' found" <<<"$result"; then
         pass "裸 argv 会在 CLI 解析阶段直接拒绝"
     else
         fail "裸 argv 未被按预期拒绝: $result"
     fi
 
     result=$(run_bifrost remote exec -- /bin/pwd)
-    if echo "$result" | grep -qE "unexpected argument '/bin/pwd' found"; then
+    if grep -qE "unexpected argument '/bin/pwd' found" <<<"$result"; then
         fail "显式 -- 后仍被当成解析错误: $result"
-    elif echo "$result" | grep -Eqi "no saved connection|using saved connection|authorization|not connected|remote conn up"; then
+    elif grep -Eqi "no saved connection|using saved connection|authorization|not connected|remote conn up" <<<"$result"; then
         pass "显式 -- 后通过了解析，继续进入连接/授权阶段"
     else
         fail "显式 -- 后未进入预期的后续阶段: $result"

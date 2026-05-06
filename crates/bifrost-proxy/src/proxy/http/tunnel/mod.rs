@@ -60,13 +60,13 @@ use crate::server::{
     empty_body, full_body, with_trailers, BoxBody, ProxyConfig, ResolvedRules, RulesResolver,
     TlsConfig, TlsInterceptConfig,
 };
-use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
 use crate::transform::decompress::get_content_encoding;
 use crate::transform::merge_cookie_header_values;
 use crate::transform::{
     apply_body_rules, apply_content_injection_preserving_encoding, ContentInjectionEncoding, Phase,
 };
+use crate::transform::{apply_req_rules, apply_res_rules};
 use crate::transform::{compress_body, maybe_inject_bifrost_badge_html};
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -79,6 +79,7 @@ use crate::utils::tee::{
     store_request_body, store_response_body, BodyCaptureHandle,
 };
 use crate::utils::throttle::wrap_throttled_body;
+use crate::utils::url::apply_url_rules;
 
 fn maybe_backfill_tunnel_client_process(
     state: &Arc<AdminState>,
@@ -229,6 +230,23 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || resolved_rules.css_append.is_some()
         || resolved_rules.css_prepend.is_some()
         || resolved_rules.css_body.is_some()
+        || resolved_rules.req_type.is_some()
+        || resolved_rules.req_charset.is_some()
+        || resolved_rules.res_type.is_some()
+        || resolved_rules.res_charset.is_some()
+        || !resolved_rules.url_params.is_empty()
+        || !resolved_rules.delete_url_params.is_empty()
+        || !resolved_rules.url_replace.is_empty()
+        || !resolved_rules.url_replace_regex.is_empty()
+        || resolved_rules.forwarded_for.is_some()
+        || resolved_rules.response_for.is_some()
+        || resolved_rules.method.is_some()
+        || resolved_rules.auth.is_some()
+        || resolved_rules.referer.is_some()
+        || resolved_rules.cache.is_some()
+        || resolved_rules.attachment.is_some()
+        || resolved_rules.req_merge.is_some()
+        || resolved_rules.res_merge.is_some()
 }
 
 pub(super) fn sanitize_upstream_headers(headers: &mut hyper::HeaderMap) {
@@ -1874,7 +1892,31 @@ async fn handle_intercepted_request_with_protocol(
         )
     };
 
-    debug!("[{}] Intercepted: {} {}", req_id, method_str, target_uri);
+    let rule_ctx = RequestContext::new()
+        .with_request_info(
+            original_uri.clone(),
+            method_str.clone(),
+            actual_target_host.clone(),
+            path.to_string(),
+            query_string.clone(),
+            client_ip.clone(),
+        )
+        .with_headers(incoming_headers.clone())
+        .with_cookies(incoming_cookies.clone())
+        .with_query_params(query_params.clone());
+
+    let upstream_uri: hyper::Uri = match target_uri.parse() {
+        Ok(uri) => apply_url_rules(&uri, &resolved_rules, verbose_logging, &rule_ctx),
+        Err(e) => {
+            error!("[{}] Failed to parse upstream URI: {}", req_id, e);
+            return Ok(Response::builder()
+                .status(502)
+                .body(full_body(b"Bad Gateway".to_vec()))
+                .unwrap());
+        }
+    };
+
+    debug!("[{}] Intercepted: {} {}", req_id, method_str, upstream_uri);
 
     if let Some(ref redirect_url) = resolved_rules.redirect {
         let status = resolved_rules.redirect_status.unwrap_or(302);
@@ -2006,7 +2048,7 @@ async fn handle_intercepted_request_with_protocol(
         return Ok(response);
     }
 
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
 
     let actual_method = if let Some(ref method_override) = resolved_rules.method {
         if verbose_logging {
@@ -2025,6 +2067,8 @@ async fn handle_intercepted_request_with_protocol(
     let req_headers = original_req_headers.clone();
 
     let req_content_encoding = get_content_encoding(&req_headers);
+
+    apply_req_rules(&mut parts, &resolved_rules, verbose_logging, &rule_ctx);
 
     let req_content_length = parts
         .headers
@@ -2192,17 +2236,6 @@ async fn handle_intercepted_request_with_protocol(
         body_bytes.len()
     } else {
         req_content_length.unwrap_or(0)
-    };
-
-    let upstream_uri: hyper::Uri = match target_uri.parse() {
-        Ok(u) => u,
-        Err(e) => {
-            error!("[{}] Failed to parse upstream URI: {}", req_id, e);
-            return Ok(Response::builder()
-                .status(502)
-                .body(full_body(b"Bad Gateway".to_vec()))
-                .unwrap());
-        }
     };
 
     let mut new_req = Request::builder().method(actual_method).uri(&upstream_uri);

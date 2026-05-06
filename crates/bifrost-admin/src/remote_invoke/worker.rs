@@ -1766,11 +1766,19 @@ impl RemoteInvokeWorker {
     }
 
     async fn dispatch_sse_event(&self, event_name: &str, data: &str) {
-        info!(
-            event = %event_name,
-            data_len = data.len(),
-            "dispatching SSE event"
-        );
+        if event_name == "ping" {
+            debug!(
+                event = %event_name,
+                data_len = data.len(),
+                "dispatching SSE event"
+            );
+        } else {
+            info!(
+                event = %event_name,
+                data_len = data.len(),
+                "dispatching SSE event"
+            );
+        }
 
         match event_name {
             "client_hello_ack" => {
@@ -3439,6 +3447,7 @@ fn shell_grant_provision(
         }
         GrantScope::RemoteQuery => FileAccessScope::None,
         GrantScope::RemotePowerMgmt => FileAccessScope::None,
+        GrantScope::RemoteImGateway => FileAccessScope::None,
     });
 
     let store = RemoteShellStore::new()?;
@@ -3491,6 +3500,7 @@ fn updated_shell_grant_provision(
         }
         GrantScope::RemoteQuery => existing.file_access,
         GrantScope::RemotePowerMgmt => FileAccessScope::None,
+        GrantScope::RemoteImGateway => FileAccessScope::None,
     });
     if desired_scope == GrantScope::RemoteQuery {
         let mut provision = default_query_grant_provision();

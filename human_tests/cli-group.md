@@ -267,6 +267,27 @@
 
 ---
 
+### TC-CGR-15：Group CLI mock 单测并发稳定性回归
+
+**操作步骤**：
+1. 执行高并发 group 命令单测：
+   ```bash
+   cargo test -p bifrost-cli commands::group::tests:: -- --test-threads=16
+   ```
+2. 执行 workspace 聚合测试：
+   ```bash
+   cargo test --workspace --all-features
+   ```
+
+**预期结果**：
+- `test_group_rule_add_with_file`、`test_group_rule_update_with_content` 等相邻 add/update 用例在高并发下全部通过。
+- workspace 聚合测试不再因 group mock HTTP server 时序互相干扰而失败。
+
+**执行记录（2026-05-02）**：
+- `cargo test -p bifrost-cli commands::group::tests:: -- --test-threads=16`：PASS，lib 与 bin 两套 group tests 共 66 个用例通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bifrost_core::text::floor_char_boundary;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -53,8 +54,9 @@ impl WebSocketFrameRecord {
         let payload_preview = if preview_limit == 0 || payload.is_empty() {
             None
         } else if payload_is_text {
-            let preview_bytes = &payload[..payload.len().min(preview_limit)];
-            Some(String::from_utf8_lossy(preview_bytes).to_string())
+            let text = String::from_utf8_lossy(payload);
+            let end = floor_char_boundary(&text, preview_limit);
+            Some(text[..end].to_string())
         } else if payload.len() <= preview_limit {
             Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,

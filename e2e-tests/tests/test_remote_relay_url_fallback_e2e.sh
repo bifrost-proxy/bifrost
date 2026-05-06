@@ -256,10 +256,14 @@ run_connect() {
     BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" "$@" 2>&1
 }
 
-log "Build bifrost (release)..."
-(cd "$ROOT_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+if [[ "${SKIP_BUILD:-false}" == "true" && -x "$BIFROST_BIN" ]]; then
+    log "Using existing bifrost binary: $BIFROST_BIN"
+else
+    log "Build bifrost (release)..."
+    (cd "$ROOT_DIR" && SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost >/dev/null 2>&1)
+fi
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" ]]; then
     echo "bifrost binary not found at $BIFROST_BIN" >&2
     exit 1

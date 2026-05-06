@@ -1,7 +1,7 @@
 use bifrost_admin::{
     start_async_traffic_processor, start_connection_cleanup_task, start_frame_cleanup_task,
     start_ws_payload_cleanup_task, AdminState, AsyncTrafficWriter, BodyStore, ConnectionRegistry,
-    RuntimeConfig, WsPayloadStore,
+    ImGatewayService, RuntimeConfig, WsPayloadStore,
 };
 use bifrost_core::{
     normalize_rule_content, parse_rules, Protocol, RequestContext, Rule, RuleParser,
@@ -477,6 +477,12 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                     if let Some(rules) = parse_header_replace_value(value) {
                         result.header_replace.extend(rules);
                     }
+                }
+                Protocol::ForwardedFor => {
+                    result.forwarded_for = Some(value.to_string());
+                }
+                Protocol::ResponseFor => {
+                    result.response_for = Some(value.to_string());
                 }
                 _ => {}
             }
@@ -1251,6 +1257,10 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_{}", port));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)
+                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
+        }
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1294,6 +1304,10 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path)
             .expect("failed to create auth db");
+        let im_gateway_service = Arc::new(ImGatewayService::new_with_agent_proxy_port(
+            &temp_dir,
+            Some(port),
+        ));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -1305,7 +1319,8 @@ impl ProxyInstance {
             .with_frame_store_shared(frame_store)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
-            .with_auth_db(auth_db);
+            .with_auth_db(auth_db)
+            .with_im_gateway_service(im_gateway_service);
         std::mem::drop(start_connection_cleanup_task(
             admin_state.connection_monitor.clone(),
         ));
@@ -1435,6 +1450,10 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_sync_{}", port));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)
+                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
+        }
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1487,6 +1506,10 @@ impl ProxyInstance {
             .expect("failed to create admin dir");
         let auth_db2 = bifrost_admin::admin_auth_db::AuthDb::open(&auth_db_path2)
             .expect("failed to create auth db");
+        let im_gateway_service = Arc::new(ImGatewayService::new_with_agent_proxy_port(
+            &temp_dir,
+            Some(port),
+        ));
 
         let admin_state = AdminState::new(port)
             .with_runtime_config(runtime_config)
@@ -1499,7 +1522,8 @@ impl ProxyInstance {
             .with_sync_manager_shared(sync_manager)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
-            .with_auth_db(auth_db2);
+            .with_auth_db(auth_db2)
+            .with_im_gateway_service(im_gateway_service);
         std::mem::drop(start_connection_cleanup_task(
             admin_state.connection_monitor.clone(),
         ));

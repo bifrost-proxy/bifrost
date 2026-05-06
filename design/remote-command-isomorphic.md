@@ -502,6 +502,7 @@ allowed_commands = [
 3. `bifrost traffic get` 与 `bifrost remote traffic get` 的 body 选项一致
 4. remote `search` / `traffic list` / `traffic get` 的首个输出事件会在命令完成前到达 caller
 5. 仓库内所有 remote query 调用入口都使用 typed query 协议
+6. shell E2E 在 CI shard 中收到 `SKIP_BUILD=true` 时必须复用 workflow 已下载的 `target/release/bifrost`，禁止在单个测试脚本内再次执行 release build，避免 16 路并行 shell shard 因 Cargo 锁等待耗尽 `TIMEOUT`。
 
 ### 真实场景测试（human_tests）
 

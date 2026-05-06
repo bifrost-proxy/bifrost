@@ -231,6 +231,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           BIFROST_VERSION: ${{ needs.prepare.outputs.version }}
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target ${{ matrix.target }}
 
       - name: Package (Unix)

@@ -1454,4 +1454,62 @@ mod tests {
         assert_eq!(header_rules.len(), 1);
         assert_eq!(header_rules[0].resolved_value, "X-Skip-Pattern:fallback");
     }
+
+    #[test]
+    fn test_path_specific_rule_takes_priority_over_domain_only_rule() {
+        use crate::rule::parser::RuleParser;
+
+        let parser = RuleParser::new();
+
+        let mut rules = parser
+            .parse_line("qianchuan.jinritemai.com/ad/api/ qianchuan.jinritemai.com/ad/")
+            .unwrap();
+        rules.extend(
+            parser
+                .parse_line("qianchuan.jinritemai.com localhost:8080")
+                .unwrap(),
+        );
+
+        assert!(!rules.is_empty());
+
+        let resolver = RulesResolver::new(rules);
+
+        // With full path: more specific rule should win
+        let ctx = RequestContext::from_url("https://qianchuan.jinritemai.com/ad/api/test");
+        let result = resolver.resolve(&ctx);
+
+        let host_rules = result.get_by_protocol(Protocol::Host);
+        assert_eq!(host_rules.len(), 1);
+        assert_eq!(host_rules[0].resolved_value, "qianchuan.jinritemai.com/ad/");
+        assert_eq!(
+            host_rules[0].rule.pattern,
+            "qianchuan.jinritemai.com/ad/api/"
+        );
+    }
+
+    #[test]
+    fn test_domain_only_rule_matches_connect_without_path() {
+        use crate::rule::parser::RuleParser;
+
+        let parser = RuleParser::new();
+
+        let mut rules = parser
+            .parse_line("qianchuan.jinritemai.com/ad/api/ qianchuan.jinritemai.com/ad/")
+            .unwrap();
+        rules.extend(
+            parser
+                .parse_line("qianchuan.jinritemai.com localhost:8080")
+                .unwrap(),
+        );
+
+        let resolver = RulesResolver::new(rules);
+
+        // CONNECT phase: URL has no path — only domain-only rules match
+        let ctx = RequestContext::from_url("https://qianchuan.jinritemai.com:443");
+        let result = resolver.resolve(&ctx);
+
+        let host_rules = result.get_by_protocol(Protocol::Host);
+        assert_eq!(host_rules.len(), 1);
+        assert_eq!(host_rules[0].resolved_value, "localhost:8080");
+    }
 }

@@ -1,0 +1,1501 @@
+# IM Gateway Agent 真实场景测试用例
+
+## 功能模块说明
+
+IM Gateway Agent 为 Bifrost 的 IM 网关接入了 LLM 对话能力。当用户通过飞书向 Bot 发送消息时，Agent 会调用大模型 API 进行对话，并将模型回复通过飞书发送回用户。支持多轮会话、会话重置、per-route 自定义 system prompt 等。
+
+## 前置条件
+
+```bash
+# 确保 MODELHUB_AK 环境变量已设置
+source ~/.zshrc
+echo $MODELHUB_AK  # 应输出 API key
+
+# 启动 Bifrost 测试实例
+BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
+```
+
+## 测试用例列表
+
+### TC-IMA-01: Agent 配置 API - 获取默认配置
+
+- **操作步骤**: `curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq .`
+- **预期结果**: 返回 JSON 包含:
+  - `enabled: true`
+  - `model: "gpt-5.4-2026-03-05"`
+  - `by_azure: true`
+  - `base_url` 包含 `bytedance.net`
+  - `api_key` 为 `"$MODELHUB_AK"`
+
+### TC-IMA-02: Agent 配置 API - 更新配置
+
+- **操作步骤**:
+  ```bash
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+    -H 'Content-Type: application/json' \
+    -d '{"default_system_prompt": "你是一个测试助手", "max_history_messages": 10}'
+  ```
+- **预期结果**: 返回 `{"success": true}`
+- **验证步骤**: 再次 GET /agent 确认 default_system_prompt 和 max_history_messages 已更新
+
+### TC-IMA-03: Agent 配置 API - 禁用/启用 Agent
+
+- **操作步骤**:
+  ```bash
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+    -H 'Content-Type: application/json' \
+    -d '{"enabled": false}'
+  ```
+- **预期结果**: 返回 `{"success": true}`
+- **验证**: GET /agent 确认 `enabled: false`
+- **恢复**: PATCH `{"enabled": true}` 恢复
+
+### TC-IMA-04: Agent 会话列表 API - 空列表
+
+- **操作步骤**: `curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions`
+- **预期结果**: 返回 `{"sessions": []}`
+
+### TC-IMA-05: Agent 路由创建 - AgentChat 类型
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/routes \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "id": "agent-test-route",
+      "provider_id": "test-feishu",
+      "name": "Agent Chat Route",
+      "enabled": true,
+      "event_type": "message_receive",
+      "matcher": {"keyword": "agent"},
+      "action": {"type": "agent_chat", "system_prompt": "你是专业的代码助手", "reply_target": "original_chat"}
+    }'
+  ```
+- **预期结果**: 返回 `{"success": true}`
+- **验证**: GET /routes 确认路由已创建，action.type 为 "agent_chat"
+
+### TC-IMA-06: Agent 路由列表 - 包含 AgentChat 类型
+
+- **操作步骤**: `curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/routes | jq .`
+- **预期结果**: 路由列表中包含 agent-test-route，action 包含 `type: "agent_chat"` 和 `system_prompt`
+
+### TC-IMA-07: 飞书消息触发 Agent 对话（需要飞书连接）
+
+- **前置条件**: 已创建飞书 provider 并建立连接 (POST /providers/:id/connect)
+- **操作步骤**: 在飞书中向 Bot 发送消息 "你好"
+- **预期结果**:
+  - Bot 先添加 "OK" reaction
+  - Bot 回复一条文本消息（AI 生成的回复）
+  - 消息日志中出现 inbound + outbound 记录
+
+### TC-IMA-08: 多轮对话保持上下文
+
+- **前置条件**: 飞书连接已建立
+- **操作步骤**:
+  1. 发送 "我的名字是小明"
+  2. 等待回复
+  3. 发送 "我叫什么名字？"
+- **预期结果**: 第二次回复应包含 "小明"，证明会话上下文被保持
+
+### TC-IMA-09: /clear 命令重置会话
+
+- **前置条件**: 已有对话历史
+- **操作步骤**: 发送 "/clear"
+- **预期结果**: Bot 回复 "会话已重置，可以开始新的对话。"
+
+### TC-IMA-10: Agent 禁用时不响应
+
+- **操作步骤**:
+  1. PATCH /agent `{"enabled": false}`
+  2. 通过飞书发送消息
+- **预期结果**: Bot 不回复任何消息（仅添加 OK reaction）
+
+### TC-IMA-11: 消息日志记录 Agent 回复
+
+- **操作步骤**: 完成一次 Agent 对话后，执行：
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/test-feishu/messages | jq .
+  ```
+- **预期结果**: 日志中包含 trigger 为 "agent" 的 outbound 消息记录
+
+### TC-IMA-12: /undo 命令 - 回退单轮对话
+
+- **前置条件**: 已有至少 2 轮对话历史
+- **操作步骤**:
+  1. 通过内部 API 创建多轮对话：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "undo-test", "message": "记住数字42"}'
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "undo-test", "message": "记住数字99"}'
+     ```
+  2. 发送 `/undo` 命令：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "undo-test", "message": "/undo"}'
+     ```
+- **预期结果**: 回复包含"已回退 1 轮对话"，并报告移除的消息数
+
+### TC-IMA-13: /undo N 命令 - 回退多轮对话
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "undo-multi-test", "message": "/undo 2"}'
+  ```
+- **预期结果**: 回复包含"已回退 2 轮对话"
+
+### TC-IMA-14: /compact 命令 - 手动触发记忆压缩
+
+- **前置条件**: 会话中有至少 5 轮对话（足够触发压缩）
+- **操作步骤**:
+  1. 通过内部 API 创建多轮对话（5 轮以上）
+  2. 发送 `/compact`：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "compact-test", "message": "/compact"}'
+     ```
+- **预期结果**: 回复包含"记忆压缩完成"，并显示压缩前后 token 数和节省量
+
+### TC-IMA-15: /compact 命令 - 历史过少时跳过
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "compact-skip-test", "message": "hello"}'
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "compact-skip-test", "message": "/compact"}'
+  ```
+- **预期结果**: 回复包含"历史消息太少，无需压缩"
+
+### TC-IMA-16: /status 命令 - 查看会话状态
+
+- **前置条件**: 已有对话历史
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "status-test", "message": "/status"}'
+  ```
+- **预期结果**: 回复包含会话状态信息：
+  - 消息数
+  - 估算 token
+  - API 累计 token
+  - 压缩次数
+  - 历史版本
+
+### TC-IMA-17: Session API 返回 history_version 字段
+
+- **操作步骤**: 创建一个会话并获取 sessions 列表：
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions | jq '.sessions[0]'
+  ```
+- **预期结果**: 每个 session 对象包含 `history_version` 字段（初始为 0，compaction/rollback 后递增）
+
+### TC-IMA-18: 清理测试数据
+
+- **操作步骤**:
+  ```bash
+  curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/routes/agent-test-route
+  ```
+- **预期结果**: 返回 `{"success": true}`
+
+### TC-IMA-19: MCP 配置从 TOML 加载验证
+
+- **前置条件**: `~/.bifrost-agent/config.toml` 中配置了 `[mcp_servers.lark]` 段
+- **操作步骤**: `curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq '.mcp_servers'`
+- **预期结果**: 返回的 JSON 包含:
+  - `lark` 对象，其中 `enabled: true`
+  - `url` 字段包含 `mcp.larkoffice.com`（具体 URL 不展示，安全敏感）
+  - `tool_timeout_sec: 120`
+
+### TC-IMA-20: MCP 端到端工具调用 - 文档搜索
+
+- **前置条件**: MCP lark 服务器已配置且可连接
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "mcp-e2e-test", "message": "使用 MCP 工具搜索飞书文档，关键词 NextOncall，只返回搜索结果即可"}'
+  ```
+- **预期结果**:
+  - 返回 JSON 中 `success: true`
+  - `tool_calls` 数组中包含至少一个 `tool_name` 以 `mcp_lark_` 开头的调用
+  - 工具调用结果中包含文档搜索结果（如文档标题列表）
+
+### TC-IMA-21: /status 报告 MCP 工具数
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "mcp-status-test", "message": "/status"}'
+  ```
+- **预期结果**: 回复包含:
+  - `MCP 工具` 字段，数值 > 0（当前飞书 MCP 提供 10 个工具）
+  - 消息数、token 等常规状态信息
+
+### TC-IMA-22: Skills 渐进式加载验证
+
+- **前置条件**: `work_dir` 配置为 `<REPO_ROOT>`，项目目录中存在 `.agents/skills/` 子目录
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "skills-test", "message": "请列出你当前可用的所有 skills，格式为 skill 名称列表"}'
+  ```
+- **预期结果**:
+  - Agent 的回复中应提到至少以下 skills：`e2e-test`、`e2e-verify`、`rust-project-validate`
+  - 证明 Skills 从 `.agents/skills/` 目录被正确加载并注入到系统 prompt
+
+### TC-IMA-23: AGENTS.md 自动加载验证
+
+- **前置条件**: `work_dir` 下存在 `AGENTS.md` 文件
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "agents-md-test", "message": "你的 Project Instructions 中有哪些关于 human_tests 的规则？简要列出"}'
+  ```
+- **预期结果**:
+  - Agent 回复应包含关于 `human_tests` 的规则说明（来自 AGENTS.md 的 Project Instructions 部分）
+  - 证明 AGENTS.md 被正确加载并注入到系统 prompt
+
+### TC-IMA-24: MCP 工具路由正确性 - 非 MCP 工具正常执行
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "routing-test", "message": "请执行 shell 命令 echo hello-routing-test 并返回输出结果"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 中包含 `shell` 工具调用（非 MCP 工具）
+  - 工具执行成功，输出包含 `hello-routing-test`
+  - 证明 MCP 路由不影响本地工具的正常执行
+
+## WebUI Agent Settings 配置管理
+
+### TC-IMA-25: Agent Tab 渲染 - 页面加载及配置展示
+
+- **操作步骤**:
+  1. 在浏览器中访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
+  2. 检查 Settings 页面 Tab 列表中是否包含 "Agent" Tab（带 Robot 图标）
+  3. 点击 Agent Tab，检查页面内容
+- **预期结果**:
+  - Settings Tab 列表显示 "Agent" Tab（带 Robot 图标）
+  - 页面标题显示 "Agent Configuration"，状态标签显示 "Enabled"/"Disabled"
+  - 显示 5 个折叠区域：General、Model Configuration、Runtime Settings、MCP Servers、Active Sessions
+  - General 和 Model Configuration 默认展开
+  - Model 字段显示 `gpt-5.4-2026-03-05`
+  - Model Provider 字段显示 `aidp_crawl`
+
+### TC-IMA-26: Agent Tab 配置修改 - PATCH API 即时生效
+
+- **操作步骤**:
+  ```bash
+  # 修改 shell_timeout_secs 为 90
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+    -H 'Content-Type: application/json' \
+    -d '{"shell_timeout_secs": 90}'
+  ```
+- **预期结果**:
+  - API 返回完整的 AgentConfig JSON（不是 `{"success": true}`）
+  - 返回的 JSON 中 `shell_timeout_secs` 为 90
+  - 刷新 WebUI 页面后，Runtime Settings 中 Shell Timeout 显示为 90
+
+### TC-IMA-27: Agent Tab 配置持久化 - 重启后数据保留
+
+- **操作步骤**:
+  1. 通过 API 修改配置（如 `max_turn_iterations` 改为 25）
+  2. 检查 `~/.bifrost/agent/agent_config.json` 文件内容
+  3. 重启 Bifrost 服务
+  4. 再次通过 GET API 获取配置
+- **预期结果**:
+  - JSON 文件中 `max_turn_iterations` 为 25
+  - 重启后 GET API 返回的 `max_turn_iterations` 仍为 25
+  - 数据目录在 `~/.bifrost/agent/`（不是旧的 `~/.bifrost-agent/`）
+
+### TC-IMA-28: Agent Tab MCP Servers - 卡片展示与操作
+
+- **操作步骤**:
+  1. 在 WebUI Agent Tab 中展开 MCP Servers 区域
+  2. 检查 lark MCP server 卡片信息
+  3. 点击 Edit 按钮，查看 JSON 编辑器
+- **预期结果**:
+  - MCP Servers 区域标题显示服务器数量（如 "1"）
+  - lark 卡片显示：名称 "lark"、标签 "HTTP"、URL 地址、enabled 开关
+  - 点击 Edit 后弹出 Modal，显示 JSON 配置
+
+### TC-IMA-29: Agent Tab 数据目录统一 - 旧目录兼容加载
+
+- **操作步骤**:
+  1. 确保 `~/.bifrost-agent/config.toml` 存在（旧位置）
+  2. 启动 Bifrost，检查启动日志
+  3. 通过 GET API 获取配置
+- **预期结果**:
+  - 启动日志包含 `loaded legacy user-level config path=.../.bifrost-agent/config.toml`
+  - GET API 返回的配置包含 TOML 中的设置（如 model、work_dir、mcp_servers）
+  - AgentConfigStore 的 JSON 文件存储在 `~/.bifrost/agent/agent_config.json`
+
+### TC-IMA-30: Agent Tab 暗色主题 - 双主题兼容性
+
+- **操作步骤**:
+  1. 在 WebUI 中切换到暗色主题（点击顶栏 moon 图标）
+  2. 检查 Agent Tab 的所有区域
+- **预期结果**:
+  - 所有文本在暗色背景上清晰可读
+  - 输入框、开关、标签等组件正确适配暗色主题
+  - MCP Server 卡片边框和背景色适配主题
+  - 无硬编码颜色导致的对比度问题
+
+### TC-IMA-31: 模型 Provider 合并逻辑 - null 字段回退到内置值
+
+- **操作步骤**:
+  1. 通过 PATCH API 设置一个 provider 条目，使其字段为 null：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{"model_providers": {"aidp_crawl": {"name": "aidp_crawl", "base_url": null, "env_key": null}}}'
+     ```
+  2. 获取配置并验证 effective config 仍然可用：
+     ```bash
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq .
+     ```
+- **预期结果**:
+  - PATCH 请求返回成功（200 + 完整 AgentConfig JSON）
+  - GET 请求返回的配置中 `model_provider` 仍为 `"aidp_crawl"`
+  - Agent 仍能正常工作（不会因 "no base_url" 报错）
+- **验证原因**: 修复了用户 provider 遮盖内置 provider 的 bug（null 字段现在会回退到内置默认值）
+
+### TC-IMA-32: 模型配置完整性 - DefaultModelConfig 参数对齐
+
+- **操作步骤**:
+  1. 启动服务后获取配置：
+     ```bash
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq .
+     ```
+  2. 验证以下默认模型配置对应的字段均已正确配置
+- **预期结果**:
+  - `model` = `"gpt-5.4-2026-03-05"`
+  - `model_provider` = `"aidp_crawl"`
+  - `model_reasoning_effort` = `"medium"`
+  - `model_reasoning_summary` = `"auto"`
+  - `max_completion_tokens` = `16384`
+  - 内置 `aidp_crawl` provider 包含:
+    - `base_url` 包含 `bytedance.net`
+    - `env_key` = `"MODELHUB_AK"`（从环境变量获取 AK）
+    - `env_http_headers` 包含 `api-key → MODELHUB_AK`（Azure 认证模式）
+    - `env_http_headers` 包含 `X-TT-LOGID → MODELHUB_LOGID`（日志追踪）
+    - `request_max_retries` = `3`
+
+### TC-IMA-33: Provider 列表 API - 返回所有内置 Provider
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/providers | jq .
+  ```
+- **预期结果**:
+  - 返回 JSON 数组，包含 14 个 provider
+  - 每个 provider 包含 `id`、`name`、`base_url`、`env_key` 字段
+  - 包含的 provider ID: `openai`, `aidp_crawl`, `azure`, `anthropic`, `gemini`, `groq`, `deepseek`, `ollama`, `lmstudio`, `amazon-bedrock`, `openrouter`, `xai`, `mistral`, `cerebras`
+  - `openai.base_url` = `"https://api.openai.com/v1/chat/completions"`
+  - `ollama.env_key` = `null`（本地推理，无需 API key）
+  - `azure.base_url` = `null`（用户必须自行配置）
+
+### TC-IMA-34: WebUI Provider 下拉选择 - 展示与切换
+
+- **操作步骤**:
+  1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
+  2. 滚动到 "Model Configuration" 区域的 "Model Provider" 字段
+  3. 确认当前显示为下拉选择器（非文本输入框）
+  4. 点击下拉框展开列表
+  5. 验证列表包含所有 14 个 provider 名称
+  6. 选择 "OpenAI"
+  7. 确认下方自动展示 API URL 和 API Key Env
+  8. 选择回 "AIDP Crawl"
+- **预期结果**:
+  - 下拉框当前选中 "AIDP Crawl"
+  - 展开后列表包含: OpenAI, AIDP Crawl, Azure OpenAI, Anthropic, Google Gemini, Groq, DeepSeek, Ollama, LM Studio, Amazon Bedrock, OpenRouter, xAI (Grok), Mistral AI, Cerebras
+  - 选择 OpenAI 后下方显示: API URL `https://api.openai.com/v1/chat/completions`，API Key Env `OPENAI_API_KEY`
+  - 选回 AIDP Crawl 后显示: API URL 包含 `bytedance.net`，API Key Env `MODELHUB_AK`
+  - 切换操作通过 PATCH API 持久化到配置文件
+
+### TC-IMA-35: WebUI Provider 下拉 - 搜索功能
+
+- **操作步骤**:
+  1. 点击 Model Provider 下拉框
+  2. 在搜索框中输入 "deep"
+  3. 确认筛选结果
+- **预期结果**:
+  - 输入 "deep" 后仅显示 "DeepSeek" 选项
+  - 支持按名称模糊搜索（showSearch + optionFilterProp="label"）
+
+### TC-IMA-36: WebUI Provider 下拉 - 暗色主题兼容性
+
+- **操作步骤**:
+  1. 切换到暗色主题
+  2. 打开 Settings → Agent Tab
+  3. 查看 Model Provider 区域（下拉框 + URL/Key 提示文字）
+  4. 展开下拉列表
+- **预期结果**:
+  - 下拉框背景色、文字颜色在暗色主题下清晰可辨
+  - URL/Key 信息的 Code 样式块在暗色主题下对比度良好
+  - 下拉列表的选中项高亮在暗色主题下可见
+
+### TC-IMA-37: 统一 Sessions 管理 - 列表展示
+
+- **操作步骤**:
+  1. 打开 Settings → Agent Tab
+  2. 滚动到 "Sessions" 区域（统一表格）
+  3. 确认表格显示列：Status / Session Key / Source / Work Dir / Turns / Tokens / Started / Last Active / Duration / Actions
+  4. 确认表格按 Last Active 降序排序（最新在前）
+  5. 点击 Refresh 按钮
+  6. 使用 Status 过滤器切换 Active / Ended
+  7. 使用 Source 过滤器切换 Feishu / API
+- **预期结果**:
+  - 表格正确渲染，无 JS 错误
+  - 顶部显示统计：`N sessions`, `M active`, `K history`
+  - Status 列显示 Active（绿色 Tag）/ Ended（灰色 Tag）
+  - Source 列显示 Feishu（蓝色 Tag）/ API（绿色 Tag）/ —
+  - Work Dir 列显示目录或 "default"
+  - 默认按 Last Active 降序排序
+  - Refresh 按钮可正常刷新列表
+  - 过滤器正确过滤结果
+
+### TC-IMA-38: Session 管理 - 子页面详情查看
+
+- **操作步骤**:
+  1. 先通过 API 创建一个会话：
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "ui-test-unified", "message": "hello, this is a test"}'
+  ```
+  2. 打开 Agent Tab → Sessions，点击 Refresh
+  3. 找到 "ui-test-unified" 会话，点击查看按钮（眼睛图标）
+  4. 确认进入子页面（URL 包含 `?tab=agent&session=...`）
+  5. 检查子页面内容：Session Info / AGENTS.md / Skills / Messages
+  6. 点击 "Back" 按钮返回列表
+- **预期结果**:
+  - **不是 Modal 弹窗，而是子页面导航**
+  - URL 变为 `?tab=agent&session=ui-test-unified&view=active`
+  - 子页面顶部有 "Back" 按钮
+  - Session Info 显示 Source / Work Dir / Messages / Tokens / Created / Last Active / Duration
+  - AGENTS.md Instructions 卡片显示内容（如果有）
+  - Skills 卡片显示已加载 Skills 列表（分 Workspace/User/System 三组）
+  - Messages 区域显示会话消息，角色标签颜色区分（user=绿色, assistant=蓝色）
+  - 点击 Back 返回列表页，URL 恢复为 `?tab=agent`
+
+### TC-IMA-39: Session 管理 - History Session 详情查看
+
+- **操作步骤**:
+  1. 确保存在至少一个 Ended 状态的 history session
+  2. 打开 Agent Tab → Sessions
+  3. 使用 Status 过滤器选择 "Ended"
+  4. 点击 history session 的查看按钮
+  5. 确认进入子页面显示历史事件时间线
+- **预期结果**:
+  - URL 包含 `view=history&historyPath=...`
+  - Session Info 显示历史会话的 Source / Turns / Tool Calls / Events / Duration
+  - Event Timeline 显示事件卡片（session_start, user_message, assistant_message, tool_call, tool_result, session_end）
+  - 每个事件卡片有对应图标和颜色区分
+
+### TC-IMA-40: Session 管理 - Session 删除
+
+- **操作步骤**:
+  1. 在 Sessions 表格中找到 "ui-test-unified" 会话
+  2. 点击删除按钮（垃圾桶图标）
+  3. 确认弹窗中点击确认
+- **预期结果**:
+  - 显示 "Session deleted" 成功提示
+  - 表格自动刷新，"ui-test-unified" 不再出现
+  - API 验证：`curl http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions` 不包含 "ui-test-unified"
+
+### TC-IMA-41: 统一 Sessions API - sessions/all 端点
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq .
+  ```
+- **预期结果**:
+  - 返回 JSON 包含 `sessions` 数组、`total`、`active_count`、`history_count`
+  - 每个 session 项包含：`session_key`, `status`（"active"/"ended"）, `source`, `work_dir`, `turns`, `tokens`, `start_time`, `last_active_time`, `duration_secs`
+  - 默认按 `last_active_time` 降序排序
+  - active sessions 排在前面（如果有相同 last_active_time）
+
+### TC-IMA-42: 组件拆分验证 - AgentTab 页面完整渲染
+
+- **操作步骤**:
+  1. 打开 Settings → Agent Tab
+  2. 逐一检查以下区域是否正常渲染：
+     - General（含 Enable Agent, Working Directory, Instructions）
+     - Model Configuration（含 Provider 下拉、Reasoning 配置）
+     - Runtime Settings（含各数值输入框）
+     - History & Session
+     - Memories
+     - MCP Servers
+     - **Sessions（统一表格，含 Status/Source/Work Dir/Turns/Tokens 等列）**
+  3. **注意**：Skills 和 AGENTS.md 已移至 Session 详情子页面展示
+- **预期结果**:
+  - 所有 7 个 Card 区域完整渲染，无缺失
+  - 各配置项数值正确显示（非空，有默认值）
+  - 无控制台 JS 错误
+  - **不在主页面显示 Skills Card 和 AGENTS.md Card**
+
+### TC-IMA-43: 组件拆分验证 - 暗色主题兼容性
+
+- **操作步骤**:
+  1. 切换到暗色主题
+  2. 打开 Settings → Agent Tab
+  3. 检查 Sessions 统一表格区域
+  4. 点击进入 Session 详情子页面
+  5. 检查 Session Info / AGENTS.md / Skills / Messages 各区域
+- **预期结果**:
+  - 表格、按钮在暗色主题下颜色正确
+  - Session 详情子页面中的消息卡片颜色区分清晰
+  - AGENTS.md 代码块背景色与主题适配
+  - Skills Tag 在暗色主题下可读
+
+## 动态工作目录与 Session 管理
+
+### TC-IMA-44: 创建带 work_dir 的 Session
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "wd-test-1", "work_dir": "<REPO_ROOT>", "message": "hi"}'
+  ```
+- **预期结果**:
+  - 返回 `success: true`
+  - GET /sessions 中 `wd-test-1` 的 `work_dir` 为 `<REPO_ROOT>`
+
+### TC-IMA-45: 创建不带 work_dir 的 Session
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "wd-test-2", "message": "hi"}'
+  ```
+- **预期结果**:
+  - 返回 `success: true`
+  - GET /sessions 中 `wd-test-2` 的 `work_dir` 为 `null`
+
+### TC-IMA-46: Sessions 列表 API 返回 work_dir 字段
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions | jq '.sessions[] | {session_key, work_dir}'
+  ```
+- **预期结果**:
+  - 带 work_dir 的 session 显示完整路径
+  - 不带 work_dir 的 session 显示 `null`
+
+### TC-IMA-47: switch_workdir 工具 - 有效路径切换
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "wd-switch-test", "work_dir": "<USER_HOME>", "message": "请切换工作目录到 <REPO_ROOT>"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 中包含 `switch_workdir` 工具调用，`success: true`
+  - `response` 包含 "已切换工作目录到"
+  - IM 通道最终回复包含最新工作路径提示：`当前工作路径: <REPO_ROOT>`
+  - GET /sessions 中该 session 的 `work_dir` 更新为 `<REPO_ROOT>`
+  - `message_count` 为 0（历史已清空）
+  - 后续 Agent Loop 会从 `<REPO_ROOT>` 重新加载 AGENTS.md 与 repo-local skills
+
+### TC-IMA-48: switch_workdir 工具 - 无效路径拒绝
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key": "wd-switch-test", "message": "切换工作目录到 /nonexistent/path/xyz"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 中 `switch_workdir` 调用的 `success: false`
+  - 结果包含 "directory does not exist"
+  - session 的 `work_dir` 保持不变
+
+### TC-IMA-49: WebUI Sessions 表格 - Work Dir 列展示
+
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
+  2. 滚动到 Active Sessions 区域
+  3. 检查表格列
+- **预期结果**:
+  - 表格包含 "Work Dir" 列
+  - 带 work_dir 的 session 显示完整路径（鼠标悬浮可看完整路径）
+  - 不带 work_dir 的 session 显示 "default"
+
+### TC-IMA-50: WebUI Session 详情 - Working Directory 展示
+
+- **操作步骤**:
+  1. 在 Active Sessions 表格中点击带 work_dir 的 session 的查看按钮
+  2. 检查 Modal 中的 "Working Directory" 信息
+- **预期结果**:
+  - Modal 中显示 "Working Directory" 字段
+  - 带 work_dir 的 session 显示完整路径
+  - 不带 work_dir 的 session 显示 "Using default from config"
+
+### TC-IMA-51: IM Provider 创建时配置 Agent 基础配置
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/providers \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "id": "agent-config-provider",
+      "provider_type": "feishu",
+      "display_name": "Agent Config Provider",
+      "enabled": true,
+      "event_connection_enabled": true,
+      "event_types": [],
+      "agent_config": {
+        "work_dir": "<REPO_ROOT>",
+        "base_instructions": "Only answer with the phrase PROVIDER_PROMPT_OK.",
+        "developer_instructions": "Provider developer policy OK.",
+        "user_instructions": "Provider user notes OK."
+      }
+    }'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider | jq '.agent_config'
+  ```
+- **预期结果**:
+  - Provider 创建成功
+  - GET Provider 返回 `agent_config.work_dir` 等于 `<REPO_ROOT>`
+  - GET Provider 返回 `agent_config.base_instructions` 包含 `PROVIDER_PROMPT_OK`
+  - GET Provider 返回 `agent_config.developer_instructions` 包含 `Provider developer policy OK`
+  - GET Provider 返回 `agent_config.user_instructions` 包含 `Provider user notes OK`
+  - GET Provider 不再把新字段归一化为旧 `agent_config.instructions`
+  - 响应不包含明文 `secret_ref`
+
+### TC-IMA-52: IM Provider Agent 基础配置动态修改
+
+- **操作步骤**:
+  ```bash
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "agent_config": {
+        "work_dir": "<USER_HOME>",
+        "base_instructions": "Only answer with the phrase PROVIDER_PROMPT_PATCHED.",
+        "developer_instructions": "Provider developer policy PATCHED.",
+        "user_instructions": "Provider user notes PATCHED."
+      }
+    }'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/agent-config-provider | jq '.agent_config'
+  ```
+- **预期结果**:
+  - PATCH 返回 `success: true`
+  - GET Provider 返回 `agent_config.work_dir` 等于 `<USER_HOME>`
+  - GET Provider 返回 `agent_config.base_instructions` 包含 `PROVIDER_PROMPT_PATCHED`
+  - GET Provider 返回 `agent_config.developer_instructions` 包含 `Provider developer policy PATCHED`
+  - GET Provider 返回 `agent_config.user_instructions` 包含 `Provider user notes PATCHED`
+  - 修改立即写入 provider store；不需要重启服务
+
+### TC-IMA-53: WebUI Add/Edit IM Provider - Agent 配置字段
+
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=im-gateway`
+  2. 点击 Connections 区域的 Add Provider
+  3. 检查弹窗包含 "Agent Working Directory"、"Base Instructions / System Prompt"、"Developer Instructions"、"User Instructions"
+  4. 检查这些字段展示默认 Agent 配置作为继承值；字段留空表示继承数据目录默认配置
+  5. 对已有 provider 点击 Edit
+  6. 检查 Edit 弹窗只读展示 Provider ID、Type、App ID、Secret、Connection Mode
+  7. 检查 Edit 弹窗同样展示默认 Agent 配置；已有 Provider 覆盖值显示在输入框中
+  8. 修改 Display Name、Enabled、Owner Open ID、Agent Working Directory 与三层 Instructions 后保存
+  9. 通过 GET Provider API 验证保存结果
+- **预期结果**:
+  - Add IM Provider 弹窗允许手动配置 Agent Working Directory 与三层 instructions
+  - Provider 卡片展示 Status、App ID、Secret、Owner、Connection Mode、Provider Enabled、Agent Work Dir、Agent Base Prompt 与 Agent Developer/User 配置状态
+  - Add/Edit 中空的 Agent 配置字段表示继承默认值；用户输入后才保存为单 Provider 覆盖
+  - Edit 弹窗不允许修改连接配置（App ID、App Secret、Provider Type、Connection Mode）
+  - Edit 后 PATCH 生效，GET Provider API 返回最新非连接配置和 `agent_config`
+  - 亮色和暗色主题下字段可读、按钮可识别
+- **回归执行记录（2026-05-05）**: PASS — 使用真实浏览器打开 Settings → IM Gateway，对已有 `clear-regression-provider` 点击图标 Edit，清空 `Base Instructions / System Prompt` 后保存；GET `/providers/clear-regression-provider` 返回的 `agent_config` 不再包含 `base_instructions`，同时保留 `developer_instructions = "PROVIDER_DEV_KEEP"`、`user_instructions = "PROVIDER_USER_KEEP"` 与 `work_dir = "/tmp/clear-regression"`，验证单字段清空不会被省略为“保留旧值”。
+
+### TC-IMA-53A: 新建 IM Provider 的 agent_config 经 IM 事件链路生效
+
+- **操作步骤**:
+  1. 创建带 Provider 级 Agent 配置的新 IM Provider：
+     - `agent_config.work_dir = <REPO_ROOT>`
+     - `agent_config.base_instructions` 包含 `IM_PROVIDER_BASE_OK`
+     - `agent_config.developer_instructions` 包含 `IM_PROVIDER_DEV_OK`
+     - `agent_config.user_instructions` 包含 `IM_PROVIDER_USER_OK`
+  2. 将全局 Agent 配置设置为不同 marker：`GLOBAL_BASE_SHOULD_NOT_APPEAR`、`GLOBAL_DEV_SHOULD_NOT_APPEAR`、`GLOBAL_USER_SHOULD_NOT_APPEAR`。
+  3. 构造来自该 Provider owner 的 IM inbound message：`IM_PROVIDER_CHAT_MARKER 请只回复 IM_PROVIDER_CONFIG_OK`。
+  4. 将事件送入与 Feishu 长连接相同的 `run_event_loop` 处理链路，并让 Chat Completions 指向本地 mock server。
+  5. 检查 mock 捕获的模型请求 messages。
+- **预期结果**:
+  - IM event loop 会为该 Provider 构造独立 session key 并进入 Agent chat，而不是只停留在 Provider 配置存储层。
+  - 模型请求 `messages[0].role == "system"`，内容包含 `IM_PROVIDER_BASE_OK`。
+  - 模型请求 `messages[1].role == "developer"`，内容包含 `IM_PROVIDER_DEV_OK`。
+  - 模型请求 `messages[2].role == "user"`，内容包含 `IM_PROVIDER_USER_OK`。
+  - 最后一条用户消息包含 `IM_PROVIDER_CHAT_MARKER`。
+  - 请求中不包含任何全局 fallback marker，证明新建 Provider 的 `agent_config` 覆盖在 IM 链路实际生效。
+- **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat --quiet`，测试创建 `new-im-provider-config` Provider 并向 `run_event_loop` 注入 IM inbound event；mock Chat Completions 捕获到 roles 为 `system/developer/user/...` 的模型请求，包含 `IM_PROVIDER_BASE_OK`、`IM_PROVIDER_DEV_OK`、`IM_PROVIDER_USER_OK`、`IM_PROVIDER_CHAT_MARKER`，且不包含 `GLOBAL_*_SHOULD_NOT_APPEAR`。
+
+### TC-IMA-53B: IM Provider 当前配置与会话重开后的 work_dir 生效回归
+
+- **操作步骤**:
+  1. 创建 Provider `persist-workdir-provider`，初始 `agent_config.work_dir = /old`，并配置 `base_instructions = keep provider prompt`。
+  2. 模拟 IM 对话中 `switch_workdir` 成功返回 `/new/workdir` 后的持久化路径，读取 Provider API。
+  3. 对同一 session 执行 `/clear` 或 `/reset` 后，修改 Provider `agent_config.work_dir` 为另一个有效目录。
+  4. 重新发起同一 IM session 的下一轮消息。
+- **预期结果**:
+  - Provider API / WebUI Provider 卡片展示的 `Agent Work Dir` 从 `/old` 更新为 `/new/workdir`。
+  - 原 Provider 的 `base_instructions/developer_instructions/user_instructions` 不会因为 work_dir 回写被清空。
+  - `/clear` 或 `/reset` 后的空 session 会按照最新 Provider `agent_config.work_dir` 重新初始化；后续 Agent Loop 从该目录加载 AGENTS.md 与 repo-local skills。
+  - IM 长连接不需要重连；事件循环每次消息都读取 Provider store 最新配置，而不是沿用连接启动时的旧 provider snapshot。
+- **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin provider_switch_workdir_persists_provider_agent_override -- --nocapture` 与 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat -- --nocapture`；前者验证 `switch_workdir` 后 Provider `agent_config.work_dir` 持久化且保留 prompt 覆盖，后者验证 IM event loop 使用 Provider store 中的最新配置进入模型请求，而不是使用连接启动时传入的旧 provider snapshot。
+
+### TC-IMA-54: Agent 全局 Codex-style 指令配置与默认 Base Prompt 展示
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq '{default_base_instructions, effective_base_instructions, base_instructions, developer_instructions, user_instructions}'
+  curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "base_instructions": "GLOBAL_BASE_PROMPT_OK",
+      "developer_instructions": "GLOBAL_DEVELOPER_PROMPT_OK",
+      "user_instructions": "GLOBAL_USER_PROMPT_OK"
+    }' | jq '{effective_base_instructions, base_instructions, developer_instructions, user_instructions}'
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/instructions | jq .
+  ```
+- **预期结果**:
+  - 初始 GET 返回 `default_base_instructions`，内容包含内置 Bifrost Agent prompt
+  - 未设置 `base_instructions` 时，`effective_base_instructions` 等于 `default_base_instructions`
+  - PATCH 后 `base_instructions` 与 `effective_base_instructions` 均为 `GLOBAL_BASE_PROMPT_OK`
+  - PATCH 后 `developer_instructions` 为 `GLOBAL_DEVELOPER_PROMPT_OK`
+  - PATCH 后 `/agent/instructions` 只包含 `GLOBAL_USER_PROMPT_OK` 与 AGENTS.md，不包含 `GLOBAL_BASE_PROMPT_OK`，验证 base prompt 不再重复注入 user instructions
+- **执行记录（2026-05-05）**: PASS — 使用 `BIFROST_DATA_DIR=./.bifrost-human-prompt cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy` 启动最新代码；GET `/agent` 返回 `default_base_instructions` 且包含 `Bifrost Agent`，PATCH 后 `base_instructions`、`developer_instructions`、`user_instructions` 与 `effective_base_instructions` 均按预期返回；GET `/agent/instructions` 只包含 `GLOBAL_USER_PROMPT_OK` 和 AGENTS.md/project-doc 内容，不重复注入 base prompt。
+- **回归执行记录（2026-05-05）**: PASS — 针对 WebUI “无法修改/无法清空”问题，使用 `BIFROST_DATA_DIR=./.bifrost-clear-regression cargo run --bin bifrost -- start -p 18870 --unsafe-ssl --no-system-proxy` 启动最新代码；通过真实浏览器打开 Settings → Agent，依次填写 `BASE_MODIFY_OK`、`DEV_MODIFY_OK`、`USER_MODIFY_OK`，等待自动保存后 GET `/agent` 返回三项新值；随后在 WebUI 清空三个 textarea，GET `/agent` 返回 `base_instructions/developer_instructions/user_instructions = null`，`effective_base_instructions` 回退并包含 `Bifrost Agent`，页面输入框未恢复旧值。
+- **真实模型回归执行记录（2026-05-05）**: PASS — 执行 `source ~/.zshrc` 后确认 `MODELHUB_AK` 存在，使用 `RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn' BIFROST_DATA_DIR=./.bifrost-real-chat cargo run --bin bifrost -- start -p 18871 --unsafe-ssl --no-system-proxy` 启动真实 Bifrost；通过真实 WebUI 写入 `REAL_BASE_MODIFY_OK`、`REAL_DEV_MODIFY_OK`、`REAL_USER_MODIFY_OK` 后 GET `/agent` 可读回；调用 `/agent/chat` 走默认 `aidp_crawl` provider 和真实模型 `gpt-5.4-2026-03-05`，用户消息 `REAL_CHAT_MARKER 请只回复 REAL_CHAT_OK` 返回 `REAL_CHAT_OK`；服务日志包含 `invoking agent chat api` 与 `agent chat api completed`；Session JSONL `./.bifrost-real-chat/agent/sessions/2026/05/05/session-real-model-webui-prompt-session-1777993659.jsonl` 记录 `session_start`、`user_message`、`assistant_message`；随后在同一真实 WebUI 清空三段 textarea，GET `/agent` 返回三项为 `null`，`effective_base_instructions` 回退到内置 `Bifrost Agent`。
+
+### TC-IMA-54B: WebUI instruction 长文本大窗口编辑回归
+
+- **操作步骤**:
+  1. 使用临时数据目录和非正式端口启动最新 Bifrost：
+     ```bash
+     BIFROST_DATA_DIR=./.bifrost-human-instruction-modal \
+       cargo run --bin bifrost -- start -p 18872 --unsafe-ssl --no-system-proxy
+     ```
+  2. 用真实浏览器打开 `http://127.0.0.1:18872/_bifrost/settings?tab=agent`
+  3. 检查 "Base Instructions / System Prompt"、"Developer Instructions"、"User Instructions" 只展示短预览和 Edit 按钮，页面中不出现行内 textarea，也不再展示独立的 "Default Base Instructions (read-only)" 区块。
+  4. 点击 "Base Instructions / System Prompt" 的 Edit 按钮，在弹出的大窗口中点击 "Copy default into editor"，确认默认 Base Instructions 被复制到 textarea 后追加 `MODAL_BASE_OK` 并点击 OK。
+  5. 分别点击 Developer/User Instructions 的 Edit 按钮，在大窗口中输入 `MODAL_DEV_OK`、`MODAL_USER_OK` 并点击 OK。
+  6. 通过 API 验证保存结果：
+     ```bash
+     curl -s http://127.0.0.1:18872/_bifrost/api/im-gateway/agent \
+       | jq '{base_instructions, developer_instructions, user_instructions}'
+     ```
+  7. 打开 `http://127.0.0.1:18872/_bifrost/settings?tab=im-gateway`，创建或编辑一个测试 provider。
+  8. 在 IM Provider 表单中检查三段 instruction 同样只展示短预览和 Edit 按钮；点击 Base Instructions 的 Edit，在大窗口中点击 "Copy inherited into editor"，确认继承值被复制到 textarea 后追加 `PROVIDER_MODAL_BASE_OK` 并保存 provider。
+  9. 通过 GET Provider API 验证 `agent_config.base_instructions` 为 `PROVIDER_MODAL_BASE_OK`。
+- **预期结果**:
+  - Agent 全局三段 instruction 不在页面行内展开长 textarea，且不再额外展示只读 Default Base Instructions 块。
+  - Base Instructions 编辑弹窗可一键复制默认值到编辑草稿，并支持继续修改后保存。
+  - 每段可编辑 instruction 都通过 Edit 按钮打开大尺寸弹窗编辑；保存后短预览立即更新。
+  - GET `/im-gateway/agent` 返回 `MODAL_BASE_OK`、`MODAL_DEV_OK`、`MODAL_USER_OK`。
+  - IM Provider Add/Edit 表单中的 instruction 也通过大尺寸弹窗编辑；保存后 GET Provider API 返回最新 `agent_config` 覆盖值。
+  - 亮色和暗色主题下预览、Edit 按钮、弹窗标题、textarea 内容均清晰可读。
+- **执行记录（2026-05-05）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings (Agent 三层 instructions 使用大窗口编辑|IM Provider instructions 使用大窗口编辑后保存覆盖值)"`，真实 Chromium 打开 Settings → Agent/IM Gateway；验证 Agent 页面三段 instruction 只有短预览 + Edit 按钮，页面不含行内 textarea，也不再展示 `Default Base Instructions (read-only)`；Base Instructions 弹窗中点击 `Copy default into editor` 后 textarea 填入默认值，可继续追加内容并 PATCH `base_instructions`；IM Provider Edit 弹窗中 Base Instructions 通过大窗口编辑后保存，PATCH payload 的 `agent_config.base_instructions` 为最新值。两条新增 UI 回归均通过。
+
+### TC-IMA-54A: Agent chat 接口端到端验证 Codex-style prompt 分层、日志与 Session 记录
+
+- **操作步骤**:
+  1. 使用临时数据目录和非正式端口启动最新 Bifrost：
+     ```bash
+     RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn' \
+       BIFROST_DATA_DIR=./.bifrost-human-prompt \
+       cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy
+     ```
+  2. 启动本地 OpenAI-compatible mock server，记录 `/chat/completions` 请求 body。
+  3. PATCH `/im-gateway/agent`，设置：
+     - `model_provider = "mock"`
+     - `base_instructions` 包含 `GLOBAL_BASE_PROMPT_OK`
+     - `developer_instructions` 包含 `GLOBAL_DEVELOPER_PROMPT_OK`
+     - `user_instructions` 包含 `GLOBAL_USER_PROMPT_OK`
+     - `model_providers.mock.base_url` 指向本地 mock server
+  4. 调用 chat 接口：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18868/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "session_key": "human-prompt-live-session-log-check-info",
+         "message": "END_TO_END_CHAT_PROMPT_MARKER 请确认 info 日志可观测。",
+         "work_dir": "<REPO_ROOT>"
+       }'
+     ```
+  5. 检查 mock 捕获到的 Chat Completions request：
+     - `messages[0].role == "system"` 且包含 `GLOBAL_BASE_PROMPT_OK`
+     - `messages[1].role == "developer"` 且包含 `GLOBAL_DEVELOPER_PROMPT_OK`
+     - `messages[2].role == "user"` 且包含 `GLOBAL_USER_PROMPT_OK` 与 AGENTS.md/project-doc/environment context
+     - 最后一条用户消息包含 `END_TO_END_CHAT_PROMPT_MARKER`
+  6. 检查服务日志包含 `invoking agent chat api` 与 `agent chat api completed`，并带有 `session_key`、`message_len`、`response_len`、`tool_call_count` 字段。
+  7. 检查 `agent/sessions/YYYY/MM/DD/session-<session_key>-*.jsonl` 记录 `session_start`、`user_message`、`assistant_message`。
+- **预期结果**:
+  - chat API 返回 `success: true`，response 来自 mock 且确认角色顺序为 `system,developer,user,user`
+  - 上游模型请求包含 base/developer/user 三层配置和用户消息 marker
+  - Bifrost info 日志可观测到 chat API 开始与完成
+  - Session JSONL 记录包含 `session_start.content.base_instructions`、用户消息和助手消息
+- **执行记录（2026-05-05）**: PASS — chat API 返回 `CHAT_E2E_OK roles=system,developer,user,user`；mock 捕获请求显示 roles 为 `["system","developer","user","user"]`，且 `has_base/has_developer/has_user/has_chat_marker` 全为 `true`；Session 文件 `./.bifrost-human-prompt/agent/sessions/2026/05/05/session-human-prompt-live-session-after-restart-1777992451.jsonl` 包含 `session_start`、`user_message`、`assistant_message`；以 `RUST_LOG='bifrost_admin::handlers::im_gateway=info,warn'` 启动后，服务日志包含 `invoking agent chat api` 和 `agent chat api completed`。
+
+## 边界测试与回归验证
+
+### TC-IMA-55: 空状态 - 无 Session 时表格展示
+
+- **操作步骤**:
+  1. 通过 API 删除所有 active sessions：`curl -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/active`
+  2. 逐个删除所有 history sessions（通过 sessions/all 获取 history_path 后 URL-encode 删除）
+  3. 验证 API 返回空：`curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all`
+  4. 刷新 WebUI Agent Tab → Sessions 区域
+- **预期结果**:
+  - API 返回 `{"active_count":0,"history_count":0,"sessions":[],"total":0}`
+  - 表格头部显示 "0 sessions", "0 active", "0 history"
+  - 表格内容区域显示 Ant Design 空状态图标和 "No sessions" 文案
+  - 表格列头（Status/Session Key/Source 等）仍正常渲染
+
+### TC-IMA-56: Session Key 去重 - 含特殊字符的 session key
+
+- **操作步骤**:
+  1. 创建含空格的 session key：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "test session with spaces", "message": "hello"}'
+     ```
+  2. 等待 session 结束变为 history
+  3. 查看 sessions/all：`curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all`
+- **预期结果**:
+  - JSONL 文件名中空格被替换为下划线（`session-test_session_with_spaces-*.jsonl`）
+  - sessions/all API 返回的 `session_key` 为原始值 `"test session with spaces"`（非 sanitized 值）
+  - 同一 session 在 active 和 history 之间不会因 key 不匹配而重复出现
+  - 验证原因：修复了 `sanitize_key` 导致的 dedup 失败 bug
+
+### TC-IMA-57: URL 边界 - 不存在的 session key
+
+- **操作步骤**:
+  1. 直接访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent&session=nonexistent-session&view=active`
+  2. 检查页面行为
+- **预期结果**:
+  - 页面正常加载子页面布局（不崩溃）
+  - 显示 "Back" 按钮可返回列表
+  - Session Info 区域显示加载状态或"未找到"提示
+  - 无 JS 控制台错误
+
+### TC-IMA-58: URL 边界 - 无效 view 参数
+
+- **操作步骤**:
+  1. 直接访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent&session=test-key&view=invalid`
+  2. 检查页面行为
+- **预期结果**:
+  - 页面不崩溃
+  - 默认降级为 active view 或显示错误提示
+  - "Back" 按钮可正常返回列表
+
+### TC-IMA-59: 删除操作 - Cancel Popconfirm
+
+- **操作步骤**:
+  1. 在 Sessions 表格中找到一个 session
+  2. 点击删除按钮（垃圾桶图标）
+  3. 在弹出的确认框中点击 "Cancel"
+- **预期结果**:
+  - 确认框消失
+  - Session 未被删除，仍在表格中
+  - 无 API 调用发出（取消操作不触发后端请求）
+
+### TC-IMA-60: 排序与过滤组合 - Turns 升序 + Status 过滤
+
+- **操作步骤**:
+  1. 确保表格有多行 session 数据（混合 active 和 ended）
+  2. 点击 Turns 列头进行升序排序
+  3. 同时使用 Status 过滤器选择 "Active"
+  4. 切换 Status 过滤器为 "Ended"
+  5. 清除过滤器：点击 Reset → OK
+- **预期结果**:
+  - 排序和过滤可同时工作，互不干扰
+  - 清除过滤器后所有行恢复显示，排序保持
+  - 表格头部统计数字反映过滤后的实际数量
+
+### TC-IMA-61: API 边界 - 405 Method Not Allowed
+
+- **操作步骤**:
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}" -X POST \
+    http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all
+  ```
+- **预期结果**:
+  - 返回 405 状态码（sessions/all 仅支持 GET）
+  - 不会误触发其他操作
+
+### TC-IMA-62: API 边界 - 幂等删除（双重删除）
+
+- **操作步骤**:
+  1. 创建一个 session 并获取其 key
+  2. 第一次删除：`curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/{key}`
+  3. 第二次删除（同一 key）：`curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/{key}`
+- **预期结果**:
+  - 第一次删除返回 `{"ok":true}`
+  - 第二次删除不崩溃（返回 ok 或 not found 均可接受）
+  - 系统无副作用
+
+### TC-IMA-63: 亮色主题 - Sessions 列表与详情完整验证
+
+- **操作步骤**:
+  1. 切换到亮色主题（点击 sun 图标 → 变为 moon 图标）
+  2. 验证 `data-theme="light"`
+  3. 打开 Agent Tab → Sessions 列表，检查表格渲染
+  4. 点击 active session 进入详情子页面
+  5. 检查 Session Info / AGENTS.md / Skills / Messages 各区域
+  6. 返回，点击 history session 进入详情子页面
+  7. 检查 Event Timeline 事件卡片渲染
+- **预期结果**:
+  - 表格在亮色主题下正确渲染，Status/Source Tag 颜色清晰
+  - Active session 详情页：消息卡片背景色与亮色主题适配
+  - History session 详情页：Event Timeline 卡片背景为白色（`rgb(255,255,255)`），文字对比度良好
+  - 所有区域无颜色异常
+
+### TC-IMA-64: Clear All Active - 一键清除
+
+- **操作步骤**:
+  1. 确保有至少 1 个 active session
+  2. 在 Sessions 表格上方找到 "Clear All Active" 按钮（仅在有 active session 时显示）
+  3. 点击按钮 → Popconfirm 确认
+- **预期结果**:
+  - 所有 active session 被删除
+  - 表格刷新后 active_count 为 0
+  - 已删除的 active session 可能变为 history session（JSONL 已持久化的）
+
+### TC-IMA-65: History Session 详情 - 直接 URL 导航
+
+- **操作步骤**:
+  1. 从 sessions/all API 获取一个 history session 的 history_path
+  2. 构造 URL：`http://127.0.0.1:8800/_bifrost/settings?tab=agent&session={key}&view=history&historyPath={path}`
+  3. 在浏览器中直接访问该 URL
+- **预期结果**:
+  - 直接进入 history session 详情子页面（无需从列表点击进入）
+  - Event Timeline 正确加载事件数据
+  - 浏览器刷新后页面恢复到同一详情页（URL 参数持久化）
+  - "Back" 按钮返回到 Sessions 列表
+
+## 清理步骤
+
+```bash
+# 停止 Bifrost 测试实例
+# Ctrl+C 或 cargo run --bin bifrost -- stop -p 8800
+
+# 清理临时数据
+rm -rf ./.bifrost-test
+```
+
+---
+
+### TC-IMA-51: API 错误 - 优雅降级返回 partial 结果
+
+- **操作步骤**:
+  1. 创建一个 session 并发送需要工具调用的消息
+  2. 在工具执行完成后，如果模型 API 调用失败（如超时），验证系统行为
+  3. 检查飞书卡片是否包含已执行的工具结果和错误原因
+- **预期结果**:
+  - 即使模型 API 调用失败，用户仍收到飞书消息
+  - 消息包含 "⚠️ 模型调用失败" 提示
+  - 消息包含已执行工具的结果摘要
+  - 消息包含具体错误原因
+  - 消息包含 "请重新发送消息或稍后重试" 建议
+
+### TC-IMA-52: Turn 级别自动重试机制
+
+- **操作步骤**:
+  1. 配置 agent 使用一个会超时的 API 端点
+  2. 发送消息触发 agent turn
+  3. 观察日志中的重试行为
+- **预期结果**:
+  - 日志中出现 "agent turn failed, retrying once"
+  - 系统自动重试一次
+  - 如重试成功，用户收到正常回复
+  - 如重试也失败，日志出现 "agent turn retry also failed"
+  - 用户收到包含错误原因的通知卡片
+
+### TC-IMA-53: Transient API 错误 - 指数退避重试
+
+- **操作步骤**:
+  1. 观察日志中 API 调用是否有 timeout/rate_limit/5xx 错误
+  2. 验证系统重试行为
+- **预期结果**:
+  - 出现 transient error 时，日志显示 "transient API error, retrying"
+  - 最多重试 3 次（retry_attempt=1,2,3）
+  - 重试间隔递增（1s, 2s, 4s）
+  - 重试成功时日志显示 "retry succeeded"
+  - 所有重试失败时，返回 partial 结果或错误通知
+
+### TC-IMA-54: 正常对话 - 确认错误处理不影响正常流程（需飞书连接）
+
+- **操作步骤**:
+  1. 从飞书发送简单消息："你好"
+  2. 等待回复
+  3. 再发送一条需要工具调用的消息："帮我查一下当前目录下有什么文件"
+  4. 等待回复
+- **预期结果**:
+  - 第一条消息收到正常回复
+  - 第二条消息收到工具调用结果和模型回复
+  - 日志中无 error/warn 级别的重试相关日志
+  - 会话正常进行，无异常中断
+
+### TC-IMA-66: CI E2E 启动器服务注入回归
+
+- **操作步骤**:
+  1. 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 cargo run -p bifrost-e2e -- --test im_gateway_agent --jobs 1 --timeout 240`
+  2. 检查输出中的 4 个用例：`im_gateway_agent_config_get`、`im_gateway_agent_config_patch`、`im_gateway_agent_sessions_empty`、`im_gateway_agent_route_create`
+  3. 确认没有 `Expected status 200, got 503` 错误
+- **预期结果**:
+  - 4 个 `im_gateway_agent_*` E2E 用例全部通过
+  - `/api/im-gateway/agent`、`PATCH /api/im-gateway/agent`、`/api/im-gateway/agent/sessions`、`POST /api/im-gateway/routes` 均返回 200
+  - 测试启动器 `ProxyInstance::start_with_admin` 已配置 `ImGatewayService`，不再返回 `IM Gateway not configured`
+
+### TC-IMA-67: Agent Loop tool message 序列回归
+
+- **操作步骤**:
+  1. 执行消息历史 invariant 单元回归：
+     ```bash
+     cargo test -p bifrost-agent -- --nocapture
+     ```
+  2. 执行恢复链路的精准单元回归：
+     ```bash
+     cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture
+     cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture
+     cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture
+     ```
+  3. 执行自动化真实链路回归：
+     ```bash
+     cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240
+     ```
+  4. 观察输出中的 mock Chat Completions 请求校验结果。
+  5. 确认测试完成后无 `messages with role 'tool' must be a response`、`messages.[].role=tool has no preceding assistant tool_calls` 或 `assistant tool_calls were not followed by tool results` 错误。
+- **预期结果**:
+  - `bifrost-agent` history / persistence / session 单元回归全部通过
+  - 多个 pending `tool_call` 先落盘、后续 `tool_result` 按 `call_id` 或旧记录顺序恢复时，不出现结果错配或 orphan `tool`
+  - max_history 裁剪和 context overflow trim 切断 tool-call 片段时，请求前会删除非法 `tool` suffix
+  - E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
+  - 测试至少完成两轮模型工具调用：首次工具调用、JSONL 持久化恢复后的再次工具调用
+  - mock 模型服务未观察到 orphan `tool` message
+  - Agent turn 正常结束，不返回 400 invalid parameter
+- **执行记录（2026-05-02）**:
+  - `cargo test -p bifrost-agent -- --nocapture`：PASS，94 个单元测试 + 1 个 doctest 通过
+  - `cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture`：PASS，2 个恢复匹配测试通过
+  - `cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture`：PASS，1 个请求裁剪清洗测试通过
+  - `cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture`：PASS，1 个 trim 清洗测试通过
+  - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
+  - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用
+
+## 飞书卡片折叠面板与 Session Title
+
+### TC-IMA-69: 飞书卡片折叠面板 - 工具调用记录默认折叠
+
+- **操作步骤**:
+  1. 通过 API 发送需要工具调用的消息：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "card-collapse-test", "message": "执行 echo hello-card-test"}'
+     ```
+  2. 检查返回 JSON 中 `tool_calls` 不为空（有工具调用）
+  3. 在飞书 IM 中查看 Bot 发送的卡片消息
+- **预期结果**:
+  - 飞书卡片使用 JSON 2.0 schema（`"schema": "2.0"`）
+  - 卡片 body 包含 main response markdown 元素（默认展开可见）
+  - 卡片 body 包含 `collapsible_panel` 元素，标题为 "🔧 工具调用记录（N次）"
+  - 折叠面板默认为折叠状态（`expanded: false`）
+  - 折叠面板背景色为灰色（`background_color: "grey"`）
+  - 展开折叠面板后，显示每个工具调用的名称（带 ✅/❌ 图标）和结果预览
+
+### TC-IMA-70: 飞书卡片 - 无工具调用时不显示折叠面板
+
+- **操作步骤**:
+  1. 通过飞书或 API 发送不需要工具调用的简单对话消息（如 "你好"）
+  2. 查看 Bot 返回的飞书卡片
+- **预期结果**:
+  - 卡片仅包含 main response markdown 元素
+  - 不包含 `collapsible_panel` 元素
+  - 用户只看到 AI 的回复文本
+
+### TC-IMA-71: Session Title 落库 - set_title 工具持久化
+
+- **操作步骤**:
+  1. 通过 API 触发一次会话，使 Agent 调用 set_title 工具：
+     ```bash
+     curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key": "title-persist-test", "message": "帮我查看一下 Cargo.toml 文件的内容"}'
+     ```
+  2. 检查返回 JSON 中 `title_updated` 字段不为空
+  3. 查看 sessions API 确认 title 存在：
+     ```bash
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions | jq '.sessions[] | select(.session_key == "title-persist-test") | {session_key, title}'
+     ```
+  4. 删除 active session 使其变为 history，再通过 sessions/all 检查 title 是否保留：
+     ```bash
+     curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/title-persist-test
+     curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq '.sessions[] | select(.session_key == "title-persist-test") | {session_key, title, status}'
+     ```
+- **预期结果**:
+  - `title_updated` 包含 Agent 生成的 session 标题
+  - Active session 的 title 字段不为 null
+  - History session（从 JSONL 恢复）的 title 字段与 active session 一致
+  - JSONL 文件中包含 `title_updated` 事件类型
+
+### TC-IMA-72: Session Title 在 sessions/all API 中返回
+
+- **操作步骤**:
+  ```bash
+  curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/sessions/all | jq '.sessions[] | {session_key, title, status}'
+  ```
+- **预期结果**:
+  - Active sessions 的 `title` 字段来自内存中的 session.title
+  - Ended sessions 的 `title` 字段从 JSONL 的 `title_updated` 事件中恢复
+  - 未设置 title 的 session 返回 `title: null`
+
+### TC-IMA-73: 飞书卡片 header 使用 Session Title
+
+- **操作步骤**:
+  1. 在飞书中开始一个新会话，发送消息触发 Agent
+  2. 等待 Agent 回复第一条消息（此时 Agent 应已调用 set_title）
+  3. 查看飞书卡片的 header 标题
+- **预期结果**:
+  - 如果 session 有 title，卡片 header 显示 title 内容（而非默认的 "Bifrost AI"）
+  - 如果 session 无 title（如第一轮 Agent 未调用 set_title），header 显示 "Bifrost AI"
+
+### TC-IMA-74: WebUI Sessions 表格 - Title 列展示
+
+- **操作步骤**:
+  1. 确保有带 title 的 session（通过前述测试创建）
+  2. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
+  3. 滚动到 Sessions 区域
+  4. 检查表格是否有 "Title" 列
+- **预期结果**:
+  - 表格在 Source 列之后显示 "Title" 列
+  - 带 title 的 session 显示 title 文本，鼠标悬浮可查看完整标题
+  - 无 title 的 session 显示 "—"（em-dash）
+  - 列宽度为 180px，超长文本省略显示
+
+### TC-IMA-68: Agent 配置 API - API Key 写入保持 Azure header 认证
+
+- **操作步骤**:
+  1. 使用临时数据目录启动 Bifrost，避免影响正式实例：
+     ```bash
+     BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18868 --unsafe-ssl --no-system-proxy
+     ```
+  2. 通过 PATCH 设置默认 `aidp_crawl` provider 的 `api_key`：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18868/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{"model": "test-model-e2e", "base_url": "https://test.example.com", "api_key": "test-api-key-e2e"}' | jq .
+     ```
+  3. 再次 GET 配置：
+     ```bash
+     curl -s http://127.0.0.1:18868/_bifrost/api/im-gateway/agent | jq '.model_providers.aidp_crawl'
+     ```
+- **预期结果**:
+  - PATCH 返回 200 和完整 AgentConfig JSON
+  - GET 返回的 `model_providers.aidp_crawl.api_key` 为 `"test-api-key-e2e"`
+  - GET 返回的 `model_providers.aidp_crawl.http_headers.api-key` 为 `"test-api-key-e2e"`
+  - 运行时仍按 `api-key` header 使用 Azure/MODELHUB 认证，不退化成 Bearer 认证
+- **执行记录（2026-05-03）**:
+  - 自动化真实链路回归 `cargo run -p bifrost-e2e -- --test im_gateway_agent_config_patch --test-timeout 120 --port 18180`：PASS，PATCH 后 GET 可见 `model_providers.aidp_crawl.api_key = "test-api-key-e2e"`，且 `http_headers.api-key = "test-api-key-e2e"`，保持 Azure/MODELHUB `api-key` header 认证路径
+
+### TC-IMA-75: Goal 模式 - create_goal 工具触发
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "请创建一个 goal，目标是：实现一个简单的计算器功能，token budget 设为 5000", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `success: true`
+  - `tool_calls` 数组中包含 `tool_name: "create_goal"` 的调用
+  - create_goal 的 result 包含 JSON：`status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`, `threadId`，且不暴露内部 `goalId`
+  - response 文本描述了 goal 的创建结果
+- **执行记录（2026-05-05）**: PASS — 模型成功调用 create_goal，返回 `status: "active"`, `tokenBudget: 5000`, `tokensUsed: 0`, `remainingTokens: 5000`
+
+### TC-IMA-76: Goal 模式 - get_goal 状态查询与 budget 超限自动转换
+
+- **前置条件**: TC-IMA-75 已创建 goal 且 session 已消耗 token
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "查看当前 goal 的状态", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 包含 `tool_name: "get_goal"`
+  - goal 的 `status` 变为 `"budgetLimited"`（因为 turn token 消耗已超过 budget 5000）
+  - `tokensUsed` > `tokenBudget`
+  - `remainingTokens: 0`
+- **执行记录（2026-05-05）**: PASS — get_goal 返回 `status: "budgetLimited"`, `tokensUsed: 33531`, `tokenBudget: 5000`, `remainingTokens: 0`
+
+### TC-IMA-77: Goal 模式 - update_goal 标记完成与 completionBudgetReport
+
+- **前置条件**: TC-IMA-76 的 session 中 goal 已存在
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "请将 goal 标记为 complete", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 包含 `tool_name: "update_goal"`
+  - update_goal 的 arguments 包含 `status: "complete"`
+  - result 中 goal 的 `status: "complete"`
+  - result 中 `completionBudgetReport` 非 null，包含 token 和时间使用统计
+- **执行记录（2026-05-05）**: PASS — update_goal 返回 `status: "complete"`, `completionBudgetReport: "Goal achieved. Report final budget usage to the user: tokens used: 67548 of 5000; time used: 30 seconds."`
+
+### TC-IMA-78: Goal 模式 - /goal 命令查看状态
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal", "session_key": "e2e-goal-test-create"}'
+  ```
+- **预期结果**:
+  - `tool_calls` 为空数组（/goal 是内置命令，不经过 LLM）
+  - response 包含 goal 的 JSON 状态（含 threadId, objective, status, tokenBudget 等字段）
+- **执行记录（2026-05-05）**: PASS — 直接返回 goal JSON，`status: "complete"`, tool_calls 为空
+
+### TC-IMA-79: Goal 模式 - /goal pause 暂停
+
+- **前置条件**: 新会话中已创建 active goal
+- **操作步骤**:
+  ```bash
+  # 先创建 goal
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "创建一个 goal: 编写文档，token budget 10000", "session_key": "e2e-goal-pause"}'
+  # 暂停
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal pause", "session_key": "e2e-goal-pause"}'
+  ```
+- **预期结果**:
+  - 暂停响应中 goal 的 `status: "paused"`
+  - tool_calls 为空
+- **执行记录（2026-05-05）**: PASS — `/goal pause` 返回 `status: "paused"`, `tokensUsed: 16695`
+
+### TC-IMA-80: Goal 模式 - /goal resume 恢复
+
+- **前置条件**: TC-IMA-79 已暂停 goal
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal resume", "session_key": "e2e-goal-pause"}'
+  ```
+- **预期结果**:
+  - goal 的 status 恢复（如果 token 已超 budget 则为 `"budgetLimited"`，否则为 `"active"`）
+  - tool_calls 为空
+- **执行记录（2026-05-05）**: PASS — resume 后 `status: "budgetLimited"`（因 tokensUsed 16695 > budget 10000）
+
+### TC-IMA-81: Goal 模式 - Session 隔离验证
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "/goal", "session_key": "e2e-goal-isolation-new-session"}'
+  ```
+- **预期结果**:
+  - response 包含 `"goal": null`
+  - 新 session 中不存在其他 session 的 goal
+- **执行记录（2026-05-05）**: PASS — 新 session 返回 `goal: null, remainingTokens: null`
+
+### TC-IMA-82: Goal 模式 - 工具调用与 token accounting
+
+- **操作步骤**:
+  ```bash
+  curl -s -X POST "http://127.0.0.1:8800/_bifrost/api/im-gateway/agent/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "创建一个 goal: 在 /tmp 下创建一个 hello.txt 文件并写入 Hello World，token budget 设为 50000。然后立即执行这个任务。", "session_key": "e2e-goal-tools", "work_dir": "/tmp/bifrost-e2e-test"}'
+  ```
+- **预期结果**:
+  - `success: true`
+  - `tool_calls` 包含 `create_goal`、`shell` 或 `write_file` 等工具调用
+  - goal 最终被标记为 `complete`（或 `budgetLimited`）
+  - `/tmp/bifrost-e2e-test/hello.txt` 文件被创建且内容为 "Hello World"
+- **清理**: `rm -rf /tmp/bifrost-e2e-test`
+- **执行记录（2026-05-05）**: PASS — 模型调用了 create_goal → shell → write_file → read_file → update_goal(complete)，文件内容验证正确
+
+### TC-IMA-83: Agent 模型请求默认进入 Bifrost Traffic
+
+- **操作步骤**:
+  1. 使用非 9900 端口和临时数据目录启动真实 Bifrost：
+     ```bash
+     BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18883 --unsafe-ssl --no-system-proxy
+     ```
+  2. 启动一个本地 OpenAI-compatible mock Chat Completions 服务，记录请求。
+  3. 将 Agent 配置 PATCH 到 mock 服务：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18883/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{"model":"mock-model","model_provider":"mock","model_providers":{"mock":{"base_url":"http://127.0.0.1:<mock_port>/chat/completions","http_headers":{"Authorization":"Bearer test"}}}}'
+     ```
+  4. 通过 Agent Chat API 触发一次模型请求：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18883/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{"session_key":"agent-proxy-human","message":"hello via proxy"}'
+     ```
+  5. 查询 Traffic：
+     ```bash
+     curl -s "http://127.0.0.1:18883/_bifrost/api/traffic?limit=20&host_contains=127.0.0.1:<mock_port>" | jq '.records[] | {m,h,u,s}'
+     ```
+- **预期结果**:
+  - Agent Chat API 返回 `success: true`，response 来自 mock 模型。
+  - mock 服务收到 Chat Completions POST 请求。
+  - Traffic 中出现一条 `POST` 到 `127.0.0.1:<mock_port>` 的记录，说明 Agent 底层模型请求默认经当前 Bifrost 端口代理发出。
+  - 启动命令包含 `--no-system-proxy`，不会污染本机正式系统代理。
+- **执行记录（2026-05-05）**:
+  - 自动化真实链路回归 `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。用例通过 `model-proxy.test host://127.0.0.1:<mock_port>` 规则把外部模型 host 转到本地 mock，Agent 请求经 Bifrost 端口代理后在 Traffic 中出现 `POST model-proxy.test` 记录。
+  - 真实模型 + TLS 拦截回归 `source ~/.zshrc; BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start --host 127.0.0.1 -p 18883 --unsafe-ssl --no-system-proxy --intercept-include search.bytedance.net` 后调用 `/api/im-gateway/agent/chat`：PASS。Agent Chat 返回 `success: true`，Traffic 出现 `REQ-69fa0d05-000003`，`POST https://search.bytedance.net/gpt/openapi/online/multimodal/crawl`，`status=200`，`protocol=https`，`is_tunnel=false`，request body 文件 61531 bytes、response body 文件 493 bytes。验证 Agent 已信任当前 Bifrost CA，不再因 `UnknownIssuer` 在 TLS 拦截下失败。
+
+### TC-IMA-84: Agent 设置页左侧导航按 URL 切换独立编辑卡片
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-agent-nav cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy
+    ```
+  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/settings?tab=agent`
+- **操作步骤**:
+  1. 确认 Agent 设置页左侧显示卡片导航，包含 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions。
+  2. 确认默认只渲染 `General` 编辑卡片，其他卡片未同时出现在右侧。
+  3. 点击左侧导航中的 `MCP Servers`。
+  4. 确认右侧只渲染 `MCP Servers` 编辑卡片，且 `MCP Servers` 导航项显示当前高亮状态。
+  5. 确认浏览器 URL 包含 `agentSection=mcp-servers`。
+  6. 刷新页面，确认仍恢复到 `MCP Servers` 编辑卡片。
+  7. 点击左侧导航中的 `Runtime`。
+  8. 确认右侧只渲染 `Runtime Settings` 编辑卡片，且 URL 更新为 `agentSection=runtime`。
+  9. 切换到暗色主题后重复点击 `MCP Servers` 与 `Runtime`。
+- **预期结果**:
+  - 左侧导航始终可见并固定在左侧区域，不跟随右侧内容滚动。
+  - 点击导航项后右侧独立渲染对应编辑卡片，不再把所有卡片堆在一个长页面中。
+  - 当前导航项通过高亮和 `aria-current="true"` 标记。
+  - URL 中的 `agentSection` 能记录当前卡片，页面刷新后恢复到同一卡片。
+  - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
+  - 窄屏下导航退化为顶部横向滚动，不挤压编辑卡片内容。
+- **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Agent 左侧导航按 URL 切换独立编辑卡片"` 通过；验证默认仅渲染 General、点击 MCP Servers/Runtime 后只渲染对应卡片、URL `agentSection` 记录并刷新恢复、暗色主题下继续切换可读且 `aria-current` 正确。
+
+### TC-IMA-85: `/agent/chat` 图片多模态理解真实链路
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须显式关闭系统代理：
+    ```bash
+    BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18885 --unsafe-ssl --no-system-proxy
+    ```
+  - 启动 OpenAI-compatible mock Chat Completions 服务；mock 必须记录请求 JSON，并在收到 `image_url` content part 且文本包含 `MULTIMODAL_IMAGE_E2E` 时返回 `MULTIMODAL_IMAGE_E2E_OK`。
+- **操作步骤**:
+  1. 配置 Agent 使用 mock 多模态模型：
+     ```bash
+     curl -s -X PATCH http://127.0.0.1:18885/_bifrost/api/im-gateway/agent \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "enabled": true,
+         "model": "mock-vision-model",
+         "model_provider": "mock",
+         "base_instructions": "You can understand images.",
+         "max_turn_iterations": 1,
+         "memories": {"use_memories": false, "generate_memories": false},
+         "model_providers": {
+           "mock": {
+             "name": "Mock",
+             "base_url": "http://127.0.0.1:<mock_port>/chat/completions",
+             "api_key": "test"
+           }
+         }
+       }'
+     ```
+  2. 通过真实 `/agent/chat` API 发送文本 + 图片：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18885/_bifrost/api/im-gateway/agent/chat \
+       -H 'Content-Type: application/json' \
+       -d '{
+         "session_key": "human-multimodal-image",
+         "message": "MULTIMODAL_IMAGE_E2E 请描述这张图片",
+         "images": [{
+           "mime_type": "image/png",
+           "data": "iVBORw0KGgo="
+         }]
+       }'
+     ```
+  3. 检查响应 JSON 和 mock 收到的请求体。
+  4. 打开 WebUI `Settings → Agent → Sessions`，进入 `human-multimodal-image` Session 详情，或调用：
+     ```bash
+     curl -s http://127.0.0.1:18885/_bifrost/api/im-gateway/agent/sessions/human-multimodal-image
+     ```
+- **预期结果**:
+  - `/agent/chat` 返回 `success: true`。
+  - `response` 包含 `MULTIMODAL_IMAGE_E2E_OK`，证明模型链路消费到了图片输入。
+  - mock 收到的最后一条 user message 的 `content` 是数组，至少包含一个 `{"type":"text"}` part 和一个 `{"type":"image_url"}` part。
+  - `image_url.url` 以 `data:image/png;base64,` 开头。
+  - Session 详情 API 的 user message 包含 `content_parts` 中的 `image_url` part。
+  - WebUI Session 详情中 user message 下方显示图片缩略图，点击缩略图后打开放大预览层。
+  - 会话 JSONL 的 `user_message.content.images` 保存 `{mime_type,data}`，后续历史会话仍可查看图片。
+  - 启动命令包含 `--no-system-proxy`，全程未使用 9900 端口。
+- **清理步骤**:
+  - 停止 Bifrost 进程和 mock 服务。
+  - 删除本用例创建的临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-06）**: PASS — 执行 `CARGO_TARGET_DIR=target/im-multimodal-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_multimodal_image_parts --test-timeout 120 --port 18885` 通过。用例启动真实 Bifrost admin + mock 多模态模型，通过 `/agent/chat` 发送文本和 `image/png` base64 图片，断言 mock 收到 OpenAI-compatible `image_url` content part，接口返回 `MULTIMODAL_IMAGE_E2E_OK`，并验证 Session 详情 API 的 user message 包含持久化 `content_parts.image_url`。
+
+### TC-IMA-86: 飞书富文本 post 图片+文字消息进入 Agent
+
+- **前置条件**:
+  - Feishu `im.message.receive_v1` 事件中的 `message_type` 为 `post`。
+  - `message.content` 使用飞书接收态富文本结构：顶层包含 `title` 和 `content`，其中 `content` 为二维数组，元素可包含 `tag=text/a/at/img/media/code_block`。
+- **操作步骤**:
+  1. 构造一条 `post` 消息，`content` 中包含 `{"tag":"text","text":"请看这张图"}` 和 `{"tag":"img","image_key":"img_v3_post"}`。
+  2. 调用 Feishu 事件归一化逻辑。
+  3. 构造一条图片-only IM event，`text=""` 且 `images` 非空，送入 IM event loop。
+  4. 检查模型 mock 收到的 Chat Completions 请求。
+- **预期结果**:
+  - 归一化后的 `message.text` 为 `请看这张图`，不是空字符串。
+  - 归一化后的 `message.images[0].file_key` 为 `img_v3_post`。
+  - 日志包含 `normalized feishu inbound message`，并输出 `message_type`、`text_len`、`image_count`、`image_keys`、`content_keys`、`content_preview`。
+  - 图片-only 消息不会因为文本为空被跳过；模型请求包含默认图片理解提示和 `image_url` content part。
+  - inbound message log 对图片-only 消息显示 `[图片消息: 1 张]` 预览。
+- **执行记录（2026-05-06）**: PASS — 执行 `cargo test -p bifrost-admin im_gateway::feishu::tests::test_normalize_feishu_post_extracts_text_and_images` 通过，验证接收态 `post` 顶层 `content` 结构能提取文字和图片 key；执行 `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 通过，验证图片-only IM event 不再被空文本短路，会进入 Agent 并携带 `image_url` content part。
+
+### TC-IMA-87: 图片数量上限与 Session 详情放大预览
+
+- **前置条件**:
+  - Agent 已启用，模型使用 OpenAI-compatible Chat Completions mock。
+  - WebUI 可访问 `Settings → Agent → Sessions`。
+- **操作步骤**:
+  1. 通过 `/agent/chat` 或飞书 IM 链路提交 7 张图片的单条消息。
+  2. 检查模型 mock 收到的 Chat Completions 请求。
+  3. 打开对应 Session 详情，查看 active session 的 user message 图片区域。
+  4. 结束会话后从 History session 详情再次查看同一条 user message 图片区域。
+  5. 分别点击 active 和 history 详情中的图片缩略图。
+- **预期结果**:
+  - 模型请求中最多包含 6 个 `image_url` content part。
+  - 超过 6 张时服务日志包含 `too many IM images in one message; truncating images for agent multimodal input` 或 `too many /agent/chat images in one request; truncating images`。
+  - Session 详情 active view 显示图片缩略图，点击后打开放大预览层。
+  - Session 详情 history view 从 JSONL `user_message.content.images` 恢复图片缩略图，点击后同样打开放大预览层。
+  - 图片缩略图和预览层在亮色、暗色主题下均可辨识。
+- **清理步骤**:
+  - 停止 Bifrost 进程和 mock 服务。
+  - 删除本用例创建的临时 `BIFROST_DATA_DIR`。
+  - 清理浏览器测试会话。
+- **执行记录（2026-05-06）**: PASS — 执行 `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 通过，测试构造 7 张图片的 IM event，验证进入模型请求的 `image_url` content part 被截断为 6 张；执行 `pnpm --dir web exec tsc --noEmit` 通过，验证 Session 详情图片缩略图改用 Ant Design `Image.PreviewGroup` 后类型检查通过，active/history 图片均可点击触发内置放大预览。

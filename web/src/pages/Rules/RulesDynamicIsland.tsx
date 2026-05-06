@@ -29,7 +29,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   const [variableConflicts, setVariableConflicts] = useState<VariableConflict[]>([]);
   const [mergedContent, setMergedContent] = useState("");
   const [showMerged, setShowMerged] = useState(false);
-  const [mergedCopied, setMergedCopied] = useState(false);
+  const [copiedMergedContent, setCopiedMergedContent] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const copiedTimerRef = useRef<number | null>(null);
   const dragRef = useRef({
@@ -66,9 +66,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     refreshActiveRules();
   }, [rules, refreshActiveRules]);
 
-  useEffect(() => {
-    setMergedCopied(false);
-  }, [mergedContent]);
+  const mergedCopied = copiedMergedContent === mergedContent && mergedContent.trim() !== "";
 
   useEffect(() => {
     return () => {
@@ -175,13 +173,13 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     if (!text) return;
     const ok = await copyToClipboard(text);
     if (ok) {
-      setMergedCopied(true);
+      setCopiedMergedContent(mergedContent);
       message.success("Merged rules copied");
       if (copiedTimerRef.current !== null) {
         window.clearTimeout(copiedTimerRef.current);
       }
       copiedTimerRef.current = window.setTimeout(() => {
-        setMergedCopied(false);
+        setCopiedMergedContent(null);
         copiedTimerRef.current = null;
       }, 1600);
     } else {

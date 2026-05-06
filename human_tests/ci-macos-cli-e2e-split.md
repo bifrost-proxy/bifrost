@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 工作目录：项目根目录 `/Users/eden/work/github/bifrost`
+- 工作目录：项目根目录 `<REPO_ROOT>`
 - 当前 bifrost 正式代理保持运行在 `127.0.0.1:9900`
 - 如需访问网络，使用：
   - `HTTP_PROXY=http://127.0.0.1:9900`

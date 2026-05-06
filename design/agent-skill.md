@@ -112,6 +112,80 @@ bifrost install-skill [OPTIONS]
 
 ## 测试方案
 
+### Skills crate hardening 回归（feat/agent review fixpass）
+
+本模块的运行时 skill 执行、注册表热重载、checksum、导入和 authoring 状态机需要满足以下约束：
+
+1. Executor 在 `env_clear()` 后保留必要宿主环境白名单，包括 `PATH`、`HOME`、`USER`、`LOGNAME`、`LANG`、`LC_ALL`、`LC_CTYPE`、`TMPDIR`、`TEMP`、`TMP`、`TERM`、`SHELL`、`SSL_CERT_FILE`、`SSL_CERT_DIR`、`CARGO_HOME`、`RUSTUP_HOME`，再叠加 `SkillManifest.env`。
+2. `SkillRegistry::reload_one(slug)` 只能重建对应 slug。目录不存在时删除索引；其他 skill 保持不变；watcher 必须从文件事件路径反推出 root 下的第一级 slug 并触发差异重载。
+3. `verify_checksum()` 遇到缺失 `manifest.json` 必须返回 `false` 并记录 warning，交由上层处理。
+4. `SkillPackager::import()` 保留包内合法 `manifest.scope`，仅当 scope 缺失或非法时使用调用方默认 scope。
+5. `SkillAuthoringSession::test()` 在非 `Drafted`/`Validated`/`Tested` 状态下返回 `AuthoringError::InvalidState`，禁止用空 `PathBuf` 继续执行。
+
+验证计划：
+
+- 单元测试：`process_executor_keeps_common_host_env` 验证白名单环境变量；`watcher_reloads_one_slug_and_removes_deleted_slug` 验证写入、删除和其他 skill 不受影响；`verify_checksum_missing_manifest_returns_false` 验证缺失 manifest 返回 false；`import_preserves_manifest_scope_when_valid` 验证合法 scope 保留；`test_rejects_unvalidated_state` 验证非法状态报错。
+- E2E 测试：复用 `test_skill_creator_flow.sh` 覆盖 create -> test -> invoke -> delete -> import 主流程。
+- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-07 到 TC-SC-11，逐条执行对应 cargo/脚本命令并记录实际结果。
+
+### Agent runtime skill 接入回归（feat/agent review fixpass）
+
+Agent runtime 必须在 `AgentSession::new_with_work_dir` 构造出的真实 session 中装配 `SkillRegistry`，而不是只在 slash router 单元测试中手工注入。`with_skills(Arc<SkillRegistry>)` 保持链式 API 兼容，同时 session 持有同一个 registry 供 slash router 和 prompt digest 复用。
+
+System prompt 末尾追加一个有界 `## Available Skills` digest：每个 enabled skill 一行 `- <name>: <description_one_line>`，总长度不超过 4KB；当前缺少使用次数和最近使用时间统计时按名称稳定排序，后续有统计字段后可提升排序策略。
+
+Skill prompt 加载采用渐进式披露：基础 system prompt 只包含 enabled skill 的名称、description 和 `SKILL.md` 路径，不直接注入 `SKILL.md` body。模型在用户显式提及 skill 或根据 description 判定需要使用 skill 时，再按路径读取完整 `SKILL.md`。对应回归要求：
+
+- `SkillsManager::build_skills_instructions` 输出必须包含 enabled skill 的 name / description / file path。
+- 同一输出不得 eager 注入 `prompt_content`，避免大量 skill body 抢占上下文。
+- `skill_loading_enabled_skill_appears_in_prompt` E2E 用例验证上述 metadata 注入与 body 不注入契约。
+
+长期记忆 append 使用 `fs2::FileExt::lock_exclusive()` 对目标文件加 advisory exclusive lock，保护多个本地 session 同时追加 `MEMORY.md` 或 `raw_memories.md` 时不会出现行交错。
+
+验证计划：
+
+- 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill；`test_build_skills_instructions` 验证 base prompt 包含 skill metadata 且不 eager 注入 body。
+- 真实场景测试：新增 `human_tests/agent-runtime-review-fixes.md`，包含 TC-ARF-01 到 TC-ARF-03，逐条执行并记录实际结果。
+
+### Admin import 与 CLI secret 回归（feat/agent review fixpass）
+
+`/agent/skills/import` 禁止继续接受客户端传入的本机 `PathBuf`。接口改为读取 `application/octet-stream` 原始包 bytes，或 multipart/form-data 中的 `package` 字段；服务端将 bytes 暂存到 agent 数据目录下 `skills/.import-tmp/` 后再调用 `SkillPackager::import()`。scope 可通过 `x-bifrost-skill-scope` 请求头传入，默认 `Repo`。
+
+管理端 skill handler 使用 `AgentSkillError` 分层映射：参数错误为 400，冲突为 409，语义校验失败为 422，未知 I/O 为 500。后续如果 handler 迁移到 typed JSON response，可以保留同一映射表。
+
+IM CLI 的 `resolve_secret` 返回 `Result<String, ResolveSecretError>`。缺失 env 映射为 `Missing`，文件读取失败映射为 `Io`，调用方转成 CLI 配置错误并停止，不再 warning 后写入空 secret。
+
+验证计划：
+
+- 单元测试：`multipart_import_extracts_package_field_bytes`、`agent_skill_error_maps_conflict_to_409`、`resolve_secret_missing_env_returns_error`、`resolve_secret_missing_file_returns_io_error`。
+- 真实场景测试：新增 `human_tests/agent-skills-admin-cli.md`，包含 TC-ASAC-01 到 TC-ASAC-03，逐条执行并记录实际结果。
+
+### Web Skill 表单与 IM Gateway 回归（feat/agent review fixpass）
+
+Skill Creator Wizard 的 Manifest、Script Editor、Test Panel 拆成可复用组件，并将 name、description、slash command、required 等字段约束放入 `utils/skillFormSchema.ts`。SkillEditor 直接复用这些 section，以单页 form 方式编辑 manifest、entrypoint、SKILL.md 和非 inline script assets，避免 Wizard 与 Editor 字段漂移。
+
+`buildSkillMd()` 不再把 shell/python/node script body 写入 SKILL.md 正文，而是引用对应 `./scripts/run.*` 文件；inline 内容使用 fenced block，并在脚本包含三反引号或独立 `---` 行时切换/转义 fence，保证 frontmatter 边界不被正文破坏。
+
+IM Gateway Tab 的 `fetchData` 在失败时通过 `message.error()` 暴露错误，并在 `finally` 中稳定清理 loading；切换 tab 时先 reset loading，再触发新 tab 的数据加载。
+
+验证计划：
+
+- 单元测试：`SkillCreatorWizard.test.ts` 覆盖三反引号和 leading `---` 两个 SKILL.md 转义回归。
+- 构建验证：`pnpm --dir web build` 验证 SkillEditor 复用组件与 IM Gateway loading/error 修改的 TypeScript/Vite 构建。
+- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-12 到 TC-SC-14，逐条执行并记录实际结果。
+
+### E2E env 与 storage size guard 回归（feat/agent review fixpass）
+
+`im_gateway_agent` E2E 中涉及 `BIFROST_AGENT_HOME` / `BIFROST_DATA_DIR` 的测试改用 `temp-env` 作用域。由于 e2e runner 要求 test future 为 `Send`，temp-env 的 non-Send guard 放在 `spawn_blocking` 内，并在该作用域内使用单线程 Tokio runtime 执行原异步测试体，避免 guard 跨 await 暴露给 runner。
+
+规则文件大小限制抽到 `bifrost-core/src/limits.rs`：`MAX_RULE_FILE_BYTES = 256 * 1024 * 1024`，`ensure_file_size_within_limit(path, limit)` 统一处理 metadata 检查和错误返回。`bifrost-storage/src/rules.rs` 的 load/load_summary 路径复用该 helper。
+
+验证计划：
+
+- 单元测试：`ensure_file_size_within_limit_rejects_oversized_file`。
+- 编译验证：`cargo check -p bifrost-e2e --quiet` 和 `cargo check -p bifrost-storage --quiet`。
+- 真实场景测试：新增 `human_tests/storage-e2e-safety.md`，包含 TC-SES-01 到 TC-SES-03，逐条执行并记录实际结果。
+
 ### E2E 测试
 
 新增 `bifrost-e2e` 覆盖以下场景：

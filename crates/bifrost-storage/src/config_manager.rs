@@ -589,6 +589,16 @@ impl ConfigManager {
             return Ok(default);
         }
 
+        const MAX_CONFIG_FILE_BYTES: u64 = 256 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&config_path) {
+            if meta.len() > MAX_CONFIG_FILE_BYTES {
+                return Err(BifrostError::Config(format!(
+                    "config file too large ({} bytes)",
+                    meta.len()
+                )));
+            }
+        }
+
         let content = std::fs::read_to_string(&config_path)?;
 
         if let Ok(config) = toml::from_str::<UnifiedConfig>(&content) {

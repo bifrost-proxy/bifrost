@@ -1,0 +1,28 @@
+[package]
+name = "skills"
+version.workspace = true
+edition.workspace = true
+description = "Skill creator storage, validation, registry, execution, and packaging"
+
+[dependencies]
+chrono.workspace = true
+notify = "6"
+parking_lot.workspace = true
+regex.workspace = true
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2 = "0.10"
+tar = "0.4"
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "time", "io-util"] }
+tracing.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile.workspace = true

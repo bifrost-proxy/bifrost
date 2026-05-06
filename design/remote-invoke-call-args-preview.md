@@ -19,7 +19,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - `Recent Calls` 本地落盘，Bifrost 重启后仍能恢复最近记录
 - 支持一键清理当前客户端的全部 Recent Calls
 - 本地记录默认保留 7 天，单个 relay/client 最多保留 100000 条
-- 命令相关文本超过 200 字符时直接截断，只保留前 200 字符用于展示和落盘，避免超长命令撑爆本地历史文件
+- 命令相关文本超过 120 字符时直接截断，只保留前 120 字符用于展示和落盘，避免超长命令撑爆本地历史文件
 
 ## 实现方案
 
@@ -47,7 +47,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 非终态历史在恢复时收敛为 `failed`，避免重启后永久显示 streaming
 - `remote_invoke.retention_days` 默认 7 天；`remote_invoke.max_records` 默认 100000 条
 - `DELETE /_bifrost/api/remote-invoke/calls` 清理当前 relay/client 的全部本地 Recent Calls
-- 写入内存历史和本地落盘前统一执行 200 字符截断：
+- 写入内存历史和本地落盘前统一执行 120 字符截断：
   - `command_summary.command_preview`
   - `command_summary.masked_args_json`
   - `command.command`
@@ -55,7 +55,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - `command.query` 中的字符串字段
   - `command.argv`、`command.shell`、`command.command_text`、`command.cwd`、`command.env`
   - `policy_id`
-- 截断逻辑不添加省略号，严格保留原始前 200 个 Unicode 字符；API、Web UI、落盘文件看到同一份截断后的内容。
+- 截断逻辑不添加省略号，严格保留原始前 120 个 Unicode 字符；API、Web UI、落盘文件看到同一份截断后的内容。
 - 对 `args_json` / `masked_args_json` 这类 JSON 字符串，截断发生在 JSON 内部的字符串值上，序列化后的 JSON 仍保持合法，避免参数预览因为硬截断变成不可解析文本。
 
 ### 1.2 Grants 时间字段稳定性
@@ -91,7 +91,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   3. 右侧保留详情按钮，点击后打开完整记录弹窗
 - 命令摘要、参数预览、caller、policy、exec mode 均单行显示并自动 `ellipsis` 截断，避免长 shell 文本把列表撑高或把右侧列压成竖排。
 - 点击记录或详情按钮时调用 `GET /remote-invoke/calls/{call_id}` 拉取最新详情；失败时回退当前列表记录，保持详情可读。
-- 详情弹窗展示服务端已保存的命令、参数 JSON、调用 ID、grant/client/caller、状态、耗时、流量、policy/exec mode 与命令详情 JSON；其中命令相关长文本最多为前 200 字符，不再暴露或保存完整超长原文。
+- 详情弹窗展示服务端已保存的命令、参数 JSON、调用 ID、grant/client/caller、状态、耗时、流量、policy/exec mode 与命令详情 JSON；其中命令相关长文本最多为前 120 字符，不再暴露或保存完整超长原文。
 
 ## 测试方案
 
@@ -104,7 +104,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - 验证 call history store 按 7 天保留期和 max_records 裁剪
   - 验证 clear_for_client 只清理当前 relay/client
   - 验证重启恢复时 streaming 记录收敛为 failed
-  - 验证 call history store 写入前会把命令相关字符串截断到 200 字符，原始长片段不会出现在落盘 JSON 中
+  - 验证 call history store 写入前会把命令相关字符串截断到 120 字符，原始长片段不会出现在落盘 JSON 中
 - `web/src/api/remoteInvoke.test.ts`
   - 验证 Recent Calls 参数预览来源优先使用 `masked_args_json`
   - 验证缺失时回退到 `command.args_json`
@@ -119,7 +119,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 新增断言：
   - 执行命令前后读取 Grants API，同一 grant 的 `first_connected_at` 必须严格相等，`last_command_at` 必须在执行后出现且不早于 `first_connected_at`
   - Recent Calls 写入 `remote_invoke_call_history.json`
-  - 超长搜索参数在 Recent Calls API 中只返回前 200 字符，且 `masked_args_json` 仍是合法 JSON
+  - 超长搜索参数在 Recent Calls API 中只返回前 120 字符，且 `masked_args_json` 仍是合法 JSON
   - `remote_invoke_call_history.json` 不包含完整超长参数原文
   - 保留同一 `BIFROST_DATA_DIR` 重启 Bifrost 后，同一 `call_id` 仍可从 Recent Calls API 读取
   - DELETE Recent Calls 后 API 返回空列表
@@ -132,7 +132,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 
 - 更新 `human_tests/remote-invoke.md`
 - 新增回归用例：加密链路下 `Recent Calls` 必须展示参数预览与 Tooltip 完整 JSON，重启后不丢失，并支持清理全部记录
-- 新增回归用例：超长命令不会撑乱 Recent Calls 布局，且 API / 详情 / 落盘文件都只保留前 200 字符
+- 新增回归用例：超长命令不会撑乱 Recent Calls 布局，且 API / 详情 / 落盘文件都只保留前 120 字符
 - 新增回归用例：执行命令后 Grants API 的 `first_connected_at` 严格保持不变，`last_command_at` 单调更新
 - 同步更新 `human_tests/readme.md` 索引与用例数
 

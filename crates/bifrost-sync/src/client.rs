@@ -1,18 +1,16 @@
 use std::time::Duration;
 
-use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_core::{
+    direct_reqwest_client_builder, text::truncate_chars_with_suffix, BifrostError, Result,
+};
 use bifrost_storage::SyncConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::types::{RemoteEnv, RemoteUser};
 
 fn truncate_for_log(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len).collect();
-        format!("{truncated}...(truncated, total {} bytes)", s.len())
-    }
+    let suffix = format!("...(truncated, total {} bytes)", s.len());
+    truncate_chars_with_suffix(s, max_len, &suffix)
 }
 
 #[derive(Debug, Deserialize)]

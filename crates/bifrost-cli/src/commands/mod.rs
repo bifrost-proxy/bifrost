@@ -5,6 +5,7 @@ mod caller_stream_frame;
 mod completions;
 pub(crate) mod config;
 mod group;
+mod im;
 mod install_skill;
 pub mod keepawake;
 mod metrics;
@@ -55,6 +56,7 @@ pub use value::*;
 pub use whitelist::*;
 
 pub use bifrost_file::{handle_export_command, handle_import_command};
+pub use im::handle_im_command;
 pub use metrics::handle_metrics_command;
 pub use remote_grant::handle_remote_grant_command;
 pub use remote_shell::handle_remote_shell_command;

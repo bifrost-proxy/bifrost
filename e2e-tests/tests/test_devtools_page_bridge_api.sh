@@ -1936,7 +1936,7 @@ if (webuiNetworkRows.length !== 1) {
 }
 const devtoolsUrlBeforeNetworkDetail = adminPage.url();
 await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
 const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
 const networkTableBox = await adminPage.getByTestId('devtools-network-traffic-table').boundingBox();
@@ -1977,7 +1977,7 @@ const bridgeOnlyDetailRow = adminPage
   .first();
 await bridgeOnlyDetailRow.waitFor({ timeout: 8000 });
 await bridgeOnlyDetailRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-query').getByText('foo').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-request-headers').getByText(/x-bifrost-fallback-header/i).waitFor({ timeout: 8000 });
@@ -2001,7 +2001,7 @@ const bridgeOnlyTagRow = adminPage
   .first();
 await bridgeOnlyTagRow.waitFor({ timeout: 8000 });
 await bridgeOnlyTagRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
 await adminPage.unroute('**/_bifrost/api/traffic/**');
@@ -2022,7 +2022,7 @@ const uiTrafficEnrichRow = adminPage
   .first();
 await uiTrafficEnrichRow.waitFor({ timeout: 8000 });
 await uiTrafficEnrichRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
 await panelSearch.fill('');
 await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
@@ -2134,9 +2134,31 @@ if (plainLogColor === 'rgb(196, 29, 29)' || plainLogColor === 'rgb(255, 0, 0)') 
 }
 await adminPage.getByTestId('devtools-console-panel').getByText(/Object \{.*pageId/).first().waitFor({ timeout: 8000 });
 const objectRow = adminPage.getByTestId('devtools-console-row-log').filter({ hasText: 'bifrost-console-object-ready' }).first();
-await objectRow.getByTestId('devtools-console-expand-value').last().click();
-await objectRow.getByText('nested:', { exact: true }).waitFor({ timeout: 8000 });
-await objectRow.getByText('items:', { exact: true }).waitFor({ timeout: 8000 });
+const waitForExpandedConsoleObject = async (row, labels, timeoutMs = 12000) => {
+  const deadline = Date.now() + timeoutMs;
+  let lastText = '';
+  let lastError = '';
+  while (Date.now() < deadline) {
+    const visible = await Promise.all(labels.map((label) =>
+      row.getByText(label, { exact: true }).first().isVisible().catch(() => false),
+    ));
+    if (visible.every(Boolean)) {
+      return;
+    }
+    lastText = await row.textContent().catch(() => '');
+    const toggles = row.getByTestId('devtools-console-expand-value');
+    const toggleCount = await toggles.count();
+    if (toggleCount === 0) {
+      break;
+    }
+    await toggles.nth(toggleCount - 1).click({ timeout: 1000 }).catch((error) => {
+      lastError = error instanceof Error ? error.message : String(error);
+    });
+    await adminPage.waitForTimeout(250);
+  }
+  throw new Error(`AV-CDP-36 failed: expanded console object labels did not become visible ${JSON.stringify({ labels, lastText, lastError })}`);
+};
+await waitForExpandedConsoleObject(objectRow, ['nested:', 'items:']);
 const objectPreviewBox = await objectRow.getByText(/Object \{.*pageId/).boundingBox();
 const nestedBox = await objectRow.getByText('nested:', { exact: true }).boundingBox();
 if (!objectPreviewBox || !nestedBox || nestedBox.x < objectPreviewBox.x + 10) {

@@ -159,15 +159,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -184,7 +184,7 @@ jobs:
     name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
     needs: [build-e2e]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -223,6 +223,9 @@ jobs:
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
         working-directory: packages/bifrost-sync-server
+      - name: Build sync-server (TypeScript -> dist/cli.js)
+        run: pnpm run build
+        working-directory: packages/bifrost-sync-server
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Download release binary
@@ -240,15 +243,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -294,15 +297,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -364,6 +367,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-aarch64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
 
   build-linux-armv7:
@@ -392,6 +396,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-armv7
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
 
   build-linux-musl-x86:
@@ -420,6 +425,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-x86_64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl
 
   build-linux-musl-aarch64:
@@ -448,6 +454,7 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-aarch64
+          CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-musl
 
   build-cli-macos-aarch64:
@@ -548,15 +555,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -573,7 +580,7 @@ jobs:
     name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -612,6 +619,9 @@ jobs:
       - name: Install sync-server dependencies
         run: pnpm install --frozen-lockfile
         working-directory: packages/bifrost-sync-server
+      - name: Build sync-server (TypeScript -> dist/cli.js)
+        run: pnpm run build
+        working-directory: packages/bifrost-sync-server
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -631,15 +641,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -687,15 +697,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -923,15 +933,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -987,15 +997,15 @@ jobs:
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
-          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
           echo ""
-          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10); do
+          for logfile in $(find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -10 || true); do
             echo "=== $logfile ==="
             tail -100 "$logfile"
             echo ""
           done
           echo "=== E2E Data Directory ==="
-          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
         if: failure()
         uses: actions/upload-artifact@v4

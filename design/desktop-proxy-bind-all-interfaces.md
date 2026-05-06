@@ -35,7 +35,10 @@ Admin API 安全机制不受影响：
 ## 测试方案
 
 ### 单元测试
-- `test_get_local_ip_returns_valid_address`: 验证 `get_local_ips()` 至少返回一个有效的非 loopback IP
+- `test_get_local_ips_returns_non_empty`: 验证 `get_local_ips()` 至少返回一个条目
+- `test_get_local_ips_preferred_is_first`: 验证首选 IP 排在第一位
+- `test_get_local_ips_no_duplicates`: 验证无重复条目
+- `test_get_local_ips_all_entries_are_valid_addresses`: 验证所有返回条目均为有效地址
 
 ### E2E 测试
 - 验证代理服务绑定 `0.0.0.0` 后可通过非 loopback 地址访问

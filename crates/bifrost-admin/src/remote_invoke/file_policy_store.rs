@@ -149,6 +149,11 @@ impl FileAccessPolicyStore {
     }
 
     pub fn load_from(path: &Path) -> Self {
+        const MAX_STORE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_STORE_FILE_BYTES {
+            warn!(path = %path.display(), "file-access config too large, using empty config");
+            return Self::empty();
+        }
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) => {
@@ -577,6 +582,11 @@ fn default_config_path() -> PathBuf {
 pub(crate) fn load_raw_config() -> RawConfig {
     let path = default_config_path();
     if !path.exists() {
+        return RawConfig::default();
+    }
+    const MAX_STORE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_STORE_FILE_BYTES {
+        warn!(path = %path.display(), "file-access config too large, using default");
         return RawConfig::default();
     }
     let raw = match std::fs::read_to_string(&path) {

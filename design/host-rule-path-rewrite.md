@@ -54,7 +54,7 @@ http://localhost:9000/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958a
 - `utils/url.rs`
   - `test_rewrite_path_same_source_target`
   - `test_rewrite_path_with_query_string`
-  - `test_find_host_rule_source_path_uses_selected_rule_not_last_host_rule`
+  - `test_find_host_rule_source_path_uses_selected_rule_not_later_host_rule`
 
 ### E2E 脚本
 

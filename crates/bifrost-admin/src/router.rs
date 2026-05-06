@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::cors::apply_cors_headers;
 use crate::handlers::{
+    agent_memories::handle_agent_memories,
     app_icon::handle_app_icon,
     audit::handle_audit,
     auth::{extract_bearer_token, handle_auth},
@@ -17,6 +18,7 @@ use crate::handlers::{
     error_response, frames,
     group::handle_group,
     group_rules::handle_group_rules,
+    im_gateway::handle_im_gateway,
     metrics::handle_metrics,
     notification::handle_notification,
     power::handle_power,
@@ -105,7 +107,9 @@ impl AdminRouter {
             return handle_audit(req, path).await;
         }
 
-        if path.starts_with("/api/rules") {
+        if path.starts_with("/api/agent/memories") {
+            handle_agent_memories(req, path).await
+        } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {
             handle_devtools(req, state, path).await
@@ -194,6 +198,8 @@ impl AdminRouter {
         } else if path.starts_with("/api/bifrost-file") {
             let path_suffix = path.strip_prefix("/api/bifrost-file").unwrap_or("");
             handle_bifrost_file(req, path_suffix, state.clone()).await
+        } else if path.starts_with("/api/im-gateway") {
+            handle_im_gateway(req, state.im_gateway_service(), path).await
         } else if path.starts_with("/api/remote-invoke") {
             handle_remote_invoke(req, state.remote_invoke_worker(), path).await
         } else {

@@ -126,8 +126,12 @@ wait_for_authorized() {
 
 log "Starting isolated mock sync server and Bifrost admin"
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
-log "Building release bifrost binary"
-(cd "$ROOT_DIR" && cargo build --release --bin bifrost) || exit 1
+if [[ -x "$BIFROST_BIN" ]]; then
+    log "Reusing pre-built release bifrost binary at $BIFROST_BIN"
+else
+    log "Building release bifrost binary"
+    (cd "$ROOT_DIR" && cargo build --release --bin bifrost) || exit 1
+fi
 start_mock_sync_server || exit 1
 admin_start_bifrost || exit 1
 

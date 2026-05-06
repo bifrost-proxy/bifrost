@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bifrost_admin::AdminState;
+use bifrost_core::text::truncate_bytes_with_suffix;
 use bifrost_script::{MatchedRuleInfo, RequestData, ResponseData, ScriptContext, ScriptType};
 use bytes::Bytes;
 use tracing::warn;
@@ -36,13 +37,11 @@ pub(super) struct DecodeForStorageResult {
     pub(super) results: Vec<bifrost_script::ScriptExecutionResult>,
 }
 
-fn truncate_string(mut s: String, max_len: usize) -> String {
+fn truncate_string(s: String, max_len: usize) -> String {
     if s.len() <= max_len {
         return s;
     }
-    s.truncate(max_len);
-    s.push_str("…(truncated)");
-    s
+    truncate_bytes_with_suffix(&s, max_len, "…(truncated)")
 }
 
 fn limit_script_logs(

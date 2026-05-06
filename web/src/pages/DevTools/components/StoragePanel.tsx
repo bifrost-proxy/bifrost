@@ -1,11 +1,13 @@
-import { useMemo, useRef, type CSSProperties } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from "react";
 import { CheckOutlined, CloseOutlined, CopyOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button, Empty, Input, Space, Typography } from "antd";
 import type { DebugStorageSnapshot } from "../../../api/devtools";
-import { HighlightedText, filterBySearch } from "./shared";
+import { HighlightedText } from "./shared";
+import { filterBySearch } from "./sharedUtils";
 
 const { Text } = Typography;
+const STORAGE_ROW_HEIGHT = 37;
+const STORAGE_ROW_OVERSCAN = 8;
 
 export function StorageView({
   storage,
@@ -40,19 +42,38 @@ export function StorageView({
   onDelete: (area: string, key: string) => void;
   onSave: () => void;
 }) {
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const rowsViewportRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
   const activeRows = useMemo(() => (storage ? storageRowsForArea(storage, area) : []), [area, storage]);
   const filteredRows = useMemo(
     () => filterBySearch(activeRows, searchQuery, ([key, value]) => `${key} ${value}`),
     [activeRows, searchQuery],
   );
-  const rowVirtualizer = useVirtualizer({
-    count: filteredRows.length,
-    getScrollElement: () => scrollerRef.current,
-    estimateSize: () => 36,
-    overscan: 12,
-  });
-  const virtualRows = rowVirtualizer.getVirtualItems();
+  const virtualRange = useMemo(() => {
+    const startIndex = Math.max(0, Math.floor(scrollTop / STORAGE_ROW_HEIGHT) - STORAGE_ROW_OVERSCAN);
+    const visibleCount = Math.ceil((viewportHeight || 480) / STORAGE_ROW_HEIGHT) + STORAGE_ROW_OVERSCAN * 2;
+    const endIndex = Math.min(filteredRows.length, startIndex + visibleCount);
+    return { startIndex, endIndex };
+  }, [filteredRows.length, scrollTop, viewportHeight]);
+  const visibleRows = useMemo(
+    () => filteredRows.slice(virtualRange.startIndex, virtualRange.endIndex),
+    [filteredRows, virtualRange],
+  );
+  const handleRowsScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = rowsViewportRef.current;
+    if (!element) return;
+    const updateHeight = () => setViewportHeight(element.clientHeight);
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   if (!storage) return <Empty description="No storage snapshot yet" />;
   return (
     <div style={storageShellStyle}>
@@ -67,68 +88,64 @@ export function StorageView({
           Add
         </Button>
       </div>
-      <div ref={scrollerRef} style={storageTableStyle}>
+      <div style={storageTableStyle}>
         <div style={storageHeaderRowStyle}>
           <Text strong>Key</Text>
           <Text strong>Value</Text>
           <Text strong>Actions</Text>
         </div>
-        {editingKey === "" ? (
-          <StorageEditRow
-            key="new"
-            storageKey={storageKey}
-            storageValue={storageValue}
-            saving={saving}
-            onKeyChange={onKeyChange}
-            onValueChange={onValueChange}
-            onSave={onSave}
-            onCancel={onCancelEdit}
-            onCopy={onCopy}
-          />
-        ) : null}
-        {filteredRows.length ? (
-          <div style={{ ...storageVirtualSpaceStyle, height: rowVirtualizer.getTotalSize() }}>
-            {virtualRows.map((virtualRow) => {
-              const [key, value] = filteredRows[virtualRow.index];
-              return (
-                <div
-                  key={`${area}-${key}`}
-                  data-index={virtualRow.index}
-                  ref={rowVirtualizer.measureElement}
-                  style={{
-                    ...storageVirtualRowStyle,
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
-                  {editingKey === key ? (
-                    <StorageEditRow
-                      storageKey={storageKey}
-                      storageValue={storageValue}
-                      saving={saving}
-                      onKeyChange={onKeyChange}
-                      onValueChange={onValueChange}
-                      onSave={onSave}
-                      onCancel={onCancelEdit}
-                      onCopy={onCopy}
-                    />
-                  ) : (
-                    <div data-testid="devtools-storage-row" style={storageRowStyle}>
-                      <Text code ellipsis title={key}><HighlightedText text={key} query={searchQuery} /></Text>
-                      <Text ellipsis title={value}><HighlightedText text={value} query={searchQuery} /></Text>
-                      <Space size={4}>
-                        <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Delete ${key}`} onClick={() => onDelete(area, key)} />
-                        <Button size="small" type="text" icon={<CopyOutlined />} aria-label={`Copy ${key}`} onClick={() => onCopy(value)} />
-                        <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${key}`} onClick={() => onStartEdit(area, key, value)} />
-                      </Space>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ) : editingKey === "" ? null : (
-          <div style={storageEmptyStyle}><Empty description="Empty" /></div>
-        )}
+        <div style={{ ...storageBodyStyle, gridTemplateRows: editingKey === "" ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)" }}>
+          {editingKey === "" ? (
+            <StorageEditRow
+              key="new"
+              storageKey={storageKey}
+              storageValue={storageValue}
+              saving={saving}
+              onKeyChange={onKeyChange}
+              onValueChange={onValueChange}
+              onSave={onSave}
+              onCancel={onCancelEdit}
+              onCopy={onCopy}
+            />
+          ) : null}
+          {filteredRows.length ? (
+            <div ref={rowsViewportRef} style={storageRowsViewportStyle} onScroll={handleRowsScroll}>
+              <div style={{ ...storageRowsStyle, height: filteredRows.length * STORAGE_ROW_HEIGHT }}>
+                {visibleRows.map(([key, value], offset) => {
+                  const index = virtualRange.startIndex + offset;
+                  return (
+                    <div key={`${area}-${key}`} style={{ ...storageVirtualRowStyle, transform: `translateY(${index * STORAGE_ROW_HEIGHT}px)` }}>
+                      {editingKey === key ? (
+                        <StorageEditRow
+                          storageKey={storageKey}
+                          storageValue={storageValue}
+                          saving={saving}
+                          onKeyChange={onKeyChange}
+                          onValueChange={onValueChange}
+                          onSave={onSave}
+                          onCancel={onCancelEdit}
+                          onCopy={onCopy}
+                        />
+                      ) : (
+                        <div data-testid="devtools-storage-row" style={storageRowStyle}>
+                          <Text code ellipsis title={key}><HighlightedText text={key} query={searchQuery} /></Text>
+                          <Text ellipsis title={value}><HighlightedText text={value} query={searchQuery} /></Text>
+                          <Space size={4}>
+                            <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Delete ${key}`} onClick={() => onDelete(area, key)} />
+                            <Button size="small" type="text" icon={<CopyOutlined />} aria-label={`Copy ${key}`} onClick={() => onCopy(value)} />
+                            <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${key}`} onClick={() => onStartEdit(area, key, value)} />
+                          </Space>
+                        </div>
+                      )}
+                      </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : editingKey === "" ? null : (
+            <div style={storageEmptyStyle}><Empty description="Empty" /></div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -210,8 +227,10 @@ const storageToolbarStyle: CSSProperties = {
 };
 
 const storageTableStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateRows: "auto minmax(0, 1fr)",
   minHeight: 0,
-  overflow: "auto",
+  overflow: "hidden",
   position: "relative",
 };
 
@@ -237,17 +256,27 @@ const storageRowStyle: CSSProperties = {
   minHeight: 36,
 };
 
-const storageVirtualSpaceStyle: CSSProperties = {
-  position: "relative",
+const storageRowsStyle: CSSProperties = {
   minWidth: 620,
+  position: "relative",
+};
+
+const storageBodyStyle: CSSProperties = {
+  display: "grid",
+  minHeight: 0,
+};
+
+const storageRowsViewportStyle: CSSProperties = {
+  minHeight: 0,
+  overflow: "auto",
+  position: "relative",
 };
 
 const storageVirtualRowStyle: CSSProperties = {
   position: "absolute",
   top: 0,
   left: 0,
-  right: 0,
-  minWidth: 620,
+  width: "100%",
 };
 
 const storageEmptyStyle: CSSProperties = {

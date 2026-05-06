@@ -1,0 +1,20 @@
+begin_patch: "*** Begin Patch" LF hunk+ "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF move_to? first_change contextual_change*
+
+move_to: ("*** Move To: " | "*** Move to: ") filename LF
+
+first_change: change_context? change_line+ eof_line?
+contextual_change: change_context change_line+ eof_line?
+change_context: "@@" /[^\n]*/ LF
+change_line: ("+" | "-" | " ") /[^\n]*/ LF | LF
+eof_line: "*** End of File" LF
+
+filename: /[^\n]+/
+add_line: "+" /[^\n]*/ LF
+
+%import common.LF
