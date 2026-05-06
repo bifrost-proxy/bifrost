@@ -355,9 +355,18 @@ async fn handle_providers(
                 json_response(&safe)
             }
             Method::POST => {
-                let mut config: ImProviderConfig = match read_body_json(req).await {
+                let payload: serde_json::Value = match read_body_json(req).await {
                     Ok(v) => v,
                     Err(resp) => return resp,
+                };
+                let mut config = match parse_provider_create_payload(payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Invalid request body: {e}"),
+                        );
+                    }
                 };
                 let now = now_ms();
                 if config.created_at == 0 {
@@ -3920,10 +3929,8 @@ fn apply_agent_config_patch(
             if !headers.contains_key("api-key") {
                 headers.insert("api-key".to_string(), String::new());
             }
-        } else {
-            if let Some(ref mut headers) = provider.http_headers {
-                headers.remove("api-key");
-            }
+        } else if let Some(ref mut headers) = provider.http_headers {
+            headers.remove("api-key");
         }
     }
     if let Some(retries) = patch.get("request_max_retries").and_then(|v| v.as_u64()) {
@@ -4183,6 +4190,37 @@ fn sanitize_provider(provider: &ImProviderConfig) -> serde_json::Value {
         "created_at": provider.created_at,
         "updated_at": provider.updated_at,
     })
+}
+
+fn parse_provider_create_payload(
+    mut payload: serde_json::Value,
+) -> std::result::Result<ImProviderConfig, serde_json::Error> {
+    let fallback_display_name = payload
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| id.to_string());
+    let display_name_missing = payload
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .is_none_or(|name| name.trim().is_empty());
+    if display_name_missing {
+        if let Some(display_name) = fallback_display_name {
+            payload["display_name"] = serde_json::Value::String(display_name);
+        }
+    }
+    if let Some(secret) = payload.get("app_secret").and_then(|v| v.as_str()) {
+        if payload
+            .get("secret_ref")
+            .is_none_or(|existing| existing.is_null())
+        {
+            payload["secret_ref"] = serde_json::Value::String(secret.to_string());
+        }
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("app_secret");
+    }
+    serde_json::from_value(payload)
 }
 
 fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Value) {
@@ -4707,6 +4745,50 @@ mod tests {
         );
 
         assert!(provider.agent_config.is_none());
+    }
+
+    #[test]
+    fn provider_create_payload_maps_app_secret_without_exposing_it() {
+        let provider = parse_provider_create_payload(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "display_name": "Feishu Main",
+            "enabled": true,
+            "app_id": "cli_xxx",
+            "app_secret": "sk_test_secret",
+            "event_connection_enabled": true,
+            "event_types": []
+        }))
+        .expect("provider create payload should parse");
+
+        assert_eq!(provider.secret_ref.as_deref(), Some("sk_test_secret"));
+        assert_eq!(provider.display_name, "Feishu Main");
+
+        let safe = sanitize_provider(&provider);
+        assert_eq!(
+            safe.get("secret_configured").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(safe.get("secret_ref").is_none());
+        assert!(safe.get("app_secret").is_none());
+        assert!(!safe.to_string().contains("sk_test_secret"));
+    }
+
+    #[test]
+    fn provider_create_payload_defaults_missing_display_name_to_id() {
+        let provider = parse_provider_create_payload(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "enabled": true,
+            "app_id": "cli_xxx",
+            "app_secret": "sk_test_secret",
+            "event_connection_enabled": true,
+            "event_types": []
+        }))
+        .expect("provider create payload should default display_name");
+
+        assert_eq!(provider.display_name, "feishu-main");
+        assert_eq!(provider.secret_ref.as_deref(), Some("sk_test_secret"));
     }
 
     #[test]

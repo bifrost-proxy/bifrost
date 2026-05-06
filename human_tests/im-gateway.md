@@ -253,3 +253,102 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - URL 中的 `imGatewaySection` 能记录当前面板，页面刷新后恢复到同一面板。
   - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
 - **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings IM Gateway 左侧导航按 URL 切换独立面板"` 通过；验证默认仅渲染 Connections、无顶部 Connections 二级 Tab、点击 Routes/History/Targets 后只渲染对应面板、URL `imGatewaySection` 记录并刷新恢复、暗色主题下继续切换且 `aria-current` 正确。
+
+### TC-IMG-32: 创建 Provider 时 App Secret 正确保存且响应脱敏
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-provider-secret cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy
+    ```
+  - 使用 WebUI 等价请求体，不需要真实飞书 app_id/app_secret；本用例只验证创建链路是否正确保存 secret 配置状态与响应脱敏。
+- **操作步骤**:
+  1. 执行创建请求：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18886/_bifrost/api/im-gateway/providers \
+       -H 'Content-Type: application/json' \
+       -d '{"id":"feishu-secret-regression","provider_type":"feishu","display_name":"Feishu Secret Regression","enabled":true,"app_id":"cli_regression","app_secret":"regression_secret_value","event_connection_enabled":true,"event_types":[]}'
+     ```
+  2. 执行列表请求：
+     ```bash
+     curl -s http://127.0.0.1:18886/_bifrost/api/im-gateway/providers
+     ```
+  3. 执行删除清理：
+     ```bash
+     curl -s -X DELETE http://127.0.0.1:18886/_bifrost/api/im-gateway/providers/feishu-secret-regression
+     ```
+- **预期结果**:
+  - 创建请求返回 `{"success":true}`。
+  - 列表响应包含 `id=feishu-secret-regression` 和 `secret_configured=true`。
+  - 列表响应不包含 `regression_secret_value`、`app_secret` 或 `secret_ref` 明文。
+  - 删除请求返回 `{"success":true}`，再次列表不再包含该 provider。
+- **执行记录（2026-05-06）**: PASS — 使用 `BIFROST_DATA_DIR=./.bifrost-test-im-provider-secret cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy` 启动源码版 Bifrost；POST WebUI 等价 payload 返回 `{"success":true}`；列表响应包含 `secret_configured=true` 且不包含 `regression_secret_value`、`app_secret`、`secret_ref`；DELETE 后列表为空。
+
+### TC-IMG-33: WebUI 创建 Provider 可省略 Display Name、编辑可补填 App Secret 且重复 ID 显示真实错误
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-provider-webui cargo run --bin bifrost -- start -p 18887 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 浏览器打开 `http://127.0.0.1:18887/_bifrost/settings?tab=im-gateway`。
+- **操作步骤**:
+  1. 先通过 API 创建一个缺少 App Secret 且省略 Display Name 的 Provider：
+     ```bash
+     curl -s -X POST http://127.0.0.1:18887/_bifrost/api/im-gateway/providers \
+       -H 'Content-Type: application/json' \
+       -d '{"id":"feishu-edit-secret-regression","provider_type":"feishu","enabled":true,"app_id":"cli_regression","event_connection_enabled":true,"event_types":[]}'
+     ```
+  2. 在 WebUI 的 IM Gateway / Connections 中确认该 Provider 使用 Provider ID 作为展示名，并显示 `Secret: Not Set`。
+  3. 点击该 Provider 的 Edit 按钮，在 `App Secret` 输入框中填入 `regression_secret_value`，点击 Save。
+  4. 执行列表请求：
+     ```bash
+     curl -s http://127.0.0.1:18887/_bifrost/api/im-gateway/providers
+     ```
+  5. 再次点击 `Add Provider`，输入相同 Provider ID `feishu-edit-secret-regression`、App ID 与 App Secret，点击 Create。
+  6. 执行删除清理：
+     ```bash
+     curl -s -X DELETE http://127.0.0.1:18887/_bifrost/api/im-gateway/providers/feishu-edit-secret-regression
+     ```
+- **预期结果**:
+  - 第 1 步创建请求返回 `{"success":true}`，即 Display Name 可按页面承诺省略。
+  - 第 2 步页面显示 Provider ID `feishu-edit-secret-regression` 与 `Secret: Not Set`。
+  - 第 3 步保存成功，页面显示 `Provider updated`。
+  - 第 4 步列表响应包含 `secret_configured=true`，且不包含 `regression_secret_value`、`app_secret` 或 `secret_ref` 明文。
+  - 第 5 步页面 toast 显示后端真实错误 `provider with id 'feishu-edit-secret-regression' already exists`，而不是通用的 `Failed to save provider`。
+  - 删除请求返回 `{"success":true}`，再次列表不再包含该 provider。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18887` 源码服务与 Playwright WebUI 流程执行；先创建缺少 secret 且省略 Display Name 的 Provider，页面使用 Provider ID 展示并显示 `Not Set`；Edit 弹窗补填 App Secret 后 toast 显示 `Provider updated`，API 列表返回 `secret_configured=true` 且无 secret 明文；再次 Add 同名 Provider 时 toast 显示后端重复 ID 错误；最后删除清理成功。
+
+### TC-IMG-34: WebUI 创建 Provider 后无需重启即可连接并通知 owner
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-provider-autoconnect cargo run --bin bifrost -- start -p 18888 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 浏览器打开 `http://127.0.0.1:18888/_bifrost/settings?tab=im-gateway`。
+  - 准备真实可用的飞书应用 App ID 和 App Secret。
+- **操作步骤**:
+  1. 在 WebUI 点击 `Add Provider`。
+  2. 输入唯一 Provider ID，例如 `feishu-autoconnect-regression`。
+  3. 保持 `Enabled` 开启，填写真实 App ID 与 App Secret，不填写 Display Name。
+  4. 点击 `Create`。
+  5. 不重启 Bifrost，直接查询状态：
+     ```bash
+     curl -s http://127.0.0.1:18888/_bifrost/api/im-gateway/providers/feishu-autoconnect-regression/status
+     ```
+  6. 查询该 Provider 的消息记录：
+     ```bash
+     curl -s http://127.0.0.1:18888/_bifrost/api/im-gateway/providers/feishu-autoconnect-regression/messages
+     ```
+  7. 执行删除清理：
+     ```bash
+     curl -s -X DELETE http://127.0.0.1:18888/_bifrost/api/im-gateway/providers/feishu-autoconnect-regression
+     ```
+- **预期结果**:
+  - WebUI 显示 `Provider created and connected`。
+  - 第 5 步状态响应包含 `state=connected`。
+  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了`。
+  - 全流程不需要重启 Bifrost。
+  - Provider 列表与消息响应不包含 App Secret 明文。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。

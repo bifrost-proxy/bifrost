@@ -142,7 +142,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 31 | Settings Tab、左侧二级导航、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
+| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 34 | Settings Tab、左侧二级导航、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、创建 Provider 时 app_secret 正确保存且响应脱敏、Display Name 可省略、创建后立即连接并通知 owner、编辑 Provider 补填 App Secret、重复 Provider ID 错误展示、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、CLI messages 命令（list/clear/direction/source 筛选） |
 | [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 94 | Agent 配置 API（获取/更新/禁用启用）、Codex-style 三层指令配置（base/developer/user，含默认 base prompt 展示、chat 接口 prompt 分层、日志与 Session JSONL 记录验证、WebUI 长文本大窗口编辑，以及 Provider 新建/修改覆盖）、统一 Sessions 列表（active+history 合并）、子页面详情（Session Info/AGENTS.md/Skills/Messages）、URL 导航、History 事件时间线、飞书消息触发 Agent 对话、多轮对话上下文保持、/clear 会话重置、Agent 禁用不响应、消息日志记录、MCP 配置加载、MCP 端到端文档搜索、/status MCP 工具数报告、Skills 渐进式加载、AGENTS.md 自动加载、MCP 与本地工具路由正确性、WebUI Agent Tab 渲染、Agent 设置页左侧卡片导航与 URL 恢复、配置 PATCH 即时生效、持久化重启保留、MCP Servers 卡片操作、数据目录统一兼容加载、暗色主题兼容、Provider 合并逻辑 null 字段回退、Provider 级 Agent 基础配置（创建时配置 work_dir/instructions、动态 PATCH 修改、WebUI Add/Edit 配置入口、新建 Provider 的 agent_config 经 IM event loop 进入模型请求、switch_workdir 回写 Provider work_dir、/clear 后重开按最新 Provider 配置初始化）、模型配置完整性 DefaultModelConfig 对齐、Provider 列表 API、WebUI Provider 下拉选择与切换、Provider 搜索功能、暗色主题下拉兼容性、动态工作目录（创建带 work_dir session、不带 work_dir session、sessions 列表返回 work_dir、switch_workdir 工具有效/无效路径、WebUI Work Dir 列展示、Session 详情 Working Directory）、错误处理与容错（API 错误优雅降级返回 partial 结果、Turn 级别自动重试、Transient 错误指数退避重试、正常对话不受影响）、飞书卡片折叠面板（工具调用记录默认折叠 collapsible_panel、无工具调用不显示折叠面板）、Session Title 落库（set_title 工具持久化 JSONL title_updated 事件、sessions/all API 返回 title、飞书卡片 header 使用 title、WebUI Title 列展示）、Goal 模式（create_goal 工具触发、get_goal 状态查询与 budget 超限自动转换、update_goal 标记完成与 completionBudgetReport、/goal 命令查看状态、/goal pause 暂停、/goal resume 恢复、Session 隔离验证、工具调用与 token accounting）、图片多模态理解（/agent/chat 文本+图片 content parts、模型请求 image_url data URL、飞书 post 图片+文字接收态解析、图片-only 不被空文本短路、单条消息图片上限 6 张截断、Session 详情图片预览与点击放大）、边界测试与回归（空状态 No sessions 展示、Session Key 特殊字符 dedup、URL 不存在/无效 view 边界、Cancel Popconfirm、排序过滤组合、405 Method Not Allowed、幂等删除、亮色主题完整验证、Clear All Active、History 直接 URL 导航、CI E2E 启动器服务注入回归、Agent Loop tool message 序列回归，含多 pending tool_call 恢复、max_history 裁剪和 trim 裁剪防 orphan tool、长期记忆后台模型调用后恢复 turn 仍执行 tool call、API Key 写入保持 Azure header 认证、Agent 模型请求默认经当前 Bifrost 端口代理并进入 Traffic） |
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 13 | SessionQueueManager 单元测试（13项，含 turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
@@ -165,7 +165,7 @@
 
 ---
 
-**总计：87 个测试文件，1549 个测试用例**
+**总计：87 个测试文件，1552 个测试用例**
 
 ## 工作流程
 

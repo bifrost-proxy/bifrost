@@ -1758,3 +1758,115 @@ bash scripts/ci/local-ci.sh --e2e-only shell
 3. History 是否需要提供短期 raw payload debug 模式？当前建议默认关闭。
 4. 第一阶段是否只支持飞书中国区 `open.feishu.cn`，还是同时抽象 Lark 国际区 base URL？
 5. 如果官方后续提供稳定 Rust SDK，是否替换当前轻量 WebSocket 实现路径？
+
+## 2026-05-06 Provider 创建 Secret 映射回归修复
+
+### 问题
+
+WebUI `Add IM Provider` 和 CLI `bifrost im provider add ... --secret ...` 都向后端提交 `app_secret` 字段；但 `POST /api/im-gateway/providers` 原实现直接把请求体反序列化为 `ImProviderConfig`，该结构体只包含内部字段 `secret_ref`。Serde 默认忽略未知字段，导致创建请求虽然返回成功，但落盘 provider 的 `secret_ref` 为空，列表显示 `secret_configured=false`，后续长连接或发送消息会在缺少 secret 时失败。
+
+### 实现逻辑
+
+- 在 provider create 入口先读取 JSON value。
+- 保存前把 `app_secret` 映射到内部 `secret_ref`；如果调用方显式传入 `secret_ref`，保留显式值。
+- 映射后移除 `app_secret` 再反序列化，避免该字段进入后续处理。
+- API 响应继续走 `sanitize_provider`，只返回 `secret_configured`，不返回 `secret_ref` 或 `app_secret` 明文。
+- PATCH 路径已有 `app_secret -> secret_ref` 逻辑，本次保持不变。
+
+### 测试方案
+
+- 单元测试：`provider_create_payload_maps_app_secret_without_exposing_it` 验证 create payload 中的 `app_secret` 会写入 `secret_ref`，且 sanitized response 不包含 secret 明文。
+- E2E 测试：使用临时数据目录和非 9900 端口启动 Bifrost，通过 `POST /_bifrost/api/im-gateway/providers` 发送 WebUI 等价 payload，断言列表中 `secret_configured=true` 且响应不含 secret 明文，然后删除 provider。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-32`，覆盖 WebUI 等价创建请求的回归路径。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin provider_create_payload_maps_app_secret_without_exposing_it
+cargo test -p bifrost-admin im_gateway -- --nocapture
+BIFROST_DATA_DIR=./.bifrost-test-im-provider-secret cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy
+curl -s -X POST http://127.0.0.1:18886/_bifrost/api/im-gateway/providers ...
+curl -s http://127.0.0.1:18886/_bifrost/api/im-gateway/providers ...
+cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-06 WebUI 创建后立即连接并通知 Owner
+
+### 问题
+
+WebUI `Add Provider` 原来只保存 Provider 配置，不会启动事件长连接。用户配置 AK/SK 后，如果不手动调用 connect API，Provider 会一直保持 disconnected；只有重启 Bifrost 时 `auto_connect_providers` 扫描已有配置并自动连接，才会触发 owner 在线通知。这导致用户看到“配置后没有通知，必须重启服务”的行为。
+
+### 实现逻辑
+
+- WebUI 新增 `connectProvider` / `disconnectProvider` API 封装。
+- 新建 Provider 成功后，如果 `enabled=true`、`event_connection_enabled=true` 且填写了 App Secret，立即调用 `/providers/:id/connect`。
+- 创建并连接成功时提示 `Provider created and connected`，不再要求重启服务。
+- Provider 卡片新增 Connect / Disconnect 操作按钮，允许用户在 WebUI 中显式恢复或断开长连接。
+- 后端 connect 路径保持负责 owner 自动检测、连接启动、在线通知发送与 message log 记录。
+
+### 测试方案
+
+- WebUI E2E：`tests/ui/im-gateway-provider.spec.ts` 验证创建启用的 Provider 后会立即调用 `/connect`。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-34`，使用真实飞书 AK/SK 创建 Provider，断言无需重启即可进入 `connected` 状态，并产生 `trigger=online`、`status=success` 的 owner 通知 message log。
+
+### 校验要求
+
+```bash
+pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts
+BIFROST_DATA_DIR=./.bifrost-test-im-provider-autoconnect cargo run --bin bifrost -- start -p 18888 --unsafe-ssl --no-system-proxy --skip-cert-check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-06 Provider 编辑 Secret 与错误提示回归修复
+
+### 问题
+
+旧版本 WebUI 创建 Provider 时可能已经落盘一个 `secret_configured=false` 的同名 Provider。后续用户再次点击 `Add Provider` 并输入相同 Provider ID 时，后端会正确返回 `provider with id '...' already exists`，但前端只显示通用的 `Failed to save provider`；同时 `Edit IM Provider` 弹窗隐藏 App Secret 字段，导致用户无法在 WebUI 中补填 secret，只能删除后重建。另一个真实 WebUI 问题是 `Display Name` 在页面上标为可选，但后端 create 反序列化要求 `display_name` 必填；用户不填 Display Name 时会报 `Invalid request body: missing field display_name`。
+
+### 实现逻辑
+
+- `Edit IM Provider` 弹窗保留 App ID 输入，并新增 App Secret 输入。
+- 编辑时 App Secret 留空表示保留已有 secret；填写新值时通过 PATCH 的 `app_secret` 字段更新后端 `secret_ref`。
+- 创建 Provider 时如果 `display_name` 缺失或为空，后端用 Provider ID 作为默认展示名。
+- 保存失败时使用 API error normalizer 展示后端真实错误，帮助用户区分重复 ID、非法请求体和网络错误。
+- 保持列表与详情响应脱敏，只显示 `secret_configured`，不回传 secret 明文。
+
+### 测试方案
+
+- 单元测试：`provider_create_payload_defaults_missing_display_name_to_id` 验证 Display Name 缺省时默认使用 Provider ID。
+- WebUI E2E：先通过 API 创建一个缺少 secret 且缺省 display_name 的 Provider，再在 Settings / IM Gateway 页面点击 Edit 补填 App Secret，断言列表 API 中 `secret_configured=true`。
+- WebUI E2E：对同一 Provider ID 再次执行 Add Provider，断言页面 toast 展示后端重复 ID 错误，而不是通用错误。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-33`，覆盖 WebUI 编辑补填 secret 和重复 ID 错误展示。
+
+### 校验要求
+
+```bash
+pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts
+cargo test -p bifrost-admin provider_create_payload_maps_app_secret_without_exposing_it
+cargo test -p bifrost-admin im_gateway -- --nocapture
+cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`

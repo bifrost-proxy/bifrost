@@ -176,7 +176,7 @@ export async function getProvider(id: string): Promise<ImProviderConfig> {
 
 export async function updateProvider(
   id: string,
-  data: Partial<ImProviderConfig>,
+  data: Partial<ImProviderConfig> & { app_secret?: string },
 ): Promise<ImProviderConfig> {
   return patch(`${BASE}/providers/${id}`, data);
 }
@@ -189,6 +189,18 @@ export async function getProviderStatus(
   id: string,
 ): Promise<ConnectionStatus> {
   return get(`${BASE}/providers/${id}/status`);
+}
+
+export async function connectProvider(
+  id: string,
+): Promise<{ success: boolean; message?: string }> {
+  return post(`${BASE}/providers/${id}/connect`);
+}
+
+export async function disconnectProvider(
+  id: string,
+): Promise<{ success: boolean; message?: string }> {
+  return post(`${BASE}/providers/${id}/disconnect`);
 }
 
 export async function getProviderPolicy(
