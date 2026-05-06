@@ -14,7 +14,7 @@ bifrost [OPTIONS] [COMMAND]
 | `-H, --host <HOST>` | 监听地址 | `0.0.0.0` |
 | `--socks5-port <PORT>` | SOCKS5 端口 | 无 |
 | `-l, --log-level <LEVEL>` | 日志级别 | `info` |
-| `--log-output <TARGETS>` | 日志输出目标：`console` / `file` / `console,file` | `console,file` |
+| `--log-output <TARGETS>` | 日志输出目标：`console` / `file` / `console,file` | `console` |
 | `--log-dir <DIR>` | 日志目录（默认：`<data_dir>/logs`） | 无 |
 | `--log-retention-days <DAYS>` | 日志保留天数 | `7` |
 | `-h, --help` | 显示帮助 | - |
@@ -27,6 +27,7 @@ bifrost [OPTIONS] [COMMAND]
 ```bash
 bifrost start
 bifrost start --daemon
+bifrost restart
 bifrost -p 9000 start
 bifrost -p 9900 --socks5-port 1080 start
 bifrost start --skip-cert-check
@@ -86,7 +87,12 @@ bifrost start --enable-badge-injection
 bifrost status
 bifrost status --tui
 bifrost stop
+bifrost restart
+bifrost restart --port 9900 --host 127.0.0.1 --log-level debug
+bifrost restart --force
 ```
+
+`restart` 会停止当前代理并启动一个新的后台 daemon，常用于 `bifrost upgrade` 后让运行中的服务切到新二进制。该命令会把新进程与当前终端管道解耦，因此也适合通过 `bifrost remote exec` 远程触发。
 
 ### 流量查看与搜索
 
@@ -262,6 +268,8 @@ bifrost script rename request demo demo-v2
 bifrost script delete request demo
 ```
 
+当前脚本运行时和管理端 API 支持 `request` / `response` / `decode` / `parser` 四类脚本；其中 `parser` 用于 `bp://... decode://bp` 的二进制协议解析。CLI 的 `script list -t`、`add`、`update`、`delete`、`rename` 参数校验仍只暴露 `request` / `response` / `decode`，不适合用来新建 parser 脚本；parser 脚本请通过 WebUI Scripts 页面、Admin API `/_bifrost/api/scripts/parser/<name>`，或直接按数据目录结构写入 `scripts/parser/<name>.js`。不带 `-t` 的 `script list` 与 `script show/run <name>` 会扫描 parser 脚本。
+
 ### 系统代理管理
 
 ```bash
@@ -288,6 +296,8 @@ bifrost config disconnect example.com
 bifrost config disconnect-by-app Chrome
 bifrost config export -o ./config.toml --format toml
 bifrost config export --format json
+bifrost config performance
+bifrost config websocket
 bifrost config set traffic.max-db-size 2GB
 bifrost config set traffic.max-body-size 1MB
 bifrost config set traffic.max-buffer-size 20MB
@@ -354,6 +364,70 @@ bifrost sync logout
 bifrost sync run
 bifrost sync config --enabled true --auto-sync true --remote-url https://example.com
 ```
+
+### 本机 remote-invoke 设置（setting）
+
+`setting` 总是管理当前机器的数据目录，不会直接操作远端设备。若要配置远端机器，需要通过 `bifrost remote exec -- bifrost setting ...` 在远端执行。
+
+```bash
+bifrost setting shell list
+bifrost setting shell show --json
+bifrost setting shell profile add --id default --name Default --cwd "$HOME" --env PATH --env HOME --timeout-ms 30000
+bifrost setting shell policy add --id allow-bifrost-cli --name "Allow Bifrost CLI" --mode shell_text --pattern '^bifrost\\s+' --shell /bin/zsh --profile default
+bifrost setting shell policy enable allow-bifrost-cli
+
+bifrost setting grant list
+bifrost setting grant list --json
+bifrost setting grant update --grant-id <grant-id> --scope shell --file-access read
+bifrost setting grant revoke --grant-id <grant-id>
+```
+
+### 远程调用（remote）
+
+`remote` 通过 relay 对另一台已授权的 Bifrost 实例执行操作。全局参数 `--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值；`--client-id` 用于在多个已保存连接中选择目标前缀。
+
+```bash
+bifrost remote conn up <pair-code>
+bifrost remote conn up --ssh-key ./bifrost-device.key --label "dev-mac"
+bifrost remote conn status
+bifrost remote conn down
+bifrost remote conn down --grant-id <grant-id>
+bifrost remote conn down --all
+
+bifrost remote exec --shell-text "pwd && ls"
+bifrost remote exec -- /bin/zsh -lc 'bifrost status'
+
+bifrost remote file read README.md --cwd /path/to/repo
+bifrost remote file list src --depth 2 --cwd /path/to/repo
+bifrost remote file find "TODO" --path src --cwd /path/to/repo
+bifrost remote file write notes.txt --content "hello" --cwd /tmp
+bifrost remote file patch --patch-file ./change.diff --cwd /path/to/repo
+
+bifrost remote traffic list --limit 20
+bifrost remote traffic get <id> --request-body --response-body
+bifrost remote traffic search "keyword" --req-body
+
+bifrost remote keep-awake status
+bifrost remote keep-awake on
+bifrost remote keep-awake off
+bifrost remote keep-awake mode set force_on
+bifrost remote keep-awake mode get
+```
+
+远程文件操作受远端 grant 的 file access policy 约束；`remote exec` 是最高权限路径，能运行任意 shell 命令，实际允许范围由远端 Shell Access policy 决定。
+
+### macOS 防睡眠（keep-awake）
+
+```bash
+bifrost keep-awake status
+bifrost keep-awake on
+bifrost keep-awake off
+bifrost keep-awake mode set force_on
+bifrost keep-awake mode set auto
+bifrost keep-awake mode get
+```
+
+该命令通过本机 Admin API 管理 macOS IOKit power assertion；非 macOS 平台会返回不支持。
 
 ### IM Gateway（im）
 

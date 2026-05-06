@@ -42,7 +42,7 @@ www.example.com resHeaders://(X-Method:PUT) includeFilter://m:PUT
 
 ### 状态码过滤
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行响应内容建议使用块变量。
 
 ```bash
 # 只对 500 响应生效
@@ -52,7 +52,7 @@ www.example.com replaceStatus://200 includeFilter://s:500
 www.example.com resBody://{not-found} includeFilter://s:404
 
 # 对 4xx 响应生效
-www.example.com resHeaders://(X-Error:true) includeFilter://s:4
+www.example.com resHeaders://(X-Error: true) includeFilter://s:4
 ```
 
 块变量定义：
@@ -73,7 +73,7 @@ www.example.com host://debug.local includeFilter://h:X-Debug
 www.example.com host://admin.local includeFilter://h:X-Role=admin
 
 # 匹配 Content-Type
-www.example.com resHeaders://{X-Json: true} includeFilter://h:content-type=application/json
+www.example.com resHeaders://(X-Json: true) includeFilter://h:content-type=application/json
 ```
 
 ### 响应头过滤
@@ -89,7 +89,7 @@ www.example.com resBody://(cached) includeFilter://H:X-Cache=HIT
 
 ```bash
 # 匹配特定路径
-www.example.com resHeaders://{X-Api: true} includeFilter://p:/api/
+www.example.com resHeaders://(X-Api: true) includeFilter://p:/api/
 
 # 匹配路径模式
 www.example.com resDelay://1000 includeFilter://p:/slow/
@@ -109,8 +109,8 @@ www.example.com host://special.local includeFilter://m:POST includeFilter://h:X-
 
 | 测试场景   | 规则                                                   | 请求     | 预期         |
 | ---------- | ------------------------------------------------------ | -------- | ------------ |
-| POST 方法  | `test.com resHeaders://{X:1} includeFilter://m:POST`   | POST     | 应用规则     |
-| POST 方法  | `test.com resHeaders://{X:1} includeFilter://m:POST`   | GET      | 不应用       |
+| POST 方法  | `test.com resHeaders://(X: 1) includeFilter://m:POST`  | POST     | 应用规则     |
+| POST 方法  | `test.com resHeaders://(X: 1) includeFilter://m:POST`  | GET      | 不应用       |
 | 状态码 500 | `test.com replaceStatus://200 includeFilter://s:500`   | 返回 500 | 状态码变 200 |
 | 状态码 500 | `test.com replaceStatus://200 includeFilter://s:500`   | 返回 200 | 不变         |
 | 头部匹配   | `test.com host://debug includeFilter://h:X-Debug=true` | 有头部   | 应用规则     |
@@ -138,10 +138,10 @@ pattern rules... excludeFilter://condition
 www.example.com resDelay://1000 excludeFilter://m:GET
 
 # 排除静态资源
-www.example.com resHeaders://(X-Dynamic:true) excludeFilter://p:.js excludeFilter://p:.css
+www.example.com resHeaders://(X-Dynamic: true) excludeFilter://p:.js excludeFilter://p:.css
 
 # 排除成功响应
-www.example.com resHeaders://(X-Error:true) excludeFilter://s:200
+www.example.com resHeaders://(X-Error: true) excludeFilter://s:200
 
 # 排除特定头部
 www.example.com host://default.local excludeFilter://h:X-Special
@@ -151,8 +151,8 @@ www.example.com host://default.local excludeFilter://h:X-Special
 
 | 测试场景 | 规则                                                | 请求 | 预期     |
 | -------- | --------------------------------------------------- | ---- | -------- |
-| 排除 GET | `test.com resHeaders://{X:1} excludeFilter://m:GET` | GET  | 不应用   |
-| 排除 GET | `test.com resHeaders://{X:1} excludeFilter://m:GET` | POST | 应用规则 |
+| 排除 GET | `test.com resHeaders://(X: 1) excludeFilter://m:GET` | GET  | 不应用   |
+| 排除 GET | `test.com resHeaders://(X: 1) excludeFilter://m:GET` | POST | 应用规则 |
 
 ---
 
@@ -291,7 +291,7 @@ www.example.com/api skip://operation=resHeaders://X-Debug:first
 www.example.com host://backend.local includeFilter://m:POST excludeFilter://p:/health
 
 # 过滤器 + 修改规则
-www.example.com resHeaders://{X-Debug: true} includeFilter://h:X-Debug
+www.example.com resHeaders://(X-Debug: true) includeFilter://h:X-Debug
 
 # 删除 + 过滤器
 www.example.com delete://reqHeaders.X-Internal includeFilter://m:GET

@@ -12,14 +12,14 @@
 
 ```
 pattern resHeaders://key=value              # 内联格式（单个头）
-pattern resHeaders://(key1:value1)          # 小括号格式（无空格）
+pattern resHeaders://(key1: value1)         # 小括号格式（可包含空格）
 pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
 
 ### 基础示例
 
@@ -27,8 +27,8 @@ pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 # 内联格式设置单个头
 www.example.com resHeaders://X-Custom-Header=custom-value
 
-# 小括号格式（无空格）
-www.example.com resHeaders://(X-Version:1.0)
+# 小括号格式
+www.example.com resHeaders://(X-Version: 1.0)
 
 # 引用内嵌值（推荐，支持空格和多个头）
 www.example.com resHeaders://{my-res-headers}
@@ -46,8 +46,8 @@ X-Server: bifrost
 ### 常用场景
 
 ```bash
-# 添加安全头部（无空格）
-www.example.com resHeaders://(X-Frame-Options:DENY)
+# 添加安全头部
+www.example.com resHeaders://(X-Frame-Options: DENY)
 
 # 设置缓存控制（使用内嵌值处理逗号和空格）
 www.example.com resHeaders://{cache-headers}
@@ -61,7 +61,7 @@ www.example.com resHeaders://X-Debug-Info=proxy-enabled
 | 测试场景     | 规则                                            | 预期                       |
 | ------------ | ----------------------------------------------- | -------------------------- |
 | 内联格式     | `test.com resHeaders://X-Custom=value`          | 响应包含 `X-Custom: value` |
-| 小括号格式   | `test.com resHeaders://(X-A:1)`                 | 响应包含 X-A 头部          |
+| 小括号格式   | `test.com resHeaders://(X-A: 1)`                | 响应包含 X-A 头部          |
 | 覆盖已有头部 | `test.com resHeaders://Content-Type=text/plain` | Content-Type 被覆盖        |
 
 ---
@@ -74,11 +74,11 @@ www.example.com resHeaders://X-Debug-Info=proxy-enabled
 
 ```
 pattern resCookies://name=value              # 内联格式
-pattern resCookies://(name:value)            # 小括号格式（无空格）
+pattern resCookies://(name: value)           # 小括号格式（可包含空格）
 pattern resCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
 
 ### 基础示例
 
@@ -86,8 +86,8 @@ pattern resCookies://{varName}               # 引用内嵌值（推荐）
 # 内联格式
 www.example.com resCookies://session=abc123
 
-# 小括号格式（无空格）
-www.example.com resCookies://(token:xyz789)
+# 小括号格式
+www.example.com resCookies://(token: xyz789)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com resCookies://{my-cookies}
@@ -113,7 +113,7 @@ auth: token123; path=/; httpOnly; secure
 | 测试场景   | 规则                                | 预期                        |
 | ---------- | ----------------------------------- | --------------------------- |
 | 内联格式   | `test.com resCookies://session=abc` | Set-Cookie 包含 session=abc |
-| 小括号格式 | `test.com resCookies://(a:1)`       | 响应包含 Set-Cookie         |
+| 小括号格式 | `test.com resCookies://(a: 1)`      | 响应包含 Set-Cookie         |
 
 ---
 
