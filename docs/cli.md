@@ -355,6 +355,22 @@ bifrost sync run
 bifrost sync config --enabled true --auto-sync true --remote-url https://example.com
 ```
 
+### IM Gateway（im）
+
+```bash
+bifrost im
+bifrost im provider list
+bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --enabled true
+bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
+bifrost im send --text "hello owner"
+bifrost im send --target oncall --text "hello group"
+bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
+bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
+bifrost im messages list --direction inbound
+```
+
+需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
+
 ### 导入/导出（import / export）
 
 ```bash

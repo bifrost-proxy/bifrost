@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use colored::Colorize;
@@ -141,6 +142,18 @@ fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     body["display_name"] = json!(v);
+                }
+            }
+            "--enabled" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["enabled"] = json!(v.parse::<bool>().unwrap_or(true));
+                }
+            }
+            "--owner-open-id" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["owner_open_id"] = json!(v);
                 }
             }
             "--enable-long-connection" => {
@@ -286,7 +299,8 @@ fn handle_im_target(host: &str, port: u16, args: &[String]) -> Result<()> {
             let name = args.get(1).ok_or_else(|| {
                 bifrost_core::BifrostError::Config("target name required".to_string())
             })?;
-            let body = parse_target_add_args(name, &args[2..])?;
+            let mut body = parse_target_add_args(name, &args[2..])?;
+            ensure_provider_in_body(host, port, &mut body)?;
             let url = api_url(host, port, "/targets");
             let resp = http_post(&url, &body)?;
             println!(
@@ -450,45 +464,84 @@ fn print_target_list(resp: &Value) {
 // ─── Send ────────────────────────────────────────────────────────────────────
 
 fn handle_im_send(host: &str, port: u16, args: &[String]) -> Result<()> {
-    let mut target: Option<String> = None;
-    let mut card_file: Option<String> = None;
-    let mut card_json: Option<String> = None;
-    let mut text: Option<String> = None;
+    let send_args = parse_send_args(args)?;
+    let provider_id = match send_args.provider.clone() {
+        Some(provider) => provider,
+        None => select_provider_interactively(host, port)?,
+    };
+
+    let body = build_send_body(&provider_id, &send_args)?;
+
+    let url = api_url(host, port, "/messages/send");
+    let resp = http_post(&url, &body)?;
+
+    let message_id = resp["message_id"].as_str().unwrap_or("unknown");
+    println!(
+        "{} Message sent via provider '{}' to {} (message_id: {})",
+        "✓".bright_green(),
+        provider_id,
+        send_args
+            .target
+            .as_deref()
+            .unwrap_or("__owner__")
+            .bright_white(),
+        message_id.dimmed()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ImSendArgs {
+    provider: Option<String>,
+    target: Option<String>,
+    card_file: Option<String>,
+    card_json: Option<String>,
+    text: Option<String>,
+}
+
+fn parse_send_args(args: &[String]) -> Result<ImSendArgs> {
+    let mut parsed = ImSendArgs::default();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--provider" => {
+                i += 1;
+                parsed.provider = args.get(i).cloned();
+            }
             "--target" => {
                 i += 1;
-                target = args.get(i).cloned();
+                parsed.target = args.get(i).cloned();
             }
             "--card-file" => {
                 i += 1;
-                card_file = args.get(i).cloned();
+                parsed.card_file = args.get(i).cloned();
             }
             "--card-json" => {
                 i += 1;
-                card_json = args.get(i).cloned();
+                parsed.card_json = args.get(i).cloned();
             }
             "--text" => {
                 i += 1;
-                text = args.get(i).cloned();
+                parsed.text = args.get(i).cloned();
             }
             _ => {}
         }
         i += 1;
     }
 
-    let target_id = target.ok_or_else(|| {
-        bifrost_core::BifrostError::Config("--target is required for im send".to_string())
-    })?;
+    Ok(parsed)
+}
 
+fn build_send_body(provider_id: &str, args: &ImSendArgs) -> Result<Value> {
+    let target_id = args.target.as_deref().unwrap_or("__owner__");
     let mut body = json!({
+        "provider_id": provider_id,
         "target_id": target_id,
     });
 
-    if let Some(file_path) = card_file {
-        let content = fs::read_to_string(Path::new(&file_path)).map_err(|e| {
+    if let Some(file_path) = &args.card_file {
+        let content = fs::read_to_string(Path::new(file_path)).map_err(|e| {
             bifrost_core::BifrostError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to read card file '{}': {}", file_path, e),
@@ -496,15 +549,15 @@ fn handle_im_send(host: &str, port: u16, args: &[String]) -> Result<()> {
         })?;
         let card: Value = serde_json::from_str(&content)
             .map_err(|e| bifrost_core::BifrostError::Parse(format!("invalid card JSON: {}", e)))?;
-        body["card"] = card;
+        body["content"] = card;
         body["msg_type"] = json!("interactive");
-    } else if let Some(json_str) = card_json {
-        let card: Value = serde_json::from_str(&json_str)
+    } else if let Some(json_str) = &args.card_json {
+        let card: Value = serde_json::from_str(json_str)
             .map_err(|e| bifrost_core::BifrostError::Parse(format!("invalid card JSON: {}", e)))?;
-        body["card"] = card;
+        body["content"] = card;
         body["msg_type"] = json!("interactive");
-    } else if let Some(text_content) = text {
-        body["text"] = json!(text_content);
+    } else if let Some(text_content) = &args.text {
+        body["content"] = json!(text_content);
         body["msg_type"] = json!("text");
     } else {
         return Err(bifrost_core::BifrostError::Config(
@@ -512,16 +565,100 @@ fn handle_im_send(host: &str, port: u16, args: &[String]) -> Result<()> {
         ));
     }
 
-    let url = api_url(host, port, "/messages/send");
-    let resp = http_post(&url, &body)?;
+    Ok(body)
+}
 
-    let message_id = resp["message_id"].as_str().unwrap_or("unknown");
-    println!(
-        "{} Message sent (message_id: {})",
-        "✓".bright_green(),
-        message_id.dimmed()
-    );
+fn select_provider_interactively(host: &str, port: u16) -> Result<String> {
+    let url = api_url(host, port, "/providers");
+    let resp = http_get(&url)?;
+    let providers = enabled_provider_choices(&resp);
+
+    if providers.is_empty() {
+        return Err(bifrost_core::BifrostError::Config(
+            "no enabled IM providers found; create one with `bifrost im provider add`".to_string(),
+        ));
+    }
+
+    if providers.len() == 1 {
+        return Ok(providers[0].0.clone());
+    }
+
+    if !io::stdin().is_terminal() {
+        return Err(bifrost_core::BifrostError::Config(
+            "--provider is required when stdin is not interactive".to_string(),
+        ));
+    }
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    choose_provider_from_reader(&providers, stdin.lock(), stdout.lock())
+}
+
+fn ensure_provider_in_body(host: &str, port: u16, body: &mut Value) -> Result<()> {
+    if body
+        .get("provider_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+
+    let provider_id = select_provider_interactively(host, port)?;
+    ensure_provider_value(body, &provider_id);
     Ok(())
+}
+
+fn ensure_provider_value(body: &mut Value, provider_id: &str) {
+    if body
+        .get("provider_id")
+        .and_then(|value| value.as_str())
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        body["provider_id"] = json!(provider_id);
+    }
+}
+
+fn enabled_provider_choices(resp: &Value) -> Vec<(String, String)> {
+    resp.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["enabled"].as_bool().unwrap_or(false))
+        .filter_map(|p| {
+            let id = p["id"].as_str()?;
+            let display = p["display_name"].as_str().unwrap_or(id);
+            Some((id.to_string(), display.to_string()))
+        })
+        .collect()
+}
+
+fn choose_provider_from_reader<R, W>(
+    providers: &[(String, String)],
+    mut reader: R,
+    mut writer: W,
+) -> Result<String>
+where
+    R: io::BufRead,
+    W: Write,
+{
+    writeln!(writer, "Select IM provider:")?;
+    for (idx, (id, display)) in providers.iter().enumerate() {
+        writeln!(writer, "  {}) {} ({})", idx + 1, display, id)?;
+    }
+    write!(writer, "Provider [1-{}]: ", providers.len())?;
+    writer.flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    let choice = input.trim().parse::<usize>().map_err(|_| {
+        bifrost_core::BifrostError::Config("invalid provider selection".to_string())
+    })?;
+    let Some((provider_id, _)) = providers.get(choice.saturating_sub(1)) else {
+        return Err(bifrost_core::BifrostError::Config(
+            "provider selection out of range".to_string(),
+        ));
+    };
+
+    Ok(provider_id.clone())
 }
 
 // ─── Route ───────────────────────────────────────────────────────────────────
@@ -539,7 +676,8 @@ fn handle_im_route(host: &str, port: u16, args: &[String]) -> Result<()> {
             let name = args.get(1).ok_or_else(|| {
                 bifrost_core::BifrostError::Config("route name required".to_string())
             })?;
-            let body = parse_route_add_args(name, &args[2..])?;
+            let mut body = parse_route_add_args(name, &args[2..])?;
+            ensure_provider_in_body(host, port, &mut body)?;
             let url = api_url(host, port, "/routes");
             let resp = http_post(&url, &body)?;
             println!(
@@ -1236,11 +1374,14 @@ fn handle_im_messages(host: &str, port: u16, args: &[String]) -> Result<()> {
                 }
             }
 
-            let pid = provider.ok_or_else(|| {
-                bifrost_core::BifrostError::Config(
-                    "--provider is required for messages list".to_string(),
-                )
-            })?;
+            let selected_provider;
+            let pid = match provider {
+                Some(provider) => provider,
+                None => {
+                    selected_provider = select_provider_interactively(host, port)?;
+                    selected_provider.as_str()
+                }
+            };
 
             let mut query_parts = Vec::new();
             if let Some(d) = direction {
@@ -1386,8 +1527,9 @@ fn print_im_help() {
     println!();
     println!("{}", "EXAMPLES:".bright_yellow());
     println!("    bifrost im provider list");
-    println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET");
-    println!("    bifrost im target add oncall --provider feishu-main --receive-id-type chat_id --receive-id oc_xxx");
+    println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx");
+    println!("    bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx");
+    println!("    bifrost im send --provider feishu-main --text 'hello owner'");
     println!("    bifrost im send --target oncall --card-file ./card.json");
     println!("    bifrost im route add deploy --provider feishu-main --event message.receive --regex '^/deploy' --script-file ./deploy.sh");
     println!("    bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh");
@@ -1424,5 +1566,84 @@ mod tests {
         let error =
             resolve_secret(&format!("file:{}", path.display())).expect_err("missing file fails");
         assert!(matches!(error, ResolveSecretError::Io { .. }));
+    }
+
+    #[test]
+    fn im_send_defaults_to_owner_and_uses_content_field() {
+        let args = parse_send_args(&[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--text".into(),
+            "hello".into(),
+        ])
+        .expect("parse send args");
+
+        let body = build_send_body("feishu-main", &args).expect("build send body");
+
+        assert_eq!(body["provider_id"], "feishu-main");
+        assert_eq!(body["target_id"], "__owner__");
+        assert_eq!(body["msg_type"], "text");
+        assert_eq!(body["content"], "hello");
+        assert!(body.get("text").is_none());
+    }
+
+    #[test]
+    fn im_send_keeps_explicit_target_and_card_content() {
+        let args = parse_send_args(&[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--target".into(),
+            "oncall".into(),
+            "--card-json".into(),
+            r#"{"config":{},"elements":[]}"#.into(),
+        ])
+        .expect("parse send args");
+
+        let body = build_send_body("feishu-main", &args).expect("build send body");
+
+        assert_eq!(body["provider_id"], "feishu-main");
+        assert_eq!(body["target_id"], "oncall");
+        assert_eq!(body["msg_type"], "interactive");
+        assert!(body["content"]["elements"].is_array());
+        assert!(body.get("card").is_none());
+    }
+
+    #[test]
+    fn enabled_provider_choices_only_returns_enabled_providers() {
+        let providers = enabled_provider_choices(&json!([
+            {"id":"disabled","display_name":"Disabled","enabled":false},
+            {"id":"feishu-main","display_name":"Feishu Main","enabled":true}
+        ]));
+
+        assert_eq!(
+            providers,
+            vec![("feishu-main".to_string(), "Feishu Main".to_string())]
+        );
+    }
+
+    #[test]
+    fn ensure_provider_in_body_preserves_explicit_provider() {
+        let mut body = json!({"provider_id":"feishu-main"});
+
+        ensure_provider_value(&mut body, "feishu-other");
+
+        assert_eq!(body["provider_id"], "feishu-main");
+    }
+
+    #[test]
+    fn choose_provider_from_reader_returns_selected_provider() {
+        let providers = vec![
+            ("feishu-a".to_string(), "Feishu A".to_string()),
+            ("feishu-b".to_string(), "Feishu B".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        let selected = choose_provider_from_reader(&providers, io::Cursor::new("2\n"), &mut output)
+            .expect("selection should work");
+
+        assert_eq!(selected, "feishu-b");
+        let prompt = String::from_utf8(output).expect("prompt utf8");
+        assert!(prompt.contains("Select IM provider"));
+        assert!(prompt.contains("Feishu B"));
     }
 }

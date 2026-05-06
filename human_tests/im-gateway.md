@@ -424,3 +424,32 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - owner 通知不得回退为全局 Agent Working Directory 或 Bifrost 进程 cwd。
   - Provider 列表与消息响应不包含 App Secret 明文。
 - **执行记录（2026-05-06）**: PASS — 使用临时端口 `18890` 和独立数据目录 `.bifrost-test-im-provider-custom-workdir` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 创建真实飞书 Provider，并在 `Agent Working Directory` 填写 `/tmp/bifrost-im-provider-custom-workdir`；页面显示 `Provider created and connected`，Provider 状态为 `connected`；message log 包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`，未回退到 `/Users/eden/work/github/bifrost`；响应中未泄露 App Secret；最后删除 Provider 清理成功。
+
+### TC-IMG-37: CLI IM 命令未传 provider 时选择 provider，并默认发送给 owner
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-cli-provider cargo run --bin bifrost -- start -p 18891 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 准备一个 fake Feishu OpenAPI 服务，支持 tenant token 与 `POST /im/v1/messages`，并记录收到的请求。
+  - 已创建一个 enabled Feishu Provider，配置 `owner_open_id=owner-open-id`、`base_url=<fake-feishu-url>`。
+- **操作步骤**:
+  1. 执行不带 `--provider`、不带 `--target` 的发送命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im send --text 'hello owner from cli'
+     ```
+  2. 查看 fake Feishu 记录的 `POST /im/v1/messages` 请求。
+  3. 执行不带 `--provider` 的消息日志命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im messages list
+     ```
+  4. 若配置了多个 enabled Provider，在真实交互式终端重复第 1 步，确认 CLI 展示 provider 列表并等待选择；非交互式 stdin 下应提示显式传 `--provider`。
+- **预期结果**:
+  - 单 enabled Provider 场景下，CLI 自动选择该 Provider，不要求额外输入。
+  - `im send` 默认使用 `target_id=__owner__`，后端解析为该 Provider 的 `owner_open_id`。
+  - fake Feishu 收到的请求包含 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=text`，文本内容为 `hello owner from cli`。
+  - CLI 输出包含 `Message sent` 与 fake Feishu 返回的 message id。
+  - `im messages list` 未传 `--provider` 时复用 provider 选择逻辑，输出包含 `Owner` 与消息内容预览。
+  - 多 Provider 交互式场景下，CLI 展示 provider 列表；多 Provider 非交互式场景下返回明确错误，要求传 `--provider`。
+- **执行记录（2026-05-06）**: PASS — 使用 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh` 执行 TC-IMG-37；脚本用临时数据目录 `.bifrost-test-im-cli-provider`、端口 `18891` 和 fake Feishu OpenAPI 服务启动源码版 Bifrost；创建唯一 enabled Provider 后执行 `bifrost im send --text 'hello owner from cli'`，CLI 自动选择 `feishu-main` 并输出 `Message sent via provider 'feishu-main' to __owner__ (message_id: om_owner_cli)`；fake Feishu 捕获 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=text` 和文本内容；`bifrost im messages list` 未传 `--provider` 时同样自动选择 Provider，输出包含 `Owner` 与消息内容预览；脚本最后清理临时数据和进程。

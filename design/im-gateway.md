@@ -1798,6 +1798,50 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-05-06 CLI IM Provider 选择与默认 Owner 发送
+
+### 问题
+
+`bifrost im send` 过去必须显式传 `--target`，不符合 IM Gateway 以 provider owner 作为默认通知对象的使用方式；同时 IM 系列命令中需要 provider 的操作如果漏传 `--provider`，会把缺失参数推迟到后端报错，用户需要自己再查 provider id。
+
+### 实现逻辑
+
+- `bifrost im send` 新增 `--provider` 语义；未传 `--target` 时默认发送到该 provider 的 owner，CLI 请求体使用 `target_id="__owner__"`。
+- 后端 `POST /_bifrost/api/im-gateway/messages/send` 支持 `provider_id + target_id="__owner__"`，从 `ImProviderConfig.owner_open_id` 构造临时 open_id 目标，不要求用户额外创建 owner target。
+- 后端继续兼容旧 target 发送：显式 target 仍从 target store 读取；如果同时传了 provider，会校验 target 属于该 provider。
+- CLI 对 `send`、`target add`、`route add`、`messages list` 这类 provider 依赖命令统一接入 provider 选择：
+  - 显式 `--provider` 优先。
+  - 未传且只有一个 enabled provider 时自动选择，方便脚本和 E2E。
+  - 未传且存在多个 enabled provider 时，在交互式终端展示 provider 列表并让用户选择。
+  - 多 provider 且非交互式 stdin 时返回明确错误，要求传 `--provider`。
+- CLI 发送请求体统一使用 `content` 字段，同时后端兼容历史 `text` / `card` 字段，避免旧调用路径立即失效。
+
+### 测试方案
+
+- 单元测试：`im_send_defaults_to_owner_and_uses_content_field` 验证 CLI 默认 owner 与 `content` body。
+- 单元测试：`im_send_keeps_explicit_target_and_card_content` 验证显式 target 和卡片 JSON 仍可用。
+- 单元测试：`enabled_provider_choices_only_returns_enabled_providers` / `choose_provider_from_reader_returns_selected_provider` 验证 provider 列表过滤与交互选择。
+- 单元测试：`send_message_request_resolves_owner_target_from_provider` / `send_message_request_rejects_owner_without_provider` 验证后端 owner 目标解析和缺 provider 错误。
+- E2E 测试：新增 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh`，使用 fake Feishu API 验证 `bifrost im send --text ...` 在单 provider 情况下自动选择 provider 并发送给 owner。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-37`，覆盖 CLI 未传 provider 时的 provider 选择、默认 owner 发送、message log 记录。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-cli commands::im::tests -- --nocapture
+cargo test -p bifrost-admin handlers::im_gateway::tests::send_message_request -- --nocapture
+BIFROST_DATA_DIR=./.bifrost-test-im-cli-provider e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
 ## 2026-05-06 飞书多机器人 Token 缓存隔离修复
 
 ### 问题
