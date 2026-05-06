@@ -1844,24 +1844,30 @@ cargo test --workspace --all-features
 
 ### 实现逻辑
 
-- 上线通知文案改为由 `build_online_notification_message()` 统一生成。
-- 文案保留原有开头 `你好，Bifrost 助手上线了`，并追加当前 Bifrost 进程的 `std::env::current_dir()`：
+- 上线通知文案改为由 `build_online_notification_message(provider)` 统一生成。
+- 文案保留原有开头 `你好，Bifrost 助手上线了`，并追加当前 provider 的有效工作目录：
   ```text
   你好，Bifrost 助手上线了
   工作目录：/path/to/workspace
   ```
+- 工作目录读取优先级：
+  1. `provider.agent_config.work_dir`：Provider 自定义 Agent Working Directory。
+  2. `std::env::current_dir()`：Provider 未配置自定义工作目录时才回退到 Bifrost 进程 cwd。
+  3. `unknown`：进程 cwd 也读取失败时的兜底值。
 - 飞书实际发送内容和 message log 的 `content_preview` 共用同一份字符串，避免用户收到的通知与后台记录不一致。
-- 如果当前工作目录读取失败，工作目录字段显示 `unknown`，不阻塞上线通知发送。
+- 上线通知必须反映连接中的 provider 配置，不能始终使用全局默认 Agent 配置或进程 cwd。
 
 ### 测试方案
 
-- 单元测试：`online_notification_message_includes_current_work_dir` 验证上线文案包含固定开头、`工作目录：` 标签和当前 cwd。
+- 单元测试：`online_notification_message_uses_provider_work_dir_override` 验证 provider 自定义 `work_dir` 优先于进程 cwd。
+- 单元测试：`online_notification_message_falls_back_to_process_work_dir` 验证 provider 未配置自定义 `work_dir` 时才回退当前 cwd。
 - 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-34` / `TC-IMG-35`，断言 owner 通知 `content_preview` 包含 `工作目录：/Users/eden/work/github/bifrost`。
+- 真实场景测试：新增并执行 `human_tests/im-gateway.md` 的 `TC-IMG-36`，创建带 Provider 自定义 Agent Working Directory 的飞书 Provider，断言 owner 上线通知和 message log 使用自定义目录而不是进程 cwd。
 
 ### 校验要求
 
 ```bash
-cargo test -p bifrost-admin online_notification_message_includes_current_work_dir -- --nocapture
+cargo test -p bifrost-admin online_notification_message_ -- --nocapture
 cargo test -p bifrost-admin im_gateway -- --nocapture
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings

@@ -823,7 +823,7 @@ async fn run_event_loop(
             updated_at: 0,
         };
 
-        let online_msg = build_online_notification_message();
+        let online_msg = build_online_notification_message(&provider);
         let send_result = feishu
             .send_text(&provider, &online_target, &online_msg)
             .await;
@@ -4046,10 +4046,20 @@ fn uuid_short() -> String {
     id.to_string()[..8].to_string()
 }
 
-fn build_online_notification_message() -> String {
-    let work_dir = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+fn build_online_notification_message(provider: &ImProviderConfig) -> String {
+    let work_dir = provider
+        .agent_config
+        .as_ref()
+        .and_then(|config| config.work_dir.as_deref())
+        .map(str::trim)
+        .filter(|work_dir| !work_dir.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .ok()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
 
     format!("你好，Bifrost 助手上线了\n工作目录：{work_dir}")
 }
@@ -4563,13 +4573,31 @@ mod tests {
     }
 
     #[test]
-    fn online_notification_message_includes_current_work_dir() {
+    fn online_notification_message_uses_provider_work_dir_override() {
+        let mut provider = test_provider();
+        provider.agent_config = Some(ImProviderAgentConfig {
+            work_dir: Some("/custom/im-provider-workdir".to_string()),
+            instructions: None,
+            base_instructions: None,
+            developer_instructions: None,
+            user_instructions: None,
+        });
+
+        let message = build_online_notification_message(&provider);
+
+        assert!(message.starts_with("你好，Bifrost 助手上线了"));
+        assert!(message.contains("工作目录：/custom/im-provider-workdir"));
+    }
+
+    #[test]
+    fn online_notification_message_falls_back_to_process_work_dir() {
         let cwd = std::env::current_dir()
             .expect("current dir")
             .display()
             .to_string();
+        let provider = test_provider();
 
-        let message = build_online_notification_message();
+        let message = build_online_notification_message(&provider);
 
         assert!(message.starts_with("你好，Bifrost 助手上线了"));
         assert!(message.contains("工作目录："));
