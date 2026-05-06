@@ -260,8 +260,59 @@ fn find_last_body_close_tag_start(body: &[u8]) -> Option<usize> {
     None
 }
 
+fn starts_with_html_marker(trimmed: &[u8]) -> bool {
+    const MARKERS: [&[u8]; 2] = [b"<!doctype", b"<html"];
+
+    MARKERS.iter().any(|marker| {
+        trimmed.len() >= marker.len()
+            && trimmed[..marker.len()]
+                .iter()
+                .zip(marker.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+fn contains_html_body_marker(body: &[u8]) -> bool {
+    const MARKERS: [&[u8]; 2] = [b"<body", b"</body>"];
+
+    MARKERS.iter().any(|marker| {
+        body.windows(marker.len()).any(|window| {
+            window
+                .iter()
+                .zip(marker.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+    })
+}
+
+fn starts_with_html_like_tag(trimmed: &[u8]) -> bool {
+    if !trimmed.starts_with(b"<") || trimmed.len() < 2 {
+        return false;
+    }
+
+    matches!(
+        trimmed[1],
+        b'a'..=b'z' | b'A'..=b'Z' | b'!' | b'/' | b'?'
+    )
+}
+
+fn is_likely_html_content(body: &[u8]) -> bool {
+    const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+    let trimmed = body.trim_ascii_start();
+    let trimmed = trimmed.strip_prefix(UTF8_BOM).unwrap_or(trimmed);
+    let trimmed = trimmed.trim_ascii_start();
+    if trimmed.is_empty() || matches!(trimmed[0], b'{' | b'[') {
+        return false;
+    }
+
+    starts_with_html_marker(trimmed)
+        || contains_html_body_marker(body)
+        || starts_with_html_like_tag(trimmed)
+}
+
 pub fn maybe_inject_bifrost_badge_html(body: Bytes, rules_json: &str) -> (Bytes, bool) {
-    if body.is_empty() || contains_badge(&body) {
+    if body.is_empty() || contains_badge(&body) || !is_likely_html_content(&body) {
         return (body, false);
     }
 
@@ -310,6 +361,44 @@ mod tests {
         let out_str = String::from_utf8(out.to_vec()).unwrap();
         assert!(out_str.starts_with("<html>Hello</html>"));
         assert!(out_str.contains(BIFROST_BADGE_ELEMENT_ID));
+    }
+
+    #[test]
+    fn test_inject_badge_with_doctype() {
+        let html = Bytes::from_static(b"<!doctype html><body>Hello</body>");
+        let (out, changed) = maybe_inject_bifrost_badge_html(html, EMPTY_RULES);
+        assert!(changed);
+
+        let out_str = String::from_utf8(out.to_vec()).unwrap();
+        assert!(out_str.contains(BIFROST_BADGE_ELEMENT_ID));
+    }
+
+    #[test]
+    fn test_inject_badge_for_html_like_fragment() {
+        let html = Bytes::from_static(b"<main><h1>Hello</h1></main>");
+        let (out, changed) = maybe_inject_bifrost_badge_html(html, EMPTY_RULES);
+        assert!(changed);
+
+        let out_str = String::from_utf8(out.to_vec()).unwrap();
+        assert!(out_str.contains(BIFROST_BADGE_ELEMENT_ID));
+    }
+
+    #[test]
+    fn test_skip_badge_for_mislabeled_json_response() {
+        let json = Bytes::from_static(br#"{"code":200,"data":{"mode":"slide"}}"#);
+        let (out, changed) = maybe_inject_bifrost_badge_html(json.clone(), EMPTY_RULES);
+
+        assert!(!changed);
+        assert_eq!(out, json);
+    }
+
+    #[test]
+    fn test_skip_badge_for_mislabeled_json_array_response() {
+        let json = Bytes::from_static(br#"[{"code":200}]"#);
+        let (out, changed) = maybe_inject_bifrost_badge_html(json.clone(), EMPTY_RULES);
+
+        assert!(!changed);
+        assert_eq!(out, json);
     }
 
     #[test]

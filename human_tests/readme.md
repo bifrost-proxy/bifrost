@@ -114,7 +114,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 10 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义 |
+| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 11 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义、误标 HTML 响应头的 JSON 数据接口不注入 |
 
 ### 性能与内存优化测试
 
@@ -165,7 +165,7 @@
 
 ---
 
-**总计：87 个测试文件，1554 个测试用例**
+**总计：87 个测试文件，1555 个测试用例**
 
 ## 工作流程
 

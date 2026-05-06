@@ -4,12 +4,12 @@
 
 当用户通过 Bifrost 代理访问网页时（尤其是 HTTPS MITM 后的页面），用户需要一个**低侵入**的视觉提示，确认“该页面已被 Bifrost 接管/代理”。
 
-本方案在**明文可编辑**的 HTML 响应中（`Content-Type` 包含 `text/html`），向页面左下角注入一个固定定位的小圆点（Bifrost badge）。
+本方案在**明文可编辑且内容看起来确实是 HTML**的响应中，向页面左下角注入一个固定定位的小圆点（Bifrost badge）。不能只信任响应头；真实线上存在 `Content-Type: text/html` 但 body 是 JSON 数据接口的响应（例如验证码接口），此类响应不得注入 Badge，避免破坏客户端 JSON 解析。
 
 ## 需求范围
 
 - 仅对 **HTTP 响应 body 可缓冲** 的场景生效（非 streaming）。
-- 仅对 `Content-Type: text/html`（包含参数如 `charset=utf-8`）生效。
+- 仅对 `Content-Type: text/html`（包含参数如 `charset=utf-8`）且 body 嗅探为 HTML-like 内容的响应生效；站点不完全遵守 HTML 文档结构但以标签内容返回时，仍允许注入。
 - 支持开关配置：
   - 全局配置项：`traffic.inject_bifrost_badge`，默认 `true`，持久化到 `config.toml`。
   - Web UI：Settings -> Proxy 页提供开关，文案：**“注入 Bifrost 小圆点”**。
@@ -33,6 +33,8 @@
 - 判定条件：
   - `config.inject_bifrost_badge == true`
   - `content-type` contains `text/html`
+  - body 明文内容通过宽松 HTML 嗅探：忽略 BOM/前导空白后以 `<!doctype`、`<html` 或任意 HTML-like 标签开头，或内容中存在 `<body` / `</body>` 标记
+  - body 明文内容像 JSON（忽略 BOM/前导空白后以 `{` 或 `[` 开头）时必须跳过，即使响应头声称是 `text/html`
   - 非 SSE / 非 streaming
 - 注入策略：
   - 将 body 解压到明文（支持 `gzip` / `br` / `deflate` / `zstd`），在 `</body>` 前插入 badge 片段；如果找不到 `</body>`，则追加到末尾。
@@ -65,6 +67,9 @@
   - `test_badge_inline_rules_data_escapes_script_close_tag`：验证包含 vConsole 风格 `</script><script>new VConsole()</script>` 的合并规则文本在 Badge 内联数据中转义为 `\u003C/script\u003E`，整段 Badge 只保留自身的一个结束脚本标签。
   - `test_badge_inline_rules_data_escapes_html_tag_syntax_generally`：验证 `<img onerror>`、`<!--`、`<svg onload>`、`</textarea>`、`<iframe srcdoc>` 等标签注入形态都不会以原始 HTML 片段出现在内联脚本里。
   - `test_badge_inline_rules_data_falls_back_for_invalid_json`：验证异常数据不会原样拼入脚本，而是回退为空规则数据。
+  - `test_skip_badge_for_mislabeled_json_response`：验证 `Content-Type: text/html` 场景下传入 JSON object body 时不会注入 Badge。
+  - `test_skip_badge_for_mislabeled_json_array_response`：验证 JSON array body 不会注入 Badge。
+  - `test_inject_badge_for_html_like_fragment`：验证 `<main>...</main>` 这类非完整 HTML 文档但明显是标签内容的响应仍会注入 Badge。
 
 ### E2E 测试
 
@@ -77,6 +82,9 @@
   - `not-current-test.local htmlAppend://{vconsole-inject}`
   - value 内容包含 `<script src="https://unpkg.com/vconsole/dist/vconsole.min.js"></script><script>new VConsole();</script>`
   - 通过代理请求普通 HTML 页面，断言 Merged Rules 仍显示该规则文本，但响应中只存在 `\u003C/script\u003E` 这类转义形式，不存在未转义的 `<script src=...>` 或 `</script>\n<script>new VConsole();</script>` 序列。
+- 误标 JSON 回归用例：本地上游返回 `Content-Type: text/html; charset=utf-8` 但 body 为 `{"code":200,"data":...}`。
+  - 通过启用 Badge 的 Bifrost 代理请求该接口。
+  - 断言响应 body 保持 JSON 内容，不包含 `__bifrost_badge__`、`__bb_copy` 或任何 Badge 片段。
 
 ### 真实场景测试
 
@@ -86,6 +94,7 @@
 - 点击复制按钮后，将系统剪贴板内容粘贴到可编辑区域、或读取系统剪贴板/浏览器剪贴板，确认等于当前合并规则文本；不能只看按钮是否显示 `Copied`。
 - 在页面中放置高 z-index 覆盖层，确认 Badge 弹窗仍可显示在其上方。
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-10`：创建包含 vConsole 脚本片段、HTML 注释、事件属性、`srcdoc`、闭合标签等片段的 `htmlAppend://{vconsole-inject}` 规则，但请求不匹配该规则的普通 HTML 页面，确认规则文本只出现在 Badge 的 Merged Rules 展示中，不会逃逸为页面真实脚本或原始 HTML token。
+- 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-11`：通过本地上游返回 `Content-Type: text/html` 但 body 为 JSON 的响应，确认启用 Badge 时客户端收到的仍是原始 JSON，不包含 Badge 注入片段。
 
 ## 校验要求
 
