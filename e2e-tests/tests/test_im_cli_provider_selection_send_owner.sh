@@ -1,13 +1,15 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -eo pipefail
 
-source ~/.zshrc
-
-ROOT_DIR="$(cd "${0:A:h}/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PORT="${BIFROST_PORT:-18891}"
 DATA_DIR="${BIFROST_DATA_DIR:-$ROOT_DIR/.bifrost-test-im-cli-provider}"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
+  BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
 MOCK_DIR="$(mktemp -d)"
 MOCK_LOG="$MOCK_DIR/requests.ndjson"
 SERVER_LOG="$MOCK_DIR/bifrost.log"
@@ -78,7 +80,12 @@ for _ in {1..50}; do
 done
 MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
 
-BIFROST_DATA_DIR="$DATA_DIR" cargo run --bin bifrost -- start \
+if [[ ! -x "$BIFROST_BIN" ]]; then
+  cargo build --bin bifrost
+  BIFROST_BIN="$ROOT_DIR/target/debug/bifrost"
+fi
+
+BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --no-system-proxy \
@@ -93,7 +100,7 @@ for _ in {1..80}; do
   sleep 0.25
 done
 
-cargo run --bin bifrost -- -p "$PORT" im provider add feishu-main \
+"$BIFROST_BIN" -p "$PORT" im provider add feishu-main \
   --type feishu \
   --app-id cli_app \
   --secret cli_secret \
@@ -102,7 +109,7 @@ cargo run --bin bifrost -- -p "$PORT" im provider add feishu-main \
   --owner-open-id owner-open-id \
   --enabled true
 
-SEND_OUTPUT="$(cargo run --bin bifrost -- -p "$PORT" im send --text 'hello owner from cli')"
+SEND_OUTPUT="$("$BIFROST_BIN" -p "$PORT" im send --text 'hello owner from cli')"
 echo "$SEND_OUTPUT"
 grep -q "Message sent" <<<"$SEND_OUTPUT"
 grep -q "om_owner_cli" <<<"$SEND_OUTPUT"
@@ -120,7 +127,7 @@ assert send["body"]["msg_type"] == "text", send
 assert json.loads(send["body"]["content"])["text"] == "hello owner from cli", send
 PY
 
-LOGS="$(cargo run --bin bifrost -- -p "$PORT" im messages list)"
+LOGS="$("$BIFROST_BIN" -p "$PORT" im messages list)"
 echo "$LOGS"
 grep -q "Owner" <<<"$LOGS"
 grep -q "hello owner" <<<"$LOGS"
