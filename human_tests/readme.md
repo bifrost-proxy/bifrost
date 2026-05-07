@@ -147,7 +147,7 @@
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 13 | SessionQueueManager 单元测试（13项，含 turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
-| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 20 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标和默认 250k context window |
+| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 23 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标、默认 250k context window、工具结果追加后 context 估算刷新、自动压缩判断不被旧响应 token 遮蔽、emergency compaction 统计事件完备 |
 | [agent-builtin-tools-completeness.md](./agent-builtin-tools-completeness.md) | Agent Codex 内置工具完备性 | 10 | `exec_command` 短命令、交互任务 session + `write_stdin`、`view_image` data URL、`request_user_input` 不可交互边界、Codex 式 `tool_search` deferred 暴露、workspace all-features 编译回归、真实 Bifrost chat 默认直暴工具调用、本地 CI 静态门禁、MCP `>= 100` 阈值 deferred loading、真实 Bifrost 注册 100 个 MCP tools 后搜索并调用 |
 | [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 6 | `/goal` 显式入口、Goal 生命周期、Codex 风格 `apply_patch`、raw patch body 兼容、PTY 会话复用与交互输入、交互式 shell prompt 前缀下 exit_code 解析、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
@@ -165,7 +165,7 @@
 
 ---
 
-**总计：87 个测试文件，1559 个测试用例**
+**总计：87 个测试文件，1562 个测试用例**
 
 ## 工作流程
 

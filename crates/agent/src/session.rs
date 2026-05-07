@@ -337,6 +337,16 @@ impl AgentSession {
     /// Track token usage from an API response.
     pub(crate) fn track_token_usage(&mut self, total_tokens: u64) {
         self.last_response_tokens = Some(total_tokens);
+        self.accumulate_token_usage(total_tokens);
+    }
+
+    /// Track token usage for background model calls that do not represent the
+    /// current session context, such as compaction summaries.
+    pub(crate) fn track_background_token_usage(&mut self, total_tokens: u64) {
+        self.accumulate_token_usage(total_tokens);
+    }
+
+    fn accumulate_token_usage(&mut self, total_tokens: u64) {
         self.total_tokens_used = Some(
             self.total_tokens_used
                 .unwrap_or(0)
@@ -345,11 +355,13 @@ impl AgentSession {
     }
 
     fn add_user_message(&mut self, content: &str) {
+        self.last_response_tokens = None;
         self.history.push(ChatMessage::user(content));
         self.touch();
     }
 
     fn add_user_message_with_images(&mut self, content: &str, images: &[ChatImageInput]) {
+        self.last_response_tokens = None;
         self.history
             .push(ChatMessage::user_with_images(content, images));
         self.touch();
@@ -361,12 +373,14 @@ impl AgentSession {
     }
 
     fn add_assistant_tool_calls(&mut self, tool_calls: &[ToolCallMessage]) {
+        self.last_response_tokens = None;
         self.history
             .push(ChatMessage::assistant_with_tool_calls(tool_calls.to_vec()));
         self.touch();
     }
 
     fn add_tool_result(&mut self, call_id: &str, content: &str) {
+        self.last_response_tokens = None;
         self.history
             .push(ChatMessage::tool_result(call_id, content));
         self.touch();
@@ -445,9 +459,12 @@ impl AgentSession {
 
     /// Get the effective token count — prefers real API data over estimates.
     pub fn effective_token_count(&self) -> u32 {
-        self.last_response_tokens
+        let estimated_tokens = self.estimate_tokens();
+        let response_tokens = self
+            .last_response_tokens
             .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
-            .unwrap_or_else(|| self.estimate_tokens())
+            .unwrap_or(0);
+        estimated_tokens.max(response_tokens)
     }
 }
 
@@ -1028,23 +1045,15 @@ pub async fn run_turn_with_mcp_multimodal(
         .await
         {
             Ok(result) if result.performed => {
-                if let Some(ref mut rec) = recorder {
-                    if let Err(e) = rec.record_compaction(
-                        &session.session_key,
-                        serde_json::json!({
-                            "trigger": "manual",
-                            "reason": "user_requested",
-                            "phase": "standalone_turn",
-                            "pre_tokens": result.pre_tokens,
-                            "post_tokens": result.post_tokens,
-                            "tokens_saved": result.tokens_saved,
-                            "messages_removed": result.messages_removed,
-                            "compaction_count": session.compaction_count,
-                        }),
-                    ) {
-                        warn!(error = %e, "failed to record compaction event");
-                    }
-                }
+                record_compaction_event(
+                    &mut recorder,
+                    session,
+                    &result,
+                    "manual",
+                    "user_requested",
+                    "standalone_turn",
+                    false,
+                );
                 return Ok(TurnResult {
                     response: format!(
                         "记忆压缩完成。\n- 压缩前 token: ~{}\n- 压缩后 token: ~{}\n- 节省: ~{}\n- 移除消息: {}\n- 累计压缩次数: {}\n- 耗时: {}ms",
@@ -1440,23 +1449,15 @@ pub async fn run_turn_with_mcp_multimodal(
         .await
         {
             Ok(result) if result.performed => {
-                if let Some(ref mut rec) = recorder {
-                    if let Err(e) = rec.record_compaction(
-                        &session.session_key,
-                        serde_json::json!({
-                            "trigger": "auto",
-                            "reason": "context_limit",
-                            "phase": "pre_turn",
-                            "pre_tokens": result.pre_tokens,
-                            "post_tokens": result.post_tokens,
-                            "tokens_saved": result.tokens_saved,
-                            "messages_removed": result.messages_removed,
-                            "compaction_count": session.compaction_count,
-                        }),
-                    ) {
-                        warn!(error = %e, "failed to record compaction event");
-                    }
-                }
+                record_compaction_event(
+                    &mut recorder,
+                    session,
+                    &result,
+                    "auto",
+                    "context_limit",
+                    "pre_turn",
+                    false,
+                );
                 info!(
                     tokens_saved = result.tokens_saved,
                     duration_ms = ?result.duration_ms,
@@ -1661,6 +1662,15 @@ pub async fn run_turn_with_mcp_multimodal(
                     .await
                     {
                         Ok(result) if result.performed => {
+                            record_compaction_event(
+                                &mut recorder,
+                                session,
+                                &result,
+                                "auto",
+                                "context_limit",
+                                "mid_turn",
+                                true,
+                            );
                             info!(
                                 tokens_saved = result.tokens_saved,
                                 duration_ms = ?result.duration_ms,
@@ -2292,23 +2302,15 @@ pub async fn run_turn_with_mcp_multimodal(
             .await
             {
                 Ok(result) if result.performed => {
-                    if let Some(ref mut rec) = recorder {
-                        if let Err(e) = rec.record_compaction(
-                            &session.session_key,
-                            serde_json::json!({
-                                "trigger": "auto",
-                                "reason": "context_limit",
-                                "phase": "mid_turn",
-                                "pre_tokens": result.pre_tokens,
-                                "post_tokens": result.post_tokens,
-                                "tokens_saved": result.tokens_saved,
-                                "messages_removed": result.messages_removed,
-                                "compaction_count": session.compaction_count,
-                            }),
-                        ) {
-                            warn!(error = %e, "failed to record compaction event");
-                        }
-                    }
+                    record_compaction_event(
+                        &mut recorder,
+                        session,
+                        &result,
+                        "auto",
+                        "context_limit",
+                        "mid_turn",
+                        false,
+                    );
                     info!(
                         tokens_saved = result.tokens_saved,
                         duration_ms = ?result.duration_ms,
@@ -2535,6 +2537,37 @@ fn build_mid_turn_initial_context(session: &AgentSession) -> Vec<ChatMessage> {
     ))]
 }
 
+fn record_compaction_event(
+    recorder: &mut Option<&mut ConversationRecorder>,
+    session: &AgentSession,
+    result: &compact::CompactionResult,
+    trigger: &str,
+    reason: &str,
+    phase: &str,
+    emergency: bool,
+) {
+    let mut metadata = serde_json::json!({
+        "trigger": trigger,
+        "reason": reason,
+        "phase": phase,
+        "pre_tokens": result.pre_tokens,
+        "post_tokens": result.post_tokens,
+        "tokens_saved": result.tokens_saved,
+        "messages_removed": result.messages_removed,
+        "compaction_count": session.compaction_count,
+        "total_tokens": session.total_tokens_used.unwrap_or(0),
+    });
+    if emergency {
+        metadata["emergency"] = serde_json::Value::Bool(true);
+    }
+
+    if let Some(rec) = recorder.as_deref_mut() {
+        if let Err(e) = rec.record_compaction(&session.session_key, metadata) {
+            warn!(error = %e, "failed to record compaction event");
+        }
+    }
+}
+
 fn current_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2719,6 +2752,84 @@ mod tests {
         session.track_token_usage(2000);
         assert_eq!(session.total_tokens_used, Some(3000));
         assert_eq!(session.last_response_tokens, Some(2000));
+    }
+
+    #[test]
+    fn test_background_token_usage_does_not_update_context_snapshot() {
+        let mut session = AgentSession::new("test");
+
+        session.track_token_usage(1000);
+        session.track_background_token_usage(2500);
+
+        assert_eq!(session.total_tokens_used, Some(3500));
+        assert_eq!(session.last_response_tokens, Some(1000));
+    }
+
+    #[test]
+    fn test_record_compaction_event_includes_emergency_and_total_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "test");
+        let file_path = recorder.file_path().to_path_buf();
+
+        let mut session = AgentSession::new("test");
+        session.compaction_count = 2;
+        session.total_tokens_used = Some(1234);
+        let result = compact::CompactionResult {
+            performed: true,
+            pre_tokens: 900,
+            post_tokens: 300,
+            tokens_saved: 600,
+            messages_removed: 8,
+            reason: None,
+            trigger: None,
+            compaction_reason: None,
+            phase: None,
+            duration_ms: Some(10),
+        };
+
+        {
+            let mut recorder_ref = Some(&mut recorder);
+            record_compaction_event(
+                &mut recorder_ref,
+                &session,
+                &result,
+                "auto",
+                "context_limit",
+                "mid_turn",
+                true,
+            );
+        }
+        recorder.close();
+
+        let events = persistence::load_conversation_events(&file_path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, persistence::event_types::COMPACTION);
+        assert_eq!(events[0].content["emergency"], true);
+        assert_eq!(events[0].content["total_tokens"], 1234);
+        assert_eq!(events[0].content["compaction_count"], 2);
+        assert_eq!(events[0].content["phase"], "mid_turn");
+    }
+
+    #[test]
+    fn test_history_growth_invalidates_last_response_tokens() {
+        let mut session = AgentSession::new("test");
+        session.track_token_usage(100);
+        assert_eq!(session.last_response_tokens, Some(100));
+
+        session.add_user_message(&"x".repeat(1_000));
+
+        assert!(session.last_response_tokens.is_none());
+        assert!(session.effective_token_count() >= 250);
+    }
+
+    #[test]
+    fn test_effective_token_count_never_hides_larger_estimate() {
+        let mut session = AgentSession::new("test");
+        session.add_assistant_message(&"x".repeat(2_000));
+        session.last_response_tokens = Some(100);
+
+        assert!(session.estimate_tokens() >= 500);
+        assert_eq!(session.effective_token_count(), session.estimate_tokens());
     }
 
     #[test]

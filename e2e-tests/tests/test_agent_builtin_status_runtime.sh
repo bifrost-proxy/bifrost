@@ -14,6 +14,8 @@ BIFROST_LOG="$TEST_DIR/bifrost.log"
 CHAT_RESPONSE="$TEST_DIR/chat-response.json"
 STATUS_RESPONSE="$TEST_DIR/status-response.json"
 IDLE_STATUS_RESPONSE="$TEST_DIR/idle-status-response.json"
+TOOL_CHAT_RESPONSE="$TEST_DIR/tool-chat-response.json"
+TOOL_STATUS_RESPONSE="$TEST_DIR/tool-status-response.json"
 WORK_DIR="$TEST_DIR/workdir"
 mkdir -p "$WORK_DIR"
 
@@ -56,6 +58,32 @@ port = int(sys.argv[1])
 log_path = sys.argv[2]
 
 
+def message_text(message):
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def tool_call(call_id, name, arguments):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
@@ -79,19 +107,72 @@ class Handler(BaseHTTPRequestHandler):
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-        time.sleep(3.0)
-        response = {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": "mock turn finished",
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
-        }
+        messages = payload.get("messages", [])
+        joined = "\n".join(
+            message_text(message)
+            for message in messages
+            if isinstance(message, dict)
+        )
+        has_tool_result = any(
+            isinstance(message, dict) and message.get("role") == "tool"
+            for message in messages
+        )
+
+        if "触发大输出工具" in joined and not has_tool_result:
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                tool_call(
+                                    "call-large-output",
+                                    "exec_command",
+                                    json.dumps(
+                                        {
+                                            "cmd": "source ~/.zshrc; python3 -c 'print(\"CTX\" * 20000)'",
+                                            "yield_time_ms": 1000,
+                                            "max_output_tokens": 30000,
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                )
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
+        elif "触发大输出工具" in joined and has_tool_result:
+            time.sleep(3.0)
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "large tool turn finished",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
+        else:
+            time.sleep(3.0)
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "mock turn finished",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
         encoded = json.dumps(response, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -210,6 +291,74 @@ assert "会话状态:" in text, text
 assert f"工作路径: {sys.argv[2]}" in text, text
 assert "API 累计 token:" in text, text
 assert "Context 用量:" in text, text
+PY
+
+echo "[agent-builtin-status-runtime] starting a tool-output growth request"
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d "{\"session_key\":\"agent-status-runtime-tool-growth\",\"work_dir\":\"$WORK_DIR\",\"message\":\"触发大输出工具，然后等待 mock 模型完成。\"}" \
+  >"$TOOL_CHAT_RESPONSE" &
+CHAT_PID=$!
+
+for _ in $(seq 1 80); do
+  curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"agent-status-runtime-tool-growth","message":"/status"}' \
+    >"$TOOL_STATUS_RESPONSE"
+  if python3 - "$TOOL_STATUS_RESPONSE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+active = response.get("active_status")
+if isinstance(active, dict) and active.get("current_loop_iteration") == 2:
+    if active.get("estimated_context_tokens", 0) > 10000:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  sleep 0.25
+done
+
+python3 - "$TOOL_STATUS_RESPONSE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+text = response.get("response", "")
+active = response.get("active_status")
+assert isinstance(active, dict), response
+assert active.get("session_key") == "agent-status-runtime-tool-growth", active
+assert active.get("current_loop_iteration") == 2, active
+estimated = active.get("estimated_context_tokens", 0)
+assert estimated > 10000, active
+assert active.get("last_response_tokens") is None, active
+assert f"Context 用量: ~{estimated} / 250000" in text, text
+assert "实时 token: 累计" in text and "最近响应 N/A" in text, text
+match = re.search(r"Context 用量: ~(\d+) / 250000", text)
+assert match, text
+assert int(match.group(1)) == estimated, (text, active)
+PY
+
+wait "$CHAT_PID"
+
+python3 - "$TOOL_CHAT_RESPONSE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+assert "large tool turn finished" in response.get("response", ""), response
+tool_calls = response.get("tool_calls")
+assert isinstance(tool_calls, list), response
+assert any(call.get("tool_name") == "exec_command" for call in tool_calls), tool_calls
 PY
 
 echo "[agent-builtin-status-runtime] PASS"
