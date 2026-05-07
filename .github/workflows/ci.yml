@@ -941,8 +941,8 @@ jobs:
       BIFROST_E2E_RETRY_BUDGET_SECS: "180"
       BIFROST_E2E_MAX_RETRY_SUITES: "6"
       BIFROST_E2E_SUITE_TIMEOUT: ${{ matrix.suite_timeout }}
-      TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
+      TIMEOUT: "90"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

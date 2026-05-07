@@ -78,6 +78,81 @@
 - rules E2E 需优先于 rust-project-validate 执行。
 - 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
 
+## 2026-05-06：Windows ARM Rules TLS readiness timeout 对齐 fixture 超时
+
+### 背景
+- GitHub Actions run `25439148645` 在 `E2E Rules (aarch64-pc-windows-msvc)` job 中失败，日志显示 TLS interception readiness 在 30 秒内未就绪，随后 60 个 rules suites 连锁失败。
+- `scripts/ci/local-ci.sh --e2e-only rules` 在 Windows ARM job 中会设置 `BIFROST_E2E_FIXTURE_TIMEOUT=90`，用于放宽慢机上的单 fixture 等待预算。
+- `e2e-tests/test_rules.sh::start_proxy` 对代理监听和 HTTP health check 已遵守外层 ready timeout，但 TLS readiness 仍写死为 `BIFROST_E2E_TLS_READY_TIMEOUT:-30`，导致 fixture timeout 放宽后 TLS 初始化仍只等 30 秒。
+
+### 实现逻辑
+- 将 TLS readiness timeout 的默认值从固定 `30` 调整为优先读取 `BIFROST_E2E_TLS_READY_TIMEOUT`，若未设置则回退到 `BIFROST_E2E_FIXTURE_TIMEOUT`，最后再回退到 `30`。
+- 保持已有显式覆盖语义不变：若调用方单独设置了 `BIFROST_E2E_TLS_READY_TIMEOUT`，仍以该值为准。
+- 不修改代理启动参数、端口策略、`--no-system-proxy` 约束和其它 ready checks，只修复 TLS readiness 与 fixture timeout 的预算对齐问题。
+
+### 依赖项
+- `e2e-tests/test_rules.sh`
+- GitHub Actions / local CI 对 `BIFROST_E2E_FIXTURE_TIMEOUT` 的现有注入逻辑
+
+### 测试方案
+- 单元/脚本级验证：`bash -n e2e-tests/test_rules.sh`，并用 `rg` 检查 `BIFROST_E2E_TLS_READY_TIMEOUT:-${BIFROST_E2E_FIXTURE_TIMEOUT:-30}` 已生效。
+- E2E 测试：执行 `bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`，确认 rules 套件在本地入口下通过。
+- 真实场景测试：更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows ARM TLS readiness timeout 回归用例，并按文档逐条执行 TC-REF-12。
+
+### 校验要求
+- 先完成 rules E2E 与 human_tests，再执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
+
+### 文档更新要求
+- 更新 `human_tests/rules-e2e-fixtures.md` 增加本次回归用例。
+- 更新 `human_tests/readme.md` 中 `rules-e2e-fixtures.md` 的用例计数与说明。
+
+## 2026-05-07：Windows ARM TLS readiness 探针域名兼容修复
+
+### 背景
+- PR #111 最新失败 run `25457292888` 的 `E2E Rules (aarch64-pc-windows-msvc)` job 已不再是 30 秒预算不足问题；日志显示 `TLS 拦截在 90s 内未就绪`，说明 readiness 探针在放宽预算后仍然无法完成。
+- 同一失败日志中可以看到 `CONNECT synchronous client process resolution succeeded`、`rules matched for request url=https://__bifrost_tls_probe.invalid:443` 与 `rules matched for request url=tunnel://__bifrost_tls_probe.invalid:443`，说明 CONNECT 建链、规则匹配与探针 host 映射本身都已生效。
+- 现有 readiness 探针使用 `https://__bifrost_tls_probe.invalid/health`。该域名包含下划线，虽然规则匹配可以把它转发到本地 echo server，但 TLS MITM 在生成 leaf 证书时仍需把 host 当作 DNS SAN 写入证书。
+- `crates/bifrost-tls/src/dynamic.rs` 中 `SanType::DnsName(domain.to_string().try_into())` 会对 DNS 名称做合法性校验；带下划线的 host 对部分 TLS 栈并不安全，Windows ARM job 上极可能在握手阶段被 Schannel / rustls 域名校验拒绝，从而表现为 CONNECT 成功但 readiness 永远拿不到 HTTP 2xx/3xx。
+
+### 实现逻辑
+- 保持“探针 host 必须与业务 fixtures 隔离、且不走系统 DNS”这一设计目标不变，但把 readiness 专用域名从 `__bifrost_tls_probe.invalid` 切换为仅含 RFC 兼容 label 字符的 `bifrost-tls-probe.invalid`。
+- 同步更新 `e2e-tests/test_rules.sh` 与独立规则 E2E fixture `e2e-tests/tests/test_host_rule_path_rewrite.sh` 中的 readiness URL 和自动注入 rule，确保所有 rules harness 使用同一个合法探针域名。
+- 在 `bifrost-tls` 为该 probe host 增加回归单元测试，明确要求动态证书生成器可以为 `bifrost-tls-probe.invalid` 成功签发证书，避免未来再次引入不合法 probe host。
+- 不改变 TLS readiness 的判定方式、timeout 预算、代理启动参数、`--no-system-proxy` 约束或业务规则语义，只修复 readiness 探针在 Windows ARM TLS 栈上的兼容性问题。
+
+### 依赖项
+- `e2e-tests/test_rules.sh`
+- `e2e-tests/tests/test_host_rule_path_rewrite.sh`
+- `crates/bifrost-tls/src/dynamic.rs`
+- `human_tests/rules-e2e-fixtures.md`
+- `human_tests/readme.md`
+
+### 测试方案
+
+#### 单元测试
+- `cargo test -p bifrost-tls test_generate_for_probe_domain -- --nocapture`：验证动态证书生成器可为 `bifrost-tls-probe.invalid` 成功签发证书链。
+
+#### E2E 测试
+- `bash e2e-tests/tests/test_host_rule_path_rewrite.sh`：验证独立 HTTPS host-rule fixture 使用新 probe 域名时，代理仍能完成 TLS readiness 并成功转发请求。
+- `bash -n e2e-tests/test_rules.sh`：验证 rules harness 脚本语法正确。
+- `bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`：回归 rules CI 主入口，确认改用合法 probe host 后本地 rules 套件不退化。
+
+#### 真实场景测试
+- 更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows ARM TLS readiness probe 域名回归用例，覆盖：
+  - readiness 探针默认 URL 已切换为 `bifrost-tls-probe.invalid`
+  - 自动注入的 host rule 与独立 HTTPS host-rule fixture 同步使用该域名
+  - 独立 fixture 真机执行通过，证明 TLS readiness 能走通到 HTTP 响应
+  - 推送后 GitHub Actions Windows ARM rules job 不再卡死在 probe 握手阶段
+- 更新 `human_tests/readme.md` 的索引说明与用例数量。
+
+### 校验要求
+- 先完成 rules 相关 E2E 与 human_tests，再执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
+- 推送后必须使用 GitHub Actions PAT skill 对 PR #111 新 run 做 fail-fast 监控，确认 Windows ARM rules job 绿灯；若继续失败，立即进入下一轮 fix→push→watch。
+
+### 文档更新要求
+- 更新 `human_tests/rules-e2e-fixtures.md` 新增 probe 域名兼容回归用例与执行记录。
+- 更新 `human_tests/readme.md` 中 `rules-e2e-fixtures.md` 的用例数与说明。
+
 ## 2026-05-04：macOS Rules E2E 语义回归收敛
 
 ### 背景

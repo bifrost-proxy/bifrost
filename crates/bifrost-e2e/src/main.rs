@@ -3,6 +3,9 @@ use clap::Parser;
 use std::process::ExitCode;
 use std::time::Duration;
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_MAIN_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 #[derive(Parser, Debug)]
 #[command(name = "bifrost-e2e")]
 #[command(about = "Bifrost E2E Test Runner", long_about = None)]
@@ -58,10 +61,7 @@ struct Args {
     test_timeout: u64,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let args = Args::parse();
-
+async fn run(args: Args) -> ExitCode {
     let log_level = if args.verbose { "debug" } else { "info" };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
@@ -166,5 +166,53 @@ async fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::main]
+async fn main() -> ExitCode {
+    run(Args::parse()).await
+}
+
+#[cfg(target_os = "windows")]
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    match std::thread::Builder::new()
+        .name("bifrost-e2e-main".to_string())
+        .stack_size(WINDOWS_MAIN_THREAD_STACK_SIZE)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map(|runtime| runtime.block_on(run(args)))
+        }) {
+        Ok(handle) => match handle.join() {
+            Ok(Ok(code)) => code,
+            Ok(Err(error)) => {
+                eprintln!("Failed to initialize tokio runtime: {error}");
+                ExitCode::FAILURE
+            }
+            Err(_) => {
+                eprintln!("bifrost-e2e main thread panicked");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("Failed to spawn bifrost-e2e main thread: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WINDOWS_MAIN_THREAD_STACK_SIZE;
+
+    #[test]
+    fn windows_main_thread_stack_is_increased() {
+        let stack_size = std::hint::black_box(WINDOWS_MAIN_THREAD_STACK_SIZE);
+        assert!(stack_size >= 8 * 1024 * 1024);
     }
 }

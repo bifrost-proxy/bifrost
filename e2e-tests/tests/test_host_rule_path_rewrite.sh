@@ -138,7 +138,7 @@ start_proxy() {
     local waited=0
     while [[ $waited -lt 30 ]]; do
         if curl -sk --proxy "http://${PROXY_HOST}:${PROXY_PORT}" --noproxy "" \
-            "https://__bifrost_tls_probe.invalid/health" >/dev/null 2>&1; then
+            "https://bifrost-tls-probe.invalid/health" >/dev/null 2>&1; then
             _log_pass "Proxy is ready on ${PROXY_PORT}"
             return 0
         fi

@@ -192,6 +192,19 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_for_probe_domain() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let generator = DynamicCertGenerator::new(ca);
+
+        let cert_key = generator
+            .generate_for_domain("bifrost-tls-probe.invalid")
+            .expect("Failed to generate certificate for probe domain");
+
+        assert_eq!(cert_key.cert.len(), 2);
+    }
+
+    #[test]
     fn test_generate_for_domain_has_browser_safe_validity_period() {
         init_crypto_provider();
         let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));

@@ -300,7 +300,7 @@ wait_for_tls_intercept_ready() {
     # Some fixtures intentionally use `*.local/health passthrough://` (ignore tests).
     # If the probe uses `.local/health`, it can be bypassed and trigger DNS failures in CI.
     # `.invalid` is reserved and should never resolve via system DNS.
-    local probe_url="${3:-https://__bifrost_tls_probe.invalid/health}"
+    local probe_url="${3:-https://bifrost-tls-probe.invalid/health}"
 
     local start_ts
     start_ts="$(date +%s)"
@@ -408,7 +408,7 @@ preprocess_rules_file() {
     {
         # A dedicated probe rule used by infra to verify TLS interception readiness.
         # It is intentionally unique to avoid interfering with any fixture logic.
-        echo "__bifrost_tls_probe.invalid host://127.0.0.1:${ECHO_HTTP_PORT}"
+        echo "bifrost-tls-probe.invalid host://127.0.0.1:${ECHO_HTTP_PORT}"
         echo
         httpbin_mock_rules "$ECHO_HTTP_PORT" "$ECHO_HTTPS_PORT"
         echo

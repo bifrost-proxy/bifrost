@@ -97,7 +97,7 @@
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
-| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 13 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 fixture timeout / CI 分片回归和 Windows Rules CLI-only 构建依赖回归 |
+| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 13 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 timeout 回归，以及 TLS readiness probe 域名兼容回归 |
 | [rule-operators-audit-fix.md](./rule-operators-audit-fix.md) | 规则操作符审计修复 | 6 | forwardedFor/responseFor applier 实现、pac 未实现标记、test_rules.sh fake-pass 清理回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 7 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证 |
@@ -127,8 +127,8 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 4 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，避免 buildx/buildkit 或 HTTP apt mirror 导致失败，并由远端 CI 验证 |
-| [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 24 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片在 CI 预算内完成、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、CLI offline Broken pipe 回归、失败日志 dump pipefail guard 回归、unsafe_ssl 自带 HTTPS mock fixture 回归、并行 shell 调度器与顶层 final status 全 PASS 后返回 0 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、Agent/IM human-api 并行端口隔离回归、remote relay fallback 预构建 binary 复用回归、Linux/macOS shell E2E timeout 预算回归、main push CI concurrency 取消旧 run 回归、Linux/macOS shell shard 内部并发预算回归 |
+| [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 7 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，补充 PR path filter 最小触发回归、merge main 后 Windows rules timeout 配置不退化验证，以及 Windows ARM Rules E2E 下线回归，并由远端 CI 验证 |
+| [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 22 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片耗时 <5min、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、CLI offline Broken pipe 回归、失败日志 dump pipefail guard 回归、unsafe_ssl 自带 HTTPS mock fixture 回归、并行 shell 调度器全 PASS 后返回 0 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、Agent/IM human-api 并行端口隔离回归、remote relay fallback 预构建 binary 复用回归、Linux/macOS shell E2E timeout 预算回归、main push CI concurrency 取消旧 run 回归 |
 | [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 4 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E |
 | [skill-loading-e2e.md](./skill-loading-e2e.md) | Skill Loading E2E 一致性 | 11 | 4 scope 加载可见性、优先级覆盖、启用/停用一致性（管理端→消费端）、prompt 渐进式披露（metadata 注入、body 按需读取）、slash 命令解析、default_roots 路径对齐、隐藏目录过滤、嵌套发现、单元测试回归 |
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
@@ -137,6 +137,7 @@
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
+| [e2e-runner-windows-stack.md](./e2e-runner-windows-stack.md) | E2E Runner Windows Stack | 3 | `bifrost-e2e` Windows 主线程大栈入口、单元测试与本地 runner smoke、以及 PR #111 Windows Runner 栈溢出回归 |
 
 ### IM Gateway 测试
 
@@ -147,7 +148,7 @@
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 13 | SessionQueueManager 单元测试（13项，含 turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
-| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 23 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标、默认 250k context window、工具结果追加后 context 估算刷新、自动压缩判断不被旧响应 token 遮蔽、emergency compaction 统计事件完备 |
+| [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 20 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标和默认 250k context window |
 | [agent-builtin-tools-completeness.md](./agent-builtin-tools-completeness.md) | Agent Codex 内置工具完备性 | 10 | `exec_command` 短命令、交互任务 session + `write_stdin`、`view_image` data URL、`request_user_input` 不可交互边界、Codex 式 `tool_search` deferred 暴露、workspace all-features 编译回归、真实 Bifrost chat 默认直暴工具调用、本地 CI 静态门禁、MCP `>= 100` 阈值 deferred loading、真实 Bifrost 注册 100 个 MCP tools 后搜索并调用 |
 | [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 6 | `/goal` 显式入口、Goal 生命周期、Codex 风格 `apply_patch`、raw patch body 兼容、PTY 会话复用与交互输入、交互式 shell prompt 前缀下 exit_code 解析、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
@@ -165,7 +166,7 @@
 
 ---
 
-**总计：87 个测试文件，1562 个测试用例**
+**总计：88 个测试文件，1562 个测试用例**
 
 ## 工作流程
 
