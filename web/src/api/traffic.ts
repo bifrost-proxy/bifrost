@@ -66,6 +66,60 @@ export async function getResponseBody(id: string): Promise<string | null> {
   return response.data || null;
 }
 
+export interface TrafficBodyContent {
+  data: string | null;
+  data_base64?: string | null;
+  encoding?: 'text' | 'base64';
+  size?: number;
+}
+
+interface BodyContentOptions {
+  raw?: boolean;
+  encoding?: 'text' | 'base64';
+}
+
+const buildBodyQuery = (options?: BodyContentOptions): string => {
+  const params = new URLSearchParams();
+  if (options?.raw) {
+    params.set('raw', '1');
+  }
+  if (options?.encoding) {
+    params.set('encoding', options.encoding);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : '';
+};
+
+export async function getRequestBodyContent(
+  id: string,
+  options?: BodyContentOptions,
+): Promise<TrafficBodyContent | null> {
+  const response = await get<ApiResponse<string> & TrafficBodyContent>(
+    `/traffic/${encodeURIComponent(id)}/request-body${buildBodyQuery(options)}`
+  );
+  return {
+    data: response.data ?? null,
+    data_base64: response.data_base64 ?? null,
+    encoding: response.encoding,
+    size: response.size,
+  };
+}
+
+export async function getResponseBodyContent(
+  id: string,
+  options?: BodyContentOptions,
+): Promise<TrafficBodyContent | null> {
+  const response = await get<ApiResponse<string> & TrafficBodyContent>(
+    `/traffic/${encodeURIComponent(id)}/response-body${buildBodyQuery(options)}`
+  );
+  return {
+    data: response.data ?? null,
+    data_base64: response.data_base64 ?? null,
+    encoding: response.encoding,
+    size: response.size,
+  };
+}
+
 export function getResponseBodyContentUrl(id: string, raw = true): string {
   const params = new URLSearchParams();
   if (raw) {

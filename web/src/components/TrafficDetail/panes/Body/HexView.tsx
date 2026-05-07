@@ -4,35 +4,16 @@ import type { SessionTargetSearchState } from '../../../../types';
 import { useTextSelection } from '../../hooks/useTextSelection';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
 import { DEFAULT_SHOW_MAX_SIZE } from '../../helper/contentType';
+import { bytesFromBase64, toHexView, toHexViewFromBytes } from './hex';
 
 interface HexViewProps {
   data?: string | null;
+  dataBase64?: string | null;
   searchValue: SessionTargetSearchState;
   onSearch: (v: Partial<SessionTargetSearchState>) => void;
 }
 
-const toHexView = (text: string): string => {
-  const encoder = new TextEncoder();
-  const buffer = encoder.encode(text);
-  const lines: string[] = [];
-
-  for (let i = 0; i < buffer.length; i += 16) {
-    const slice = buffer.slice(i, i + 16);
-    const hex = Array.from(slice)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join(' ');
-    const ascii = Array.from(slice)
-      .map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.'))
-      .join('');
-    lines.push(
-      `${i.toString(16).padStart(8, '0')}  ${hex.padEnd(48)}  ${ascii}`
-    );
-  }
-
-  return lines.join('\n');
-};
-
-export const HexView = ({ data, searchValue, onSearch }: HexViewProps) => {
+export const HexView = ({ data, dataBase64, searchValue, onSearch }: HexViewProps) => {
   const { token } = theme.useToken();
   const [showAll, setShowAll] = useState(false);
   const wrapperRef = useTextSelection(!!data);
@@ -46,12 +27,31 @@ export const HexView = ({ data, searchValue, onSearch }: HexViewProps) => {
     return data;
   }, [data, showAll]);
 
+  const decodedBytes = useMemo(() => {
+    if (!dataBase64) return null;
+    try {
+      return bytesFromBase64(dataBase64);
+    } catch {
+      return null;
+    }
+  }, [dataBase64]);
+
+  const truncatedBytes = useMemo(() => {
+    if (!decodedBytes) return null;
+    if (!showAll && decodedBytes.length > DEFAULT_SHOW_MAX_SIZE) {
+      return decodedBytes.slice(0, DEFAULT_SHOW_MAX_SIZE);
+    }
+    return decodedBytes;
+  }, [decodedBytes, showAll]);
+
   const hexData = useMemo(() => {
+    if (truncatedBytes) return toHexViewFromBytes(truncatedBytes);
     if (!truncatedData) return '';
     return toHexView(truncatedData);
-  }, [truncatedData]);
+  }, [truncatedBytes, truncatedData]);
 
-  const shouldShowMore = !showAll && (data?.length ?? 0) > DEFAULT_SHOW_MAX_SIZE;
+  const totalSize = decodedBytes?.length ?? data?.length ?? 0;
+  const shouldShowMore = !showAll && totalSize > DEFAULT_SHOW_MAX_SIZE;
 
   const { startMarkSearch } = useMarkSearch(
     searchValue,
@@ -70,7 +70,7 @@ export const HexView = ({ data, searchValue, onSearch }: HexViewProps) => {
     startMarkSearch();
   }, [hexData, searchValue.value, startMarkSearch]);
 
-  if (!data) {
+  if (!data && !dataBase64) {
     return null;
   }
 
@@ -101,7 +101,7 @@ export const HexView = ({ data, searchValue, onSearch }: HexViewProps) => {
             background: token.colorBgContainer,
           }}
         >
-          Show All ({Math.round((data.length - DEFAULT_SHOW_MAX_SIZE) / 1024)}KB more)
+          Show All ({Math.round((totalSize - DEFAULT_SHOW_MAX_SIZE) / 1024)}KB more)
         </Button>
       )}
     </div>

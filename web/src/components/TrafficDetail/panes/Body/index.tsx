@@ -1,4 +1,4 @@
-import { Typography, theme } from 'antd';
+import { Segmented, Typography, theme } from 'antd';
 import type { CSSProperties } from 'react';
 import type {
   RecordContentType,
@@ -32,6 +32,10 @@ const styles: Record<string, CSSProperties> = {
 
 interface BodyProps {
   data?: string | null;
+  rawData?: string | null;
+  rawDataBase64?: string | null;
+  source?: 'decoded' | 'raw';
+  onSourceChange?: (source: 'decoded' | 'raw') => void;
   contentType: RecordContentType;
   rawContentType?: string | null;
   mediaSrc?: string | null;
@@ -42,6 +46,10 @@ interface BodyProps {
 
 export const Body = ({
   data,
+  rawData,
+  rawDataBase64,
+  source = 'decoded',
+  onSourceChange,
   contentType,
   rawContentType,
   mediaSrc,
@@ -52,7 +60,23 @@ export const Body = ({
   const { token } = theme.useToken();
   const normalizedRawContentType = rawContentType?.toLowerCase() ?? '';
   const isImageMedia = contentType === 'Media' && normalizedRawContentType.includes('image/');
-  const disableJsonStructuredView = shouldDisableJsonStructuredView(contentType, data);
+  const hasRawData = Boolean(rawData || rawDataBase64);
+  const displayData = source === 'raw' && hasRawData ? (rawData ?? '') : data;
+  const displayDataBase64 = source === 'raw' ? rawDataBase64 : null;
+  const disableJsonStructuredView = shouldDisableJsonStructuredView(contentType, displayData);
+  const sourceSwitch = hasRawData && onSourceChange ? (
+    <div style={{ padding: '6px 8px 0 8px' }}>
+      <Segmented
+        size="small"
+        value={source}
+        onChange={(value) => onSourceChange(value as 'decoded' | 'raw')}
+        options={[
+          { label: 'Decoded', value: 'decoded' },
+          { label: 'Raw', value: 'raw' },
+        ]}
+      />
+    </div>
+  ) : null;
 
   if (displayFormat === DF.Media) {
     if (contentType === 'Media') {
@@ -90,29 +114,50 @@ export const Body = ({
     );
   }
 
-  if (!data) {
+  if (!displayData && !displayDataBase64) {
     return (
-      <Text type="secondary" style={{ padding: 8, display: 'block' }}>
-        No body content
-      </Text>
+      <>
+        {sourceSwitch}
+        <Text type="secondary" style={{ padding: 8, display: 'block' }}>
+          No body content
+        </Text>
+      </>
     );
   }
 
   if (displayFormat === DF.Hex) {
-    return <HexView data={data} searchValue={searchValue} onSearch={onSearch} />;
+    return (
+      <>
+        {sourceSwitch}
+        <HexView
+          data={displayData}
+          dataBase64={displayDataBase64}
+          searchValue={searchValue}
+          onSearch={onSearch}
+        />
+      </>
+    );
   }
 
   if (displayFormat === DF.Tree && !disableJsonStructuredView) {
-    return <TreeView data={data} searchValue={searchValue} onSearch={onSearch} />;
+    return (
+      <>
+        {sourceSwitch}
+        <TreeView data={displayData} searchValue={searchValue} onSearch={onSearch} />
+      </>
+    );
   }
 
   return (
-    <HighLightBody
-      data={data}
-      contentType={contentType}
-      searchValue={searchValue}
-      onSearch={onSearch}
-    />
+    <>
+      {sourceSwitch}
+      <HighLightBody
+        data={displayData}
+        contentType={contentType}
+        searchValue={searchValue}
+        onSearch={onSearch}
+      />
+    </>
   );
 };
 
