@@ -610,7 +610,7 @@ start_proxy() {
         fi
         if [[ "$port_ready" == "true" ]] && curl -s --proxy "$PROXY" --noproxy "" --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${ECHO_HTTP_PORT}/health" 2>/dev/null | grep -q '^[23]'; then
             if [[ "${ENABLE_INTERCEPT:-true}" == "true" ]]; then
-                local tls_timeout="${BIFROST_E2E_TLS_READY_TIMEOUT:-30}"
+                local tls_timeout="${BIFROST_E2E_TLS_READY_TIMEOUT:-${BIFROST_E2E_FIXTURE_TIMEOUT:-30}}"
                 if ! wait_for_tls_intercept_ready "$tls_timeout" 0.2; then
                     echo -e "${RED}✗${NC} TLS 拦截在 ${tls_timeout}s 内未就绪（可能仍在生成 CA 或初始化失败），为避免 HTTPS 用例出现 http_code=000，终止本套件。"
                     echo -e "${RED}✗${NC} 请检查: ${TEST_DATA_DIR}/logs"

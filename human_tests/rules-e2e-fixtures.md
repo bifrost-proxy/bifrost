@@ -148,16 +148,17 @@
 **操作步骤**：
 1. 检查 Windows rules job timeout：
    ```bash
-   rg -n 'e2e-windows-rules|timeout-minutes: 90|BIFROST_E2E_SUITE_TIMEOUT: "4800"|BIFROST_E2E_RETRY_BUDGET_SECS: "180"' .github/workflows/ci.yml
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; raise "expected one windows rules entry" unless include.size == 1; raise "expected x86_64 windows rules" unless include[0]["target"] == "x86_64-pc-windows-msvc"; raise "expected 30 minute job timeout" unless job["timeout-minutes"] == 30; raise "expected 1200 second suite timeout" unless include[0]["suite_timeout"] == "1200"; raise "expected 180 second retry budget" unless job["env"]["BIFROST_E2E_RETRY_BUDGET_SECS"] == "180"; puts "windows rules timeout budget ok"'
    ```
 2. 在 GitHub Actions Windows rules job 中触发 rules E2E。
-3. 若 Windows x86 rules 进入共享 mock outage 后的全量串行重试路径，观察 job 不应在约 50 分钟处被 suite watchdog 或 GitHub job timeout 截断。
+3. 若 Windows x86 rules 进入共享 mock outage 后的失败路径，观察 suite watchdog 应在 1200 秒内终止并上传日志，而不是拖到慢平台长尾。
 
 **预期结果**：
-- Windows rules job 的 `timeout-minutes` 为 `90`，只影响 `e2e-windows-rules` 矩阵。
-- Windows rules job 的 `BIFROST_E2E_SUITE_TIMEOUT` 为 `4800` 秒，大于共享 mock outage 全量重试路径的最长预期耗时。
+- Windows rules job 的 `timeout-minutes` 为 `30`，只影响 `e2e-windows-rules` 矩阵。
+- Windows rules job 的 `BIFROST_E2E_SUITE_TIMEOUT` 为 `1200` 秒，满足 Windows x86 正常全量 rules 运行，同时让失败路径符合 20 分钟合入预算。
 - `BIFROST_E2E_RETRY_BUDGET_SECS` 仍保持 `180`，普通失败不会因为 job timeout 提升而被无限重试。
-- Windows x86 和 aarch64 rules job 都应完成为 success；若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact。
+- Windows rules 只保留 x86_64 全量 fixture；Windows ARM 不再跑完整 rules shards，避免串行慢失败阻塞主干合入。
+- 若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact。
 
 ### TC-REF-07：bifrost-e2e admin 测试目录重复端口重跑隔离
 
@@ -339,6 +340,62 @@
 - rules 全量回归输出 `65 通过 / 0 失败`，总断言失败数为 `0`。
 - 测试使用临时数据目录和非 9900 动态端口，代理启动仍包含 `--no-system-proxy`。
 
+### TC-REF-12：Windows Rules CI 20 分钟预算收敛回归
+
+**操作步骤**：
+1. 执行 `test_rules.sh` 语法检查：
+   ```bash
+   bash -n e2e-tests/test_rules.sh
+   ```
+2. 执行 rules 并行 runner 语法检查：
+   ```bash
+   bash -n e2e-tests/run_all_tests_parallel.sh
+   ```
+3. 检查 TLS readiness timeout 默认值：
+   ```bash
+   rg -n 'BIFROST_E2E_TLS_READY_TIMEOUT:-\$\{BIFROST_E2E_FIXTURE_TIMEOUT:-30\}' e2e-tests/test_rules.sh
+   ```
+4. 检查 GitHub Actions Windows rules CI 预算与矩阵范围：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; raise "windows rules should keep one x86_64 matrix entry" unless include.size == 1 && include[0]["target"] == "x86_64-pc-windows-msvc"; raise "windows rules timeout should be 30 min" unless job["timeout-minutes"] == 30; raise "suite timeout should be 1200s" unless include[0]["suite_timeout"] == "1200"; puts "windows rules matrix budget ok"'
+   ```
+5. 检查 rules runner 支持 CI 分片环境变量：
+   ```bash
+   rg -n 'BIFROST_E2E_RULE_SHARD_INDEX|BIFROST_E2E_RULE_SHARD_TOTAL|--shard N/M|sharded_test_files' e2e-tests/run_all_tests_parallel.sh
+   ```
+6. 推送后检查 GitHub Actions `CI` run：只应出现 `E2E Rules (x86_64-pc-windows-msvc, shard 1/1)`，不再出现 Windows ARM rules shards；Windows ARM 仍应出现 `Build Windows CLI (aarch64-pc-windows-msvc)`、`E2E Runner (aarch64-pc-windows-msvc)` 与 `Build Windows (aarch64-pc-windows-msvc)`。
+
+**预期结果**：
+- `test_rules.sh` 语法检查通过。
+- `run_all_tests_parallel.sh` 语法检查通过。
+- 未显式设置 `BIFROST_E2E_TLS_READY_TIMEOUT` 时，TLS 拦截就绪等待继承 `BIFROST_E2E_FIXTURE_TIMEOUT`。
+- Windows rules job 只保留 x86_64 全量 rules fixture，`BIFROST_E2E_SUITE_TIMEOUT=1200`，job 总 timeout 为 30 分钟，避免 Windows ARM 串行慢失败路径超过合入预算。
+- Windows ARM rules shards 不再作为合入门禁；ARM 平台二进制可用性由 CLI build、runner E2E 和 desktop sidecar/check 继续覆盖。
+- 若后续重新启用 Windows ARM rules，必须先解决 90 秒请求超时重试导致的串行长尾，并保持完整 rules job 在 20 分钟内完成。
+
+### TC-REF-13：Windows rules CI 只依赖 CLI 构建产物
+
+**操作步骤**：
+1. 静态解析 GitHub Actions workflow，确认 Windows rules job 只依赖 CLI 构建 job：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); jobs = workflow["jobs"]; raise "missing build-cli-windows" unless jobs.key?("build-cli-windows"); raise "rules should depend only on build-cli-windows" unless jobs["e2e-windows-rules"]["needs"] == ["build-cli-windows"]; raise "desktop should depend on build-cli-windows" unless jobs["build-desktop-windows"]["needs"] == ["build-cli-windows"]; puts "windows rules cli dependency ok"'
+   ```
+2. 检查 CLI artifact 的上传和 Windows rules job 的下载名称一致：
+   ```bash
+   rg -n 'build-cli-windows|name: bifrost-release-\$\{\{ matrix\.target \}\}|Download release binary' .github/workflows/ci.yml
+   ```
+3. 检查 Windows desktop job 下载同一 CLI artifact 作为 sidecar 输入，但 `e2e-windows-rules` 不再 `needs: [build-desktop-windows]`：
+   ```bash
+   rg -n 'build-desktop-windows|Download CLI binary|needs: \[build-desktop-windows\]|needs: \[build-cli-windows\]' .github/workflows/ci.yml
+   ```
+4. 推送后检查 GitHub Actions `CI` run：`E2E Rules (x86_64-pc-windows-msvc, shard 1/1)` 应在 `Build Windows CLI (x86_64-pc-windows-msvc)` 成功后即可排队/运行，不等待 `Build Windows (...)` 桌面端 job 完成。
+
+**预期结果**：
+- `build-cli-windows` 独立构建并上传 `bifrost-release-${{ matrix.target }}`。
+- `e2e-windows-rules` 的 `needs` 只有 `build-cli-windows`，不再依赖 Windows desktop 构建或 Tauri 检查。
+- `build-desktop-windows` 继续依赖 `build-cli-windows`，并下载同一 CLI artifact 执行 sidecar 准备与桌面端检查。
+- Windows rules E2E 的启动条件与实际依赖一致：只要求 CLI 二进制可用。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -361,3 +418,9 @@
 - 2026-05-03：通过。补充并执行 TC-REF-07；在清理旧 mock server 后，先用同一 base port `18180` 执行 `cargo run -p bifrost-e2e -- --test body_resMerge_add_field --test-timeout 120 --port 18180` 通过，确认早先失败是旧 `ws_echo_server.py 24200` 端口占用；随后执行 `cargo run -p bifrost-e2e -- --test binary_performance_mode_skips_binary_recording --test-timeout 120 --port 18180` 通过，并执行 `cargo run -p bifrost-e2e -- --category body_cache --jobs 1 --test-timeout 120 --port 18180`，5/5 通过。回归确认 `start_with_admin`/`start_with_admin_sync` 启动前清理 `bifrost_e2e_test_*` 数据目录，避免同端口聚合重跑读取旧 traffic.db/body cache。
 - 2026-05-04：通过。补充并执行 TC-REF-08、TC-REF-09、TC-REF-10；执行 `bash -n e2e-tests/test_rules.sh` 通过，执行 `cargo test -p bifrost-proxy utils::url -- --nocapture` 通过，执行 `cargo test -p bifrost-cli test_url_params -- --nocapture` 通过。使用 release 二进制、临时数据目录和非 9900 端口逐个执行 CI 失败清单：`content_inject/html.txt` 8/8、`content_inject/js.txt` 8/8、`content_inject/css.txt` 8/8、`control/enable_disable.txt` 6/6、`advanced/content_type.txt` 8/8、`request_modify/url_params.txt` 12/12、`advanced/speed.txt` 6/6、`template/values.txt` 38/38、`combination/multi_rules.txt` 19/19，全部失败数为 0。确认 tunnel 请求侧规则为功能缺口并已修复；html/js/css、lineProps disabled、speed、部分 URL fixture 断言为测试夹具/预期问题并已修正；`urlParams://key1=value1&key2=value2` 为解析功能缺口并已补齐。
 - 2026-05-04：通过。补充并执行 TC-REF-11；先执行 `bash -n e2e-tests/test_rules.sh` 通过，随后执行 `CARGO_BIN=<cargo 路径> NODE_BIN=<node 路径> PNPM_BIN=<pnpm 路径> BIFROST_UI_TEST_RUNNER_PORT=18083 BIFROST_E2E_REPORT_DIR=.e2e-reports/rules-human-ref11-20260504-222436 BIFROST_E2E_RULE_JOBS=4 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_HTTP_RETRIES=2 bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`。runner 使用动态共享 mock 端口（HTTP 57607、HTTPS 57608、WS 57609、WSS 57610、SSE 57611、Proxy 57612），代理起始端口 19678，未使用 9900；rules 全量回归 65/65 套件通过，573/573 断言通过，失败数 0，确认 CI harness 对 fenced code block 注入、lineProps disabled、urlParams/urlReplace、speed 初始窗口的断言逻辑恢复正确。
+- 2026-05-06：通过。补充并执行 TC-REF-12；执行 `bash -n e2e-tests/test_rules.sh` 通过，执行 `rg -n 'BIFROST_E2E_TLS_READY_TIMEOUT:-\$\{BIFROST_E2E_FIXTURE_TIMEOUT:-30\}' e2e-tests/test_rules.sh` 定位到 TLS readiness 默认继承 fixture timeout。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；Windows ARM rules 完整结果由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-06：通过。补充并执行 TC-REF-12 的 Windows ARM suite timeout 预算验证；执行 `bash -n e2e-tests/test_rules.sh` 通过，执行 `rg -n 'timeout-minutes: 150|suite_timeout: "7200"|BIFROST_E2E_SUITE_TIMEOUT: \$\{\{ matrix\.suite_timeout \}\}' .github/workflows/ci.yml` 确认 Windows rules job 总 timeout 为 150 分钟，x86_64 继续使用 4800 秒 suite timeout，Windows ARM 使用 7200 秒 suite timeout。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整平台结果由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-06：通过。TC-REF-12 三次执行，基于 GitHub Actions `CI` run `25450671540` 的 Windows ARM rules 失败日志确认 ARM job 已使用 `BIFROST_E2E_SUITE_TIMEOUT=7200`，但仍因 `TLS 拦截在 90s 内未就绪` 失败；执行 `rg -n 'tls_ready_timeout: "240"|BIFROST_E2E_TLS_READY_TIMEOUT: \$\{\{ matrix\.tls_ready_timeout \}\}' .github/workflows/ci.yml` 确认 Windows ARM rules job 单独使用 240 秒 TLS readiness timeout。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整平台结果由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-07：通过。TC-REF-12 四次执行，基于 GitHub Actions `CI` run `25458380526` 的 Windows ARM rules 失败日志确认 ARM job 已使用 `BIFROST_E2E_TLS_READY_TIMEOUT=240` 与 `BIFROST_E2E_SUITE_TIMEOUT=7200`，但单个 fixture 仍被 `BIFROST_E2E_FIXTURE_TIMEOUT=90` 提前杀掉，且串行 60 个 suite 会撞 7200 秒 wrapper timeout；执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过，执行 `rg -n 'rule_shard: "4/4"|fixture_timeout: "360"|BIFROST_E2E_RULE_SHARD_INDEX|BIFROST_E2E_RULE_SHARD_TOTAL' .github/workflows/ci.yml e2e-tests/run_all_tests_parallel.sh` 确认 Windows ARM rules 拆为 4 个分片，且 ARM fixture watchdog 提升到 360 秒。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整平台结果由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-07：通过。补充并执行 TC-REF-13；执行 Ruby workflow 静态解析，输出 `windows rules cli dependency ok`，确认 `e2e-windows-rules.needs == ["build-cli-windows"]`，`build-desktop-windows.needs == ["build-cli-windows"]`；执行 `rg -n 'build-cli-windows|name: bifrost-release-\$\{\{ matrix\.target \}\}|Download release binary|Download CLI binary|needs: \[build-desktop-windows\]|needs: \[build-cli-windows\]' .github/workflows/ci.yml`，确认 CLI artifact 上传/下载路径一致，且 Windows rules 不再依赖 desktop 构建。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整平台调度由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-07：通过。更新并执行 TC-REF-06 与 TC-REF-12 的 Windows rules 20 分钟预算收敛验证；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules matrix budget ok` 与 `windows rules timeout budget ok`，确认 `e2e-windows-rules` 只保留 `x86_64-pc-windows-msvc` 一项、job timeout 为 30 分钟、suite timeout 为 1200 秒、retry budget 为 180 秒。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；Windows x86 完整 rules job、Windows ARM CLI build/runner/desktop job 由推送后的 GitHub Actions `CI` run 验证。

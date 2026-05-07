@@ -32,7 +32,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -192,7 +192,7 @@ jobs:
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
       BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
@@ -588,7 +588,7 @@ jobs:
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "16"
+      BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
       BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
@@ -820,8 +820,52 @@ jobs:
           path: dist/bifrost-desktop-${{ matrix.target }}.dmg
           if-no-files-found: error
 
+  build-cli-windows:
+    name: Build Windows CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            web/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-build-${{ matrix.target }}
+          save-if: always()
+      - name: Build CLI
+        run: cargo build -p bifrost-cli --release --target ${{ matrix.target }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bifrost.exe
+          retention-days: 1
+
   build-desktop-windows:
     name: Build Windows (${{ matrix.target }})
+    needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -854,45 +898,49 @@ jobs:
         with:
           key: desktop-windows-${{ matrix.target }}
           save-if: always()
-      - name: Build workspace
-        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Download CLI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release
       - name: Build desktop frontend
         run: pnpm --dir web run build:desktop
       - name: Prepare desktop sidecar
         run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
       - name: Check desktop client
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
-      - name: Upload release binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: bifrost-release-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/bifrost.exe
-          retention-days: 1
 
   e2e-windows-rules:
-    name: E2E Rules (${{ matrix.target }})
-    needs: [build-desktop-windows]
+    name: E2E Rules (${{ matrix.target }}, shard ${{ matrix.rule_shard }})
+    needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
+            rule_shard: "1/1"
+            rule_shard_index: "1"
+            rule_shard_total: "1"
+            suite_timeout: "1200"
+            fixture_timeout: "90"
+            tls_ready_timeout: "90"
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_RULE_JOBS: "2"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
-      BIFROST_E2E_FIXTURE_TIMEOUT: "90"
+      BIFROST_E2E_RULE_SHARD_INDEX: ${{ matrix.rule_shard_index }}
+      BIFROST_E2E_RULE_SHARD_TOTAL: ${{ matrix.rule_shard_total }}
+      BIFROST_E2E_FIXTURE_TIMEOUT: ${{ matrix.fixture_timeout }}
+      BIFROST_E2E_TLS_READY_TIMEOUT: ${{ matrix.tls_ready_timeout }}
       BIFROST_E2E_RETRY_FIXTURE_TIMEOUT: "60"
       BIFROST_E2E_RETRY_BUDGET_SECS: "180"
       BIFROST_E2E_MAX_RETRY_SUITES: "6"
-      BIFROST_E2E_SUITE_TIMEOUT: "4800"
+      BIFROST_E2E_SUITE_TIMEOUT: ${{ matrix.suite_timeout }}
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
@@ -964,12 +1012,14 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            runner_jobs: "8"
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            runner_jobs: "2"
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_RUNNER_JOBS: "8"
+      BIFROST_E2E_RUNNER_JOBS: ${{ matrix.runner_jobs }}
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"

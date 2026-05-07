@@ -67,6 +67,7 @@ usage() {
     echo "  -c, --category CAT 只运行指定分类的测试"
     echo "  --no-build         跳过编译步骤"
     echo "  --base-port PORT   起始端口号 (默认: 自动分配)"
+    echo "  --shard N/M        只运行第 N 个分片 (1-indexed)"
     echo "  -v, --verbose      详细输出"
     echo ""
     echo "示例:"
@@ -851,6 +852,8 @@ SKIP_BUILD="false"
 VERBOSE="false"
 BASE_PORT=0
 RETRY_FAILED_ONCE="false"
+SHARD_INDEX="${BIFROST_E2E_RULE_SHARD_INDEX:-0}"
+SHARD_TOTAL="${BIFROST_E2E_RULE_SHARD_TOTAL:-0}"
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -872,6 +875,15 @@ parse_args() {
                 ;;
             --base-port)
                 BASE_PORT="$2"
+                shift 2
+                ;;
+            --shard)
+                if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
+                    echo -e "${RED}✗${NC} --shard 需要 N/M 格式，例如 1/4" >&2
+                    exit 1
+                fi
+                SHARD_INDEX="${2%%/*}"
+                SHARD_TOTAL="${2##*/}"
                 shift 2
                 ;;
             --retry-failed-once)
@@ -899,6 +911,10 @@ main() {
     if [[ -z "${JOBS:-}" || "$JOBS" -lt 1 ]]; then
         JOBS=1
     fi
+    if [[ "$SHARD_TOTAL" -lt 0 || "$SHARD_INDEX" -lt 0 || ( "$SHARD_TOTAL" -eq 0 && "$SHARD_INDEX" -ne 0 ) || ( "$SHARD_TOTAL" -gt 0 && ( "$SHARD_INDEX" -lt 1 || "$SHARD_INDEX" -gt "$SHARD_TOTAL" ) ) ]]; then
+        echo -e "${RED}✗${NC} 分片参数无效: ${SHARD_INDEX}/${SHARD_TOTAL}" >&2
+        exit 1
+    fi
     local jobs_cap="${BIFROST_E2E_RULE_JOBS_CAP:-16}"
     if [[ -n "${jobs_cap:-}" && "$jobs_cap" -gt 0 && "$JOBS" -gt "$jobs_cap" ]]; then
         warn "并行度过高 (jobs=$JOBS)，为稳定性自动降级到 ${jobs_cap}。可通过 BIFROST_E2E_RULE_JOBS_CAP 或 --jobs 调整。"
@@ -917,6 +933,9 @@ main() {
     fi
     if [[ "$RETRY_FAILED_ONCE" == "true" ]]; then
         echo "失败重试: 开启（串行重试一次）"
+    fi
+    if [[ "$SHARD_TOTAL" -gt 0 ]]; then
+        echo "测试分片: ${SHARD_INDEX}/${SHARD_TOTAL}"
     fi
     echo ""
 
@@ -975,6 +994,18 @@ main() {
     while IFS= read -r file; do
         [[ -n "$file" ]] && test_files+=("$file")
     done < <(collect_test_files "$CATEGORY")
+
+    if [[ "$SHARD_TOTAL" -gt 0 ]]; then
+        local sharded_test_files=()
+        local shard_i=0
+        for file in "${test_files[@]}"; do
+            if [[ $(( (shard_i % SHARD_TOTAL) + 1 )) -eq "$SHARD_INDEX" ]]; then
+                sharded_test_files+=("$file")
+            fi
+            shard_i=$((shard_i + 1))
+        done
+        test_files=("${sharded_test_files[@]}")
+    fi
 
     local total_suites=${#test_files[@]}
 

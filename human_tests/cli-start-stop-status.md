@@ -560,17 +560,19 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 **前置条件**：服务未运行，端口 `18930` 未被 TCP 占用。
 
 **操作步骤**：
-1. 使用临时数据目录并先占用同端口 UDP：
+1. 使用临时数据目录并先占用同端口 TCP：
    ```bash
    TEST_DATA_DIR="$(mktemp -d)"
    python3 - <<'PY' &
 import socket, time
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("0.0.0.0", 18930))
+sock.listen(1)
 while True:
     time.sleep(1)
 PY
-   UDP_PID=$!
+   TCP_PID=$!
    ```
 2. 启动前台服务：
    ```bash
@@ -582,15 +584,18 @@ PY
    ```bash
    curl -fsS http://127.0.0.1:18930/_bifrost/api/proxy/address
    ```
-5. 清理 UDP 占用和临时目录。
+5. 清理 TCP 占用和临时目录。
 
 **预期结果**：
 - 前台 Bifrost 进程在 listener task 失败后自动退出，不会继续假运行。
-- `foreground.log` 包含同端口 UDP bind 失败相关错误，例如 `Address already in use`。
+- `foreground.log` 包含同端口 TCP listener bind 失败相关错误，例如 `another process is already listening on this port`，或 Linux CI 非交互 auto-resolve 路径中的 `already in use`。
 - Admin API 请求失败，端口不会呈现半启动状态。
 
 **执行记录**：
 - 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，先占用同端口 UDP 后启动前台服务；断言前台进程退出、Admin API 不可达、日志包含 `Address already in use`，全部通过。
+- 2026-05-07 因统一代理增加 UDP relay ephemeral fallback，改为占用同端口 TCP 来覆盖主 listener bind 失败。执行 `PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、非 9900 端口；断言前台进程退出、Admin API 不可达、日志包含 `another process is already listening on this port`，通过。
+- 2026-05-07 CI run `25471477201` 的 Linux shard 3 显示本用例在前台退出断言后卡住：Admin API 不可达探针请求命中仍占用端口的 TCP holder，但 curl 未设置超时。修复后 `admin_unreachable` 使用 `--connect-timeout 1 --max-time 2`，确保 TCP holder 场景下快速返回不可达而不是等到 suite timeout。随后执行 `SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本汇总 `Total: 8 / Passed: 8 / Failed: 0`。
+- 2026-05-07 CI run `25474240006` 的 Linux shard 3 显示同一前台 listener 失败会输出非交互端口冲突提示 `Port 0.0.0.0:<port> is already in use`，而 macOS 本地仍输出旧的 `another process is already listening on this port`。本次将断言调整为同时接受这两种平台相关文案，继续验证前台进程退出、Admin API 不可达、日志确认为端口占用。随后执行 `SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本汇总 `Total: 8 / Passed: 8 / Failed: 0`。
 
 ---
 
@@ -599,17 +604,19 @@ PY
 **前置条件**：服务未运行，端口 `18930` 未被 TCP 占用。
 
 **操作步骤**：
-1. 使用临时数据目录并先占用同端口 UDP：
+1. 使用临时数据目录并先占用同端口 TCP：
    ```bash
    TEST_DATA_DIR="$(mktemp -d)"
    python3 - <<'PY' &
 import socket, time
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("0.0.0.0", 18930))
+sock.listen(1)
 while True:
     time.sleep(1)
 PY
-   UDP_PID=$!
+   TCP_PID=$!
    ```
 2. 启动 daemon：
    ```bash
@@ -620,16 +627,19 @@ PY
    ```bash
    curl -fsS http://127.0.0.1:18930/_bifrost/api/proxy/address
    ```
-5. 清理 UDP 占用和临时目录。
+5. 清理 TCP 占用和临时目录。
 
 **预期结果**：
 - daemon 启动命令返回非零退出码。
-- 输出包含 listener readiness 失败提示，例如 `before the proxy listener became ready`。
+- 输出包含 listener readiness 失败提示，例如 `before the proxy listener became ready`，或 Linux CI 非交互 auto-resolve 路径中的 `already in use`。
 - 输出不包含 `Daemon started with PID`。
 - Admin API 请求失败，不会出现父进程提前报告 daemon 已启动但端口未监听的状态。
 
 **执行记录**：
 - 2026-05-04 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR`、端口 `18930`、`--no-system-proxy`，占用同端口 UDP 后执行 daemon 启动；断言命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，全部通过。脚本汇总 `8/8` 断言通过。
+- 2026-05-07 因统一代理增加 UDP relay ephemeral fallback，改为占用同端口 TCP 来覆盖主 listener readiness 失败。执行 `PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、非 9900 端口；断言 daemon 命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，脚本汇总通过。
+- 2026-05-07 同步覆盖 TCP holder 下的 Admin API 不可达探针超时保护；daemon 分支复用 `admin_unreachable`，因此同样要求探针在 2 秒内返回失败而不是挂起。`SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 已验证 daemon 分支通过。
+- 2026-05-07 CI run `25475008050` 的 Linux shard 3 显示 daemon 分支也会在非交互 auto-resolve 路径中直接输出 `Port 0.0.0.0:<port> is already in use`，而不是 readiness 等待文案。本次将 daemon 错误断言调整为同时接受 readiness 失败与端口占用提示，仍保留非零退出、无 `Daemon started with PID`、Admin API 不可达三个核心断言。随后执行 `SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本汇总 `Total: 8 / Passed: 8 / Failed: 0`。
 
 ---
 

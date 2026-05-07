@@ -57,13 +57,13 @@
 - 只运行分片 1 的测试
 - 所有测试通过
 
-### TC-CS-06: 单分片执行耗时 < 5 分钟
+### TC-CS-06: 单分片执行在 CI 预算内完成
 
 **操作步骤**：
-1. 运行 `time BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 bash scripts/ci/run-e2e-shell.sh`
+1. 运行 `time BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=4 bash scripts/ci/run-e2e-shell.sh`
 
 **预期结果**：
-- 总耗时 < 5 分钟（wall clock）
+- 总耗时在 GitHub Actions 60 分钟 job timeout 内完成
 - 所有测试通过（已知环境问题除外）
 
 ### TC-CS-07: test_tls_logic_simple.sh 在 CI 模式下被跳过
@@ -108,7 +108,7 @@
    } > "$TMP_LOG"
    bash scripts/run_all_e2e.sh --extract-failure-reason "$TMP_LOG"
    ```
-3. 运行 `BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh`。
+3. 运行 `BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh`。
 
 **预期结果**：
 - 第 1 步输出为 `8`，覆盖 Linux/macOS/Windows rules、shell、runner E2E 日志上传步骤。
@@ -167,7 +167,7 @@
    ```
 3. 执行一次 CI shell shard 3 回归：
    ```bash
-   BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh
+   BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh
    ```
 
 **预期结果**：
@@ -412,6 +412,61 @@
 - 第 4 步输出 `starting bifrost on 18121`、`configuring agent mock provider`、`[agent-builtin-status-runtime] PASS`，运行中 `/status` 指标仍通过。
 - 两个真实链路均使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
 
+### TC-CS-22: main push CI concurrency 取消旧 run 回归
+
+**操作步骤**：
+1. 静态检查 GitHub Actions workflow 顶层 concurrency：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); raise "group mismatch" unless workflow["concurrency"]["group"] == "${{ github.workflow }}-${{ github.ref }}"; raise "cancel-in-progress mismatch" unless workflow["concurrency"]["cancel-in-progress"] == true; puts "ci concurrency cancels stale runs"'
+   ```
+2. 连续向 `main` 推送修复 commit 后，检查 GitHub Actions `CI` run 列表。
+
+**预期结果**：
+- 第 1 步输出 `ci concurrency cancels stale runs`。
+- 新 push 到 `main` 时，同一 `CI-refs/heads/main` concurrency group 下旧的 pending/in-progress run 被取消，最新 commit 的 run 获得执行权。
+- 该回归只读取 workflow YAML；不启动 Bifrost，不使用 9900，不修改系统代理。
+
+### TC-CS-23: Linux/macOS shell shard 内部并发预算回归
+
+**操作步骤**：
+1. 静态检查 GitHub Actions 中 Linux 与 macOS shell shard 的内部并发：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); %w[e2e-shell e2e-macos-shell].each { |name| jobs = workflow["jobs"][name]["env"]["BIFROST_E2E_SHELL_JOBS"]; raise "#{name} jobs mismatch: #{jobs.inspect}" unless jobs == "4" }; puts "shell shard jobs budget ok"'
+   ```
+2. 推送后检查 GitHub Actions `CI` run 中 `E2E Shell (Linux, shard 2/3)` 与 macOS shell shards。
+
+**预期结果**：
+- 第 1 步输出 `shell shard jobs budget ok`。
+- Linux 与 macOS shell shard 仍按 3 shard 横向执行，但每个 shard 内部只并发 4 个 shell suite，避免 hosted runner 在 8 路或 16 路内部并发下将多个 Bifrost 子进程 OOM kill。
+- 该静态回归只读取 workflow YAML；不启动 Bifrost，不使用 9900，不修改系统代理。
+
+### TC-CS-24: 顶层 shell E2E 全 PASS 退出码回归
+
+**操作步骤**：
+1. 检查 `scripts/run_all_e2e.sh` 的 final status 检查在失败 suite 才 `exit 1`，并在无失败 suite 时显式 `exit 0`：
+   ```bash
+   tail -n 16 scripts/run_all_e2e.sh
+   ```
+2. 运行脚本语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh
+   ```
+3. 使用 shell E2E 入口执行一个最小 shard，验证只有通过用例时外层退出码为 0：
+   ```bash
+   BIFROST_UI_TEST_RUNNER_PORT=18080 \
+     BIFROST_E2E_SHARD_INDEX=3 \
+     BIFROST_E2E_SHARD_TOTAL=999 \
+     BIFROST_E2E_SHELL_JOBS=4 \
+     TIMEOUT=90 \
+     bash scripts/ci/run-e2e-shell.sh
+   ```
+
+**预期结果**：
+- 第 1 步能看到 final status 循环之后存在显式 `exit 0`。
+- 第 2 步语法检查通过。
+- 第 3 步至少选中并执行一个 shell 用例，最终报告 `Failed : 0`，外层命令退出码为 0；不再出现所有 suite 日志均 PASS 但 CI step 仍进入 `Dump failed suite logs` 的情况。
+- 该回归使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
+
 ## 本轮执行记录
 
 测试日期：2026-05-05
@@ -430,6 +485,9 @@
 | TC-CS-19 | 通过 | 2026-05-06 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 60`；`rg -n 'e2e-shell:\|e2e-macos-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux/macOS shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-20 | 通过 | 2026-05-05 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'echo "\$[A-Za-z_][A-Za-z0-9_]*" \| grep -[A-Za-z]+' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `system-proxy enable --help` 正确显示且无 Broken pipe；Ruby 静态检查 `.github/workflows/ci.yml` 输出 `dump pipefail guards: 24`，确认 8 个失败日志 dump 步骤均对 `find \| head` 管道做容错。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-21 | 通过 | 2026-05-06 本轮执行：`bash -n e2e-tests/tests/test_agent_builtin_status_runtime.sh e2e-tests/tests/test_im_guide_queue_human_api.sh e2e-tests/tests/test_long_term_memory_human_api.sh e2e-tests/tests/test_update_plan_human_api.sh e2e-tests/tests/test_agent_loop_runtime_limits.sh` 通过；`rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-\|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' ...` 显示 5 个脚本均优先消费并行调度器端口。随后执行 `ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，输出 `starting bifrost on 18111` 与 `[im-guide-queue-human-api] PASS`；执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，输出 `starting bifrost on 18121` 与 `[agent-builtin-status-runtime] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与非 9900 端口，未复现 CI 中 `curl: (52) Empty reply from server` 的端口碰撞症状。 |
+| TC-CS-22 | 通过 | 2026-05-07 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `concurrency.group == "${{ github.workflow }}-${{ github.ref }}"` 且 `cancel-in-progress == true`；该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。旧 run 取消和最新 run 获得执行权由推送后的 GitHub Actions `CI` run 验证。 |
+| TC-CS-23 | 通过 | 2026-05-07 本轮执行：基于 GitHub Actions `CI` run `25469654203` 的 `E2E Shell (Linux, shard 2/3)` artifact，定位到多个 Bifrost 子进程被系统 `Killed`，符合 hosted runner 内存压力症状；随后 run `25470391707` 的 `E2E Shell (Linux, shard 3/3)` artifact 显示所有业务断言通过但仍有 Bifrost 子进程在 cleanup 中被系统 `Killed`，说明 8 路并发仍有资源峰值风险；随后 Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `e2e-shell` 与 `e2e-macos-shell` 的 `BIFROST_E2E_SHELL_JOBS == "4"`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。完整云端结果由推送后的 GitHub Actions `CI` run 验证。 |
+| TC-CS-24 | 通过 | 2026-05-07 本轮执行：`tail -n 16 scripts/run_all_e2e.sh` 显示 final status 循环后存在显式 `exit 0`；`bash -n scripts/run_all_e2e.sh` 通过；随后使用 `BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 执行最小 shard，选中 `test_badge_injection_e2e.sh`，最终报告 `Total suites : 1`、`Passed : 1`、`Failed : 0`，外层退出码 0。该回归使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 
 ## 清理步骤
 

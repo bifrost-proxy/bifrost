@@ -125,8 +125,10 @@ CREATE INDEX idx_frame_metadata_closed_updated
 3. 使用 `RUST_LOG=info` 观察 `bifrost_cli::startup` 日志，确认能看到阶段耗时与总耗时
 4. 使用 daemon 模式执行 `BIFROST_DATA_DIR=./.bifrost-test-<run-id> cargo run --bin bifrost -- -l debug start -p <PORT> --unsafe-ssl --daemon`，确认文件日志中出现 `DEBUG` 级别输出
 5. 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`：
-   - 前台启动时占用同端口 UDP，验证 listener task 失败后主进程退出且 admin API 不可达
-   - daemon 启动时占用同端口 UDP，验证父进程返回非零、不会打印 daemon started
+   - 前台启动时占用同端口 TCP，验证主 listener bind 失败后主进程退出且 admin API 不可达
+   - 前台 listener 失败日志断言接受直接 bind 错误 `another process is already listening on this port` 与 Linux 非交互 auto-resolve 提示 `already in use`
+   - daemon 启动时占用同端口 TCP，验证父进程返回非零、不会打印 daemon started；错误断言接受 readiness 等待失败与 Linux 非交互 auto-resolve 端口冲突提示
+   - Admin API 不可达探针必须使用短 `connect-timeout` / `max-time`，避免请求命中 TCP holder 后在 Linux CI 中挂起到 suite timeout
 6. 真实场景测试：更新并执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-26 / TC-CSS-27
 7. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-07，验证默认 `info` 日志不再反复输出常态连接关闭、进程归因 miss、WebSocket 正常关闭和 SSE ping
 8. 执行与启动链路相关的 E2E / 校验命令，确认无回归

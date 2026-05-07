@@ -76,6 +76,22 @@ fn is_fd_limit_error(_err: &std::io::Error) -> bool {
     false
 }
 
+fn is_udp_relay_fallback_bind_error(err: &BifrostError) -> bool {
+    match err {
+        BifrostError::Io(io_err) => io_err.kind() == std::io::ErrorKind::AddrInUse,
+        BifrostError::Network(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("address already in use")
+                || message.contains("addrinuse")
+                || message.contains("os error 48")
+                || message.contains("os error 98")
+                || message.contains("os error 10013")
+                || message.contains("only one usage of each socket address")
+        }
+        _ => false,
+    }
+}
+
 fn log_connection_serve_error(peer_addr: SocketAddr, err: &hyper::Error) {
     let err_debug = format!("{err:?}");
     let is_noisy_disconnect = is_noisy_connection_close(&err_debug, &err.to_string());
@@ -768,7 +784,21 @@ impl ProxyServer {
             let mut udp_relay = UdpRelay::new(udp_addr)
                 .with_rules(Arc::clone(&self.rules))
                 .with_access_control(Arc::clone(&self.access_control));
-            let udp_relay_started_addr = udp_relay.start().await?;
+            let udp_relay_started_addr = match udp_relay.start().await {
+                Ok(started_addr) => started_addr,
+                Err(error) if is_udp_relay_fallback_bind_error(&error) => {
+                    let fallback_addr = SocketAddr::new(addr.ip(), 0);
+                    warn!(
+                        "UDP relay failed to bind on {}; retrying with an ephemeral port: {}",
+                        udp_addr, error
+                    );
+                    udp_relay = UdpRelay::new(fallback_addr)
+                        .with_rules(Arc::clone(&self.rules))
+                        .with_access_control(Arc::clone(&self.access_control));
+                    udp_relay.start().await?
+                }
+                Err(error) => return Err(error),
+            };
             {
                 let mut relay_addr = self.udp_relay_addr.write().await;
                 *relay_addr = Some(udp_relay_started_addr);
