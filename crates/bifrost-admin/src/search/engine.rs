@@ -909,4 +909,49 @@ mod tests {
             .preview
             .contains("hello world"));
     }
+
+    #[test]
+    fn response_body_search_finds_decoded_bp_body() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+
+        let mut record = TrafficRecord::new(
+            "REQ-search-bp".to_string(),
+            "POST".to_string(),
+            "https://example.com/bp".to_string(),
+        );
+        record.raw_response_body_ref = Some(BodyRef::Inline {
+            data: "\u{0000}\u{0001}binary".to_string(),
+        });
+        record.response_body_ref = Some(BodyRef::Inline {
+            data: serde_json::json!({
+                "decoded": true,
+                "marker": "bp-search-unique-needle"
+            })
+            .to_string(),
+        });
+        db.record(record);
+
+        let engine = SearchEngine::new(db, None);
+        let response = engine.search(&SearchRequest {
+            keyword: "bp-search-unique-needle".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            filters: SearchFilters::default(),
+            cursor: None,
+            limit: Some(20),
+            max_scan: None,
+            max_results: None,
+        });
+
+        assert_eq!(response.total_matched, 1);
+        assert_eq!(response.results[0].record.id, "REQ-search-bp");
+        assert_eq!(response.results[0].matches[0].field, "response_body");
+    }
 }

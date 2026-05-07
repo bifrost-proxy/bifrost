@@ -7,6 +7,7 @@ pub enum ScriptType {
     Request,
     Response,
     Decode,
+    Parser,
 }
 
 impl std::fmt::Display for ScriptType {
@@ -15,6 +16,7 @@ impl std::fmt::Display for ScriptType {
             ScriptType::Request => write!(f, "request"),
             ScriptType::Response => write!(f, "response"),
             ScriptType::Decode => write!(f, "decode"),
+            ScriptType::Parser => write!(f, "parser"),
         }
     }
 }

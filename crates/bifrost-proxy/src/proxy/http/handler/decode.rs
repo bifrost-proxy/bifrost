@@ -144,6 +144,122 @@ pub(super) async fn apply_decode_scripts_for_storage(
             continue;
         }
 
+        if script_name == "bp" {
+            if resolved_rules.bp_scripts.is_empty() {
+                results.push(bifrost_script::ScriptExecutionResult {
+                    script_name: "bp".to_string(),
+                    script_type: ScriptType::Parser,
+                    success: false,
+                    error: Some(
+                        "decode://bp requires at least one bp:// parser script".to_string(),
+                    ),
+                    duration_ms: 0,
+                    logs: vec![],
+                    request_modifications: None,
+                    response_modifications: None,
+                    decode_output: None,
+                });
+                break;
+            }
+
+            for parser_ref in &resolved_rules.bp_scripts {
+                let parser_ref = parser_ref.trim();
+                if parser_ref.is_empty() {
+                    continue;
+                }
+
+                let script_ctx = ScriptContext {
+                    request_id: ctx.id_str().to_string(),
+                    script_name: parser_ref.to_string(),
+                    script_type: ScriptType::Parser,
+                    values: values.clone(),
+                    matched_rules: matched_rules.clone(),
+                };
+
+                let (req_bytes, res_bytes) = if phase.eq_ignore_ascii_case("request") {
+                    (current.as_slice(), &[][..])
+                } else {
+                    (&[][..], current.as_slice())
+                };
+
+                let start = Instant::now();
+                let result = if let Some(ref cfg) = cfg {
+                    mgr.execute_parser_script_with_config(
+                        parser_ref,
+                        phase,
+                        request_data,
+                        req_bytes,
+                        response_data,
+                        res_bytes,
+                        &script_ctx,
+                        cfg,
+                    )
+                    .await
+                } else {
+                    mgr.engine()
+                        .execute_parser_script(
+                            parser_ref,
+                            phase,
+                            request_data,
+                            req_bytes,
+                            response_data,
+                            res_bytes,
+                            &script_ctx,
+                        )
+                        .await
+                };
+
+                match result {
+                    Ok((out, logs)) => {
+                        let success = out.code == "0";
+                        let data_preview = truncate_string(out.data.clone(), 4096);
+                        let msg_preview = truncate_string(out.msg.clone(), 4096);
+                        let err = if success {
+                            None
+                        } else {
+                            Some(format!("bp parser 输出 code != 0: {}", msg_preview))
+                        };
+                        results.push(bifrost_script::ScriptExecutionResult {
+                            script_name: parser_ref.to_string(),
+                            script_type: ScriptType::Parser,
+                            success,
+                            error: err,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            logs: limit_script_logs(logs, 100),
+                            request_modifications: None,
+                            response_modifications: None,
+                            decode_output: Some(bifrost_script::DecodeOutput {
+                                code: out.code,
+                                data: data_preview,
+                                msg: msg_preview,
+                            }),
+                        });
+
+                        if success {
+                            current = out.data.into_bytes();
+                        } else {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        results.push(bifrost_script::ScriptExecutionResult {
+                            script_name: parser_ref.to_string(),
+                            script_type: ScriptType::Parser,
+                            success: false,
+                            error: Some(format!("bp parser 执行失败: {}", e)),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            logs: vec![],
+                            request_modifications: None,
+                            response_modifications: None,
+                            decode_output: None,
+                        });
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
         // 内置解码器（与 WebSocket decode 行为保持一致）：decode://utf8 / decode://default
         if is_builtin_decoder(script_name) {
             let start = Instant::now();

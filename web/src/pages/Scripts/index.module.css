@@ -39,6 +39,14 @@
   align-items: center;
 }
 
+.hiddenImport {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .searchBox {
   display: flex;
   gap: 8px;

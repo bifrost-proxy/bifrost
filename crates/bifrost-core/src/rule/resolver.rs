@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::context::RequestContext;
 use super::template::TemplateEngine;
 use super::types::Rule;
-use super::{MemoryValueStore, ValueStore};
+use super::{MemoryValueStore, ValueSource, ValueStore};
 
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
 
@@ -27,7 +27,15 @@ impl ResolvedRule {
         ctx: &RequestContext,
         values: &HashMap<String, String>,
     ) -> Self {
-        let base_value = if matches!(
+        let base_value = if matches!(rule.protocol, crate::protocol::Protocol::Bp) {
+            match &rule.value_source {
+                ValueSource::ValueRef(var_name) => values
+                    .get(var_name)
+                    .cloned()
+                    .unwrap_or_else(|| rule.value.clone()),
+                _ => rule.value.clone(),
+            }
+        } else if matches!(
             rule.protocol,
             crate::protocol::Protocol::File
                 | crate::protocol::Protocol::RawFile
@@ -309,7 +317,7 @@ impl RulesResolver {
             if !match_result.matched {
                 continue;
             }
-            tracing::info!(
+            tracing::debug!(
                 target: "bifrost_core::rules",
                 pattern = %rule.pattern,
                 protocol = %rule.protocol.to_str(),
@@ -759,6 +767,43 @@ mod tests {
         assert_eq!(
             result.rules[0].resolved_value,
             "X-Custom-Token: secret-12345"
+        );
+    }
+
+    #[test]
+    fn test_bp_remote_url_is_preserved_as_script_reference() {
+        let rule = create_test_rule(
+            "bp.example.com",
+            Protocol::Bp,
+            "http://127.0.0.1:18080/parser.js?sha256=abc",
+        );
+        let resolver = RulesResolver::new(vec![rule]);
+        let ctx = RequestContext::from_url("http://bp.example.com/api");
+
+        let result = resolver.resolve(&ctx);
+
+        assert_eq!(
+            result.rules[0].resolved_value,
+            "http://127.0.0.1:18080/parser.js?sha256=abc"
+        );
+    }
+
+    #[test]
+    fn test_bp_value_ref_expands_profile_without_remote_fetch() {
+        let rule = create_test_rule("bp.example.com", Protocol::Bp, "{order_bp}");
+        let mut values = HashMap::new();
+        values.insert(
+            "order_bp".to_string(),
+            "build_in_bp?psm=foo.bar.order&idlSource=bam".to_string(),
+        );
+        let resolver = RulesResolver::new(vec![rule]).with_values(values);
+        let ctx = RequestContext::from_url("http://bp.example.com/api");
+
+        let result = resolver.resolve(&ctx);
+
+        assert_eq!(
+            result.rules[0].resolved_value,
+            "build_in_bp?psm=foo.bar.order&idlSource=bam"
         );
     }
 

@@ -79,6 +79,7 @@ pub enum Protocol {
     ReqScript,
     ResScript,
     Decode,
+    Bp,
 
     // DNS 解析
     Dns,
@@ -136,6 +137,7 @@ pub const MULTI_MATCH_PROTOCOLS: &[Protocol] = &[
     Protocol::ReqScript,
     Protocol::ResScript,
     Protocol::Decode,
+    Protocol::Bp,
     Protocol::Delete,
     Protocol::Skip,
     Protocol::DevTools,
@@ -311,6 +313,7 @@ impl Protocol {
             "reqScript" => Some(Protocol::ReqScript),
             "resScript" => Some(Protocol::ResScript),
             "decode" => Some(Protocol::Decode),
+            "bp" => Some(Protocol::Bp),
             "reqDelay" => Some(Protocol::ReqDelay),
             "resDelay" => Some(Protocol::ResDelay),
             "headerReplace" => Some(Protocol::HeaderReplace),
@@ -390,6 +393,7 @@ impl Protocol {
             Protocol::ReqScript => "reqScript",
             Protocol::ResScript => "resScript",
             Protocol::Decode => "decode",
+            Protocol::Bp => "bp",
             Protocol::ReqDelay => "reqDelay",
             Protocol::ResDelay => "resDelay",
             Protocol::HeaderReplace => "headerReplace",
@@ -514,7 +518,8 @@ impl Protocol {
             | Protocol::Delete
             | Protocol::HeaderReplace
             | Protocol::UrlReplace
-            | Protocol::Decode => ProtocolCategory::Both,
+            | Protocol::Decode
+            | Protocol::Bp => ProtocolCategory::Both,
         }
     }
 
@@ -553,7 +558,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 73] = [
+pub const ALL_PROTOCOLS: [Protocol; 74] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -583,6 +588,7 @@ pub const ALL_PROTOCOLS: [Protocol; 73] = [
     Protocol::ReqScript,
     Protocol::ResScript,
     Protocol::Decode,
+    Protocol::Bp,
     Protocol::ReqDelay,
     Protocol::ResDelay,
     Protocol::HeaderReplace,
@@ -635,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 73);
+        assert_eq!(ALL_PROTOCOLS.len(), 74);
     }
 
     #[test]
@@ -670,6 +676,7 @@ mod tests {
             "reqScript",
             "resScript",
             "decode",
+            "bp",
             "reqDelay",
             "resDelay",
             "headerReplace",
@@ -721,7 +728,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 73);
+        assert_eq!(protocol_names.len(), 74);
     }
 
     #[test]

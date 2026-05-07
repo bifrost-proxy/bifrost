@@ -20,8 +20,9 @@ fn parse_script_type(s: &str) -> bifrost_core::Result<ScriptType> {
         "request" | "req" => Ok(ScriptType::Request),
         "response" | "res" => Ok(ScriptType::Response),
         "decode" | "dec" => Ok(ScriptType::Decode),
+        "parser" | "bp" => Ok(ScriptType::Parser),
         _ => Err(bifrost_core::BifrostError::Config(format!(
-            "Invalid script type '{}'. Expected: request, response, decode",
+            "Invalid script type '{}'. Expected: request, response, decode, parser",
             s
         ))),
     }
@@ -68,6 +69,7 @@ fn list_all_scripts(
         ScriptType::Request,
         ScriptType::Response,
         ScriptType::Decode,
+        ScriptType::Parser,
     ] {
         let scripts = rt.block_on(engine.list_scripts(script_type)).map_err(|e| {
             bifrost_core::BifrostError::Config(format!(
@@ -259,6 +261,7 @@ pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()>
                     ScriptType::Request,
                     ScriptType::Response,
                     ScriptType::Decode,
+                    ScriptType::Parser,
                 ]
             };
 

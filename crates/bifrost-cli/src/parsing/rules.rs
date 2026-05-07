@@ -385,7 +385,7 @@ fn resolve_rules_impl(
             "no rules matched"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             target: "bifrost_proxy::rules",
             url = %url,
             matched_count = core_result.rules.len(),
@@ -393,7 +393,7 @@ fn resolve_rules_impl(
         );
         for (idx, resolved) in core_result.rules.iter().enumerate() {
             let rule = &resolved.rule;
-            tracing::info!(
+            tracing::trace!(
                 target: "bifrost_proxy::rules",
                 rule_index = idx + 1,
                 pattern = %rule.pattern,
@@ -706,6 +706,9 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             }
             Protocol::Decode => {
                 result.decode_scripts.push(value.to_string());
+            }
+            Protocol::Bp => {
+                result.bp_scripts.push(value.to_string());
             }
             Protocol::Auth => {
                 result.auth = Some(value.to_string());
@@ -1724,6 +1727,44 @@ x-use-ppe: 1
         assert_eq!(resolved.decode_scripts.len(), 2);
         assert_eq!(resolved.decode_scripts[0], "gzip");
         assert_eq!(resolved.decode_scripts[1], "br");
+    }
+
+    #[test]
+    fn test_bp_parser_script_accumulates_with_decode_bp() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com bp://team/parser decode://bp")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(resolved.bp_scripts, vec!["team/parser".to_string()]);
+        assert_eq!(resolved.decode_scripts, vec!["bp".to_string()]);
+    }
+
+    #[test]
+    fn test_bp_remote_script_reference_is_not_pre_fetched_by_rule_resolver() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com bp://http://127.0.0.1:18080/parser.js?sha256=abc decode://bp")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            resolved.bp_scripts,
+            vec!["http://127.0.0.1:18080/parser.js?sha256=abc".to_string()]
+        );
     }
 
     #[test]

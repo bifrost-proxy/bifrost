@@ -286,6 +286,7 @@ interface ScriptsState {
   requestScripts: ScriptInfo[];
   responseScripts: ScriptInfo[];
   decodeScripts: ScriptInfo[];
+  parserScripts: ScriptInfo[];
   selectedScript: ScriptDetail | null;
   selectedType: ScriptType;
   loading: boolean;
@@ -294,7 +295,7 @@ interface ScriptsState {
   testResult: ScriptExecutionResult | null;
   error: string | null;
 
-  applyScriptsSnapshot: (data: { request: ScriptInfo[]; response: ScriptInfo[]; decode: ScriptInfo[] }) => void;
+  applyScriptsSnapshot: (data: { request: ScriptInfo[]; response: ScriptInfo[]; decode: ScriptInfo[]; parser?: ScriptInfo[] }) => void;
   fetchScripts: () => Promise<void>;
   selectScript: (type: ScriptType, name: string) => Promise<void>;
   saveScript: (type: ScriptType, name: string, content: string) => Promise<boolean>;
@@ -310,6 +311,7 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
   requestScripts: [],
   responseScripts: [],
   decodeScripts: [],
+  parserScripts: [],
   selectedScript: null,
   selectedType: 'request',
   loading: false,
@@ -323,6 +325,7 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
       requestScripts: data.request,
       responseScripts: data.response,
       decodeScripts: data.decode,
+      parserScripts: data.parser || [],
       loading: false,
       error: null,
     });
@@ -336,6 +339,7 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
         requestScripts: data.request,
         responseScripts: data.response,
         decodeScripts: data.decode,
+        parserScripts: data.parser || [],
         loading: false,
       });
     } catch (e) {
@@ -384,6 +388,10 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
             type === 'decode'
               ? updateList(state.decodeScripts)
               : state.decodeScripts,
+          parserScripts:
+            type === 'parser'
+              ? updateList(state.parserScripts)
+              : state.parserScripts,
           selectedScript: script,
           saving: false,
         };
@@ -412,6 +420,10 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
           type === 'decode'
             ? state.decodeScripts.filter((item) => item.name !== name)
             : state.decodeScripts,
+        parserScripts:
+          type === 'parser'
+            ? state.parserScripts.filter((item) => item.name !== name)
+            : state.parserScripts,
         selectedScript:
           state.selectedScript?.name === name &&
             state.selectedScript?.script_type === type
@@ -446,6 +458,7 @@ export const useScriptsStore = create<ScriptsState>((set) => ({
           requestScripts: type === 'request' ? updateList(state.requestScripts) : state.requestScripts,
           responseScripts: type === 'response' ? updateList(state.responseScripts) : state.responseScripts,
           decodeScripts: type === 'decode' ? updateList(state.decodeScripts) : state.decodeScripts,
+          parserScripts: type === 'parser' ? updateList(state.parserScripts) : state.parserScripts,
           selectedScript: wasSelected && state.selectedScript
             ? { ...state.selectedScript, name: newName }
             : state.selectedScript,

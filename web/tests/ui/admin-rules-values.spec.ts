@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import {
   apiBase,
   clearRules,
+  clearScripts,
   clearTraffic,
   clearValues,
   openPage,
@@ -23,6 +24,7 @@ async function changeSort(page: import("@playwright/test").Page, testId: string,
 test.beforeEach(async ({ request }) => {
   await clearTraffic(request);
   await clearRules(request);
+  await clearScripts(request);
   await clearValues(request);
 });
 
@@ -64,6 +66,101 @@ test("Rules 页面会主动拉取 syntax 信息，并包含动态脚本与协议
 
   await page.getByTestId("rule-new-button").click();
   await expect(page.getByTestId("rule-editor")).toBeVisible();
+});
+
+test("Rules 编辑器 bp 补全使用 parser scripts，decode bp 校验不报缺失脚本", async ({
+  page,
+  request,
+}) => {
+  const parserScriptName = uniqueName("bp-parser-hint");
+  const createParserRes = await request.put(
+    `${apiBase}/scripts/parser/${encodeURIComponent(parserScriptName)}`,
+    {
+      data: { content: 'ctx.output = { code: "0", data: "parser-hint", msg: "" };' },
+    },
+  );
+  if (!createParserRes.ok()) {
+    throw new Error(await createParserRes.text());
+  }
+
+  const validateRes = await request.post(`${apiBase}/rules/validate`, {
+    data: {
+      content: [
+        `bp-local.test bp://${parserScriptName} decode://bp`,
+        "bp-remote.test bp://https://example.com/parser.js?sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef decode://bp",
+        "bp-file.test bp://file:///Users/eden/parser.js decode://bp",
+        "bp-abs.test bp:///Users/eden/parser.js decode://bp",
+      ].join("\n"),
+    },
+  });
+  expect(validateRes.ok()).toBeTruthy();
+  const validatePayload = (await validateRes.json()) as {
+    warnings?: Array<{ message: string }>;
+  };
+  const warningText = (validatePayload.warnings || [])
+    .map((warning) => warning.message)
+    .join("\n");
+  expect(warningText).not.toContain("Script 'bp' not found");
+  expect(warningText).not.toContain("parser.js");
+
+  const ruleName = uniqueName("bp-hint-rule");
+  const createRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: ruleName,
+      content: "bp-hint.test bp://",
+      enabled: true,
+    },
+  });
+  if (!createRuleRes.ok()) {
+    throw new Error(await createRuleRes.text());
+  }
+
+  await openPage(page, "rules");
+  await page.getByTestId("rule-item").filter({ hasText: ruleName }).first().click();
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
+
+  const editorInput = page
+    .getByTestId("rule-editor-container")
+    .getByRole("textbox", { name: "Editor content" });
+  await editorInput.click({ force: true });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
+  await page.keyboard.press("Control+Space");
+  await expect(
+    page.locator(".suggest-widget .monaco-list-row").filter({
+      hasText: `${parserScriptName} decode://bp`,
+    }).first(),
+  ).toBeVisible();
+
+  await request.put(`${apiBase}/scripts/parser/${encodeURIComponent("build_in_bp")}`, {
+    data: { content: 'ctx.output = { code: "0", data: "built-in-nav", msg: "" };' },
+  });
+  const navRuleName = uniqueName("bp-nav-rule");
+  const createNavRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: navRuleName,
+      content: "bp-nav.test bp://build_in_bp?protocol=thrift decode://bp",
+      enabled: true,
+    },
+  });
+  if (!createNavRuleRes.ok()) {
+    throw new Error(await createNavRuleRes.text());
+  }
+  await page.goto("/_bifrost/rules");
+  await page.getByTestId("rule-item").filter({ hasText: navRuleName }).first().click();
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
+  const editorBox = page.getByTestId("rule-editor-container").locator(".monaco-editor").first();
+  await expect(editorBox).toBeVisible();
+  await expect(page.locator(".view-line").filter({ hasText: "bp://build_in_bp" }).first()).toBeVisible();
+  const box = await editorBox.boundingBox();
+  if (!box) {
+    throw new Error("Rule editor is not visible");
+  }
+  await editorBox.click({
+    position: { x: 220, y: 18 },
+    modifiers: [process.platform === "darwin" ? "Meta" : "Control"],
+  });
+  await expect(page).toHaveURL(/\/_bifrost\/scripts/);
+  await expect(page.getByTestId("scripts-editor-panel")).toContainText("build_in_bp");
 });
 
 test("Values 页面完成 CRUD、支持多种排序，并通过 push 自动同步外部写入", async ({

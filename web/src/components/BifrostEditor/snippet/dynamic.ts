@@ -1,7 +1,7 @@
 import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 
-export type ReferenceType = 'value' | 'requestScript' | 'responseScript';
+export type ReferenceType = 'value' | 'requestScript' | 'responseScript' | 'parserScript';
 export type NavigationType = 'page' | 'editor';
 
 export interface ReferenceLocation {

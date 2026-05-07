@@ -24,7 +24,8 @@
 | [cli-group.md](./cli-group.md) | CLI Group 管理 | 15 | group list/show、group rule list/show/add/update/enable/disable/delete，以及 Group CLI mock 单测并发稳定性回归 |
 | [cli-import-export.md](./cli-import-export.md) | CLI 导入导出与杂项 | 27 | export/import、metrics、sync、version-check、upgrade、completions、install-skill，含 version-check 空输出与 install-skill 更多 agent 兼容回归验证，以及 version-check redirect 优先与 HTML highlights 降级验证 |
 | [port-conflict-restart.md](./port-conflict-restart.md) | 端口冲突检测与自动重启 | 6 | 端口占用检测、进程信息显示、交互式终止确认、--yes 自动确认、PID 检测兼容性、非交互端口冲突早于系统代理摘要回归 |
-| [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 7 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、显式指定覆盖，以及默认 info 日志隐藏常态连接生命周期噪声 |
+| [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 8 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、显式指定覆盖，以及默认 info 日志隐藏常态连接生命周期与规则命中噪声 |
+| [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 4 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、ScriptType::Parser、bp/devtools 协议实现，以及规则语法示例保持一致 |
 
 ### Web UI 测试
 
@@ -34,7 +35,7 @@
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 45 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤、右键菜单、WebSocket/SSE、搜索 |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 40 | 规则列表、创建/编辑/删除、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
-| [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 21 | 脚本创建（Req/Res/Dec）、编辑、保存、测试运行、日志查看、名称校验、树形目录、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
+| [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
@@ -94,6 +95,7 @@
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 5 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归、统一代理 UDP relay 端口 fallback 与 Windows ARM runner 并发回归 |
 | [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 8 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 65 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏和上游 HTTP/2 body 断流 fallback 真实回归 |
+| [bp-protocol-parser.md](./bp-protocol-parser.md) | BP 协议脚本解析 | 16 | `bp://<script>` + `decode://bp` 本地/远程 parser 解析，远程脚本下载缓存，远程下载超时/超大响应失败且不污染缓存，Traffic 详情 decoded body 展示，raw body 保留，`bifrost search` 与 Search SSE 搜索解析后内容，本地 parser 名称路径穿越拒绝，内置 `build_in_bp` 自动释放覆盖与规则编辑智能提示/hover 说明，`decode://bp` 内置校验、`bp://` parser 脚本列表补全、本地 parser 跳转到 Scripts 页面、query 高亮不污染后续协议、远端 URL 和绝对路径兼容，`build_in_bp.js` 对 next_agent PSM 的 BAM metadata/Thrift 双向二进制解包路径验证、默认 Bifrost sync token 换取 server `bam_token`，以及参考脚本/相关文档不暴露明文默认域名 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
@@ -165,7 +167,7 @@
 
 ---
 
-**总计：87 个测试文件，1562 个测试用例**
+**总计：89 个测试文件，1568 个测试用例**
 
 ## 工作流程
 

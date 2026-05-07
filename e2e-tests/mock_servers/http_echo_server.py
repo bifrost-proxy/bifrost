@@ -37,6 +37,9 @@ JPEG_1X1_BYTES = base64.b64decode(
     b'AT8AqWORo//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8Af//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAI'
     b'AQMBAT8Af//Z'
 )
+NEXT_AGENT_HEALTHZ_REPLY_BYTES = base64.b64decode(
+    b'gAEAAgAAAAdIZWFsdGh6AAAABwwAAAsAAQAAAAJvawwA/wAAAA=='
+)
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -853,6 +856,9 @@ body {{ color: #333; }}
             except UnicodeDecodeError:
                 print(f"  [Binary data: {body.hex()[:100]}...]")
         parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path == '/thrift/healthz':
+            self._send_bytes_response(200, 'application/x-thrift', NEXT_AGENT_HEALTHZ_REPLY_BYTES)
+            return
         if self._handle_httpbin_common("POST", body):
             return
         if parsed_path.path == '/large-response':

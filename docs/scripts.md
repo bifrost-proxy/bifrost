@@ -2,19 +2,20 @@
 
 本篇文档介绍 Bifrost 管理端 **Scripts** 模块的使用方式（创建/保存/测试/组织脚本），并给出常见应用场景与示例代码。
 
-> 规则侧如何引用脚本（`reqScript://` / `resScript://` / `decode://`）请参考：`docs/rules/scripts.md`。
+> 规则侧如何引用脚本（`reqScript://` / `resScript://` / `decode://` / `bp://`）请参考：`docs/rules/scripts.md`。
 
 ---
 
 ## 1. 脚本类型与执行时机
 
-Bifrost 支持三类脚本：
+Bifrost 当前实现支持四类脚本：
 
 1. **Request Script**：转发到上游前执行，可修改请求（方法/头/body）。
 2. **Response Script**：收到上游响应后执行，可修改响应（状态码/头/body）。
 3. **Decode Script**：用于对 body 做“解码/脱敏/格式化”等处理（常用于展示与落库前的处理）。
+4. **Parser Script**：用于 `bp://...` + `decode://bp` 的二进制协议解析。它不会改写真实客户端/上游流量，只影响 Traffic 落库、详情展示与搜索。
 
-管理端创建脚本时，对应三种快捷入口按钮：`Req` / `Res` / `Dec`（`web/src/pages/Scripts/index.tsx:494`）。
+管理端 Scripts 页面会展示 request / response / decode / parser 四类脚本，列表、保存、删除、重命名、测试走 Admin API `/_bifrost/api/scripts/*`。
 
 ---
 
@@ -33,7 +34,8 @@ Bifrost 支持三类脚本：
 - 存储根目录：`{data_dir}/scripts`
   - 默认 `data_dir=~/.bifrost`（可用 `BIFROST_DATA_DIR` 覆盖：`crates/bifrost-storage/src/data_dir.rs:10`）
 - 单个脚本文件路径：`{data_dir}/scripts/{type}/{name}.js`
-  - `type ∈ {request,response,decode}`（目录由 `crates/bifrost-script/src/engine.rs:115` 创建）
+  - `type ∈ {request,response,decode,parser}`（目录由 `crates/bifrost-script/src/engine.rs` 创建）
+  - 远程 parser 脚本缓存位于 `{data_dir}/scripts/_remote-cache/parser/`
   - 脚本名允许包含 `/`，会对应子目录（`crates/bifrost-script/src/engine.rs:156`）
 
 脚本名限制（保存时会校验）：
@@ -94,6 +96,30 @@ Scripts 页面提供测试能力，会把执行日志（`log/info/warn/error`）
 decode 注入与截断逻辑：`crates/bifrost-script/src/sandbox.rs:811`。
 
 decode 输出约定：脚本需要输出 `{ code, data, msg }`（支持 `return` / `ctx.output` / 全局 `output`），解析逻辑：`crates/bifrost-script/src/sandbox.rs:1011`。
+
+### 3.5 Parser Script
+
+Parser Script 是 `bp://<parser_ref>` 的执行目标，常用于 thrift/protobuf/私有二进制协议在 Traffic 详情中的可读化展示。
+
+- 存储目录：`{data_dir}/scripts/parser/{name}.js`
+- 内置脚本：Bifrost 启动时会自动释放并覆盖 `{data_dir}/scripts/parser/build_in_bp.js`
+- 规则引用：`api.example.com bp://build_in_bp decode://bp`
+- 可带参数：`bp://build_in_bp?psm=foo.bar.order&service=OrderService&method=GetOrder`
+- 远程脚本：`bp://https://example.com/parser.js?sha256=<64位hex>`
+- 本地调试允许 `http://127.0.0.1` / `localhost` / `::1`，其他远程 HTTP 会被拒绝；线上远程脚本必须使用 HTTPS 并提供 `sha256`
+
+Parser 复用 decode 输出约定，成功时返回 `{ code: "0", data, msg: "" }`。`data` 会替换落库后的 body 文本用于详情展示与 `bifrost search --req-body/--res-body`，但不会改写真实转发流量。
+
+示例：
+
+```javascript
+var bytes = response && response.bodyBase64 ? response.bodyBase64 : request.bodyBase64;
+return {
+  code: "0",
+  data: JSON.stringify({ phase: ctx.phase, bodyBase64: bytes }),
+  msg: "",
+};
+```
 
 ---
 
@@ -215,7 +241,7 @@ if (net.enabled) {
 
 ### 5.1 重要配置项
 
-脚本沙箱配置通过 Admin API `/api/config/sandbox` 读取/更新：
+脚本沙箱配置通过 Admin API `/_bifrost/api/config/sandbox` 读取/更新：
 
 - 读取：`crates/bifrost-admin/src/handlers/config.rs:143`
 - 更新并持久化：`crates/bifrost-admin/src/handlers/config.rs:186`

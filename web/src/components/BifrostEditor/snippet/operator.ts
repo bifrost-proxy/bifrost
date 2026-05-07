@@ -2,6 +2,7 @@ import { editor, languages, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 import {
   fetchSyntaxInfo,
+  refreshSyntaxInfo,
   getCachedSyntaxInfo,
   type ProtocolInfo,
   type TemplateVariableInfo,
@@ -14,7 +15,9 @@ import {
   CACHE_VALUES,
   CONTENT_TYPES,
   getProtocolDoc,
+  formatProtocolHover,
 } from './protocol-docs';
+import { BUILT_IN_BP_VALUE_SNIPPET, buildBpProtocolSnippets } from './bpSnippets';
 
 interface Operator extends Partial<languages.CompletionItem> {
   snippet: string[];
@@ -94,7 +97,15 @@ function getSnippetsForProtocol(
       const scripts =
         name === 'reqScript'
           ? syntaxInfo.scripts.request_scripts
-          : syntaxInfo.scripts.response_scripts;
+          : name === 'resScript'
+            ? syntaxInfo.scripts.response_scripts
+            : name === 'bp'
+              ? syntaxInfo.scripts.parser_scripts
+              : syntaxInfo.scripts.decode_scripts;
+
+      if (name === 'bp') {
+        return buildBpProtocolSnippets(scripts);
+      }
 
       if (scripts.length > 0) {
         return scripts.map((s) => `${name}://${s.name}`);
@@ -163,9 +174,12 @@ function protocolToOperator(
   protocol: ProtocolInfo,
   syntaxInfo: UnifiedSyntaxInfo
 ): Operator {
+  const result = getProtocolDoc(protocol.name);
+
   return {
     label: protocol.name,
     detail: `${protocol.name}://<${protocol.value_type}> - ${protocol.description}`,
+    documentation: result ? { value: formatProtocolHover(result) } : protocol.description,
     snippet: getSnippetsForProtocol(protocol, syntaxInfo),
   };
 }
@@ -258,9 +272,9 @@ const clean = (token: string) => {
 let dynamicOperators: Operator[] | null = null;
 let dynamicTemplateVars: Operator[] | null = null;
 
-async function loadDynamicData(): Promise<void> {
+async function loadDynamicData(options?: { force?: boolean }): Promise<void> {
   try {
-    const syntaxInfo = await fetchSyntaxInfo();
+    const syntaxInfo = options?.force ? await refreshSyntaxInfo() : await fetchSyntaxInfo();
 
     const filterOperators = buildFilterOperators(syntaxInfo.filter_specs);
 
@@ -292,6 +306,10 @@ async function loadDynamicData(): Promise<void> {
 }
 
 loadDynamicData();
+
+function isScriptValueProtocol(protocol: string): boolean {
+  return ['bp', 'decode', 'reqscript', 'resscript'].includes(protocol.toLowerCase());
+}
 
 function getOperators(): Operator[] {
   return dynamicOperators || [];
@@ -532,6 +550,59 @@ function getProtocolValueSuggestions(protocol: string, range: IRange): languages
       });
       break;
 
+    case 'decode': {
+      const decodeScripts = getCachedSyntaxInfo()?.scripts.decode_scripts ?? [
+        { name: 'utf8', description: 'Built-in UTF-8 decoder' },
+        { name: 'default', description: 'Alias of built-in UTF-8 decoder' },
+        { name: 'bp', description: 'Run parser scripts bound by bp:// rules' },
+      ];
+
+      decodeScripts.forEach(({ name, description }, index) => {
+        suggestions.push({
+          ...base,
+          label: name,
+          detail: description || `Decode script: ${name}`,
+          documentation:
+            name === 'bp'
+              ? 'Runs the parser script selected by a matching bp:// rule. Decoded output is available in Traffic detail and decoded-body search.'
+              : description,
+          insertText: name,
+          sortText: name === 'bp' ? '00_bp' : String(index + 1).padStart(2, '0'),
+        });
+      });
+      break;
+    }
+
+    case 'bp': {
+      const parserScripts = getCachedSyntaxInfo()?.scripts.parser_scripts ?? [
+        { name: 'build_in_bp', description: 'Built-in BP parser adapter' },
+      ];
+
+      suggestions.push({
+        ...base,
+        label: 'build_in_bp?psm=<psm>&method=<method> decode://bp',
+        kind: languages.CompletionItemKind.Snippet,
+        detail: 'Built-in BP parser with paired decode://bp',
+        documentation: 'Inserts a complete bp:// parser binding and the required decode://bp decoder so decoded bodies are stored, shown, and searchable.',
+        insertText: BUILT_IN_BP_VALUE_SNIPPET,
+        insertTextRules: languages.CompletionItemInsertTextRule.InsertAsSnippet,
+        sortText: '00_build_in_bp_decode_bp',
+      });
+
+      parserScripts.forEach(({ name, description }, index) => {
+        suggestions.push({
+          ...base,
+          label: `${name} decode://bp`,
+          kind: languages.CompletionItemKind.Reference,
+          detail: description || `Parser script: ${name}`,
+          documentation: 'Pairs this parser script with decode://bp so Bifrost runs it on captured binary bodies.',
+          insertText: `${name} decode://bp`,
+          sortText: String(index + 1).padStart(2, '0'),
+        });
+      });
+      break;
+    }
+
     default: {
       const result = getProtocolDoc(protocol);
       if (result && result.doc.examples.length > 0) {
@@ -556,7 +627,7 @@ function getProtocolValueSuggestions(protocol: string, range: IRange): languages
 
 const provider: languages.CompletionItemProvider = {
   triggerCharacters: ['$', '{', ':', '/'],
-  provideCompletionItems: (model: editor.ITextModel, position: Position) => {
+  provideCompletionItems: async (model: editor.ITextModel, position: Position) => {
     let suggestions: languages.CompletionItem[] = [];
     if (model.isDisposed()) {
       return { suggestions };
@@ -576,6 +647,9 @@ const provider: languages.CompletionItemProvider = {
       const context = analyzeContext(textBeforeCursor);
 
       if (context.afterProtocolSeparator && context.currentProtocol) {
+        if (isScriptValueProtocol(context.currentProtocol)) {
+          await loadDynamicData({ force: true });
+        }
         suggestions = getProtocolValueSuggestions(context.currentProtocol, range);
         if (suggestions.length > 0) {
           return { suggestions };

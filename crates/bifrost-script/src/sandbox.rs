@@ -1,5 +1,6 @@
 use crate::error::{Result, ScriptError};
 use crate::types::*;
+use base64::Engine as _;
 use rquickjs::function::Rest;
 use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
 use serde_json::Value as JsonValue;
@@ -855,6 +856,11 @@ impl Sandbox {
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyHex", body_hex)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        req.set(
+            "bodyBase64",
+            base64::engine::general_purpose::STANDARD.encode(body_bytes),
+        )
+        .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyHexTruncated", body_hex_truncated)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyTextTruncated", body_text_truncated)
@@ -907,6 +913,8 @@ impl Sandbox {
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyHex", "".to_string())
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        req.set("bodyBase64", "".to_string())
+            .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyHexTruncated", false)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         req.set("bodyTextTruncated", false)
@@ -957,6 +965,11 @@ impl Sandbox {
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         res.set("bodyHex", body_hex)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        res.set(
+            "bodyBase64",
+            base64::engine::general_purpose::STANDARD.encode(body_bytes),
+        )
+        .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         res.set("bodyHexTruncated", body_hex_truncated)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         res.set("bodyTextTruncated", body_text_truncated)
@@ -1297,6 +1310,7 @@ impl Sandbox {
                 let mut method = "GET".to_string();
                 let mut headers = HashMap::<String, String>::new();
                 let mut body: Option<String> = None;
+                let mut body_bytes: Option<Vec<u8>> = None;
                 let mut req_timeout_ms = timeout_ms;
 
                 if let Some(json) = options_json {
@@ -1324,14 +1338,25 @@ impl Sandbox {
                             other => body = Some(other.to_string()),
                         }
                     }
+                    if let Some(b64) = v.get("bodyBase64").and_then(|x| x.as_str()) {
+                        let decoded = base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| js_err("net", "fetch", e))?;
+                        body_bytes = Some(decoded);
+                        body = None;
+                    }
                 }
 
-                if let Some(ref b) = body {
-                    if b.len() > max_req {
+                let body_len = body_bytes
+                    .as_ref()
+                    .map(|b| b.len())
+                    .or_else(|| body.as_ref().map(|b| b.len()));
+                if let Some(len) = body_len {
+                    if len > max_req {
                         return Err(rquickjs::Error::new_from_js_message(
                             "net",
                             "fetch",
-                            format!("请求体过大: {} bytes (limit {})", b.len(), max_req),
+                            format!("请求体过大: {} bytes (limit {})", len, max_req),
                         ));
                     }
                 }
@@ -1347,7 +1372,9 @@ impl Sandbox {
                 for (k, v) in headers.iter() {
                     req = req.header(k, v);
                 }
-                if let Some(b) = body {
+                if let Some(b) = body_bytes {
+                    req = req.body(b);
+                } else if let Some(b) = body {
                     req = req.body(b);
                 }
 

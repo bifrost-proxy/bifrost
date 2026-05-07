@@ -6,7 +6,7 @@ use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{error_response, json_response, method_not_allowed, success_response, BoxBody};
 use crate::push::SharedPushManager;
@@ -117,6 +117,8 @@ struct ValidateRuleResponse {
     defined_variables: Vec<VariableInfo>,
     script_references: Vec<ScriptReference>,
 }
+
+const BUILTIN_DECODE_SCRIPTS: &[&str] = &["utf8", "default", "bp"];
 
 pub async fn handle_rules(
     req: Request<Incoming>,
@@ -475,6 +477,52 @@ fn build_variable_conflicts(
     conflicts
 }
 
+fn append_missing_script_reference_warnings(
+    result: &mut bifrost_core::ValidationResult,
+    req_scripts: &HashSet<String>,
+    res_scripts: &HashSet<String>,
+    decode_scripts: &HashSet<String>,
+) {
+    for script_ref in &result.script_references {
+        let scripts = match script_ref.script_type.as_str() {
+            "request" => req_scripts,
+            "response" => res_scripts,
+            "decode" => decode_scripts,
+            _ => continue,
+        };
+
+        if scripts.contains(&script_ref.name) {
+            continue;
+        }
+
+        let mut available = scripts.iter().cloned().collect::<Vec<_>>();
+        available.sort();
+
+        let warning = ParseError::with_range(
+            script_ref.line,
+            1,
+            script_ref.name.len() + 15,
+            format!(
+                "Script '{}' not found. Available {} scripts: {}",
+                script_ref.name,
+                script_ref.script_type,
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W003")
+        .with_suggestion(format!(
+            "Create a {} script named '{}' in the scripts directory, or use an existing script.",
+            script_ref.script_type, script_ref.name
+        ));
+        result.warnings.push(warning);
+    }
+}
+
 async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
     let body = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -542,39 +590,25 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
             .map(|s| s.name)
             .collect();
 
-        for script_ref in &result.script_references {
-            let scripts = if script_ref.script_type == "request" {
-                &req_scripts
-            } else {
-                &res_scripts
-            };
+        let mut decode_scripts: std::collections::HashSet<String> = BUILTIN_DECODE_SCRIPTS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        decode_scripts.extend(
+            engine
+                .list_scripts(bifrost_script::ScriptType::Decode)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.name),
+        );
 
-            if !scripts.contains(&script_ref.name) {
-                let warning = ParseError::with_range(
-                    script_ref.line,
-                    1,
-                    script_ref.name.len() + 15,
-                    format!(
-                        "Script '{}' not found. Available {} scripts: {}",
-                        script_ref.name,
-                        script_ref.script_type,
-                        if scripts.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            scripts.iter().cloned().collect::<Vec<_>>().join(", ")
-                        }
-                    ),
-                )
-                .with_severity(ParseErrorSeverity::Warning)
-                .with_code("W003")
-                .with_suggestion(format!(
-                    "Create a {} script named '{}' in the scripts directory, or use an existing script.",
-                    script_ref.script_type,
-                    script_ref.name
-                ));
-                result.warnings.push(warning);
-            }
-        }
+        append_missing_script_reference_warnings(
+            &mut result,
+            &req_scripts,
+            &res_scripts,
+            &decode_scripts,
+        );
     }
 
     let response = ValidateRuleResponse {
@@ -1046,5 +1080,68 @@ mod tests {
             conflicts[0].definitions[1].group_id,
             Some("group-123".to_string())
         );
+    }
+
+    #[test]
+    fn test_builtin_decode_script_references_do_not_warn() {
+        let mut result = bifrost_core::ValidationResult {
+            script_references: BUILTIN_DECODE_SCRIPTS
+                .iter()
+                .map(|name| ScriptReference {
+                    name: (*name).to_string(),
+                    script_type: "decode".to_string(),
+                    line: 1,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let req_scripts = HashSet::new();
+        let res_scripts = HashSet::new();
+        let decode_scripts = BUILTIN_DECODE_SCRIPTS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+
+        append_missing_script_reference_warnings(
+            &mut result,
+            &req_scripts,
+            &res_scripts,
+            &decode_scripts,
+        );
+
+        assert!(
+            result.warnings.is_empty(),
+            "built-in decode scripts such as decode://bp must not be reported as missing"
+        );
+    }
+
+    #[test]
+    fn test_missing_decode_script_warning_uses_decode_inventory() {
+        let mut result = bifrost_core::ValidationResult {
+            script_references: vec![ScriptReference {
+                name: "missing".to_string(),
+                script_type: "decode".to_string(),
+                line: 3,
+            }],
+            ..Default::default()
+        };
+        let req_scripts = HashSet::new();
+        let res_scripts = HashSet::from(["response_only".to_string()]);
+        let decode_scripts = HashSet::from(["bbb".to_string(), "default".to_string()]);
+
+        append_missing_script_reference_warnings(
+            &mut result,
+            &req_scripts,
+            &res_scripts,
+            &decode_scripts,
+        );
+
+        assert_eq!(result.warnings.len(), 1);
+        let warning = &result.warnings[0];
+        assert_eq!(warning.code.as_deref(), Some("W003"));
+        assert!(warning
+            .message
+            .contains("Available decode scripts: bbb, default"));
+        assert!(!warning.message.contains("response_only"));
     }
 }

@@ -438,6 +438,7 @@ pub fn needs_body_processing(rules: &ResolvedRules) -> bool {
         || rules.css_prepend.is_some()
         || rules.css_body.is_some()
         || !rules.res_scripts.is_empty()
+        || !rules.decode_scripts.is_empty()
 }
 
 pub fn needs_response_override(rules: &ResolvedRules) -> bool {
@@ -735,6 +736,7 @@ pub fn needs_request_body_processing(rules: &ResolvedRules) -> bool {
         || !rules.req_replace.is_empty()
         || !rules.req_replace_regex.is_empty()
         || rules.req_merge.is_some()
+        || !rules.decode_scripts.is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3447,6 +3449,17 @@ mod tests {
             .unwrap();
 
         assert!(!is_websocket_upgrade(&req));
+    }
+
+    #[test]
+    fn test_decode_scripts_require_body_read_for_storage_only_decode() {
+        let rules = ResolvedRules {
+            decode_scripts: vec!["bp".to_string()],
+            ..Default::default()
+        };
+
+        assert!(needs_request_body_processing(&rules));
+        assert!(needs_body_processing(&rules));
     }
 
     #[test]
