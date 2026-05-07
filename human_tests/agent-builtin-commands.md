@@ -229,6 +229,64 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - `active_status.context_usage_percent` 为可读数值或 `null`（仅当未配置 context window 时允许为 `null`）
 - 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"
 
+### TC-BC-21: 回归 - 工具结果追加后 /status 展示当前上下文估算
+
+**背景**：运行中的 Agent 在收到模型响应后会记录 `last_response_tokens`。此前工具结果追加到 `session.history` 后没有让该快照失效，可能导致 `/status` 的运行中状态和自动压缩判断继续参考旧模型响应 token，而不是工具结果追加后的当前上下文。
+
+**操作步骤**：
+1. 使用临时数据目录启动 Bifrost：`BIFROST_DATA_DIR=<temp_dir> ./target/debug/bifrost start --host 127.0.0.1 -p <non_9900_port> --unsafe-ssl --no-system-proxy`。
+2. 将 Agent 配置为 mock Chat Completions provider。
+3. mock 第一次响应返回 `exec_command` 工具调用，`usage.total_tokens = 17`，工具命令输出大体积文本。
+4. mock 第二次模型请求延迟 3 秒返回最终文本。
+5. 在第二次模型请求执行期间，发送同 session 的 `/status`。
+
+**预期结果**：
+- `/status` 返回 `success: true`，不是忙碌提示。
+- JSON 响应包含 `active_status`。
+- `active_status.current_loop_iteration == 2`。
+- `active_status.estimated_context_tokens > 10000`，能反映大体积工具结果已经进入当前 history。
+- `active_status.last_response_tokens == null`，说明工具结果追加后旧模型响应 token 快照已失效。
+- response 文本中的 `Context 用量: ~<estimated_context_tokens> / 250000` 与 JSON 字段一致。
+- response 文本中的 `实时 token` 仍展示累计 token，但最近响应显示 `N/A`，不把旧的 `17` 当作当前上下文。
+
+**本次执行结果**：通过。2026-05-07 执行 `BIFROST_PORT=18897 MOCK_PORT=18898 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；运行中 `/status` 在第二轮模型请求期间返回 `active_status.current_loop_iteration == 2`、`estimated_context_tokens = 12061`（大于 10000）、`last_response_tokens = null`，文本中的 `Context 用量` 与 JSON 字段一致，最近响应显示 `N/A`；脚本输出 `[agent-builtin-status-runtime] PASS`。
+
+### TC-BC-22: 回归 - 自动压缩判断不被较小的旧响应 token 遮蔽
+
+**背景**：此前 `should_compact()` 优先读取 `last_response_tokens`。当 history 估算已超过阈值，而旧模型响应或压缩摘要模型请求的 token 较小时，自动压缩可能被跳过，出现 `Context 用量` 远超窗口但 `压缩次数` 增长很少的现象。
+
+**操作步骤**：
+1. 运行单元回归：`cargo test -p bifrost-agent compact::tests::test_should_compact_uses_history_estimate_when_response_snapshot_is_smaller -- --nocapture`。
+2. 运行 session token 快照回归：`cargo test -p bifrost-agent session::tests::test_ -- --nocapture`。
+3. 检查测试输出。
+
+**预期结果**：
+- `compact::tests::test_should_compact_uses_history_estimate_when_response_snapshot_is_smaller` 通过。
+- session 模块测试通过，包含：
+  - `test_background_token_usage_does_not_update_context_snapshot`
+  - `test_history_growth_invalidates_last_response_tokens`
+  - `test_effective_token_count_never_hides_larger_estimate`
+- 证明较小的旧响应 token 不会遮蔽更大的 history 估算；压缩摘要调用只累计 token 消耗，不污染最近响应快照。
+
+**本次执行结果**：通过。2026-05-07 执行 `cargo test -p bifrost-agent compact::tests::test_should_compact_uses_history_estimate_when_response_snapshot_is_smaller -- --nocapture`，结果 `1 passed`；执行 `cargo test -p bifrost-agent session::tests::test_ -- --nocapture`，结果 `57 passed`，其中包含 `test_background_token_usage_does_not_update_context_snapshot`、`test_history_growth_invalidates_last_response_tokens` 与 `test_effective_token_count_never_hides_larger_estimate`。
+
+### TC-BC-23: 回归 - Emergency compaction 也记录完整压缩统计事件
+
+**背景**：普通 `/compact`、pre-turn 与 mid-turn 自动压缩会写入 `compaction` 事件；此前 context window overflow 后的 emergency compaction 只增加内存中的 `compaction_count`，没有写入 recorder，导致会话事件流中的压缩次数统计不完备。
+
+**操作步骤**：
+1. 运行事件 metadata 回归：`cargo test -p bifrost-agent session::tests::test_record_compaction_event_includes_emergency_and_total_tokens -- --nocapture`。
+2. 检查测试输出。
+
+**预期结果**：
+- 测试通过。
+- 写入的 `compaction` 事件包含 `emergency: true`。
+- 写入的 `compaction` 事件包含 `total_tokens`。
+- 写入的 `compaction` 事件包含当前 `compaction_count`。
+- 证明 emergency compaction 与 manual/pre-turn/mid-turn compaction 使用一致的 recorder metadata 口径。
+
+**本次执行结果**：通过。2026-05-07 执行 `cargo test -p bifrost-agent session::tests::test_record_compaction_event_includes_emergency_and_total_tokens -- --nocapture`，结果 `1 passed`；事件内容断言覆盖 `emergency: true`、`total_tokens = 1234`、`compaction_count = 2` 与 `phase = "mid_turn"`。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

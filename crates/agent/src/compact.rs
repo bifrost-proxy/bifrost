@@ -171,7 +171,7 @@ pub async fn compact_session(
         .chat_completion(config, &summary_messages, &[])
         .await?;
     if let Some(ref usage) = response.usage {
-        session.track_token_usage(usage.total_tokens);
+        session.track_background_token_usage(usage.total_tokens);
     }
 
     let summary = response
@@ -234,6 +234,7 @@ pub async fn compact_session(
     session.history = new_history;
     session.compaction_count += 1;
     session.history_version = session.history_version.saturating_add(1);
+    session.last_response_tokens = None;
 
     // Track token savings
     let post_tokens = session.estimate_tokens();
@@ -585,6 +586,24 @@ mod tests {
         let result = CompactionResult::skipped("too few");
         assert!(!result.performed);
         assert_eq!(result.reason.as_deref(), Some("too few"));
+    }
+
+    #[test]
+    fn test_should_compact_uses_history_estimate_when_response_snapshot_is_smaller() {
+        let mut session = AgentSession::new("compact-stale-response");
+        let config = AgentConfig {
+            model_context_window: Some(1_000),
+            model_auto_compact_token_limit: Some(500),
+            ..Default::default()
+        };
+
+        session
+            .history
+            .push(ChatMessage::assistant(&"x".repeat(3_000)));
+        session.last_response_tokens = Some(100);
+
+        assert!(session.estimate_tokens() > config.get_compact_threshold_tokens());
+        assert!(should_compact(&session, &config));
     }
 
     #[test]
