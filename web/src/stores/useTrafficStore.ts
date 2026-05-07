@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData } from '../types';
 import * as api from '../api';
+import type { TrafficBodyContent } from '../api';
 import pushService, { type TrafficUpdatesData } from '../services/pushService';
 
 export interface TrafficRecordsMutation {
@@ -18,6 +19,8 @@ interface TrafficState {
   currentRecord: TrafficRecord | null;
   requestBody: string | null;
   responseBody: string | null;
+  requestRawBody: TrafficBodyContent | null;
+  responseRawBody: TrafficBodyContent | null;
   serverTotal: number;
   serverSequence: number;
   hasMore: boolean;
@@ -894,6 +897,8 @@ export const useTrafficStore = create<TrafficState>()(
       currentRecord: null,
       requestBody: null,
       responseBody: null,
+      requestRawBody: null,
+      responseRawBody: null,
       serverTotal: 0,
       serverSequence: 0,
       hasMore: false,
@@ -1850,7 +1855,14 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       fetchTrafficDetail: async (id: string) => {
-        set({ detailLoading: true, detailError: null, requestBody: null, responseBody: null });
+        set({
+          detailLoading: true,
+          detailError: null,
+          requestBody: null,
+          responseBody: null,
+          requestRawBody: null,
+          responseRawBody: null,
+        });
         try {
           const record = await api.getTrafficDetail(id);
           const summary = get().recordsMap.get(id);
@@ -1861,11 +1873,22 @@ export const useTrafficStore = create<TrafficState>()(
             set({ requestBody: body });
           }).catch(() => { });
 
+          if (mergedRecord.raw_request_body_ref) {
+            api.getRequestBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
+              set({ requestRawBody: body });
+            }).catch(() => { });
+          }
+
           const isOpenSse = !!mergedRecord.is_sse && !!mergedRecord.socket_status?.is_open;
           if (!isOpenSse) {
             api.getResponseBody(id).then(body => {
               set({ responseBody: body });
             }).catch(() => { });
+            if (mergedRecord.raw_response_body_ref) {
+              api.getResponseBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
+                set({ responseRawBody: body });
+              }).catch(() => { });
+            }
           }
         } catch (e) {
           const error = e as { response?: { data?: { error?: string } }; message?: string };
@@ -1874,6 +1897,8 @@ export const useTrafficStore = create<TrafficState>()(
             currentRecord: null,
             requestBody: null,
             responseBody: null,
+            requestRawBody: null,
+            responseRawBody: null,
             detailError: message,
             detailLoading: false,
           });
@@ -1989,6 +2014,8 @@ export const useTrafficStore = create<TrafficState>()(
           currentRecord: null,
           requestBody: null,
           responseBody: null,
+          requestRawBody: null,
+          responseRawBody: null,
           detailError: null,
           loading: false,
           filterVersion: 0,
@@ -2052,6 +2079,8 @@ export const useTrafficStore = create<TrafficState>()(
         currentRecord: null,
         requestBody: null,
         responseBody: null,
+        requestRawBody: null,
+        responseRawBody: null,
         detailError: null,
       }),
 

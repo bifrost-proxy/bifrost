@@ -26,12 +26,37 @@ http://localhost:9000/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
 http://localhost:9000/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
 ```
 
+当规则是精确文件路径而不是目录前缀时，也必须保留目标路径的文件语义，例如：
+
+```text
+https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr http://localhost:9000/__webpack_hmr
+```
+
+请求：
+
+```text
+https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr
+```
+
+预期应转发到：
+
+```text
+http://localhost:9000/__webpack_hmr
+```
+
+不能错误补成：
+
+```text
+http://localhost:9000/__webpack_hmr/
+```
+
 ## 根因
 
 现有实现只拿到了目标 host rule 中的 target path，但没有稳定拿到“真正生效的源 pattern path”。
 
 - 如果直接把 target path 当作 base path 再拼原请求 path，会导致重复前缀
 - 如果从 `resolved_rules.rules` 中倒序取最后一条 host 类规则，又可能拿到并未实际生效的另一条规则，导致错误裁剪 path
+- 如果 source path 与 request path 精确相等，旧逻辑无条件把 target path 当目录处理，会给不带尾斜杠的目标文件路径补上 `/`
 
 ## 修复方案
 
@@ -55,6 +80,7 @@ http://localhost:9000/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958a
   - `test_rewrite_path_same_source_target`
   - `test_rewrite_path_with_query_string`
   - `test_find_host_rule_source_path_uses_selected_rule_not_later_host_rule`
+  - `test_rewrite_path_exact_match_preserves_target_without_trailing_slash`
 
 ### E2E 脚本
 
@@ -63,11 +89,14 @@ http://localhost:9000/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958a
   - 通过真实代理请求 `.svg`
   - 断言上游 `parsed_path` 等于单份 `/labor_cost/static/<file>`
   - 断言 query string 保持不变
+  - 构造 `https://.../labor_cost/static/__webpack_hmr -> http://127.0.0.1:<echo>/__webpack_hmr`
+  - 断言上游 `parsed_path` 精确等于 `/__webpack_hmr`，不能变成 `/__webpack_hmr/`
 
 ### Human Tests
 
 - 更新 `human_tests/proxy-http-https.md`
   - 新增 host rule 路径前缀回归用例
+  - 新增 host rule 精确路径不补尾斜杠回归用例
   - 覆盖 HTTPS + TLS 拦截 + 静态资源路径前缀保留
 
 ## 校验要求

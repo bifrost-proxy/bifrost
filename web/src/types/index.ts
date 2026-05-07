@@ -121,6 +121,10 @@ export interface TrafficRecord extends TrafficSummary {
   response_headers: [string, string][] | null;
   request_body: string | null;
   response_body: string | null;
+  request_body_ref?: BodyRef | null;
+  response_body_ref?: BodyRef | null;
+  raw_request_body_ref?: BodyRef | null;
+  raw_response_body_ref?: BodyRef | null;
   matched_rules: MatchedRule[] | null;
   request_content_type: string | null;
   timing?: RequestTiming | null;
@@ -134,6 +138,11 @@ export interface TrafficRecord extends TrafficSummary {
   decode_req_script_results?: ScriptExecutionResult[] | null;
   decode_res_script_results?: ScriptExecutionResult[] | null;
 }
+
+export type BodyRef =
+  | { Inline: { data: string } }
+  | { File: { path: string; size: number } }
+  | { FileRange: { path: string; offset: number; size: number } };
 
 export type FrameDirection = 'send' | 'receive';
 

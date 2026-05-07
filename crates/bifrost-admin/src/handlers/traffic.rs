@@ -2,6 +2,8 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use tokio_stream::StreamExt;
 
+use base64::Engine as _;
+
 use super::frames::{get_frame_detail, get_frames, subscribe_frames, unsubscribe_frames};
 use super::{
     error_response, full_body, json_response, method_not_allowed, success_response, BoxBody,
@@ -119,6 +121,39 @@ fn query_wants_raw(query: Option<&str>) -> bool {
         }
     }
     false
+}
+
+fn query_wants_base64(query: Option<&str>) -> bool {
+    let Some(q) = query else {
+        return false;
+    };
+    for part in q.split('&') {
+        if let Some(v) = part
+            .strip_prefix("encoding=")
+            .or_else(|| part.strip_prefix("format="))
+        {
+            return v.eq_ignore_ascii_case("base64");
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{query_wants_base64, query_wants_raw};
+
+    #[test]
+    fn raw_body_query_flags_are_parsed_independently() {
+        assert!(query_wants_raw(Some("raw=1&encoding=base64")));
+        assert!(query_wants_raw(Some("raw=true")));
+        assert!(!query_wants_raw(Some("raw=0&encoding=base64")));
+        assert!(!query_wants_raw(Some("encoding=base64")));
+
+        assert!(query_wants_base64(Some("raw=1&encoding=base64")));
+        assert!(query_wants_base64(Some("format=base64")));
+        assert!(!query_wants_base64(Some("raw=1&encoding=text")));
+        assert!(!query_wants_base64(None));
+    }
 }
 
 async fn subscribe_sse_stream(
@@ -1179,7 +1214,7 @@ async fn get_request_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref).await
+                get_body_content_async(&state, body_ref, query_wants_base64(query)).await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1222,7 +1257,7 @@ async fn get_response_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref).await
+                get_body_content_async(&state, body_ref, query_wants_base64(query)).await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1288,11 +1323,51 @@ async fn get_response_body_content(
     }
 }
 
-async fn get_body_content_async(state: &SharedAdminState, body_ref: &BodyRef) -> Response<BoxBody> {
+async fn load_body_bytes_async(state: &SharedAdminState, body_ref: &BodyRef) -> Option<Vec<u8>> {
+    match body_ref {
+        BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
+        BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+            if let Some(ref body_store) = state.body_store {
+                let body_store_clone = body_store.clone();
+                let body_ref_clone = body_ref.clone();
+                tokio::task::spawn_blocking(move || {
+                    let store = body_store_clone.read();
+                    store.load_bytes(&body_ref_clone)
+                })
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
+        }
+    }
+}
+
+async fn get_body_content_async(
+    state: &SharedAdminState,
+    body_ref: &BodyRef,
+    base64_output: bool,
+) -> Response<BoxBody> {
+    if base64_output {
+        return match load_body_bytes_async(state, body_ref).await {
+            Some(bytes) => json_response(&serde_json::json!({
+                "success": true,
+                "data": String::from_utf8_lossy(&bytes),
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "encoding": "base64",
+                "size": bytes.len()
+            })),
+            None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
+        };
+    }
+
     match body_ref {
         BodyRef::Inline { data } => json_response(&serde_json::json!({
             "success": true,
-            "data": data
+            "data": data,
+            "encoding": "text",
+            "size": data.len()
         })),
         BodyRef::File { path, size } | BodyRef::FileRange { path, size, .. } => {
             if let Some(ref body_store) = state.body_store {
@@ -1311,7 +1386,9 @@ async fn get_body_content_async(state: &SharedAdminState, body_ref: &BodyRef) ->
                 match data {
                     Some(content) => json_response(&serde_json::json!({
                         "success": true,
-                        "data": content
+                        "data": content,
+                        "encoding": "text",
+                        "size": size
                     })),
                     None => error_response(
                         StatusCode::NOT_FOUND,
@@ -1335,26 +1412,7 @@ async fn get_body_bytes_async(
     body_ref: &BodyRef,
     content_type: &str,
 ) -> Response<BoxBody> {
-    let bytes = match body_ref {
-        BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
-        BodyRef::File { .. } | BodyRef::FileRange { .. } => {
-            if let Some(ref body_store) = state.body_store {
-                let body_store_clone = body_store.clone();
-                let body_ref_clone = body_ref.clone();
-                tokio::task::spawn_blocking(move || {
-                    let store = body_store_clone.read();
-                    store.load_bytes(&body_ref_clone)
-                })
-                .await
-                .ok()
-                .flatten()
-            } else {
-                None
-            }
-        }
-    };
-
-    match bytes {
+    match load_body_bytes_async(state, body_ref).await {
         Some(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", content_type)

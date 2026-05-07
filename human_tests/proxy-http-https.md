@@ -645,9 +645,46 @@ HTTPServer(("127.0.0.1", 8999), H).serve_forever()'
 
 ---
 
+### TC-PHT-27：host 规则精确路径回归（不补尾斜杠）
+
+**前置条件**：
+1. 使用当前工作区源码构建最新 Bifrost release 二进制：
+   ```bash
+   cargo build --release --bin bifrost
+   ```
+2. 执行 host rule path rewrite E2E 脚本。脚本会使用临时数据目录、非 `9900` 端口、`--no-system-proxy`，启动本地 echo 服务，并创建精确路径规则：
+   ```text
+   https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr http://127.0.0.1:<echo_port>/__webpack_hmr
+   ```
+
+**操作步骤**：
+1. 执行命令：
+   ```bash
+   PROXY_PORT=18881 ECHO_HTTP_PORT=13081 bash e2e-tests/tests/test_host_rule_path_rewrite.sh
+   ```
+2. 检查脚本输出中 `HTTPS exact host rule path rewrite without trailing slash` 小节。
+3. 确认上游 echo 服务记录的 `request.parsed_path`。
+
+**预期结果**：
+- 请求返回 `200`
+- 上游收到的 `request.parsed_path` 必须精确等于：
+  ```text
+  /__webpack_hmr
+  ```
+- 上游收到的 `request.parsed_path` 不能等于：
+  ```text
+  /__webpack_hmr/
+  ```
+- 脚本同时验证原有路径前缀场景仍通过，避免修复精确路径时破坏 TC-PHT-25
+
+**执行记录**：
+- 2026-05-07：PASS。执行 `cargo build --release --bin bifrost` 后运行 `PROXY_PORT=18881 ECHO_HTTP_PORT=13081 bash e2e-tests/tests/test_host_rule_path_rewrite.sh`。脚本返回 0，HMR 精确路径请求返回 200，上游 `request.parsed_path` 精确为 `/__webpack_hmr`，未变成 `/__webpack_hmr/`；原有路径前缀场景也通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
 ```bash
-rm -rf .bifrost-test .bifrost-test-path-wildcard
+rm -rf .bifrost-test .bifrost-test-path-wildcard .bifrost-e2e-host-path-*
 ```

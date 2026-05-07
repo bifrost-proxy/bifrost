@@ -25,6 +25,7 @@ import { QueryView } from "./panes/Query";
 import { Messages } from "./panes/Messages";
 import ScriptLogsPane from "./panes/ScriptLogs";
 import { getResponseBodyContentUrl } from "../../api/traffic";
+import type { TrafficBodyContent } from "../../api/traffic";
 import { parseSseTextToEvents } from "../VirtualMessageViewer";
 import {
   assembleOpenAiLikeSse,
@@ -40,6 +41,8 @@ interface TrafficDetailProps {
   record: TrafficRecord | null;
   requestBody: string | null;
   responseBody: string | null;
+  requestRawBody?: TrafficBodyContent | null;
+  responseRawBody?: TrafficBodyContent | null;
   loading?: boolean;
   error?: string | null;
   onOpenInNewWindow?: ((record: TrafficRecord) => void) | undefined;
@@ -64,6 +67,18 @@ const hasCookies = (headers: [string, string][] | null): boolean => {
 const hasSetCookies = (headers: [string, string][] | null): boolean => {
   if (!headers) return false;
   return headers.some(([name]) => name.toLowerCase() === "set-cookie");
+};
+
+const bodyLooksJson = (body: string | null | undefined): boolean => {
+  if (!body) return false;
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const COLLAPSED_HEIGHT = 28;
@@ -152,6 +167,8 @@ export default function TrafficDetail({
   record,
   requestBody,
   responseBody,
+  requestRawBody,
+  responseRawBody,
   loading,
   error,
   onOpenInNewWindow,
@@ -166,6 +183,8 @@ export default function TrafficDetail({
   const [hasAutoOpenedRequestOpenAiTab, setHasAutoOpenedRequestOpenAiTab] = useState(false);
   const [hasAutoOpenedTraeTab, setHasAutoOpenedTraeTab] = useState(false);
   const [hasAutoOpenedDouBaoTab, setHasAutoOpenedDouBaoTab] = useState(false);
+  const [requestBodySource, setRequestBodySource] = useState<'decoded' | 'raw'>('decoded');
+  const [responseBodySource, setResponseBodySource] = useState<'decoded' | 'raw'>('decoded');
   const {
     requestSearch,
     responseSearch,
@@ -202,6 +221,8 @@ export default function TrafficDetail({
     setHasAutoOpenedRequestOpenAiTab(false);
     setHasAutoOpenedTraeTab(false);
     setHasAutoOpenedDouBaoTab(false);
+    setRequestBodySource('decoded');
+    setResponseBodySource('decoded');
   }, [record?.id]);
 
   const responseContentType = useMemo<RecordContentType>(() => {
@@ -234,6 +255,16 @@ export default function TrafficDetail({
     return getContentTypeFromHeader(record?.request_content_type);
   }, [record?.request_content_type]);
 
+  const requestPanelContentType = useMemo<RecordContentType>(() => {
+    if (requestBodySource === 'decoded' && bodyLooksJson(requestBody)) {
+      return 'JSON';
+    }
+    return requestContentType;
+  }, [requestBody, requestBodySource, requestContentType]);
+
+  const requestPanelBodyData =
+    requestBodySource === 'raw' ? requestRawBody?.data ?? null : requestBody;
+
   const openAiRequestParsed = useMemo(() => {
     return parseOpenAiLikeRequest(requestBody);
   }, [requestBody]);
@@ -241,13 +272,13 @@ export default function TrafficDetail({
   useEffect(() => {
     if (
       requestDisplayFormat === "Tree" &&
-      shouldDisableJsonStructuredView(requestContentType, requestBody)
+      shouldDisableJsonStructuredView(requestPanelContentType, requestBody)
     ) {
       setRequestDisplayFormat("HighLight");
     }
   }, [
     requestBody,
-    requestContentType,
+    requestPanelContentType,
     requestDisplayFormat,
     setRequestDisplayFormat,
   ]);
@@ -273,6 +304,30 @@ export default function TrafficDetail({
       setRequestDisplayFormat(format as DisplayFormat);
     },
     [setRequestDisplayFormat],
+  );
+
+  const handleRequestBodySourceChange = useCallback(
+    (source: 'decoded' | 'raw') => {
+      setRequestBodySource(source);
+      if (source === 'raw') {
+        setRequestDisplayFormat("Hex");
+      } else if (bodyLooksJson(requestBody)) {
+        setRequestDisplayFormat("HighLight");
+      }
+    },
+    [requestBody, setRequestDisplayFormat],
+  );
+
+  const handleResponseBodySourceChange = useCallback(
+    (source: 'decoded' | 'raw') => {
+      setResponseBodySource(source);
+      if (source === 'raw') {
+        setResponseDisplayFormat("Hex");
+      } else if (bodyLooksJson(responseBody)) {
+        setResponseDisplayFormat("HighLight");
+      }
+    },
+    [responseBody, setResponseDisplayFormat],
   );
 
   const handleResponseDisplayFormatChange = useCallback(
@@ -370,11 +425,15 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!requestBody,
+        enable: !!requestBody || !!requestRawBody,
         children: (
           <Body
             data={requestBody}
-            contentType={requestContentType}
+            rawData={requestRawBody?.data}
+            rawDataBase64={requestRawBody?.data_base64}
+            source={requestBodySource}
+            onSourceChange={handleRequestBodySourceChange}
+            contentType={requestPanelContentType}
             searchValue={requestSearch}
             displayFormat={requestDisplayFormat}
             onSearch={setRequestSearch}
@@ -391,7 +450,7 @@ export default function TrafficDetail({
             url={record.url}
             protocol={record.protocol}
             headers={record.request_headers}
-            body={requestBody}
+            body={requestRawBody?.data ?? requestBody}
             searchValue={requestSearch}
             onSearch={setRequestSearch}
           />
@@ -411,9 +470,12 @@ export default function TrafficDetail({
     requestBody,
     requestSearch,
     setRequestSearch,
-    requestContentType,
+    requestPanelContentType,
     requestDisplayFormat,
     openAiRequestParsed,
+    requestRawBody,
+    requestBodySource,
+    handleRequestBodySourceChange,
   ]);
 
   const openAiLikeAssembly = useMemo(() => {
@@ -463,10 +525,14 @@ export default function TrafficDetail({
 
   const responsePanelContentType = responseTab === "OpenAI"
     ? openAiLikeAssembly?.contentType ?? "Other"
-    : responseContentType;
+    : responseBodySource === 'decoded' && bodyLooksJson(responseBody)
+      ? "JSON"
+      : responseContentType;
   const responsePanelBodyData = responseTab === "OpenAI"
     ? openAiLikeAssembly?.body ?? null
-    : responseBody;
+    : responseBodySource === 'raw'
+      ? responseRawBody?.data ?? null
+      : responseBody;
 
   useEffect(() => {
     if (
@@ -580,11 +646,15 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!responseBody || canPreviewResponseImage,
+        enable: !!responseBody || !!responseRawBody || canPreviewResponseImage,
         children: (
           <Body
             data={responseBody}
-            contentType={responseContentType}
+            rawData={responseRawBody?.data}
+            rawDataBase64={responseRawBody?.data_base64}
+            source={responseBodySource}
+            onSourceChange={handleResponseBodySourceChange}
+            contentType={responsePanelContentType}
             rawContentType={record.content_type}
             mediaSrc={getResponseBodyContentUrl(record.id)}
             searchValue={responseSearch}
@@ -602,7 +672,7 @@ export default function TrafficDetail({
             protocol={record.protocol}
             status={record.status}
             headers={effectiveResponseHeaders}
-            body={responseBody}
+            body={responseRawBody?.data ?? responseBody}
             searchValue={responseSearch}
             onSearch={setResponseSearch}
             isTunnel={record.is_tunnel}
@@ -631,8 +701,11 @@ export default function TrafficDetail({
     canPreviewResponseImage,
     responseSearch,
     setResponseSearch,
-    responseContentType,
+    responsePanelContentType,
     responseDisplayFormat,
+    responseRawBody,
+    responseBodySource,
+    handleResponseBodySourceChange,
   ]);
 
   useEffect(() => {
@@ -835,8 +908,8 @@ export default function TrafficDetail({
                 onSearch={setRequestSearch}
                 displayFormat={requestDisplayFormat}
                 onDisplayFormatChange={handleRequestDisplayFormatChange}
-                contentType={requestContentType}
-                bodyData={requestBody}
+                contentType={requestPanelContentType}
+                bodyData={requestPanelBodyData}
                 collapsed={requestCollapsed}
                 onCollapsedChange={handleRequestCollapsedChange}
                 keepAliveTabs={["Body", "OpenAI"]}

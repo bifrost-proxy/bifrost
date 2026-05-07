@@ -277,16 +277,31 @@ bp-real-next-agent-binary.test decode://bp
 4. 通过临时 Bifrost 代理端口发起 `POST http://bp-real-next-agent-binary.test/thrift/healthz`，request body 必须是 `Healthz` Thrift CALL binary frame。
 5. 上游 fixture 只能返回 `Healthz` Thrift REPLY binary frame，不返回 JSON wrapper。
 6. 在 WebUI Traffic 详情中打开该记录，检查默认 request/response body 面板展示 decoded JSON。
-7. 使用 raw body ref/API 或落盘文件检查原始 request/response body 仍为二进制，request raw size 为 24 bytes，response raw size 为 37 bytes。
-8. 执行 `bifrost search Healthz --req-body --format json` 和 `bifrost search ok --res-body --format json`。
+7. 在 request Body 与 response Body 面板内切换 `Decoded / Raw`，确认 `Raw` 使用 Hex 展示解码前的原始二进制。
+8. 使用 raw body ref/API 或落盘文件检查原始 request/response body 仍为二进制，request raw size 为 24 bytes，response raw size 为 37 bytes。
+9. 执行 `bifrost search Healthz --req-body --format json` 和 `bifrost search ok --res-body --format json`。
 
 预期结果：
 - Traffic 命中 `bp://build_in_bp?protocol=thrift...` 和 `decode://bp`。
 - `decode_req_script_results` 与 `decode_res_script_results` 中 `build_in_bp` 均执行成功。
 - 默认 request body 展示 `schema_type=request`、`message.type=1`、`method=Healthz`。
 - 默认 response body 展示 `schema_type=response`、`message.type=2`、`method=Healthz`、`status=ok`。
+- Body 面板的 `Raw` 视图展示原始 Thrift CALL / REPLY bytes，不展示 decoded JSON，也不经过 UTF-8 lossy 重新编码；request hex 以 `80 01 00 01 ... 48 65 61 6c 74 68 7a` 开头，response hex 以 `80 01 00 02 ... 48 65 61 6c 74 68 7a` 开头。
 - raw request body 为原始 Thrift CALL bytes，raw response body 为原始 Thrift REPLY bytes。
 - `bifrost search` 可以分别搜索 decoded request body 中的 `Healthz` 和 decoded response body 中的 `ok`。
+
+### TC-BP-09A 回归：raw body API 精确返回解码前二进制
+
+操作步骤：
+1. 复用 TC-BP-09 生成的二进制 Thrift 流量记录 ID。
+2. 执行 `source ~/.zshrc && curl -s "http://127.0.0.1:<PORT>/_bifrost/api/traffic/<ID>/request-body?raw=1&encoding=base64" | jq -r '.data_base64'`。
+3. 执行 `source ~/.zshrc && curl -s "http://127.0.0.1:<PORT>/_bifrost/api/traffic/<ID>/response-body?raw=1&encoding=base64" | jq -r '.data_base64'`。
+4. 对比返回值与发起请求/fixture 响应的原始 base64。
+
+预期结果：
+- request raw base64 等于 `gAEAAQAAAAdIZWFsdGh6AAAABwwAAQAA`。
+- response raw base64 等于 `gAEAAgAAAAdIZWFsdGh6AAAABwwAAAsAAQAAAAJvawwA/wAAAA==`。
+- 不带 `raw=1` 的 `/request-body` 和 `/response-body` 仍返回 decoded JSON，用于 WebUI 默认展示和 decoded body 搜索。
 
 ### TC-BP-10 内置 `build_in_bp` 自动释放覆盖并在规则编辑器中提示成对写法
 

@@ -229,7 +229,11 @@ pub fn rewrite_path_with_prefix(
         if let Some(remaining) = request_path.strip_prefix(source_trimmed) {
             let target = target_path.trim_end_matches('/');
             if remaining.is_empty() {
-                format!("{}/", target)
+                if target_path.ends_with('/') {
+                    format!("{}/", target)
+                } else {
+                    target.to_string()
+                }
             } else if remaining.starts_with('/') || remaining.starts_with('?') {
                 format!("{}{}", target, remaining)
             } else {
@@ -604,6 +608,16 @@ mod tests {
             "/labor_cost/static/",
         );
         assert_eq!(result, "/labor_cost/static/");
+    }
+
+    #[test]
+    fn test_rewrite_path_exact_match_preserves_target_without_trailing_slash() {
+        let result = rewrite_path_with_prefix(
+            "/labor_cost/static/__webpack_hmr",
+            Some("/labor_cost/static/__webpack_hmr"),
+            "/__webpack_hmr",
+        );
+        assert_eq!(result, "/__webpack_hmr");
     }
 
     #[test]

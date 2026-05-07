@@ -118,12 +118,14 @@ export default function Traffic() {
       domainCounts: state.domainCounts,
     })),
   );
-  const { currentRecord, requestBody, responseBody, detailLoading, detailError } =
+  const { currentRecord, requestBody, responseBody, requestRawBody, responseRawBody, detailLoading, detailError } =
     useTrafficStore(
       useShallow((state) => ({
         currentRecord: state.currentRecord,
         requestBody: state.requestBody,
         responseBody: state.responseBody,
+        requestRawBody: state.requestRawBody,
+        responseRawBody: state.responseRawBody,
         detailLoading: state.detailLoading,
         detailError: state.detailError,
       })),
@@ -752,6 +754,8 @@ export default function Traffic() {
         record={currentRecord}
         requestBody={requestBody}
         responseBody={responseBody}
+        requestRawBody={requestRawBody}
+        responseRawBody={responseRawBody}
         loading={detailLoading}
         error={detailError}
         onOpenInNewWindow={handleOpenDetailInNewWindow}

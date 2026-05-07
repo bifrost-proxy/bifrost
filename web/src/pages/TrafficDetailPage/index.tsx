@@ -3,9 +3,16 @@ import { Alert, Button, Empty, Spin, theme } from "antd";
 import { ArrowLeftOutlined, ImportOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import TrafficDetail from "../../components/TrafficDetail";
-import { getTrafficDetail, getRequestBody, getResponseBody } from "../../api/traffic";
+import {
+  getTrafficDetail,
+  getRequestBody,
+  getResponseBody,
+  getRequestBodyContent,
+  getResponseBodyContent,
+} from "../../api/traffic";
 import { normalizeApiErrorMessage } from "../../api/client";
 import type { TrafficRecord } from "../../types";
+import type { TrafficBodyContent } from "../../api/traffic";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import { useTrafficDetailWindowStore } from "../../stores/useTrafficDetailWindowStore";
 
@@ -16,6 +23,8 @@ export default function TrafficDetailPage() {
   const [record, setRecord] = useState<TrafficRecord | null>(null);
   const [requestBody, setRequestBody] = useState<string | null>(null);
   const [responseBody, setResponseBody] = useState<string | null>(null);
+  const [requestRawBody, setRequestRawBody] = useState<TrafficBodyContent | null>(null);
+  const [responseRawBody, setResponseRawBody] = useState<TrafficBodyContent | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedId = useTrafficStore((state) => state.selectedId);
@@ -77,6 +86,8 @@ export default function TrafficDetailPage() {
       setRecord(null);
       setRequestBody(null);
       setResponseBody(null);
+      setRequestRawBody(null);
+      setResponseRawBody(null);
       setError("Missing traffic id");
       return;
     }
@@ -90,13 +101,25 @@ export default function TrafficDetailPage() {
         getRequestBody(recordId),
         getResponseBody(recordId),
       ]);
+      const [nextRequestRawBody, nextResponseRawBody] = await Promise.all([
+        detail.raw_request_body_ref
+          ? getRequestBodyContent(recordId, { raw: true, encoding: "base64" }).catch(() => null)
+          : Promise.resolve(null),
+        detail.raw_response_body_ref
+          ? getResponseBodyContent(recordId, { raw: true, encoding: "base64" }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
       setRecord(detail);
       setRequestBody(nextRequestBody);
       setResponseBody(nextResponseBody);
+      setRequestRawBody(nextRequestRawBody);
+      setResponseRawBody(nextResponseRawBody);
     } catch (nextError) {
       setRecord(null);
       setRequestBody(null);
       setResponseBody(null);
+      setRequestRawBody(null);
+      setResponseRawBody(null);
       setError(normalizeApiErrorMessage(nextError, "Failed to load request detail"));
     } finally {
       setLoading(false);
@@ -215,6 +238,8 @@ export default function TrafficDetailPage() {
             record={record}
             requestBody={requestBody}
             responseBody={responseBody}
+            requestRawBody={requestRawBody}
+            responseRawBody={responseRawBody}
             loading={loading}
             error={error}
             onResponseBodyChange={(body) => {

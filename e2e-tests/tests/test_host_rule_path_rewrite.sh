@@ -30,6 +30,8 @@ TARGET_HOST="ejt9lgzgu9.feishu-boe.cn"
 TARGET_PREFIX="/labor_cost/static/"
 TARGET_FILE="07c1d7e1fb3e13436b958af5f90ec9c8.svg"
 TARGET_QUERY="v=1"
+HMR_SOURCE_PATH="/labor_cost/static/__webpack_hmr"
+HMR_TARGET_PATH="/__webpack_hmr"
 
 HTTP_STATUS=""
 HTTP_HEADERS=""
@@ -118,6 +120,7 @@ build_bifrost_if_needed() {
 write_rules() {
     mkdir -p "$TEST_DATA_DIR"
     cat > "$RULES_FILE" <<EOF
+https://${TARGET_HOST}${HMR_SOURCE_PATH} http://127.0.0.1:${ECHO_HTTP_PORT}${HMR_TARGET_PATH}
 https://${TARGET_HOST}${TARGET_PREFIX} http://127.0.0.1:${ECHO_HTTP_PORT}${TARGET_PREFIX}
 EOF
 }
@@ -189,12 +192,36 @@ test_https_host_rule_path_rewrite() {
     _log_pass "path should not duplicate target prefix"
 }
 
+test_https_host_rule_exact_path_without_trailing_slash() {
+    log_section "HTTPS exact host rule path rewrite without trailing slash"
+    local url="https://${TARGET_HOST}${HMR_SOURCE_PATH}"
+    perform_request "$url"
+
+    assert_status_2xx "$HTTP_STATUS" "exact HMR path request through rewritten HTTPS host rule should succeed" || return 1
+
+    local actual_path
+    actual_path=$(echo "$HTTP_BODY" | jq -r '.request.parsed_path')
+    if [[ "$actual_path" == "$HMR_TARGET_PATH" ]]; then
+        _log_pass "upstream parsed path should preserve exact target path without trailing slash"
+    else
+        _log_fail "upstream parsed path should preserve exact target path without trailing slash" "$HMR_TARGET_PATH" "$actual_path"
+        return 1
+    fi
+
+    if [[ "$actual_path" == "${HMR_TARGET_PATH}/" ]]; then
+        _log_fail "exact target path should not gain a trailing slash" "$HMR_TARGET_PATH" "$actual_path"
+        return 1
+    fi
+    _log_pass "exact target path should not gain a trailing slash"
+}
+
 main() {
     start_mock_servers
     build_bifrost_if_needed
     write_rules
     start_proxy
     test_https_host_rule_path_rewrite
+    test_https_host_rule_exact_path_without_trailing_slash
 }
 
 main "$@"
