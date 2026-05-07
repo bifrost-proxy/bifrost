@@ -104,11 +104,16 @@ export interface ScriptLogEntry {
 
 export interface ScriptExecutionResult {
   script_name: string;
-  script_type: 'request' | 'response';
+  script_type: 'request' | 'response' | 'decode' | 'parser';
   success: boolean;
   error?: string;
   duration_ms: number;
   logs: ScriptLogEntry[];
+  decode_output?: {
+    data: string;
+    code: string;
+    msg: string;
+  };
 }
 
 export interface TrafficRecord extends TrafficSummary {
@@ -126,6 +131,8 @@ export interface TrafficRecord extends TrafficSummary {
   original_response_headers?: [string, string][] | null;
   req_script_results?: ScriptExecutionResult[] | null;
   res_script_results?: ScriptExecutionResult[] | null;
+  decode_req_script_results?: ScriptExecutionResult[] | null;
+  decode_res_script_results?: ScriptExecutionResult[] | null;
 }
 
 export type FrameDirection = 'send' | 'receive';

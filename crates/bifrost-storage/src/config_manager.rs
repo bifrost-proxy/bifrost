@@ -563,6 +563,9 @@ impl ConfigManager {
             "scripts/request",
             "scripts/response",
             "scripts/decode",
+            "scripts/parser",
+            "scripts/_remote-cache",
+            "scripts/_remote-cache/parser",
             "scripts/_sandbox",
         ]
     }

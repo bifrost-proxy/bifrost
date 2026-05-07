@@ -31,6 +31,8 @@ export interface ScriptListItem {
 export interface ScriptsInfo {
   request_scripts: ScriptListItem[];
   response_scripts: ScriptListItem[];
+  decode_scripts: ScriptListItem[];
+  parser_scripts: ScriptListItem[];
 }
 
 export interface ValueHint {
@@ -59,12 +61,12 @@ export interface UnifiedSyntaxInfo {
 let cachedSyntaxInfo: UnifiedSyntaxInfo | null = null;
 let fetchPromise: Promise<UnifiedSyntaxInfo> | null = null;
 
-export async function fetchSyntaxInfo(): Promise<UnifiedSyntaxInfo> {
-  if (cachedSyntaxInfo) {
+export async function fetchSyntaxInfo(options?: { force?: boolean }): Promise<UnifiedSyntaxInfo> {
+  if (!options?.force && cachedSyntaxInfo) {
     return cachedSyntaxInfo;
   }
 
-  if (fetchPromise) {
+  if (!options?.force && fetchPromise) {
     return fetchPromise;
   }
 
@@ -84,6 +86,10 @@ export async function fetchSyntaxInfo(): Promise<UnifiedSyntaxInfo> {
     });
 
   return fetchPromise;
+}
+
+export async function refreshSyntaxInfo(): Promise<UnifiedSyntaxInfo> {
+  return fetchSyntaxInfo({ force: true });
 }
 
 export function getCachedSyntaxInfo(): UnifiedSyntaxInfo | null {

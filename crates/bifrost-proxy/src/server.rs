@@ -501,6 +501,7 @@ pub struct ResolvedRules {
     pub req_scripts: Vec<String>,
     pub res_scripts: Vec<String>,
     pub decode_scripts: Vec<String>,
+    pub bp_scripts: Vec<String>,
 
     pub auth: Option<String>,
     pub forwarded_for: Option<String>,

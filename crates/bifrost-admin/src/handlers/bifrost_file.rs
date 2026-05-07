@@ -401,6 +401,8 @@ async fn import_scripts(content: &str, state: &SharedAdminState) -> Response<Box
         let script_type = match script.script_type.as_str() {
             "request" => bifrost_script::ScriptType::Request,
             "response" => bifrost_script::ScriptType::Response,
+            "decode" => bifrost_script::ScriptType::Decode,
+            "parser" => bifrost_script::ScriptType::Parser,
             _ => {
                 warnings.push(format!(
                     "Invalid script type for '{}': {}",
@@ -813,10 +815,16 @@ async fn handle_export_scripts(
         .list_scripts(bifrost_script::ScriptType::Decode)
         .await
         .unwrap_or_default();
+    let parser_scripts = manager
+        .engine()
+        .list_scripts(bifrost_script::ScriptType::Parser)
+        .await
+        .unwrap_or_default();
     let all_scripts: Vec<_> = request_scripts
         .into_iter()
         .chain(response_scripts)
         .chain(decode_scripts)
+        .chain(parser_scripts)
         .collect();
 
     for name in &request.script_names {
@@ -829,6 +837,7 @@ async fn handle_export_scripts(
             "request" => bifrost_script::ScriptType::Request,
             "response" => bifrost_script::ScriptType::Response,
             "decode" => bifrost_script::ScriptType::Decode,
+            "parser" => bifrost_script::ScriptType::Parser,
             _ => continue,
         };
         let script_name = parts[1];
@@ -844,6 +853,7 @@ async fn handle_export_scripts(
                         bifrost_script::ScriptType::Request => "request".to_string(),
                         bifrost_script::ScriptType::Response => "response".to_string(),
                         bifrost_script::ScriptType::Decode => "decode".to_string(),
+                        bifrost_script::ScriptType::Parser => "parser".to_string(),
                     },
                     description: info.description.clone(),
                     content,

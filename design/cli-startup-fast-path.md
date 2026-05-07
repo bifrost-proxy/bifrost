@@ -77,6 +77,16 @@
   - Remote Invoke SSE `ping` 心跳分发
 - 保持真实异常路径的等级不变：HTTP 连接服务错误继续 `error`，WebSocket 协议/IO 错误继续 `warn`，异步进程解析任务失败继续 `warn`，非 ping SSE 事件继续按现有业务日志输出。
 
+### 2.5 规则命中日志降噪
+
+- 规则 resolver 的逐条命中日志属于高频调试信息，默认 `info` 下不再输出。
+- `bifrost_core::rules` 的 `rule MATCHED` 降级到 `debug`，用于定位某条规则是否参与匹配。
+- `bifrost_proxy::rules` 的请求级 `rules matched for request` 降级到 `debug`，逐条 `matched rule detail` 降级到 `trace`。
+- 需要排查规则命中细节时，可显式使用：
+  - `RUST_LOG=bifrost_core::rules=debug,bifrost_proxy::rules=trace,info`
+  - 或通过 `--log-level debug` 打开较粗粒度调试日志，再按需使用 `RUST_LOG` 精确过滤。
+- 该调整不改变规则匹配、合并或转发语义，只减少默认日志量和高频字段格式化成本。
+
 ### 3. Frame metadata 落入 SQLite 独立表
 
 - `FrameStore metadata` 不再存储/读取 `frames/*.meta.json`
@@ -131,7 +141,8 @@ CREATE INDEX idx_frame_metadata_closed_updated
    - Admin API 不可达探针必须使用短 `connect-timeout` / `max-time`，避免请求命中 TCP holder 后在 Linux CI 中挂起到 suite timeout
 6. 真实场景测试：更新并执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-26 / TC-CSS-27
 7. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-07，验证默认 `info` 日志不再反复输出常态连接关闭、进程归因 miss、WebSocket 正常关闭和 SSE ping
-8. 执行与启动链路相关的 E2E / 校验命令，确认无回归
+8. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-08，验证默认 `info` 日志不再输出规则匹配摘要和逐条命中详情，同时 `trace` 下仍可按需看到详细规则命中信息
+9. 执行与启动链路相关的 E2E / 校验命令，确认无回归
 
 ## 校验要求（含 rust-project-validate）
 

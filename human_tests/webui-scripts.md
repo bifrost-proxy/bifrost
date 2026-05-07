@@ -2,13 +2,13 @@
 
 ## 功能模块说明
 
-Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：请求脚本（Request）、响应脚本（Response）、解码脚本（Decode）。页面采用左右分栏布局，左侧为脚本列表（树状视图，支持文件夹分组），右侧为代码编辑器（Monaco Editor）和测试结果面板。
+Scripts 页面用于管理 Bifrost 的脚本功能，支持四种类型脚本：请求脚本（Request）、响应脚本（Response）、解码脚本（Decode）、协议解析脚本（Parser）。页面采用左右分栏布局，左侧为脚本列表（树状视图，支持文件夹分组），右侧为代码编辑器（Monaco Editor）和测试结果面板。
 
 ## 前置条件
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 未被其他进程占用
 3. 浏览器已打开，可访问 `http://127.0.0.1:8800/_bifrost/`
@@ -25,26 +25,29 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 **预期结果**：
 - 页面成功加载，左侧显示脚本列表面板（data-testid: `scripts-list-panel`）
 - 左侧面板标题为 "Scripts"
+- 左侧列表顶部只显示两个主操作按钮：`+` 创建菜单（data-testid: `scripts-create-menu-button`）和 `...` 更多菜单（data-testid: `scripts-more-menu-button`）
+- 左侧列表顶部不再直接平铺 New Request / New Response / New Decode / Sandbox / Export All / Import 多个按钮
 - 右侧显示空状态提示 "Select a script or create a new one"
 - 右侧空状态区域包含 "How to use Scripts" 说明，列出 Request scripts、Response scripts 等用法
 - 底部显示脚本统计信息（如 "0 scripts"）
 
 ---
 
-### TC-WSC-02：创建请求脚本（Req 按钮）
+### TC-WSC-02：通过 + 下拉菜单创建请求脚本
 
 **操作步骤**：
-1. 在 Scripts 页面，点击左侧面板头部的 "New Request" 按钮（蓝色 + 图标，data-testid: `scripts-new-request-button`）
-2. 右侧编辑器面板加载后，在编辑器中输入脚本内容：
+1. 在 Scripts 页面，点击左侧面板头部的 `+` 创建菜单（data-testid: `scripts-create-menu-button`）
+2. 在下拉菜单中点击 "Request Script"（data-testid: `scripts-create-request-item`）
+3. 右侧编辑器面板加载后，在编辑器中输入脚本内容：
    ```javascript
    request.headers["X-Test-Header"] = "test-value";
    ```
-3. 点击右上角 "Save" 按钮（data-testid: `scripts-save-button`）
-4. 在弹出的 "Save New Script" 对话框中，输入脚本名称 `test-request-script`
-5. 点击对话框中的 "Save" 按钮
+4. 点击右上角 "Save" 按钮（data-testid: `scripts-save-button`）
+5. 在弹出的 "Save New Script" 对话框中，输入脚本名称 `test-request-script`
+6. 点击对话框中的 "Save" 按钮
 
 **预期结果**：
-- 点击 New Request 按钮后，右侧编辑器显示 Request Script 模板代码
+- 点击 Request Script 菜单项后，右侧编辑器显示 Request Script 模板代码
 - 编辑器面板标题显示 "New Script"，类型标签为蓝色 "request"
 - 保存对话框中有 placeholder 提示 "Enter script name (e.g., api/add-auth-header)"
 - 保存成功后显示 Toast 消息 "Script created"
@@ -52,43 +55,99 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 
 ---
 
-### TC-WSC-03：创建响应脚本（Res 按钮）
+### TC-WSC-03：通过 + 下拉菜单创建响应脚本
 
 **操作步骤**：
-1. 点击左侧面板头部的 "New Response" 按钮（绿色 + 图标，data-testid: `scripts-new-response-button`）
-2. 在编辑器中输入脚本内容：
+1. 点击左侧面板头部的 `+` 创建菜单
+2. 在下拉菜单中点击 "Response Script"（data-testid: `scripts-create-response-item`）
+3. 在编辑器中输入脚本内容：
    ```javascript
    response.headers["X-Response-Modified"] = "true";
    ```
-3. 点击 "Save" 按钮
-4. 在对话框中输入脚本名称 `test-response-script`
-5. 点击 "Save"
+4. 点击 "Save" 按钮
+5. 在对话框中输入脚本名称 `test-response-script`
+6. 点击 "Save"
 
 **预期结果**：
-- 点击 New Response 按钮后，右侧编辑器显示 Response Script 模板代码
+- 点击 Response Script 菜单项后，右侧编辑器显示 Response Script 模板代码
 - 编辑器面板标题显示 "New Script"，类型标签为绿色 "response"
 - 保存成功后显示 Toast 消息 "Script created"
 - 左侧列表中出现新脚本项，类型标签为绿色 "RES"
 
 ---
 
-### TC-WSC-04：创建解码脚本（Dec 按钮）
+### TC-WSC-04：通过 + 下拉菜单创建解码脚本
 
 **操作步骤**：
-1. 点击左侧面板头部的 "New Decode" 按钮（紫色 + 图标，data-testid: `scripts-new-decode-button`）
-2. 在编辑器中输入脚本内容：
+1. 点击左侧面板头部的 `+` 创建菜单
+2. 在下拉菜单中点击 "Decode Script"（data-testid: `scripts-create-decode-item`）
+3. 在编辑器中输入脚本内容：
    ```javascript
    ctx.output = { data: "decoded", code: "ok", msg: "" };
    ```
-3. 点击 "Save" 按钮
-4. 在对话框中输入脚本名称 `test-decode-script`
-5. 点击 "Save"
+4. 点击 "Save" 按钮
+5. 在对话框中输入脚本名称 `test-decode-script`
+6. 点击 "Save"
 
 **预期结果**：
-- 点击 New Decode 按钮后，右侧编辑器显示 Decode Script 模板代码
+- 点击 Decode Script 菜单项后，右侧编辑器显示 Decode Script 模板代码
 - 编辑器面板标题显示 "New Script"，类型标签为紫色 "decode"
 - 保存成功后显示 Toast 消息 "Script created"
 - 左侧列表中出现新脚本项，类型标签为紫色 "DEC"
+
+---
+
+### TC-WSC-04A：通过 + 下拉菜单创建 Parser 脚本
+
+**操作步骤**：
+1. 点击左侧面板头部的 `+` 创建菜单
+2. 确认菜单中同时存在 "Request Script"、"Response Script"、"Decode Script"、"Parser Script" 四个创建入口
+3. 点击 "Parser Script"（data-testid: `scripts-create-parser-item`）
+4. 在编辑器中输入脚本内容：
+   ```javascript
+   ctx.output = { data: "parser-output", code: "0", msg: "" };
+   ```
+5. 点击 "Save" 按钮
+6. 在对话框中输入脚本名称 `test-parser-script`
+7. 点击 "Save"
+
+**预期结果**：
+- `+` 创建菜单明确展示四种脚本类型，而不是只有 request / response / decode 三种
+- 点击 Parser Script 菜单项后，右侧编辑器显示新脚本，类型标签显示 "Parser"
+- 保存成功后显示 Toast 消息 "Script created"
+- 左侧列表中出现新脚本项，类型标签为 "PAR"
+
+---
+
+### TC-WSC-04B：通过 ... 下拉菜单访问非创建操作
+
+**操作步骤**：
+1. 点击左侧面板头部的 `...` 更多菜单（data-testid: `scripts-more-menu-button`）
+2. 查看菜单项
+3. 点击 "Sandbox Settings"（data-testid: `scripts-more-sandbox-item`）
+4. 关闭 Sandbox Settings 对话框
+5. 再次打开 `...` 更多菜单
+
+**预期结果**：
+- 更多菜单包含 "Sandbox Settings"、"Export All"、"Import"
+- 无脚本时 "Export All" 为禁用状态；已有脚本时 "Export All" 可点击
+- 点击 "Sandbox Settings" 后打开 Sandbox Settings 对话框
+- Import 操作仍通过 `.bifrost` 文件选择器触发，不再作为顶部平铺按钮展示
+
+---
+
+### TC-WSC-04C：通过 ... 下拉菜单触发真实 Import 文件选择器
+
+**操作步骤**：
+1. 在 Scripts 页面，切换到暗色主题。
+2. 点击左侧面板头部的 `...` 更多菜单（data-testid: `scripts-more-menu-button`）。
+3. 点击 "Import"（data-testid: `scripts-more-import-item`）。
+4. 使用浏览器自动化等待 `filechooser` 事件。
+
+**预期结果**：
+- 更多菜单中的 Import 项可见且可点击。
+- 点击 Import 后浏览器真实触发文件选择器，而不仅是菜单项可见。
+- 文件选择器支持选择 `.bifrost` 文件，且当前入口允许多文件选择。
 
 ---
 
@@ -109,6 +168,27 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 - 编辑器支持 TypeScript 语法高亮
 - 编辑器提供代码补全（输入 `request.` 时弹出属性建议）
 - 编辑器提供 Bifrost 类型定义提示（BifrostRequest、BifrostContext 等）
+
+---
+
+### TC-WSC-05A：Parser 脚本编辑器识别 bp parser 运行时上下文字段
+
+**操作步骤**：
+1. 在 Scripts 页面，点击左侧面板头部的 `+` 创建菜单。
+2. 点击 "Parser Script"。
+3. 在 Monaco 编辑器中粘贴包含以下访问模式的脚本：
+   - `ctx.phase === "websocket_send"`
+   - `ctx.phase === "websocket_recv"`
+   - `request.bodyBase64`
+   - `response.bodyBase64`
+   - `response.request.path`
+   - `req.method` / `req.host` / `req.path` / `req.url`
+4. 等待 Monaco diagnostics 刷新。
+
+**预期结果**：
+- 编辑器类型系统识别 `ctx.phase` 的 request / response / websocket_send / websocket_recv 四种阶段。
+- Parser/Decode 脚本中 `request.bodyBase64`、`response.bodyBase64` 和 `response.request` 请求快照字段都有补全提示。
+- 类似 `build_in_bp` 的 `currentRequest()` 写法不会因为 `req.method`、`req.host`、`req.path`、`req.url` 被误报类型错误。
 
 ---
 
@@ -143,7 +223,7 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 ### TC-WSC-08：脚本名称校验 — 不允许特殊字符
 
 **操作步骤**：
-1. 点击 "New Request" 创建新脚本
+1. 通过 `+` 创建菜单点击 "Request Script" 创建新脚本
 2. 点击 "Save" 按钮
 3. 在保存对话框中输入名称 `test@script!`
 4. 点击 "Save"
@@ -158,7 +238,7 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 ### TC-WSC-09：脚本名称校验 — 空名称
 
 **操作步骤**：
-1. 点击 "New Request" 创建新脚本
+1. 通过 `+` 创建菜单点击 "Request Script" 创建新脚本
 2. 点击 "Save" 按钮
 3. 在保存对话框中不输入任何名称（留空）
 4. 点击 "Save"
@@ -172,7 +252,7 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 ### TC-WSC-10：创建带目录的脚本（名称中使用 /）
 
 **操作步骤**：
-1. 点击 "New Request" 创建新脚本
+1. 通过 `+` 创建菜单点击 "Request Script" 创建新脚本
 2. 在编辑器中输入内容：
    ```javascript
    request.headers["X-Folder-Test"] = "ok";
@@ -282,13 +362,13 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持三种类型脚本：
 ### TC-WSC-16：脚本模板自动填充
 
 **操作步骤**：
-1. 点击 "New Request" 按钮
+1. 通过 `+` 创建菜单点击 "Request Script"
 2. 检查编辑器中自动填充的模板内容
 3. 关闭编辑器（选择其他脚本或创建新脚本）
-4. 点击 "New Response" 按钮
+4. 通过 `+` 创建菜单点击 "Response Script"
 5. 检查编辑器中自动填充的模板内容
 6. 关闭编辑器
-7. 点击 "New Decode" 按钮
+7. 通过 `+` 创建菜单点击 "Decode Script"
 8. 检查编辑器中自动填充的模板内容
 
 **预期结果**：

@@ -204,6 +204,7 @@ pub struct ScriptsData {
     pub request: Vec<ScriptInfo>,
     pub response: Vec<ScriptInfo>,
     pub decode: Vec<ScriptInfo>,
+    pub parser: Vec<ScriptInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -971,6 +972,11 @@ impl PushManager {
             .list_scripts(ScriptType::Decode)
             .await
             .unwrap_or_default();
+        let parser = manager
+            .engine()
+            .list_scripts(ScriptType::Parser)
+            .await
+            .unwrap_or_default();
 
         for name in ["utf8", "default"] {
             if decode.iter().any(|item| item.name == name) {
@@ -992,6 +998,7 @@ impl PushManager {
             request,
             response,
             decode,
+            parser,
         })
     }
 

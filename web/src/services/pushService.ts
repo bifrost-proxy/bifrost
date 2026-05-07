@@ -75,6 +75,7 @@ export interface ScriptsData {
   request: ScriptInfo[];
   response: ScriptInfo[];
   decode: ScriptInfo[];
+  parser: ScriptInfo[];
 }
 
 export type SettingsScope =

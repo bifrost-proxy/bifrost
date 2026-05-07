@@ -173,6 +173,32 @@ export const PROTOCOL_DOCS: Record<string, ProtocolDoc> = {
     examples: ['resScript://processResponse', 'resScript://filterData'],
     category: 'script',
   },
+  decode: {
+    name: 'decode',
+    description: 'Decode captured request and response bodies before they are stored, displayed, and searched',
+    valueType: 'decode script',
+    valueDescription: 'Built-in decoder name or custom decode script name',
+    valueSyntax: 'Use decode://utf8 for UTF-8 text, decode://default as the UTF-8 alias, or decode://bp with a bp:// parser rule.',
+    examples: [
+      'decode://utf8',
+      'decode://default',
+      'bp://build_in_bp?psm=example.service&method=GetItem decode://bp',
+    ],
+    category: 'script',
+  },
+  bp: {
+    name: 'bp',
+    description: 'Bind a parser script for binary protocol bodies; pair it with decode://bp so decoded content is stored, shown, and searchable',
+    valueType: 'parser script',
+    valueDescription: 'Parser script name or remote parser URL, with optional query parameters passed to the parser',
+    valueSyntax: 'Use bp://build_in_bp?psm=<psm>&method=<method> decode://bp for the built-in parser flow, or bp://<parser-script> decode://bp for another parser.',
+    examples: [
+      'bp://build_in_bp?psm=example.service&method=GetItem decode://bp',
+      'bp://team/custom_parser decode://bp',
+      'bp://https://example.com/parser.js?sha256=<sha256> decode://bp',
+    ],
+    category: 'script',
+  },
   includeFilter: {
     name: 'includeFilter',
     description: 'Only match requests that pass the filter',

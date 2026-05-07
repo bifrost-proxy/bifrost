@@ -1,0 +1,3 @@
+# Test target: verify rule matching still works while default info logs hide
+# high-frequency rule match diagnostics.
+example.test status://200 resBody://ok

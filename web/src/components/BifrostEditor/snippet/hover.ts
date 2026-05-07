@@ -17,6 +17,23 @@ interface ProtocolMatch {
 const VALUE_REF_PATTERN = /\{([\w-]+)\}/g;
 const REQ_SCRIPT_PATTERN = /reqScript:\/\/([\w\-.]+)/g;
 const RES_SCRIPT_PATTERN = /resScript:\/\/([\w\-.]+)/g;
+const BP_SCRIPT_PATTERN = /bp:\/\/([^\s]+)/g;
+
+export function localBpParserScriptName(rawValue: string): string | null {
+  const localName = rawValue.split(/[?#]/, 1)[0];
+  if (
+    !localName ||
+    localName.startsWith('/') ||
+    localName.endsWith('/') ||
+    localName.includes('//') ||
+    localName.split('/').includes('..') ||
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(localName) ||
+    !/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(localName)
+  ) {
+    return null;
+  }
+  return localName;
+}
 
 function findReferenceAtPosition(
   model: editor.ITextModel,
@@ -29,6 +46,7 @@ function findReferenceAtPosition(
     { pattern: VALUE_REF_PATTERN, type: 'value' },
     { pattern: REQ_SCRIPT_PATTERN, type: 'requestScript' },
     { pattern: RES_SCRIPT_PATTERN, type: 'responseScript' },
+    { pattern: BP_SCRIPT_PATTERN, type: 'parserScript' },
   ];
 
   for (const { pattern, type } of patterns) {
@@ -39,8 +57,16 @@ function findReferenceAtPosition(
       const endCol = match.index + match[0].length + 1;
 
       if (column >= startCol && column <= endCol) {
+        const name =
+          type === 'parserScript'
+            ? localBpParserScriptName(match[1])
+            : match[1];
+        if (!name) {
+          continue;
+        }
+
         return {
-          name: match[1],
+          name,
           type,
           range: {
             startLineNumber: position.lineNumber,
@@ -87,7 +113,7 @@ function findProtocolAtPosition(
   return null;
 }
 
-function getReferenceLocation(
+export function getReferenceLocation(
   name: string,
   type: ReferenceType
 ): ReferenceLocation | undefined {
@@ -129,6 +155,13 @@ function getReferenceLocation(
         navigationType: 'page',
         uri: `/scripts?type=response&name=${encodeURIComponent(name)}`,
       };
+    case 'parserScript':
+      return {
+        name,
+        type: 'parserScript',
+        navigationType: 'page',
+        uri: `/scripts?type=parser&name=${encodeURIComponent(name)}`,
+      };
   }
 
   return undefined;
@@ -142,6 +175,8 @@ function getTypeLabel(type: ReferenceType): string {
       return 'Request Script';
     case 'responseScript':
       return 'Response Script';
+    case 'parserScript':
+      return 'Parser Script';
   }
 }
 
@@ -260,5 +295,3 @@ export const executePendingNavigation = (): boolean => {
   }
   return false;
 };
-
-

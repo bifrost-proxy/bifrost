@@ -1,14 +1,19 @@
 use crate::error::{Result, ScriptError};
 use crate::sandbox::Sandbox;
 use crate::types::*;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use bifrost_storage::UnifiedConfig;
+
+const MAX_SCRIPT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct ScriptEngineConfig {
     pub scripts_dir: PathBuf,
@@ -124,11 +129,21 @@ impl ScriptEngine {
         self.config.scripts_dir.join("decode")
     }
 
+    fn parser_scripts_dir(&self) -> PathBuf {
+        self.config.scripts_dir.join("parser")
+    }
+
+    fn remote_parser_cache_dir(&self) -> PathBuf {
+        self.config.scripts_dir.join("_remote-cache").join("parser")
+    }
+
     pub async fn init(&self) -> Result<()> {
         let request_dir = self.request_scripts_dir();
         let response_dir = self.response_scripts_dir();
         let decode_dir = self.decode_scripts_dir();
+        let parser_dir = self.parser_scripts_dir();
         let sandbox_dir = self.config.scripts_dir.join("_sandbox");
+        let remote_parser_cache_dir = self.remote_parser_cache_dir();
 
         if !request_dir.exists() {
             std::fs::create_dir_all(&request_dir)?;
@@ -145,9 +160,30 @@ impl ScriptEngine {
             info!("Created decode scripts directory: {:?}", decode_dir);
         }
 
+        if !parser_dir.exists() {
+            std::fs::create_dir_all(&parser_dir)?;
+            info!("Created parser scripts directory: {:?}", parser_dir);
+        }
+        let released_parser_scripts = crate::builtins::release_parser_scripts(&parser_dir)?;
+
+        if !remote_parser_cache_dir.exists() {
+            std::fs::create_dir_all(&remote_parser_cache_dir)?;
+            info!(
+                "Created remote parser cache directory: {:?}",
+                remote_parser_cache_dir
+            );
+        }
+
         if !sandbox_dir.exists() {
             std::fs::create_dir_all(&sandbox_dir)?;
             info!("Created sandbox directory: {:?}", sandbox_dir);
+        }
+
+        if !released_parser_scripts.is_empty() {
+            let mut cache = self.script_cache.write().await;
+            for name in released_parser_scripts {
+                cache.remove(&format!("{}:{}", ScriptType::Parser, name));
+            }
         }
 
         Ok(())
@@ -158,11 +194,238 @@ impl ScriptEngine {
             ScriptType::Request => self.request_scripts_dir(),
             ScriptType::Response => self.response_scripts_dir(),
             ScriptType::Decode => self.decode_scripts_dir(),
+            ScriptType::Parser => self.parser_scripts_dir(),
         };
         dir.join(format!("{}.js", name))
     }
 
+    fn is_remote_script_ref(script_ref: &str) -> bool {
+        reqwest::Url::parse(script_ref)
+            .map(|url| matches!(url.scheme(), "https" | "http"))
+            .unwrap_or(false)
+    }
+
+    fn validate_remote_script_url(script_ref: &str) -> Result<()> {
+        let parsed = reqwest::Url::parse(script_ref)
+            .map_err(|e| ScriptError::InvalidName(format!("invalid remote parser URL: {e}")))?;
+        match parsed.scheme() {
+            "https" => Ok(()),
+            "http" => {
+                let host = parsed.host_str().unwrap_or_default();
+                if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+                    Ok(())
+                } else {
+                    Err(ScriptError::InvalidName(
+                        "remote bp parser script only allows http for localhost".to_string(),
+                    ))
+                }
+            }
+            _ => Err(ScriptError::InvalidName(
+                "remote bp parser script URL must use https".to_string(),
+            )),
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn source_id_for_remote_ref(script_ref: &str) -> String {
+        let hash = Self::sha256_hex(script_ref.as_bytes());
+        hash[..16].to_string()
+    }
+
+    fn expected_sha_from_remote_ref(script_ref: &str) -> Option<String> {
+        let parsed = reqwest::Url::parse(script_ref).ok()?;
+        if let Some((_, value)) = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "sha256" || key == "checksum")
+        {
+            return Some(value.to_string().to_ascii_lowercase());
+        }
+        let fragment = parsed.fragment()?;
+        for part in fragment.split('&') {
+            if let Some(value) = part
+                .strip_prefix("sha256=")
+                .or_else(|| part.strip_prefix("checksum="))
+            {
+                return Some(value.to_string().to_ascii_lowercase());
+            }
+        }
+        None
+    }
+
+    fn remote_download_url(script_ref: &str) -> String {
+        if let Ok(mut parsed) = reqwest::Url::parse(script_ref) {
+            let filtered: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(key, _)| key != "sha256" && key != "checksum")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            parsed.query_pairs_mut().clear().extend_pairs(filtered);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        } else {
+            script_ref.to_string()
+        }
+    }
+
+    fn local_parser_script_name(script_ref: &str) -> &str {
+        let query_pos = script_ref.find('?');
+        let fragment_pos = script_ref.find('#');
+        let split_at = match (query_pos, fragment_pos) {
+            (Some(q), Some(f)) => q.min(f),
+            (Some(q), None) => q,
+            (None, Some(f)) => f,
+            (None, None) => script_ref.len(),
+        };
+        &script_ref[..split_at]
+    }
+
+    fn load_remote_parser_script_blocking(
+        &self,
+        script_ref: &str,
+        network_timeout_ms: u64,
+    ) -> Result<String> {
+        let expected_sha = Self::expected_sha_from_remote_ref(script_ref).ok_or_else(|| {
+            ScriptError::InvalidName(
+                "remote bp parser script requires sha256=<hex> in query or fragment".to_string(),
+            )
+        })?;
+        Self::validate_remote_script_url(script_ref)?;
+        if expected_sha.len() != 64 || !expected_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ScriptError::InvalidName(
+                "remote bp parser sha256 must be a 64-character hex string".to_string(),
+            ));
+        }
+
+        let source_id = Self::source_id_for_remote_ref(script_ref);
+        let cache_dir = self.remote_parser_cache_dir().join(source_id);
+        let cache_path = cache_dir.join(format!("{expected_sha}.js"));
+        if cache_path.exists() {
+            return Ok(std::fs::read_to_string(cache_path)?);
+        }
+
+        std::fs::create_dir_all(&cache_dir)?;
+        let download_url = Self::remote_download_url(script_ref);
+        let client = bifrost_core::direct_blocking_reqwest_client_builder()
+            .timeout(Duration::from_millis(network_timeout_ms))
+            .build()
+            .map_err(|e| {
+                ScriptError::ExecutionFailed(format!("remote parser client init failed: {e}"))
+            })?;
+        let response = client.get(&download_url).send().map_err(|e| {
+            ScriptError::ExecutionFailed(format!("remote parser download failed: {e}"))
+        })?;
+        if !response.status().is_success() {
+            return Err(ScriptError::ExecutionFailed(format!(
+                "remote parser download failed with status {}",
+                response.status()
+            )));
+        }
+        let bytes = Self::read_remote_parser_body_with_limit(response)?;
+        let actual_sha = Self::sha256_hex(&bytes);
+        if actual_sha != expected_sha {
+            return Err(ScriptError::ExecutionFailed(format!(
+                "remote parser sha256 mismatch: expected {expected_sha}, got {actual_sha}"
+            )));
+        }
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|e| ScriptError::ExecutionFailed(format!("remote parser is not UTF-8: {e}")))?
+            .to_string();
+        let tmp_path = cache_dir.join(format!("{expected_sha}.tmp"));
+        std::fs::write(&tmp_path, &content)?;
+        std::fs::rename(&tmp_path, &cache_path)?;
+        Ok(content)
+    }
+
+    fn read_remote_parser_body_with_limit(
+        response: reqwest::blocking::Response,
+    ) -> Result<Vec<u8>> {
+        if let Some(len) = response.content_length() {
+            if len > MAX_SCRIPT_FILE_BYTES {
+                return Err(Self::script_too_large_error(
+                    "remote parser script",
+                    len,
+                    MAX_SCRIPT_FILE_BYTES,
+                ));
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let mut limited = response.take(MAX_SCRIPT_FILE_BYTES + 1);
+        limited.read_to_end(&mut bytes).map_err(|e| {
+            ScriptError::ExecutionFailed(format!("remote parser body read failed: {e}"))
+        })?;
+
+        if bytes.len() as u64 > MAX_SCRIPT_FILE_BYTES {
+            return Err(Self::script_too_large_error(
+                "remote parser script",
+                bytes.len() as u64,
+                MAX_SCRIPT_FILE_BYTES,
+            ));
+        }
+
+        Ok(bytes)
+    }
+
+    fn script_too_large_error(label: &str, size: u64, limit: u64) -> ScriptError {
+        ScriptError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} too large ({size} bytes, limit {limit} bytes)"),
+        ))
+    }
+
+    async fn load_parser_script_ref(
+        &self,
+        script_ref: &str,
+        network_timeout_ms: u64,
+    ) -> Result<String> {
+        if !Self::is_remote_script_ref(script_ref) {
+            return self
+                .load_script(
+                    ScriptType::Parser,
+                    Self::local_parser_script_name(script_ref),
+                )
+                .await;
+        }
+
+        let cache_key = format!("parser-remote:{script_ref}");
+        {
+            let cache = self.script_cache.read().await;
+            if let Some(content) = cache.get(&cache_key) {
+                return Ok(content.clone());
+            }
+        }
+
+        let engine = self.clone_for_blocking();
+        let script_ref_owned = script_ref.to_string();
+        let content = tokio::task::spawn_blocking(move || {
+            engine.load_remote_parser_script_blocking(&script_ref_owned, network_timeout_ms)
+        })
+        .await
+        .map_err(|e| ScriptError::ExecutionFailed(format!("remote parser task failed: {e}")))??;
+
+        let mut cache = self.script_cache.write().await;
+        cache.insert(cache_key, content.clone());
+        Ok(content)
+    }
+
+    fn clone_for_blocking(&self) -> Self {
+        Self {
+            config: ScriptEngineConfig {
+                scripts_dir: self.config.scripts_dir.clone(),
+                timeout_ms: self.config.timeout_ms,
+                max_memory: self.config.max_memory,
+            },
+            script_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     pub async fn load_script(&self, script_type: ScriptType, name: &str) -> Result<String> {
+        Self::validate_script_name(name)?;
+
         let cache_key = format!("{}:{}", script_type, name);
 
         {
@@ -180,17 +443,13 @@ impl ScriptEngine {
             )));
         }
 
-        const MAX_SCRIPT_FILE_BYTES: u64 = 8 * 1024 * 1024;
         if let Ok(meta) = std::fs::metadata(&path) {
             if meta.len() > MAX_SCRIPT_FILE_BYTES {
-                return Err(ScriptError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "script file too large ({} bytes, limit {} bytes)",
-                        meta.len(),
-                        MAX_SCRIPT_FILE_BYTES
-                    ),
-                )));
+                return Err(Self::script_too_large_error(
+                    "script file",
+                    meta.len(),
+                    MAX_SCRIPT_FILE_BYTES,
+                ));
             }
         }
         let content = std::fs::read_to_string(&path)?;
@@ -230,6 +489,8 @@ impl ScriptEngine {
     }
 
     pub async fn delete_script(&self, script_type: ScriptType, name: &str) -> Result<()> {
+        Self::validate_script_name(name)?;
+
         let path = self.get_script_path(script_type, name);
         if !path.exists() {
             return Err(ScriptError::NotFound(format!(
@@ -254,6 +515,7 @@ impl ScriptEngine {
         old_name: &str,
         new_name: &str,
     ) -> Result<()> {
+        Self::validate_script_name(old_name)?;
         Self::validate_script_name(new_name)?;
 
         let old_path = self.get_script_path(script_type, old_name);
@@ -294,6 +556,7 @@ impl ScriptEngine {
             ScriptType::Request => self.request_scripts_dir(),
             ScriptType::Response => self.response_scripts_dir(),
             ScriptType::Decode => self.decode_scripts_dir(),
+            ScriptType::Parser => self.parser_scripts_dir(),
         };
         let mut dir = old_path.parent().map(|p| p.to_path_buf());
         while let Some(d) = dir {
@@ -323,6 +586,7 @@ impl ScriptEngine {
             ScriptType::Request => self.request_scripts_dir(),
             ScriptType::Response => self.response_scripts_dir(),
             ScriptType::Decode => self.decode_scripts_dir(),
+            ScriptType::Parser => self.parser_scripts_dir(),
         };
 
         if !dir.exists() {
@@ -764,6 +1028,102 @@ impl ScriptEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_parser_script(
+        &self,
+        script_ref: &str,
+        phase: &str,
+        request: &RequestData,
+        request_body_bytes: &[u8],
+        response: &ResponseData,
+        response_body_bytes: &[u8],
+        ctx: &ScriptContext,
+    ) -> std::result::Result<(DecodeOutput, Vec<ScriptLogEntry>), ScriptError> {
+        self.execute_parser_script_with_sandbox(
+            script_ref,
+            phase,
+            request,
+            request_body_bytes,
+            response,
+            response_body_bytes,
+            ctx,
+            self.default_sandbox_config(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_parser_script_with_config(
+        &self,
+        script_ref: &str,
+        phase: &str,
+        request: &RequestData,
+        request_body_bytes: &[u8],
+        response: &ResponseData,
+        response_body_bytes: &[u8],
+        ctx: &ScriptContext,
+        cfg: &UnifiedConfig,
+    ) -> std::result::Result<(DecodeOutput, Vec<ScriptLogEntry>), ScriptError> {
+        let sandbox = self.sandbox_config_from_unified(cfg);
+        self.execute_parser_script_with_sandbox(
+            script_ref,
+            phase,
+            request,
+            request_body_bytes,
+            response,
+            response_body_bytes,
+            ctx,
+            sandbox,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_parser_script_with_sandbox(
+        &self,
+        script_ref: &str,
+        phase: &str,
+        request: &RequestData,
+        request_body_bytes: &[u8],
+        response: &ResponseData,
+        response_body_bytes: &[u8],
+        ctx: &ScriptContext,
+        sandbox_config: crate::sandbox::SandboxConfig,
+    ) -> std::result::Result<(DecodeOutput, Vec<ScriptLogEntry>), ScriptError> {
+        let script = self
+            .load_parser_script_ref(script_ref, sandbox_config.network_timeout_ms)
+            .await?;
+
+        let phase = phase.to_string();
+        let request_clone = request.clone();
+        let response_clone = response.clone();
+        let req_bytes = request_body_bytes.to_vec();
+        let res_bytes = response_body_bytes.to_vec();
+        let ctx_clone = ctx.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut sandbox = Sandbox::new(sandbox_config)?;
+            sandbox.execute_decode_script(
+                &script,
+                &phase,
+                &request_clone,
+                &req_bytes,
+                &response_clone,
+                &res_bytes,
+                &ctx_clone,
+            )
+        })
+        .await;
+
+        match result {
+            Ok(r) => r,
+            Err(e) => Err(ScriptError::ExecutionFailed(format!(
+                "Parser script execution thread panicked: {}",
+                e
+            ))),
+        }
+    }
+
     pub async fn test_script(
         &self,
         script_type: ScriptType,
@@ -935,7 +1295,7 @@ impl ScriptEngine {
                     },
                 }
             }
-            ScriptType::Decode => {
+            ScriptType::Decode | ScriptType::Parser => {
                 // 说明：decode 脚本需要区分阶段；这里按优先级选择：有 response 就跑 response 阶段，否则跑 request 阶段。
                 let content_owned = content.to_string();
                 let ctx_clone = ctx.clone();
@@ -1062,173 +1422,4 @@ impl ScriptEngine {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn test_engine_init() {
-        let temp_dir = TempDir::new().unwrap();
-        let engine = ScriptEngine::new(ScriptEngineConfig {
-            scripts_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        });
-
-        assert!(engine.init().await.is_ok());
-        assert!(temp_dir.path().join("request").exists());
-        assert!(temp_dir.path().join("response").exists());
-    }
-
-    #[tokio::test]
-    async fn test_save_and_load_script() {
-        let temp_dir = TempDir::new().unwrap();
-        let engine = ScriptEngine::new(ScriptEngineConfig {
-            scripts_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        });
-        engine.init().await.unwrap();
-
-        let script_content = r#"log.info("Hello from test script");"#;
-        engine
-            .save_script(ScriptType::Request, "test-script", script_content)
-            .await
-            .unwrap();
-
-        let loaded = engine
-            .load_script(ScriptType::Request, "test-script")
-            .await
-            .unwrap();
-        assert_eq!(loaded, script_content);
-    }
-
-    #[tokio::test]
-    async fn test_list_scripts() {
-        let temp_dir = TempDir::new().unwrap();
-        let engine = ScriptEngine::new(ScriptEngineConfig {
-            scripts_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        });
-        engine.init().await.unwrap();
-
-        engine
-            .save_script(ScriptType::Request, "script-a", "// A")
-            .await
-            .unwrap();
-        engine
-            .save_script(ScriptType::Request, "script-b", "// B")
-            .await
-            .unwrap();
-
-        let scripts = engine.list_scripts(ScriptType::Request).await.unwrap();
-        assert_eq!(scripts.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_decode_test_returns_output() {
-        let temp_dir = TempDir::new().unwrap();
-        let engine = ScriptEngine::new(ScriptEngineConfig {
-            scripts_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        });
-        engine.init().await.unwrap();
-
-        let mut headers = HashMap::new();
-        headers.insert("Content-Type".to_string(), "text/plain".to_string());
-        let request = RequestData {
-            url: "https://example.com/".to_string(),
-            method: "GET".to_string(),
-            host: "example.com".to_string(),
-            path: "/".to_string(),
-            protocol: "https".to_string(),
-            client_ip: "127.0.0.1".to_string(),
-            client_app: None,
-            headers,
-            body: Some("hello".to_string()),
-        };
-        let ctx = ScriptContext {
-            request_id: "test".to_string(),
-            script_name: "test".to_string(),
-            script_type: ScriptType::Decode,
-            values: HashMap::new(),
-            matched_rules: vec![],
-        };
-
-        let script = r#"
-log.info("decode phase:", ctx.phase);
-ctx.output = { code: "0", data: request.body, msg: "" };
-"#;
-
-        let result = engine
-            .test_script(ScriptType::Decode, script, Some(&request), None, &ctx)
-            .await;
-
-        assert!(result.success);
-        assert!(result.decode_output.is_some());
-        let out = result.decode_output.unwrap();
-        assert_eq!(out.code, "0");
-        assert_eq!(out.data, "hello");
-        assert_eq!(out.msg, "");
-        assert!(!result.logs.is_empty());
-    }
-
-    #[test]
-    fn test_validate_script_name() {
-        assert!(ScriptEngine::validate_script_name("valid-name").is_ok());
-        assert!(ScriptEngine::validate_script_name("valid_name").is_ok());
-        assert!(ScriptEngine::validate_script_name("validName123").is_ok());
-        assert!(ScriptEngine::validate_script_name("api/auth/add-token").is_ok());
-        assert!(ScriptEngine::validate_script_name("folder/script").is_ok());
-        assert!(ScriptEngine::validate_script_name("").is_err());
-        assert!(ScriptEngine::validate_script_name("invalid name").is_err());
-        assert!(ScriptEngine::validate_script_name("invalid.name").is_err());
-        assert!(ScriptEngine::validate_script_name("/leading-slash").is_err());
-        assert!(ScriptEngine::validate_script_name("trailing-slash/").is_err());
-        assert!(ScriptEngine::validate_script_name("double//slash").is_err());
-        assert!(ScriptEngine::validate_script_name("../path-traversal").is_err());
-    }
-
-    #[tokio::test]
-    async fn test_script_timeout_in_engine() {
-        let temp_dir = TempDir::new().unwrap();
-        let engine = ScriptEngine::new(ScriptEngineConfig {
-            scripts_dir: temp_dir.path().to_path_buf(),
-            timeout_ms: 100,
-            max_memory: 16 * 1024 * 1024,
-        });
-        engine.init().await.unwrap();
-
-        let infinite_loop_script = r#"while(true) {}"#;
-        engine
-            .save_script(ScriptType::Request, "infinite-loop", infinite_loop_script)
-            .await
-            .unwrap();
-
-        let mut request = RequestData::default();
-        let ctx = ScriptContext {
-            request_id: "test-timeout".to_string(),
-            script_name: "infinite-loop".to_string(),
-            script_type: ScriptType::Request,
-            values: HashMap::new(),
-            matched_rules: vec![],
-        };
-
-        let start = std::time::Instant::now();
-        let result = engine
-            .execute_request_script("infinite-loop", &mut request, &ctx)
-            .await;
-        let elapsed = start.elapsed();
-
-        assert!(!result.success);
-        assert!(result.error.is_some());
-        assert!(
-            result.error.as_ref().unwrap().contains("timeout"),
-            "Error should mention timeout: {:?}",
-            result.error
-        );
-        assert!(
-            elapsed.as_millis() < 500,
-            "Should timeout within 500ms, took {:?}",
-            elapsed
-        );
-    }
-}
+mod tests;

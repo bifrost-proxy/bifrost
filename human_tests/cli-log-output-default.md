@@ -168,9 +168,6 @@
 - 日志目录下存在 `bifrost*.log` 文件（daemon 模式默认写文件）
 - 终端输出 `PASS: log file created`
 
-**执行记录**：
-- 2026-05-04 执行 `bash e2e-tests/tests/test_daemon_log_level_e2e.sh` 补充验证 daemon 启动 readiness 后 Admin API 可达、代理请求成功、日志文件包含结构化 tracing 行，脚本汇总 `3/3` 断言通过。
-
 ---
 
 ### TC-LOD-07：start 默认 info 日志不刷常态连接生命周期噪声（回归验证）
@@ -225,8 +222,73 @@ PY
   - `Client closed connection` / `WebSocket connection closed`
   - `dispatching SSE event event=ping`
 
-**执行记录**：
-- 2026-05-05 执行 TC-LOD-07：`source ~/.zshrc` 后使用 `BIFROST_DATA_DIR=/tmp/bifrost-human-log-noise/data CARGO_TARGET_DIR=/tmp/bifrost-human-log-noise/target RUST_LOG=info cargo run --bin bifrost -- start --host 127.0.0.1 -p 18884 --unsafe-ssl --no-system-proxy` 启动，通过短连接提前关闭复现连接生命周期噪声入口，最终输出 `PASS: noisy lifecycle logs hidden at info`。
+---
+
+### TC-LOD-08：start 默认 info 日志不刷规则命中详情（回归验证）
+
+**操作步骤**：
+1. 清理临时数据目录并准备日志文件：
+   ```bash
+   rm -rf /tmp/bifrost-human-rule-log-noise
+   mkdir -p /tmp/bifrost-human-rule-log-noise
+   ```
+2. 先基于当前源码编译最新二进制：
+   ```bash
+   source ~/.zshrc
+   CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/bifrost-human-rule-log-noise/target cargo build --bin bifrost
+   ```
+3. 使用临时数据目录和非正式端口以前台模式启动服务，必须加载用户环境变量并禁用系统代理：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data RUST_LOG=info /tmp/bifrost-human-rule-log-noise/target/debug/bifrost start --host 127.0.0.1 -p 18885 --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/info.log 2>&1 &
+   echo $! > /tmp/bifrost-human-rule-log-noise/info.pid
+   ```
+4. 等待代理监听启动完成：
+   ```bash
+   for i in {1..60}; do
+     grep -q "Unified proxy server listening on 127.0.0.1:18885" /tmp/bifrost-human-rule-log-noise/info.log && break
+     sleep 1
+   done
+   ```
+5. 通过代理请求命中规则：
+   ```bash
+   http_proxy=http://127.0.0.1:18885 https_proxy=http://127.0.0.1:18885 no_proxy= curl -sS --max-time 5 http://example.test/
+   ```
+6. 等待日志 flush 后检查默认 `info` 日志：
+   ```bash
+   sleep 1
+   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/info.log && echo "FAIL: rule match logs visible at info" || echo "PASS: rule match logs hidden at info"
+   ```
+7. 停止 info 服务：
+   ```bash
+   kill "$(cat /tmp/bifrost-human-rule-log-noise/info.pid)" 2>/dev/null || true
+   wait "$(cat /tmp/bifrost-human-rule-log-noise/info.pid)" 2>/dev/null || true
+   ```
+8. 再次以前台模式启动服务，但显式打开规则调试日志：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data-debug RUST_LOG='bifrost_core::rules=debug,bifrost_proxy::rules=trace,info' /tmp/bifrost-human-rule-log-noise/target/debug/bifrost start --host 127.0.0.1 -p 18886 --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/debug.log 2>&1 &
+   echo $! > /tmp/bifrost-human-rule-log-noise/debug.pid
+   for i in {1..60}; do
+     grep -q "Unified proxy server listening on 127.0.0.1:18886" /tmp/bifrost-human-rule-log-noise/debug.log && break
+     sleep 1
+   done
+   ```
+9. 通过代理请求命中规则并检查调试日志：
+   ```bash
+   http_proxy=http://127.0.0.1:18886 https_proxy=http://127.0.0.1:18886 no_proxy= curl -sS --max-time 5 http://example.test/
+   sleep 1
+   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/debug.log && echo "PASS: rule match logs visible when explicitly enabled" || echo "FAIL: rule match logs missing when explicitly enabled"
+   ```
+10. 停止 debug 服务：
+   ```bash
+   kill "$(cat /tmp/bifrost-human-rule-log-noise/debug.pid)" 2>/dev/null || true
+   wait "$(cat /tmp/bifrost-human-rule-log-noise/debug.pid)" 2>/dev/null || true
+   ```
+
+**预期结果**：
+- 服务分别在 `127.0.0.1:18885` 和 `127.0.0.1:18886` 成功启动，且没有修改系统代理
+- 两次代理请求均返回 `ok`
+- 默认 `RUST_LOG=info` 时输出 `PASS: rule match logs hidden at info`
+- 显式 `RUST_LOG='bifrost_core::rules=debug,bifrost_proxy::rules=trace,info'` 时输出 `PASS: rule match logs visible when explicitly enabled`
 
 ---
 
@@ -236,4 +298,5 @@ PY
 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop 2>/dev/null || true
 rm -rf ./.bifrost-test
 rm -rf /tmp/bifrost-human-log-noise
+rm -rf /tmp/bifrost-human-rule-log-noise
 ```

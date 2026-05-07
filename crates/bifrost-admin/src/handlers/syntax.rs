@@ -20,6 +20,7 @@ pub struct ScriptsInfo {
     pub request_scripts: Vec<ScriptListItem>,
     pub response_scripts: Vec<ScriptListItem>,
     pub decode_scripts: Vec<ScriptListItem>,
+    pub parser_scripts: Vec<ScriptListItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +88,10 @@ async fn get_unified_syntax(state: SharedAdminState) -> Response<BoxBody> {
                 name: "default".to_string(),
                 description: Some("Alias of built-in UTF-8 decoder".to_string()),
             },
+            ScriptListItem {
+                name: "bp".to_string(),
+                description: Some("Run parser scripts bound by bp:// rules".to_string()),
+            },
         ];
 
         let mut user_decode_scripts: Vec<ScriptListItem> = engine
@@ -101,10 +106,22 @@ async fn get_unified_syntax(state: SharedAdminState) -> Response<BoxBody> {
             .collect();
         decode_scripts.append(&mut user_decode_scripts);
 
+        let parser_scripts = engine
+            .list_scripts(bifrost_script::ScriptType::Parser)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| ScriptListItem {
+                name: s.name,
+                description: s.description,
+            })
+            .collect();
+
         ScriptsInfo {
             request_scripts,
             response_scripts,
             decode_scripts,
+            parser_scripts,
         }
     } else {
         ScriptsInfo {
@@ -119,7 +136,12 @@ async fn get_unified_syntax(state: SharedAdminState) -> Response<BoxBody> {
                     name: "default".to_string(),
                     description: Some("Alias of built-in UTF-8 decoder".to_string()),
                 },
+                ScriptListItem {
+                    name: "bp".to_string(),
+                    description: Some("Run parser scripts bound by bp:// rules".to_string()),
+                },
             ],
+            parser_scripts: Vec::new(),
         }
     };
 

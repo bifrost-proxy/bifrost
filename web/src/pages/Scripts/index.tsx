@@ -31,9 +31,11 @@ import {
   UpOutlined,
   DownOutlined,
   ExportOutlined,
+  ImportOutlined,
   SettingOutlined,
   EditOutlined,
   MoreOutlined,
+  CodeOutlined,
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { useScriptsStore } from "../../stores/useScriptsStore";
@@ -62,9 +64,13 @@ const BIFROST_TYPES_DECODE = `
  * Bifrost Decode Script Types
  *
  * Decode scripts are executed BEFORE body is stored and pushed.
- * - ctx.phase === "request"  : request body decode (response is null)
+ * - ctx.phase === "request"  : request body decode
  * - ctx.phase === "response" : response body decode (response.request carries request snapshot)
+ * - ctx.phase === "websocket_send" : client-to-server WebSocket frame decode
+ * - ctx.phase === "websocket_recv" : server-to-client WebSocket frame decode
  */
+
+type BifrostScriptPhase = "request" | "response" | "websocket_send" | "websocket_recv";
 
 interface BifrostDecodeRequest {
   readonly url: string;
@@ -80,6 +86,8 @@ interface BifrostDecodeRequest {
   readonly body: string;
   /** Hex preview (may be truncated) */
   readonly bodyHex: string;
+  /** Full body bytes encoded as base64 */
+  readonly bodyBase64: string;
   /** Original byte length */
   readonly bodySize: number;
   readonly bodyHexTruncated: boolean;
@@ -92,6 +100,7 @@ interface BifrostDecodeResponse {
   readonly headers: Record<string, string>;
   readonly body: string;
   readonly bodyHex: string;
+  readonly bodyBase64: string;
   readonly bodySize: number;
   readonly bodyHexTruncated: boolean;
   readonly bodyTextTruncated: boolean;
@@ -116,8 +125,8 @@ interface BifrostDecodeOutput {
 interface BifrostContext {
   readonly requestId: string;
   readonly scriptName: string;
-  readonly scriptType: "request" | "response" | "decode";
-  readonly phase?: "request" | "response";
+  readonly scriptType: "request" | "response" | "decode" | "parser";
+  readonly phase?: BifrostScriptPhase;
   output?: BifrostDecodeOutput;
   readonly values: Record<string, string>;
   readonly matchedRules: Array<{ pattern: string; protocol: string; value: string }>;
@@ -148,7 +157,12 @@ interface BifrostNet {
 }
 
 declare const request: BifrostDecodeRequest;
-declare const response: BifrostDecodeResponse | null;
+/**
+ * Response snapshot for response/websocket_recv phases.
+ * Runtime value is null in request/websocket_send phases, so guard by ctx.phase
+ * before reading response fields.
+ */
+declare const response: BifrostDecodeResponse;
 declare const ctx: BifrostContext;
 declare let output: BifrostDecodeOutput | undefined;
 declare const log: BifrostLog;
@@ -194,10 +208,10 @@ interface BifrostContext {
   readonly requestId: string;
   /** Name of the current script */
   readonly scriptName: string;
-  /** Type of script: "request" | "response" | "decode" */
-  readonly scriptType: "request" | "response" | "decode";
-  /** Current phase for decode: "request" | "response" */
-  readonly phase?: "request" | "response";
+  /** Type of script: "request" | "response" | "decode" | "parser" */
+  readonly scriptType: "request" | "response" | "decode" | "parser";
+  /** Current phase for decode/parser scripts */
+  readonly phase?: "request" | "response" | "websocket_send" | "websocket_recv";
   /** Custom key-value configuration from Bifrost settings */
   readonly values: Record<string, string>;
   /** List of rules that matched this request */
@@ -292,6 +306,12 @@ interface BifrostResponse {
     host: string;
     /** Request path */
     path: string;
+    /** Request protocol, when available */
+    protocol?: string;
+    /** Client IP address, when available */
+    clientIp?: string;
+    /** Client application identifier, if available */
+    clientApp?: string | null;
     /** Request headers */
     headers: Record<string, string>;
   };
@@ -303,10 +323,10 @@ interface BifrostContext {
   readonly requestId: string;
   /** Name of the current script */
   readonly scriptName: string;
-  /** Type of script: "request" | "response" | "decode" */
-  readonly scriptType: "request" | "response" | "decode";
-  /** Current phase for decode: "request" | "response" */
-  readonly phase?: "request" | "response";
+  /** Type of script: "request" | "response" | "decode" | "parser" */
+  readonly scriptType: "request" | "response" | "decode" | "parser";
+  /** Current phase for decode/parser scripts */
+  readonly phase?: "request" | "response" | "websocket_send" | "websocket_recv";
   /** Custom key-value configuration from Bifrost settings */
   readonly values: Record<string, string>;
   /** List of rules that matched this request */
@@ -434,6 +454,45 @@ function getScriptItemId(key: string) {
   return `script-item-${encodeURIComponent(key)}`;
 }
 
+function getScriptTypeLabel(type: ScriptType) {
+  switch (type) {
+    case "request":
+      return "Request";
+    case "response":
+      return "Response";
+    case "decode":
+      return "Decode";
+    case "parser":
+      return "Parser";
+  }
+}
+
+function getScriptTypeShortLabel(type: ScriptType) {
+  switch (type) {
+    case "request":
+      return "REQ";
+    case "response":
+      return "RES";
+    case "decode":
+      return "DEC";
+    case "parser":
+      return "PAR";
+  }
+}
+
+function getScriptTypeTagColor(type: ScriptType) {
+  switch (type) {
+    case "request":
+      return "blue";
+    case "response":
+      return "green";
+    case "decode":
+      return "purple";
+    case "parser":
+      return "geekblue";
+  }
+}
+
 function ScriptListPanel({
   allScripts,
   selectedScript,
@@ -477,6 +536,7 @@ function ScriptListPanel({
   const [newName, setNewName] = useState("");
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
+  const hiddenImportRef = useRef<HTMLDivElement | null>(null);
 
   const flatNodes = useMemo<FlatNode[]>(() => {
     const filteredScripts = searchValue
@@ -816,69 +876,106 @@ function ScriptListPanel({
   );
 
   const hasScripts = allScripts.length > 0;
+  const createMenuItems = useMemo<MenuProps["items"]>(
+    () => [
+      {
+        key: "request",
+        icon: <FileOutlined />,
+        label: <span data-testid="scripts-create-request-item">Request Script</span>,
+        onClick: () => onNewScript("request"),
+      },
+      {
+        key: "response",
+        icon: <FileOutlined />,
+        label: <span data-testid="scripts-create-response-item">Response Script</span>,
+        onClick: () => onNewScript("response"),
+      },
+      {
+        key: "decode",
+        icon: <CodeOutlined />,
+        label: <span data-testid="scripts-create-decode-item">Decode Script</span>,
+        onClick: () => onNewScript("decode"),
+      },
+      {
+        key: "parser",
+        icon: <CodeOutlined />,
+        label: <span data-testid="scripts-create-parser-item">Parser Script</span>,
+        onClick: () => onNewScript("parser"),
+      },
+    ],
+    [onNewScript],
+  );
+
+  const moreMenuItems = useMemo<MenuProps["items"]>(
+    () => [
+      {
+        key: "sandbox",
+        icon: <SettingOutlined />,
+        label: <span data-testid="scripts-more-sandbox-item">Sandbox Settings</span>,
+        onClick: onOpenSandboxSettings,
+      },
+      {
+        key: "export-all",
+        icon: <ExportOutlined />,
+        label: <span data-testid="scripts-more-export-all-item">Export All</span>,
+        disabled: !hasScripts,
+        onClick: onExportAll,
+      },
+      {
+        key: "import",
+        icon: <ImportOutlined />,
+        label: <span data-testid="scripts-more-import-item">Import</span>,
+        onClick: () => {
+          hiddenImportRef.current?.querySelector("button")?.click();
+        },
+      },
+    ],
+    [hasScripts, onExportAll, onOpenSandboxSettings],
+  );
 
   return (
     <div className={styles.container} data-testid="scripts-list-panel">
       <div className={styles.header}>
         <span className={styles.headerTitle}>Scripts</span>
         <div className={styles.headerActions}>
-          <Tooltip title="Sandbox Settings">
-            <Button
-              type="text"
-              size="small"
-              icon={<SettingOutlined />}
-              onClick={onOpenSandboxSettings}
-              data-testid="scripts-sandbox-button"
-            />
-          </Tooltip>
-          <Tooltip title="New Request">
-            <Button
-              type="text"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={() => onNewScript("request")}
-              data-testid="scripts-new-request-button"
-            />
-          </Tooltip>
-          <Tooltip title="New Response">
-            <Button
-              type="text"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={() => onNewScript("response")}
-              style={{ color: "#52c41a" }}
-              data-testid="scripts-new-response-button"
-            />
-          </Tooltip>
-          <Tooltip title="New Decode">
-            <Button
-              type="text"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={() => onNewScript("decode")}
-              style={{ color: "#722ed1" }}
-              data-testid="scripts-new-decode-button"
-            />
-          </Tooltip>
-          {hasScripts && (
-            <Tooltip title="Export All">
+          <Dropdown
+            menu={{ items: createMenuItems }}
+            trigger={["click"]}
+            placement="bottomRight"
+          >
+            <Tooltip title="New Script">
               <Button
                 type="text"
                 size="small"
-                icon={<ExportOutlined />}
-                onClick={onExportAll}
-                data-testid="scripts-export-all-button"
+                icon={<PlusOutlined />}
+                data-testid="scripts-create-menu-button"
               />
             </Tooltip>
-          )}
-          <ImportBifrostButton
-            expectedType="script"
-            onImportSuccess={onImportSuccess}
-            buttonText=""
-            buttonType="text"
-            size="small"
-            testId="scripts-import-button"
-          />
+          </Dropdown>
+          <Dropdown
+            menu={{ items: moreMenuItems }}
+            trigger={["click"]}
+            placement="bottomRight"
+          >
+            <Tooltip title="More Actions">
+              <Button
+                type="text"
+                size="small"
+                icon={<MoreOutlined />}
+                data-testid="scripts-more-menu-button"
+              />
+            </Tooltip>
+          </Dropdown>
+          <div ref={hiddenImportRef} className={styles.hiddenImport}>
+            <ImportBifrostButton
+              expectedType="script"
+              onImportSuccess={onImportSuccess}
+              buttonText=""
+              buttonType="text"
+              size="small"
+              testId="scripts-import-button"
+            />
+          </div>
         </div>
       </div>
 
@@ -951,6 +1048,10 @@ function ScriptListPanel({
 
               const isSelected = node.key === selectedKey;
               const isMultiSelected = selectedScripts.includes(node.key);
+              const scriptType = node.scriptType;
+              if (!scriptType) {
+                return null;
+              }
 
               return (
                 <Dropdown
@@ -968,7 +1069,7 @@ function ScriptListPanel({
                     data-testid="script-item"
                     data-script-key={node.key}
                     data-script-name={node.scriptName}
-                    data-script-type={node.scriptType}
+                    data-script-type={scriptType}
                   >
                     <div className={styles.itemContent}>
                       <span className={styles.folderIcon}>
@@ -982,20 +1083,10 @@ function ScriptListPanel({
                       </span>
                       <div className={styles.itemMeta}>
                         <Tag
-                          color={
-                            node.scriptType === "request"
-                              ? "blue"
-                              : node.scriptType === "response"
-                                ? "green"
-                                : "purple"
-                          }
+                          color={getScriptTypeTagColor(scriptType)}
                           className={styles.scriptTag}
                         >
-                          {node.scriptType === "request"
-                            ? "REQ"
-                            : node.scriptType === "response"
-                              ? "RES"
-                              : "DEC"}
+                          {getScriptTypeShortLabel(scriptType)}
                         </Tag>
                       </div>
                     </div>
@@ -1237,16 +1328,10 @@ api.example.com reqScript://add-auth-header
             {isNewScript ? "New Script" : selectedScript.name}
           </Text>
           <Tag
-            color={
-              selectedType === "request"
-                ? "blue"
-                : selectedType === "response"
-                  ? "green"
-                  : "purple"
-            }
+            color={getScriptTypeTagColor(selectedType)}
             style={{ margin: 0 }}
           >
-            {selectedType}
+            {getScriptTypeLabel(selectedType)}
           </Tag>
         </Space>
         <Space size={8}>
@@ -1597,6 +1682,7 @@ export default function ScriptsPage() {
     requestScripts,
     responseScripts,
     decodeScripts,
+    parserScripts,
     selectedScript,
     selectedType,
     loading,
@@ -1666,7 +1752,7 @@ export default function ScriptsPage() {
   useEffect(() => {
     const typeParam = searchParams.get("type") as ScriptType | null;
     const nameParam = searchParams.get("name");
-    const scripts = [...requestScripts, ...responseScripts, ...decodeScripts];
+    const scripts = [...requestScripts, ...responseScripts, ...decodeScripts, ...parserScripts];
 
     if (typeParam && nameParam && scripts.length > 0 && !urlParamRef.current) {
       const exists = scripts.some(
@@ -1683,13 +1769,14 @@ export default function ScriptsPage() {
     requestScripts,
     responseScripts,
     decodeScripts,
+    parserScripts,
     selectScript,
     setSearchParams,
   ]);
 
   const allScripts = useMemo(
-    () => [...requestScripts, ...responseScripts, ...decodeScripts],
-    [requestScripts, responseScripts, decodeScripts],
+    () => [...requestScripts, ...responseScripts, ...decodeScripts, ...parserScripts],
+    [requestScripts, responseScripts, decodeScripts, parserScripts],
   );
 
   const getAllFolderKeys = useCallback((scripts: ScriptInfo[]): string[] => {

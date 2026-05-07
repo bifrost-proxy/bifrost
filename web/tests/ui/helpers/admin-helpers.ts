@@ -47,7 +47,7 @@ export async function clearValues(request: APIRequestContext): Promise<void> {
 export async function clearScripts(request: APIRequestContext): Promise<void> {
   const response = await request.get(`${apiBase}/scripts`);
   const payload = (await readJson(response)) as Record<string, Array<{ name: string }> | undefined>;
-  for (const type of ["request", "response", "decode"] as const) {
+  for (const type of ["request", "response", "decode", "parser"] as const) {
     for (const script of payload?.[type] || []) {
       await request.delete(`${apiBase}/scripts/${type}/${encodeURIComponent(script.name)}`);
     }

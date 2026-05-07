@@ -199,6 +199,38 @@ impl ScriptManager {
         }
         results
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_parser_script_with_config(
+        &self,
+        script_ref: &str,
+        phase: &str,
+        request: &bifrost_script::RequestData,
+        request_body_bytes: &[u8],
+        response: &bifrost_script::ResponseData,
+        response_body_bytes: &[u8],
+        ctx: &bifrost_script::ScriptContext,
+        cfg: &UnifiedConfig,
+    ) -> std::result::Result<
+        (
+            bifrost_script::DecodeOutput,
+            Vec<bifrost_script::ScriptLogEntry>,
+        ),
+        bifrost_script::ScriptError,
+    > {
+        self.engine
+            .execute_parser_script_with_config(
+                script_ref,
+                phase,
+                request,
+                request_body_bytes,
+                response,
+                response_body_bytes,
+                ctx,
+                cfg,
+            )
+            .await
+    }
 }
 
 #[derive(Serialize)]
@@ -206,6 +238,7 @@ struct ScriptsListResponse {
     request: Vec<ScriptInfo>,
     response: Vec<ScriptInfo>,
     decode: Vec<ScriptInfo>,
+    parser: Vec<ScriptInfo>,
 }
 
 #[derive(Deserialize)]
@@ -302,6 +335,11 @@ async fn handle_get(path: String, script_manager: Arc<RwLock<ScriptManager>>) ->
             .list_scripts(ScriptType::Decode)
             .await
             .unwrap_or_default();
+        let parser_scripts = manager
+            .engine()
+            .list_scripts(ScriptType::Parser)
+            .await
+            .unwrap_or_default();
 
         // 为了与规则层（decode://utf8 / decode://default）以及 WebSocket decode 行为保持一致，
         // 在脚本列表中暴露内置 decode 解码器（只读）。
@@ -323,6 +361,7 @@ async fn handle_get(path: String, script_manager: Arc<RwLock<ScriptManager>>) ->
             request: request_scripts,
             response: response_scripts,
             decode: decode_scripts,
+            parser: parser_scripts,
         });
     }
 
@@ -343,6 +382,7 @@ async fn handle_get(path: String, script_manager: Arc<RwLock<ScriptManager>>) ->
         "request" => ScriptType::Request,
         "response" => ScriptType::Response,
         "decode" => ScriptType::Decode,
+        "parser" => ScriptType::Parser,
         _ => return error_response(StatusCode::BAD_REQUEST, "Invalid script type"),
     };
 
@@ -405,6 +445,7 @@ async fn handle_put(
         "request" => ScriptType::Request,
         "response" => ScriptType::Response,
         "decode" => ScriptType::Decode,
+        "parser" => ScriptType::Parser,
         _ => return error_response(StatusCode::BAD_REQUEST, "Invalid script type"),
     };
 
@@ -487,6 +528,7 @@ async fn handle_delete(
         "request" => ScriptType::Request,
         "response" => ScriptType::Response,
         "decode" => ScriptType::Decode,
+        "parser" => ScriptType::Parser,
         _ => return error_response(StatusCode::BAD_REQUEST, "Invalid script type"),
     };
 
@@ -644,6 +686,7 @@ async fn handle_rename(
         "request" => ScriptType::Request,
         "response" => ScriptType::Response,
         "decode" => ScriptType::Decode,
+        "parser" => ScriptType::Parser,
         _ => return error_response(StatusCode::BAD_REQUEST, "Invalid script type"),
     };
 

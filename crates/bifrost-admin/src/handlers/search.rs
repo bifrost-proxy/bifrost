@@ -5,6 +5,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use tokio_stream::StreamExt;
+use tracing::warn;
 
 use super::{error_response, json_response, method_not_allowed, BoxBody};
 use crate::query_service::AdminQueryService;
@@ -154,7 +155,12 @@ async fn execute_search_stream(
                 &search_args,
                 move |item| {
                     if let Ok(json) = serde_json::to_string(item) {
-                        let _ = tx_results.blocking_send(Bytes::from(sse_event("result", &json)));
+                        if tx_results
+                            .blocking_send(Bytes::from(sse_event("result", &json)))
+                            .is_err()
+                        {
+                            warn!("search stream result receiver disconnected");
+                        }
                     }
                 },
                 move |p| {
@@ -182,8 +188,12 @@ async fn execute_search_stream(
                     };
 
                     if let Ok(json) = serde_json::to_string(&payload) {
-                        let _ =
-                            tx_progress.blocking_send(Bytes::from(sse_event("progress", &json)));
+                        if tx_progress
+                            .blocking_send(Bytes::from(sse_event("progress", &json)))
+                            .is_err()
+                        {
+                            warn!("search stream progress receiver disconnected");
+                        }
                     }
                 },
             )
@@ -199,7 +209,13 @@ async fn execute_search_stream(
                     search_id: response.search_id,
                 };
                 if let Ok(json) = serde_json::to_string(&done) {
-                    let _ = tx.blocking_send(Bytes::from(sse_event("done", &json)));
+                    if tx
+                        .send(Bytes::from(sse_event("done", &json)))
+                        .await
+                        .is_err()
+                    {
+                        warn!("search stream done receiver disconnected");
+                    }
                 }
             }
             Err(error) => {
@@ -207,7 +223,13 @@ async fn execute_search_stream(
                     message: error.to_string(),
                 };
                 if let Ok(json) = serde_json::to_string(&payload) {
-                    let _ = tx.blocking_send(Bytes::from(sse_event("error", &json)));
+                    if tx
+                        .send(Bytes::from(sse_event("error", &json)))
+                        .await
+                        .is_err()
+                    {
+                        warn!("search stream error receiver disconnected");
+                    }
                 }
             }
         }

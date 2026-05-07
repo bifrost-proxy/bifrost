@@ -97,6 +97,9 @@ const language: languages.IMonarchLanguage = {
         ],
       ],
 
+      [/([\w.\-]+:\/\/)([^#\s]*[?&=][^#\s]*)/, ['keyword', 'string']],
+      [/[?&][^#\s]*/, 'string'],
+
       [
         /(\s*[^()#=\s]+\s*)(=)(\s*[^#]+)(\s*|@comment)$/,
         ['identifier.var', 'delimiter', 'attribute.value', 'comment'],
@@ -217,6 +220,11 @@ const language: languages.IMonarchLanguage = {
         /(lineProps:\/\/)(.*)/,
         ['keyword', 'string'],
       ],
+      [
+        /([\w.\-]+:\/\/)([^#\s]*[?&=][^#\s]*)/,
+        ['keyword', 'string'],
+      ],
+      [/[?&][^#\s]*/, 'string'],
       [
         /([\w.\-]+:\/\/)([^#\s]*)/,
         ['keyword', 'string'],
