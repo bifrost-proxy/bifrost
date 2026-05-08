@@ -1358,6 +1358,8 @@ pub struct UiConfigResponse {
     pub filter_panel: UiFilterPanelConfig,
     #[serde(rename = "detailPanelCollapsed")]
     pub detail_panel_collapsed: bool,
+    #[serde(rename = "rulesSortMode")]
+    pub rules_sort_mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1368,6 +1370,8 @@ pub struct UpdateUiConfigRequest {
     pub filter_panel: Option<UiFilterPanelConfig>,
     #[serde(rename = "detailPanelCollapsed")]
     pub detail_panel_collapsed: Option<bool>,
+    #[serde(rename = "rulesSortMode")]
+    pub rules_sort_mode: Option<String>,
 }
 
 async fn get_ui_config(state: SharedAdminState) -> Response<BoxBody> {
@@ -1388,6 +1392,7 @@ async fn get_ui_config(state: SharedAdminState) -> Response<BoxBody> {
             .collect(),
         filter_panel: ui_config.filter_panel.into(),
         detail_panel_collapsed: ui_config.detail_panel_collapsed,
+        rules_sort_mode: ui_config.rules_sort_mode,
     };
 
     json_response(&response)
@@ -1424,6 +1429,7 @@ async fn update_ui_config(req: Request<Incoming>, state: SharedAdminState) -> Re
             .map(|filters| filters.into_iter().map(Into::into).collect()),
         filter_panel: request.filter_panel.map(Into::into),
         detail_panel_collapsed: request.detail_panel_collapsed,
+        rules_sort_mode: request.rules_sort_mode,
     };
 
     match config_manager.update_ui_config(update).await {
@@ -1437,6 +1443,7 @@ async fn update_ui_config(req: Request<Incoming>, state: SharedAdminState) -> Re
                     .collect(),
                 filter_panel: ui_config.filter_panel.into(),
                 detail_panel_collapsed: ui_config.detail_panel_collapsed,
+                rules_sort_mode: ui_config.rules_sort_mode,
             };
             json_response(&response)
         }

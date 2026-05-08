@@ -311,6 +311,13 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
   const server = await startMockHttpServer();
 
   try {
+    const resetUiConfigRes = await request.put(`${apiBase}/config/ui`, {
+      data: { rulesSortMode: "manual" },
+    });
+    if (!resetUiConfigRes.ok()) {
+      throw new Error(await resetUiConfigRes.text());
+    }
+
     const createRuleRes = await request.post(`${apiBase}/rules`, {
       data: {
         name: ruleName,
@@ -356,6 +363,20 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
     }
     await page.getByTestId("rule-refresh-button").click();
 
+    await changeSort(page, "rule-sort-select", "Updated");
+    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
+      "data-rule-name",
+      ruleName,
+    );
+    await page.reload();
+    await expect(page.getByTestId("rules-list")).toBeVisible();
+    await expect(page.getByTestId("rule-sort-select")).toContainText("Updated");
+    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
+      "data-rule-name",
+      ruleName,
+    );
+    await changeSort(page, "rule-sort-select", "Manual");
+
     await expect(page.getByTestId("rule-item").nth(0)).toHaveAttribute(
       "data-rule-name",
       latestRuleName,
@@ -398,6 +419,13 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
 
     await page.getByTestId("rule-sort-select").click();
     await page.locator(".ant-select-dropdown").getByText("Name", { exact: true }).click();
+    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
+      "data-rule-name",
+      ruleName,
+    );
+    await page.reload();
+    await expect(page.getByTestId("rules-list")).toBeVisible();
+    await expect(page.getByTestId("rule-sort-select")).toContainText("Name");
     await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
       "data-rule-name",
       ruleName,

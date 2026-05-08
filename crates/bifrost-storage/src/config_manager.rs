@@ -361,6 +361,9 @@ impl ConfigManager {
         if let Some(detail_panel_collapsed) = update.detail_panel_collapsed {
             config.ui.detail_panel_collapsed = detail_panel_collapsed;
         }
+        if let Some(rules_sort_mode) = update.rules_sort_mode {
+            config.ui.rules_sort_mode = rules_sort_mode;
+        }
 
         self.save_config(&config)?;
 
@@ -804,6 +807,29 @@ mod tests {
             let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
             let config = manager.config().await;
             assert!(!config.tls.enable_interception);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_ui_rules_sort_mode_persists() {
+        let temp_dir = TempDir::new().unwrap();
+
+        {
+            let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+            let updated = manager
+                .update_ui_config(UiConfigUpdate {
+                    rules_sort_mode: Some("updated_desc".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(updated.rules_sort_mode, "updated_desc");
+        }
+
+        {
+            let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+            let config = manager.config().await;
+            assert_eq!(config.ui.rules_sort_mode, "updated_desc");
         }
     }
 

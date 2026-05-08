@@ -273,6 +273,30 @@
 
 ---
 
+### TC-WLN-15：小窗口下左侧导航栏支持滚动
+
+**前置条件**：使用临时数据目录启动 Bifrost，且窗口高度调整到约 360px，确保左侧导航项总高度超过可视区域。
+
+**操作步骤**：
+1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/traffic`
+2. 观察左侧一级导航栏中 Network、Replay、Rules、Values、Scripts、DevTools、Notify、Settings 等 Tab 项
+3. 在左侧导航栏内向下滚动
+4. 点击滚动后露出的 `Settings` Tab
+5. 点击底部主题切换按钮，切换亮色/暗色主题后重复第 3 步
+
+**预期结果**：
+- 每个一级 Tab item 都保持稳定最小高度，不因窗口变矮被压缩或文字重叠
+- 当导航项总高度超过窗口高度时，左侧导航项区域出现可滚动行为
+- 向下滚动后靠下的 `Notify`、`Settings` 等 Tab 可见且可点击
+- 点击 `Settings` 后 URL 变为 `/_bifrost/settings`，Settings Tab 激活指示器正确显示
+- 底部主题切换按钮保持在侧边栏底部，不随导航项一起滚动
+- 亮色和暗色主题下滚动区域、激活背景、文字和图标均清晰可读
+
+**本次执行记录（2026-05-09）**：
+- 通过。执行 `pnpm --dir web exec playwright test admin-settings.spec.ts --grep "左侧一级导航在小窗口下可滚动"`，在 900x360 viewport 下验证导航滚动容器 `scrollHeight > clientHeight`、`overflow-y: auto`、Tab item `min-height: 64px`，滚动后可点击 `Settings` 并保持主题按钮可见。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
