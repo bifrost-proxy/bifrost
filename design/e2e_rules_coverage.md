@@ -78,25 +78,26 @@
 - rules E2E 需优先于 rust-project-validate 执行。
 - 收尾阶段执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
 
-## 2026-05-08：Windows x86 Rules E2E 20 分钟内完成
+## 2026-05-08：Windows x86 Rules E2E 分片预算收敛
 
 ### 背景
 - Windows rules runner 为避免共享 mock servers 在并发 fixture 下掉线，会在 Windows 平台强制串行执行。
 - 单个 `x86_64-pc-windows-msvc` `1/1` job 需要串行跑完整 rules fixture 集，实际 wall time 容易贴近或超过 20 分钟预算，并在慢 runner 上触发 job timeout。
+- `CI` run `25574281001` 的 Windows x86 shard 1/4 中，rules fixture 本身 354 秒完成且 `Failed: 0`，但 job 在 `Post Run Swatinem/rust-cache@v2` / `Post Run actions/checkout@v4` 阶段超时。说明 20 分钟 job 外层预算不足以覆盖 Windows runner 的固定 setup、artifact 下载、cache post cleanup 与 orphan process cleanup。
 - rules job 只使用下载好的 CLI release binary、bash/Python/curl/jq 与 mock servers；Node/pnpm 依赖安装不参与 rules fixture 执行。
 
 ### 实现逻辑
 - 将 Windows x86 rules CI 拆为 4 个矩阵分片：`1/4`、`2/4`、`3/4`、`4/4`，继续通过 `BIFROST_E2E_RULE_SHARD_INDEX` / `BIFROST_E2E_RULE_SHARD_TOTAL` 复用已有 runner 分片逻辑。
 - 每个 shard 仍在 Windows 内部串行执行，避免重新引入共享 mock server 并发掉线风险；跨 shard 由 GitHub Actions 并行调度，把 wall time 降到约四分之一。
-- 单个 shard 的 `BIFROST_E2E_SUITE_TIMEOUT` 收敛为 1080 秒，job `timeout-minutes` 收敛为 20 分钟，给失败日志 dump/upload 留出约 2 分钟余量。
+- 单个 shard 的 `BIFROST_E2E_SUITE_TIMEOUT` 保持 1080 秒，job `timeout-minutes` 使用 30 分钟。suite watchdog 仍负责限制真实 rules runner，job 外层预算用于覆盖 Windows 固定启动/清理开销，避免业务套件已通过后在 action post cleanup 阶段被判失败。
 - 移除 Windows rules job 的 pnpm setup、Node setup 与 `pnpm install` 步骤；rules fixture 不构建或运行 Web UI，减少每个 shard 的固定启动耗时。
 - 失败 artifact 名称加入 shard index，避免多个 shard 同时失败时上传 artifact 名称冲突。
 
 ### 测试方案
-- 静态解析 `.github/workflows/ci.yml`，确认 `e2e-windows-rules` 有 4 个 x86_64 shard、每个 shard total 为 4、job timeout 为 20 分钟、suite timeout 为 1080 秒。
+- 静态解析 `.github/workflows/ci.yml`，确认 `e2e-windows-rules` 有 4 个 x86_64 shard、每个 shard total 为 4、job timeout 为 30 分钟、suite timeout 为 1080 秒。
 - 语法检查 `e2e-tests/run_all_tests_parallel.sh`、`e2e-tests/test_rules.sh` 与 `scripts/run_all_e2e.sh`，确认现有 rules runner 和 wrapper 入口未被破坏。
 - 分片覆盖检查：按当前 workflow 矩阵参数验证 4 个 shard 索引为 `1 2 3 4` 且没有重复/缺失，artifact 名称包含 shard 维度。
-- 真实场景测试：更新并执行 `human_tests/rules-e2e-fixtures.md` 中 Windows x86 rules 20 分钟分片预算用例；完整 Windows runtime 耗时由推送后的 GitHub Actions `CI` run 继续验证。
+- 真实场景测试：更新并执行 `human_tests/rules-e2e-fixtures.md` 中 Windows x86 rules 30 分钟 job envelope 分片预算用例；完整 Windows runtime 耗时由推送后的 GitHub Actions `CI` run 继续验证。
 
 ### 校验要求
 - rules E2E 需优先于 rust-project-validate 执行。

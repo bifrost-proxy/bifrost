@@ -340,7 +340,7 @@
 - rules 全量回归输出 `65 通过 / 0 失败`，总断言失败数为 `0`。
 - 测试使用临时数据目录和非 9900 动态端口，代理启动仍包含 `--no-system-proxy`。
 
-### TC-REF-12：Windows x86 Rules CI 20 分钟分片预算回归
+### TC-REF-12：Windows x86 Rules CI 分片预算回归
 
 **操作步骤**：
 1. 执行 `test_rules.sh` 语法检查：
@@ -357,7 +357,7 @@
    ```
 4. 检查 GitHub Actions Windows rules CI 预算与矩阵范围：
    ```bash
-   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; shards = include.map { |row| row["rule_shard"] }.sort; raise "expected four x86_64 windows rules shards" unless include.size == 4 && include.all? { |row| row["target"] == "x86_64-pc-windows-msvc" }; raise "expected shards 1/4..4/4" unless shards == ["1/4", "2/4", "3/4", "4/4"]; raise "windows rules timeout should be 20 min" unless job["timeout-minutes"] == 20; raise "suite timeout should be 1080s on every shard" unless include.all? { |row| row["suite_timeout"] == "1080" }; raise "shard total should be 4" unless include.all? { |row| row["rule_shard_total"] == "4" }; puts "windows rules sharded budget ok"'
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; shards = include.map { |row| row["rule_shard"] }.sort; raise "expected four x86_64 windows rules shards" unless include.size == 4 && include.all? { |row| row["target"] == "x86_64-pc-windows-msvc" }; raise "expected shards 1/4..4/4" unless shards == ["1/4", "2/4", "3/4", "4/4"]; raise "windows rules timeout should be 30 min" unless job["timeout-minutes"] == 30; raise "suite timeout should be 1080s on every shard" unless include.all? { |row| row["suite_timeout"] == "1080" }; raise "shard total should be 4" unless include.all? { |row| row["rule_shard_total"] == "4" }; puts "windows rules sharded budget ok"'
    ```
 5. 检查 Windows rules job 不再安装前端依赖：
    ```bash
@@ -371,17 +371,17 @@
    ```bash
    rg -n 'BIFROST_E2E_RULE_SHARD_INDEX|BIFROST_E2E_RULE_SHARD_TOTAL|--shard N/M|sharded_test_files' e2e-tests/run_all_tests_parallel.sh
    ```
-8. 推送后检查 GitHub Actions `CI` run：应出现 4 个 `E2E Rules (x86_64-pc-windows-msvc, shard N/4)` job，单个 shard 应在 20 分钟内完成；不再出现 Windows ARM rules shards。Windows ARM 仍应出现 `Build Windows CLI (aarch64-pc-windows-msvc)`、`E2E Runner (aarch64-pc-windows-msvc)` 与 `Build Windows (aarch64-pc-windows-msvc)`。
+8. 推送后检查 GitHub Actions `CI` run：应出现 4 个 `E2E Rules (x86_64-pc-windows-msvc, shard N/4)` job，业务 rules suite 仍受 1080 秒 watchdog 限制，job 外层 30 分钟 envelope 应覆盖 Windows 固定 setup/cache/post-cleanup 开销；不再出现业务套件已 PASS 但 job 在 `Post Run Swatinem/rust-cache@v2` / `Post Run actions/checkout@v4` 阶段因 20 分钟总预算不足而失败。Windows ARM 仍应出现 `Build Windows CLI (aarch64-pc-windows-msvc)`、`E2E Runner (aarch64-pc-windows-msvc)` 与 `Build Windows (aarch64-pc-windows-msvc)`。
 
 **预期结果**：
 - `test_rules.sh` 语法检查通过。
 - `run_all_tests_parallel.sh` 语法检查通过。
 - 未显式设置 `BIFROST_E2E_TLS_READY_TIMEOUT` 时，TLS 拦截就绪等待继承 `BIFROST_E2E_FIXTURE_TIMEOUT`。
-- Windows rules job 保留 x86_64 rules fixture，并拆为 4 个 shard；每个 shard `BIFROST_E2E_SUITE_TIMEOUT=1080`，job 总 timeout 为 20 分钟。
+- Windows rules job 保留 x86_64 rules fixture，并拆为 4 个 shard；每个 shard `BIFROST_E2E_SUITE_TIMEOUT=1080`，job 总 timeout 为 30 分钟。
 - Windows rules job 不再执行 Node/pnpm setup 或 `pnpm install`，减少每个 shard 的固定耗时。
 - 失败日志 artifact 名称包含 shard index，多个 shard 同时失败时不会互相抢占 artifact 名称。
 - Windows ARM rules shards 不再作为合入门禁；ARM 平台二进制可用性由 CLI build、runner E2E 和 desktop sidecar/check 继续覆盖。
-- 若后续重新启用 Windows ARM rules 或调整 x86 shard 数，必须先证明每个 shard 在 20 分钟内完成。
+- 若后续重新启用 Windows ARM rules 或调整 x86 shard 数，必须先证明每个 shard 在 30 分钟 job envelope 内完成，且 rules suite 自身不会超过 1080 秒 watchdog。
 
 ### TC-REF-13：Windows rules CI 只依赖 CLI 构建产物
 
@@ -435,3 +435,4 @@
 - 2026-05-07：通过。补充并执行 TC-REF-13；执行 Ruby workflow 静态解析，输出 `windows rules cli dependency ok`，确认 `e2e-windows-rules.needs == ["build-cli-windows"]`，`build-desktop-windows.needs == ["build-cli-windows"]`；执行 `rg -n 'build-cli-windows|name: bifrost-release-\$\{\{ matrix\.target \}\}|Download release binary|Download CLI binary|needs: \[build-desktop-windows\]|needs: \[build-cli-windows\]' .github/workflows/ci.yml`，确认 CLI artifact 上传/下载路径一致，且 Windows rules 不再依赖 desktop 构建。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整平台调度由推送后的 GitHub Actions `CI` run 验证。
 - 2026-05-07：通过。更新并执行 TC-REF-06 与 TC-REF-12 的 Windows rules 20 分钟预算收敛验证；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules matrix budget ok` 与 `windows rules timeout budget ok`，确认 `e2e-windows-rules` 只保留 `x86_64-pc-windows-msvc` 一项、job timeout 为 30 分钟、suite timeout 为 1200 秒、retry budget 为 180 秒。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；Windows x86 完整 rules job、Windows ARM CLI build/runner/desktop job 由推送后的 GitHub Actions `CI` run 验证。
 - 2026-05-08：通过。更新并执行 TC-REF-06 与 TC-REF-12 的 Windows x86 rules 20 分钟分片预算回归；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules sharded budget ok`、`windows rules frontend setup removed` 与 `windows rules timeout budget ok`，确认 `e2e-windows-rules` 拆为 4 个 x86_64 shard（1/4 到 4/4）、job timeout 为 20 分钟、每个 shard suite timeout 为 1080 秒、retry budget 为 180 秒，且 Windows rules job 不再执行 pnpm/Node setup 或 `pnpm install`。执行 `BIFROST_E2E_RULE_JOBS=1 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_FIXTURE_TIMEOUT=90 BIFROST_E2E_RETRY_FIXTURE_TIMEOUT=60 BIFROST_E2E_RETRY_BUDGET_SECS=120 BIFROST_E2E_RULE_RESULTS_DIR=.bifrost-e2e-runs/rules-win-shard-smoke-20260508 bash e2e-tests/run_all_tests_parallel.sh -c priority --no-build --shard 1/4`，使用动态 mock 端口（HTTP 60753、HTTPS 60754、WS 60757、WSS 60758、SSE 60790、Proxy 60792）和代理起始端口 16031，未使用 9900；priority 分片 2/2 套件通过，6/6 断言通过。完整 Windows x86 4-shard runtime 耗时由推送后的 GitHub Actions `CI` run 验证。
+- 2026-05-09：通过。基于 GitHub Actions `CI` run `25574281001` 的 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 失败日志确认 rules fixture 自身已 `Passed: 1`、`Failed: 0`，耗时 354 秒；失败发生在业务步骤结束后的 `Post Run Swatinem/rust-cache@v2` / `Post Run actions/checkout@v4`，属于 20 分钟 job envelope 不足覆盖 Windows 固定 setup 与 post cleanup。更新并执行 TC-REF-12；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules sharded budget ok`、`windows rules frontend setup removed`，确认 `e2e-windows-rules` 仍拆为 4 个 x86_64 shard、每个 shard suite timeout 为 1080 秒、job timeout 提升到 30 分钟、Windows rules job 不执行 pnpm/Node setup 或 `pnpm install`。随后执行 `bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`，使用动态 mock 端口（HTTP 50111、HTTPS 50112、WS 50113、WSS 50114、SSE 50115、Proxy 50116）和代理起始端口 14497，未使用 9900；rules 全量回归 66/66 套件通过，575/575 断言通过，失败数 0。完整 Windows x86 runtime 由推送后的 GitHub Actions `CI` run 验证。
