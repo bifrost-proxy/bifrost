@@ -950,7 +950,7 @@ trap e2e_cleanup EXIT
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-export CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+export CARGO_BIN="${CARGO_BIN:-$(resolve_non_shim_command cargo)}"
 export NODE_BIN="${NODE_BIN:-$(resolve_non_shim_command node)}"
 export PNPM_BIN="${PNPM_BIN:-$(resolve_non_shim_command pnpm)}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"

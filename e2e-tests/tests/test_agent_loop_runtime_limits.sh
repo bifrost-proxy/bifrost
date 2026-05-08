@@ -13,6 +13,7 @@ MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-18896}}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
+BIFROST_BIN="${BIFROST_BIN:-}"
 RESPONSE_FILE="$TEST_DIR/agent-response.json"
 FINAL_TEXT="已完成 35 次 list_directory 调用，默认迭代上限未在 30 次时提前中断。"
 
@@ -131,11 +132,17 @@ PY
 MOCK_PID=$!
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
-echo "[agent-loop-runtime-limits] building bifrost"
-SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
+  echo "[agent-loop-runtime-limits] skipping build, using $BIFROST_BIN"
+else
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+  echo "[agent-loop-runtime-limits] building bifrost"
+  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+fi
 
 echo "[agent-loop-runtime-limits] starting bifrost on $BIFROST_PORT with temp data dir $TEST_DIR"
-BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start \
+BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
   --unsafe-ssl \

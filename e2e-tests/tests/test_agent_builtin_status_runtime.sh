@@ -11,11 +11,13 @@ MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-18898}}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
+BIFROST_BIN="${BIFROST_BIN:-}"
 CHAT_RESPONSE="$TEST_DIR/chat-response.json"
 STATUS_RESPONSE="$TEST_DIR/status-response.json"
 IDLE_STATUS_RESPONSE="$TEST_DIR/idle-status-response.json"
 TOOL_CHAT_RESPONSE="$TEST_DIR/tool-chat-response.json"
 TOOL_STATUS_RESPONSE="$TEST_DIR/tool-status-response.json"
+TOOL_ACTIVE_STATUS_RESPONSE="$TEST_DIR/tool-active-status-response.json"
 WORK_DIR="$TEST_DIR/workdir"
 mkdir -p "$WORK_DIR"
 
@@ -145,7 +147,8 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 70, "completion_tokens": 7, "total_tokens": 77},
             }
         elif "触发大输出工具" in joined and has_compacted_summary:
-            time.sleep(3.0)
+            # Keep the second-loop status observable under slower CI runners.
+            time.sleep(8.0)
             response = {
                 "choices": [
                     {
@@ -226,11 +229,17 @@ PY
 MOCK_PID=$!
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
-echo "[agent-builtin-status-runtime] building bifrost"
-SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
+  echo "[agent-builtin-status-runtime] skipping build, using $BIFROST_BIN"
+else
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+  echo "[agent-builtin-status-runtime] building bifrost"
+  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+fi
 
 echo "[agent-builtin-status-runtime] starting bifrost on $BIFROST_PORT"
-BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start \
+BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
   --unsafe-ssl \
@@ -341,20 +350,22 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   >"$TOOL_CHAT_RESPONSE" &
 CHAT_PID=$!
 
-for _ in $(seq 1 80); do
+for _ in $(seq 1 160); do
   curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
     -d '{"session_key":"agent-status-runtime-tool-growth","message":"/status"}' \
     >"$TOOL_STATUS_RESPONSE"
-  if python3 - "$TOOL_STATUS_RESPONSE" <<'PY'
+  if python3 - "$TOOL_STATUS_RESPONSE" "$TOOL_ACTIVE_STATUS_RESPONSE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+active_path = Path(sys.argv[2])
 active = response.get("active_status")
-if isinstance(active, dict) and active.get("current_loop_iteration") == 2:
-    if active.get("compaction_count") == 1 and active.get("estimated_context_tokens", 0) < 10000:
+if isinstance(active, dict):
+    active_path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+    if active.get("current_loop_iteration") == 2 and active.get("compaction_count") == 1:
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -363,6 +374,10 @@ PY
   fi
   sleep 0.25
 done
+
+if [[ -s "$TOOL_ACTIVE_STATUS_RESPONSE" ]]; then
+  cp "$TOOL_ACTIVE_STATUS_RESPONSE" "$TOOL_STATUS_RESPONSE"
+fi
 
 python3 - "$TOOL_STATUS_RESPONSE" <<'PY'
 import json

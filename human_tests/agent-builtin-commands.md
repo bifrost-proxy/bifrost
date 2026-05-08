@@ -237,7 +237,7 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 1. 使用临时数据目录启动 Bifrost：`BIFROST_DATA_DIR=<temp_dir> ./target/debug/bifrost start --host 127.0.0.1 -p <non_9900_port> --unsafe-ssl --no-system-proxy`。
 2. 将 Agent 配置为 mock Chat Completions provider。
 3. mock 第一次响应返回 `exec_command` 工具调用，`usage.total_tokens = 17`，工具命令输出大体积文本。
-4. mock 第二次模型请求延迟 3 秒返回最终文本。
+4. mock 第二次模型请求延迟 8 秒返回最终文本，保证 CI 高负载下 `/status` 轮询有稳定的运行中采样窗口。
 5. 在第二次模型请求执行期间，发送同 session 的 `/status`。
 
 **预期结果**：
@@ -249,7 +249,7 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - response 文本中的 `Context 用量: ~<estimated_context_tokens> / 250000` 与 JSON 字段一致。
 - response 文本中的 `实时 token` 仍展示累计 token，最近响应显示 `17`，`Context 用量` 不等于单独的 `17`。
 
-**本次执行结果**：通过。2026-05-08 执行 `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；运行中 `/status` 在第二轮模型请求期间通过脚本断言：`active_status.current_loop_iteration == 2`、`estimated_context_tokens > 10017`、`last_response_tokens == 17`，文本中的 `Context 用量` 与 JSON 字段一致，最近响应显示 `17`；脚本输出 `[agent-builtin-status-runtime] PASS`。
+**本次执行结果**：通过。2026-05-09 执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；运行中 `/status` 在第二轮模型请求期间通过脚本断言：`active_status.current_loop_iteration == 2`、`estimated_context_tokens > 10017`、`last_response_tokens == 17`，文本中的 `Context 用量` 与 JSON 字段一致，最近响应显示 `17`；脚本输出 `[agent-builtin-status-runtime] PASS`。本次同时验证了 CI 高负载下的轮询加固：第二轮 mock 响应保留 8 秒采样窗口，脚本保存最后一次 `active_status` 响应用于最终断言，避免只捕获到 turn 完成后的空闲 `/status`。
 
 ### TC-BC-22: 回归 - 自动压缩判断不被较小的旧响应 token 遮蔽
 
