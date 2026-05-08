@@ -83,6 +83,14 @@ use super::devtools::{
     take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
 };
 
+fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
+    record.listener_port = ctx.port;
+    record.client_ip = ctx.client_ip.clone();
+    record.client_app = ctx.client_app.clone();
+    record.client_pid = ctx.client_pid;
+    record.client_path = ctx.client_path.clone();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_http_mock_traffic(
     state: &Arc<AdminState>,
@@ -134,10 +142,7 @@ fn record_http_mock_traffic(
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
     record.matched_rules = crate::utils::build_matched_rules(resolved_rules);
-    record.client_ip = ctx.client_ip.clone();
-    record.client_app = ctx.client_app.clone();
-    record.client_pid = ctx.client_pid;
-    record.client_path = ctx.client_path.clone();
+    apply_request_context(&mut record, ctx);
     record.response_size = calculate_response_size(
         mock_status,
         record.original_response_headers.as_deref().unwrap_or(&[]),
@@ -895,10 +900,7 @@ pub async fn handle_http_request(
             record.original_response_headers = Some(mock_res_headers);
             record.has_rule_hit = has_rules;
             record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-            record.client_ip = ctx.client_ip.clone();
-            record.client_app = ctx.client_app.clone();
-            record.client_pid = ctx.client_pid;
-            record.client_path = ctx.client_path.clone();
+            apply_request_context(&mut record, ctx);
             record.response_body_ref = if let Some(ref body_store) = state.body_store {
                 let store = body_store.read();
                 store.store(ctx.id_str(), "res", mock_res_body.as_ref())
@@ -1437,6 +1439,7 @@ pub async fn handle_http_request(
                     record.original_response_headers.as_deref().unwrap_or(&[]),
                     response_body.len(),
                 );
+                apply_request_context(&mut record, ctx);
 
                 state.record_traffic(record);
             }
@@ -2185,10 +2188,7 @@ pub async fn handle_http_request(
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone());
-                record.client_ip = ctx.client_ip.clone();
-                record.client_app = ctx.client_app.clone();
-                record.client_pid = ctx.client_pid;
-                record.client_path = ctx.client_path.clone();
+                apply_request_context(&mut record, ctx);
 
                 if is_websocket {
                     record.protocol = "ws".to_string();
@@ -2457,7 +2457,7 @@ pub async fn handle_http_request(
     };
 
     if inject_bifrost_badge {
-        let badge_rules_json = build_badge_rules_json(admin_state.as_deref());
+        let badge_rules_json = build_badge_rules_json(admin_state.as_deref(), ctx.port).await;
         let final_res_content_type = get_content_type(&res_parts);
         if final_res_content_type.starts_with("text/html") {
             if let Some(content_encoding) = response_content_encoding(&res_parts) {
@@ -2590,10 +2590,7 @@ pub async fn handle_http_request(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
-        record.client_ip = ctx.client_ip.clone();
-        record.client_app = ctx.client_app.clone();
-        record.client_pid = ctx.client_pid;
-        record.client_path = ctx.client_path.clone();
+        apply_request_context(&mut record, ctx);
 
         if is_websocket {
             record.protocol = "ws".to_string();
@@ -3103,10 +3100,7 @@ async fn handle_http_websocket(
         record.original_response_headers = Some(response_headers.clone());
         record.has_rule_hit = has_rules;
         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-        record.client_ip = ctx.client_ip.clone();
-        record.client_app = ctx.client_app.clone();
-        record.client_pid = ctx.client_pid;
-        record.client_path = ctx.client_path.clone();
+        apply_request_context(&mut record, ctx);
         record.set_websocket();
 
         state.connection_monitor.register_connection(&record_id);
@@ -3390,11 +3384,36 @@ pub fn parse_and_record_sse_events(body: &[u8]) -> usize {
     count
 }
 
-pub(crate) fn build_badge_rules_json(admin_state: Option<&AdminState>) -> String {
+pub(crate) async fn build_badge_rules_json(
+    admin_state: Option<&AdminState>,
+    listener_port: u16,
+) -> String {
     match admin_state {
-        Some(s) => s.badge_rules_json(),
+        Some(state) => {
+            if listener_port != 0 && listener_port != state.port() {
+                if let Some(manager) = state.temporary_port_manager() {
+                    if let Ok(summary) = manager.active_summary(listener_port).await {
+                        return temporary_port_badge_rules_json(state.port(), summary);
+                    }
+                }
+            }
+            state.badge_rules_json()
+        }
         None => r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string(),
     }
+}
+
+fn temporary_port_badge_rules_json(
+    admin_port: u16,
+    summary: bifrost_admin::TemporaryPortActiveSummary,
+) -> String {
+    let rules = serde_json::to_string(&summary.rules).unwrap_or_else(|_| "[]".to_string());
+    let merged_content =
+        serde_json::to_string(&summary.merged_content).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"{{"rules":{},"merged_content":{},"admin_port":{},"listener_port":{}}}"#,
+        rules, merged_content, admin_port, summary.port
+    )
 }
 
 #[cfg(test)]
@@ -3822,5 +3841,29 @@ mod tests {
                 .parse::<Uri>()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_temporary_port_badge_rules_json_uses_summary_content() {
+        let json = temporary_port_badge_rules_json(
+            18880,
+            bifrost_admin::TemporaryPortActiveSummary {
+                port: 18881,
+                total: 1,
+                rules: vec![bifrost_admin::TemporaryPortRuleItem {
+                    name: "temp-badge".to_string(),
+                    rule_count: 1,
+                    group_id: None,
+                    group_name: None,
+                }],
+                merged_content: "badge-temp.test status://221".to_string(),
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["admin_port"], 18880);
+        assert_eq!(value["listener_port"], 18881);
+        assert_eq!(value["rules"][0]["name"], "temp-badge");
+        assert_eq!(value["merged_content"], "badge-temp.test status://221");
     }
 }

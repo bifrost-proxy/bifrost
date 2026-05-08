@@ -582,5 +582,5 @@ bifrost remote file apply-patch --patch-file <local-patch|->
 ## 参考
 
 - GitHub Contents API — `If-Match-SHA` 乐观锁
-- Claude Code / Codex / Cursor 的 file_read / file_edit / grep / glob / apply_patch 工具
+- Claude Code / Cursor 的 file_read / file_edit / grep / glob / apply_patch 工具
 - 现有 `crates/bifrost-admin/src/remote_invoke/` 的 executor/worker/types 分层

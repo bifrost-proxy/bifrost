@@ -394,7 +394,7 @@ fn find_available_port(host: &str, preferred_port: u16) -> bifrost_core::Result<
     )))
 }
 
-async fn spawn_managed_proxy_task(
+pub(crate) async fn spawn_managed_proxy_task(
     config: ProxyConfig,
     rules: SharedDynamicRulesResolver,
     tls_config: Arc<bifrost_proxy::TlsConfig>,
@@ -1321,6 +1321,16 @@ pub fn run_foreground(
                 config_manager_for_resolver.clone(),
                 push_manager.clone(),
             );
+            let temporary_port_manager = Arc::new(crate::commands::port::CliTemporaryPortManager::new(
+                config.clone(),
+                tls_config.clone(),
+                admin_state_arc.clone(),
+                push_manager.clone(),
+                access_control.clone(),
+                rules_storage_for_resolver.clone(),
+                values_storage_for_resolver.clone(),
+            ));
+            admin_state_arc.set_temporary_port_manager(temporary_port_manager.clone());
             log_startup_phase("push_manager.init", phase_started_at);
 
             let phase_started_at = Instant::now();
@@ -1336,6 +1346,7 @@ pub fn run_foreground(
                 connection_registry_for_resolver,
                 runtime_config_for_resolver,
                 admin_state_arc.clone(),
+                Some(temporary_port_manager),
             );
             log_startup_phase("rules_watcher.start", phase_started_at);
 
@@ -2030,8 +2041,8 @@ pub fn run_daemon(
                         config.host.clone()
                     };
                     let system_proxy_port = config.port;
-                    let server = ProxyServer::new(config)
-                        .with_access_control(access_control)
+                    let server = ProxyServer::new(config.clone())
+                        .with_access_control(access_control.clone())
                         .with_tls_config(tls_config.clone())
                         .with_admin_state(admin_state)
                         .with_rules(resolver.clone());
@@ -2093,6 +2104,17 @@ pub fn run_daemon(
                         push_manager.clone(),
                     );
                     let server = server.with_push_manager(push_manager.clone());
+                    let temporary_port_manager =
+                        Arc::new(crate::commands::port::CliTemporaryPortManager::new(
+                            config.clone(),
+                            tls_config.clone(),
+                            admin_state_arc.clone(),
+                            push_manager.clone(),
+                            access_control.clone(),
+                            rules_storage_for_resolver.clone(),
+                            values_storage_for_resolver.clone(),
+                        ));
+                    admin_state_arc.set_temporary_port_manager(temporary_port_manager.clone());
 
                     let _metrics_task = start_metrics_collector_task(metrics_collector, 1);
 
@@ -2104,6 +2126,7 @@ pub fn run_daemon(
                         connection_registry_for_resolver,
                         runtime_config_for_resolver,
                         admin_state_arc.clone(),
+                        Some(temporary_port_manager),
                     );
 
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -2280,6 +2303,7 @@ fn log_resolver_rules(resolver: &DynamicRulesResolver) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_rules_watcher_task(
     config_manager: Option<Arc<ConfigManager>>,
     rules_storage: bifrost_storage::RulesStorage,
@@ -2288,6 +2312,7 @@ fn spawn_rules_watcher_task(
     connection_registry: bifrost_admin::SharedConnectionRegistry,
     runtime_config: bifrost_admin::SharedRuntimeConfig,
     admin_state: Arc<AdminState>,
+    temporary_port_manager: Option<Arc<crate::commands::port::CliTemporaryPortManager>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Some(config_manager) = config_manager else {
@@ -2331,6 +2356,9 @@ fn spawn_rules_watcher_task(
 
                         resolver.update_stored_rules(new_stored_rules, new_values);
                         admin_state.refresh_badge_rules_cache();
+                        if let Some(manager) = &temporary_port_manager {
+                            manager.reload_all().await;
+                        }
 
                         if matches!(event, ConfigChangeEvent::RulesChanged) {
                             let should_disconnect = {

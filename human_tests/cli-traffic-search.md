@@ -633,6 +633,49 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/post -X POST -d '{"test":"inter
 
 ---
 
+### TC-CTS-37：traffic list/search 按代理入口端口筛选
+
+**前置条件**：
+- 使用隔离数据目录启动 Bifrost，启动参数必须包含 `--no-system-proxy`。
+- 准备主端口和一个临时代理端口，并分别产生 traffic 记录。
+
+**操作步骤**：
+1. 使用 list 按入口端口筛选：
+   ```bash
+   cargo run --bin bifrost -- -p "$MAIN_PORT" traffic list --listener-port "$TEMP_PORT" --format json
+   ```
+2. 使用 search 按入口端口筛选：
+   ```bash
+   cargo run --bin bifrost -- -p "$MAIN_PORT" traffic search "port" --listener-port "$TEMP_PORT" --format json
+   ```
+3. 验证别名可解析：
+   ```bash
+   cargo run --bin bifrost -- -p "$MAIN_PORT" traffic list --proxy-port "$TEMP_PORT" --format json
+   cargo run --bin bifrost -- -p "$MAIN_PORT" search "temp-port" --proxy-port "$TEMP_PORT" --format json
+   ```
+
+**预期结果**：
+- `traffic list --listener-port` 只返回 `lp=$TEMP_PORT` 的记录，不包含主端口记录。
+- `traffic search --listener-port` 只返回临时端口记录，不包含主端口记录。
+- `--proxy-port` 与 `--listener-port` 行为一致。
+- `traffic list --port "$MAIN_PORT"` 仍表示 Admin API 端口，不作为入口端口筛选。
+
+---
+
+## 执行记录
+
+2026-05-08 代理入口端口筛选执行记录：
+
+- 已执行命令：`source ~/.zshrc; cargo test -p bifrost-cli`
+- 已执行命令：`source ~/.zshrc; cargo build --bin bifrost`
+- 已执行命令：`source ~/.zshrc; SKIP_BUILD=true e2e-tests/tests/test_temporary_port_bindings.sh`
+- 实际结果：`cargo test -p bifrost-cli` 全部通过，覆盖 `traffic list --listener-port`、`traffic search --listener-port`、`--proxy-port` 别名、远端 traffic list/search 参数透传。
+- 实际结果：临时端口 E2E 在隔离 `BIFROST_DATA_DIR` 和动态端口下执行，Bifrost 启动参数包含 `--no-system-proxy`，未使用 `9900`。
+- 实际结果：`traffic list --listener-port "$TEMP_PORT"` 返回 compact JSON 中的 `"lp":$TEMP_PORT`，不包含主端口 `"lp":$MAIN_PORT`；`traffic search "port" --listener-port "$TEMP_PORT"` 返回 `/temp-port`，不包含 `/main-port`。
+- 结论：`TC-CTS-37` 已按文档完成执行并通过，本次无环境阻塞。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

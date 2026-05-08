@@ -787,6 +787,13 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
           <Descriptions.Item label="Protocol">
             {record.protocol}
           </Descriptions.Item>
+          <Descriptions.Item label="Proxy Port">
+            {record.listener_port ? (
+              <Tag style={{ margin: 0 }}>{record.listener_port}</Tag>
+            ) : (
+              "-"
+            )}
+          </Descriptions.Item>
           <Descriptions.Item label="Host">
             {record.host}
             {record.actual_host && (

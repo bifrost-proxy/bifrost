@@ -468,6 +468,7 @@ pub fn traffic_list_params_from_command(args: &TrafficListArgs) -> QueryParams {
         client_ip_match: TextMatchMode::Contains,
         client_app: args.client_app.clone(),
         client_app_match: TextMatchMode::Contains,
+        listener_port: args.listener_port,
         has_rule_hit: args.has_rule_hit,
         is_websocket: args.is_websocket,
         is_sse: args.is_sse,
@@ -531,11 +532,13 @@ mod tests {
             limit: Some(10),
             direction: TrafficListDirection::Forward,
             host: Some("example.com".to_string()),
+            listener_port: Some(50831),
             ..TrafficListArgs::default()
         });
 
         assert_eq!(params.limit, Some(10));
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.host_contains.as_deref(), Some("example.com"));
+        assert_eq!(params.listener_port, Some(50831));
     }
 }

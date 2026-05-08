@@ -21,6 +21,7 @@ use crate::handlers::{
     im_gateway::handle_im_gateway,
     metrics::handle_metrics,
     notification::handle_notification,
+    ports::handle_ports,
     power::handle_power,
     proxy::handle_proxy,
     remote_invoke::handle_remote_invoke,
@@ -117,6 +118,8 @@ impl AdminRouter {
             handle_traffic(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/metrics") {
             handle_metrics(req, state, path).await
+        } else if path.starts_with("/api/ports") {
+            handle_ports(req, state, path).await
         } else if path.starts_with("/api/power") {
             handle_power(req, state, path).await
         } else if path.starts_with("/api/system") {

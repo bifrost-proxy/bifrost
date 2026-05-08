@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
+import { promisify } from "node:util";
 import { allocateUiTestEnv } from "./helpers/test-env";
 
 const env = await allocateUiTestEnv();
@@ -12,6 +13,7 @@ const BACKEND_URL =
   process.env.ADMIN_STATUS_URL ||
   `${BASE_PROXY_URL.replace(/\/$/, "")}/_bifrost/api/proxy/address`;
 const ACCESS_STATUS_URL = `${BASE_PROXY_URL.replace(/\/$/, "")}/_bifrost/api/whitelist`;
+const execFileAsync = promisify(execFile);
 
 const getRepoRoot = () => {
   const current = fileURLToPath(import.meta.url);
@@ -46,6 +48,22 @@ const waitForBackend = async () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return false;
+};
+
+const ensureBackendBinaryBuilt = async (repoRoot: string, targetDir: string) => {
+  await execFileAsync(
+    "cargo",
+    ["build", "--bin", "bifrost"],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        CARGO_TARGET_DIR: targetDir,
+      },
+      timeout: 15 * 60 * 1000,
+      maxBuffer: 20 * 1024 * 1024,
+    },
+  );
 };
 
 const isProcessAlive = (pid: number) => {
@@ -117,41 +135,20 @@ export default async () => {
     const binPath = path.join(targetDir, "debug", "bifrost");
     const logPath = process.env.BIFROST_UI_TEST_LOG_FILE || path.join(repoRoot, ".ui-backend.log");
     const logStream = createWriteStream(logPath, { flags: "a" });
-    const { cmd, args } = await fs
-      .access(binPath)
-      .then(() => ({
-        cmd: binPath,
-        args: [
-          "start",
-          "--host",
-          "127.0.0.1",
-          "-p",
-          String(backendPort),
-          "--unsafe-ssl",
-          "--no-system-proxy",
-          "--access-mode",
-          "allow_all",
-        ],
-      }))
-      .catch(() => ({
-        cmd: "cargo",
-        args: [
-          "run",
-          "--bin",
-          "bifrost",
-          "--",
-          "start",
-          "--host",
-          "127.0.0.1",
-          "-p",
-          String(backendPort),
-          "--unsafe-ssl",
-          "--no-system-proxy",
-          "--access-mode",
-          "allow_all",
-        ],
-      }));
-    const child = spawn(cmd, args, {
+
+    await ensureBackendBinaryBuilt(repoRoot, targetDir);
+
+    const child = spawn(binPath, [
+      "start",
+      "--host",
+      "127.0.0.1",
+      "-p",
+      String(backendPort),
+      "--unsafe-ssl",
+      "--no-system-proxy",
+      "--access-mode",
+      "allow_all",
+    ], {
       cwd: repoRoot,
       env: {
         ...process.env,

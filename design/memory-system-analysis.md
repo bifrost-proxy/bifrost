@@ -151,7 +151,7 @@ pub struct ChatMessage {
 
 ### 2.3 配置模型：`MemoriesConfig`
 
-`MemoriesConfig` 明确是 Codex-compatible 配置，但当前只存配置，不形成数据模型实体：
+`MemoriesConfig` 是 memory 配置，但当前只存配置，不形成数据模型实体：
 
 ```rust
 // crates/agent/src/config.rs:L262-L295
@@ -434,7 +434,7 @@ Agent 复用 Bifrost data dir 约定：
 - config 加载顺序：user-level `$BIFROST_DATA_DIR/agent/config.toml`、project-level `.bifrost/agent/config.toml`、env override，证据 `crates/agent/src/config.rs:L847-L895`。
 - provider API key 从环境变量解析，不直接落 session history；证据 `crates/agent/src/config.rs:L507-L558`。
 
-未发现 TLS、Traffic Recorder 或 Remote Invoke 将 Codex session rollout 直接转存为 memory。搜索证据：`rg -n -i "rollout|codex|memory|memories" crates web design docs human_tests README.md` 只命中 `MemoriesConfig` 中 rollout 配置字段、agent skill 文档和本地任务派发设计；无自动导入 Codex rollout 的实现。
+未发现 TLS、Traffic Recorder 或 Remote Invoke 将 session rollout 直接转存为 memory。搜索证据：`rg -n -i "rollout|memory|memories" crates web design docs human_tests README.md` 只命中 `MemoriesConfig` 中 rollout 配置字段、agent skill 文档和本地任务派发设计；无自动导入 rollout 的实现。
 
 ## 8. 现状 vs 设计文档的 Gap
 
@@ -446,7 +446,7 @@ Agent 复用 Bifrost data dir 约定：
 
 ### 8.2 设计了但未实现 / 未完全实现
 
-- `MemoriesConfig` 字段显示计划支持 Codex-compatible memories，但没有实际 memory extraction/consolidation/recall 实现，证据 `crates/agent/src/config.rs:L262-L295` 与搜索命令 `rg -n -i "raw_memor|rollout|consolidat|extract_model|use_memories|generate_memories|memory_mode|embedding|vector|semantic|episodic|recall"` 的结果。
+- `MemoriesConfig` 字段显示计划支持 memories，但没有实际 memory extraction/consolidation/recall 实现，证据 `crates/agent/src/config.rs:L262-L295` 与搜索命令 `rg -n -i "raw_memor|rollout|consolidat|extract_model|use_memories|generate_memories|memory_mode|embedding|vector|semantic|episodic|recall"` 的结果。
 - `event_types::COMPACTION` 和 `scan_session_summary()` 识别 compaction，但 `compact_session()` 不写 JSONL event；证据 `crates/agent/src/persistence.rs:L33-L38`、`crates/agent/src/persistence.rs:L445-L451`、`crates/agent/src/compact.rs:L218-L243`。
 - `HistoryConfig.max_bytes` 字段存在，但未见文件大小裁剪实现；证据 `crates/agent/src/config.rs:L250-L255`，搜索 `rg -n "max_bytes" crates/agent crates/bifrost-admin` 未发现清理逻辑。
 - `design/im-gateway-agent.md` 较早段落仍有旧结构描述 `ImAgentSessionManager` / `Session { messages: Vec<ChatMessage> }`，与当前 `crates/agent/src/session.rs` 的 `AgentSession` / `ConversationRecorder` 不完全一致，证据 `design/im-gateway-agent.md:L123-L145` 与 `crates/agent/src/session.rs:L32-L69`。

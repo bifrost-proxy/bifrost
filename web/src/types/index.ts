@@ -67,6 +67,7 @@ export interface TrafficSummary {
   request_size: number;
   response_size: number;
   duration_ms: number;
+  listener_port?: number;
   host: string;
   path: string;
   protocol: string;
@@ -202,6 +203,7 @@ export interface TrafficSummaryCompact {
   req_sz: number;
   res_sz: number;
   dur: number;
+  lp?: number;
   proto: string;
   cip: string;
   capp?: string | null;
@@ -395,6 +397,7 @@ export interface TrafficQueryRequest {
   path_contains?: string;
   client_app?: string;
   client_ip?: string;
+  listener_port?: number;
   content_type?: string;
 }
 
@@ -431,6 +434,7 @@ export interface TrafficFilter {
   header_contains?: string;
   client_ip?: string;
   client_app?: string;
+  listener_port?: number;
   is_h3?: boolean;
   is_websocket?: boolean;
   is_sse?: boolean;

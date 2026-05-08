@@ -46,6 +46,7 @@ pub struct TrafficListOptions {
     pub content_type: Option<String>,
     pub client_ip: Option<String>,
     pub client_app: Option<String>,
+    pub listener_port: Option<u16>,
     pub has_rule_hit: Option<bool>,
     pub is_websocket: Option<bool>,
     pub is_sse: Option<bool>,
@@ -82,6 +83,8 @@ struct TrafficSummaryCompact {
     s: u16,
     res_sz: usize,
     dur: u64,
+    #[serde(default)]
+    lp: u16,
     proto: String,
     st: String,
 }
@@ -104,6 +107,8 @@ struct TrafficSummaryLegacy {
     status: u16,
     response_size: usize,
     duration_ms: u64,
+    #[serde(default)]
+    listener_port: u16,
     protocol: String,
     start_time: String,
 }
@@ -118,6 +123,7 @@ struct TrafficRow {
     path: String,
     res_sz: usize,
     dur: u64,
+    listener_port: u16,
     start_time: String,
 }
 
@@ -133,6 +139,7 @@ impl From<TrafficSummaryCompact> for TrafficRow {
             path: r.p,
             res_sz: r.res_sz,
             dur: r.dur,
+            listener_port: r.lp,
             start_time: r.st,
         }
     }
@@ -150,6 +157,7 @@ impl From<TrafficSummaryLegacy> for TrafficRow {
             path: r.path,
             res_sz: r.response_size,
             dur: r.duration_ms,
+            listener_port: r.listener_port,
             start_time: r.start_time,
         }
     }
@@ -645,6 +653,9 @@ fn build_traffic_list_query(options: &TrafficListOptions) -> String {
     if let Some(ref v) = options.client_app {
         params.push(("client_app".to_string(), v.to_string()));
     }
+    if let Some(v) = options.listener_port {
+        params.push(("listener_port".to_string(), v.to_string()));
+    }
     if let Some(v) = options.has_rule_hit {
         params.push(("has_rule_hit".to_string(), v.to_string()));
     }
@@ -698,21 +709,23 @@ fn print_traffic_rows(
                         _ => "\x1b[37m",
                     };
                     println!(
-                        "\x1b[90m{}\x1b[0m {}{}\x1b[0m {} \x1b[36m{}\x1b[0m{} \x1b[90m#{}\x1b[0m",
+                        "\x1b[90m{}\x1b[0m {}{}\x1b[0m {} :{} \x1b[36m{}\x1b[0m{} \x1b[90m#{}\x1b[0m",
                         short_start_time(&r.start_time),
                         status_color,
                         status,
                         r.method,
+                        r.listener_port,
                         r.host,
                         r.path,
                         r.seq
                     );
                 } else {
                     println!(
-                        "{} {} {} {}{} #{}",
+                        "{} {} {} :{} {}{} #{}",
                         short_start_time(&r.start_time),
                         status,
                         r.method,
+                        r.listener_port,
                         r.host,
                         r.path,
                         r.seq
@@ -724,13 +737,22 @@ fn print_traffic_rows(
             println!();
             let header = if use_color {
                 format!(
-                    "\x1b[1;37m{:12}  {:>6}  {:>6}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}\x1b[0m",
-                    "START", "STATUS", "METHOD", "PROTO", "HOST", "PATH", "SIZE", "TIME", "SEQ"
+                    "\x1b[1;37m{:12}  {:>6}  {:>6}  {:>5}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}\x1b[0m",
+                    "START", "STATUS", "METHOD", "PORT", "PROTO", "HOST", "PATH", "SIZE", "TIME", "SEQ"
                 )
             } else {
                 format!(
-                    "{:12}  {:>6}  {:>6}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}",
-                    "START", "STATUS", "METHOD", "PROTO", "HOST", "PATH", "SIZE", "TIME", "SEQ"
+                    "{:12}  {:>6}  {:>6}  {:>5}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}",
+                    "START",
+                    "STATUS",
+                    "METHOD",
+                    "PORT",
+                    "PROTO",
+                    "HOST",
+                    "PATH",
+                    "SIZE",
+                    "TIME",
+                    "SEQ"
                 )
             };
             println!("{}", header);
@@ -779,11 +801,12 @@ fn print_traffic_rows(
 
                 if use_color {
                     println!(
-                        "\x1b[90m{:12}\x1b[0m  {}{}  {}  {:7}  {:28}  {:50}  {:>10}  {:>8}  \x1b[90m{:>10}\x1b[0m",
+                        "\x1b[90m{:12}\x1b[0m  {}{}  {}  {:>5}  {:7}  {:28}  {:50}  {:>10}  {:>8}  \x1b[90m{:>10}\x1b[0m",
                         start,
                         status_color,
                         status_display,
                         method_display,
+                        r.listener_port,
                         proto,
                         host,
                         path,
@@ -793,8 +816,17 @@ fn print_traffic_rows(
                     );
                 } else {
                     println!(
-                        "{:12}  {}  {}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}",
-                        start, status_display, method_display, proto, host, path, size, time, seq
+                        "{:12}  {}  {}  {:>5}  {:7}  {:28}  {:50}  {:>10}  {:>8}  {:>10}",
+                        start,
+                        status_display,
+                        method_display,
+                        r.listener_port,
+                        proto,
+                        host,
+                        path,
+                        size,
+                        time,
+                        seq
                     );
                 }
             }
@@ -1240,5 +1272,42 @@ fn print_body(body: &Value, use_color: bool) {
         }
     } else {
         println!("    {}", body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_traffic_list_query, TrafficListOptions};
+    use crate::commands::OutputFormat;
+
+    #[test]
+    fn build_traffic_list_query_includes_listener_port_filter() {
+        let query = build_traffic_list_query(&TrafficListOptions {
+            port: 9900,
+            limit: 50,
+            cursor: None,
+            direction: "backward".to_string(),
+            method: None,
+            status: None,
+            status_min: None,
+            status_max: None,
+            protocol: None,
+            host: None,
+            url: None,
+            path: None,
+            content_type: None,
+            client_ip: None,
+            client_app: None,
+            listener_port: Some(50831),
+            has_rule_hit: None,
+            is_websocket: None,
+            is_sse: None,
+            is_tunnel: None,
+            format: OutputFormat::Json,
+            no_color: true,
+        });
+
+        assert!(query.contains("limit=50"));
+        assert!(query.contains("listener_port=50831"));
     }
 }

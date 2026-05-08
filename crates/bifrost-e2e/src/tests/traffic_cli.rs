@@ -66,6 +66,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 url: None,
                 path: None,
                 content_type: None,
+                listener_port: None,
                 client_ip: None,
                 client_app: None,
                 has_rule_hit: None,

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 IM Gateway Agent 的 runtime 默认限制已调整为更接近 Codex 的方案：
+验证 IM Gateway Agent 的 runtime 默认限制已调整为更合理的方案：
 
 - 保留较高的 `max_turn_iterations = 1000`，避免长链路工具调用在 30 次左右被硬中断
 - 将模型请求、shell、后台终端、MCP 的默认超时统一收敛为 600 秒级，而不是过长的 24 小时

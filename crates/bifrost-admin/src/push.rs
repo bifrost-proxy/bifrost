@@ -1848,6 +1848,7 @@ mod tests {
             req_sz: 0,
             res_sz: 0,
             dur: 0,
+            lp: 0,
             proto: "http".to_string(),
             cip: "127.0.0.1".to_string(),
             capp: None,

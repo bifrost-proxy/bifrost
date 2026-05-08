@@ -106,7 +106,7 @@ pub(crate) fn refresh_active_turn_status(
     progress: ActiveTurnProgress,
 ) {
     let context_window_tokens = config_context_window_tokens(config);
-    let estimated_context_tokens = session.estimate_tokens();
+    let estimated_context_tokens = session.effective_token_count();
     update_active_turn_status(session, |status| {
         status.state = progress.state.to_string();
         status.current_loop_iteration = progress.current_loop_iteration;

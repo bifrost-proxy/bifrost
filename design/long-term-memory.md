@@ -2,7 +2,7 @@
 
 ## 2026-05-02 方案修订：对齐文件化记忆标准
 
-本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆采用 Codex-style 文件化 read-path 方案，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
+本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆采用文件化 read-path 方案，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
 
 ## 目录布局
 
@@ -15,7 +15,7 @@
 
 - `memory_summary.md`：随请求注入的轻量摘要。为空时不注入 memory instructions。
 - `MEMORY.md`：可搜索的长期记忆索引。
-- `raw_memories.md`：Codex-style 原始记忆汇总，用于后续 consolidation。
+- `raw_memories.md`：原始记忆汇总，用于后续 consolidation。
 - `rollout_summaries/`：每次自动抽取产生的可追溯摘要。
 - `skills/`：保留 memory skill 目录，用于后续 consolidation 生成/更新 skills。
 - `.phase2_state.json`：无数据库 Phase 2 的 bounded input hash 与处理计数状态，用于判断是否需要再次 consolidation。
@@ -29,7 +29,7 @@ turn 前执行：
 1. 如果 `memories.use_memories == Some(false)`，直接短路。
 2. 确保 `agent/memory/` 布局存在。
 3. 读取 `memory_summary.md`，为空则不注入。
-4. 非空时注入 Codex-style read-path instructions，模型按需决定是否读取 `MEMORY.md`、`rollout_summaries/` 或 `skills/`。
+4. 非空时注入 read-path instructions，模型按需决定是否读取 `MEMORY.md`、`rollout_summaries/` 或 `skills/`。
 
 Bifrost 不再在 turn 前做 topK 数据库召回，也不维护 `scope/kind/use_count/FTS` 等数据库字段。
 
@@ -92,12 +92,12 @@ Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使�
 已对齐：
 
 - 用户数据目录下的文件化 memory root。
-- `memory_summary.md` 非空才注入 Codex-style read-path instructions。
+- `memory_summary.md` 非空才注入 read-path instructions。
 - `MEMORY.md`、`raw_memories.md`、`rollout_summaries/`、`skills/` 布局。
 - `generate_memories` 与 `use_memories` 默认开启，显式 `false` 关闭。
 - 自动抽取后跨独立 session 可消费记忆。
 - `disable_on_external_context` 与旧 alias `no_memories_if_mcp_or_web_search` 的配置字段保留。
-- Admin PATCH 接收 Codex-compatible memories 配置字段，包括 `min_rate_limit_remaining_percent`。
+- Admin PATCH 接收 memories 配置字段，包括 `min_rate_limit_remaining_percent`。
 - 无数据库 Phase 2 consolidation：基于 bounded `raw_memories.md`/`rollout_summaries/` 输入重写 `MEMORY.md`、`memory_summary.md`，使用文件锁和原子替换，并支持生成 memory skills。
 
 不实现：
@@ -129,7 +129,7 @@ Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使�
 
 E2E 测试：
 
-- `e2e-tests/tests/test_long_term_memory_remember_recall.sh`：预置文件记忆，断言模型请求包含 Codex-style read-path instructions。
+- `e2e-tests/tests/test_long_term_memory_remember_recall.sh`：预置文件记忆，断言模型请求包含 read-path instructions。
   - 自动记忆用例的 mock Chat Completions 服务必须用实际 `EXTRACT_SYSTEM_PROMPT` / `CONSOLIDATION_SYSTEM_PROMPT` 常量识别 Phase 1/Phase 2 请求，避免 prompt 文案演进后落入普通对话兜底响应。
 - `e2e-tests/tests/test_long_term_memory_human_api.sh`：启动真实 Bifrost 和 OpenAI-compatible mock，使用对话接口创建多个独立 session，验证“请记住我是独孤怼怼”自动沉淀并在新 session 消费。
   - mock 同时验证自动抽取请求和 Phase 2 consolidation 请求；请求识别必须匹配当前 `Memory Writing Agent: Phase 1` / `Memory Writing Agent: Phase 2` prompt 文案，并返回当前 Phase 1 的 `rollout_summary` / `rollout_slug` / `raw_memory` JSON 结构。

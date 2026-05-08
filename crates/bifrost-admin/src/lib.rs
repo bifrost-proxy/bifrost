@@ -31,6 +31,7 @@ mod sse;
 mod state;
 mod static_files;
 pub mod status_printer;
+pub mod temp_ports;
 mod traffic;
 pub mod traffic_db;
 mod version_check;
@@ -92,6 +93,11 @@ pub use state::{
     start_total_disk_cleanup_task, AdminState, RuntimeConfig, SharedAccessControl,
     SharedClientTrustTracker, SharedIpTlsPendingManager, SharedRuntimeConfig, SharedScriptManager,
     SharedSystemProxyManager, SharedValuesStorage,
+};
+pub use temp_ports::{
+    RuleSetRef, SharedTemporaryPortManager, TemporaryPortActiveSummary, TemporaryPortBindRequest,
+    TemporaryPortBinding, TemporaryPortError, TemporaryPortManager, TemporaryPortRuleItem,
+    TemporaryPortStatus, TemporaryPortUpdateRequest,
 };
 pub use traffic::{
     FrameDirection, FrameType, MatchedRule, RequestTiming, SocketStatus, TrafficRecord,

@@ -249,9 +249,9 @@ IM Provider 支持可选 `agent_config`，用于给不同 IM 通道绑定不同�
 字段语义：
 
 - `work_dir`：Provider 默认工作目录。来自该 Provider 的新 Agent session 会以该目录初始化；未配置时回退到全局 Agent `work_dir`。
-- `base_instructions`：Codex-style base/system instructions。配置后覆盖内置默认 Agent prompt；旧字段 `instructions` / `default_system_prompt` 仅作为兼容别名写入该字段。
-- `developer_instructions`：Codex-style developer instructions。不会覆盖 base prompt，而是作为独立 `<developer_instructions>` section 追加到模型可见系统上下文。
-- `user_instructions`：Codex-style user/AGENTS instructions。会与全局 home AGENTS.md、项目 AGENTS.md 合并后放入 `<user_instructions>`；不会再复用 `base_instructions`，避免同一 prompt 重复注入。
+- `base_instructions`：base/system instructions。配置后覆盖内置默认 Agent prompt；旧字段 `instructions` / `default_system_prompt` 仅作为兼容别名写入该字段。
+- `developer_instructions`：developer instructions。不会覆盖 base prompt，而是作为独立 `<developer_instructions>` section 追加到模型可见系统上下文。
+- `user_instructions`：user/AGENTS instructions。会与全局 home AGENTS.md、项目 AGENTS.md 合并后放入 `<user_instructions>`；不会再复用 `base_instructions`，避免同一 prompt 重复注入。
 
 Base/system instructions 优先级：
 

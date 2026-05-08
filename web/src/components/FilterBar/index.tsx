@@ -19,6 +19,7 @@ const fieldOptions = [
   { value: "method", label: "Method" },
   { value: "client_app", label: "Client App" },
   { value: "client_ip", label: "Client IP" },
+  { value: "listener_port", label: "Port" },
   { value: "content_type", label: "Content-Type" },
 ];
 
@@ -89,6 +90,21 @@ export default function FilterBar({
     );
   };
 
+  const handleFieldChange = (id: string, field: string) => {
+    onFiltersChange(
+      filters.map((f) =>
+        f.id === id
+          ? {
+              ...f,
+              field,
+              operator: field === "listener_port" ? "equals" : f.operator,
+              value: "",
+            }
+          : f,
+      ),
+    );
+  };
+
   const clientAppOptions = useMemo(() => {
     return availableClientApps.map((app) => ({
       value: app,
@@ -150,6 +166,19 @@ export default function FilterBar({
       );
     }
 
+    if (filter.field === "listener_port") {
+      return (
+        <Input
+          value={filter.value}
+          onChange={(e) => handleChange(filter.id, "value", e.target.value)}
+          style={styles.valueInput}
+          placeholder="Enter proxy port..."
+          size="small"
+          inputMode="numeric"
+        />
+      );
+    }
+
     return (
       <Input
         value={filter.value}
@@ -164,11 +193,11 @@ export default function FilterBar({
   return (
     <div style={styles.container}>
       {filters.map((filter, index) => (
-        <div key={filter.id} style={styles.row}>
+        <div key={filter.id} style={styles.row} data-testid="traffic-filter-row">
           <Select
             value={filter.field}
             options={fieldOptions}
-            onChange={(value) => handleChange(filter.id, "field", value)}
+            onChange={(value) => handleFieldChange(filter.id, value)}
             style={styles.fieldSelect}
             placeholder="Field"
             size="small"

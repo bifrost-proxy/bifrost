@@ -204,6 +204,45 @@ test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载�
   }
 });
 
+test("Settings Proxy 展示临时端口绑定规则详情卡片", async ({ page, request }) => {
+  const ruleName = uniqueName("ui-temp-port-rule");
+  let temporaryPort: number | null = null;
+
+  try {
+    await request.post(`${apiBase}/rules`, {
+      data: {
+        name: ruleName,
+        content: `temp-card-ui.test status://218 resBody://(${ruleName})`,
+        enabled: false,
+      },
+    });
+    const bindRes = await request.post(`${apiBase}/ports`, {
+      data: {
+        port: 0,
+        name: "UI temporary port",
+        rule_refs: [{ type: "local_rule", name: ruleName }],
+      },
+    });
+    const binding = (await bindRes.json()) as { port: number };
+    temporaryPort = binding.port;
+
+    await openPage(page, "settings?tab=proxy");
+    const card = page.getByTestId(`settings-temporary-port-card-${temporaryPort}`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`127.0.0.1:${temporaryPort}`);
+    await expect(card).toContainText("UI temporary port");
+    await expect(card).toContainText(ruleName);
+    await expect(page.getByTestId(`settings-temporary-port-merged-${temporaryPort}`)).toContainText(
+      `resBody://(${ruleName})`,
+    );
+  } finally {
+    if (temporaryPort !== null) {
+      await request.delete(`${apiBase}/ports/${temporaryPort}`);
+    }
+    await request.delete(`${apiBase}/rules/${encodeURIComponent(ruleName)}`);
+  }
+});
+
 test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", async ({
   page,
   request,

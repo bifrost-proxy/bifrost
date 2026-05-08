@@ -683,6 +683,10 @@ const matchRecord = (
       case 'client_ip':
         fieldValue = record.client_ip || '';
         break;
+      case 'listener_port':
+      case 'port':
+        fieldValue = record.listener_port ? String(record.listener_port) : '';
+        break;
       default:
         continue;
     }
@@ -870,6 +874,7 @@ const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
     request_size: c.req_sz,
     response_size: c.res_sz,
     duration_ms: c.dur,
+    listener_port: c.lp || undefined,
     protocol: c.proto,
     client_ip: c.cip,
     client_app: c.capp || undefined,

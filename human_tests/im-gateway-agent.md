@@ -761,7 +761,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - IM 长连接不需要重连；事件循环每次消息都读取 Provider store 最新配置，而不是沿用连接启动时的旧 provider snapshot。
 - **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin provider_switch_workdir_persists_provider_agent_override -- --nocapture` 与 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat -- --nocapture`；前者验证 `switch_workdir` 后 Provider `agent_config.work_dir` 持久化且保留 prompt 覆盖，后者验证 IM event loop 使用 Provider store 中的最新配置进入模型请求，而不是使用连接启动时传入的旧 provider snapshot。
 
-### TC-IMA-54: Agent 全局 Codex-style 指令配置与默认 Base Prompt 展示
+### TC-IMA-54: Agent 全局指令配置与默认 Base Prompt 展示
 
 - **操作步骤**:
   ```bash
@@ -814,7 +814,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 亮色和暗色主题下预览、Edit 按钮、弹窗标题、textarea 内容均清晰可读。
 - **执行记录（2026-05-05）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings (Agent 三层 instructions 使用大窗口编辑|IM Provider instructions 使用大窗口编辑后保存覆盖值)"`，真实 Chromium 打开 Settings → Agent/IM Gateway；验证 Agent 页面三段 instruction 只有短预览 + Edit 按钮，页面不含行内 textarea，也不再展示 `Default Base Instructions (read-only)`；Base Instructions 弹窗中点击 `Copy default into editor` 后 textarea 填入默认值，可继续追加内容并 PATCH `base_instructions`；IM Provider Edit 弹窗中 Base Instructions 通过大窗口编辑后保存，PATCH payload 的 `agent_config.base_instructions` 为最新值。两条新增 UI 回归均通过。
 
-### TC-IMA-54A: Agent chat 接口端到端验证 Codex-style prompt 分层、日志与 Session 记录
+### TC-IMA-54A: Agent chat 接口端到端验证 prompt 分层、日志与 Session 记录
 
 - **操作步骤**:
   1. 使用临时数据目录和非正式端口启动最新 Bifrost：

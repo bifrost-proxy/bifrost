@@ -103,6 +103,7 @@ impl UdpRelay {
         })?;
 
         info!("SOCKS5 UDP relay listening on {}", local_addr);
+        let listener_port = local_addr.port();
 
         let socket = Arc::new(socket);
         let sessions = Arc::clone(&self.sessions);
@@ -140,6 +141,7 @@ impl UdpRelay {
                                     &admin_state,
                                     &access_control,
                                     verbose,
+                                    listener_port,
                                 ).await {
                                     debug!("UDP relay packet error from {}: {}", src_addr, e);
                                 }
@@ -179,6 +181,7 @@ impl UdpRelay {
         admin_state: &Option<Arc<AdminState>>,
         access_control: &Option<Arc<RwLock<ClientAccessControl>>>,
         verbose: bool,
+        listener_port: u16,
     ) -> Result<()> {
         if let Some(ref ac) = access_control {
             let decision = {
@@ -367,6 +370,7 @@ impl UdpRelay {
                     record.host = host_str.clone();
                     record.is_tunnel = true;
                     record.client_ip = src_addr.ip().to_string();
+                    record.listener_port = listener_port;
 
                     if let Some(ref rules) = rules {
                         let scheme = if is_quic || dest_port == 443 {

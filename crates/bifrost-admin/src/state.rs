@@ -26,6 +26,7 @@ use crate::port_rebind::SharedPortRebindManager;
 use crate::replay_db::{ReplayDbStore, SharedReplayDbStore};
 use crate::replay_executor::SharedReplayExecutor;
 use crate::sse::SseHub;
+use crate::temp_ports::SharedTemporaryPortManager;
 use crate::traffic::{SocketStatus, TrafficRecord};
 use crate::traffic_db::TrafficSummaryCompact;
 use crate::traffic_db::{SharedTrafficDbStore, TrafficDbStore};
@@ -120,6 +121,7 @@ pub struct AdminState {
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
     pub devtools_broker: SharedBrowserDebugBroker,
+    temporary_port_manager: parking_lot::RwLock<Option<SharedTemporaryPortManager>>,
     /// Keep-awake manager; None if not initialized (e.g. in tests).
     pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
     remote_invoke_worker:
@@ -178,6 +180,7 @@ impl AdminState {
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
             devtools_broker: Arc::new(BrowserDebugBroker::new()),
+            temporary_port_manager: parking_lot::RwLock::new(None),
             keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
             im_gateway_service: parking_lot::RwLock::new(None),
@@ -898,6 +901,14 @@ impl AdminState {
         let _ = self.replay_executor.set(executor);
     }
 
+    pub fn set_temporary_port_manager(&self, manager: SharedTemporaryPortManager) {
+        *self.temporary_port_manager.write() = Some(manager);
+    }
+
+    pub fn temporary_port_manager(&self) -> Option<SharedTemporaryPortManager> {
+        self.temporary_port_manager.read().clone()
+    }
+
     pub fn get_replay_executor(&self) -> Option<&SharedReplayExecutor> {
         self.replay_executor.get()
     }
@@ -1456,8 +1467,7 @@ mod tests {
         let _ = fs::create_dir_all(&rules_dir);
         let storage = RulesStorage::with_dir(rules_dir.clone()).unwrap();
 
-        let mut state = AdminState::new(19900);
-        state.rules_storage = storage;
+        let state = AdminState::new_for_test(19900, storage);
 
         {
             let mut cache = state.group_name_cache();
@@ -1469,8 +1479,7 @@ mod tests {
         let cache_file = rules_dir.join(".group_cache.json");
         assert!(cache_file.exists(), "cache file should be written to disk");
 
-        let mut state2 = AdminState::new(19901);
-        state2.rules_storage = RulesStorage::with_dir(rules_dir).unwrap();
+        let state2 = AdminState::new_for_test(19901, RulesStorage::with_dir(rules_dir).unwrap());
         state2.load_group_name_cache();
 
         {
@@ -1490,8 +1499,7 @@ mod tests {
         let _ = fs::create_dir_all(&rules_dir);
         let storage = RulesStorage::with_dir(rules_dir).unwrap();
 
-        let mut state = AdminState::new(19902);
-        state.rules_storage = storage;
+        let state = AdminState::new_for_test(19902, storage);
 
         state.load_group_name_cache();
         let cache = state.group_name_cache();
@@ -1509,8 +1517,7 @@ mod tests {
         fs::write(rules_dir.join(".group_cache.json"), "not json!!!").unwrap();
 
         let storage = RulesStorage::with_dir(rules_dir).unwrap();
-        let mut state = AdminState::new(19903);
-        state.rules_storage = storage;
+        let state = AdminState::new_for_test(19903, storage);
 
         state.load_group_name_cache();
         let cache = state.group_name_cache();
@@ -1526,8 +1533,7 @@ mod tests {
         let _ = fs::create_dir_all(&rules_dir);
         let storage = RulesStorage::with_dir(rules_dir.clone()).unwrap();
 
-        let mut state = AdminState::new(19904);
-        state.rules_storage = storage;
+        let state = AdminState::new_for_test(19904, storage);
 
         state.persist_group_name_cache();
         assert!(

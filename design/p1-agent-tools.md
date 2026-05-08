@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-本次实现对齐 Codex 的 3 个 P1 能力，并补上一条显式的用户入口：
+本次实现 3 个 P1 能力，并补上一条显式的用户入口：
 
 1. Goal 系统：保留 `get_goal` / `create_goal` / `update_goal` 三工具，并新增 `/goal` 专用命令，供普通会话和 IM Gateway 直接激活。
 2. Apply Patch Diff：用结构化 `apply_patch` 取代旧的 search-and-replace 方案，只保留一套补丁工具。
@@ -13,7 +13,7 @@
 ### Goal
 
 - 工具层位于 `crates/agent/src/tools/goal.rs`，统一由 `GoalManager` 持有状态。
-- Goal 工具对外返回 Codex-compatible `ThreadGoal` 兼容快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
+- Goal 工具对外返回 `ThreadGoal` 快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
 - 会话入口位于 `crates/agent/src/slash.rs` 与 `crates/agent/src/session.rs`：
   - `/goal`
   - `/goal show`

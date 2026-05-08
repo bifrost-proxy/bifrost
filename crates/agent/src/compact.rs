@@ -1,9 +1,9 @@
 //! Memory compaction: summarize conversation history when context grows too long.
 //!
 //! Inspired by Codex's compaction system (Memento strategy):
-//! 1. Format conversation history for the compaction model
-//! 2. Use COMPACTION_PROMPT to generate a handoff summary
-//! 3. Reconstruct history with summary_prefix + summary + recent user messages
+//! 1. Append COMPACTION_PROMPT as a structured user input to cloned history
+//! 2. Generate a handoff summary
+//! 3. Reconstruct history with recent user messages + summary_prefix + summary
 //! 4. Track compaction count and token savings
 //!
 //! Key concepts aligned with Codex:
@@ -16,7 +16,6 @@ use crate::config::AgentConfig;
 use crate::history;
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
-use bifrost_core::text::truncate_chars_with_suffix;
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -74,31 +73,25 @@ pub enum InitialContextInjection {
 // ---------------------------------------------------------------------------
 
 /// The compaction prompt instructs the model to create a handoff summary.
-/// Based on Codex's `templates/compact/prompt.md`.
-const COMPACTION_PROMPT: &str = r#"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a concise handoff summary for another LLM that will resume the task.
+/// Mirrored from Codex's `templates/compact/prompt.md`.
+const COMPACTION_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
 - Current progress and key decisions made
-- Important context, constraints, or user preferences discovered
-- What was accomplished (including tool calls and their results — summarize file paths, command outputs, and key findings)
-- What remains to be done (clear next steps if any)
-- Any critical data, examples, references, or error patterns needed to continue
-- File paths that were read, written, or modified
-- Environment details that affect execution (working directory, shell, OS)
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
 
-Be concise and structured. Use bullet points. Focus on preserving information needed to continue the conversation seamlessly without re-discovering context."#;
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+";
 
 /// The summary prefix is prepended to the compacted summary when injected back.
-/// Based on Codex's `templates/compact/summary_prefix.md`.
-const SUMMARY_PREFIX: &str = r#"Another language model started to work on this task and produced a summary of its progress. You also have access to the state of the tools that were used. Use this information to continue seamlessly:
+/// Mirrored from Codex's `templates/compact/summary_prefix.md`.
+pub(crate) const SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 
-"#;
-
-/// Maximum tokens for user messages included in compaction input.
-const COMPACT_USER_MESSAGE_MAX_CHARS: usize = 20_000 * 4; // ~20k tokens at 4 chars/token
-
-/// Maximum total chars for the compaction input history.
-const COMPACT_HISTORY_MAX_CHARS: usize = 100_000 * 4; // ~100k tokens
+/// Maximum total approximate tokens for real user messages preserved after compaction.
+/// Mirrors Codex's local compaction budget for user-message carry-over.
+const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -107,10 +100,10 @@ const COMPACT_HISTORY_MAX_CHARS: usize = 100_000 * 4; // ~100k tokens
 /// Compact (summarize) the session history using the model.
 ///
 /// Strategy (Memento — same as Codex):
-/// 1. Format conversation history into a structured text
+/// 1. Clone structured history and append the compaction prompt as a user input
 /// 2. Ask the model to create a handoff summary
 /// 3. Preserve recent user messages for continuity
-/// 4. Rebuild history as: [summary_message, ...recent_user_messages]
+/// 4. Rebuild history as: [...recent_user_messages, summary_message]
 #[allow(clippy::too_many_arguments)]
 pub async fn compact_session(
     client: &AgentClient,
@@ -119,15 +112,12 @@ pub async fn compact_session(
     trigger: CompactionTrigger,
     reason: CompactionReason,
     phase: CompactionPhase,
+    base_instructions: Option<&str>,
     initial_context_injection: InitialContextInjection,
     initial_context: Vec<ChatMessage>,
 ) -> Result<CompactionResult, String> {
-    if session.history.len() < 4 {
-        return Ok(CompactionResult::skipped("too few messages"));
-    }
-
     let start_instant = std::time::Instant::now();
-    let pre_tokens = session.estimate_tokens();
+    let pre_tokens = session.effective_token_count();
     let pre_messages = session.history.len();
 
     info!(
@@ -143,33 +133,54 @@ pub async fn compact_session(
         "starting session compaction"
     );
 
-    // Build compaction request
-    let formatted_history = format_history_for_compaction(&session.history);
-
-    // Truncate if the formatted history is too large
-    let truncated_history = if formatted_history.len() > COMPACT_HISTORY_MAX_CHARS {
-        let half = COMPACT_HISTORY_MAX_CHARS / 2;
-        let head_end = formatted_history.floor_char_boundary(half);
-        let tail_start = formatted_history.ceil_char_boundary(formatted_history.len() - half);
-        format!(
-            "{}\n\n... ({} characters omitted for compaction) ...\n\n{}",
-            &formatted_history[..head_end],
-            formatted_history.len() - COMPACT_HISTORY_MAX_CHARS,
-            &formatted_history[tail_start..]
-        )
-    } else {
-        formatted_history
-    };
-
-    let summary_messages = vec![
-        ChatMessage::system(COMPACTION_PROMPT),
-        ChatMessage::user(&truncated_history),
-    ];
+    // Build compaction request in Codex local shape: keep the pre-compaction
+    // history as structured messages and append the compaction prompt as a new
+    // user input. Base instructions are carried separately as the system item
+    // for the request, not flattened into replacement history.
+    let request_has_base_instructions =
+        base_instructions.is_some_and(|instructions| !instructions.trim().is_empty());
+    let mut summary_messages = build_compaction_messages(&session.history, base_instructions);
+    let history_start_index = usize::from(request_has_base_instructions);
+    let max_retries = compaction_summary_max_retries(config);
+    let mut retries = 0_u64;
 
     // Call the model to generate a summary (no tools for compaction)
-    let response = client
-        .chat_completion(config, &summary_messages, &[])
-        .await?;
+    let response = loop {
+        match client.chat_completion(config, &summary_messages, &[]).await {
+            Ok(response) => break response,
+            Err(error) if is_context_window_error(&error) => {
+                if remove_oldest_history_item_from_compaction_messages(
+                    &mut summary_messages,
+                    history_start_index,
+                ) {
+                    warn!(
+                        session_key = %session.session_key,
+                        remaining_compaction_messages = summary_messages.len(),
+                        error = %error,
+                        "context window exceeded while compacting; removed oldest history item and retrying"
+                    );
+                    retries = 0;
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) if is_retryable_error(&error) && retries < max_retries => {
+                retries = retries.saturating_add(1);
+                let delay = retry_backoff(retries);
+                warn!(
+                    session_key = %session.session_key,
+                    retry_attempt = retries,
+                    max_retries,
+                    retry_in_ms = delay.as_millis(),
+                    error = %error,
+                    "transient error while compacting; retrying summary request"
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    };
     if let Some(ref usage) = response.usage {
         session.track_background_token_usage(usage.total_tokens);
     }
@@ -179,33 +190,17 @@ pub async fn compact_session(
         .or(response.reasoning_content)
         .unwrap_or_else(|| "(compaction produced no summary)".to_string());
 
-    // Collect recent user messages to preserve for continuity
-    // Keep the last N user messages (with their tool context if adjacent)
-    let recent_user_messages = collect_recent_user_messages(&session.history, 3);
+    // Collect real user messages to preserve for continuity. This must not
+    // retain assistant/tool/tool_result suffixes; those are represented by the
+    // handoff summary. Selection is budgeted from newest to oldest, matching
+    // Codex local compaction.
+    let user_messages = collect_user_messages(&session.history);
 
-    // Build new compacted history
-    let mut new_history = Vec::new();
+    let summary_text = format!("{SUMMARY_PREFIX}\n{summary}");
 
-    // Add compaction warning if this is a repeated compaction
-    let compaction_note = if session.compaction_count > 0 {
-        format!(
-            "\n\n[Note: This is compaction #{}, which means the conversation has been long. \
-             Some earlier context may have been lost. Focus on the most recent information.]",
-            session.compaction_count + 1
-        )
-    } else {
-        String::new()
-    };
-
-    // Inject summary with prefix (matches Codex's InitialContextInjection pattern)
-    new_history.push(ChatMessage::user(&format!(
-        "{SUMMARY_PREFIX}{summary}{compaction_note}"
-    )));
-
-    // Preserve recent user messages for context continuity
-    for msg in &recent_user_messages {
-        new_history.push(msg.clone());
-    }
+    // Build compacted history in Codex's local-compaction shape: preserved
+    // recent user turns first, then the compaction summary as the last item.
+    let mut new_history = build_compacted_history(&user_messages, &summary_text);
 
     // Mid-turn injection: place caller-provided context before the last real
     // user message so the model sees instructions after the compaction summary
@@ -234,10 +229,10 @@ pub async fn compact_session(
     session.history = new_history;
     session.compaction_count += 1;
     session.history_version = session.history_version.saturating_add(1);
-    session.last_response_tokens = None;
+    session.recompute_token_snapshot_from_history(base_instructions);
 
     // Track token savings
-    let post_tokens = session.estimate_tokens();
+    let post_tokens = session.effective_token_count();
     let tokens_saved = pre_tokens.saturating_sub(post_tokens);
 
     let duration_ms = start_instant.elapsed().as_millis() as u64;
@@ -312,99 +307,281 @@ pub struct CompactionResult {
     pub duration_ms: Option<u64>,
 }
 
-impl CompactionResult {
-    fn skipped(reason: &str) -> Self {
-        Self {
-            performed: false,
-            pre_tokens: 0,
-            post_tokens: 0,
-            tokens_saved: 0,
-            messages_removed: 0,
-            reason: Some(reason.to_string()),
-            trigger: None,
-            compaction_reason: None,
-            phase: None,
-            duration_ms: None,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// History formatting
+// Compaction request construction
 // ---------------------------------------------------------------------------
 
-fn format_history_for_compaction(history: &[ChatMessage]) -> String {
-    let mut parts = Vec::new();
-    for msg in history {
-        let role = &msg.role;
-        match &msg.content {
-            Some(content) if !content.is_empty() => {
-                // Truncate very long messages in the compaction input
-                let char_count = content.chars().count();
-                let truncated = if char_count > COMPACT_USER_MESSAGE_MAX_CHARS {
-                    format!(
-                        "{}(truncated, {} chars total)",
-                        truncate_chars_with_suffix(content, COMPACT_USER_MESSAGE_MAX_CHARS, "..."),
-                        char_count
-                    )
-                } else {
-                    content.clone()
-                };
-                parts.push(format!("[{role}]: {truncated}"));
-            }
-            _ => {
-                if let Some(tool_calls) = &msg.tool_calls {
-                    let calls: Vec<String> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            let args = truncate_chars_with_suffix(tc.arguments(), 500, "...");
-                            format!("{}({})", tc.name(), args)
-                        })
-                        .collect();
-                    parts.push(format!("[{role}]: called tools: {}", calls.join(", ")));
-                }
-            }
-        }
+fn build_compaction_messages(
+    history: &[ChatMessage],
+    base_instructions: Option<&str>,
+) -> Vec<ChatMessage> {
+    let base_instructions =
+        base_instructions.filter(|instructions| !instructions.trim().is_empty());
+    let mut messages = Vec::with_capacity(
+        history
+            .len()
+            .saturating_add(usize::from(base_instructions.is_some()))
+            .saturating_add(1),
+    );
+
+    if let Some(base_instructions) = base_instructions {
+        messages.push(ChatMessage::system(base_instructions));
     }
-    parts.join("\n")
+    messages.extend_from_slice(history);
+    messages.push(ChatMessage::user(COMPACTION_PROMPT));
+    messages
 }
 
-/// Collect the last N *real* user messages (preserving order).
+fn remove_oldest_history_item_from_compaction_messages(
+    messages: &mut Vec<ChatMessage>,
+    history_start_index: usize,
+) -> bool {
+    let Some(prompt_index) = messages.len().checked_sub(1) else {
+        return false;
+    };
+    if history_start_index >= prompt_index {
+        return false;
+    }
+    messages.remove(history_start_index);
+    true
+}
+
+fn is_context_window_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("context_length_exceeded")
+        || lower.contains("context window")
+        || lower.contains("maximum context length")
+        || lower.contains("token limit")
+        || (lower.contains("too many tokens") && lower.contains("max"))
+}
+
+fn is_retryable_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("connection")
+        || lower.contains("temporary")
+        || lower.contains("server error")
+        || lower.contains("internal error")
+        || lower.contains("service unavailable")
+        || lower.contains("gateway")
+        || lower.contains("overloaded")
+        || lower.contains("try again")
+        || lower.contains("http request failed")
+}
+
+fn compaction_summary_max_retries(config: &AgentConfig) -> u64 {
+    config
+        .resolve_effective_config()
+        .map(|effective| effective.stream_max_retries)
+        .unwrap_or(0)
+}
+
+fn retry_backoff(retry_attempt: u64) -> std::time::Duration {
+    let exponent = retry_attempt.saturating_sub(1).min(3);
+    std::time::Duration::from_millis(1_000_u64.saturating_mul(1_u64 << exponent))
+}
+
+fn build_compacted_history(user_messages: &[String], summary_text: &str) -> Vec<ChatMessage> {
+    build_compacted_history_with_limit(user_messages, summary_text, COMPACT_USER_MESSAGE_MAX_TOKENS)
+}
+
+fn build_compacted_history_with_limit(
+    user_messages: &[String],
+    summary_text: &str,
+    max_tokens: usize,
+) -> Vec<ChatMessage> {
+    let mut selected_messages: Vec<String> = Vec::new();
+    if max_tokens > 0 {
+        let mut remaining = max_tokens;
+        for message in user_messages.iter().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let tokens = approx_token_count(message);
+            if tokens <= remaining {
+                selected_messages.push(message.clone());
+                remaining = remaining.saturating_sub(tokens);
+            } else {
+                selected_messages.push(truncate_middle_with_token_budget(message, remaining));
+                break;
+            }
+        }
+        selected_messages.reverse();
+    }
+
+    let mut history = Vec::with_capacity(selected_messages.len() + 1);
+    for message in selected_messages {
+        history.push(ChatMessage::user(&message));
+    }
+
+    let summary_text = if summary_text.is_empty() {
+        "(no summary available)".to_string()
+    } else {
+        summary_text.to_string()
+    };
+    history.push(ChatMessage::user(&summary_text));
+    history
+}
+
+/// Collect real user messages (preserving order).
 /// Summary messages from prior compactions are excluded to prevent
 /// stale summaries from accumulating across repeated compactions
 /// (matching Codex's `collect_user_messages` filter).
-/// Also includes adjacent assistant/tool messages for context.
-fn collect_recent_user_messages(history: &[ChatMessage], count: usize) -> Vec<ChatMessage> {
-    // Find indices of real user messages (skip compaction summaries)
-    let user_indices: Vec<usize> = history
+/// Assistant/tool/tool_result messages are intentionally excluded; their useful
+/// state belongs in the generated summary, not in replacement history.
+fn collect_user_messages(history: &[ChatMessage]) -> Vec<String> {
+    history
         .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == "user" && m.content.is_some() && !is_summary_message(m))
-        .map(|(i, _)| i)
-        .collect();
-
-    if user_indices.is_empty() {
-        return Vec::new();
-    }
-
-    // Take the last `count` user message indices
-    let start = user_indices.len().saturating_sub(count);
-    let selected_indices = &user_indices[start..];
-
-    if selected_indices.is_empty() {
-        return Vec::new();
-    }
-
-    // Include all messages from the first selected user message to the end
-    let first_idx = selected_indices[0];
-    history[first_idx..].to_vec()
+        .filter_map(|message| {
+            let content = message.content.as_ref()?;
+            if message.role == "user"
+                && !is_summary_message(message)
+                && !is_contextual_prompt_user_message(content)
+            {
+                Some(content.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Check if a message is a compaction summary (starts with [`SUMMARY_PREFIX`]).
-fn is_summary_message(msg: &ChatMessage) -> bool {
+pub(crate) fn is_summary_message(msg: &ChatMessage) -> bool {
     msg.content
         .as_ref()
-        .is_some_and(|c| c.starts_with(SUMMARY_PREFIX))
+        .is_some_and(|c| c.starts_with(format!("{SUMMARY_PREFIX}\n").as_str()))
+}
+
+fn is_contextual_prompt_user_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with(crate::prompt::USER_INSTRUCTIONS_OPEN_TAG)
+        || trimmed.starts_with(crate::prompt::ENVIRONMENT_CONTEXT_OPEN_TAG)
+        || trimmed.starts_with("# AGENTS.md instructions")
+        || trimmed.starts_with("<INSTRUCTIONS>")
+        || trimmed.starts_with("<environment_context>")
+}
+
+const APPROX_BYTES_PER_TOKEN: usize = 4;
+
+fn approx_token_count(text: &str) -> usize {
+    text.len()
+        .saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1))
+        / APPROX_BYTES_PER_TOKEN
+}
+
+fn approx_bytes_for_tokens(tokens: usize) -> usize {
+    tokens.saturating_mul(APPROX_BYTES_PER_TOKEN)
+}
+
+fn approx_tokens_from_byte_count(bytes: usize) -> u64 {
+    let bytes_u64 = bytes as u64;
+    bytes_u64.saturating_add((APPROX_BYTES_PER_TOKEN as u64).saturating_sub(1))
+        / (APPROX_BYTES_PER_TOKEN as u64)
+}
+
+fn truncate_middle_with_token_budget(text: &str, max_tokens: usize) -> String {
+    truncate_middle_with_byte_estimate(text, approx_bytes_for_tokens(max_tokens), true)
+}
+
+fn truncate_middle_with_byte_estimate(text: &str, max_bytes: usize, use_tokens: bool) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let total_chars = text.chars().count();
+    if max_bytes == 0 {
+        return format_truncation_marker(
+            use_tokens,
+            removed_units(use_tokens, text.len(), total_chars),
+        );
+    }
+
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let (left_budget, right_budget) = split_budget(max_bytes);
+    let (removed_chars, left, right) = split_string(text, left_budget, right_budget);
+    let marker = format_truncation_marker(
+        use_tokens,
+        removed_units(
+            use_tokens,
+            text.len().saturating_sub(max_bytes),
+            removed_chars,
+        ),
+    );
+
+    let mut output = String::with_capacity(left.len() + marker.len() + right.len());
+    output.push_str(left);
+    output.push_str(&marker);
+    output.push_str(right);
+    output
+}
+
+fn split_budget(budget: usize) -> (usize, usize) {
+    let left = budget / 2;
+    (left, budget - left)
+}
+
+fn split_string(text: &str, beginning_bytes: usize, end_bytes: usize) -> (usize, &str, &str) {
+    if text.is_empty() {
+        return (0, "", "");
+    }
+
+    let tail_start_target = text.len().saturating_sub(end_bytes);
+    let mut prefix_end = 0usize;
+    let mut suffix_start = text.len();
+    let mut removed_chars = 0usize;
+    let mut suffix_started = false;
+
+    for (idx, ch) in text.char_indices() {
+        let char_end = idx + ch.len_utf8();
+        if char_end <= beginning_bytes {
+            prefix_end = char_end;
+            continue;
+        }
+
+        if idx >= tail_start_target {
+            if !suffix_started {
+                suffix_start = idx;
+                suffix_started = true;
+            }
+            continue;
+        }
+
+        removed_chars = removed_chars.saturating_add(1);
+    }
+
+    if suffix_start < prefix_end {
+        suffix_start = prefix_end;
+    }
+
+    (removed_chars, &text[..prefix_end], &text[suffix_start..])
+}
+
+fn format_truncation_marker(use_tokens: bool, removed_count: u64) -> String {
+    if use_tokens {
+        format!("…{removed_count} tokens truncated…")
+    } else {
+        format!("…{removed_count} chars truncated…")
+    }
+}
+
+fn removed_units(use_tokens: bool, removed_bytes: usize, removed_chars: usize) -> u64 {
+    if use_tokens {
+        approx_tokens_from_byte_count(removed_bytes)
+    } else {
+        u64::try_from(removed_chars).unwrap_or(u64::MAX)
+    }
 }
 
 /// Insert initial context items before the last real user message in
@@ -457,63 +634,378 @@ pub fn insert_initial_context_before_last_user_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::AgentClient;
+    use crate::config::{AgentConfig, ModelProviderConfig};
     use crate::types::ToolCallMessage;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    fn chat_text_response(content: &str, total_tokens: u64) -> serde_json::Value {
+        serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": total_tokens.saturating_sub(1),
+                "completion_tokens": 1,
+                "total_tokens": total_tokens
+            }
+        })
+    }
+
+    fn test_config_for_base_url(base_url: String) -> AgentConfig {
+        let mut model_providers = HashMap::new();
+        model_providers.insert(
+            "test".to_string(),
+            ModelProviderConfig {
+                name: Some("test".to_string()),
+                base_url: Some(base_url),
+                env_key: None,
+                api_key: Some("test-key".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+        AgentConfig {
+            model: Some("test-model".to_string()),
+            model_provider: Some("test".to_string()),
+            model_providers,
+            model_context_window: Some(1_000),
+            model_auto_compact_token_limit: Some(100),
+            ..Default::default()
+        }
+    }
+
+    async fn compaction_retry_url(requests: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = Vec::new();
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if header_end.is_none() {
+                        header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                    }
+                    if let Some(pos) = header_end {
+                        let headers = String::from_utf8_lossy(&buffer[..pos]);
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= pos + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(pos) = header_end {
+                    let body = &buffer[pos + 4..];
+                    let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    requests.lock().unwrap().push(request);
+                }
+
+                let (status, body) = if attempt == 0 {
+                    (
+                        "400 Bad Request",
+                        serde_json::json!({
+                            "error": {
+                                "message": "context_length_exceeded: too many tokens"
+                            }
+                        }),
+                    )
+                } else {
+                    ("200 OK", chat_text_response("retry summary", 77))
+                };
+                let body = body.to_string();
+                let http = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(http.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{addr}/chat/completions")
+    }
+
+    async fn transient_retry_url(requests: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = Vec::new();
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if header_end.is_none() {
+                        header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                    }
+                    if let Some(pos) = header_end {
+                        let headers = String::from_utf8_lossy(&buffer[..pos]);
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= pos + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(pos) = header_end {
+                    let body = &buffer[pos + 4..];
+                    let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    requests.lock().unwrap().push(request);
+                }
+
+                let (status, body) = if attempt == 0 {
+                    (
+                        "500 Internal Server Error",
+                        serde_json::json!({
+                            "error": {
+                                "message": "temporary server error"
+                            }
+                        }),
+                    )
+                } else {
+                    ("200 OK", chat_text_response("transient retry summary", 88))
+                };
+                let body = body.to_string();
+                let http = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(http.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{addr}/chat/completions")
+    }
 
     #[test]
-    fn test_format_history_basic() {
+    fn test_build_compaction_messages_uses_codex_local_request_shape() {
         let history = vec![
             ChatMessage::user("hello"),
-            ChatMessage::assistant("hi there"),
-            ChatMessage::user("do something"),
-        ];
-        let formatted = format_history_for_compaction(&history);
-        assert!(formatted.contains("[user]: hello"));
-        assert!(formatted.contains("[assistant]: hi there"));
-        assert!(formatted.contains("[user]: do something"));
-    }
-
-    #[test]
-    fn test_format_history_truncates_long_messages() {
-        let long_msg = "x".repeat(COMPACT_USER_MESSAGE_MAX_CHARS + 1000);
-        let history = vec![ChatMessage::user(&long_msg)];
-        let formatted = format_history_for_compaction(&history);
-        assert!(formatted.contains("...(truncated,"));
-        assert!(formatted.len() < long_msg.len() + 200);
-    }
-
-    #[test]
-    fn test_format_history_truncates_multibyte_user_messages() {
-        let long_msg = "前".repeat(COMPACT_USER_MESSAGE_MAX_CHARS + 2);
-        let history = vec![ChatMessage::user(&long_msg)];
-        let formatted = format_history_for_compaction(&history);
-
-        assert!(formatted.contains("...(truncated,"));
-        assert!(formatted.contains("chars total)"));
-    }
-
-    #[test]
-    fn test_format_history_handles_multibyte_tool_arguments() {
-        let arguments = format!(
-            "{{\"path\":\"/tmp/example.md\",\"content\":\"{}\"}}",
-            "前".repeat(600)
-        );
-        let history = vec![ChatMessage::assistant_with_tool_calls(vec![
-            ToolCallMessage::function_call(
+            ChatMessage::assistant_with_tool_calls(vec![ToolCallMessage::function_call(
                 "call-1".to_string(),
-                "write_file".to_string(),
-                arguments,
-            ),
-        ])];
+                "read_file".to_string(),
+                r#"{"path":"Cargo.toml"}"#.to_string(),
+            )]),
+            ChatMessage::tool_result("call-1", "workspace = true"),
+            ChatMessage::assistant("done"),
+        ];
+        let messages = build_compaction_messages(&history, Some("base instructions"));
 
-        let formatted = format_history_for_compaction(&history);
-
-        assert!(formatted.contains("write_file("));
-        assert!(formatted.contains("..."));
-        assert!(formatted.is_char_boundary(formatted.len()));
+        assert_eq!(messages.len(), history.len() + 2);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content.as_deref(), Some("base instructions"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content.as_deref(), Some("hello"));
+        assert_eq!(messages[2].role, "assistant");
+        assert!(messages[2].tool_calls.is_some());
+        assert_eq!(messages[3].role, "tool");
+        assert_eq!(messages[3].content.as_deref(), Some("workspace = true"));
+        assert_eq!(messages[4].role, "assistant");
+        assert_eq!(messages[5].role, "user");
+        assert_eq!(messages[5].content.as_deref(), Some(COMPACTION_PROMPT));
+        assert!(messages.iter().all(|message| message.role != "system"
+            || message.content.as_deref() != Some(COMPACTION_PROMPT)));
+        assert!(messages.iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("[user]: hello"))
+        }));
     }
 
     #[test]
-    fn test_collect_recent_user_messages() {
+    fn test_build_compaction_messages_omits_empty_base_instructions() {
+        let messages = build_compaction_messages(&[ChatMessage::user("hello")], Some("   "));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content.as_deref(), Some(COMPACTION_PROMPT));
+    }
+
+    #[test]
+    fn test_remove_oldest_history_item_preserves_base_and_compaction_prompt() {
+        let mut messages = build_compaction_messages(
+            &[
+                ChatMessage::user("oldest"),
+                ChatMessage::assistant("reply"),
+                ChatMessage::user("newest"),
+            ],
+            Some("base"),
+        );
+
+        assert!(remove_oldest_history_item_from_compaction_messages(
+            &mut messages,
+            1
+        ));
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content.as_deref(), Some("base"));
+        assert_eq!(messages[1].content.as_deref(), Some("reply"));
+        assert_eq!(messages[2].content.as_deref(), Some("newest"));
+        assert_eq!(messages[3].content.as_deref(), Some(COMPACTION_PROMPT));
+        assert!(!remove_oldest_history_item_from_compaction_messages(
+            &mut vec![
+                ChatMessage::system("base"),
+                ChatMessage::user(COMPACTION_PROMPT)
+            ],
+            1
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_compaction_retries_context_window_error_by_dropping_oldest_request_item() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let config = test_config_for_base_url(compaction_retry_url(Arc::clone(&requests)).await);
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("compact-retry");
+        session.history = vec![
+            ChatMessage::user("oldest user"),
+            ChatMessage::assistant("assistant reply"),
+            ChatMessage::user("newest user"),
+        ];
+
+        let result = compact_session(
+            &client,
+            &config,
+            &mut session,
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionPhase::MidTurn,
+            Some("base instructions"),
+            InitialContextInjection::DoNotInject,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.performed);
+        assert_eq!(session.compaction_count, 1);
+        assert_eq!(session.total_tokens_used, Some(77));
+        assert!(session.history.last().is_some_and(is_summary_message));
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let first_messages = requests[0]["messages"].as_array().unwrap();
+        let retry_messages = requests[1]["messages"].as_array().unwrap();
+
+        assert_eq!(first_messages.len(), 5);
+        assert_eq!(first_messages[0]["role"], "system");
+        assert_eq!(first_messages[0]["content"], "base instructions");
+        assert_eq!(first_messages[1]["content"], "oldest user");
+        assert_eq!(first_messages[4]["content"], COMPACTION_PROMPT);
+
+        assert_eq!(retry_messages.len(), 4);
+        assert_eq!(retry_messages[0]["content"], "base instructions");
+        assert_eq!(retry_messages[1]["content"], "assistant reply");
+        assert_eq!(retry_messages[2]["content"], "newest user");
+        assert_eq!(retry_messages[3]["content"], COMPACTION_PROMPT);
+        assert!(retry_messages
+            .iter()
+            .all(|message| message["content"] != "oldest user"));
+    }
+
+    #[tokio::test]
+    async fn test_compaction_retries_transient_error_using_provider_budget() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut config = test_config_for_base_url(transient_retry_url(Arc::clone(&requests)).await);
+        config
+            .model_providers
+            .get_mut("test")
+            .unwrap()
+            .stream_max_retries = Some(1);
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("compact-transient-retry");
+        session.history = vec![ChatMessage::user("keep this user message")];
+
+        let result = compact_session(
+            &client,
+            &config,
+            &mut session,
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionPhase::MidTurn,
+            Some("base instructions"),
+            InitialContextInjection::DoNotInject,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.performed);
+        assert_eq!(session.compaction_count, 1);
+        assert_eq!(session.total_tokens_used, Some(88));
+        assert!(session.history.last().is_some_and(is_summary_message));
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let first_messages = requests[0]["messages"].as_array().unwrap();
+        let retry_messages = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(first_messages.len(), retry_messages.len());
+        assert_eq!(retry_messages[0]["content"], "base instructions");
+        assert!(retry_messages
+            .iter()
+            .any(|message| message["content"] == "keep this user message"));
+        assert_eq!(retry_messages.last().unwrap()["content"], COMPACTION_PROMPT);
+    }
+
+    #[test]
+    fn test_codex_compaction_templates_are_exact() {
+        assert_eq!(
+            COMPACTION_PROMPT,
+            "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.\n"
+        );
+        assert_eq!(
+            SUMMARY_PREFIX,
+            "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
+        );
+    }
+
+    #[test]
+    fn test_collect_user_messages_preserves_all_real_users_within_budget() {
         let history = vec![
             ChatMessage::user("first"),
             ChatMessage::assistant("reply1"),
@@ -523,42 +1015,60 @@ mod tests {
             ChatMessage::assistant("reply3"),
             ChatMessage::user("fourth"),
         ];
-        let recent = collect_recent_user_messages(&history, 2);
-        // Should include from "third" onwards (last 2 user messages + everything after)
-        assert!(recent.len() >= 2);
-        assert_eq!(recent[0].content.as_deref(), Some("third"));
+        let recent = collect_user_messages(&history);
+        // Should include all real user messages that fit the budget, without the
+        // assistant suffix between them.
+        assert_eq!(recent.len(), 4);
+        assert_eq!(recent[0], "first");
+        assert_eq!(recent[1], "second");
+        assert_eq!(recent[2], "third");
+        assert_eq!(recent[3], "fourth");
     }
 
     #[test]
-    fn test_collect_recent_user_messages_excludes_summary() {
-        // After a prior compaction the history starts with a summary message.
-        // It must NOT be included in recent_user_messages to prevent stale
-        // summaries accumulating across repeated compactions.
+    fn test_collect_user_messages_excludes_summary() {
         let history = vec![
-            ChatMessage::user(&format!("{SUMMARY_PREFIX}previous compaction summary")),
-            ChatMessage::assistant("reply1"),
             ChatMessage::user("real user question 1"),
             ChatMessage::assistant("reply2"),
             ChatMessage::user("real user question 2"),
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}\nprevious compaction summary")),
         ];
-        let recent = collect_recent_user_messages(&history, 3);
-        // Only real user messages should appear; summary excluded
-        assert!(
-            recent.iter().all(|m| m.role != "user"
-                || !m
-                    .content
-                    .as_deref()
-                    .unwrap_or("")
-                    .starts_with(SUMMARY_PREFIX)),
-            "summary message leaked into recent_user_messages: {recent:?}"
-        );
-        // The first included message should be "real user question 1"
-        let first_user = recent.iter().find(|m| m.role == "user").unwrap();
-        assert_eq!(first_user.content.as_deref(), Some("real user question 1"));
+        let recent = collect_user_messages(&history);
+        assert_eq!(recent, vec!["real user question 1", "real user question 2"]);
     }
 
     #[test]
-    fn test_compaction_preserves_tool_call_tool_result_invariants() {
+    fn test_collect_user_messages_filters_contextual_prompt_entries() {
+        let history = vec![
+            ChatMessage::user("<user_instructions>\nAGENTS.md\n</user_instructions>"),
+            ChatMessage::user("<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"),
+            ChatMessage::user("real user message"),
+        ];
+
+        let recent = collect_user_messages(&history);
+
+        assert_eq!(recent, vec!["real user message"]);
+    }
+
+    #[test]
+    fn test_build_compacted_history_places_summary_after_recent_messages() {
+        let recent = vec!["recent question".to_string()];
+
+        let compacted =
+            build_compacted_history(&recent, &format!("{SUMMARY_PREFIX}\nhandoff summary"));
+
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].content.as_deref(), Some("recent question"));
+        assert!(is_summary_message(&compacted[1]));
+        assert!(compacted[1]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("handoff summary"));
+    }
+
+    #[test]
+    fn test_compaction_drops_tool_artifacts_from_replacement_messages() {
         let history = vec![
             ChatMessage::user("first"),
             ChatMessage::assistant("reply"),
@@ -574,22 +1084,50 @@ mod tests {
             ChatMessage::assistant("done"),
         ];
 
-        let recent = collect_recent_user_messages(&history, 1);
+        let recent = collect_user_messages(&history);
 
-        assert!(history::is_valid_chat_history(&recent));
-        assert_eq!(recent[1].role, "assistant");
-        assert_eq!(recent[2].role, "tool");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0], "first");
+        assert_eq!(recent[1], "inspect");
     }
 
     #[test]
-    fn test_compaction_result_skipped() {
-        let result = CompactionResult::skipped("too few");
-        assert!(!result.performed);
-        assert_eq!(result.reason.as_deref(), Some("too few"));
+    fn test_collect_user_messages_caps_preserved_user_budget() {
+        let long_message = "x".repeat(10_000);
+        let user_messages = vec!["older".to_string(), long_message];
+
+        let compacted = build_compacted_history_with_limit(
+            &user_messages,
+            &format!("{SUMMARY_PREFIX}\nsummary"),
+            16,
+        );
+
+        assert_eq!(compacted.len(), 2);
+        let content = compacted[0].content.as_deref().unwrap();
+        assert!(content.contains("tokens truncated"));
+        assert!(approx_token_count(content) <= 32);
+        assert!(is_summary_message(&compacted[1]));
     }
 
     #[test]
-    fn test_should_compact_uses_history_estimate_when_response_snapshot_is_smaller() {
+    fn test_build_compacted_history_rebuilds_text_only_user_messages() {
+        let image = crate::types::ChatImageInput {
+            mime_type: "image/png".to_string(),
+            data: "abc".to_string(),
+        };
+        let history = vec![ChatMessage::user_with_images("describe this", &[image])];
+
+        let user_messages = collect_user_messages(&history);
+        let compacted =
+            build_compacted_history(&user_messages, &format!("{SUMMARY_PREFIX}\nsummary"));
+
+        assert_eq!(compacted[0].role, "user");
+        assert_eq!(compacted[0].content.as_deref(), Some("describe this"));
+        assert!(compacted[0].content_parts.is_none());
+    }
+
+    #[test]
+    fn test_should_compact_adds_items_after_last_model_snapshot() {
         let mut session = AgentSession::new("compact-stale-response");
         let config = AgentConfig {
             model_context_window: Some(1_000),
@@ -601,14 +1139,15 @@ mod tests {
             .history
             .push(ChatMessage::assistant(&"x".repeat(3_000)));
         session.last_response_tokens = Some(100);
+        session.last_response_history_len = Some(0);
 
-        assert!(session.estimate_tokens() > config.get_compact_threshold_tokens());
+        assert!(session.effective_token_count() > config.get_compact_threshold_tokens());
         assert!(should_compact(&session, &config));
     }
 
     #[test]
     fn test_is_summary_message() {
-        let summary = ChatMessage::user(&format!("{SUMMARY_PREFIX}some summary"));
+        let summary = ChatMessage::user(&format!("{SUMMARY_PREFIX}\nsome summary"));
         assert!(is_summary_message(&summary));
 
         let regular = ChatMessage::user("hello");
@@ -621,26 +1160,28 @@ mod tests {
     #[test]
     fn test_insert_initial_context_before_last_real_user_message() {
         let history = vec![
-            ChatMessage::user(&format!("{SUMMARY_PREFIX}summary text")),
+            ChatMessage::user("older question"),
             ChatMessage::assistant("reply"),
             ChatMessage::user("recent question"),
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}\nsummary text")),
         ];
         let context = vec![ChatMessage::system("[context reminder]")];
 
         let result = insert_initial_context_before_last_user_message(history, context);
 
         // Context should be inserted before "recent question" (last real user message)
-        assert_eq!(result.len(), 4);
-        assert_eq!(result[0].role, "user"); // summary
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].content.as_deref(), Some("older question"));
         assert_eq!(result[1].role, "assistant"); // reply
         assert_eq!(result[2].role, "system"); // injected context
         assert_eq!(result[3].content.as_deref(), Some("recent question"));
+        assert!(is_summary_message(&result[4]));
     }
 
     #[test]
     fn test_insert_initial_context_only_summary() {
         // When only a summary user message exists, insert before it
-        let history = vec![ChatMessage::user(&format!("{SUMMARY_PREFIX}summary"))];
+        let history = vec![ChatMessage::user(&format!("{SUMMARY_PREFIX}\nsummary"))];
         let context = vec![ChatMessage::system("[context]")];
 
         let result = insert_initial_context_before_last_user_message(history, context);
@@ -678,8 +1219,8 @@ mod tests {
     #[test]
     fn test_insert_initial_context_multiple_context_items() {
         let history = vec![
-            ChatMessage::user(&format!("{SUMMARY_PREFIX}summary")),
             ChatMessage::user("question"),
+            ChatMessage::user(&format!("{SUMMARY_PREFIX}\nsummary")),
         ];
         let context = vec![ChatMessage::system("[ctx1]"), ChatMessage::system("[ctx2]")];
 
@@ -687,9 +1228,9 @@ mod tests {
 
         // Both context items inserted before "question"
         assert_eq!(result.len(), 4);
-        assert_eq!(result[0].role, "user"); // summary
-        assert_eq!(result[1].content.as_deref(), Some("[ctx1]"));
-        assert_eq!(result[2].content.as_deref(), Some("[ctx2]"));
-        assert_eq!(result[3].content.as_deref(), Some("question"));
+        assert_eq!(result[0].content.as_deref(), Some("[ctx1]"));
+        assert_eq!(result[1].content.as_deref(), Some("[ctx2]"));
+        assert_eq!(result[2].content.as_deref(), Some("question"));
+        assert!(is_summary_message(&result[3]));
     }
 }

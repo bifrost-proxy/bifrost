@@ -2,11 +2,11 @@
 
 ## 功能模块说明
 
-本模块用于把 Bifrost agent 的编程工具面与 Codex-compatible 内置编程工具标准对齐。目标不是只补工具名，而是对齐模型可见 schema、运行时行为、错误边界、输出截断、长任务交互、真实验证文档。
+本模块用于完善 Bifrost agent 的编程工具面。目标不是只补工具名，而是完善模型可见 schema、运行时行为、错误边界、输出截断、长任务交互、真实验证文档。
 
 ## 参照工具面
 
-Codex-compatible 编程工具标准包含以下重要工具：
+编程工具标准包含以下重要工具：
 
 - 环境执行：`exec_command`、`write_stdin`，以及旧形态 `shell`/`shell_command`/`local_shell`
 - 文件修改：`apply_patch`
@@ -20,7 +20,7 @@ Codex-compatible 编程工具标准包含以下重要工具：
 
 ### `tool_search` 对齐结论
 
-按 Codex-compatible 标准逐项核对，`tool_search` 不是普通常驻本地工具，而是 deferred tool discovery 的模型可见入口：
+按标准逐项核对，`tool_search` 不是普通常驻本地工具，而是 deferred tool discovery 的模型可见入口：
 
 | 行为要求 | Bifrost 对齐方式 |
 | --- | --- |

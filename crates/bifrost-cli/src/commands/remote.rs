@@ -2155,6 +2155,7 @@ fn build_remote_command_checked(
                     content_type: list_args.content_type.clone(),
                     client_ip: list_args.client_ip.clone(),
                     client_app: list_args.client_app.clone(),
+                    listener_port: list_args.listener_port,
                     has_rule_hit: list_args.has_rule_hit,
                     is_websocket: list_args.is_websocket,
                     is_sse: list_args.is_sse,
@@ -2633,6 +2634,13 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
             field: "path".to_string(),
             operator: "contains".to_string(),
             value: path.clone(),
+        });
+    }
+    if let Some(listener_port) = args.listener_port {
+        filters.conditions.push(FilterCondition {
+            field: "listener_port".to_string(),
+            operator: "equals".to_string(),
+            value: listener_port.to_string(),
         });
     }
 
@@ -4931,6 +4939,7 @@ mod tests {
                 method: Some("GET".to_string()),
                 host: Some("api.example.com".to_string()),
                 path: Some("/v1".to_string()),
+                listener_port: Some(50831),
                 protocol: Some("HTTPS".to_string()),
                 content_type: Some("json".to_string()),
                 domain: Some("example.com".to_string()),
@@ -4987,6 +4996,11 @@ mod tests {
                     .conditions
                     .iter()
                     .any(|condition| { condition.field == "path" && condition.value == "/v1" }));
+                assert!(args.filters.conditions.iter().any(|condition| {
+                    condition.field == "listener_port"
+                        && condition.operator == "equals"
+                        && condition.value == "50831"
+                }));
             }
             other => panic!("unexpected query: {:?}", other),
         }
@@ -5011,6 +5025,7 @@ mod tests {
                 method: None,
                 host: None,
                 path: None,
+                listener_port: None,
                 protocol: None,
                 content_type: None,
                 domain: None,
@@ -5075,6 +5090,7 @@ mod tests {
                 method: None,
                 host: Some("api.example.com".to_string()),
                 path: None,
+                listener_port: Some(50831),
                 protocol: None,
                 content_type: None,
                 domain: None,
@@ -5093,6 +5109,13 @@ mod tests {
                     .iter()
                     .any(|condition| condition.field == "host"
                         && condition.value == "api.example.com"));
+                assert!(args
+                    .filters
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.field == "listener_port"
+                        && condition.operator == "equals"
+                        && condition.value == "50831"));
             }
             other => panic!("unexpected query: {:?}", other),
         }
@@ -5116,6 +5139,7 @@ mod tests {
                 content_type: Some("application/json".to_string()),
                 client_ip: Some("127.0.0.1".to_string()),
                 client_app: Some("curl".to_string()),
+                listener_port: Some(50831),
                 has_rule_hit: Some(true),
                 is_websocket: Some(false),
                 is_sse: Some(true),
@@ -5143,6 +5167,10 @@ mod tests {
             json.get("client_app").and_then(|v| v.as_str()),
             Some("curl")
         );
+        assert_eq!(
+            json.get("listener_port").and_then(|v| v.as_u64()),
+            Some(50831)
+        );
         match &built.render {
             RemoteRenderMode::TrafficList { format, no_color } => {
                 assert_eq!(*format, OutputFormat::Compact);
@@ -5166,6 +5194,7 @@ mod tests {
                 assert_eq!(args.content_type.as_deref(), Some("application/json"));
                 assert_eq!(args.client_ip.as_deref(), Some("127.0.0.1"));
                 assert_eq!(args.client_app.as_deref(), Some("curl"));
+                assert_eq!(args.listener_port, Some(50831));
                 assert_eq!(args.has_rule_hit, Some(true));
                 assert_eq!(args.is_websocket, Some(false));
                 assert_eq!(args.is_sse, Some(true));

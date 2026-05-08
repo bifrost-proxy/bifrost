@@ -2,17 +2,17 @@
 
 ## 功能模块说明
 
-覆盖 Bifrost agent 对齐 Codex 编程内置工具的第一批能力：
+覆盖 Bifrost agent 编程内置工具的第一批能力：
 
 1. `exec_command` 短命令一次性完成
 2. `exec_command` 长任务返回 session，并由 `write_stdin` 继续交互
 3. `view_image` 读取本地图片并返回 data URL
 4. `request_user_input` 参数校验与当前不可交互边界
-5. Codex 式 `tool_search` 只在 deferred tools 存在时暴露，并返回可加载工具定义
+5. `tool_search` 只在 deferred tools 存在时暴露，并返回可加载工具定义
 6. `ChatMessage` 手写序列化类型在 workspace all-features 下可编译
 7. 启动真实 Bifrost 服务，通过 `/api/im-gateway/agent/chat` 触发真实模型对话和默认直暴工具调用
 8. 本地 CI 静态门禁覆盖 IM gateway 编译回归
-9. MCP 工具数量达到 Codex 阈值 `>= 100` 时进入 deferred loading
+9. MCP 工具数量达到阈值 `>= 100` 时进入 deferred loading
 10. 真实 Bifrost + 大量 MCP tools 验证 `tool_search` 搜索、加载、调用策略生效
 
 ## 前置条件
@@ -40,7 +40,7 @@ mkdir -p ./.bifrost-test
   ```bash
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture
   ```
-- **预期结果**: 测试通过；短命令返回完成 JSON；交互命令返回 `session_id`，`write_stdin` 使用 Codex-compatible `chars` 字段写入后可读回 `hello exec`。
+- **预期结果**: 测试通过；短命令返回完成 JSON；交互命令返回 `session_id`，`write_stdin` 使用 `chars` 字段写入后可读回 `hello exec`。
 - **本次执行结果**: 2026-05-06 执行通过；`exec_command_tool_works_end_to_end` 测试返回 ok。
 
 ### TC-ABT-03: `view_image` 返回本地图片 data URL

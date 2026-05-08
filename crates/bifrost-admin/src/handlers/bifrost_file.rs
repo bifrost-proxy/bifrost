@@ -333,6 +333,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         request_size: record.request_body.as_ref().map_or(0, |b| b.len()),
         response_size: record.response_body.as_ref().map_or(0, |b| b.len()),
         duration_ms: record.duration_ms,
+        listener_port: 0,
         timing: None,
         request_headers: record.request_headers.clone(),
         original_response_headers: record.response_headers.clone(),

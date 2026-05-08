@@ -517,6 +517,37 @@ pub enum Commands {
         #[command(subcommand)]
         action: GroupCommands,
     },
+    #[command(
+        about = "Manage temporary proxy ports bound to explicit rule sets",
+        long_about = concat!(
+            "Manage temporary proxy ports bound to explicit rule sets.\n",
+            "\n",
+            "Multi-port model:\n",
+            "  - The main proxy port keeps using the normal enabled-rule view.\n",
+            "  - Each temporary port uses only the rule refs passed via `bind` or `update`.\n",
+            "  - Temporary ports share the same data dir, values, scripts, certs, and traffic DB.\n",
+            "  - Destroying a temporary port stops only that listener and does not affect the main port.\n",
+            "\n",
+            "Typical workflow:\n",
+            "  1. Start the main proxy first.\n",
+            "  2. Bind one or more temporary ports with `port bind`.\n",
+            "  3. Inspect bindings with `port list`, `port show`, and `port active`.\n",
+            "  4. Replace a port's bound rule refs with `port update`.\n",
+            "  5. Remove the listener with `port destroy` when debugging is done.\n",
+            "\n",
+            "Rule sources:\n",
+            "  --rule         Existing local rule name\n",
+            "  --group-rule   Existing group rule in <group_id>/<rule_name> format\n",
+            "  --rule-file    One-off rule file bound directly to the port\n",
+            "  --rule-text    One-off inline rule text bound directly to the port\n",
+            "\n",
+            "The `port` command requires the main proxy to already be running."
+        )
+    )]
+    Port {
+        #[command(subcommand)]
+        action: PortCommands,
+    },
     #[command(about = "Manage CA certificates")]
     Ca {
         #[command(subcommand)]
@@ -642,6 +673,12 @@ pub enum Commands {
         host: Option<String>,
         #[arg(long, help = "Filter path contains")]
         path: Option<String>,
+        #[arg(
+            long = "listener-port",
+            visible_alias = "proxy-port",
+            help = "Filter by proxy listener port"
+        )]
+        listener_port: Option<u16>,
         #[arg(long, value_parser = ["HTTP", "HTTPS", "WS", "WSS"], help = "Filter by protocol: HTTP, HTTPS, WS, WSS")]
         protocol: Option<String>,
         #[arg(long, value_parser = ["json", "xml", "html", "form", "text", "javascript", "css", "image", "font", "binary"], help = "Filter by content type: json, xml, html, form, etc.")]
@@ -808,6 +845,8 @@ pub enum AdminRemoteCommands {
 pub enum TrafficCommands {
     #[command(about = "List traffic records")]
     List {
+        #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
+        port: Option<u16>,
         #[arg(short, long, default_value = "50", help = "Maximum records to return")]
         limit: usize,
         #[arg(
@@ -844,6 +883,12 @@ pub enum TrafficCommands {
         client_ip: Option<String>,
         #[arg(long, help = "Filter by client app")]
         client_app: Option<String>,
+        #[arg(
+            long = "listener-port",
+            visible_alias = "proxy-port",
+            help = "Filter by proxy listener port"
+        )]
+        listener_port: Option<u16>,
         #[arg(long, help = "Filter by rule hit (true/false)")]
         has_rule_hit: Option<bool>,
         #[arg(long, help = "Filter websocket only (true/false)")]
@@ -865,6 +910,8 @@ pub enum TrafficCommands {
     },
     #[command(about = "Get traffic record details by id")]
     Get {
+        #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
+        port: Option<u16>,
         #[arg(help = "Traffic record id or sequence (optional; prompts if omitted)")]
         id: Option<String>,
         #[arg(long, help = "Include request body (best effort)")]
@@ -918,6 +965,12 @@ pub enum TrafficCommands {
         host: Option<String>,
         #[arg(long, help = "Filter path contains")]
         path: Option<String>,
+        #[arg(
+            long = "listener-port",
+            visible_alias = "proxy-port",
+            help = "Filter by proxy listener port"
+        )]
+        listener_port: Option<u16>,
         #[arg(long, value_parser = ["HTTP", "HTTPS", "WS", "WSS"], help = "Filter by protocol: HTTP, HTTPS, WS, WSS")]
         protocol: Option<String>,
         #[arg(long, value_parser = ["json", "xml", "html", "form", "text", "javascript", "css", "image", "font", "binary"], help = "Filter by content type: json, xml, html, form, etc.")]
@@ -1087,6 +1140,131 @@ pub enum GroupRuleCommands {
         group_id: String,
         #[arg(help = "Rule name")]
         name: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum PortCommands {
+    #[command(
+        about = "Bind a temporary proxy port to explicit rule sets",
+        long_about = concat!(
+            "Bind a temporary proxy port to explicit rule sets.\n",
+            "\n",
+            "This creates an extra listener inside the running Bifrost process. The new port\n",
+            "shares the same BIFROST_DATA_DIR, values, scripts, certificates, and traffic DB,\n",
+            "but it does not inherit the main port's enabled-rule view. Only the rule refs\n",
+            "passed here become active on the temporary port.\n",
+            "\n",
+            "At least one of the following must be provided:\n",
+            "  --rule         Bind an existing local rule by name\n",
+            "  --group-rule   Bind an existing group rule in <group_id>/<rule_name> format\n",
+            "  --rule-file    Bind a rule file directly without writing to shared rules/\n",
+            "  --rule-text    Bind inline rule text directly for one-off debugging\n",
+            "\n",
+            "Use `--port 0` to let Bifrost allocate a free port automatically."
+        )
+    )]
+    Bind {
+        #[arg(
+            long,
+            help = "Temporary proxy port; use 0 to allocate an available port"
+        )]
+        port: u16,
+        #[arg(
+            short = 'H',
+            long,
+            help = "Listen host; defaults to the running proxy host"
+        )]
+        host: Option<String>,
+        #[arg(long, help = "Optional display name")]
+        name: Option<String>,
+        #[arg(long = "rule", help = "Local rule name to bind; can be repeated")]
+        rules: Vec<String>,
+        #[arg(
+            long = "rule-file",
+            value_hint = ValueHint::FilePath,
+            help = "Rule file path to bind directly; can be repeated"
+        )]
+        rule_files: Vec<PathBuf>,
+        #[arg(
+            long = "rule-text",
+            help = "Inline rule content to bind directly; can be repeated"
+        )]
+        rule_texts: Vec<String>,
+        #[arg(
+            long = "group-rule",
+            help = "Group rule reference in <group_id>/<rule_name> format; can be repeated"
+        )]
+        group_rules: Vec<String>,
+    },
+    #[command(
+        about = "List temporary proxy port bindings",
+        long_about = "List all currently active temporary proxy port bindings created inside the running Bifrost process. Use this to see which extra listeners exist and which ports are already occupied by temporary bindings."
+    )]
+    List,
+    #[command(
+        about = "Show a temporary proxy port binding",
+        long_about = "Show the persisted binding metadata for one temporary proxy port, including host, optional display name, status, and the explicit rule refs currently attached to that listener."
+    )]
+    Show {
+        #[arg(help = "Temporary proxy port")]
+        port: u16,
+    },
+    #[command(
+        about = "Show active rules for a temporary proxy port",
+        long_about = "Show the resolved active-rule summary for one temporary proxy port. This is the port-scoped view and should differ from the main port whenever the temporary port binds a different rule set."
+    )]
+    Active {
+        #[arg(help = "Temporary proxy port")]
+        port: u16,
+    },
+    #[command(
+        about = "Replace the rule bindings for a temporary proxy port",
+        long_about = concat!(
+            "Replace the explicit rule refs for a temporary proxy port.\n",
+            "\n",
+            "Like `port bind`, this command works against the running main proxy process and\n",
+            "rebuilds only the selected temporary port's rule view. The main port and other\n",
+            "temporary ports are not affected.\n",
+            "\n",
+            "Use the same rule source flags as `port bind`:\n",
+            "  --rule, --group-rule, --rule-file, --rule-text\n",
+            "\n",
+            "If you need a different mix of rules on a port, provide the full replacement set\n",
+            "in this command."
+        )
+    )]
+    Update {
+        #[arg(help = "Temporary proxy port")]
+        port: u16,
+        #[arg(long, help = "Optional display name")]
+        name: Option<String>,
+        #[arg(long = "rule", help = "Local rule name to bind; can be repeated")]
+        rules: Vec<String>,
+        #[arg(
+            long = "rule-file",
+            value_hint = ValueHint::FilePath,
+            help = "Rule file path to bind directly; can be repeated"
+        )]
+        rule_files: Vec<PathBuf>,
+        #[arg(
+            long = "rule-text",
+            help = "Inline rule content to bind directly; can be repeated"
+        )]
+        rule_texts: Vec<String>,
+        #[arg(
+            long = "group-rule",
+            help = "Group rule reference in <group_id>/<rule_name> format; can be repeated"
+        )]
+        group_rules: Vec<String>,
+    },
+    #[command(
+        about = "Destroy a temporary proxy port binding",
+        long_about = "Destroy a temporary proxy port binding and stop only that listener. Shared rule data, values, scripts, certs, traffic history, and the main proxy port remain unchanged."
+    )]
+    Destroy {
+        #[arg(help = "Temporary proxy port")]
+        port: u16,
     },
 }
 
@@ -2045,6 +2223,12 @@ pub struct RemoteTrafficListArgs {
     pub client_ip: Option<String>,
     #[arg(long, help = "Filter by client app")]
     pub client_app: Option<String>,
+    #[arg(
+        long = "listener-port",
+        visible_alias = "proxy-port",
+        help = "Filter by proxy listener port"
+    )]
+    pub listener_port: Option<u16>,
     #[arg(long, help = "Filter by rule hit (true/false)")]
     pub has_rule_hit: Option<bool>,
     #[arg(long, help = "Filter websocket only (true/false)")]
@@ -2113,6 +2297,12 @@ pub struct RemoteSearchArgs {
     pub host: Option<String>,
     #[arg(long, help = "Filter path contains")]
     pub path: Option<String>,
+    #[arg(
+        long = "listener-port",
+        visible_alias = "proxy-port",
+        help = "Filter by proxy listener port"
+    )]
+    pub listener_port: Option<u16>,
     #[arg(
         long,
         value_parser = ["HTTP", "HTTPS", "WS", "WSS"],

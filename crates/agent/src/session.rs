@@ -6,11 +6,10 @@
 //! - Expired sessions are cleaned up by the session manager
 //!
 //! Turn loop (inspired by Codex's session/turn.rs):
-//! 1. Pre-turn compaction check (if context is too large)
-//! 2. Build system prompt + history + user message
-//! 3. Send to model with available tools
-//! 4. If model returns tool_calls → execute → mid-turn compaction check → loop
-//! 5. If model returns text → return as final response
+//! 1. Build prompt prefix and run Codex-style pre-sampling compaction when needed
+//! 2. Add the new user message and send to model with available tools
+//! 3. If model returns tool_calls or pending input → mid-turn compaction check → loop
+//! 4. If model returns text → return as final response
 
 use crate::client::AgentClient;
 use crate::compact;
@@ -70,6 +69,11 @@ pub struct AgentSession {
 
     /// Token count from the last API response (for mid-turn budget checks).
     pub last_response_tokens: Option<u64>,
+
+    /// History length immediately after the last model-generated item covered by
+    /// `last_response_tokens`. Items appended after this boundary are estimated
+    /// and added to the last API usage, matching Codex context accounting.
+    pub last_response_history_len: Option<usize>,
 
     /// Bumped whenever history is rewritten (compaction, rollback, clear).
     /// Mirrors Codex's `history_version` for detecting stale state.
@@ -166,6 +170,7 @@ impl AgentSession {
             compaction_count: 0,
             total_tokens_used: None,
             last_response_tokens: None,
+            last_response_history_len: None,
             history_version: 0,
             work_dir: None,
             source: "unknown".to_string(),
@@ -267,7 +272,7 @@ impl AgentSession {
         self.history.clear();
         self.compaction_count = 0;
         self.total_tokens_used = None;
-        self.last_response_tokens = None;
+        self.invalidate_token_snapshot();
         self.history_version = self.history_version.saturating_add(1);
         self.current_plan = None;
         self.current_goal = None;
@@ -307,22 +312,30 @@ impl AgentSession {
 
         let n = num_turns as usize;
         let cut_idx = if n >= user_positions.len() {
-            // If rolling back more turns than exist, preserve compaction summary if present
-            if self.compaction_count > 0 && !self.history.is_empty() {
-                // Keep the compaction summary (first message)
-                1
-            } else {
-                0
-            }
+            0
         } else {
             user_positions[user_positions.len() - n]
         };
 
-        let removed = self.history.len() - cut_idx;
+        let old_len = self.history.len();
+        let summary = if self.compaction_count > 0 {
+            self.history
+                .iter()
+                .find(|message| compact::is_summary_message(message))
+                .cloned()
+        } else {
+            None
+        };
         self.history.truncate(cut_idx);
+        if let Some(summary) = summary {
+            if !self.history.iter().any(compact::is_summary_message) {
+                self.history.push(summary);
+            }
+        }
+        let removed = old_len.saturating_sub(self.history.len());
         self.history_version = self.history_version.saturating_add(1);
-        // Reset last_response_tokens since history changed
-        self.last_response_tokens = None;
+        // Reset token snapshot since history changed.
+        self.invalidate_token_snapshot();
         removed
     }
 
@@ -337,6 +350,10 @@ impl AgentSession {
     /// Track token usage from an API response.
     pub(crate) fn track_token_usage(&mut self, total_tokens: u64) {
         self.last_response_tokens = Some(total_tokens);
+        // The assistant/model item is appended just after the API response is
+        // processed. Until that append happens, the current history length is
+        // the correct "items after last model item" boundary.
+        self.last_response_history_len = Some(self.history.len());
         self.accumulate_token_usage(total_tokens);
     }
 
@@ -354,73 +371,132 @@ impl AgentSession {
         );
     }
 
-    fn add_user_message(&mut self, content: &str) {
+    pub(crate) fn invalidate_token_snapshot(&mut self) {
         self.last_response_tokens = None;
+        self.last_response_history_len = None;
+    }
+
+    /// Recompute the context snapshot after a history replacement.
+    ///
+    /// Compaction installs a much smaller replacement history. Keeping the old
+    /// API-response token count would keep `effective_token_count()` above the
+    /// threshold and cause the next loop to compact again immediately.
+    pub(crate) fn recompute_token_snapshot_from_history(
+        &mut self,
+        base_instructions: Option<&str>,
+    ) {
+        let base_tokens = base_instructions
+            .filter(|instructions| !instructions.trim().is_empty())
+            .map(|instructions| {
+                Self::estimate_messages_tokens(&[ChatMessage::system(instructions)])
+            })
+            .unwrap_or(0);
+        self.last_response_tokens = Some(u64::from(
+            self.estimate_tokens().saturating_add(base_tokens),
+        ));
+        self.last_response_history_len = Some(self.history.len());
+    }
+
+    fn add_user_message(&mut self, content: &str) {
         self.history.push(ChatMessage::user(content));
         self.touch();
     }
 
     fn add_user_message_with_images(&mut self, content: &str, images: &[ChatImageInput]) {
-        self.last_response_tokens = None;
         self.history
             .push(ChatMessage::user_with_images(content, images));
         self.touch();
     }
 
     fn add_assistant_message(&mut self, content: &str) {
+        let previous_len = self.history.len();
         self.history.push(ChatMessage::assistant(content));
+        self.mark_model_item_boundary_if_pending(previous_len);
         self.touch();
     }
 
     fn add_assistant_tool_calls(&mut self, tool_calls: &[ToolCallMessage]) {
-        self.last_response_tokens = None;
+        let previous_len = self.history.len();
         self.history
             .push(ChatMessage::assistant_with_tool_calls(tool_calls.to_vec()));
+        self.mark_model_item_boundary_if_pending(previous_len);
         self.touch();
     }
 
     fn add_tool_result(&mut self, call_id: &str, content: &str) {
-        self.last_response_tokens = None;
         self.history
             .push(ChatMessage::tool_result(call_id, content));
         self.touch();
     }
 
+    fn mark_model_item_boundary_if_pending(&mut self, previous_len: usize) {
+        if self.last_response_tokens.is_some()
+            && self.last_response_history_len == Some(previous_len)
+        {
+            self.last_response_history_len = Some(self.history.len());
+        }
+    }
+
     /// Build the full message list for a model call.
     ///
-    /// Enforces `max_history_messages` limit by dropping the oldest non-summary messages
-    /// while preserving the compaction summary (first message after compaction).
+    /// Enforces `max_history_messages` limit by dropping the oldest non-summary
+    /// messages while preserving the compaction summary wherever Codex-style
+    /// replacement history placed it.
     fn build_messages(
         &self,
         prompt_prefix: &[ChatMessage],
         memory_message: Option<&ChatMessage>,
         max_history: u32,
     ) -> Vec<ChatMessage> {
-        let mut messages = prompt_prefix.to_vec();
-        if let Some(memory_message) = memory_message {
-            messages.push(memory_message.clone());
-        }
-
         let history = &self.history;
         let max = max_history as usize;
 
-        if max > 0 && history.len() > max {
-            // Keep the first message if it's a compaction summary, then the most recent messages
-            let has_summary = self.compaction_count > 0 && !history.is_empty();
-            if has_summary {
-                // Preserve compaction summary (first message) + most recent (max-1) messages
-                messages.push(history[0].clone());
-                let tail_start = history.len().saturating_sub(max.saturating_sub(1));
-                let tail_start = tail_start.max(1); // Don't duplicate the first message
-                messages.extend_from_slice(&history[tail_start..]);
+        let selected_history = if max > 0 && history.len() > max {
+            if let Some(summary_idx) = history.iter().position(compact::is_summary_message) {
+                // Preserve the compaction summary wherever it lives. Codex local
+                // compaction places it after preserved user messages, and later
+                // turns may append newer messages after it.
+                let summary = history[summary_idx].clone();
+                let tail_start = history.len().saturating_sub(max);
+                if summary_idx >= tail_start {
+                    history[tail_start..].to_vec()
+                } else {
+                    let tail_budget = max.saturating_sub(1);
+                    let tail_start = history.len().saturating_sub(tail_budget);
+                    let mut tail = Vec::with_capacity(tail_budget.saturating_add(1));
+                    tail.insert(0, summary);
+                    tail.extend_from_slice(&history[tail_start..]);
+                    tail
+                }
             } else {
                 // No compaction summary — just take the most recent messages
                 let tail_start = history.len().saturating_sub(max);
-                messages.extend_from_slice(&history[tail_start..]);
+                history[tail_start..].to_vec()
             }
         } else {
-            messages.extend(history.iter().cloned());
+            history.to_vec()
+        };
+
+        let mut messages = Vec::with_capacity(
+            prompt_prefix
+                .len()
+                .saturating_add(usize::from(memory_message.is_some()))
+                .saturating_add(selected_history.len()),
+        );
+        for message in prompt_prefix {
+            if message.role == "system"
+                || !Self::messages_contain_equivalent_context_message(&selected_history, message)
+            {
+                messages.push(message.clone());
+            }
         }
+        if let Some(memory_message) = memory_message {
+            if !Self::messages_contain_equivalent_context_message(&selected_history, memory_message)
+            {
+                messages.push(memory_message.clone());
+            }
+        }
+        messages.extend(selected_history);
 
         let (sanitized, report) = history::sanitize_chat_history(&messages);
         if report.dropped_anything() {
@@ -436,14 +512,50 @@ impl AgentSession {
         sanitized
     }
 
-    /// Rough token count estimate (1 token ≈ 4 chars).
-    /// This is a coarse lower bound, same approach as Codex (codex-rs/utils/string/src/truncate.rs).
-    pub fn estimate_tokens(&self) -> u32 {
-        let total_chars: usize = self
-            .history
+    fn messages_contain_equivalent_context_message(
+        messages: &[ChatMessage],
+        candidate: &ChatMessage,
+    ) -> bool {
+        if candidate.role == "system" || candidate.tool_calls.is_some() {
+            return false;
+        }
+        messages
+            .iter()
+            .any(|message| Self::context_messages_equivalent(message, candidate))
+    }
+
+    fn context_messages_equivalent(left: &ChatMessage, right: &ChatMessage) -> bool {
+        left.role == right.role
+            && left.content == right.content
+            && left.content_parts == right.content_parts
+            && left.tool_calls.is_none()
+            && right.tool_calls.is_none()
+            && left.tool_call_id == right.tool_call_id
+            && left.name == right.name
+    }
+
+    /// Rough token count estimate (1 token ≈ 4 chars) for a message slice.
+    /// This is a coarse lower bound, same approach as Codex
+    /// (codex-rs/utils/string/src/truncate.rs).
+    fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
+        let total_chars: usize = messages
             .iter()
             .map(|m| {
                 m.content.as_ref().map(|c| c.len()).unwrap_or(0)
+                    + m.content_parts
+                        .as_ref()
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .map(|part| match part {
+                                    crate::types::ChatContentPart::Text { text } => text.len(),
+                                    crate::types::ChatContentPart::ImageUrl { image_url } => {
+                                        image_url.url.len()
+                                    }
+                                })
+                                .sum::<usize>()
+                        })
+                        .unwrap_or(0)
                     + m.tool_calls
                         .as_ref()
                         .map(|tcs| {
@@ -457,14 +569,29 @@ impl AgentSession {
         (total_chars / 4).min(u32::MAX as usize) as u32
     }
 
-    /// Get the effective token count — prefers real API data over estimates.
+    /// Rough full-history token count estimate.
+    pub fn estimate_tokens(&self) -> u32 {
+        Self::estimate_messages_tokens(&self.history)
+    }
+
+    /// Get the current context token count.
+    ///
+    /// This follows Codex's trigger口径: last API response usage plus an
+    /// estimate for items appended after the last model-generated history item.
+    /// If the response snapshot was invalidated by history rewrite, fall back to
+    /// a full-history estimate.
     pub fn effective_token_count(&self) -> u32 {
-        let estimated_tokens = self.estimate_tokens();
-        let response_tokens = self
-            .last_response_tokens
-            .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
-            .unwrap_or(0);
-        estimated_tokens.max(response_tokens)
+        let Some(last_response_tokens) = self.last_response_tokens else {
+            return self.estimate_tokens();
+        };
+        let boundary = self
+            .last_response_history_len
+            .unwrap_or(self.history.len())
+            .min(self.history.len());
+        let appended_tokens = Self::estimate_messages_tokens(&self.history[boundary..]);
+        u32::try_from(last_response_tokens)
+            .unwrap_or(u32::MAX)
+            .saturating_add(appended_tokens)
     }
 }
 
@@ -610,7 +737,7 @@ impl AgentSessionManager {
                     last_active_at: s.last_active_at,
                     compaction_count: s.compaction_count,
                     total_tokens_used: s.total_tokens_used,
-                    estimated_tokens: s.estimate_tokens(),
+                    estimated_tokens: s.effective_token_count(),
                     history_version: s.history_version,
                     work_dir: s.work_dir.clone(),
                     source: s.source.clone(),
@@ -656,7 +783,7 @@ impl AgentSessionManager {
                 last_active_at: s.last_active_at,
                 compaction_count: s.compaction_count,
                 total_tokens_used: s.total_tokens_used,
-                estimated_tokens: s.estimate_tokens(),
+                estimated_tokens: s.effective_token_count(),
                 history_version: s.history_version,
                 work_dir: s.work_dir.clone(),
                 source: s.source.clone(),
@@ -821,11 +948,10 @@ pub fn handle_session_free_command(
 ///
 /// This implements the core turn loop (same pattern as Codex's session/turn.rs):
 /// 1. Handle built-in commands (/clear, /reset)
-/// 2. Pre-turn compaction check (based on real tokens or estimate)
-/// 3. Build prompt with system instructions + history + user message
-/// 4. Send to model with available tools
-/// 5. If model returns tool_calls → execute → mid-turn compaction check → loop
-/// 6. If model returns text → return as final response
+/// 2. Build prompt prefix and run Codex-style pre-sampling compaction when needed
+/// 3. Add the user message and send to model with available tools
+/// 4. If model returns tool_calls → execute → mid-turn compaction check → loop
+/// 5. If model returns text → return as final response
 pub async fn run_turn(
     client: &AgentClient,
     config: &AgentConfig,
@@ -1021,7 +1147,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 warn!(error = %e, "failed to record user message");
             }
         }
-        if session.history.len() < 4 {
+        if session.history.is_empty() {
             return Ok(TurnResult {
                 response: "历史消息太少，无需压缩。".to_string(),
                 tool_calls_log: Vec::new(),
@@ -1032,6 +1158,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 goal_objective: None,
             });
         }
+        let base_instructions = prompt::resolve_base_instructions_text(config, None);
         match compact::compact_session(
             client,
             config,
@@ -1039,6 +1166,7 @@ pub async fn run_turn_with_mcp_multimodal(
             compact::CompactionTrigger::Manual,
             compact::CompactionReason::UserRequested,
             compact::CompactionPhase::StandaloneTurn,
+            Some(&base_instructions),
             compact::InitialContextInjection::DoNotInject,
             vec![],
         )
@@ -1233,13 +1361,14 @@ pub async fn run_turn_with_mcp_multimodal(
             }
         }
         let est = session.estimate_tokens();
+        let context_tokens = session.effective_token_count();
         let real = session
             .total_tokens_used
             .map(|t| t.to_string())
             .unwrap_or_else(|| "N/A".to_string());
         let mcp_tool_count = mcp.as_ref().map(|m| m.list_tools().len()).unwrap_or(0);
         let context_window = config_context_window_tokens(config);
-        let context_usage = context_usage_percent(est, context_window)
+        let context_usage = context_usage_percent(context_tokens, context_window)
             .map(|percent| format!("{percent:.1}%"))
             .unwrap_or_else(|| "N/A".to_string());
         let context_window_text = context_window
@@ -1253,7 +1382,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 session.history.len(),
                 est,
                 real,
-                est,
+                context_tokens,
                 context_window_text,
                 context_usage,
                 session.compaction_count,
@@ -1427,50 +1556,6 @@ pub async fn run_turn_with_mcp_multimodal(
         crate::tools::goal::GoalRuntimeEvent::TurnStarted,
     );
 
-    // Pre-turn compaction: check using real tokens if available, else estimate
-    if compact::should_compact(session, config) {
-        info!(
-            session_key = %session.session_key,
-            estimated_tokens = session.estimate_tokens(),
-            threshold = config.get_compact_threshold_tokens(),
-            compaction_count = session.compaction_count,
-            "triggering pre-turn compaction"
-        );
-        match compact::compact_session(
-            client,
-            config,
-            session,
-            compact::CompactionTrigger::Auto,
-            compact::CompactionReason::ContextLimit,
-            compact::CompactionPhase::PreTurn,
-            compact::InitialContextInjection::DoNotInject,
-            vec![],
-        )
-        .await
-        {
-            Ok(result) if result.performed => {
-                record_compaction_event(
-                    &mut recorder,
-                    session,
-                    &result,
-                    "auto",
-                    "context_limit",
-                    "pre_turn",
-                    false,
-                );
-                info!(
-                    tokens_saved = result.tokens_saved,
-                    duration_ms = ?result.duration_ms,
-                    "pre-turn compaction succeeded"
-                );
-            }
-            Ok(_) => {} // skipped
-            Err(e) => {
-                warn!(error = %e, "pre-turn compaction failed, continuing with full history");
-            }
-        }
-    }
-
     // Lazily load user instructions on first turn (matching Codex's once-per-session
     // loading). Subsequent turns reuse the cached value.
     if session.user_instructions.is_none() {
@@ -1499,6 +1584,9 @@ pub async fn run_turn_with_mcp_multimodal(
         session.user_instructions.as_deref(),
     );
     let prompt_prefix = prompt_messages.prefix;
+
+    compact_pre_sampling_if_needed(client, config, session, &mut recorder, &base_instructions)
+        .await?;
 
     // Add user message to history
     session.add_user_message_with_images(user_message, images);
@@ -1610,18 +1698,15 @@ pub async fn run_turn_with_mcp_multimodal(
             memory_message.as_ref(),
             config.get_max_history_messages(),
         );
-        refresh_active_turn_status(
-            session,
-            config,
-            ActiveTurnProgress {
-                state: "model_request",
-                current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
-                completed_loop_iterations: u32::try_from(iteration).unwrap_or(u32::MAX),
-                max_loop_iterations: config.get_max_turn_iterations(),
-                local_tool_count,
-                mcp_tool_count,
-            },
-        );
+        let model_request_progress = ActiveTurnProgress {
+            state: "model_request",
+            current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+            completed_loop_iterations: u32::try_from(iteration).unwrap_or(u32::MAX),
+            max_loop_iterations: config.get_max_turn_iterations(),
+            local_tool_count,
+            mcp_tool_count,
+        };
+        refresh_active_turn_status(session, config, model_request_progress);
 
         debug!(
             iteration,
@@ -1656,8 +1741,13 @@ pub async fn run_turn_with_mcp_multimodal(
                         compact::CompactionTrigger::Auto,
                         compact::CompactionReason::ContextLimit,
                         compact::CompactionPhase::MidTurn,
+                        Some(&base_instructions),
                         compact::InitialContextInjection::BeforeLastUserMessage,
-                        build_mid_turn_initial_context(session),
+                        build_mid_turn_initial_context(
+                            session,
+                            &prompt_prefix,
+                            memory_message.as_ref(),
+                        ),
                     )
                     .await
                     {
@@ -1676,11 +1766,11 @@ pub async fn run_turn_with_mcp_multimodal(
                                 duration_ms = ?result.duration_ms,
                                 "emergency compact succeeded"
                             );
-                            session.last_response_tokens = None;
+                            refresh_active_turn_status(session, config, model_request_progress);
                             true
                         }
                         Ok(_) => {
-                            info!("emergency compact skipped (too few messages)");
+                            info!("emergency compact skipped");
                             false
                         }
                         Err(compact_err) => {
@@ -1709,7 +1799,9 @@ pub async fn run_turn_with_mcp_multimodal(
                                     config,
                                     session,
                                     &prompt_prefix,
+                                    memory_message.as_ref(),
                                     &tool_defs,
+                                    model_request_progress,
                                 )
                                 .await
                                 {
@@ -1738,8 +1830,16 @@ pub async fn run_turn_with_mcp_multimodal(
                         }
                     } else {
                         // Compact didn't run or failed, go straight to trim loop
-                        match trim_loop_retry(client, config, session, &prompt_prefix, &tool_defs)
-                            .await
+                        match trim_loop_retry(
+                            client,
+                            config,
+                            session,
+                            &prompt_prefix,
+                            memory_message.as_ref(),
+                            &tool_defs,
+                            model_request_progress,
+                        )
+                        .await
                         {
                             Ok(r) => r,
                             Err(e3) => {
@@ -1948,6 +2048,23 @@ pub async fn run_turn_with_mcp_multimodal(
                         warn!(error = %e, "failed to record guide message at turn end");
                     }
                 }
+                compact_mid_turn_if_needed(
+                    client,
+                    config,
+                    session,
+                    &mut recorder,
+                    &prompt_prefix,
+                    memory_message.as_ref(),
+                    ActiveTurnProgress {
+                        state: "model_response",
+                        current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                        completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                        max_loop_iterations: config.get_max_turn_iterations(),
+                        local_tool_count,
+                        mcp_tool_count,
+                    },
+                )
+                .await;
                 continue;
             }
 
@@ -1986,6 +2103,25 @@ pub async fn run_turn_with_mcp_multimodal(
                             warn!(error = %e, "failed to record queued message");
                         }
                     }
+                    compact_mid_turn_if_needed(
+                        client,
+                        config,
+                        session,
+                        &mut recorder,
+                        &prompt_prefix,
+                        memory_message.as_ref(),
+                        ActiveTurnProgress {
+                            state: "model_response",
+                            current_loop_iteration: u32::try_from(iteration + 1)
+                                .unwrap_or(u32::MAX),
+                            completed_loop_iterations: u32::try_from(iteration + 1)
+                                .unwrap_or(u32::MAX),
+                            max_loop_iterations: config.get_max_turn_iterations(),
+                            local_tool_count,
+                            mcp_tool_count,
+                        },
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -2283,48 +2419,23 @@ pub async fn run_turn_with_mcp_multimodal(
         }
 
         // Mid-turn compaction check (same pattern as Codex's auto-compact in turn.rs)
-        if compact::should_compact(session, config) {
-            info!(
-                estimated_tokens = session.estimate_tokens(),
-                compaction_count = session.compaction_count,
-                "triggering mid-turn compaction"
-            );
-            match compact::compact_session(
-                client,
-                config,
-                session,
-                compact::CompactionTrigger::Auto,
-                compact::CompactionReason::ContextLimit,
-                compact::CompactionPhase::MidTurn,
-                compact::InitialContextInjection::BeforeLastUserMessage,
-                build_mid_turn_initial_context(session),
-            )
-            .await
-            {
-                Ok(result) if result.performed => {
-                    record_compaction_event(
-                        &mut recorder,
-                        session,
-                        &result,
-                        "auto",
-                        "context_limit",
-                        "mid_turn",
-                        false,
-                    );
-                    info!(
-                        tokens_saved = result.tokens_saved,
-                        duration_ms = ?result.duration_ms,
-                        "mid-turn compaction succeeded"
-                    );
-                    // Reset last_response_tokens so next check uses estimate until new API call
-                    session.last_response_tokens = None;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(error = %e, "mid-turn compaction failed");
-                }
-            }
-        }
+        compact_mid_turn_if_needed(
+            client,
+            config,
+            session,
+            &mut recorder,
+            &prompt_prefix,
+            memory_message.as_ref(),
+            ActiveTurnProgress {
+                state: "tool_calls",
+                current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+                max_loop_iterations: config.get_max_turn_iterations(),
+                local_tool_count,
+                mcp_tool_count,
+            },
+        )
+        .await;
     }
 
     error!(
@@ -2519,22 +2630,137 @@ fn truncate_tool_output(output: &str, max_tokens: usize) -> String {
 ///
 /// Inserted before the last user message in the compacted history via
 /// [`compact::InitialContextInjection::BeforeLastUserMessage`] to preserve
-/// continuity within the turn loop. The full system prompt is already
-/// prepended by `build_messages()` on every model call, so this provides a
-/// lightweight context reminder rather than duplicating the full prompt.
-///
-/// Extend this when the architecture stores initial context in history
-/// (i.e. when system prompt is no longer prepended at `build_messages()` time).
-fn build_mid_turn_initial_context(session: &AgentSession) -> Vec<ChatMessage> {
-    let work_dir = session.work_dir.as_deref().unwrap_or("(default)");
-    vec![ChatMessage::system(&format!(
-        "[Context after mid-turn compaction]\n\
-         Working directory: {work_dir}\n\
-         Session: {source}\n\
-         Compaction #{count} — continue following system instructions.",
-        source = session.source,
-        count = session.compaction_count + 1,
-    ))]
+/// continuity within the turn loop. Base/system instructions stay outside
+/// replacement history, matching Codex's `Prompt.base_instructions` boundary;
+/// only developer/contextual user prompt items plus optional memory are
+/// reinjected.
+fn build_mid_turn_initial_context(
+    _session: &AgentSession,
+    prompt_prefix: &[ChatMessage],
+    memory_message: Option<&ChatMessage>,
+) -> Vec<ChatMessage> {
+    let mut context =
+        Vec::with_capacity(prompt_prefix.len() + usize::from(memory_message.is_some()));
+    context.extend(
+        prompt_prefix
+            .iter()
+            .filter(|message| message.role != "system")
+            .cloned(),
+    );
+    if let Some(memory_message) = memory_message {
+        context.push(memory_message.clone());
+    }
+    context
+}
+
+async fn compact_mid_turn_if_needed(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    prompt_prefix: &[ChatMessage],
+    memory_message: Option<&ChatMessage>,
+    progress: ActiveTurnProgress,
+) {
+    if !compact::should_compact(session, config) {
+        return;
+    }
+
+    info!(
+        estimated_tokens = session.estimate_tokens(),
+        compaction_count = session.compaction_count,
+        "triggering mid-turn compaction"
+    );
+    let initial_context = build_mid_turn_initial_context(session, prompt_prefix, memory_message);
+    match compact::compact_session(
+        client,
+        config,
+        session,
+        compact::CompactionTrigger::Auto,
+        compact::CompactionReason::ContextLimit,
+        compact::CompactionPhase::MidTurn,
+        prompt_prefix
+            .iter()
+            .find(|message| message.role == "system")
+            .and_then(|message| message.content.as_deref()),
+        compact::InitialContextInjection::BeforeLastUserMessage,
+        initial_context,
+    )
+    .await
+    {
+        Ok(result) if result.performed => {
+            record_compaction_event(
+                recorder,
+                session,
+                &result,
+                "auto",
+                "context_limit",
+                "mid_turn",
+                false,
+            );
+            info!(
+                tokens_saved = result.tokens_saved,
+                duration_ms = ?result.duration_ms,
+                "mid-turn compaction succeeded"
+            );
+            refresh_active_turn_status(session, config, progress);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(error = %e, "mid-turn compaction failed");
+        }
+    }
+}
+
+async fn compact_pre_sampling_if_needed(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    base_instructions: &str,
+) -> Result<(), String> {
+    if !compact::should_compact(session, config) {
+        return Ok(());
+    }
+
+    info!(
+        session_key = %session.session_key,
+        estimated_tokens = session.effective_token_count(),
+        threshold = config.get_compact_threshold_tokens(),
+        "pre-sampling token limit reached; running compaction before adding new input"
+    );
+
+    let result = compact::compact_session(
+        client,
+        config,
+        session,
+        compact::CompactionTrigger::Auto,
+        compact::CompactionReason::ContextLimit,
+        compact::CompactionPhase::PreTurn,
+        Some(base_instructions),
+        compact::InitialContextInjection::DoNotInject,
+        vec![],
+    )
+    .await?;
+
+    if result.performed {
+        record_compaction_event(
+            recorder,
+            session,
+            &result,
+            "auto",
+            "context_limit",
+            "pre_turn",
+            false,
+        );
+        info!(
+            tokens_saved = result.tokens_saved,
+            duration_ms = ?result.duration_ms,
+            "pre-sampling compact completed"
+        );
+    }
+
+    Ok(())
 }
 
 fn record_compaction_event(
@@ -2617,7 +2843,9 @@ async fn trim_loop_retry(
     config: &crate::config::AgentConfig,
     session: &mut AgentSession,
     prompt_prefix: &[ChatMessage],
+    memory_message: Option<&ChatMessage>,
     tool_defs: &[crate::types::ToolDefinition],
+    progress: ActiveTurnProgress,
 ) -> Result<crate::types::ModelResponse, String> {
     const MAX_TRIM_ITERATIONS: usize = 10;
     const TRIM_BATCH_SIZE: usize = 4;
@@ -2628,6 +2856,7 @@ async fn trim_loop_retry(
         if trimmed == 0 {
             return Err("context window exceeded and history exhausted".to_string());
         }
+        refresh_active_turn_status(session, config, progress);
 
         warn!(
             iteration = i + 1,
@@ -2636,8 +2865,11 @@ async fn trim_loop_retry(
             "trimmed oldest messages, retrying"
         );
 
-        let retry_messages =
-            session.build_messages(prompt_prefix, None, config.get_max_history_messages());
+        let retry_messages = session.build_messages(
+            prompt_prefix,
+            memory_message,
+            config.get_max_history_messages(),
+        );
         match client
             .chat_completion(config, &retry_messages, tool_defs)
             .await
@@ -2669,11 +2901,18 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
     if session.history.is_empty() {
         return 0;
     }
-    let start = if session.compaction_count > 0 { 1 } else { 0 };
-    let end = (start + count).min(session.history.len());
-    if start < end {
-        let removed = end - start;
-        session.history.drain(start..end);
+    let mut removed = 0;
+    let mut idx = 0;
+    while idx < session.history.len() && removed < count {
+        if session.compaction_count > 0 && compact::is_summary_message(&session.history[idx]) {
+            idx += 1;
+            continue;
+        }
+        session.history.remove(idx);
+        removed += 1;
+    }
+
+    if removed > 0 {
         let (sanitized, report) = history::sanitize_chat_history(&session.history);
         if report.dropped_anything() {
             warn!(
@@ -2685,6 +2924,7 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
             session.history = sanitized;
         }
         session.history_version = session.history_version.saturating_add(1);
+        session.invalidate_token_snapshot();
         removed
     } else {
         0
@@ -2694,7 +2934,9 @@ fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelProviderConfig;
     use crate::types::ToolCallMessage;
+    use std::collections::HashMap;
 
     fn test_tool_call(id: &str) -> ToolCallMessage {
         ToolCallMessage::function_call(
@@ -2702,6 +2944,113 @@ mod tests {
             "list_directory".to_string(),
             r#"{"path":"."}"#.to_string(),
         )
+    }
+
+    fn count_messages_with_content(messages: &[ChatMessage], content: &str) -> usize {
+        messages
+            .iter()
+            .filter(|message| message.content.as_deref() == Some(content))
+            .count()
+    }
+
+    async fn chat_response_url(responses: Vec<serde_json::Value>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = Vec::new();
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if header_end.is_none() {
+                        header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                    }
+                    if let Some(pos) = header_end {
+                        let headers = String::from_utf8_lossy(&buffer[..pos]);
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= pos + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                let body = response.to_string();
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(http.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{addr}/chat/completions")
+    }
+
+    fn chat_text_response(content: &str, total_tokens: u64) -> serde_json::Value {
+        serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": total_tokens.saturating_sub(1),
+                "completion_tokens": 1,
+                "total_tokens": total_tokens
+            }
+        })
+    }
+
+    async fn provider_config_for_responses(responses: Vec<serde_json::Value>) -> AgentConfig {
+        let url = chat_response_url(responses).await;
+        let mut model_providers = HashMap::new();
+        model_providers.insert(
+            "test".to_string(),
+            ModelProviderConfig {
+                name: Some("test".to_string()),
+                base_url: Some(url),
+                env_key: None,
+                api_key: Some("test-key".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+        AgentConfig {
+            model: Some("test-model".to_string()),
+            model_provider: Some("test".to_string()),
+            model_providers,
+            model_context_window: Some(1_000),
+            model_auto_compact_token_limit: Some(100),
+            ..Default::default()
+        }
+    }
+
+    async fn single_summary_provider_config(total_tokens: u64) -> AgentConfig {
+        provider_config_for_responses(vec![chat_text_response("compacted summary", total_tokens)])
+            .await
     }
 
     #[test]
@@ -2745,13 +3094,18 @@ mod tests {
         let mut session = AgentSession::new("test");
         assert!(session.total_tokens_used.is_none());
 
+        session.add_user_message("hello");
         session.track_token_usage(1000);
         assert_eq!(session.total_tokens_used, Some(1000));
         assert_eq!(session.last_response_tokens, Some(1000));
+        assert_eq!(session.last_response_history_len, Some(1));
 
+        session.add_assistant_message("hi");
+        assert_eq!(session.last_response_history_len, Some(2));
         session.track_token_usage(2000);
         assert_eq!(session.total_tokens_used, Some(3000));
         assert_eq!(session.last_response_tokens, Some(2000));
+        assert_eq!(session.last_response_history_len, Some(2));
     }
 
     #[test]
@@ -2811,25 +3165,457 @@ mod tests {
     }
 
     #[test]
-    fn test_history_growth_invalidates_last_response_tokens() {
+    fn test_history_growth_after_response_is_incrementally_accounted() {
         let mut session = AgentSession::new("test");
         session.track_token_usage(100);
         assert_eq!(session.last_response_tokens, Some(100));
 
         session.add_user_message(&"x".repeat(1_000));
 
-        assert!(session.last_response_tokens.is_none());
-        assert!(session.effective_token_count() >= 250);
+        assert_eq!(session.last_response_tokens, Some(100));
+        assert_eq!(session.effective_token_count(), 350);
     }
 
     #[test]
-    fn test_effective_token_count_never_hides_larger_estimate() {
+    fn test_model_message_advances_incremental_token_boundary() {
         let mut session = AgentSession::new("test");
-        session.add_assistant_message(&"x".repeat(2_000));
-        session.last_response_tokens = Some(100);
+        session.add_user_message(&"old context ".repeat(100));
+        session.track_token_usage(500);
+        session.add_assistant_message("covered by usage");
+        session.add_user_message(&"new context ".repeat(100));
 
-        assert!(session.estimate_tokens() >= 500);
-        assert_eq!(session.effective_token_count(), session.estimate_tokens());
+        assert_eq!(session.last_response_history_len, Some(2));
+        assert_eq!(session.effective_token_count(), 800);
+    }
+
+    #[test]
+    fn test_recompute_token_snapshot_includes_base_instructions() {
+        let mut session = AgentSession::new("test");
+        session.add_user_message("hello");
+        let base = "base instructions ".repeat(20);
+
+        session.recompute_token_snapshot_from_history(Some(&base));
+
+        let expected =
+            session
+                .estimate_tokens()
+                .saturating_add(AgentSession::estimate_messages_tokens(&[
+                    ChatMessage::system(&base),
+                ]));
+        assert_eq!(session.last_response_tokens, Some(u64::from(expected)));
+        assert_eq!(session.effective_token_count(), expected);
+    }
+
+    #[test]
+    fn test_mid_turn_initial_context_excludes_base_instructions() {
+        let session = AgentSession::new("test");
+        let prompt_prefix = vec![
+            ChatMessage::system("base instructions"),
+            ChatMessage::developer("developer context"),
+            ChatMessage::user("<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"),
+        ];
+        let memory_message = ChatMessage::developer("memory context");
+
+        let context =
+            build_mid_turn_initial_context(&session, &prompt_prefix, Some(&memory_message));
+
+        assert_eq!(context.len(), 3);
+        assert!(context
+            .iter()
+            .all(|message| message.content.as_deref() != Some("base instructions")));
+        assert_eq!(
+            count_messages_with_content(&context, "developer context"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(
+                &context,
+                "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"
+            ),
+            1
+        );
+        assert_eq!(count_messages_with_content(&context, "memory context"), 1);
+    }
+
+    #[test]
+    fn test_build_messages_dedupes_injected_mid_turn_context() {
+        let mut session = AgentSession::new("test");
+        let env_context = "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>";
+        session
+            .history
+            .push(ChatMessage::developer("developer context"));
+        session.history.push(ChatMessage::user(env_context));
+        session
+            .history
+            .push(ChatMessage::developer("memory context"));
+        session.history.push(ChatMessage::user(&format!(
+            "{}\nsummary",
+            compact::SUMMARY_PREFIX
+        )));
+        let prompt_prefix = vec![
+            ChatMessage::system("base instructions"),
+            ChatMessage::developer("developer context"),
+            ChatMessage::user(env_context),
+        ];
+        let memory_message = ChatMessage::developer("memory context");
+
+        let messages = session.build_messages(&prompt_prefix, Some(&memory_message), 0);
+
+        assert_eq!(
+            count_messages_with_content(&messages, "base instructions"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(&messages, "developer context"),
+            1
+        );
+        assert_eq!(count_messages_with_content(&messages, env_context), 1);
+        assert_eq!(count_messages_with_content(&messages, "memory context"), 1);
+        assert!(messages[0].role == "system");
+    }
+
+    #[test]
+    fn test_build_messages_only_dedupes_context_selected_for_request() {
+        let mut session = AgentSession::new("test");
+        session
+            .history
+            .push(ChatMessage::developer("developer context"));
+        for i in 0..10 {
+            session.add_user_message(&format!("msg {i}"));
+        }
+        let prompt_prefix = vec![
+            ChatMessage::system("base instructions"),
+            ChatMessage::developer("developer context"),
+        ];
+
+        let messages = session.build_messages(&prompt_prefix, None, 5);
+
+        assert_eq!(
+            count_messages_with_content(&messages, "base instructions"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(&messages, "developer context"),
+            1
+        );
+        assert_eq!(messages.len(), 7);
+        assert_eq!(messages[2].content.as_deref(), Some("msg 5"));
+        assert_eq!(messages[6].content.as_deref(), Some("msg 9"));
+    }
+
+    #[tokio::test]
+    async fn test_queued_continuation_compacts_before_next_model_request() {
+        let mut config = single_summary_provider_config(77).await;
+        config.model_auto_compact_token_limit = Some(500);
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("queued-compaction");
+        let status_handle = std::sync::Arc::new(std::sync::Mutex::new(ActiveTurnStatus::new(
+            &session.session_key,
+        )));
+        session.active_turn_status = Some(status_handle.clone());
+
+        session.add_user_message("first");
+        session.add_assistant_message("reply");
+        session.add_user_message("second");
+        session.add_assistant_message("final before queued message");
+        session.track_token_usage(17);
+        session.add_user_message(&"queued context ".repeat(200));
+
+        assert!(compact::should_compact(&session, &config));
+        let mut recorder: Option<&mut ConversationRecorder> = None;
+        let prompt_prefix = vec![
+            ChatMessage::system("base instructions"),
+            ChatMessage::developer("developer context"),
+            ChatMessage::user("<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"),
+        ];
+        let memory_message = ChatMessage::developer("memory context");
+        compact_mid_turn_if_needed(
+            &client,
+            &config,
+            &mut session,
+            &mut recorder,
+            &prompt_prefix,
+            Some(&memory_message),
+            ActiveTurnProgress {
+                state: "model_response",
+                current_loop_iteration: 1,
+                completed_loop_iterations: 1,
+                max_loop_iterations: 8,
+                local_tool_count: 0,
+                mcp_tool_count: 0,
+            },
+        )
+        .await;
+
+        assert_eq!(session.compaction_count, 1);
+        assert_eq!(session.total_tokens_used, Some(94));
+        let expected_snapshot_tokens =
+            session
+                .estimate_tokens()
+                .saturating_add(AgentSession::estimate_messages_tokens(&[
+                    ChatMessage::system("base instructions"),
+                ]));
+        assert_eq!(
+            session.last_response_tokens,
+            Some(u64::from(expected_snapshot_tokens))
+        );
+        assert_eq!(
+            session.last_response_history_len,
+            Some(session.history.len())
+        );
+        assert!(session
+            .history
+            .iter()
+            .all(|message| message.content.as_deref() != Some("base instructions")));
+        assert_eq!(
+            count_messages_with_content(&session.history, "developer context"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(
+                &session.history,
+                "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"
+            ),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(&session.history, "memory context"),
+            1
+        );
+        assert!(session
+            .history
+            .last()
+            .is_some_and(compact::is_summary_message));
+        let messages = session.build_messages(&prompt_prefix, Some(&memory_message), 0);
+        assert_eq!(
+            count_messages_with_content(&messages, "base instructions"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(&messages, "developer context"),
+            1
+        );
+        assert_eq!(
+            count_messages_with_content(
+                &messages,
+                "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"
+            ),
+            1
+        );
+        assert_eq!(count_messages_with_content(&messages, "memory context"), 1);
+        let status = status_handle.lock().unwrap().clone();
+        assert_eq!(status.compaction_count, session.compaction_count);
+        assert_eq!(status.history_version, session.history_version);
+        assert_eq!(
+            status.estimated_context_tokens,
+            session.effective_token_count()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pre_sampling_auto_compacts_before_model_request() {
+        let mut config = provider_config_for_responses(vec![
+            chat_text_response("compacted summary", 77),
+            chat_text_response("final answer", 33),
+        ])
+        .await;
+        config.model_auto_compact_token_limit = Some(100);
+        let client = AgentClient::new();
+        let tools = ToolRegistry::new();
+        let mut session = AgentSession::new("pre-sampling-compaction");
+        session.add_user_message(&"old context ".repeat(1_000));
+
+        assert!(compact::should_compact(&session, &config));
+        let result = run_turn(
+            &client,
+            &config,
+            &mut session,
+            &tools,
+            "answer without tools",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.response, "final answer");
+        assert_eq!(session.compaction_count, 1);
+        assert!(session.history.iter().any(compact::is_summary_message));
+        assert!(session
+            .history
+            .iter()
+            .all(|message| message.content.as_deref() != Some("base instructions")));
+        assert!(session
+            .history
+            .iter()
+            .any(|message| message.content.as_deref() == Some("answer without tools")));
+        assert!(session
+            .history
+            .iter()
+            .any(|message| message.content.as_deref() == Some("final answer")));
+    }
+
+    #[tokio::test]
+    async fn test_compaction_recomputes_context_snapshot_and_drops_tool_suffix() {
+        let mut config = single_summary_provider_config(77).await;
+        config.model_auto_compact_token_limit = Some(500);
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("tool-output-compaction");
+
+        session.add_user_message("first");
+        session.add_assistant_message("reply");
+        session.add_user_message("inspect generated output");
+        session.track_token_usage(17);
+        session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
+        session.add_tool_result("call-1", &"tool-output ".repeat(2_000));
+
+        let pre_tokens = session.effective_token_count();
+        assert!(compact::should_compact(&session, &config));
+
+        let result = compact::compact_session(
+            &client,
+            &config,
+            &mut session,
+            compact::CompactionTrigger::Auto,
+            compact::CompactionReason::ContextLimit,
+            compact::CompactionPhase::MidTurn,
+            None,
+            compact::InitialContextInjection::DoNotInject,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.performed);
+        assert_eq!(result.pre_tokens, pre_tokens);
+        assert_eq!(session.compaction_count, 1);
+        assert_eq!(session.total_tokens_used, Some(94));
+        assert!(session.history.iter().all(|message| message.role == "user"));
+        assert!(session
+            .history
+            .iter()
+            .all(|message| message.content.as_deref() != Some("reply")));
+        assert!(session.history.iter().all(|message| message.role != "tool"));
+        assert!(session
+            .history
+            .last()
+            .is_some_and(compact::is_summary_message));
+        assert_eq!(
+            session.last_response_tokens,
+            Some(u64::from(session.estimate_tokens()))
+        );
+        assert_eq!(
+            session.last_response_history_len,
+            Some(session.history.len())
+        );
+        assert_eq!(result.post_tokens, session.effective_token_count());
+        assert!(result.post_tokens < config.get_compact_threshold_tokens());
+        assert!(!compact::should_compact(&session, &config));
+    }
+
+    #[tokio::test]
+    async fn test_compaction_runs_for_first_tool_turn_below_four_messages() {
+        let mut config = single_summary_provider_config(77).await;
+        config.model_auto_compact_token_limit = Some(500);
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("first-tool-turn-compaction");
+
+        session.add_user_message("inspect generated output");
+        session.track_token_usage(17);
+        session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
+        session.add_tool_result("call-1", &"tool-output ".repeat(2_000));
+
+        assert_eq!(session.history.len(), 3);
+        assert!(compact::should_compact(&session, &config));
+
+        let result = compact::compact_session(
+            &client,
+            &config,
+            &mut session,
+            compact::CompactionTrigger::Auto,
+            compact::CompactionReason::ContextLimit,
+            compact::CompactionPhase::MidTurn,
+            None,
+            compact::InitialContextInjection::DoNotInject,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.performed);
+        assert_eq!(session.compaction_count, 1);
+        assert!(session.history.iter().all(|message| message.role == "user"));
+        assert!(session.history.iter().all(|message| message.role != "tool"));
+        assert!(session
+            .history
+            .last()
+            .is_some_and(compact::is_summary_message));
+        assert!(result.post_tokens < config.get_compact_threshold_tokens());
+        assert!(!compact::should_compact(&session, &config));
+    }
+
+    #[test]
+    fn test_context_rewrite_refreshes_active_status_snapshot() {
+        let config = AgentConfig {
+            model_context_window: Some(1_000),
+            ..Default::default()
+        };
+        let mut session = AgentSession::new("status-refresh");
+        let status_handle = std::sync::Arc::new(std::sync::Mutex::new(ActiveTurnStatus::new(
+            &session.session_key,
+        )));
+        session.active_turn_status = Some(status_handle.clone());
+        session.add_user_message(&"before ".repeat(800));
+        refresh_active_turn_status(
+            &session,
+            &config,
+            ActiveTurnProgress {
+                state: "model_request",
+                current_loop_iteration: 1,
+                completed_loop_iterations: 0,
+                max_loop_iterations: 8,
+                local_tool_count: 0,
+                mcp_tool_count: 0,
+            },
+        );
+        let before = status_handle.lock().unwrap().estimated_context_tokens;
+
+        session.history = vec![ChatMessage::user("compacted summary")];
+        session.compaction_count = 1;
+        session.history_version = session.history_version.saturating_add(1);
+        refresh_active_turn_status(
+            &session,
+            &config,
+            ActiveTurnProgress {
+                state: "model_request",
+                current_loop_iteration: 1,
+                completed_loop_iterations: 0,
+                max_loop_iterations: 8,
+                local_tool_count: 0,
+                mcp_tool_count: 0,
+            },
+        );
+
+        let status = status_handle.lock().unwrap().clone();
+        assert!(before > status.estimated_context_tokens);
+        assert_eq!(status.compaction_count, 1);
+        assert_eq!(status.history_version, session.history_version);
+        assert_eq!(status.estimated_context_tokens, session.estimate_tokens());
+    }
+
+    #[test]
+    fn test_trim_oldest_messages_invalidates_response_tokens() {
+        let mut session = AgentSession::new("trim");
+        session.add_user_message("inspect");
+        session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
+        session.add_tool_result("call-1", "[file] Cargo.toml");
+        session.add_user_message("continue");
+        session.track_token_usage(10);
+
+        let trimmed = trim_oldest_messages_count(&mut session, 2);
+
+        assert_eq!(trimmed, 2);
+        assert!(session.last_response_tokens.is_none());
+        assert_eq!(session.history_version, 1);
     }
 
     #[test]
@@ -2853,20 +3639,21 @@ mod tests {
     fn test_build_messages_preserves_compaction_summary() {
         let mut session = AgentSession::new("test");
         session.compaction_count = 1; // Mark as compacted
-        session.add_user_message("SUMMARY: previous context"); // This is the compaction summary
         for i in 0..10 {
             session.add_user_message(&format!("msg {i}"));
         }
+        session.add_user_message(&format!("{}\nprevious context", compact::SUMMARY_PREFIX));
         // Limit to 5 messages
         let prefix = vec![ChatMessage::system("system")];
         let messages = session.build_messages(&prefix, None, 5);
-        // 1 system + 1 summary + 4 recent = 6
+        // 1 system + 5 history (4 recent + summary) = 6
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "system");
-        assert_eq!(
-            messages[1].content.as_deref(),
-            Some("SUMMARY: previous context")
-        );
+        assert_eq!(messages[1].content.as_deref(), Some("msg 6"));
+        assert!(messages[5]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with(compact::SUMMARY_PREFIX)));
     }
 
     #[test]
@@ -2942,14 +3729,14 @@ mod tests {
     fn test_rollback_preserves_compaction_summary() {
         let mut session = AgentSession::new("test");
         session.compaction_count = 1; // Marked as compacted
-        session.add_user_message("SUMMARY");
         session.add_user_message("msg1");
         session.add_assistant_message("reply1");
+        session.add_user_message(&format!("{}\nsummary", compact::SUMMARY_PREFIX));
 
         // Roll back more turns than exist
         let removed = session.rollback(999);
         assert_eq!(session.history.len(), 1); // Summary preserved
-        assert_eq!(session.history[0].content.as_deref(), Some("SUMMARY"));
+        assert!(compact::is_summary_message(&session.history[0]));
         assert!(removed > 0);
     }
 
@@ -3027,15 +3814,15 @@ mod tests {
     fn test_trim_oldest_preserves_summary() {
         let mut session = AgentSession::new("test");
         session.compaction_count = 1;
-        session.add_user_message("SUMMARY");
         for i in 0..5 {
             session.add_user_message(&format!("msg{i}"));
         }
+        session.add_user_message(&format!("{}\nsummary", compact::SUMMARY_PREFIX));
         let trimmed = trim_oldest_messages_count(&mut session, 2);
         assert_eq!(trimmed, 2);
         assert_eq!(session.history.len(), 4); // summary + 3 remaining
-        assert_eq!(session.history[0].content.as_deref(), Some("SUMMARY"));
-        assert_eq!(session.history[1].content.as_deref(), Some("msg2"));
+        assert_eq!(session.history[0].content.as_deref(), Some("msg2"));
+        assert!(compact::is_summary_message(&session.history[3]));
     }
 
     #[test]
