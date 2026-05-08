@@ -914,17 +914,41 @@ jobs:
     name: E2E Rules (${{ matrix.target }}, shard ${{ matrix.rule_shard }})
     needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            rule_shard: "1/1"
+            rule_shard: "1/4"
             rule_shard_index: "1"
-            rule_shard_total: "1"
-            suite_timeout: "1200"
+            rule_shard_total: "4"
+            suite_timeout: "1080"
+            fixture_timeout: "90"
+            tls_ready_timeout: "90"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rule_shard: "2/4"
+            rule_shard_index: "2"
+            rule_shard_total: "4"
+            suite_timeout: "1080"
+            fixture_timeout: "90"
+            tls_ready_timeout: "90"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rule_shard: "3/4"
+            rule_shard_index: "3"
+            rule_shard_total: "4"
+            suite_timeout: "1080"
+            fixture_timeout: "90"
+            tls_ready_timeout: "90"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rule_shard: "4/4"
+            rule_shard_index: "4"
+            rule_shard_total: "4"
+            suite_timeout: "1080"
             fixture_timeout: "90"
             tls_ready_timeout: "90"
     env:
@@ -945,15 +969,6 @@ jobs:
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -994,7 +1009,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-rules-logs-${{ matrix.target }}
+          name: e2e-rules-logs-${{ matrix.target }}-shard-${{ matrix.rule_shard_index }}-of-${{ matrix.rule_shard_total }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
