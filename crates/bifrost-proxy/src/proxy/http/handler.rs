@@ -494,6 +494,16 @@ enum BodyMode {
     StreamWithTrailers,
 }
 
+fn streaming_res_body_mode(content_length: Option<usize>, has_trailers: bool) -> BodyMode {
+    if has_trailers {
+        BodyMode::StreamWithTrailers
+    } else if let Some(len) = content_length {
+        BodyMode::StreamWithLength(len)
+    } else {
+        BodyMode::Stream
+    }
+}
+
 #[derive(Clone)]
 struct RetryableRequestBlueprint {
     method: hyper::Method,
@@ -2110,11 +2120,8 @@ pub async fn handle_http_request(
     if skip_body_processing {
         let is_streaming =
             is_streaming_response(&res_parts, res_content_length, max_body_buffer_size);
-        let res_body_mode = if resolved_rules.trailers.is_empty() {
-            BodyMode::Stream
-        } else {
-            BodyMode::StreamWithTrailers
-        };
+        let res_body_mode =
+            streaming_res_body_mode(res_content_length, !resolved_rules.trailers.is_empty());
         normalize_res_headers(&mut res_parts, res_body_mode, &method);
         if verbose_logging && !res_body_too_large {
             if is_sse {
@@ -3419,6 +3426,7 @@ fn temporary_port_badge_rules_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::empty_body;
     use hyper::Method;
     use hyper::Uri;
     use hyper::Version;
@@ -3674,6 +3682,56 @@ mod tests {
         assert!(!should_use_metrics_only_forwarding_mode(
             true, false, true, false, false
         ));
+    }
+
+    #[test]
+    fn test_streaming_res_body_mode_preserves_known_length_without_trailers() {
+        assert!(matches!(
+            streaming_res_body_mode(Some(168), false),
+            BodyMode::StreamWithLength(168)
+        ));
+        assert!(matches!(
+            streaming_res_body_mode(None, false),
+            BodyMode::Stream
+        ));
+        assert!(matches!(
+            streaming_res_body_mode(Some(168), true),
+            BodyMode::StreamWithTrailers
+        ));
+    }
+
+    #[test]
+    fn test_normalize_res_headers_preserves_stream_content_length_when_known() {
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header(hyper::header::CONTENT_LENGTH, "100")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(empty_body())
+            .unwrap()
+            .into_parts();
+
+        normalize_res_headers(&mut parts, BodyMode::StreamWithLength(168), "GET");
+
+        assert_eq!(
+            parts.headers.get(hyper::header::CONTENT_LENGTH).unwrap(),
+            "168"
+        );
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn test_normalize_res_headers_removes_content_length_for_unknown_stream() {
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_LENGTH, "100")
+            .body(empty_body())
+            .unwrap()
+            .into_parts();
+
+        normalize_res_headers(&mut parts, BodyMode::Stream, "GET");
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
     }
 
     #[test]
