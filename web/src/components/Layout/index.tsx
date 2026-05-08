@@ -20,6 +20,7 @@ import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
 import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
 import { useNotificationStore } from "../../stores/useNotificationStore";
 import StatusBar from "../StatusBar";
+import AiSkillAssistant from "../AiSkillAssistant";
 import { setNavigateCallback, type ReferenceLocation } from "../BifrostEditor";
 import { getDesktopPlatform, isDesktopShell } from "../../runtime";
 import { useThemeStore } from "../../stores/useThemeStore";
@@ -359,6 +360,7 @@ export default function AppLayout() {
           <Outlet />
         </div>
       </div>
+      <AiSkillAssistant />
       <StatusBar />
     </div>
   );

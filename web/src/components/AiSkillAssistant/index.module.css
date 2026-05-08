@@ -1,0 +1,230 @@
+.root {
+  position: fixed;
+  z-index: 950;
+  width: 56px;
+  height: 56px;
+  color: var(--ai-skill-text);
+  --ai-skill-panel-width: min(360px, calc(100vw - 32px));
+}
+
+.rootHidden {
+  display: none;
+}
+
+.launcher {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border: 1px solid var(--ai-skill-border);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--ai-skill-launcher-text);
+  background: var(--ai-skill-launcher-bg);
+  box-shadow: var(--ai-skill-shadow);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.launcher:active {
+  cursor: grabbing;
+}
+
+.launcher:hover {
+  transform: translateY(-2px);
+  border-color: var(--ai-skill-accent);
+}
+
+.launcherIcon {
+  position: relative;
+  z-index: 1;
+  font-size: 25px;
+  animation: aiSkillBounce 1.55s ease-in-out infinite;
+}
+
+.launcherPulse {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  border: 1px solid var(--ai-skill-pulse);
+  animation: aiSkillPulse 1.55s ease-out infinite;
+}
+
+.dragHint {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  color: var(--ai-skill-muted);
+  background: var(--ai-skill-panel-bg);
+  border: 1px solid var(--ai-skill-border);
+}
+
+.panel {
+  position: absolute;
+  right: 0;
+  bottom: 66px;
+  width: var(--ai-skill-panel-width);
+  padding: 14px;
+  border: 1px solid var(--ai-skill-border);
+  border-radius: 8px;
+  background: var(--ai-skill-panel-bg);
+  color: var(--ai-skill-text);
+  box-shadow: var(--ai-skill-panel-shadow);
+  backdrop-filter: blur(18px) saturate(1.08);
+}
+
+.panelLeft {
+  right: auto;
+  left: 0;
+}
+
+.panelBelow {
+  bottom: auto;
+  top: 66px;
+}
+
+.header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.badge {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--ai-skill-accent);
+  background: var(--ai-skill-accent-bg);
+}
+
+.titleGroup {
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 650;
+  color: var(--ai-skill-text);
+}
+
+.subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ai-skill-muted);
+}
+
+.commandRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--ai-skill-command-bg);
+  border: 1px solid var(--ai-skill-border);
+}
+
+.command {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ai-skill-text);
+}
+
+.copyButton,
+.link {
+  height: 30px;
+  border-radius: 6px;
+}
+
+.scenarioList {
+  list-style: none;
+  margin: 12px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.scenario {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ai-skill-text);
+}
+
+.scenarioIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--ai-skill-accent);
+  background: var(--ai-skill-accent-bg);
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.hint {
+  min-width: 0;
+  color: var(--ai-skill-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+@keyframes aiSkillBounce {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  45% {
+    transform: translateY(-5px) scale(1.04);
+  }
+}
+
+@keyframes aiSkillPulse {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.82);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.42);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launcherIcon,
+  .launcherPulse {
+    animation: none;
+  }
+}

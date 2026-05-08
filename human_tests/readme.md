@@ -46,6 +46,7 @@
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 3 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器 |
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 14 | 侧边栏导航、分割面板、状态栏、Toolbar、主题切换、版本检查、拖拽导入 |
+| [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 全局右下角 AI skill 引导入口、hover 浮窗、hover 延迟关闭、安装命令复制、仓库 SKILL.md 链接、拖拽位置、点击隐藏，以及亮色/暗色主题验证 |
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
@@ -100,7 +101,7 @@
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
-| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 13 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 fixture timeout / CI 分片回归和 Windows Rules CLI-only 构建依赖回归 |
+| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 13 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 fixture timeout / CI 分片回归、Windows x86 Rules 4 分片 20 分钟预算回归和 Windows Rules CLI-only 构建依赖回归 |
 | [rule-operators-audit-fix.md](./rule-operators-audit-fix.md) | 规则操作符审计修复 | 6 | forwardedFor/responseFor applier 实现、pac 未实现标记、test_rules.sh fake-pass 清理回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 7 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证 |
@@ -168,7 +169,7 @@
 
 ---
 
-**总计：89 个测试文件，1579 个测试用例**
+**总计：90 个测试文件，1585 个测试用例**
 
 ## 工作流程
 
