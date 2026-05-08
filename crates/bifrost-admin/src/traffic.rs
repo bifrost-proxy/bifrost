@@ -107,6 +107,8 @@ pub struct TrafficRecord {
     pub request_size: usize,
     pub response_size: usize,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub listener_port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<RequestTiming>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +213,7 @@ impl TrafficRecord {
             request_size: 0,
             response_size: 0,
             duration_ms: 0,
+            listener_port: 0,
             timing: None,
             request_headers: None,
             original_response_headers: None,
@@ -282,6 +285,8 @@ pub struct TrafficSummary {
     pub request_size: usize,
     pub response_size: usize,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub listener_port: u16,
     pub host: String,
     pub path: String,
     pub protocol: String,
@@ -356,6 +361,7 @@ impl From<&TrafficRecord> for TrafficSummary {
             request_size: record.request_size,
             response_size: record.response_size,
             duration_ms: record.duration_ms,
+            listener_port: record.listener_port,
             host: record.host.clone(),
             path: record.path.clone(),
             protocol: record.protocol.clone(),
@@ -396,6 +402,7 @@ mod tests {
         assert_eq!(record.host, "example.com");
         assert_eq!(record.path, "/api/test");
         assert_eq!(record.protocol, "https");
+        assert_eq!(record.listener_port, 0);
     }
 
     #[test]
@@ -406,8 +413,10 @@ mod tests {
             "https://example.com".to_string(),
         );
         record.sequence = 42;
+        record.listener_port = 18888;
         let summary = TrafficSummary::from(&record);
         assert_eq!(summary.sequence, 42);
+        assert_eq!(summary.listener_port, 18888);
     }
 
     #[test]

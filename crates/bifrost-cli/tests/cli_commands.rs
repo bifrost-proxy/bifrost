@@ -1038,6 +1038,7 @@ fn all_subcommands_have_about() {
         "status",
         "rule",
         "group",
+        "port",
         "ca",
         "whitelist",
         "system-proxy",
@@ -1213,6 +1214,62 @@ fn traffic_subcommands_complete_list() {
 }
 
 #[test]
+fn port_help_explains_multi_port_model() {
+    let help = run_help(&["port"]);
+    for snippet in &[
+        "Multi-port model",
+        "main proxy port keeps using the normal enabled-rule view",
+        "Each temporary port uses only the rule refs passed via `bind` or `update`",
+        "Bind one or more temporary ports with `port bind`",
+        "Replace a port's bound rule refs with `port update`",
+        "destroy",
+    ] {
+        assert!(
+            help.contains(snippet),
+            "port help should contain '{}'",
+            snippet
+        );
+    }
+}
+
+#[test]
+fn port_bind_help_lists_all_rule_sources() {
+    let help = run_help(&["port", "bind"]);
+    for snippet in &[
+        "At least one of the following must be provided",
+        "--rule",
+        "--group-rule",
+        "--rule-file",
+        "--rule-text",
+        "Use `--port 0` to let Bifrost allocate a free port automatically",
+    ] {
+        assert!(
+            help.contains(snippet),
+            "port bind help should contain '{}'",
+            snippet
+        );
+    }
+}
+
+#[test]
+fn port_update_help_lists_all_rule_sources() {
+    let help = run_help(&["port", "update"]);
+    for snippet in &[
+        "Replace the explicit rule refs for a temporary proxy port",
+        "main proxy process",
+        "The main port and other",
+        "temporary ports are not affected",
+        "--rule, --group-rule, --rule-file, --rule-text",
+    ] {
+        assert!(
+            help.contains(snippet),
+            "port update help should contain '{}'",
+            snippet
+        );
+    }
+}
+
+#[test]
 fn start_all_options_parse() {
     let help = run_help(&["start"]);
     for opt in &[
@@ -1322,6 +1379,8 @@ fn traffic_list_all_options_parse() {
         "--content-type",
         "--client-ip",
         "--client-app",
+        "--listener-port",
+        "--proxy-port",
         "--has-rule-hit",
         "--is-websocket",
         "--is-sse",
@@ -1335,6 +1394,19 @@ fn traffic_list_all_options_parse() {
             opt
         );
     }
+}
+
+#[test]
+fn traffic_search_help_lists_listener_port_filter() {
+    let help = run_help(&["traffic", "search"]);
+    assert!(
+        help.contains("--listener-port"),
+        "traffic search help should list listener port filter"
+    );
+    assert!(
+        help.contains("--proxy-port"),
+        "traffic search help should list proxy-port alias"
+    );
 }
 
 #[test]

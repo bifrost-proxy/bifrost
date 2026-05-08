@@ -477,6 +477,7 @@ impl TrafficDbStore {
                 record.request_size as i64,
                 record.response_size as i64,
                 record.duration_ms as i64,
+                record.listener_port as i64,
                 &record.client_ip,
                 &record.client_app,
                 record.client_pid.map(|p| p as i32),
@@ -701,6 +702,7 @@ impl TrafficDbStore {
                     record.request_size as i64,
                     record.response_size as i64,
                     record.duration_ms as i64,
+                    record.listener_port as i64,
                     &record.client_app,
                     record.client_pid.map(|p| p as i32),
                     &record.client_path,
@@ -806,16 +808,16 @@ impl TrafficDbStore {
         let records: Vec<TrafficSummaryCompact> = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let socket_status = build_socket_status_summary(
-                    row.get::<_, bool>(18)?,
-                    row.get::<_, i64>(19)? as u64,
+                    row.get::<_, bool>(19)?,
                     row.get::<_, i64>(20)? as u64,
                     row.get::<_, i64>(21)? as u64,
                     row.get::<_, i64>(22)? as u64,
-                    row.get::<_, i64>(23)? as usize,
+                    row.get::<_, i64>(23)? as u64,
+                    row.get::<_, i64>(24)? as usize,
                 );
-                let rc = row.get::<_, i64>(24)? as usize;
+                let rc = row.get::<_, i64>(25)? as usize;
                 let rp = row
-                    .get::<_, Option<String>>(25)?
+                    .get::<_, Option<String>>(26)?
                     .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                     .unwrap_or_default();
 
@@ -829,15 +831,16 @@ impl TrafficDbStore {
                     proto: row.get(6)?,
                     p: row.get(8)?,
                     ct: row.get(9)?,
-                    req_ct: row.get(26)?,
+                    req_ct: row.get(27)?,
                     req_sz: row.get::<_, i64>(10)? as usize,
                     res_sz: row.get::<_, i64>(11)? as usize,
                     dur: row.get::<_, i64>(12)? as u64,
-                    cip: row.get(13)?,
-                    capp: row.get(14)?,
-                    cpid: row.get::<_, Option<i32>>(15)?.map(|v| v as u32),
-                    flags: row.get::<_, i32>(16)? as u32,
-                    fc: row.get::<_, i64>(17)? as usize,
+                    lp: row.get::<_, i64>(13)? as u16,
+                    cip: row.get(14)?,
+                    capp: row.get(15)?,
+                    cpid: row.get::<_, Option<i32>>(16)?.map(|v| v as u32),
+                    flags: row.get::<_, i32>(17)? as u32,
+                    fc: row.get::<_, i64>(18)? as usize,
                     ss: socket_status,
                     st: format_timestamp_ms(row.get::<_, i64>(2)? as u64),
                     et: {
@@ -1101,7 +1104,7 @@ impl TrafficDbStore {
             .query_row(
                 "SELECT sequence, id, timestamp, host, method, status, protocol, url, path, \
                  content_type, request_content_type, request_size, response_size, duration_ms, \
-                 client_ip, client_app, client_pid, client_path, flags, frame_count, \
+                 listener_port, client_ip, client_app, client_pid, client_path, flags, frame_count, \
                  last_frame_id, socket_is_open, socket_send_count, socket_receive_count, \
                  socket_send_bytes, socket_receive_bytes, socket_frame_count, \
                  devtools_client_req_id \
@@ -1128,7 +1131,7 @@ impl TrafficDbStore {
         let sql = format!(
             "SELECT sequence, id, timestamp, host, method, status, protocol, \
              url, path, content_type, request_size, response_size, duration_ms, \
-             client_ip, client_app, client_pid, flags, frame_count, \
+             listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \
              rule_count, rule_protocols, request_content_type \
@@ -1147,16 +1150,16 @@ impl TrafficDbStore {
 
         stmt.query_map(params.as_slice(), |row| {
             let socket_status = build_socket_status_summary(
-                row.get::<_, bool>(18)?,
-                row.get::<_, i64>(19)? as u64,
+                row.get::<_, bool>(19)?,
                 row.get::<_, i64>(20)? as u64,
                 row.get::<_, i64>(21)? as u64,
                 row.get::<_, i64>(22)? as u64,
-                row.get::<_, i64>(23)? as usize,
+                row.get::<_, i64>(23)? as u64,
+                row.get::<_, i64>(24)? as usize,
             );
-            let rc = row.get::<_, i64>(24)? as usize;
+            let rc = row.get::<_, i64>(25)? as usize;
             let rp = row
-                .get::<_, Option<String>>(25)?
+                .get::<_, Option<String>>(26)?
                 .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                 .unwrap_or_default();
 
@@ -1170,15 +1173,16 @@ impl TrafficDbStore {
                 proto: row.get(6)?,
                 p: row.get(8)?,
                 ct: row.get(9)?,
-                req_ct: row.get(26)?,
+                req_ct: row.get(27)?,
                 req_sz: row.get::<_, i64>(10)? as usize,
                 res_sz: row.get::<_, i64>(11)? as usize,
                 dur: row.get::<_, i64>(12)? as u64,
-                cip: row.get(13)?,
-                capp: row.get(14)?,
-                cpid: row.get::<_, Option<i32>>(15)?.map(|v| v as u32),
-                flags: row.get::<_, i32>(16)? as u32,
-                fc: row.get::<_, i64>(17)? as usize,
+                lp: row.get::<_, i64>(13)? as u16,
+                cip: row.get(14)?,
+                capp: row.get(15)?,
+                cpid: row.get::<_, Option<i32>>(16)?.map(|v| v as u32),
+                flags: row.get::<_, i32>(17)? as u32,
+                fc: row.get::<_, i64>(18)? as usize,
                 ss: socket_status,
                 st: format_timestamp_ms(row.get::<_, i64>(2)? as u64),
                 et: {
@@ -1216,6 +1220,7 @@ impl TrafficDbStore {
             request_size: row.get::<_, i64>("request_size")? as usize,
             response_size: row.get::<_, i64>("response_size")? as usize,
             duration_ms: row.get::<_, i64>("duration_ms")? as u64,
+            listener_port: row.get::<_, i64>("listener_port")? as u16,
             client_ip: row.get("client_ip")?,
             client_app: row.get("client_app")?,
             client_pid: row.get::<_, Option<i32>>("client_pid")?.map(|v| v as u32),

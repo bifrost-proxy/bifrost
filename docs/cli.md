@@ -94,13 +94,68 @@ bifrost restart --force
 
 `restart` 会停止当前代理并启动一个新的后台 daemon，常用于 `bifrost upgrade` 后让运行中的服务切到新二进制。该命令会把新进程与当前终端管道解耦，因此也适合通过 `bifrost remote exec` 远程触发。
 
+### 临时端口规则绑定
+
+```bash
+bifrost port bind --port 18888 --rule local-dev
+bifrost port bind --port 18889 --rule local-dev --group-rule 7152084678483132446/abc
+bifrost port bind --port 0 --rule-file ./temp-rule.bifrost
+bifrost port bind --port 18890 --rule-text "debug.test status://218 resBody://(debug)"
+bifrost port list
+bifrost port show 18888
+bifrost port active 18888
+bifrost port update 18888 --rule another-local-rule
+bifrost port update 18888 --rule-file ./updated-temp-rule.bifrost
+bifrost port destroy 18888
+```
+
+`port` 命令需要主代理正在运行。临时端口与主端口共享同一个 `BIFROST_DATA_DIR` 中的规则、values、scripts、证书、流量记录等数据；端口绑定只保存“这个端口选择哪些规则集”。临时端口流量不受默认规则 enabled/disabled 状态影响：只有 `port bind` / `port update` 显式绑定的本地规则或 Group 规则会进入该临时端口的 resolver。
+
+`--rule` 引用本地规则名；`--group-rule` 使用 `<group_id>/<rule_name>` 格式；`--rule-file` 直接绑定规则文件；`--rule-text` 直接绑定规则原文。销毁临时端口只关闭该端口监听，不删除共享规则数据，也不影响主端口。
+
+临时端口绑定状态只在当前运行进程内存里生效，不写入持久配置。Bifrost 重启后临时端口会被重置，不会自动重新监听，也不会恢复之前的规则绑定；需要时请重新执行 `bifrost port bind ...`。
+
+Traffic 记录会带监听端口信息，即使请求没有命中任何规则也会记录来源端口：`traffic list` 的表格包含 `PORT` 列，JSON compact 字段为 `lp`，`traffic get` 详情字段为 `listener_port`。这用于区分同一数据目录内主端口和临时端口产生的流量。
+
+多端口推荐工作流：
+
+1. 先启动主代理端口，例如 `bifrost start -p 8811 --no-system-proxy`。
+2. 保持主端口继续承载默认启用规则。
+3. 为临时调试场景按需再开多个端口：
+   - `bifrost port bind --port 18888 --rule local-dev`
+   - `bifrost port bind --port 18889 --group-rule 7152084678483132446/abc`
+   - `bifrost port bind --port 0 --rule-file ./temp-debug.bifrost`
+   - `bifrost port bind --port 18890 --rule-text "debug.test status://218 resBody://(debug)"`
+4. 用 `bifrost port list` 查看当前所有临时端口；用 `bifrost port show <port>` 看绑定元信息；用 `bifrost port active <port>` 看这个端口当前真正生效的规则视图。
+5. 当一个临时端口需要切换到另一组规则时，使用 `bifrost port update <port> ...` 传入新的完整规则引用集合。
+6. 调试结束后执行 `bifrost port destroy <port>` 回收对应监听端口。
+
+规则来源选择建议：
+
+| 方式 | 适用场景 | 示例 |
+| --- | --- | --- |
+| `--rule` | 复用已有本地规则 | `bifrost port bind --port 18888 --rule local-dev` |
+| `--group-rule` | 复用已有 Group 规则 | `bifrost port bind --port 18889 --group-rule 7152084678483132446/abc` |
+| `--rule-file` | 一次性加载本地规则文件，不写入共享规则目录 | `bifrost port bind --port 0 --rule-file ./temp-debug.bifrost` |
+| `--rule-text` | 临时写一条短规则快速排障 | `bifrost port bind --port 18890 --rule-text "debug.test status://218 resBody://(debug)"` |
+
+帮助文档检查点：
+
+- `bifrost --help` 应能看到 `port` 顶层命令。
+- `bifrost port --help` 应解释主端口与临时端口的职责差异。
+- `bifrost port bind --help` / `bifrost port update --help` 应解释四类规则来源和 `--port 0` 自动分配行为。
+
 ### 流量查看与搜索
 
 ```bash
 bifrost traffic list
 bifrost traffic list --method GET --status-min 400 --limit 100
+bifrost traffic list --listener-port 50831 --format json
+bifrost traffic list --proxy-port 50831 --format json
 bifrost traffic get <id> --request-body --response-body
 bifrost traffic search "keyword"
+bifrost traffic search "keyword" --listener-port 50831
+bifrost traffic search "keyword" --proxy-port 50831
 bifrost search "keyword"
 bifrost search "keyword" --method POST --host api.openai.com --path /v1/responses
 bifrost search "keyword" --req-header
@@ -120,6 +175,9 @@ bifrost search "keyword" --res-body
 | `--protocol <PROTO>` | 按协议过滤，如 `HTTP`、`HTTPS`、`WS`、`WSS` |
 | `--domain <PATTERN>` | 按域名模式过滤 |
 | `--content-type <TYPE>` | 按内容类型过滤，如 `json`、`html`、`form` |
+| `--listener-port <PORT>` / `--proxy-port <PORT>` | 按流量入口代理端口过滤；`traffic list` 中的 `--port` 仍表示 Admin API 端口 |
+
+入口端口过滤用于区分主代理端口、临时代理端口、远端代理端口产生的流量。例如临时端口 `50831` 的请求可以用 `traffic list --listener-port 50831` 或 `traffic search "keyword" --proxy-port 50831` 查询；顶层 `bifrost search` 与 `bifrost traffic search` 的过滤语义一致。
 
 搜索范围：
 
@@ -404,8 +462,9 @@ bifrost remote file write notes.txt --content "hello" --cwd /tmp
 bifrost remote file patch --patch-file ./change.diff --cwd /path/to/repo
 
 bifrost remote traffic list --limit 20
+bifrost remote traffic list --listener-port 50831
 bifrost remote traffic get <id> --request-body --response-body
-bifrost remote traffic search "keyword" --req-body
+bifrost remote traffic search "keyword" --listener-port 50831 --req-body
 
 bifrost remote keep-awake status
 bifrost remote keep-awake on

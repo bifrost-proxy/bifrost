@@ -18,6 +18,7 @@ const proxyUrl =
   process.env.PROXY_URL ||
   `http://127.0.0.1:${process.env.BIFROST_UI_TEST_PORT ?? process.env.BACKEND_PORT ?? 9910}`;
 const proxyHost = new URL(proxyUrl);
+const proxyPort = proxyHost.port || "80";
 const apiBase =
   process.env.ADMIN_API_BASE || `${proxyUrl.replace(/\/$/, "")}/_bifrost/api`;
 const currentFilePath = fileURLToPath(import.meta.url);
@@ -237,7 +238,7 @@ const startIsolatedBackend = async () => {
 
   const child = spawn(
     binPath,
-    ["start", "--host", "127.0.0.1", "-p", String(port), "--unsafe-ssl", "--access-mode", "allow_all"],
+    ["start", "--host", "127.0.0.1", "-p", String(port), "--unsafe-ssl", "--no-system-proxy", "--access-mode", "allow_all"],
     {
       cwd: repoRoot,
       env: {
@@ -283,12 +284,12 @@ const getTrafficRecordsByApi = async (baseApiUrl: string) => {
   const response = await fetch(`${baseApiUrl}/traffic?limit=100`);
   expect(response.ok).toBeTruthy();
   return (await response.json()) as {
-    records?: Array<{ id: string; p?: string; capp?: string | null }>;
+    records?: Array<{ id: string; p?: string; lp?: number; capp?: string | null }>;
   };
 };
 
 const waitForTrafficRecordByApi = async (baseApiUrl: string, targetPath: string) => {
-  let found: { id: string; p?: string; capp?: string | null } | undefined;
+  let found: { id: string; p?: string; lp?: number; capp?: string | null } | undefined;
   await expect
     .poll(
       async () => {
@@ -299,7 +300,7 @@ const waitForTrafficRecordByApi = async (baseApiUrl: string, targetPath: string)
       { timeout: 15000 },
     )
     .toMatch(/^REQ-/);
-  return found as { id: string; p?: string; capp?: string | null };
+  return found as { id: string; p?: string; lp?: number; capp?: string | null };
 };
 
 const updateTrafficClientApp = async (dataDir: string, recordId: string, clientApp: string) => {
@@ -318,6 +319,30 @@ finally:
 `;
 
   await execFileAsync("python3", ["-c", script, dbPath, recordId, clientApp], {
+    timeout: 10000,
+  });
+};
+
+const updateTrafficListenerPort = async (
+  dataDir: string,
+  recordId: string,
+  listenerPort: number,
+) => {
+  const dbPath = path.join(dataDir, "traffic", "traffic.db");
+  const script = `
+import sqlite3
+import sys
+
+db_path, record_id, listener_port = sys.argv[1:4]
+conn = sqlite3.connect(db_path)
+try:
+    conn.execute("UPDATE traffic_records SET listener_port = ? WHERE id = ?", (int(listener_port), record_id))
+    conn.commit()
+finally:
+    conn.close()
+`;
+
+  await execFileAsync("python3", ["-c", script, dbPath, recordId, String(listenerPort)], {
     timeout: 10000,
   });
 };
@@ -387,7 +412,7 @@ const queryTraffic = async (baseApiUrl: string, params: Record<string, string>) 
   const response = await fetch(`${baseApiUrl}/traffic?${searchParams.toString()}`);
   expect(response.ok).toBeTruthy();
   return (await response.json()) as {
-    records: Array<{ p?: string; capp?: string | null }>;
+    records: Array<{ p?: string; lp?: number; capp?: string | null }>;
     total: number;
   };
 };
@@ -444,6 +469,7 @@ test("加载流量列表并显示详情", async ({ page, request }) => {
 
   const row = page.getByTestId("traffic-row").filter({ hasText: path }).first();
   await expect(row).toBeVisible();
+  await expect(row).toContainText(proxyPort);
   const firstRow = row;
   await expect(firstRow).toHaveAttribute(
     "data-response-size",
@@ -457,6 +483,8 @@ test("加载流量列表并显示详情", async ({ page, request }) => {
     "data-url",
     expect.stringContaining("/hello"),
   );
+  await expect(page.getByTestId("traffic-detail")).toContainText("Proxy Port");
+  await expect(page.getByTestId("traffic-detail")).toContainText(proxyPort);
 
   await server.close();
 });
@@ -704,6 +732,68 @@ test("Client App 空值与模糊匹配会同步作用于列表查询和 Fuzzy Se
     ]);
     expect(fuzzySearch.results.map((item) => item.record.p)).toContain(fuzzyClientPath);
     expect(fuzzySearch.results.map((item) => item.record.p)).not.toContain(emptyClientPath);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("主筛选器支持按代理端口过滤 Traffic", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const mainPortPath = `/port-filter-main-${token}`;
+  const otherPortPath = `/port-filter-other-${token}`;
+  const otherPort = backend.port + 1;
+
+  try {
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${mainPortPath}`, backend.proxyUrl);
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${otherPortPath}`, backend.proxyUrl);
+
+    const mainRecord = await waitForTrafficRecordByApi(backend.baseApi, mainPortPath);
+    const otherRecord = await waitForTrafficRecordByApi(backend.baseApi, otherPortPath);
+    await updateTrafficListenerPort(backend.dataDir, otherRecord.id, otherPort);
+
+    const portTraffic = await queryTraffic(backend.baseApi, {
+      listener_port: String(backend.port),
+      limit: "50",
+    });
+    expect(portTraffic.records.map((item) => item.p)).toContain(mainPortPath);
+    expect(portTraffic.records.map((item) => item.p)).not.toContain(otherPortPath);
+    expect(mainRecord.lp).toBe(backend.port);
+
+    const portSearch = await searchTraffic(backend.baseApi, [
+      { field: "listener_port", operator: "equals", value: String(backend.port) },
+    ]);
+    expect(portSearch.results.map((item) => item.record.p)).toContain(mainPortPath);
+    expect(portSearch.results.map((item) => item.record.p)).not.toContain(otherPortPath);
+
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: mainPortPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPortPath }).first(),
+    ).toBeVisible();
+
+    if ((await page.getByPlaceholder("Enter value...").count()) === 0) {
+      await page.getByRole("button", { name: "Add Filter" }).click();
+    }
+    await page.getByRole("combobox").first().click();
+    await page
+      .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-content")
+      .filter({ hasText: "Port" })
+      .click();
+    await expect(page.getByText("Equals").first()).toBeVisible();
+    await page.getByPlaceholder("Enter proxy port...").first().fill(String(backend.port));
+
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: mainPortPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPortPath }),
+    ).toHaveCount(0);
   } finally {
     await backend.close();
     await server.close();

@@ -81,6 +81,21 @@ use crate::utils::tee::{
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::url::apply_url_rules;
 
+fn apply_listener_context(
+    record: &mut TrafficRecord,
+    listener_port: u16,
+    client_ip: &str,
+    client_app: &Option<String>,
+    client_pid: Option<u32>,
+    client_path: &Option<String>,
+) {
+    record.listener_port = listener_port;
+    record.client_ip = client_ip.to_string();
+    record.client_app = client_app.clone();
+    record.client_pid = client_pid;
+    record.client_path = client_path.clone();
+}
+
 fn maybe_backfill_tunnel_client_process(
     state: &Arc<AdminState>,
     req_id: &str,
@@ -784,6 +799,7 @@ pub async fn handle_connect(
     let client_app = ctx.client_app.clone();
     let client_pid = ctx.client_pid;
     let client_path = ctx.client_path.clone();
+    let listener_port = ctx.port;
 
     // cancel_rx 用于在配置变更时优雅关闭 tunnel。
     // 注意：若 admin_state 为空，必须保留 cancel_tx 的生命周期，否则 Sender 被提前 drop 会导致
@@ -820,10 +836,14 @@ pub async fn handle_connect(
         record.protocol = "tunnel".to_string();
         record.host = host.clone();
         record.is_tunnel = true;
-        record.client_ip = client_ip.clone();
-        record.client_app = client_app.clone();
-        record.client_pid = client_pid;
-        record.client_path = client_path.clone();
+        apply_listener_context(
+            &mut record,
+            listener_port,
+            &client_ip,
+            &client_app,
+            client_pid,
+            &client_path,
+        );
         record.has_rule_hit = has_rules;
         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
         state.record_traffic(record);
@@ -935,6 +955,7 @@ async fn handle_tls_interception(
     let client_app = ctx.client_app.clone();
     let client_pid = ctx.client_pid;
     let client_path = ctx.client_path.clone();
+    let listener_port = ctx.port;
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let mut cancel_tx_keepalive = Some(cancel_tx);
@@ -992,6 +1013,7 @@ async fn handle_tls_interception(
             client_app,
             client_pid,
             client_path,
+            listener_port,
             push_manager,
         )
         .await;
@@ -1046,6 +1068,7 @@ async fn tls_intercept_tunnel(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> Result<()> {
     let acceptor = TlsAcceptor::from(server_config);
@@ -1119,6 +1142,7 @@ async fn tls_intercept_tunnel(
                 client_app,
                 client_pid,
                 client_path,
+                listener_port,
                 push_manager,
                 inject_bifrost_badge,
             )
@@ -1173,6 +1197,7 @@ async fn tls_intercept_tunnel_with_cancel(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> Result<bool> {
     let acceptor = TlsAcceptor::from(server_config);
@@ -1277,6 +1302,7 @@ async fn tls_intercept_tunnel_with_cancel(
                 client_app,
                 client_pid,
                 client_path,
+                listener_port,
                 push_manager,
                 inject_bifrost_badge,
             )
@@ -1693,6 +1719,7 @@ async fn handle_intercepted_request_with_protocol(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    listener_port: u16,
     push_manager: Option<SharedPushManager>,
     inject_bifrost_badge_default: bool,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
@@ -1739,6 +1766,7 @@ async fn handle_intercepted_request_with_protocol(
             client_app,
             client_pid,
             client_path,
+            listener_port,
             push_manager,
         )
         .await;
@@ -1903,7 +1931,8 @@ async fn handle_intercepted_request_with_protocol(
         )
         .with_headers(incoming_headers.clone())
         .with_cookies(incoming_cookies.clone())
-        .with_query_params(query_params.clone());
+        .with_query_params(query_params.clone())
+        .with_port(listener_port);
 
     let upstream_uri: hyper::Uri = match target_uri.parse() {
         Ok(uri) => apply_url_rules(&uri, &resolved_rules, verbose_logging, &rule_ctx),
@@ -1943,6 +1972,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                listener_port,
                 &devtools_client_req_id,
             );
         }
@@ -1971,6 +2001,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                listener_port,
                 &devtools_client_req_id,
             );
         }
@@ -2011,6 +2042,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                listener_port,
                 &devtools_client_req_id,
             );
         }
@@ -2042,6 +2074,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                listener_port,
                 &devtools_client_req_id,
             );
         }
@@ -2407,6 +2440,14 @@ async fn handle_intercepted_request_with_protocol(
                 };
                 record.duration_ms = total_ms;
                 record.host = original_host.to_string();
+                apply_listener_context(
+                    &mut record,
+                    listener_port,
+                    &client_ip,
+                    &client_app,
+                    client_pid,
+                    &client_path,
+                );
                 record.timing = Some(RequestTiming {
                     dns_ms,
                     connect_ms: None,
@@ -2959,6 +3000,7 @@ async fn handle_intercepted_request_with_protocol(
         .with_headers(incoming_headers.clone())
         .with_cookies(incoming_cookies.clone())
         .with_query_params(query_params.clone())
+        .with_port(listener_port)
         .with_client_process(client_app.clone(), client_pid, client_path.clone());
     let request_origin = incoming_headers
         .iter()
@@ -3230,10 +3272,14 @@ async fn handle_intercepted_request_with_protocol(
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone());
-                record.client_ip = client_ip.clone();
-                record.client_app = client_app.clone();
-                record.client_pid = client_pid;
-                record.client_path = client_path.clone();
+                apply_listener_context(
+                    &mut record,
+                    listener_port,
+                    &client_ip,
+                    &client_app,
+                    client_pid,
+                    &client_path,
+                );
 
                 if is_websocket {
                     record.protocol = "wss".to_string();
@@ -3431,10 +3477,14 @@ async fn handle_intercepted_request_with_protocol(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
-        record.client_ip = client_ip.clone();
-        record.client_app = client_app.clone();
-        record.client_pid = client_pid;
-        record.client_path = client_path.clone();
+        apply_listener_context(
+            &mut record,
+            listener_port,
+            &client_ip,
+            &client_app,
+            client_pid,
+            &client_path,
+        );
 
         if is_websocket {
             record.protocol = "wss".to_string();
@@ -3597,7 +3647,8 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     let final_body = if inject_bifrost_badge {
-        let badge_rules_json = super::handler::build_badge_rules_json(admin_state.as_deref());
+        let badge_rules_json =
+            super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
         let final_res_content_type = res_parts
             .headers
             .get(hyper::header::CONTENT_TYPE)
@@ -3719,6 +3770,7 @@ async fn handle_intercepted_websocket(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
     if original_host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
@@ -4088,10 +4140,14 @@ async fn handle_intercepted_websocket(
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
         record.host = original_host.to_string();
-        record.client_ip = client_ip.clone();
-        record.client_app = client_app.clone();
-        record.client_pid = client_pid;
-        record.client_path = client_path.clone();
+        apply_listener_context(
+            &mut record,
+            listener_port,
+            &client_ip,
+            &client_app,
+            client_pid,
+            &client_path,
+        );
         record.set_websocket();
 
         record.has_rule_hit = has_rules;
@@ -4124,7 +4180,8 @@ async fn handle_intercepted_websocket(
             String::new(),
             client_ip.clone(),
         )
-        .with_client_process(client_app.clone(), client_pid, client_path.clone());
+        .with_client_process(client_app.clone(), client_pid, client_path.clone())
+        .with_port(listener_port);
 
     let ws_compression_cfg = compression_cfg.clone();
     let ws_meta_spawn = ws_meta.clone();
@@ -4551,6 +4608,7 @@ fn record_mock_traffic(
     client_app: Option<&str>,
     client_pid: Option<u32>,
     client_path: Option<&str>,
+    listener_port: u16,
     devtools_client_req_id: &Option<String>,
 ) {
     let total_ms = start_time.elapsed().as_millis() as u64;
@@ -4590,6 +4648,7 @@ fn record_mock_traffic(
     record.client_app = client_app.map(|s| s.to_string());
     record.client_pid = client_pid;
     record.client_path = client_path.map(|s| s.to_string());
+    record.listener_port = listener_port;
     record.response_size = calculate_response_size(
         mock_status,
         record.original_response_headers.as_deref().unwrap_or(&[]),

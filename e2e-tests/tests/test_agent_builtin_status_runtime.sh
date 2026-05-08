@@ -113,12 +113,52 @@ class Handler(BaseHTTPRequestHandler):
             for message in messages
             if isinstance(message, dict)
         )
+        is_compaction_request = any(
+            isinstance(message, dict)
+            and "CONTEXT CHECKPOINT COMPACTION" in message_text(message)
+            for message in messages
+        )
+        has_compacted_summary = any(
+            isinstance(message, dict)
+            and (
+                "Another language model started to solve this problem" in message_text(message)
+                or "Another language model started to work on this task" in message_text(message)
+            )
+            for message in messages
+        )
         has_tool_result = any(
             isinstance(message, dict) and message.get("role") == "tool"
             for message in messages
         )
 
-        if "触发大输出工具" in joined and not has_tool_result:
+        if is_compaction_request:
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "large tool output summarized for continuation",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 70, "completion_tokens": 7, "total_tokens": 77},
+            }
+        elif "触发大输出工具" in joined and has_compacted_summary:
+            time.sleep(3.0)
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "large tool turn finished after compacted context",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
+        elif "触发大输出工具" in joined and not has_tool_result:
             response = {
                 "choices": [
                     {
@@ -212,6 +252,7 @@ curl -fsS --noproxy '*' -X PATCH "$BASE" \
     \"api_key\": \"test-key\",
     \"request_timeout_secs\": 20,
     \"max_turn_iterations\": 8,
+    \"model_auto_compact_token_limit\": 2000,
     \"memories\": {
       \"use_memories\": false,
       \"generate_memories\": false
@@ -313,7 +354,7 @@ from pathlib import Path
 response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 active = response.get("active_status")
 if isinstance(active, dict) and active.get("current_loop_iteration") == 2:
-    if active.get("estimated_context_tokens", 0) > 10000:
+    if active.get("compaction_count") == 1 and active.get("estimated_context_tokens", 0) < 10000:
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -337,13 +378,16 @@ assert isinstance(active, dict), response
 assert active.get("session_key") == "agent-status-runtime-tool-growth", active
 assert active.get("current_loop_iteration") == 2, active
 estimated = active.get("estimated_context_tokens", 0)
-assert estimated > 10000, active
-assert active.get("last_response_tokens") is None, active
+assert active.get("compaction_count") == 1, active
+assert estimated < 10000, active
+assert active.get("message_count", 0) < 10, active
+assert active.get("last_response_tokens", 0) == estimated, active
 assert f"Context 用量: ~{estimated} / 250000" in text, text
-assert "实时 token: 累计" in text and "最近响应 N/A" in text, text
+assert "实时 token: 累计" in text and f"最近响应 {estimated}" in text, text
 match = re.search(r"Context 用量: ~(\d+) / 250000", text)
 assert match, text
 assert int(match.group(1)) == estimated, (text, active)
+assert "压缩次数: 1" in text, text
 PY
 
 wait "$CHAT_PID"
@@ -355,7 +399,7 @@ from pathlib import Path
 
 response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert response.get("success") is True, response
-assert "large tool turn finished" in response.get("response", ""), response
+assert "large tool turn finished after compacted context" in response.get("response", ""), response
 tool_calls = response.get("tool_calls")
 assert isinstance(tool_calls, list), response
 assert any(call.get("tool_name") == "exec_command" for call in tool_calls), tool_calls

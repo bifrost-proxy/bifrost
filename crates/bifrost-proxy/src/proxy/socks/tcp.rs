@@ -1427,6 +1427,7 @@ impl SocksHandler {
             record.client_app = client_app;
             record.client_pid = client_pid;
             record.client_path = client_path;
+            record.listener_port = self.local_addr.port();
             record.has_rule_hit = !resolved_rules.rules.is_empty()
                 || resolved_rules.host.is_some()
                 || resolved_rules.proxy.is_some();
@@ -1850,6 +1851,7 @@ impl SocksHandler {
             record.client_app = client_app;
             record.client_pid = client_pid;
             record.client_path = client_path;
+            record.listener_port = self.local_addr.port();
 
             let body_start = request_str
                 .find("\r\n\r\n")
@@ -2119,6 +2121,7 @@ async fn handle_socks5_intercepted_request(
     let ctx = RequestContext::new()
         .with_client_ip(peer_addr.ip().to_string())
         .with_client_process(client_app, client_pid, client_path)
+        .with_port(local_addr.port())
         .with_request_info(
             full_url.clone(),
             method.clone(),

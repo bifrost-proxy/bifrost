@@ -235,6 +235,81 @@ bifrost group rule disable <group_id> <name>
 - `group rule show` 别名：`get`
 - `group list` 支持 `-k/--keyword` 模糊搜索、`-l/--limit` 限制最大结果数（默认 50）和 `-o/--offset` 分页偏移
 
+### 5A. 多端口临时规则绑定
+
+当用户想“保留主代理不动，再开几个调试端口分别命中不同规则”时，优先使用 `bifrost port` 命令族，而不是反复启停主代理或切换默认 enabled 规则。
+
+```bash
+# 主端口继续跑默认规则
+bifrost start -p 8811 --no-system-proxy
+
+# 临时端口 18888 只绑定一个本地规则
+bifrost port bind --port 18888 --rule local-dev
+
+# 临时端口 18889 绑定 Group 规则
+bifrost port bind --port 18889 --group-rule 7152084678483132446/abc
+
+# 自动分配端口并直接绑定规则文件
+bifrost port bind --port 0 --rule-file ./temp-debug.bifrost
+
+# 直接用一条 inline 规则开一个独立调试端口
+bifrost port bind --port 18890 --rule-text "debug.test status://218 resBody://(debug)"
+
+# 查看所有临时端口与单个端口详情
+bifrost port list
+bifrost port show 18888
+bifrost port active 18888
+
+# 把 18888 切换成另一整组规则
+bifrost port update 18888 --rule login-mock --rule trace-api
+
+# 调试结束后回收临时端口
+bifrost port destroy 18888
+
+# 用入口代理端口筛选流量，区分主端口和临时端口来源
+bifrost traffic list --listener-port 18888
+bifrost traffic search "debug" --proxy-port 18888
+```
+
+核心原则：
+
+- `port` 命令要求主代理已经在运行。
+- 主端口继续使用默认启用规则视图；临时端口只使用 `port bind` / `port update` 里显式绑定的规则引用。
+- 所有端口共享同一个 `BIFROST_DATA_DIR`，因此 values、scripts、证书、流量数据库都是共用的。
+- 临时端口绑定状态只在当前运行进程的内存里生效；Bifrost 重启后临时端口会被重置，不会自动恢复监听或绑定状态。
+- 临时端口流量不受默认规则 enabled/disabled 状态影响；即使默认规则启用，也不会混入临时端口的规则视图。
+- 销毁临时端口不会删除共享规则数据，也不会影响主端口监听。
+- Traffic 会为来自主端口和临时端口的所有请求记录入口端口，即使没有命中任何规则也会记录。
+
+四种规则来源的选择建议：
+
+- `--rule`：复用已存在的本地规则名，适合长期维护的规则。
+- `--group-rule`：复用已存在的 Group 规则，适合团队共享规则。
+- `--rule-file`：直接绑定一个规则文件，适合本地临时排障，不污染共享 `rules/` 目录。
+- `--rule-text`：直接写一条规则原文，适合快速构造一次性调试端口。
+
+推荐工作流：
+
+1. 先用主端口承载常规默认规则。
+2. 按场景开多个临时端口，例如：
+   - 18888 专门命中本地 mock 规则
+   - 18889 专门命中某个 Group 规则
+   - 自动分配端口用于一次性文件规则调试
+3. 用 `port active <port>` 验证每个端口当前真正生效的规则集合。
+4. 结合 `traffic list` / `traffic search` / `traffic get` 查看或筛选入口端口：
+   - 表格列：`PORT`
+   - compact JSON 字段：`lp`
+   - 详情 JSON 字段：`listener_port`
+   - 过滤参数：`--listener-port <PORT>`，别名 `--proxy-port <PORT>`
+5. 调试结束后逐个 `port destroy` 回收。
+
+当用户问“如何灵活绑定不同端口和规则”时，应该明确区分：
+
+- 主端口：默认工作流、长期启用规则。
+- 临时端口：隔离实验、单任务排障、局部 mock、对比不同规则集合。
+
+如果用户只是想“切一下默认规则”，优先继续用 `rule enable/disable/reorder`；如果用户明确需要“同一时间并存多套规则入口”，则用 `port bind`。
+
 ### 6. 脚本管理
 
 > 支持 QuickJS 引擎执行 JS 脚本
@@ -386,8 +461,10 @@ bifrost config export --format json
 ```bash
 bifrost traffic list --limit 20
 bifrost traffic list --host example.com --method POST --format json-pretty
+bifrost traffic list --listener-port 18888 --format json
 bifrost traffic get 57544 --request-body --response-body
 bifrost traffic search openai --domain api.openai.com --method POST
+bifrost traffic search openai --proxy-port 18888
 ```
 
 > 当用户提及一个少于 6 位的数字 ID 并希望查看详情时，直接执行 `bifrost traffic get <ID>`。
@@ -409,6 +486,7 @@ bifrost traffic search openai --domain api.openai.com --method POST
     --content-type <TYPE>     Content-Type 过滤
     --client-ip <IP>          客户端 IP 过滤
     --client-app <APP>        客户端应用过滤
+    --listener-port <PORT>    入口代理监听端口过滤（别名：--proxy-port）
     --has-rule-hit <BOOL>     是否命中规则
     --is-websocket <BOOL>     仅 WebSocket
     --is-sse <BOOL>           仅 SSE
@@ -443,6 +521,7 @@ bifrost search --interactive                    # 交互式 TUI 模式
     --method <METHOD>         HTTP 方法过滤
     --host <TEXT>             Host 包含过滤
     --path <TEXT>             Path 包含过滤
+    --listener-port <PORT>    入口代理监听端口过滤（别名：--proxy-port）
     --protocol <PROTO>        协议过滤：HTTP|HTTPS|WS|WSS
     --content-type <TYPE>     Content-Type 过滤（json/xml/html/form 等）
     --domain <PATTERN>        域名 pattern 过滤
@@ -553,8 +632,8 @@ bifrost remote conn up --ssh-key <path>         # 使用导出的 SSH key 建立
 bifrost remote conn up <code>                   # 使用一次性配对码建立授权
 bifrost remote conn status                      # 查看远端状态
 bifrost remote conn down [--all|--grant-id <g>] # 回收 grant
-bifrost remote traffic search <query>           # 远程搜索流量
-bifrost remote traffic list   [OPTIONS]         # 远程流量列表
+bifrost remote traffic search <query> --listener-port 18888  # 按远端入口代理端口搜索流量
+bifrost remote traffic list --proxy-port 18888               # 按远端入口代理端口列流量
 bifrost remote traffic get    <id> [OPTIONS]    # 远程获取流量详情
 bifrost remote exec --shell-text "pwd"          # 受 Shell Access policy 限制的 shell.exec
 bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo test

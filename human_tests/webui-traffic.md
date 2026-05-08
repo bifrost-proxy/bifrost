@@ -400,6 +400,32 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 
 ---
 
+### TC-WTR-23B：主筛选器按代理端口筛选
+
+**操作步骤**：
+1. 使用隔离数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 通过 `$MAIN_PORT` 代理发起请求 `/port-filter-main`，再准备另一条 `listener_port` 不同的 traffic 记录 `/port-filter-other`。
+3. 打开 Traffic 页面：
+   ```text
+   http://127.0.0.1:$MAIN_PORT/_bifrost/traffic
+   ```
+4. 点击主筛选器 `Add Filter`，在字段下拉中选择 `Port`。
+5. 确认操作符自动变为 `Equals`，输入 `$MAIN_PORT`。
+6. 使用 API 验证服务端筛选：
+   ```bash
+   curl "http://127.0.0.1:$MAIN_PORT/_bifrost/api/traffic?listener_port=$MAIN_PORT&limit=50"
+   ```
+7. 切换到 Fuzzy Search，使用 condition `listener_port equals $MAIN_PORT` 验证搜索筛选。
+
+**预期结果**：
+- 主筛选器字段下拉包含 `Port`。
+- 选择 `Port` 后，输入框提示为代理端口，操作符默认为 `Equals`。
+- 表格只展示 `listener_port=$MAIN_PORT` 的记录，隐藏其他端口记录。
+- API 返回 records 中每条记录的 `lp` 都等于 `$MAIN_PORT`。
+- Fuzzy Search 使用相同 port condition 时只返回对应端口记录。
+
+---
+
 ### TC-WTR-24：右键上下文菜单 - Copy URL
 
 **操作步骤**：
@@ -837,3 +863,13 @@ wait
 rm -rf .bifrost-test
 rm -f /tmp/bifrost-mock-test.json
 ```
+
+## 执行记录
+
+2026-05-08 Traffic 主筛选器端口过滤执行记录：
+
+- 已执行命令：`source ~/.zshrc; pnpm --dir web test:ui traffic.spec.ts -g "主筛选器支持按代理端口过滤 Traffic"`
+- 使用隔离数据目录：Playwright UI 全局 setup 自动分配独立 `BIFROST_DATA_DIR` 与独立后端端口，启动 Bifrost 时包含 `--no-system-proxy`。
+- 端口要求：UI 测试动态分配后端端口，未使用 `9900`。
+- 实际结果：Playwright 本次执行 `1 passed`，Traffic 主筛选器可选择 `Port`，输入临时端口后列表只保留对应入口端口记录。
+- 结论：`TC-WTR-23B` 已按文档完成执行并通过，本次无环境阻塞。

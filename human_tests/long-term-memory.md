@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 Bifrost Agent 长期记忆已改为 Codex-style 文件布局和按需加载：记忆存放在用户数据目录 `agent/memory/`，模型请求只注入读取说明和 `memory_summary.md` 摘要，不再使用 SQLite 数据库存储。
+验证 Bifrost Agent 长期记忆已改为文件布局和按需加载：记忆存放在用户数据目录 `agent/memory/`，模型请求只注入读取说明和 `memory_summary.md` 摘要，不再使用 SQLite 数据库存储。
 
 ## 前置条件
 
@@ -18,7 +18,7 @@ cargo build --bin bifrost
 
 ## 测试用例列表
 
-### TC-LTM-01 Codex-style 文件目录初始化
+### TC-LTM-01 文件目录初始化
 
 操作步骤：
 1. 运行 `cargo test -p bifrost-agent memory_runtime::tests::memory_read_instructions_use_agent_memory_root -- --nocapture`。
@@ -75,12 +75,12 @@ cargo build --bin bifrost
 - mock Chat Completions 收到的 messages 包含 `## Memory` read-path instructions。
 - messages 包含 `memory_summary.md (already provided below; do NOT open again)`。
 - messages 包含 `MEMORY.md (searchable registry; primary file to query)`。
-- messages 包含预置 summary：`Bifrost should use Codex-style on-demand memory loading.`。
+- messages 包含预置 summary：`Bifrost should use on-demand memory loading.`。
 - 测试临时 `agent/memory/` 下没有 `memories.sqlite`。
 
 实际结果：
 - 通过。2026-05-05 执行 `CARGO_TARGET_DIR=target/ci-fix BIFROST_E2E_RUNNER_JOBS=1 bash e2e-tests/tests/test_long_term_memory_remember_recall.sh`：
-  - `im_gateway_agent_long_term_memory_remember_recall` passed，mock 请求包含 Codex-style read-path instructions 与预置 summary。
+  - `im_gateway_agent_long_term_memory_remember_recall` passed，mock 请求包含 read-path instructions 与预置 summary。
   - `im_gateway_agent_auto_memory_new_session_consumes` passed，自动生成记忆后新 session 消费 `MEM-AUTO-42`，且未创建 `memories.sqlite`。
 
 ### TC-LTM-06 Admin API 文件追加与列表
@@ -168,7 +168,7 @@ cargo build --bin bifrost
 - `rollout_summaries/` 至少新增一个本轮自动抽取摘要文件。
 - `$BIFROST_DATA_DIR/agent/memory/memories.sqlite` 不存在。
 - 第二个和第三个全新 session 的响应都包含 `独孤怼怼`。
-- 第二个和第三个 session 发给模型的请求中都自动注入 Codex-style memory read-path instructions，并包含 `memory_summary.md` 摘要里的 `独孤怼怼`。
+- 第二个和第三个 session 发给模型的请求中都自动注入 memory read-path instructions，并包含 `memory_summary.md` 摘要里的 `独孤怼怼`。
 
 实际结果：
 - 通过。2026-05-03 使用临时目录 `/tmp/bifrost-memory-phase2.kqYSys`、mock 模型 `127.0.0.1:18894`、真实 Bifrost `127.0.0.1:18893` 手工执行：
@@ -198,7 +198,7 @@ cargo build --bin bifrost
 - Phase 1 请求按当前 `EXTRACT_SYSTEM_PROMPT` 被识别，mock 返回 `rollout_summary`、`rollout_slug`、`raw_memory` JSON，内容包含 `MEM-AUTO-42`。
 - Phase 2 请求按当前 `CONSOLIDATION_SYSTEM_PROMPT` 被识别，`phase-2 memory consolidation completed` 出现在日志中。
 - `memory_summary.md`、`MEMORY.md`、`raw_memories.md` 和 `rollout_summaries/` 均落地并包含 `MEM-AUTO-42`。
-- 新 session 请求注入 Codex-style memory read-path instructions，并返回包含 `MEM-AUTO-42` 的答案。
+- 新 session 请求注入 memory read-path instructions，并返回包含 `MEM-AUTO-42` 的答案。
 
 实际结果：
 - 通过。2026-05-05 执行该命令 passed，日志显示：

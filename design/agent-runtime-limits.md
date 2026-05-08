@@ -5,7 +5,7 @@
 本次修复聚焦 Bifrost Agent runtime 在真实 IM Gateway / Admin API 对话中出现的提前退出问题，目标包括：
 
 1. 将默认 `max_turn_iterations` 从偏小的开发期值提升到更接近真实代理执行需求的上限，避免长链路工具调用在 30 次左右被硬中断。
-2. 将默认超时策略调整为更接近 Codex 的分层方案：保留较高的迭代上限以避免 30 次左右被硬中断，但模型请求、shell 工具、后台终端、MCP 启动与 MCP tool call 的默认超时保持在 10 分钟量级，避免默认值过长掩盖卡死与异常等待。
+2. 将默认超时策略调整为分层方案：保留较高的迭代上限以避免 30 次左右被硬中断，但模型请求、shell 工具、后台终端、MCP 启动与 MCP tool call 的默认超时保持在 10 分钟量级，避免默认值过长掩盖卡死与异常等待。
 3. 去掉 `AgentClient` 内部与配置体系重复、且可能形成隐藏上限的 builder 级 300 秒超时，确保 runtime 只受显式配置控制。
 4. 通过真实 Bifrost 进程 + Admin API + mock model server 验证：超过 30 轮工具调用的会话可以继续执行直至完成，不再报 `exceeded maximum iterations (30)`。
 

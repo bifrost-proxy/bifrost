@@ -6,7 +6,7 @@
 
 1. `/goal` 显式目标命令入口
 2. Goal 工具生命周期（create/get/update）
-3. Codex 风格结构化 `apply_patch`
+3. 结构化 `apply_patch`
 4. PTY 会话复用、交互模式与 `write_stdin`
 
 ## 前置条件
@@ -28,7 +28,7 @@ mkdir -p ./.bifrost-test
 - **预期结果**: 测试通过；`/goal set --budget 128 finish the p1 work` 返回 active goal，响应包含 objective、`"active"` 与 `threadId`，且不暴露内部 `goalId`。
 - **本次执行结果**: 通过。2026-05-05 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent --test session_skills_integration goal_slash_command_runs_through_session_router -- --nocapture`，结果 `1 passed`；响应契约验证为包含 `threadId` 且不包含内部 `goalId`。
 
-### TC-APT-02: `apply_patch` 支持 Codex 风格结构化 patch
+### TC-APT-02: `apply_patch` 支持结构化 patch
 
 - **操作步骤**:
   ```bash

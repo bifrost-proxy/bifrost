@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS traffic_records (
     request_size INTEGER NOT NULL DEFAULT 0,
     response_size INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
+    listener_port INTEGER NOT NULL DEFAULT 0,
     client_ip TEXT NOT NULL DEFAULT '',
     client_app TEXT,
     client_pid INTEGER,
@@ -157,7 +158,7 @@ pub fn get_insert_sql() -> &'static str {
         sequence, id, timestamp, host, method, status, protocol,
         url, path, content_type, request_content_type,
         request_size, response_size, duration_ms,
-        client_ip, client_app, client_pid, client_path,
+        listener_port, client_ip, client_app, client_pid, client_path,
         flags, frame_count, last_frame_id,
         socket_is_open, socket_send_count, socket_receive_count,
         socket_send_bytes, socket_receive_bytes, socket_frame_count,
@@ -166,10 +167,10 @@ pub fn get_insert_sql() -> &'static str {
         ?1, ?2, ?3, ?4, ?5, ?6, ?7,
         ?8, ?9, ?10, ?11,
         ?12, ?13, ?14,
-        ?15, ?16, ?17, ?18,
-        ?19, ?20, ?21,
-        ?22, ?23, ?24, ?25, ?26, ?27,
-        ?28, ?29, ?30
+        ?15, ?16, ?17, ?18, ?19,
+        ?20, ?21, ?22,
+        ?23, ?24, ?25, ?26, ?27, ?28,
+        ?29, ?30, ?31
     )
     "#
 }
@@ -205,22 +206,23 @@ pub fn get_update_sql() -> &'static str {
         request_size = ?4,
         response_size = ?5,
         duration_ms = ?6,
-        client_app = ?7,
-        client_pid = ?8,
-        client_path = ?9,
-        flags = ?10,
-        frame_count = ?11,
-        last_frame_id = ?12,
-        socket_is_open = ?13,
-        socket_send_count = ?14,
-        socket_receive_count = ?15,
-        socket_send_bytes = ?16,
-        socket_receive_bytes = ?17,
-        socket_frame_count = ?18,
-        rule_count = ?19,
-        rule_protocols = ?20,
-        devtools_client_req_id = ?21
-    WHERE id = ?22
+        listener_port = ?7,
+        client_app = ?8,
+        client_pid = ?9,
+        client_path = ?10,
+        flags = ?11,
+        frame_count = ?12,
+        last_frame_id = ?13,
+        socket_is_open = ?14,
+        socket_send_count = ?15,
+        socket_receive_count = ?16,
+        socket_send_bytes = ?17,
+        socket_receive_bytes = ?18,
+        socket_frame_count = ?19,
+        rule_count = ?20,
+        rule_protocols = ?21,
+        devtools_client_req_id = ?22
+    WHERE id = ?23
     "#
 }
 

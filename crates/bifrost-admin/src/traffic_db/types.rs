@@ -40,6 +40,8 @@ pub struct TrafficSummaryCompact {
     pub req_sz: usize,
     pub res_sz: usize,
     pub dur: u64,
+    #[serde(default)]
+    pub lp: u16,
     pub proto: String,
     pub cip: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,6 +104,7 @@ impl TrafficSummaryCompact {
             req_sz: record.request_size,
             res_sz: record.response_size,
             dur: record.duration_ms,
+            lp: record.listener_port,
             proto: record.protocol.clone(),
             cip: record.client_ip.clone(),
             capp: record.client_app.clone(),

@@ -371,6 +371,7 @@ pub struct EffectiveModelConfig {
     pub request_timeout_secs: u64,
     pub extra_headers: HashMap<String, String>,
     pub use_azure_auth: bool,
+    pub stream_max_retries: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +620,7 @@ impl AgentConfig {
             request_timeout_secs: self.get_request_timeout_secs(),
             extra_headers,
             use_azure_auth,
+            stream_max_retries: provider.stream_max_retries.unwrap_or(0),
         })
     }
 

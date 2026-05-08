@@ -57,7 +57,7 @@ interface VirtualTrafficTableProps {
 
 const ROW_HEIGHT = 36;
 const SCROLL_THRESHOLD = 50;
-const TABLE_MIN_WIDTH = 1440;
+const TABLE_MIN_WIDTH = 1510;
 
 const DEFAULT_STATUS_DOT_COLOR = "#d9d9d9";
 
@@ -212,6 +212,18 @@ const columns: ColumnDef[] = [
         </span>
       </div>
     ),
+  },
+  {
+    key: "listener_port",
+    title: "Port",
+    width: 70,
+    align: "center",
+    render: (record, textSecondary) =>
+      record.listener_port ? (
+        <Tag style={{ margin: 0, fontSize: 11 }}>{record.listener_port}</Tag>
+      ) : (
+        <span style={{ color: textSecondary }}>-</span>
+      ),
   },
   {
     key: "rules",
@@ -388,7 +400,7 @@ interface TableRowProps {
   onRowContextMenu: (e: React.MouseEvent) => void;
 }
 
-const areRowPropsEqual = (
+export const areTrafficRowPropsEqual = (
   prev: TableRowProps,
   next: TableRowProps,
 ): boolean => {
@@ -412,6 +424,7 @@ const areRowPropsEqual = (
   if (prevRecord.path !== nextRecord.path) return false;
   if (prevRecord.request_size !== nextRecord.request_size) return false;
   if (prevRecord.duration_ms !== nextRecord.duration_ms) return false;
+  if (prevRecord.listener_port !== nextRecord.listener_port) return false;
   if (prevRecord.response_size !== nextRecord.response_size) return false;
   if (prevRecord.frame_count !== nextRecord.frame_count) return false;
   if (prevRecord.content_type !== nextRecord.content_type) return false;
@@ -504,7 +517,7 @@ const TableRow = memo(function TableRow({
       ))}
     </div>
   );
-}, areRowPropsEqual);
+}, areTrafficRowPropsEqual);
 
 const keyframesStyle = `
   @keyframes slideUp {

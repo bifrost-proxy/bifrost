@@ -47,6 +47,7 @@ pub struct QueryParams {
     #[serde(default)]
     pub client_ip_match: TextMatchMode,
     pub client_ip_empty: Option<bool>,
+    pub listener_port: Option<u16>,
     pub content_type: Option<String>,
 
     pub pending_ids: Option<Vec<String>>,
@@ -71,6 +72,7 @@ impl QueryParams {
             || self.client_app_empty.is_some()
             || self.client_ip.is_some()
             || self.client_ip_empty.is_some()
+            || self.listener_port.is_some()
             || self.content_type.is_some()
     }
 
@@ -192,6 +194,11 @@ impl QueryParams {
             }
         }
 
+        if let Some(port) = self.listener_port {
+            conditions.push("listener_port = ?".to_string());
+            params.push(QueryValue::Int(port as i64));
+        }
+
         if let Some(ref ct) = self.content_type {
             conditions.push("content_type LIKE ?".to_string());
             params.push(QueryValue::Text(format!("%{}%", ct)));
@@ -219,7 +226,7 @@ impl QueryParams {
         let sql = format!(
             "SELECT sequence, id, timestamp, host, method, status, protocol, \
              url, path, content_type, request_size, response_size, duration_ms, \
-             client_ip, client_app, client_pid, flags, frame_count, \
+             listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \
              rule_count, rule_protocols, request_content_type \
@@ -289,5 +296,17 @@ mod tests {
         let (where_clause, values) = params.build_where_clause();
         assert!(where_clause.contains("client_app = ?"));
         assert!(matches!(values.first(), Some(QueryValue::Text(v)) if v == "Safari"));
+    }
+
+    #[test]
+    fn build_where_clause_supports_listener_port_filter() {
+        let params = QueryParams {
+            listener_port: Some(50831),
+            ..Default::default()
+        };
+
+        let (where_clause, values) = params.build_where_clause();
+        assert!(where_clause.contains("listener_port = ?"));
+        assert!(matches!(values.first(), Some(QueryValue::Int(v)) if *v == 50831));
     }
 }

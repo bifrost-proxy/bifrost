@@ -144,6 +144,8 @@ pub struct TrafficListArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_app: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listener_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_rule_hit: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_websocket: Option<bool>,
@@ -170,6 +172,7 @@ impl Default for TrafficListArgs {
             content_type: None,
             client_ip: None,
             client_app: None,
+            listener_port: None,
             has_rule_hit: None,
             is_websocket: None,
             is_sse: None,

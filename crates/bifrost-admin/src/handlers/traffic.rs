@@ -989,6 +989,7 @@ fn parse_query_params_from_query_string(query: &str) -> QueryParams {
                     };
                 }
                 "client_ip_empty" => params.client_ip_empty = value.parse().ok(),
+                "listener_port" | "port" => params.listener_port = value.parse().ok(),
                 "content_type" => params.content_type = Some(value),
                 _ => {}
             }

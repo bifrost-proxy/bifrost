@@ -17,11 +17,12 @@ use cli::{Cli, Commands, ImportArgs, TrafficCommands};
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ca_command, handle_config_command,
     handle_export_command, handle_group_command, handle_import_command, handle_install_skill,
-    handle_metrics_command, handle_rule_command, handle_script_command, handle_sync_command,
-    handle_system_proxy_command, handle_upgrade, handle_value_command, handle_whitelist_command,
-    remote, run_restart, run_search, run_start, run_status, run_status_tui, run_stop,
-    run_traffic_clear, run_traffic_get, run_traffic_list, spawn_update_check_notice, OutputFormat,
-    RestartOptions, SearchOptions, TrafficGetOptions, TrafficListOptions,
+    handle_metrics_command, handle_port_command, handle_rule_command, handle_script_command,
+    handle_sync_command, handle_system_proxy_command, handle_upgrade, handle_value_command,
+    handle_whitelist_command, remote, run_restart, run_search, run_start, run_status,
+    run_status_tui, run_stop, run_traffic_clear, run_traffic_get, run_traffic_list,
+    spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions, TrafficGetOptions,
+    TrafficListOptions,
 };
 use process::read_runtime_port;
 
@@ -218,6 +219,7 @@ fn main() {
         }
         Some(Commands::Rule { action }) => handle_rule_command(action),
         Some(Commands::Group { action }) => handle_group_command(action),
+        Some(Commands::Port { action }) => handle_port_command(action),
         Some(Commands::Ca { action }) => handle_ca_command(action),
         Some(Commands::Whitelist { action }) => handle_whitelist_command(action),
         Some(Commands::SystemProxy { ref action }) => {
@@ -261,6 +263,7 @@ fn main() {
             protocol,
             content_type,
             domain,
+            listener_port,
             no_color,
             max_scan,
             max_results,
@@ -286,6 +289,7 @@ fn main() {
                 filter_domain: domain,
                 filter_host: host,
                 filter_path: path,
+                filter_listener_port: listener_port,
                 no_color,
                 max_scan,
                 max_results,
@@ -338,6 +342,7 @@ fn main() {
         }
         Some(Commands::Traffic { action }) => match action {
             TrafficCommands::List {
+                port,
                 limit,
                 cursor,
                 direction,
@@ -352,6 +357,7 @@ fn main() {
                 content_type,
                 client_ip,
                 client_app,
+                listener_port,
                 has_rule_hit,
                 is_websocket,
                 is_sse,
@@ -360,7 +366,7 @@ fn main() {
                 no_color,
             } => {
                 let options = TrafficListOptions {
-                    port: get_effective_port(cli.port),
+                    port: port.unwrap_or_else(|| get_effective_port(cli.port)),
                     limit,
                     cursor,
                     direction,
@@ -375,6 +381,7 @@ fn main() {
                     content_type,
                     client_ip,
                     client_app,
+                    listener_port,
                     has_rule_hit,
                     is_websocket,
                     is_sse,
@@ -385,13 +392,14 @@ fn main() {
                 run_traffic_list(options)
             }
             TrafficCommands::Get {
+                port,
                 id,
                 request_body,
                 response_body,
                 format,
             } => {
                 let options = TrafficGetOptions {
-                    port: get_effective_port(cli.port),
+                    port: port.unwrap_or_else(|| get_effective_port(cli.port)),
                     id,
                     request_body,
                     response_body,
@@ -418,6 +426,7 @@ fn main() {
                 protocol,
                 content_type,
                 domain,
+                listener_port,
                 no_color,
                 max_scan,
                 max_results,
@@ -443,6 +452,7 @@ fn main() {
                     filter_domain: domain,
                     filter_host: host,
                     filter_path: path,
+                    filter_listener_port: listener_port,
                     no_color,
                     max_scan,
                     max_results,

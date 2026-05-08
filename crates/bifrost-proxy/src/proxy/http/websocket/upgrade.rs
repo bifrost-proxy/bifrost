@@ -23,7 +23,7 @@ pub async fn handle_websocket_upgrade(
     peer_addr: std::net::SocketAddr,
     local_addr: std::net::SocketAddr,
 ) -> Result<Response<BoxBody>> {
-    let ctx = RequestContext::new();
+    let ctx = RequestContext::new().with_port(local_addr.port());
     let start_time = Instant::now();
     let uri = req.uri().clone();
     let url = uri.to_string();
@@ -169,6 +169,7 @@ pub async fn handle_websocket_upgrade(
         record.client_app = client_app;
         record.client_pid = client_pid;
         record.client_path = client_path;
+        record.listener_port = ctx.port;
         record.set_websocket();
 
         state.connection_monitor.register_connection(&record_id);

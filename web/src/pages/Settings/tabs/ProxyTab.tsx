@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   AutoComplete,
@@ -28,15 +28,241 @@ import {
   QrcodeOutlined,
   SafetyCertificateOutlined,
   SwapOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import type { SystemOverview } from "../../../types";
 import { getProxyQRCodeUrl } from "../../../api/proxy";
 import type { CliProxyStatus, ProxyAddressInfo, SystemProxyStatus } from "../../../api/proxy";
+import {
+  getTemporaryPortActiveSummary,
+  getTemporaryPorts,
+  type TemporaryPortActiveSummary,
+  type TemporaryPortBinding,
+  type TemporaryPortRuleSetRef,
+} from "../../../api/ports";
 import type { ProxySettings, TlsConfig } from "../../../api/config";
 import { updateTlsConfig } from "../../../api/config";
 import { useTlsConfigStore } from "../../../stores/useTlsConfigStore";
 
 const { Text } = Typography;
+
+function formatRuleRef(ref: TemporaryPortRuleSetRef): string {
+  switch (ref.type) {
+    case "local_rule":
+      return ref.name;
+    case "group_rule":
+      return `${ref.group_id}/${ref.name}`;
+    case "rule_file":
+      return ref.path;
+    case "inline_rule":
+      return ref.content.split(/\r?\n/).find((line) => line.trim()) || "inline rule";
+    default:
+      return "unknown";
+  }
+}
+
+function ruleRefColor(ref: TemporaryPortRuleSetRef): string {
+  switch (ref.type) {
+    case "local_rule":
+      return "blue";
+    case "group_rule":
+      return "purple";
+    case "rule_file":
+      return "cyan";
+    case "inline_rule":
+      return "geekblue";
+    default:
+      return "default";
+  }
+}
+
+interface TemporaryProxyPortsSectionProps {
+  mainPort: number;
+}
+
+function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProps) {
+  const { token } = theme.useToken();
+  const [ports, setPorts] = useState<TemporaryPortBinding[]>([]);
+  const [summaries, setSummaries] = useState<Record<number, TemporaryPortActiveSummary>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchPorts = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const nextPorts = await getTemporaryPorts();
+      const settled = await Promise.allSettled(
+        nextPorts.map(
+          async (port) =>
+            [port.port, await getTemporaryPortActiveSummary(port.port)] as const,
+        ),
+      );
+      const nextSummaries: Record<number, TemporaryPortActiveSummary> = {};
+      for (const result of settled) {
+        if (result.status === "fulfilled") {
+          const [port, summary] = result.value;
+          nextSummaries[port] = summary;
+        }
+      }
+      setPorts(nextPorts);
+      setSummaries(nextSummaries);
+    } catch (err) {
+      setPorts([]);
+      setSummaries({});
+      setError(err instanceof Error ? err.message : "Failed to load temporary ports");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchPorts();
+  }, [fetchPorts]);
+
+  return (
+    <Card
+      title={
+        <Space>
+          <ApiOutlined />
+          <span>Temporary Proxy Ports</span>
+          <Tag color={ports.length > 0 ? "blue" : "default"}>{ports.length}</Tag>
+        </Space>
+      }
+      size="small"
+      extra={
+        <Button
+          icon={<ReloadOutlined />}
+          size="small"
+          loading={loading}
+          onClick={fetchPorts}
+          data-testid="settings-temporary-ports-refresh"
+        >
+          Refresh
+        </Button>
+      }
+    >
+      <Space direction="vertical" style={{ width: "100%" }}>
+        {error ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="Temporary proxy ports are unavailable"
+            description={error}
+            data-testid="settings-temporary-ports-error"
+          />
+        ) : null}
+
+        {!error && !loading && ports.length === 0 ? (
+          <Text type="secondary" data-testid="settings-temporary-ports-empty">
+            Main proxy port {mainPort} is using the default active rules. Temporary
+            ports created with bifrost port bind will appear here.
+          </Text>
+        ) : null}
+
+        <div style={{ width: "100%" }} data-testid="settings-temporary-ports-list">
+          {ports.map((port, index) => {
+          const summary = summaries[port.port];
+          return (
+            <div key={port.port} data-testid={`settings-temporary-port-card-${port.port}`}>
+              {index > 0 ? <Divider style={{ margin: "16px 0" }} /> : null}
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Port">
+                  <Space wrap>
+                    <Text code>
+                      {port.host}:{port.port}
+                    </Text>
+                    <Tag color={port.status === "running" ? "green" : "orange"}>
+                      {port.status}
+                    </Tag>
+                  </Space>
+                </Descriptions.Item>
+                {port.name ? (
+                  <Descriptions.Item label="Name">{port.name}</Descriptions.Item>
+                ) : null}
+                <Descriptions.Item label="Bound Rules">
+                  {port.rule_refs.length > 0 ? (
+                    <Space wrap>
+                      {port.rule_refs.map((ref, refIndex) => (
+                        <Tooltip key={`${ref.type}-${refIndex}`} title={formatRuleRef(ref)}>
+                          <Tag color={ruleRefColor(ref)}>{formatRuleRef(ref)}</Tag>
+                        </Tooltip>
+                      ))}
+                    </Space>
+                  ) : (
+                    <Text type="secondary">No bound rule sets</Text>
+                  )}
+                </Descriptions.Item>
+                {port.missing_refs.length > 0 ? (
+                  <Descriptions.Item label="Missing Rules">
+                    <Space wrap>
+                      {port.missing_refs.map((ref, refIndex) => (
+                        <Tag key={`${ref.type}-${refIndex}`} color="orange">
+                          {formatRuleRef(ref)}
+                        </Tag>
+                      ))}
+                    </Space>
+                  </Descriptions.Item>
+                ) : null}
+                <Descriptions.Item label="Active Rules">
+                  {summary ? (
+                    summary.rules.length > 0 ? (
+                      <Space wrap>
+                        {summary.rules.map((rule) => (
+                          <Tag
+                            key={`${rule.group_id || "local"}-${rule.name}`}
+                            color={rule.group_id ? "purple" : "blue"}
+                          >
+                            {rule.group_name ? `${rule.group_name}/` : ""}
+                            {rule.name} · {rule.rule_count}
+                          </Tag>
+                        ))}
+                      </Space>
+                    ) : (
+                      <Text type="secondary">No active rules resolved</Text>
+                    )
+                  ) : (
+                    <Text type="secondary">Loading active rules...</Text>
+                  )}
+                </Descriptions.Item>
+              </Descriptions>
+              <Divider style={{ margin: "12px 0" }} />
+              <Text
+                type="secondary"
+                style={{
+                  fontSize: 12,
+                  display: "block",
+                  marginBottom: 12,
+                }}
+              >
+                Merged Rules for this temporary proxy port
+              </Text>
+              <pre
+                style={{
+                  margin: 0,
+                  padding: 12,
+                  maxHeight: 180,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  borderRadius: 6,
+                  border: `1px solid ${token.colorBorderSecondary}`,
+                  background: token.colorFillQuaternary,
+                  color: token.colorText,
+                  fontSize: 12,
+                }}
+                data-testid={`settings-temporary-port-merged-${port.port}`}
+              >
+                {summary?.merged_content || ""}
+              </pre>
+            </div>
+          );
+        })}
+        </div>
+      </Space>
+    </Card>
+  );
+}
 
 interface TlsInterceptionPatternsCardProps {
   tlsConfig: TlsConfig | null;
@@ -983,6 +1209,10 @@ export default function ProxyTab({
               </Tooltip>
             </Space>
           </Card>
+        </Col>
+
+        <Col xs={24}>
+          <TemporaryProxyPortsSection mainPort={overview?.server.port || 9900} />
         </Col>
 
         <Col xs={24}>

@@ -1053,6 +1053,7 @@ impl ReplayExecutor {
             request_size,
             response_size,
             duration_ms,
+            listener_port: 0,
             client_ip: "127.0.0.1".to_string(),
             client_app: Some("Bifrost Replay".to_string()),
             client_pid: None,

@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-给 Agent 提供一个 `update_plan` 内置工具（类似 Codex 的 TodoWrite），让模型在执行复杂任务时可以结构化地记录和更新计划步骤，每个步骤有 `pending` / `in_progress` / `completed` 三种状态。计划通过飞书卡片实时展示进度给用户。
+给 Agent 提供一个 `update_plan` 内置工具，让模型在执行复杂任务时可以结构化地记录和更新计划步骤，每个步骤有 `pending` / `in_progress` / `completed` 三种状态。计划通过飞书卡片实时展示进度给用户。
 
 本次修复的核心目标不是“看起来像有计划”，而是把 `update_plan` 从**单次 turn 的展示信号**升级为 **runtime 持有的会话状态**：
 
@@ -10,7 +10,7 @@
 2. **计划生命周期由 runtime 强制闭环**：一旦会话中存在 active plan，模型在最终回答前必须把计划收口到最终状态。
 3. **展示层只渲染 runtime 状态**：IM 卡片和 API 返回都基于 `AgentSession.current_plan`，不再依赖当前 turn 的临时提取结果。
 
-这更接近 Codex 的设计哲学：plan 是真实运行态，而不是 prompt + UI 拼接出来的附属物。
+plan 是真实运行态，而不是 prompt + UI 拼接出来的附属物。
 
 ## 数据结构
 

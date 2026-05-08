@@ -229,6 +229,7 @@ pub struct SearchOptions {
     pub filter_domain: Option<String>,
     pub filter_host: Option<String>,
     pub filter_path: Option<String>,
+    pub filter_listener_port: Option<u16>,
     pub no_color: bool,
     pub max_scan: Option<usize>,
     pub max_results: Option<usize>,
@@ -256,6 +257,7 @@ impl Default for SearchOptions {
             filter_domain: None,
             filter_host: None,
             filter_path: None,
+            filter_listener_port: None,
             no_color: false,
             max_scan: None,
             max_results: None,
@@ -737,6 +739,13 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
             "field": "path",
             "operator": "contains",
             "value": path,
+        }));
+    }
+    if let Some(port) = options.filter_listener_port {
+        conditions.push(serde_json::json!({
+            "field": "listener_port",
+            "operator": "equals",
+            "value": port.to_string(),
         }));
     }
     if !conditions.is_empty() {
@@ -1817,6 +1826,7 @@ mod tests {
             filter_method: Some("POST".to_string()),
             filter_host: Some("api.example.com".to_string()),
             filter_path: Some("/v1/chat".to_string()),
+            filter_listener_port: Some(50831),
             ..SearchOptions::default()
         };
 
@@ -1842,6 +1852,11 @@ mod tests {
                     "field": "path",
                     "operator": "contains",
                     "value": "/v1/chat"
+                },
+                {
+                    "field": "listener_port",
+                    "operator": "equals",
+                    "value": "50831"
                 }
             ])
         );

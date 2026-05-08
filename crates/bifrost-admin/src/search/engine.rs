@@ -435,6 +435,9 @@ impl SearchEngine {
                     }
                     _ => {}
                 },
+                "listener_port" | "port" if condition.operator == "equals" => {
+                    params.listener_port = condition.value.parse().ok();
+                }
                 "content_type" => {
                     params.content_type = Some(condition.value.clone());
                 }
@@ -481,6 +484,10 @@ impl SearchEngine {
             "content_type" => compact.ct.as_deref().unwrap_or(""),
             "client_app" => compact.capp.as_deref().unwrap_or(""),
             "client_ip" => compact.cip.as_str(),
+            "listener_port" | "port" => {
+                url_fallback = compact.lp.to_string();
+                &url_fallback
+            }
             _ => return true,
         };
 
