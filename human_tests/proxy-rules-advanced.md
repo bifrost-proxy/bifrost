@@ -2173,6 +2173,37 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-61：回归 - 无规则命中时已知长度响应保留 Content-Length
+
+**背景**：
+- 真实流量 `586` 显示 `has_rule_hit=false`，但 Traffic 详情中 `original_response_headers` 包含 `content-length`，最终 `response_headers` 缺失 `content-length`。
+- 原因是无 body 处理的透明转发路径被当作未知长度 stream 归一化，导致代理在无规则命中时也修改了响应头。
+
+**前置条件**：
+- 不使用 9900 端口，不修改系统代理。
+- 使用测试脚本内置的临时 origin server 和 Bifrost 临时数据目录。
+
+**操作步骤**：
+1. 执行端到端回归脚本：
+   ```bash
+   bash e2e-tests/tests/test_no_rule_content_length_transparency.sh
+   ```
+2. 确认脚本输出中包含以下断言通过：
+   - `client response should preserve upstream Content-Length`
+   - `traffic detail should remain marked as no rule hit`
+   - `traffic detail should not store modified response headers when final headers match upstream`
+
+**预期结果**：
+- 代理返回给客户端的响应头保留上游 `Content-Length`，且值与响应体字节数一致。
+- Traffic 详情中 `has_rule_hit=false`。
+- Traffic 详情中 `original_response_headers` 包含 `content-length`。
+- 当最终响应头与上游一致时，Traffic 详情不应额外存储 `response_headers` 修改快照；如果实现选择存储最终快照，则其中的 `content-length` 必须与上游一致。
+- 测试全程使用 `--no-system-proxy` 和临时端口。
+
+**执行记录（2026-05-09）**：PASS — 执行 `bash e2e-tests/tests/test_no_rule_content_length_transparency.sh`；脚本从当前源码构建 `target/debug/bifrost`，使用临时端口和隔离数据目录启动代理，本地 origin 返回固定 JSON 与显式 `Content-Length`。经代理请求后客户端响应保留上游 `Content-Length`，Traffic 详情保持 `has_rule_hit=false`，`original_response_headers` 记录上游 `content-length`，且最终响应头与上游一致时不再额外存储修改快照。总计 6 项断言全部通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

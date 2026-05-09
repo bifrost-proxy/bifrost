@@ -394,13 +394,24 @@
      e2e-tests/tests/test_update_plan_human_api.sh \
      e2e-tests/tests/test_agent_loop_runtime_limits.sh
    ```
-3. 用 CI 调度器风格端口执行 guide/queue 黑盒真实链路：
+3. 检查这些脚本尊重外层预构建 binary：
    ```bash
+   rg -n 'SKIP_BUILD|BIFROST_BIN|skipping build, using' \
+     e2e-tests/tests/test_agent_builtin_status_runtime.sh \
+     e2e-tests/tests/test_im_guide_queue_human_api.sh \
+     e2e-tests/tests/test_long_term_memory_human_api.sh \
+     e2e-tests/tests/test_update_plan_human_api.sh \
+     e2e-tests/tests/test_agent_loop_runtime_limits.sh
+   ```
+4. 用 CI 调度器风格端口执行 guide/queue 黑盒真实链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
    ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 \
      bash e2e-tests/tests/test_im_guide_queue_human_api.sh
    ```
-4. 用另一组 CI 调度器风格端口执行 `/status` 运行中指标黑盒真实链路：
+5. 用另一组 CI 调度器风格端口执行 `/status` 运行中指标黑盒真实链路：
    ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
    ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 \
      bash e2e-tests/tests/test_agent_builtin_status_runtime.sh
    ```
@@ -408,8 +419,9 @@
 **预期结果**：
 - 第 1 步所有脚本语法检查通过。
 - 第 2 步每个脚本均能匹配到 `ADMIN_PORT` 与 `MOCK_HTTP_PORT` 回退表达式，证明并行 shell 调度器分配的端口会覆盖固定本地默认端口。
-- 第 3 步输出 `starting bifrost on 18111`、`configuring agent mock provider`、`[im-guide-queue-human-api] PASS`，不再因为与其它并行用例争抢 `18897/18898` 出现 `curl: (52) Empty reply from server`。
-- 第 4 步输出 `starting bifrost on 18121`、`configuring agent mock provider`、`[agent-builtin-status-runtime] PASS`，运行中 `/status` 指标仍通过。
+- 第 3 步每个脚本均能匹配到 `SKIP_BUILD` / `BIFROST_BIN` / `skipping build, using`，证明外层传入 `SKIP_BUILD=true` 时会复用预构建 binary，不再强制 `cargo build`。
+- 第 4 步输出 `skipping build, using`、`starting bifrost on 18111`、`configuring agent mock provider`、`[im-guide-queue-human-api] PASS`，不再因为与其它并行用例争抢 `18897/18898` 出现 `curl: (52) Empty reply from server`。
+- 第 5 步输出 `skipping build, using`、`starting bifrost on 18121`、`configuring agent mock provider`、`[agent-builtin-status-runtime] PASS`，运行中 `/status` 指标仍通过。
 - 两个真实链路均使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
 
 ### TC-CS-22: main push CI concurrency 取消旧 run 回归
@@ -467,9 +479,32 @@
 - 第 3 步至少选中并执行一个 shell 用例，最终报告 `Failed : 0`，外层命令退出码为 0；不再出现所有 suite 日志均 PASS 但 CI step 仍进入 `Dump failed suite logs` 的情况。
 - 该回归使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
 
+### TC-CS-25: shell E2E 默认 Cargo 解析回归
+
+**操作步骤**：
+1. 检查 `scripts/run_all_e2e.sh` 不再把默认 Cargo 固定到 `$HOME/.cargo/bin/cargo`：
+   ```bash
+   rg -n 'CARGO_BIN="\$\{CARGO_BIN:-\$\(resolve_non_shim_command cargo\)\}"' scripts/run_all_e2e.sh
+   ```
+2. 执行脚本语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh
+   ```
+3. 使用当前 shell 选中的 Cargo 运行 shell E2E 列表模式：
+   ```bash
+   CARGO_BIN="$(which cargo)" \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests
+   ```
+
+**预期结果**：
+- 第 1 步能定位到 `resolve_non_shim_command cargo` 默认解析逻辑。
+- 第 2 步语法检查通过。
+- 第 3 步只列出 shell tests，不构建、不启动 Bifrost、不修改系统代理；显式 `CARGO_BIN="$(which cargo)"` 证明入口仍保留调用方覆盖能力。
+- 在本机同时存在旧 rustup Cargo 与新版 Homebrew/系统 Cargo 时，shell E2E 子脚本内部的 `cargo test/run` 会继承入口选定的 Cargo，不再因 `$HOME/.cargo/bin/cargo` 旧版本解析 2024 edition 依赖失败。
+
 ## 本轮执行记录
 
-测试日期：2026-05-05
+测试日期：2026-05-09
 
 | 用例 | 结果 | 实际结果 |
 |------|------|----------|
@@ -484,10 +519,11 @@
 | TC-CS-18 | 通过 | 2026-05-04 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'received post-timeout event before client disconnect\|"id":"\(1\[2-9\]\|\[2-9\]\[0-9\]\+\)"\|missing connection/applied_rules/post-timeout event' e2e-tests/tests/test_replay_rules.sh` 定位到 post-timeout 事件兜底断言和失败提示。随后执行 `PROXY_PORT=18891 MOCK_HTTP_PORT=18892 MOCK_SSE_PORT=18893 MOCK_WS_PORT=18894 BIFROST_DATA_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/data SERVER_LOG_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/logs SKIP_BUILD=true BIFROST_E2E_REPORT_DIR=/tmp/bifrost-replay-ci-noise-human.pV12r4/reports bash e2e-tests/tests/test_replay_rules.sh`，输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；测试端口 18891-18894，未使用 9900。 |
 | TC-CS-19 | 通过 | 2026-05-06 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `jobs.e2e-shell.timeout-minutes == 60` 且 `jobs.e2e-macos-shell.timeout-minutes == 60`；`rg -n 'e2e-shell:\|e2e-macos-shell:\|timeout-minutes: 60\|playwright install --with-deps chromium-headless-shell' .github/workflows/ci.yml` 定位到 Linux/macOS shell E2E job、60 分钟 timeout 和 Playwright `--with-deps` 安装步骤。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-20 | 通过 | 2026-05-05 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'echo "\$[A-Za-z_][A-Za-z0-9_]*" \| grep -[A-Za-z]+' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `system-proxy enable --help` 正确显示且无 Broken pipe；Ruby 静态检查 `.github/workflows/ci.yml` 输出 `dump pipefail guards: 24`，确认 8 个失败日志 dump 步骤均对 `find \| head` 管道做容错。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
-| TC-CS-21 | 通过 | 2026-05-06 本轮执行：`bash -n e2e-tests/tests/test_agent_builtin_status_runtime.sh e2e-tests/tests/test_im_guide_queue_human_api.sh e2e-tests/tests/test_long_term_memory_human_api.sh e2e-tests/tests/test_update_plan_human_api.sh e2e-tests/tests/test_agent_loop_runtime_limits.sh` 通过；`rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-\|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' ...` 显示 5 个脚本均优先消费并行调度器端口。随后执行 `ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，输出 `starting bifrost on 18111` 与 `[im-guide-queue-human-api] PASS`；执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，输出 `starting bifrost on 18121` 与 `[agent-builtin-status-runtime] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与非 9900 端口，未复现 CI 中 `curl: (52) Empty reply from server` 的端口碰撞症状。 |
+| TC-CS-21 | 通过 | 2026-05-09 本轮执行：`bash -n e2e-tests/tests/test_agent_builtin_status_runtime.sh e2e-tests/tests/test_im_guide_queue_human_api.sh e2e-tests/tests/test_long_term_memory_human_api.sh e2e-tests/tests/test_update_plan_human_api.sh e2e-tests/tests/test_agent_loop_runtime_limits.sh` 通过；`rg -n 'BIFROST_PORT="\$\{BIFROST_PORT:-\$\{ADMIN_PORT:-\|MOCK_PORT="\$\{MOCK_PORT:-\$\{MOCK_HTTP_PORT:-' ...` 显示 5 个脚本均优先消费并行调度器端口；`rg -n 'SKIP_BUILD\|BIFROST_BIN\|skipping build, using' ...` 显示 5 个脚本均支持外层预构建 binary。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，输出 `skipping build, using`、`starting bifrost on 18111` 与 `[im-guide-queue-human-api] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，输出 `skipping build, using`、`starting bifrost on 18121` 与 `[agent-builtin-status-runtime] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与非 9900 端口，未复现端口碰撞或旧 Cargo 重新构建阻塞。 |
 | TC-CS-22 | 通过 | 2026-05-07 本轮执行：Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `concurrency.group == "${{ github.workflow }}-${{ github.ref }}"` 且 `cancel-in-progress == true`；该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。旧 run 取消和最新 run 获得执行权由推送后的 GitHub Actions `CI` run 验证。 |
 | TC-CS-23 | 通过 | 2026-05-07 本轮执行：基于 GitHub Actions `CI` run `25469654203` 的 `E2E Shell (Linux, shard 2/3)` artifact，定位到多个 Bifrost 子进程被系统 `Killed`，符合 hosted runner 内存压力症状；随后 run `25470391707` 的 `E2E Shell (Linux, shard 3/3)` artifact 显示所有业务断言通过但仍有 Bifrost 子进程在 cleanup 中被系统 `Killed`，说明 8 路并发仍有资源峰值风险；随后 Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `e2e-shell` 与 `e2e-macos-shell` 的 `BIFROST_E2E_SHELL_JOBS == "4"`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。完整云端结果由推送后的 GitHub Actions `CI` run 验证。 |
 | TC-CS-24 | 通过 | 2026-05-07 本轮执行：`tail -n 16 scripts/run_all_e2e.sh` 显示 final status 循环后存在显式 `exit 0`；`bash -n scripts/run_all_e2e.sh` 通过；随后使用 `BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 执行最小 shard，选中 `test_badge_injection_e2e.sh`，最终报告 `Total suites : 1`、`Passed : 1`、`Failed : 0`，外层退出码 0。该回归使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
+| TC-CS-25 | 通过 | 2026-05-09 本轮执行：`rg -n 'CARGO_BIN="\$\{CARGO_BIN:-\$\(resolve_non_shim_command cargo\)\}"' scripts/run_all_e2e.sh` 定位到默认 Cargo 解析逻辑；`bash -n scripts/run_all_e2e.sh` 通过；`which cargo` 输出 `/opt/homebrew/bin/cargo`；`CARGO_BIN="$(which cargo)" bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 只列出 shell tests，未构建、未启动 Bifrost、未使用 9900、未修改系统代理。随后完整本地 shell CI 由 `bash scripts/ci/local-ci.sh --skip-static --e2e-only shell` 验证。 |
 
 ## 清理步骤
 

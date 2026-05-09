@@ -224,6 +224,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
    - `active_status.estimated_context_tokens > 10017`
    - 文本 `Context 用量` 与 JSON 字段一致
    - 文本最近响应显示 `17`
+4. CI 高负载下第二轮模型请求保留足够长的 mock 延迟窗口，并在轮询期间保存最后一次 `active_status` 响应，避免因为采样窗口过短导致脚本只捕获到 turn 完成后的空闲 `/status`。
 
 由于本轮触达 guide / pending continuation，补跑 `e2e-tests/tests/test_im_guide_queue_human_api.sh`，验证 turn-end guide、FIFO queue、guide 优先级和空白忽略仍符合预期。
 

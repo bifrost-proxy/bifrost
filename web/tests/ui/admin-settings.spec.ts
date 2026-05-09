@@ -16,6 +16,35 @@ test.beforeEach(async ({ request }) => {
   await resetAccessControl(request);
 });
 
+test("左侧一级导航在小窗口下可滚动且 Settings 仍可达", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 360 });
+  await openPage(page, "traffic");
+
+  const navScroll = page.getByTestId("app-sidebar-nav-scroll");
+  await expect(navScroll).toBeVisible();
+  await expect(page.getByTestId("theme-toggle")).toBeVisible();
+
+  const metrics = await navScroll.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: window.getComputedStyle(element).overflowY,
+  }));
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  expect(metrics.overflowY).toBe("auto");
+
+  const firstItemMinHeight = await page
+    .getByTestId("app-sidebar-nav-item")
+    .first()
+    .evaluate((element) => window.getComputedStyle(element).minHeight);
+  expect(firstItemMinHeight).toBe("64px");
+
+  await navScroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await page.locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Settings"]').click();
+  await expect(page).toHaveURL(/\/_bifrost\/settings/);
+});
+
 test("Settings 访问控制支持模式切换、白名单、临时白名单和 LAN 开关", async ({
   page,
 }) => {

@@ -474,7 +474,11 @@
 ### TC-WRU-29：规则列表排序
 
 **操作步骤**：
-1. 在左侧面板搜索框旁的排序选择器中切换排序模式
+1. 在左侧面板搜索框旁的排序选择器中切换为 `Updated`
+2. 刷新 Rules 页面
+3. 再将排序选择器切换为 `Name`
+4. 再次刷新 Rules 页面
+5. 最后切换回 `Manual`
 
 **预期结果**：
 - 支持三种排序模式：Manual（手动）、Updated（按更新时间倒序）、Name（按名称升序）
@@ -482,6 +486,13 @@
 - Updated 模式下最近更新的规则排在最前
 - Name 模式下按字母顺序排列
 - 切换排序模式后列表立即重新排列
+- 第 2 步刷新后排序选择器仍显示 `Updated`，列表仍按更新时间倒序展示
+- 第 4 步刷新后排序选择器仍显示 `Name`，列表仍按名称升序展示
+- 排序方式写入 UI 配置信息，刷新页面不丢失状态
+
+**本次执行记录（2026-05-09）**：
+- 通过。使用临时数据目录 `.bifrost-human-ui` 启动 `./.bifrost-ui-target/debug/bifrost start -p 8800 --unsafe-ssl --no-system-proxy`。
+- 创建 `aaa-human-sort` 与 `zzz-human-sort`，更新 `aaa-human-sort` 后在浏览器中验证：切换 `Updated` 后刷新仍显示 `Updated` 且 `aaa-human-sort` 排第一；切换 `Name` 后刷新仍显示 `Name` 且 `aaa-human-sort` 排第一；最后切回 `Manual`。
 
 ---
 

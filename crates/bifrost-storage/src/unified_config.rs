@@ -457,12 +457,13 @@ pub struct CollapsedSections {
     pub domain: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub pinned_filters: Vec<PinnedFilter>,
     pub filter_panel: FilterPanelConfig,
     pub detail_panel_collapsed: bool,
+    pub rules_sort_mode: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -470,6 +471,18 @@ pub struct UiConfigUpdate {
     pub pinned_filters: Option<Vec<PinnedFilter>>,
     pub filter_panel: Option<FilterPanelConfig>,
     pub detail_panel_collapsed: Option<bool>,
+    pub rules_sort_mode: Option<String>,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            pinned_filters: Vec::new(),
+            filter_panel: FilterPanelConfig::default(),
+            detail_panel_collapsed: false,
+            rules_sort_mode: "manual".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +498,7 @@ mod tests {
         assert!(config.tls.intercept_exclude.is_empty());
         assert_eq!(config.access.mode, AccessMode::Interactive);
         assert!(config.system_proxy.enabled);
+        assert_eq!(config.ui.rules_sort_mode, "manual");
     }
 
     #[test]
@@ -535,6 +549,7 @@ mod tests {
             config.tls.enable_interception,
             parsed.tls.enable_interception
         );
+        assert_eq!(config.ui.rules_sort_mode, parsed.ui.rules_sort_mode);
     }
 }
 

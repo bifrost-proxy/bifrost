@@ -26,12 +26,14 @@ export interface UiConfig {
   pinnedFilters: PinnedFilter[];
   filterPanel: FilterPanelConfig;
   detailPanelCollapsed: boolean;
+  rulesSortMode: string;
 }
 
 export interface UpdateUiConfigRequest {
   pinnedFilters?: PinnedFilter[];
   filterPanel?: FilterPanelConfig;
   detailPanelCollapsed?: boolean;
+  rulesSortMode?: string;
 }
 
 export async function getUiConfig(): Promise<UiConfig> {

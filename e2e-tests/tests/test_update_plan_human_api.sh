@@ -11,6 +11,7 @@ MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-18892}}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
+BIFROST_BIN="${BIFROST_BIN:-}"
 GATE_PROMPT="You already have an active task plan. Before concluding, call update_plan to reflect the final task state. If the work is complete, mark all steps as completed."
 
 cleanup() {
@@ -183,11 +184,17 @@ PY
 MOCK_PID=$!
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
-echo "[update-plan-human-api] building bifrost"
-SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
+  echo "[update-plan-human-api] skipping build, using $BIFROST_BIN"
+else
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+  echo "[update-plan-human-api] building bifrost"
+  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+fi
 
 echo "[update-plan-human-api] starting bifrost on $BIFROST_PORT with temp data dir $TEST_DIR"
-BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start \
+BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
   --unsafe-ssl \

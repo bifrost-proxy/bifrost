@@ -218,9 +218,22 @@ export default function AppLayout() {
       flexShrink: 0,
       backdropFilter: desktopEnabled ? "blur(18px) saturate(1.08)" : undefined,
     },
+    menuScroll: {
+      width: "100%",
+      flex: 1,
+      minHeight: 0,
+      overflowY: "auto",
+      overflowX: "hidden",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      scrollbarGutter: "stable",
+    },
     menuItem: {
       width: 50,
       height: 64,
+      minHeight: 64,
+      flexShrink: 0,
       display: "flex",
       flexDirection: "column",
       alignItems: "center",
@@ -312,30 +325,32 @@ export default function AppLayout() {
       ) : null}
       <div style={styles.main}>
         <div style={styles.sidebar}>
-          {menuItems.filter((item) => !item.hidden).map((item) => {
-            const active = isActive(item.key);
-            return (
-              <div
-                key={item.key}
-                data-testid="app-sidebar-nav-item"
-                data-nav-label={item.label}
-                data-nav-key={item.key}
-                style={{
-                  ...styles.menuItem,
-                  ...(active ? styles.menuItemActive : {}),
-                }}
-                onClick={() => handleClick(item.key)}
-              >
-                {active && <div style={styles.activeBorder as CSSProperties} />}
-                {renderMenuIcon(item)}
-                <div style={styles.menuItemLabel}>{item.label}</div>
-              </div>
-            );
-          })}
+          <div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">
+            {menuItems.filter((item) => !item.hidden).map((item) => {
+              const active = isActive(item.key);
+              return (
+                <div
+                  key={item.key}
+                  data-testid="app-sidebar-nav-item"
+                  data-nav-label={item.label}
+                  data-nav-key={item.key}
+                  style={{
+                    ...styles.menuItem,
+                    ...(active ? styles.menuItemActive : {}),
+                  }}
+                  onClick={() => handleClick(item.key)}
+                >
+                  {active && <div style={styles.activeBorder as CSSProperties} />}
+                  {renderMenuIcon(item)}
+                  <div style={styles.menuItemLabel}>{item.label}</div>
+                </div>
+              );
+            })}
+          </div>
           <div
             data-testid="theme-toggle"
             style={{
-              marginTop: "auto",
+              flexShrink: 0,
               marginBottom: 8,
               width: 36,
               height: 36,

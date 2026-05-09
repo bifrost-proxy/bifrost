@@ -33,6 +33,8 @@ import { ImportBifrostButton } from '../../../components/ImportBifrostButton';
 import { useExportBifrost } from '../../../hooks/useExportBifrost';
 import { useSyncStore } from '../../../stores/useSyncStore';
 import { searchGroups, type Group } from '../../../api/group';
+import { getUiConfig, updateUiConfig } from '../../../api/ui';
+import { isConnectionIssueError } from '../../../api/client';
 import styles from './index.module.css';
 import {
   buildRuleTree,
@@ -50,6 +52,10 @@ const ruleSortOptions = [
   { label: 'Updated', value: 'updated_desc' },
   { label: 'Name', value: 'name_asc' },
 ];
+
+function isRuleSortMode(value: string | undefined): value is RuleSortMode {
+  return value === 'manual' || value === 'updated_desc' || value === 'name_asc';
+}
 
 function getRuleItemId(name: string) {
   return `rule-item-${encodeURIComponent(name)}`;
@@ -142,6 +148,34 @@ export default function RuleList() {
     fetchRules();
   }, [activeGroupId, fetchRules]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadSortMode = async () => {
+      try {
+        const config = await getUiConfig();
+        if (!cancelled && isRuleSortMode(config.rulesSortMode)) {
+          setSortMode(config.rulesSortMode);
+        }
+      } catch (err) {
+        if (!isConnectionIssueError(err)) {
+          console.error('Failed to load Rules sort mode:', err);
+        }
+      }
+    };
+    loadSortMode();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSortModeChange = useCallback((value: RuleSortMode) => {
+    setSortMode(value);
+    updateUiConfig({ rulesSortMode: value }).catch((err) => {
+      if (!isConnectionIssueError(err)) {
+        console.error('Failed to persist Rules sort mode:', err);
+      }
+    });
+  }, []);
 
   const handleGroupChange = useCallback((value: string) => {
     setExpandedFolders([]);
@@ -894,7 +928,7 @@ export default function RuleList() {
         <Select
           size="small"
           value={sortMode}
-          onChange={(value: RuleSortMode) => setSortMode(value)}
+          onChange={handleSortModeChange}
           options={ruleSortOptions}
           className={styles.sortControl}
           popupMatchSelectWidth={false}
