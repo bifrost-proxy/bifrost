@@ -76,7 +76,7 @@ use crate::utils::logging::{format_rules_summary, RequestContext};
 use crate::utils::process_info::spawn_async_process_resolver;
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
-    store_request_body, store_response_body, BodyCaptureHandle,
+    store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::url::apply_url_rules;
@@ -103,6 +103,7 @@ fn maybe_backfill_tunnel_client_process(
     client_pid: Option<u32>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    skip_unknown_backfill: bool,
 ) {
     if client_app.is_some() && client_pid.is_some() {
         debug!(
@@ -110,6 +111,16 @@ fn maybe_backfill_tunnel_client_process(
             client_app = ?client_app,
             client_pid = ?client_pid,
             "Skipping tunnel client process backfill because client metadata is already present"
+        );
+        return;
+    }
+
+    if skip_unknown_backfill {
+        debug!(
+            req_id,
+            peer_addr = %peer_addr,
+            local_addr = %local_addr,
+            "Skipping tunnel client process backfill after synchronous resolution miss"
         );
         return;
     }
@@ -124,7 +135,7 @@ fn maybe_backfill_tunnel_client_process(
         return;
     }
 
-    info!(
+    debug!(
         req_id,
         peer_addr = %peer_addr,
         local_addr = %local_addr,
@@ -544,7 +555,7 @@ pub async fn handle_connect(
                 .metrics_collector
                 .increment_client_process_policy_unknown_decision();
         }
-        warn!(
+        debug!(
             req_id = ctx.id_str(),
             host,
             port,
@@ -854,6 +865,7 @@ pub async fn handle_connect(
             client_pid,
             peer_addr,
             local_addr,
+            requires_client_app,
         );
 
         state.connection_monitor.register_tunnel_connection(&req_id);
@@ -3359,10 +3371,13 @@ async fn handle_intercepted_request_with_protocol(
                     res_body,
                     admin_state.clone(),
                     record_id,
-                    Some(max_body_buffer_size),
-                    res_content_encoding.clone(),
-                    Some(traffic_type),
-                    response_headers_size,
+                    TeeBodyCaptureOptions {
+                        max_body_size: Some(max_body_buffer_size),
+                        content_encoding: res_content_encoding.clone(),
+                        traffic_type: Some(traffic_type),
+                        monitor_connection: false,
+                        response_headers_size,
+                    },
                 )
             };
             let final_body = wrap_throttled_body(tee_body, resolved_rules.res_speed);

@@ -772,6 +772,84 @@ wait
 
 ---
 
+### TC-WTR-47：高并发流量下 Traffic、SSE 详情和 appinfo 仍可响应
+
+**背景**：用户反馈管理端经常一直 loading，打开 SSE 请求详情页后结果不出来。日志中大量 CONNECT 请求触发客户端进程解析；该用例验证极限 CONNECT/HTTP 压力下，管理端 Traffic 列表、请求详情和 SSE frames 接口不会被明显阻塞，同时验证高并发短请求不会大量丢失客户端应用识别。客户端进程解析在极端情况下最多等待 2 秒，超过后应按未知客户端降级，不能继续阻塞请求链路；近期解析 miss/timeout 应命中 negative cache 快速跳过，进程解析 blocking 任务也必须受全局并发阀门限制，socket 快照刷新必须 singleflight，普通 HTTP 请求也应在请求开始时执行受限同步解析，`/_bifrost` 管理端接口应完全跳过进程识别。普通 HTTP 响应不得抢占 `ConnectionMonitor` 全局写锁；当 `BodyStore` 忙时允许后台最终一致保存响应体，但不能丢失 Traffic 记录或永久丢失 body。
+
+**前置条件**：
+1. 使用隔离数据目录和非 9900 端口启动最新 Bifrost，必须带 `--no-system-proxy`：
+   ```bash
+   export BIFROST_TEST_DIR="$(mktemp -d /tmp/bifrost-webui-traffic-perf.XXXXXX)"
+   export BIFROST_TEST_PORT=18880
+   BIFROST_DATA_DIR="$BIFROST_TEST_DIR" cargo run --bin bifrost -- start -p "$BIFROST_TEST_PORT" --unsafe-ssl --no-system-proxy
+   ```
+2. 打开管理端页面：
+   ```text
+   http://127.0.0.1:18880/_bifrost/traffic
+   ```
+
+**操作步骤**：
+1. 启动本地 SSE mock 服务：
+   ```bash
+   python3 - <<'PY'
+   from http.server import BaseHTTPRequestHandler, HTTPServer
+   import time
+
+   class Handler(BaseHTTPRequestHandler):
+       def do_GET(self):
+           if not self.path.startswith("/sse"):
+               self.send_response(404)
+               self.end_headers()
+               return
+           self.send_response(200)
+           self.send_header("Content-Type", "text/event-stream")
+           self.end_headers()
+           for index in range(3):
+               self.wfile.write(f"id: {index}\ndata: bifrost-event-{index}\n\n".encode())
+               self.wfile.flush()
+               time.sleep(0.05)
+
+       def log_message(self, *_args):
+           pass
+
+   HTTPServer(("127.0.0.1", 18981), Handler).serve_forever()
+   PY
+   ```
+2. 通过 Bifrost 代理发起一个 SSE 请求，并等待 Traffic 中出现 SSE 记录：
+   ```bash
+   NO_PROXY="" no_proxy="" curl -sS --max-time 8 -x "http://127.0.0.1:${BIFROST_TEST_PORT}" "http://127.0.0.1:18981/sse?count=3" -o /tmp/bifrost-sse.out
+   curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic?limit=50&is_sse=true"
+   ```
+3. 在另一个终端发起高并发 CONNECT 压力：
+   ```bash
+   seq 1 160 | xargs -n1 -P40 -I{} sh -c 'curl -ksS --max-time 5 -x "http://127.0.0.1:${BIFROST_TEST_PORT}" "https://example.com/?connect_pressure={}" -o /dev/null || true'
+   ```
+4. 压力运行期间或刚结束后，验证管理端列表接口仍能快速返回：
+   ```bash
+   time curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic?limit=20" -o /tmp/bifrost-traffic-list.json
+   ```
+5. 从第 2 步的 SSE 列表结果中取一条 SSE 请求 ID，验证详情、SSE frames 元信息和响应体接口：
+   ```bash
+   export BIFROST_SSE_ID="$(curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic?limit=50&is_sse=true" | jq -r '.records[0].id')"
+   time curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic/${BIFROST_SSE_ID}" -o /tmp/bifrost-sse-detail.json
+   time curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic/${BIFROST_SSE_ID}/frames" -o /tmp/bifrost-sse-frames.json
+   time curl -fsS "http://127.0.0.1:${BIFROST_TEST_PORT}/_bifrost/api/traffic/${BIFROST_SSE_ID}/response-body" -o /tmp/bifrost-sse-response-body.json
+   ```
+6. 在浏览器 Traffic 页面点击该 SSE 请求，打开详情页并切到 SSE Messages/Frames 视图。
+7. 以 200 QPS 混合普通 HTTP 与 CONNECT 请求持续压测 60 秒，同时每 0.5 秒轮询 `/_bifrost/api/proxy/address`、`/_bifrost/api/traffic?limit=20`、`/_bifrost/api/rules`、`/_bifrost/api/config`、`/_bifrost/api/values`、`/_bifrost/api/scripts` 和最新 Traffic 详情接口；压测结束后抽查最近 10 条 GET 详情。
+
+**预期结果**：
+- 高并发 CONNECT 压力期间，Traffic 列表接口返回 HTTP 200，且 wall time 不出现秒级以上的明显卡死。
+- SSE 请求详情接口返回 HTTP 200，JSON 中包含该请求的 URL、状态码和 SSE 标识。
+- SSE frames 接口返回 HTTP 200，`socket_status.frame_count` 至少为 1；如果闭合 SSE 的 frames 列表为空，则响应体接口必须包含实际 SSE event 数据。
+- 浏览器中的 Traffic 页面不长期停留在 loading 状态；SSE Messages/Frames 视图能展示事件或明确的空状态。
+- Bifrost 日志中不应出现持续增长的同步客户端进程解析排队阻塞；如出现 `Client process resolution timed out; continuing without app info`，对应请求应继续完成或按策略降级，不能因为等待客户端应用信息导致管理端接口超时。
+- 在极端压力下，近期解析失败应短期命中 negative cache，不应反复创建同一连接的 blocking 解析任务；进程解析并发饱和时应在 2 秒总预算内等待解析机会，预算耗尽后降级为未知客户端，但不能把“饱和未执行解析”写成端口负缓存。
+- 200 QPS 混合压测中，由同一本地客户端进程发起的短 HTTP 和 CONNECT 请求，Traffic DB 中保留记录的 `client_app` 不应出现大量空值；应用黑白名单关键路径不能因为高并发排队而系统性失效。
+- 200 QPS 混合压测期间管理端 API 不超时；压测后的 GET 详情可返回 HTTP 200，且最终包含 `response_body_ref`，不得以丢失记录或丢失 body 换取性能。
+
+---
+
 ### TC-WTR-回归-01：file:// 规则响应的请求在 Traffic 中可见
 
 **背景**：修复 Bug——使用 file:// 规则（如 `a.com file://xxxx`）响应请求时，该请求不在 network traffic 中显示。
@@ -873,3 +951,61 @@ rm -f /tmp/bifrost-mock-test.json
 - 端口要求：UI 测试动态分配后端端口，未使用 `9900`。
 - 实际结果：Playwright 本次执行 `1 passed`，Traffic 主筛选器可选择 `Port`，输入临时端口后列表只保留对应入口端口记录。
 - 结论：`TC-WTR-23B` 已按文档完成执行并通过，本次无环境阻塞。
+
+2026-05-09 高并发 CONNECT 压力下 Traffic 和 SSE 详情执行记录：
+
+- 已执行用例：`TC-WTR-47`
+- 使用隔离数据目录：`/tmp/bifrost-webui-traffic-perf.YPeYko`
+- 使用端口：`18880`，未使用 `9900`；启动命令包含 `--no-system-proxy`
+- 已执行命令：`source ~/.zshrc; BIFROST_DATA_DIR=/tmp/bifrost-webui-traffic-perf.YPeYko cargo run --bin bifrost -- start -p 18880 --unsafe-ssl --no-system-proxy`
+- 已执行命令：通过本地 SSE mock 服务发起 `NO_PROXY="" no_proxy="" curl -sS --max-time 8 -x http://127.0.0.1:18880 http://127.0.0.1:18981/sse?count=3`
+- 已执行命令：`source ~/.zshrc; seq 1 160 | xargs -n1 -P40 ... curl -ksS --max-time 5 -x http://127.0.0.1:18880 https://example.com/?connect_pressure={}`
+- 管理端列表接口实际结果：`/_bifrost/api/traffic?limit=20` 在压力期间返回 HTTP 200，`real 0.03s`
+- SSE 详情接口实际结果：`/_bifrost/api/traffic/REQ-69fee228-000001` 返回 HTTP 200，`real 0.27s`
+- SSE frames 元信息实际结果：`/_bifrost/api/traffic/REQ-69fee228-000001/frames` 返回 HTTP 200，`real 0.26s`，`socket_status.frame_count=3`
+- SSE 响应体实际结果：`/_bifrost/api/traffic/REQ-69fee228-000001/response-body` 返回 HTTP 200，`real 0.26s`，包含 `bifrost-event-0`、`bifrost-event-1`、`bifrost-event-2`
+- 浏览器验证实际结果：Playwright 打开 `/_bifrost/traffic` 和 `/_bifrost/traffic/detail?id=REQ-69fee228-000001`，页面未长期 loading，详情页展示 URL、`text/event-stream`、`SSE Status Closed`、`Receive Count 3`、`Frame Count 3` 和 `Messages (3)`；浏览器 console 未出现 error
+- 进程解析超时和并发降级：代码增加了 2 秒硬超时、negative cache 快速返回和全局 blocking 并发阀门；本次压力未触发持续超时堆积，若极端系统调用或并发阀门饱和，请求会按未知客户端降级并继续处理。
+- 热路径日志验证：CONNECT/SOCKS5 应用策略解析的逐请求日志降级为 debug，默认 info 日志不再为每个 CONNECT 输出 `requires synchronous client process resolution` / `succeeded` / `unknown`；已同步解析失败的 CONNECT 不再立即追加 background backfill。
+- 结论：`TC-WTR-47` 已按文档完成执行并通过，本次性能优化没有改变 Traffic/SSE 可见性，CONNECT 压力下管理端接口和详情页保持可响应。
+
+2026-05-09 负缓存和并发阀门补充后二次执行记录：
+
+- 已执行用例：`TC-WTR-47`
+- 使用隔离数据目录：`/tmp/bifrost-webui-traffic-perf2.9ZkGSR`
+- 使用端口：`18881`，未使用 `9900`；启动命令包含 `--no-system-proxy`
+- 已执行命令：通过本地 SSE mock 服务发起 `NO_PROXY="" no_proxy="" curl -sS --max-time 8 -x http://127.0.0.1:18881 http://127.0.0.1:18982/sse?count=3`
+- 已执行命令：`source ~/.zshrc; seq 1 160 | xargs -P40 ... curl -ksS --max-time 5 -x http://127.0.0.1:18881 https://example.com/?connect_pressure={}`
+- 管理端列表接口实际结果：`/_bifrost/api/traffic?limit=20` 在压力后返回 HTTP 200，`real 0.04s`
+- SSE 详情接口实际结果：`/_bifrost/api/traffic/REQ-69fee87e-000001` 返回 HTTP 200，`real 0.25s`
+- SSE frames 元信息实际结果：`/_bifrost/api/traffic/REQ-69fee87e-000001/frames` 返回 HTTP 200，`real 0.24s`，`socket_status.frame_count=3`
+- SSE 响应体实际结果：`/_bifrost/api/traffic/REQ-69fee87e-000001/response-body` 返回 HTTP 200，`real 0.23s`，包含 `bifrost-event-0`、`bifrost-event-1`、`bifrost-event-2`
+- 浏览器验证实际结果：Playwright 打开 `/_bifrost/traffic` 和 `/_bifrost/traffic/detail?id=REQ-69fee87e-000001`，页面未长期 loading，详情页展示请求 ID、`text/event-stream` 和 SSE 信息；浏览器 console 和 pageerror 均为空
+- 负缓存、并发阀门与快照刷新验证：单元测试覆盖 async negative cache 快速返回和并发饱和快速降级；代码对 socket 快照刷新增加 singleflight，避免同一 TTL 窗口重复系统扫描；真实场景中 CONNECT 压力下管理端接口未出现秒级卡死。
+- 结论：`TC-WTR-47` 二次执行通过，负缓存和并发阀门补充后没有造成功能可见性损失。
+
+2026-05-09 200 QPS 管理端接口与数据完整性补充执行记录：
+
+- 已执行用例：`TC-WTR-47`
+- 使用隔离数据目录：`/tmp/bifrost-qps200-load8.UKDomc`
+- 使用端口：`18886`，未使用 `9900`；启动命令包含 `--no-system-proxy`
+- 已执行命令：`source ~/.zshrc; BIFROST_DATA_DIR=/tmp/bifrost-qps200-load8.UKDomc RUST_LOG=warn,bifrost_proxy::utils::process_info=warn cargo run --bin bifrost -- start -p 18886 --host 127.0.0.1 --no-system-proxy --access-mode allow_all --app-intercept-include DefinitelyNoSuchApp`
+- 已配置规则：`**.load.test host://127.0.0.1:19083`
+- 压测流量：60 秒、目标 200 QPS、混合普通 HTTP 与 CONNECT；总请求 `12000`，成功 `12000`，失败 `0`，实际 QPS `200.0`。
+- 管理端接口轮询：共 `40` 次，成功 `40`，失败 `0`；覆盖 `proxy/address`、`traffic?limit=20`、`rules`、`config`、`values`、`scripts` 和最新 Traffic 详情。
+- 管理端接口延迟：平均 `1005.4ms`，P50 `1044.6ms`，P95 `1108.9ms`，最大 `1205.5ms`。
+- CPU 采样：平均 `42.6%`，P95 `62.4%`；`ps` 采样存在一次瞬时 `109.9%` 峰值，未观察到持续超过 `70%`。
+- 数据完整性抽样：压测后抽查最近 10 条 GET 详情，详情 HTTP 200 为 `10/10`，`response_body_ref` 就绪为 `10/10`。
+- 结论：`TC-WTR-47` 200 QPS 补充执行通过；管理端接口无超时，普通 HTTP/CONNECT 记录未丢失，响应体引用最终可见。本次优化不以丢失 Traffic 记录或响应体为代价。
+
+2026-05-09 200 QPS appinfo 命中率补充执行记录：
+
+- 已执行用例：`TC-WTR-47`
+- 使用隔离数据目录：`/tmp/bifrost-appinfo-final2.pW1lFm`
+- 使用端口：`18889`，未使用 `9900`；启动命令包含 `--no-system-proxy`
+- 已执行命令：`source ~/.zshrc; BIFROST_DATA_DIR=/tmp/bifrost-appinfo-final2.pW1lFm RUST_LOG=warn,bifrost_proxy::utils::process_info=warn cargo run --bin bifrost -- start -p 18889 --host 127.0.0.1 --no-system-proxy --access-mode allow_all --app-intercept-include DefinitelyNoSuchApp`
+- 压测流量：60 秒、目标 200 QPS、混合普通 HTTP 与 CONNECT；总请求 `12000`，完成 `12000`，普通 HTTP 成功 `8000/8000`，CONNECT 成功 `4000/4000`。
+- 管理端接口轮询：共 `120` 次，成功 `120`，失败 `0`；平均 `33.3ms`，P95 `60ms`，最大 `67ms`。
+- CPU 采样：平均 `46.2%`，P95 `54.7%`，最大瞬时 `78.5%`；未观察到持续超过 `70%`。
+- appinfo 完整性：受 `traffic.max_records=5000` 保留策略影响，DB 保留最新 `4800` 条记录；保留记录中 `client_app` 空值 `0`，`node` 命中 `4800`，其中 CONNECT `1600`、GET `3200`。
+- 结论：`TC-WTR-47` appinfo 补充执行通过；短 HTTP/CONNECT 高并发下，最终保留记录没有出现大量 unknown app，管理端接口可持续响应，CPU P95 低于 `70%` 目标。

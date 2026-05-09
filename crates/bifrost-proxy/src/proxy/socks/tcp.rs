@@ -1251,7 +1251,7 @@ impl SocksHandler {
                             let client_process = if requires_client_app {
                                 let (max_retries, delay_ms) =
                                     app_policy_process_resolution_retry_config();
-                                info!(
+                                debug!(
                                     target_host,
                                     target_port,
                                     peer_addr = %self.peer_addr,
@@ -1283,7 +1283,7 @@ impl SocksHandler {
 
                             if requires_client_app {
                                 match client_process.as_ref() {
-                                    Some(process) => info!(
+                                    Some(process) => debug!(
                                         target_host,
                                         target_port,
                                         peer_addr = %self.peer_addr,
@@ -1301,7 +1301,7 @@ impl SocksHandler {
                                                 .metrics_collector
                                                 .increment_client_process_policy_unknown_decision();
                                         }
-                                        warn!(
+                                        debug!(
                                             target_host,
                                             target_port,
                                             peer_addr = %self.peer_addr,

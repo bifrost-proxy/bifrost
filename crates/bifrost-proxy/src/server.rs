@@ -42,8 +42,8 @@ use crate::unified::{DetectedProtocol, PeekableStream};
 use crate::utils::logging::RequestContext;
 use crate::utils::process_info::{
     app_policy_process_resolution_retry_config, resolve_client_process_async_for_connection,
-    resolve_client_process_async_for_connection_with_retry, spawn_async_process_resolver,
-    ClientProcess,
+    resolve_client_process_async_for_connection_with_retry,
+    spawn_async_process_resolver_with_finish, ClientProcess,
 };
 use bifrost_core::{
     AccessControlConfig, AccessDecision, AccessMode, ClientAccessControl, ProxyAuthRateLimiter,
@@ -125,14 +125,12 @@ fn is_noisy_connection_close(err_debug: &str, err_display: &str) -> bool {
     err_debug.contains("IncompleteMessage") || err_display.contains("message completed")
 }
 
-fn should_defer_client_process_resolution(
-    method: &Method,
-    verbose_logging: bool,
-    has_script_manager: bool,
-) -> bool {
-    // Client process information is part of the policy input for CONNECT/TLS interception.
-    // That path must resolve the process before making an interception decision.
-    method != Method::CONNECT && !verbose_logging && !has_script_manager
+fn should_defer_client_process_resolution(_method: &Method, _verbose_logging: bool) -> bool {
+    false
+}
+
+fn is_admin_request_path(path: &str) -> bool {
+    path == "/_bifrost" || path.starts_with("/_bifrost/")
 }
 
 #[derive(Debug, Clone)]
@@ -1152,25 +1150,6 @@ async fn handle_http_connection(
     let client_process_cache = Arc::new(Mutex::new(None::<ClientProcess>));
     let client_process_resolution_started = Arc::new(AtomicBool::new(false));
 
-    if peer_addr.ip().is_loopback() {
-        let cache = Arc::clone(&client_process_cache);
-        let started = Arc::clone(&client_process_resolution_started);
-        tokio::spawn(async move {
-            let result = resolve_client_process_async_for_connection_with_retry(
-                &peer_addr,
-                &local_addr,
-                20,
-                50,
-            )
-            .await;
-            if let Some(process) = result {
-                started.store(true, Ordering::Release);
-                if let Ok(mut guard) = cache.lock() {
-                    *guard = Some(process);
-                }
-            }
-        });
-    }
     let http1_max_header_size = if let Some(ref state) = admin_state {
         if let Some(ref config_manager) = state.config_manager {
             config_manager.config().await.server.http1_max_header_size
@@ -1249,13 +1228,9 @@ async fn handle_request(
     let path = uri.path();
     let verbose_logging = proxy_config.verbose_logging;
     let is_local_client = peer_addr.ip().is_loopback();
-    let can_defer_client_process = should_defer_client_process_resolution(
-        &method,
-        verbose_logging,
-        admin_state
-            .as_ref()
-            .is_some_and(|state| state.script_manager.is_some()),
-    );
+    let is_admin_request = is_admin_request_path(path);
+    let can_defer_client_process =
+        !is_admin_request && should_defer_client_process_resolution(&method, verbose_logging);
 
     let connect_tls_intercept_config = if method == Method::CONNECT {
         Some(if let Some(ref state) = admin_state {
@@ -1291,7 +1266,7 @@ async fn handle_request(
         let client_process =
             if is_local_client && requires_client_app_for_tls_decision(tls_intercept_config) {
                 let (max_retries, delay_ms) = app_policy_process_resolution_retry_config();
-                info!(
+                debug!(
                     req_id = ctx.id_str(),
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
@@ -1311,7 +1286,7 @@ async fn handle_request(
             };
         if is_local_client && requires_client_app_for_tls_decision(tls_intercept_config) {
             match client_process.as_ref() {
-                Some(process) => info!(
+                Some(process) => debug!(
                     req_id = ctx.id_str(),
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
@@ -1319,7 +1294,7 @@ async fn handle_request(
                     client_pid = process.pid,
                     "CONNECT synchronous client process resolution succeeded"
                 ),
-                None => warn!(
+                None => debug!(
                     req_id = ctx.id_str(),
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
@@ -1339,7 +1314,8 @@ async fn handle_request(
             if should_spawn {
                 let record_id = ctx.id_str();
                 let client_process_cache = Arc::clone(&client_process_cache);
-                spawn_async_process_resolver(
+                let resolution_started_for_finish = Arc::clone(&client_process_resolution_started);
+                spawn_async_process_resolver_with_finish(
                     peer_addr,
                     local_addr,
                     record_id.to_string(),
@@ -1348,6 +1324,9 @@ async fn handle_request(
                             *cache = Some(process.clone());
                         }
                         state.update_client_process(&id, process.name, process.pid, process.path);
+                    },
+                    move || {
+                        resolution_started_for_finish.store(false, Ordering::Release);
                     },
                 );
             }
@@ -1381,7 +1360,9 @@ async fn handle_request(
                     if should_spawn {
                         let record_id = ctx.id_str();
                         let client_process_cache = Arc::clone(&client_process_cache);
-                        spawn_async_process_resolver(
+                        let resolution_started_for_finish =
+                            Arc::clone(&client_process_resolution_started);
+                        spawn_async_process_resolver_with_finish(
                             peer_addr,
                             local_addr,
                             record_id.to_string(),
@@ -1395,6 +1376,9 @@ async fn handle_request(
                                     process.pid,
                                     process.path,
                                 );
+                            },
+                            move || {
+                                resolution_started_for_finish.store(false, Ordering::Release);
                             },
                         );
                     }
@@ -2200,32 +2184,26 @@ mod tests {
     fn test_should_not_defer_client_process_for_connect() {
         assert!(!should_defer_client_process_resolution(
             &Method::CONNECT,
-            false,
             false
         ));
     }
 
     #[test]
-    fn test_should_not_defer_client_process_when_scripts_are_enabled() {
-        assert!(!should_defer_client_process_resolution(
-            &Method::GET,
-            false,
-            true
-        ));
+    fn test_should_not_defer_client_process_for_plain_http() {
+        assert!(!should_defer_client_process_resolution(&Method::GET, false));
     }
 
     #[test]
-    fn test_should_defer_client_process_only_for_plain_http_without_scripts() {
-        assert!(should_defer_client_process_resolution(
-            &Method::GET,
-            false,
-            false
-        ));
-        assert!(!should_defer_client_process_resolution(
-            &Method::GET,
-            true,
-            false
-        ));
+    fn test_should_not_defer_client_process_for_verbose_plain_http() {
+        assert!(!should_defer_client_process_resolution(&Method::GET, true));
+    }
+
+    #[test]
+    fn test_is_admin_request_path() {
+        assert!(is_admin_request_path("/_bifrost"));
+        assert!(is_admin_request_path("/_bifrost/api/traffic"));
+        assert!(!is_admin_request_path("/api/_bifrost"));
+        assert!(!is_admin_request_path("/_bifrostish/api"));
     }
 
     #[test]

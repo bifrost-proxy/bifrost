@@ -1,17 +1,18 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use bifrost_admin::{
     assemble_openai_like_response_body_from_text, AdminState, BodyRef, BodyStreamWriter,
-    FrameDirection, TrafficType, MAX_OPENAI_LIKE_SSE_ASSEMBLY_INPUT_BYTES,
+    FrameDirection, SharedBodyStore, TrafficType, MAX_OPENAI_LIKE_SSE_ASSEMBLY_INPUT_BYTES,
 };
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use memchr::memchr;
+use tokio::sync::Semaphore;
 use tokio::time::Sleep;
 
 use crate::server::BoxBody;
@@ -21,6 +22,7 @@ use crate::transform::decompress::decompress_body_with_limit;
 // not burn CPU on bookkeeping.
 const BODY_TRAFFIC_FLUSH_BYTES: usize = 1024 * 1024;
 const MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES: usize = MAX_OPENAI_LIKE_SSE_ASSEMBLY_INPUT_BYTES;
+const DEFAULT_BODY_STORE_BACKGROUND_CONCURRENCY: usize = 1;
 
 fn record_first_downstream_byte(state: &AdminState, record_id: &str) {
     state.update_traffic_by_id(record_id, move |record| {
@@ -32,6 +34,93 @@ fn record_first_downstream_byte(state: &AdminState, record_id: &str) {
             }
         }
     });
+}
+
+fn store_body_sync(
+    body_store: &SharedBodyStore,
+    record_id: &str,
+    kind: &str,
+    data: &[u8],
+) -> Option<BodyRef> {
+    body_store.read().store(record_id, kind, data)
+}
+
+fn body_store_background_semaphore() -> Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| {
+            let permits = std::env::var("BIFROST_BODY_STORE_BACKGROUND_CONCURRENCY")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_BODY_STORE_BACKGROUND_CONCURRENCY);
+            Arc::new(Semaphore::new(permits))
+        })
+        .clone()
+}
+
+fn schedule_decompressed_response_body_store(
+    state: Arc<AdminState>,
+    body_store: SharedBodyStore,
+    record_id: String,
+    body: Vec<u8>,
+) -> Option<BodyRef> {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return store_body_sync(&body_store, &record_id, "res", &body);
+    };
+
+    handle.spawn(async move {
+        let semaphore = body_store_background_semaphore();
+        let _permit = semaphore.acquire_owned().await.ok();
+        let record_id_for_store = record_id.clone();
+        let body_ref = tokio::task::spawn_blocking(move || {
+            store_body_sync(&body_store, &record_id_for_store, "res", &body)
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(body_ref) = body_ref {
+            state.update_traffic_by_id(&record_id, move |record| {
+                record.response_body_ref = Some(body_ref.clone());
+            });
+        }
+    });
+
+    None
+}
+
+fn store_response_body_or_schedule(
+    state: Arc<AdminState>,
+    body_store: SharedBodyStore,
+    record_id: String,
+    body: Vec<u8>,
+    content_encoding: Option<String>,
+    max_decompress_output_bytes: usize,
+) -> Option<BodyRef> {
+    let decompressed = decompress_body_with_limit(
+        &body,
+        content_encoding.as_deref(),
+        max_decompress_output_bytes,
+    );
+    if let Some(store) = body_store.try_read() {
+        return store.store(&record_id, "res", decompressed.as_ref());
+    }
+
+    schedule_decompressed_response_body_store(
+        state,
+        body_store,
+        record_id,
+        decompressed.as_ref().to_vec(),
+    )
+}
+
+fn start_body_stream(
+    body_store: &SharedBodyStore,
+    record_id: &str,
+    kind: &str,
+) -> std::io::Result<BodyStreamWriter> {
+    body_store.read().start_stream(record_id, kind)
 }
 
 fn persist_socket_summary(state: &AdminState, record_id: &str, total_bytes: usize) {
@@ -100,6 +189,7 @@ struct TeeBodyDropGuard {
     max_body_size: usize,
     content_encoding: Option<String>,
     traffic_type: Option<TrafficType>,
+    monitor_connection: bool,
     response_headers_size: usize,
     file_writer: Option<BodyStreamWriter>,
 }
@@ -127,11 +217,13 @@ impl TeeBodyDropGuard {
             } else {
                 state.metrics_collector.add_bytes_received(bytes);
             }
-            state.connection_monitor.update_traffic(
-                &self.record_id,
-                FrameDirection::Receive,
-                bytes,
-            );
+            if self.monitor_connection {
+                state.connection_monitor.update_traffic(
+                    &self.record_id,
+                    FrameDirection::Receive,
+                    bytes,
+                );
+            }
         }
 
         self.pending_traffic_bytes = 0;
@@ -144,19 +236,20 @@ impl TeeBodyDropGuard {
                 Some(writer.finish())
             } else if !self.buffer.is_empty() {
                 if let Some(ref body_store) = state.body_store {
-                    let store = body_store.read();
                     let max_decompress_output_bytes = state
                         .config_manager
                         .as_ref()
                         .and_then(|cm| cm.try_config())
                         .map(|cfg| cfg.sandbox.limits.max_decompress_output_bytes)
                         .unwrap_or(10 * 1024 * 1024);
-                    let decompressed = decompress_body_with_limit(
-                        &self.buffer,
-                        self.content_encoding.as_deref(),
+                    store_response_body_or_schedule(
+                        state.clone(),
+                        body_store.clone(),
+                        self.record_id.clone(),
+                        self.buffer.split().freeze().to_vec(),
+                        self.content_encoding.clone(),
                         max_decompress_output_bytes,
-                    );
-                    store.store(&self.record_id, "res", decompressed.as_ref())
+                    )
                 } else {
                     None
                 }
@@ -177,13 +270,15 @@ impl TeeBodyDropGuard {
                 }
             });
 
-            state.connection_monitor.set_connection_closed(
-                &self.record_id,
-                None,
-                None,
-                state.frame_store.as_ref(),
-                state.ws_payload_store.as_ref(),
-            );
+            if self.monitor_connection {
+                state.connection_monitor.set_connection_closed(
+                    &self.record_id,
+                    None,
+                    None,
+                    state.frame_store.as_ref(),
+                    state.ws_payload_store.as_ref(),
+                );
+            }
         }
     }
 }
@@ -195,17 +290,24 @@ struct TeeBody<B> {
 
 const DEFAULT_MAX_BODY_BUFFER_SIZE: usize = 10 * 1024 * 1024;
 
+pub struct TeeBodyCaptureOptions {
+    pub max_body_size: Option<usize>,
+    pub content_encoding: Option<String>,
+    pub traffic_type: Option<TrafficType>,
+    pub monitor_connection: bool,
+    pub response_headers_size: usize,
+}
+
 impl<B> TeeBody<B> {
     pub fn new(
         inner: B,
         admin_state: Option<Arc<AdminState>>,
         record_id: String,
-        max_body_size: Option<usize>,
-        content_encoding: Option<String>,
-        traffic_type: Option<TrafficType>,
-        response_headers_size: usize,
+        options: TeeBodyCaptureOptions,
     ) -> Self {
-        let max_size = max_body_size.unwrap_or(DEFAULT_MAX_BODY_BUFFER_SIZE);
+        let max_size = options
+            .max_body_size
+            .unwrap_or(DEFAULT_MAX_BODY_BUFFER_SIZE);
         Self {
             inner: Box::pin(inner),
             guard: TeeBodyDropGuard {
@@ -216,9 +318,10 @@ impl<B> TeeBody<B> {
                 finished: false,
                 buffer: BytesMut::with_capacity(8192),
                 max_body_size: max_size,
-                content_encoding,
-                traffic_type,
-                response_headers_size,
+                content_encoding: options.content_encoding,
+                traffic_type: options.traffic_type,
+                monitor_connection: options.monitor_connection,
+                response_headers_size: options.response_headers_size,
                 file_writer: None,
             },
         }
@@ -267,11 +370,9 @@ where
                     {
                         if let Some(ref state) = self.guard.admin_state {
                             if let Some(ref body_store) = state.body_store {
-                                let store = body_store.read();
-                                if let Ok(writer) = store.start_stream(&self.guard.record_id, "res")
-                                {
-                                    new_writer = Some(writer);
-                                }
+                                new_writer =
+                                    start_body_stream(body_store, &self.guard.record_id, "res")
+                                        .ok();
                             }
                         }
                     }
@@ -326,21 +427,9 @@ pub fn create_tee_body_with_store(
     body: impl Body<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
     admin_state: Option<Arc<AdminState>>,
     record_id: String,
-    max_body_size: Option<usize>,
-    content_encoding: Option<String>,
-    traffic_type: Option<TrafficType>,
-    response_headers_size: usize,
+    options: TeeBodyCaptureOptions,
 ) -> BoxBody {
-    TeeBody::new(
-        body,
-        admin_state,
-        record_id,
-        max_body_size,
-        content_encoding,
-        traffic_type,
-        response_headers_size,
-    )
-    .boxed()
+    TeeBody::new(body, admin_state, record_id, options).boxed()
 }
 
 struct MetricsBodyDropGuard {
@@ -513,11 +602,9 @@ impl Body for RequestTeeBody {
                         let mut new_writer: Option<BodyStreamWriter> = None;
                         if let Some(ref state) = self.guard.admin_state {
                             if let Some(ref body_store) = state.body_store {
-                                let store = body_store.read();
-                                if let Ok(writer) = store.start_stream(&self.guard.record_id, "req")
-                                {
-                                    new_writer = Some(writer);
-                                }
+                                new_writer =
+                                    start_body_stream(body_store, &self.guard.record_id, "req")
+                                        .ok();
                             }
                         }
                         if let Some(writer) = new_writer {
@@ -856,7 +943,6 @@ pub fn store_request_body(
 
     if let Some(ref state) = admin_state {
         if let Some(ref body_store) = state.body_store {
-            let store = body_store.read();
             let max_decompress_output_bytes = state
                 .config_manager
                 .as_ref()
@@ -868,7 +954,7 @@ pub fn store_request_body(
                 content_encoding,
                 max_decompress_output_bytes,
             );
-            return store.store(record_id, "req", decompressed.as_ref());
+            return store_body_sync(body_store, record_id, "req", decompressed.as_ref());
         }
     }
     None
@@ -885,9 +971,114 @@ pub fn store_response_body(
 
     if let Some(ref state) = admin_state {
         if let Some(ref body_store) = state.body_store {
-            let store = body_store.read();
-            return store.store(record_id, "res", body_data);
+            return store_body_sync(body_store, record_id, "res", body_data);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use bifrost_admin::BodyStore;
+    use parking_lot::RwLock;
+
+    #[test]
+    fn tee_body_skips_connection_monitor_when_tracking_disabled() {
+        let state = Arc::new(AdminState::new(0));
+        let mut guard = TeeBodyDropGuard {
+            admin_state: Some(state.clone()),
+            record_id: "plain-http".to_string(),
+            total_bytes: 128,
+            pending_traffic_bytes: 64,
+            finished: false,
+            buffer: BytesMut::new(),
+            max_body_size: DEFAULT_MAX_BODY_BUFFER_SIZE,
+            content_encoding: None,
+            traffic_type: Some(TrafficType::Http),
+            monitor_connection: false,
+            response_headers_size: 0,
+            file_writer: None,
+        };
+
+        guard.store_body_and_update_record();
+
+        assert_eq!(state.connection_monitor.connection_count(), 0);
+        assert!(state.connection_monitor.get_status("plain-http").is_none());
+    }
+
+    #[test]
+    fn tee_body_updates_connection_monitor_when_tracking_enabled() {
+        let state = Arc::new(AdminState::new(0));
+        state.connection_monitor.register_connection("streaming");
+        let mut guard = TeeBodyDropGuard {
+            admin_state: Some(state.clone()),
+            record_id: "streaming".to_string(),
+            total_bytes: 128,
+            pending_traffic_bytes: 64,
+            finished: false,
+            buffer: BytesMut::new(),
+            max_body_size: DEFAULT_MAX_BODY_BUFFER_SIZE,
+            content_encoding: None,
+            traffic_type: Some(TrafficType::Http),
+            monitor_connection: true,
+            response_headers_size: 0,
+            file_writer: None,
+        };
+
+        guard.store_body_and_update_record();
+
+        let status = state
+            .connection_monitor
+            .get_status("streaming")
+            .expect("registered streaming connection should keep a final status");
+        assert!(!status.is_open);
+        assert_eq!(status.receive_bytes, 64);
+    }
+
+    #[tokio::test]
+    async fn response_body_storage_waits_in_background_when_body_store_is_busy() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-body-store-eventual-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        )));
+        let state = Arc::new(AdminState::new(0).with_body_store(body_store.clone()));
+        let busy_writer = body_store.write();
+
+        let body_ref = store_response_body_or_schedule(
+            state,
+            body_store.clone(),
+            "eventual-body".to_string(),
+            b"body".to_vec(),
+            None,
+            1024 * 1024,
+        );
+
+        assert!(body_ref.is_none());
+        assert!(!dir.join("eventual-body_res").exists());
+        drop(busy_writer);
+
+        for _ in 0..50 {
+            if dir.join("eventual-body_res").exists() {
+                let saved = std::fs::read(dir.join("eventual-body_res")).unwrap();
+                assert_eq!(saved, b"body");
+                let _ = std::fs::remove_dir_all(dir);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+        panic!("background body storage did not finish");
+    }
 }

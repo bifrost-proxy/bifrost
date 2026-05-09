@@ -77,3 +77,4 @@ windows = { version = "0.58", features = [
 [dev-dependencies]
 tokio-test = "0.4"
 env_logger = "0.11"
+parking_lot = "0.12"
