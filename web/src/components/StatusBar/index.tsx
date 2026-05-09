@@ -430,6 +430,7 @@ const StatusBar = memo(function StatusBar() {
               <div
                 style={styles.versionButton}
                 onClick={handleVersionClick}
+                data-testid="statusbar-version-button"
                 onMouseEnter={(e) => {
                   e.currentTarget.style.backgroundColor = token.colorFillSecondary;
                 }}

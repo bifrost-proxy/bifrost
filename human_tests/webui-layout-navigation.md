@@ -297,6 +297,29 @@
 
 ---
 
+### TC-WLN-16：版本更新弹窗 Upgrade Command Copy 真实写入剪贴板
+
+**前置条件**：使用临时数据目录启动 Bifrost，端口避开 `9900`，启动参数包含 `--no-system-proxy`。测试前先清空系统剪贴板内容。
+
+**操作步骤**：
+1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/traffic`
+2. 让版本检查接口返回有新版本，例如 current `0.0.62`、latest `0.0.73`
+3. 点击状态栏右侧版本号，打开 `New Version Available` 弹窗
+4. 点击 `Upgrade Command` 区域右侧的 `Copy` 按钮
+5. 读取真实剪贴板内容
+
+**预期结果**：
+- 页面显示成功提示 `Command copied to clipboard`
+- 剪贴板内容精确等于 `bifrost upgrade`
+- 若复制失败，页面必须显示失败提示，不允许出现成功提示但剪贴板为空的假阳性
+- 亮色和暗色主题下弹窗内容、Copy 按钮和提示均清晰可读
+
+**本次执行记录（2026-05-09）**：
+- 通过。先执行 `printf '' | pbcopy` 清空系统剪贴板，再执行 `pnpm --dir web exec playwright test admin-settings.spec.ts --grep "版本更新弹窗 Upgrade Command Copy 写入剪贴板" --headed`，headed Chromium 打开真实 WebUI，mock 版本检查为 `0.0.62 -> 0.0.73`，点击状态栏版本号打开更新弹窗并点击 `Copy`。
+- 通过。测试结束后执行 `pbpaste`，真实系统剪贴板内容为 `bifrost upgrade`，与预期完全一致。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
