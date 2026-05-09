@@ -30,10 +30,10 @@ export default function VersionModal() {
   }, [setModalVisible]);
 
   const handleCopyCommand = useCallback(async () => {
-    try {
-      await copyToClipboard("bifrost upgrade");
+    const ok = await copyToClipboard("bifrost upgrade");
+    if (ok) {
       message.success("Command copied to clipboard");
-    } catch {
+    } else {
       message.error("Failed to copy command");
     }
   }, []);
@@ -231,6 +231,7 @@ export default function VersionModal() {
             size="small"
             icon={<CopyOutlined />}
             onClick={handleCopyCommand}
+            data-testid="version-upgrade-copy-button"
           >
             Copy
           </Button>

@@ -40,21 +40,31 @@ function execCommandCopy(text: string): boolean {
     document.activeElement?.closest('[role="dialog"]') ??
     document.body;
 
+  let copyEventWroteText = false;
+  const handleCopy = (event: ClipboardEvent) => {
+    if (!event.clipboardData) return;
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', text);
+    copyEventWroteText = true;
+  };
+
   container.appendChild(textarea);
   textarea.focus();
   textarea.select();
+  document.addEventListener('copy', handleCopy);
   try {
-    return document.execCommand('copy');
+    return document.execCommand('copy') && copyEventWroteText;
   } catch {
     return false;
   } finally {
+    document.removeEventListener('copy', handleCopy);
     container.removeChild(textarea);
   }
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {
-  if (isDesktopShell()) {
-    return nativeClipboardWrite(text);
+  if (isDesktopShell() && await nativeClipboardWrite(text)) {
+    return true;
   }
 
   // 1. Prefer the synchronous copy path while we are still inside the user's

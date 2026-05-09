@@ -45,6 +45,35 @@ test("左侧一级导航在小窗口下可滚动且 Settings 仍可达", async (
   await expect(page).toHaveURL(/\/_bifrost\/settings/);
 });
 
+test("版本更新弹窗 Upgrade Command Copy 写入剪贴板", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route("**/_bifrost/api/system/version-check**", async (route) => {
+    await route.fulfill({
+      json: {
+        has_update: true,
+        current_version: "0.0.62",
+        latest_version: "0.0.73",
+        release_highlights: ["fix: copy upgrade command regression"],
+        release_url: "https://github.com/bifrost-proxy/bifrost/releases/tag/v0.0.73",
+      },
+    });
+  });
+
+  await openPage(page, "traffic");
+  await page.evaluate(async () => navigator.clipboard.writeText(""));
+  await page.getByTestId("statusbar-version-button").click();
+  await expect(page.getByText("New Version Available")).toBeVisible();
+
+  await page.getByTestId("version-upgrade-copy-button").click();
+  await waitForToast(page, "Command copied to clipboard");
+
+  const clipboardText = await page.evaluate(async () => navigator.clipboard.readText());
+  expect(clipboardText).toBe("bifrost upgrade");
+});
+
 test("Settings 访问控制支持模式切换、白名单、临时白名单和 LAN 开关", async ({
   page,
 }) => {
