@@ -15,22 +15,6 @@
 
 Bifrost 是一个用 Rust 编写的高性能代理服务器，灵感来源于 [Whistle](https://github.com/avwo/whistle)。它提供请求拦截、规则修改、TLS 拦截、脚本扩展、流量查看、请求重放以及 Web UI 管理能力。
 
-## 特性说明
-
-![network.png](assets/network.png) <img width="1500" height="783" alt="image" src="https://github.com/user-attachments/assets/44062a96-47f3-481b-a2b6-e1bda9b3fda9" />
-![scripts.png](assets/scripts.png)
-![rules.png](assets/rules.png)
-![replay.png](assets/replay.png)
-![metrics.png](assets/metrics.png)
-
-- 高性能代理内核：基于 Tokio + Hyper，支持高并发与连接复用
-- 多协议支持：HTTP/1.1、HTTP/2、HTTP/3、HTTPS、SOCKS5、WebSocket、SSE、gRPC
-- TLS 拦截能力：支持 CA 证书生成、按域名动态签发证书、按规则选择拦截或透传
-- 规则引擎：支持路由、请求/响应改写、注入、延迟、限速、Mock、脚本处理
-- 管理界面：内置 Web UI，支持规则编辑、流量查看、脚本管理、请求重放
-- 资源风险告警：Performance 页与 `/_bifrost/api/system/memory` 会显示 body/ws 文件 writer 占用及接近句柄上限的告警状态
-- 脚本沙箱：基于 QuickJS，支持 `reqScript`、`resScript`、`decode`
-
 ## 快速开始
 
 安装 CLI：
@@ -66,6 +50,27 @@ bifrost start -d
 ```text
 http://127.0.0.1:9900/_bifrost/
 ```
+
+## 和AI集成
+```bash
+bifrost install-skill -y
+```
+
+## 特性说明
+
+![network.png](assets/network.png) <img width="1500" height="783" alt="image" src="https://github.com/user-attachments/assets/44062a96-47f3-481b-a2b6-e1bda9b3fda9" />
+![scripts.png](assets/scripts.png)
+![rules.png](assets/rules.png)
+![replay.png](assets/replay.png)
+![metrics.png](assets/metrics.png)
+
+- 高性能代理内核：基于 Tokio + Hyper，支持高并发与连接复用
+- 多协议支持：HTTP/1.1、HTTP/2、HTTP/3、HTTPS、SOCKS5、WebSocket、SSE、gRPC
+- TLS 拦截能力：支持 CA 证书生成、按域名动态签发证书、按规则选择拦截或透传
+- 规则引擎：支持路由、请求/响应改写、注入、延迟、限速、Mock、脚本处理
+- 管理界面：内置 Web UI，支持规则编辑、流量查看、脚本管理、请求重放
+- 资源风险告警：Performance 页与 `/_bifrost/api/system/memory` 会显示 body/ws 文件 writer 占用及接近句柄上限的告警状态
+- 脚本沙箱：基于 QuickJS，支持 `reqScript`、`resScript`、`decode`
 
 ## 开发初始化
 
