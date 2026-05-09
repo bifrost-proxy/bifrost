@@ -1,4 +1,12 @@
-import { Select, Input, Button, Space, AutoComplete, Tooltip } from "antd";
+import {
+  Select,
+  Input,
+  Button,
+  Space,
+  AutoComplete,
+  Tooltip,
+  Checkbox,
+} from "antd";
 import { PlusOutlined, DeleteOutlined, SearchOutlined } from "@ant-design/icons";
 import { useMemo } from "react";
 import type { FilterCondition } from "../../types";
@@ -43,6 +51,12 @@ const styles = {
     alignItems: "center",
     gap: 8,
   },
+  disabledRow: {
+    opacity: 0.62,
+  },
+  enabledCheckbox: {
+    flex: "0 0 auto",
+  },
   fieldSelect: {
     width: 140,
   },
@@ -72,6 +86,7 @@ export default function FilterBar({
       field: "url",
       operator: "contains",
       value: "",
+      enabled: true,
     };
     onFiltersChange([...filters, newFilter]);
   };
@@ -80,10 +95,10 @@ export default function FilterBar({
     onFiltersChange(filters.filter((f) => f.id !== id));
   };
 
-  const handleChange = (
+  const handleChange = <K extends keyof FilterCondition>(
     id: string,
-    key: keyof FilterCondition,
-    value: string,
+    key: K,
+    value: FilterCondition[K],
   ) => {
     onFiltersChange(
       filters.map((f) => (f.id === id ? { ...f, [key]: value } : f)),
@@ -120,6 +135,8 @@ export default function FilterBar({
   }, [availableClientIps]);
 
   const renderValueInput = (filter: FilterCondition) => {
+    const disabled = filter.enabled === false;
+
     if (filter.operator === "is_empty" || filter.operator === "is_not_empty") {
       return (
         <Input
@@ -141,6 +158,7 @@ export default function FilterBar({
           style={styles.valueInput}
           placeholder="Select or enter app name..."
           size="small"
+          disabled={disabled}
           filterOption={(inputValue, option) =>
             option?.value.toLowerCase().includes(inputValue.toLowerCase()) ?? false
           }
@@ -158,6 +176,7 @@ export default function FilterBar({
           style={styles.valueInput}
           placeholder="Select or enter IP address..."
           size="small"
+          disabled={disabled}
           filterOption={(inputValue, option) =>
             option?.value.toLowerCase().includes(inputValue.toLowerCase()) ?? false
           }
@@ -174,6 +193,7 @@ export default function FilterBar({
           style={styles.valueInput}
           placeholder="Enter proxy port..."
           size="small"
+          disabled={disabled}
           inputMode="numeric"
         />
       );
@@ -186,6 +206,7 @@ export default function FilterBar({
         style={styles.valueInput}
         placeholder="Enter value..."
         size="small"
+        disabled={disabled}
       />
     );
   };
@@ -193,7 +214,31 @@ export default function FilterBar({
   return (
     <div style={styles.container}>
       {filters.map((filter, index) => (
-        <div key={filter.id} style={styles.row} data-testid="traffic-filter-row">
+        <div
+          key={filter.id}
+          style={{
+            ...styles.row,
+            ...(filter.enabled === false ? styles.disabledRow : {}),
+          }}
+          data-testid="traffic-filter-row"
+        >
+          <Tooltip
+            title={
+              filter.enabled === false
+                ? "Enable this filter"
+                : "Temporarily disable this filter"
+            }
+          >
+            <Checkbox
+              checked={filter.enabled !== false}
+              onChange={(e) =>
+                handleChange(filter.id, "enabled", e.target.checked)
+              }
+              aria-label="Enable filter"
+              data-testid="traffic-filter-enabled-checkbox"
+              style={styles.enabledCheckbox}
+            />
+          </Tooltip>
           <Select
             value={filter.field}
             options={fieldOptions}
@@ -201,6 +246,7 @@ export default function FilterBar({
             style={styles.fieldSelect}
             placeholder="Field"
             size="small"
+            disabled={filter.enabled === false}
           />
           <Select
             value={filter.operator}
@@ -209,6 +255,7 @@ export default function FilterBar({
             style={styles.operatorSelect}
             placeholder="Operator"
             size="small"
+            disabled={filter.enabled === false}
           />
           {renderValueInput(filter)}
           <Space size={4}>

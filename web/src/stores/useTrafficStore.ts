@@ -552,8 +552,16 @@ const replaceRecordInClientCatalog = (
   }
   addRecordToClientCatalog(catalog, next);
 };
-
-
+export const isFilterConditionApplicable = (
+  condition: FilterCondition,
+): boolean => {
+  return (
+    condition.enabled !== false &&
+    (condition.operator === 'is_empty' ||
+      condition.operator === 'is_not_empty' ||
+      condition.value.trim().length > 0)
+  );
+};
 
 const hasActiveFilters = (toolbar: ToolbarFilters, conditions: FilterCondition[]): boolean => {
   return toolbar.rule.length > 0 ||
@@ -561,12 +569,7 @@ const hasActiveFilters = (toolbar: ToolbarFilters, conditions: FilterCondition[]
     toolbar.status.length > 0 ||
     toolbar.type.length > 0 ||
     toolbar.imported.length > 0 ||
-    conditions.some(
-      (c) =>
-        c.operator === 'is_empty' ||
-        c.operator === 'is_not_empty' ||
-        c.value.trim().length > 0,
-    );
+    conditions.some(isFilterConditionApplicable);
 };
 
 interface CompiledCondition {
@@ -578,12 +581,7 @@ interface CompiledCondition {
 
 const compileConditions = (conditions: FilterCondition[]): CompiledCondition[] => {
   return conditions
-    .filter(
-      (c) =>
-        c.operator === 'is_empty' ||
-        c.operator === 'is_not_empty' ||
-        c.value.trim().length > 0,
-    )
+    .filter(isFilterConditionApplicable)
     .map(c => {
       let regex: RegExp | null = null;
       if (c.operator === 'regex') {

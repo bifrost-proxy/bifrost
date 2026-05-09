@@ -800,6 +800,67 @@ test("主筛选器支持按代理端口过滤 Traffic", async ({ page }) => {
   }
 });
 
+test("主筛选器支持临时停用单条条件", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const targetPath = `/filter-enabled-target-${token}`;
+  const otherPath = `/filter-enabled-other-${token}`;
+
+  try {
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${targetPath}`, backend.proxyUrl);
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${otherPath}`, backend.proxyUrl);
+    await waitForTrafficRecordByApi(backend.baseApi, targetPath);
+    await waitForTrafficRecordByApi(backend.baseApi, otherPath);
+
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: targetPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPath }).first(),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Add Filter" }).click();
+    const enabledCheckbox = page.getByRole("checkbox", { name: "Enable filter" }).first();
+    await expect(enabledCheckbox).toBeChecked();
+
+    await page.getByRole("combobox").first().click();
+    await page
+      .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-content")
+      .filter({ hasText: "Path" })
+      .click();
+    await page.getByPlaceholder("Enter value...").first().fill(targetPath);
+
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: targetPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPath }),
+    ).toHaveCount(0);
+
+    await enabledCheckbox.uncheck();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: targetPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPath }).first(),
+    ).toBeVisible();
+
+    await enabledCheckbox.check();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: targetPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPath }),
+    ).toHaveCount(0);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
 async function sendHttpViaProxy(url: string) {
   await new Promise<void>((resolve, reject) => {
     const req = httpRequest(

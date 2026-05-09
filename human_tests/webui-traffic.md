@@ -15,7 +15,7 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 生成测试流量（在另一个终端执行）：
    ```bash
@@ -423,6 +423,32 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 - 表格只展示 `listener_port=$MAIN_PORT` 的记录，隐藏其他端口记录。
 - API 返回 records 中每条记录的 `lp` 都等于 `$MAIN_PORT`。
 - Fuzzy Search 使用相同 port condition 时只返回对应端口记录。
+
+---
+
+### TC-WTR-23C：主筛选器临时停用单条筛选条件
+
+**操作步骤**：
+1. 使用隔离数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`，禁止使用 `9900`。
+2. 通过 `$MAIN_PORT` 代理发起两条请求：
+   ```bash
+   curl -x http://127.0.0.1:$MAIN_PORT http://127.0.0.1:$MOCK_PORT/filter-enabled-target
+   curl -x http://127.0.0.1:$MAIN_PORT http://127.0.0.1:$MOCK_PORT/filter-enabled-other
+   ```
+3. 打开 Traffic 页面：
+   ```text
+   http://127.0.0.1:$MAIN_PORT/_bifrost/traffic
+   ```
+4. 点击主筛选器 `Add Filter`，确认新增筛选条件行最左侧 checkbox 默认处于选中状态。
+5. 在字段下拉中选择 `Path`，操作符保持 `Contains`，输入 `/filter-enabled-target`。
+6. 取消勾选该筛选条件行最左侧 checkbox，不删除筛选条件。
+7. 再次勾选该 checkbox。
+
+**预期结果**：
+- 新增筛选条件默认启用，checkbox 默认选中。
+- 输入 `/filter-enabled-target` 且 checkbox 选中时，表格只展示 target 流量，隐藏 other 流量。
+- 取消勾选 checkbox 后，该筛选条件仍保留在页面上，但不再参与过滤，target 和 other 流量都可见。
+- 重新勾选 checkbox 后，该条件再次生效，表格重新只展示 target 流量。
 
 ---
 
@@ -943,6 +969,15 @@ rm -f /tmp/bifrost-mock-test.json
 ```
 
 ## 执行记录
+
+2026-05-09 Traffic 主筛选器临时停用单条条件执行记录：
+
+- 已执行用例：`TC-WTR-23C`
+- 已执行命令：`source ~/.zshrc; pnpm --dir web test:ui traffic.spec.ts -g "主筛选器支持临时停用单条条件"`
+- 使用隔离数据目录：Playwright UI 全局 setup 与用例内 `startIsolatedBackend()` 自动分配独立 `BIFROST_DATA_DIR`，启动 Bifrost 时包含 `--no-system-proxy`。
+- 端口要求：UI 测试动态分配后端端口，未使用 `9900`。
+- 实际结果：Playwright 本次执行 `1 passed`。新增筛选条件 checkbox 默认选中；输入 Path 条件后只展示 target 记录；取消勾选后不删除条件且 target/other 记录都可见；重新勾选后条件再次生效。
+- 结论：`TC-WTR-23C` 已按文档完成执行并通过，本次无环境阻塞。
 
 2026-05-08 Traffic 主筛选器端口过滤执行记录：
 
