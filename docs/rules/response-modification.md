@@ -266,6 +266,38 @@ www.example.com resCharset://iso-8859-1
 
 ---
 
+## responseFor / trailers
+
+这些协议用于设置额外响应元数据。`cache` 与 `attachment` 在下方有独立章节。
+
+### 语法
+
+```txt
+pattern responseFor://value
+pattern trailers://{trailer-headers}
+```
+
+### 示例
+
+```bash
+# 添加 x-bifrost-response-for 响应头
+api.example.com responseFor://mock
+
+# 设置响应 trailers（使用内嵌值）
+api.example.com trailers://{debug-trailers}
+```
+
+内嵌值定义：
+
+````
+``` debug-trailers
+X-Trace-Id: abc123
+X-Debug: true
+```
+````
+
+---
+
 ## headerReplace (响应头)
 
 局部替换响应头内容。

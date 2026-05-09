@@ -346,9 +346,9 @@ Expected coverage:
 - [ ] **Step 3: Update the human-test index counts**
 
 ```md
-| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 37 | ... 桌面端编辑器快捷键回归 |
-| [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 20 | ... 桌面端编辑器快捷键回归 |
-| [webui-values.md](./webui-values.md) | Web UI Values 页面 | 19 | ... 桌面端编辑器快捷键回归 |
+| [webui-rules.md](../../../human_tests/webui-rules.md) | Web UI Rules 页面 | 37 | ... 桌面端编辑器快捷键回归 |
+| [webui-scripts.md](../../../human_tests/webui-scripts.md) | Web UI Scripts 页面 | 20 | ... 桌面端编辑器快捷键回归 |
+| [webui-values.md](../../../human_tests/webui-values.md) | Web UI Values 页面 | 19 | ... 桌面端编辑器快捷键回归 |
 ```
 
 - [ ] **Step 4: Execute the human tests immediately after editing**

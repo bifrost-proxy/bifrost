@@ -204,7 +204,7 @@ http*://api.example.com cache://3600
 
 ```txt
 192.168.1.1 proxy://127.0.0.1:3000
-10.0.0.0/8 log://
+10.0.0.0/8 reqHeaders://X-Matched-Private=1
 !192.168.0.0/16 proxy://external
 ```
 
@@ -221,7 +221,7 @@ $api.example.com file:///mock
 ```txt
 ^example.com/api/*/info file:///mock/$1.json
 ^example.com/static/** cache://3600
-^api.example.com/v*/users/*** log://
+^api.example.com/v*/users/*** reqHeaders://X-Api-Pattern=path-wildcard
 ```
 
 ### 正则匹配

@@ -11,7 +11,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 27 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证、status 活跃规则摘要，以及 listener 失败退出与 daemon readiness 回归 |
-| [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 的 start 参考区块同步、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
+| [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 短链化、按场景组织的 CLI 快速开始、同一 Bifrost 服务服务多个应用/开发任务、Agent 协作开发业务 Skill 场景、完整 CLI 详细文档入口、全局 Values 推荐边界、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 45 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器和 lineProps |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
 | [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 37 | traffic list/get/search/clear 命令，含多维度过滤器、代理入口端口筛选、搜索范围控制、交互式搜索 |
@@ -26,7 +26,7 @@
 | [cli-import-export.md](./cli-import-export.md) | CLI 导入导出与杂项 | 27 | export/import、metrics、sync、version-check、upgrade、completions、install-skill，含 version-check 空输出与 install-skill 更多 agent 兼容回归验证，以及 version-check redirect 优先与 HTML highlights 降级验证 |
 | [port-conflict-restart.md](./port-conflict-restart.md) | 端口冲突检测与自动重启 | 6 | 端口占用检测、进程信息显示、交互式终止确认、--yes 自动确认、PID 检测兼容性、非交互端口冲突早于系统代理摘要回归 |
 | [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 8 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、显式指定覆盖，以及默认 info 日志隐藏常态连接生命周期与规则命中噪声 |
-| [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 4 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、ScriptType::Parser、bp/devtools 协议实现，以及规则语法示例保持一致 |
+| [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 7 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、traffic/search/remote file help、ScriptType::Parser、bp/devtools 协议、过滤器 resolver 边界、workspace crate 架构索引、Markdown 相对链接，以及规则语法示例保持一致 |
 
 ### Web UI 测试
 

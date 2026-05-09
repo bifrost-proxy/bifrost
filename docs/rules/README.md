@@ -38,25 +38,30 @@
 - `proxy` / `pac`
 - `redirect`
 - `file` / `tpl` / `rawfile`
+- `tunnel`
 
 详见：[routing.md](./routing.md)、[status-redirect.md](./status-redirect.md)
 
 ### 2) 请求修改
 
-- 头部/Cookie：`reqHeaders`、`reqCookies`
-- 方法与常用字段：`method`、`ua`、`referer`
+- 头部/Cookie：`reqHeaders`、`reqCookies`、`auth`、`forwardedFor`
+- 方法与常用字段：`method`、`ua`、`referer`、`reqType`、`reqCharset`
 - CORS：`reqCors`
-- Body：`reqBody`、`reqReplace`、`params`（兼容别名 `reqMerge`）
+- Body：`reqBody`、`reqPrepend`、`reqAppend`、`reqReplace`、`params`（兼容别名 `reqMerge`）
+- 延迟与限速：`reqDelay`、`reqSpeed`
+- DNS / 上游协议：`dns`、`http3` / `h3`
 
-详见：[request-modification.md](./request-modification.md)、[body-manipulation.md](./body-manipulation.md)
+详见：[request-modification.md](./request-modification.md)、[body-manipulation.md](./body-manipulation.md)、[timing-throttle.md](./timing-throttle.md)、[routing.md](./routing.md)
 
 ### 3) 响应修改
 
 - 头部/Cookie/CORS：`resHeaders`、`resCookies`、`resCors`
-- Body：`resBody`、`resReplace`、`resMerge`
+- 常用响应字段：`resType`、`resCharset`、`cache`、`attachment`、`responseFor`、`trailers`
+- Body：`resBody`、`resPrepend`、`resAppend`、`resReplace`、`resMerge`
 - 状态码：`statusCode` / `replaceStatus`
+- 延迟与限速：`resDelay`、`resSpeed`
 
-详见：[response-modification.md](./response-modification.md)、[body-manipulation.md](./body-manipulation.md)、[status-redirect.md](./status-redirect.md)
+详见：[response-modification.md](./response-modification.md)、[body-manipulation.md](./body-manipulation.md)、[status-redirect.md](./status-redirect.md)、[timing-throttle.md](./timing-throttle.md)
 
 ### 4) URL 操作
 
@@ -76,6 +81,7 @@
 ### 6) TLS / DevTools / 控制规则
 
 - `tlsIntercept` / `tlsPassthrough`
+- `tlsOptions` / `sniCallback`
 - `passthrough` / `tunnel`
 - `devtools`
 

@@ -200,6 +200,123 @@ test_completions_include_new_commands() {
 
 # ─── Help Text ───
 
+test_root_help_links_docs_instead_of_subcommand_reference() {
+    header "测试顶层 help 短链化"
+
+    local result
+    result=$(run_bifrost --help)
+
+    if grep -qF "SUBCOMMAND REFERENCE" <<<"$result"; then
+        fail "顶层 help 不应再包含 SUBCOMMAND REFERENCE"
+    else
+        pass "顶层 help 已移除 SUBCOMMAND REFERENCE"
+    fi
+
+    if grep -qF "RULE TEMPLATE VARIABLES" <<<"$result" || grep -qF "RULES QUICK START" <<<"$result"; then
+        fail "顶层 help 不应再展开规则变量/规则快速开始"
+    else
+        pass "顶层 help 已移除规则变量和规则快速开始长说明"
+    fi
+
+    local links=(
+        "docs/cli-quick-start.md"
+        "docs/cli.md"
+        "docs/getting-started.md"
+        "docs/rule.md"
+        "docs/operation.md"
+        "docs/pattern.md"
+        "docs/rules/README.md"
+    )
+    for link in "${links[@]}"; do
+        if grep -qF "$link" <<<"$result"; then
+            pass "顶层 help 包含文档链接: $link"
+        else
+            fail "顶层 help 缺少文档链接: $link"
+        fi
+    done
+
+    if grep -qF "Use 'bifrost <command> -h'" <<<"$result"; then
+        pass "顶层 help 提示使用子命令 help"
+    else
+        fail "顶层 help 缺少子命令 help 提示"
+    fi
+
+    local quick_start_checks=(
+        "先选场景"
+        "场景 1：使用主服务和多端口安全调试"
+        "默认启动会启用系统代理，让浏览器和桌面应用自然进入 Bifrost"
+        "默认不要开启全局 TLS 抓包，也不要用 \`--unsafe-ssl\` 跳过上游证书校验"
+        "bifrost port bind --port 18888"
+        "场景 4：按需调试 HTTPS 和路径规则"
+        "不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 \`tlsIntercept://\` 精确控制范围"
+        "遇到 SSL pinning 应用时，优先排除应用或域名"
+        "场景 6：从流量记录定位问题"
+        "场景 8：同一个服务服务多个应用或开发任务"
+        "一个常驻 Bifrost 共享证书、配置和流量库；每个任务用独立端口绑定独立规则"
+        "bifrost port bind --port 18881 --rule-text \"app-a.example.com tlsIntercept:// host://127.0.0.1:3001\""
+        "bifrost traffic list --listener-port 18881 --limit 50"
+        "只分析 \`listener_port=18882\` 的流量"
+        "不要停止整个主服务"
+        "场景 10：远程操作另一台 Bifrost"
+        "场景 12：和 Agent 协作开发业务 Skill"
+        "bifrost install-skill -t codex -y"
+        "bifrost port bind --port 18882"
+        "如果目标 App 有 SSL pinning，不要强行抓包它的 TLS 明文"
+        "bifrost traffic list --listener-port 18882 --limit 50"
+        "bifrost traffic list --client-app Chrome --limit 50"
+        "不要 mock，不要猜"
+        "简单值优先直接写在规则里，不要默认拆成全局 Values"
+        "优先使用规则文件内嵌值"
+        "命令快捷别名"
+        "规则快速入门"
+    )
+    for expected in "${quick_start_checks[@]}"; do
+        if grep -qF "$expected" "$PROJECT_DIR/docs/cli-quick-start.md"; then
+            pass "CLI 快速开始包含场景化说明: $expected"
+        else
+            fail "CLI 快速开始缺少场景化说明: $expected"
+        fi
+    done
+
+    local cli_doc_checks=(
+        "命令覆盖索引"
+        "环境变量"
+        "规则变量速查"
+        "| \`--client-app <APP>\` | 按客户端应用或进程名过滤"
+        "\`install-skill\` 只安装 Bifrost Agent Skill 文档"
+        "\`bifrost start\` 默认会启用系统代理"
+        "TLS 抓包不是默认建议，应按需通过规则级 \`tlsIntercept://\`、\`--intercept-include\` 或 \`--app-intercept-include\` 收窄到目标域名/应用"
+        "遇到 SSL pinning 应用时，用 \`tlsPassthrough://\`、\`--intercept-exclude\` 或 \`--app-intercept-exclude\` 排除"
+        "需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA"
+        "\`--no-system-proxy\`、\`--unsafe-ssl\` 和 \`--skip-cert-check\` 是测试/诊断选项，不应作为普通启动路径"
+        "同一个 Bifrost 服务可以同时服务多个应用或开发任务"
+        "只分析 \`listener_port=18882\` 的流量"
+        "默认优先写内联 value 或规则文件内嵌值"
+        "默认不要把普通 host、token 片段、短 header 或小 mock body 拆到全局 Values"
+        "\`setting\` 始终管理本机数据目录；\`remote\` 才会操作已连接的远端 Bifrost"
+        "\`--system-proxy\` 修改操作系统代理配置；\`--cli-proxy\` 写入 shell rc 文件中的代理环境变量"
+    )
+    for expected in "${cli_doc_checks[@]}"; do
+        if grep -qF "$expected" "$PROJECT_DIR/docs/cli.md"; then
+            pass "CLI 详细文档包含完整手册说明: $expected"
+        else
+            fail "CLI 详细文档缺少完整手册说明: $expected"
+        fi
+    done
+
+    local operation_doc_checks=(
+        "多行内容优先使用规则文件内嵌值"
+        "日常规则不要默认创建全局 Values"
+    )
+    for expected in "${operation_doc_checks[@]}"; do
+        if grep -qF "$expected" "$PROJECT_DIR/docs/operation.md"; then
+            pass "Operation 文档包含 Values 推荐边界: $expected"
+        else
+            fail "Operation 文档缺少 Values 推荐边界: $expected"
+        fi
+    done
+}
+
 test_help_all_commands() {
     header "测试所有子命令 help 可用"
 
@@ -969,6 +1086,7 @@ main() {
     test_config_help
     test_remote_command_exec_requires_double_dash_for_argv
 
+    test_root_help_links_docs_instead_of_subcommand_reference
     test_help_all_commands
     test_help_new_subcommands
 
