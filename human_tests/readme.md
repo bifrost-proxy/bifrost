@@ -34,7 +34,7 @@
 |------|---------|-----------|------|
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
-| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 46 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤）、右键菜单、WebSocket/SSE、搜索 |
+| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 47 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤）、右键菜单、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 40 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
@@ -45,7 +45,7 @@
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 3 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器 |
-| [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 15 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、Toolbar、主题切换、版本检查、拖拽导入 |
+| [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 16 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 全局右下角 AI skill 引导入口、hover 浮窗、hover 延迟关闭、安装命令复制、仓库 SKILL.md 链接、拖拽位置、点击隐藏，以及亮色/暗色主题验证 |
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
@@ -169,7 +169,7 @@
 
 ---
 
-**总计：90 个测试文件，1585 个测试用例**
+**总计：90 个测试文件，1586 个测试用例**
 
 ## 工作流程
 

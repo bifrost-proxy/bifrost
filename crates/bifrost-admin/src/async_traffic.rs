@@ -93,6 +93,7 @@ pub fn start_async_traffic_processor(
 
         let mut batch: Vec<Box<TrafficRecord>> = Vec::with_capacity(64);
         let mut updates: Vec<(String, TrafficUpdater)> = Vec::with_capacity(32);
+        let mut pending_updates: HashMap<String, Vec<TrafficUpdater>> = HashMap::new();
 
         loop {
             batch.clear();
@@ -121,8 +122,15 @@ pub fn start_async_traffic_processor(
 
                     if !batch.is_empty() {
                         let batch_size = batch.len();
-                        let records: Vec<TrafficRecord> =
+                        let mut records: Vec<TrafficRecord> =
                             batch.drain(..).map(|record| *record).collect();
+                        for record in &mut records {
+                            if let Some(updaters) = pending_updates.remove(&record.id) {
+                                for updater in updaters {
+                                    updater(record);
+                                }
+                            }
+                        }
                         let store = traffic_db_store.clone();
                         if let Err(e) = tokio::task::spawn_blocking(move || {
                             store.record_batch(records);
@@ -139,10 +147,13 @@ pub fn start_async_traffic_processor(
                         let has_subscribers = traffic_db_store.has_traffic_event_subscribers();
                         let drained = std::mem::take(&mut updates);
                         let store = traffic_db_store.clone();
-                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
+                            let mut missed_updates = Vec::new();
                             if has_subscribers {
                                 for (id, updater) in drained {
-                                    store.update_by_id(&id, |r| updater(r));
+                                    if !store.update_by_id(&id, |r| updater(r)) {
+                                        missed_updates.push((id, updater));
+                                    }
                                 }
                             } else {
                                 let mut grouped: HashMap<String, Vec<TrafficUpdater>> =
@@ -158,18 +169,31 @@ pub fn start_async_traffic_processor(
 
                                 for id in order {
                                     if let Some(grouped_updaters) = grouped.remove(&id) {
-                                        store.update_by_id(&id, move |record| {
+                                        let updated = store.update_by_id(&id, |record| {
                                             for updater in &grouped_updaters {
                                                 updater(record);
                                             }
                                         });
+                                        if !updated {
+                                            for updater in grouped_updaters {
+                                                missed_updates.push((id.clone(), updater));
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            missed_updates
                         })
                         .await
                         {
-                            error!("Traffic update task panicked: {}", e);
+                            Ok(missed_updates) => {
+                                for (id, updater) in missed_updates {
+                                    pending_updates.entry(id).or_default().push(updater);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Traffic update task panicked: {}", e);
+                            }
                         }
                         debug!("Processed {} traffic updates", update_count);
                     }
@@ -290,6 +314,59 @@ mod tests {
         let updated = db_store.get_by_id("test-update").unwrap();
         assert_eq!(updated.status, 200);
         assert_eq!(updated.duration_ms, 100);
+
+        drop(writer);
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_async_traffic_update_before_record_is_applied() {
+        let (writer, rx) = AsyncTrafficWriter::new(100);
+        let dir = make_temp_dir("async-traffic-update-before-record");
+        let traffic_dir = dir.join("traffic");
+        let _ = std::fs::create_dir_all(&traffic_dir);
+        let db_store = Arc::new(
+            TrafficDbStore::new(traffic_dir, 1000, 0, None)
+                .expect("failed to create traffic db store"),
+        );
+
+        let handle = start_async_traffic_processor(rx, db_store.clone());
+
+        writer.update_by_id("test-update-before-record", |r| {
+            r.client_app = Some("node".to_string());
+            r.client_pid = Some(4242);
+        });
+
+        assert!(tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                if db_store.get_by_id("test-update-before-record").is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_err());
+
+        let record = TrafficRecord::new(
+            "test-update-before-record".to_string(),
+            "GET".to_string(),
+            "https://example.com".to_string(),
+        );
+        writer.record(record);
+
+        assert!(
+            wait_until(Duration::from_secs(2), || {
+                db_store
+                    .get_by_id("test-update-before-record")
+                    .map(|record| {
+                        record.client_app.as_deref() == Some("node")
+                            && record.client_pid == Some(4242)
+                    })
+                    .unwrap_or(false)
+            })
+            .await
+        );
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;

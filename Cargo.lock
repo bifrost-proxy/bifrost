@@ -522,6 +522,7 @@ dependencies = [
  "memchr",
  "mime_guess",
  "netstat2",
+ "parking_lot",
  "pin-project-lite",
  "quinn",
  "rand 0.8.5",

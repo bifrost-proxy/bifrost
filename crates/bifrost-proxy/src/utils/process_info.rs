@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
-use tracing::{debug, info, trace, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, trace, warn};
+
+const PROCESS_RESOLUTION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct ClientProcess {
@@ -46,22 +49,22 @@ struct CachedProcess {
     expires_at: Instant,
 }
 
-#[cfg(not(target_os = "macos"))]
 struct SocketSnapshot {
     connections_to_pids: HashMap<ConnKey, u32>,
+    refreshed_at: Instant,
     expires_at: Instant,
 }
 
 pub struct ProcessResolver {
     cache: RwLock<HashMap<ConnKey, CachedProcess>>,
     pid_cache: RwLock<HashMap<u32, CachedProcess>>,
-    #[cfg(not(target_os = "macos"))]
     socket_snapshot: RwLock<Option<SocketSnapshot>>,
+    socket_snapshot_refresh: Mutex<()>,
     cache_ttl: Duration,
     pid_cache_ttl: Duration,
     negative_cache_ttl: Duration,
-    #[cfg(not(target_os = "macos"))]
     socket_snapshot_ttl: Duration,
+    socket_snapshot_miss_refresh_interval: Duration,
 }
 
 impl Default for ProcessResolver {
@@ -75,13 +78,13 @@ impl ProcessResolver {
         Self {
             cache: RwLock::new(HashMap::new()),
             pid_cache: RwLock::new(HashMap::new()),
-            #[cfg(not(target_os = "macos"))]
             socket_snapshot: RwLock::new(None),
+            socket_snapshot_refresh: Mutex::new(()),
             cache_ttl: Duration::from_secs(30),
             pid_cache_ttl: Duration::from_secs(2),
-            negative_cache_ttl: Duration::from_secs(5),
-            #[cfg(not(target_os = "macos"))]
+            negative_cache_ttl: Duration::from_millis(500),
             socket_snapshot_ttl: Duration::from_millis(250),
+            socket_snapshot_miss_refresh_interval: Duration::from_millis(50),
         }
     }
 
@@ -250,19 +253,41 @@ impl ProcessResolver {
         self.lookup_cached_process_by_pid(pid)
     }
 
-    #[cfg(target_os = "macos")]
-    fn lookup_pid(&self, key: &ConnKey) -> Option<u32> {
-        lookup_socket_pid_macos(key)
-    }
-
-    #[cfg(not(target_os = "macos"))]
     fn lookup_pid(&self, key: &ConnKey) -> Option<u32> {
         let now = Instant::now();
 
         if let Ok(snapshot_guard) = self.socket_snapshot.read() {
             if let Some(snapshot) = snapshot_guard.as_ref() {
                 if snapshot.expires_at > now {
-                    return snapshot.connections_to_pids.get(key).copied();
+                    if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
+                        return Some(pid);
+                    }
+                    if now.duration_since(snapshot.refreshed_at)
+                        < self.socket_snapshot_miss_refresh_interval
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        let _refresh_guard = match self.socket_snapshot_refresh.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let refresh_now = Instant::now();
+
+        if let Ok(snapshot_guard) = self.socket_snapshot.read() {
+            if let Some(snapshot) = snapshot_guard.as_ref() {
+                if snapshot.expires_at > refresh_now {
+                    if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
+                        return Some(pid);
+                    }
+                    if refresh_now.duration_since(snapshot.refreshed_at)
+                        < self.socket_snapshot_miss_refresh_interval
+                    {
+                        return None;
+                    }
                 }
             }
         }
@@ -273,7 +298,8 @@ impl ProcessResolver {
         if let Ok(mut snapshot_guard) = self.socket_snapshot.write() {
             *snapshot_guard = Some(SocketSnapshot {
                 connections_to_pids,
-                expires_at: now + self.socket_snapshot_ttl,
+                refreshed_at: refresh_now,
+                expires_at: refresh_now + self.socket_snapshot_ttl,
             });
         }
 
@@ -330,7 +356,6 @@ impl ProcessResolver {
             cache.retain(|_, value| value.expires_at > Instant::now());
         }
 
-        #[cfg(not(target_os = "macos"))]
         if let Ok(mut snapshot) = self.socket_snapshot.write() {
             if snapshot
                 .as_ref()
@@ -396,6 +421,7 @@ fn get_process_path_macos(pid: u32) -> Option<String> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::ConnKey;
+    use std::collections::HashMap;
     use std::mem::size_of;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use tracing::{debug, trace};
@@ -463,32 +489,18 @@ mod macos {
         remote_addr_raw: [u8; 16],
     }
 
-    pub(super) fn lookup_socket_pid_macos(key: &ConnKey) -> Option<u32> {
+    pub(super) fn lookup_socket_pid_map_macos() -> HashMap<ConnKey, u32> {
         let pids = list_all_pids();
-        let pid = pids
-            .iter()
-            .copied()
-            .find(|&pid| process_has_matching_socket(pid, key));
-
-        match pid {
-            Some(pid) => {
-                debug!(
-                    ?key,
-                    pid,
-                    pid_count = pids.len(),
-                    "Matched macOS client socket to process"
-                );
-                Some(pid)
-            }
-            None => {
-                debug!(
-                    ?key,
-                    pid_count = pids.len(),
-                    "No macOS process matched accepted connection"
-                );
-                None
-            }
+        let mut connections_to_pids = HashMap::new();
+        for pid in &pids {
+            collect_process_tcp_sockets(*pid, &mut connections_to_pids);
         }
+        debug!(
+            pid_count = pids.len(),
+            socket_count = connections_to_pids.len(),
+            "Refreshed macOS client socket pid snapshot"
+        );
+        connections_to_pids
     }
 
     fn list_all_pids() -> Vec<u32> {
@@ -519,7 +531,7 @@ mod macos {
             .collect()
     }
 
-    fn process_has_matching_socket(pid: u32, key: &ConnKey) -> bool {
+    fn collect_process_tcp_sockets(pid: u32, connections_to_pids: &mut HashMap<ConnKey, u32>) {
         let mut capacity = 64usize;
         loop {
             let mut fds = vec![
@@ -541,7 +553,7 @@ mod macos {
             };
 
             if bytes_filled <= 0 {
-                return false;
+                return;
             }
 
             if bytes_filled as usize == buffer_size as usize && capacity < 4096 {
@@ -555,16 +567,19 @@ mod macos {
                     continue;
                 }
 
-                if socket_fd_matches(pid, fd.proc_fd, key) {
-                    return true;
+                if let Some(key) = socket_fd_key(pid, fd.proc_fd) {
+                    connections_to_pids
+                        .entry(ConnKey::from_peer_addr(&key.client_addr))
+                        .or_insert(pid);
+                    connections_to_pids.entry(key).or_insert(pid);
                 }
             }
 
-            return false;
+            return;
         }
     }
 
-    fn socket_fd_matches(pid: u32, fd: i32, key: &ConnKey) -> bool {
+    fn socket_fd_key(pid: u32, fd: i32) -> Option<ConnKey> {
         let mut socket_fdinfo = [0u8; SOCKET_FDINFO_SIZE];
         let bytes_filled = unsafe {
             proc_pidfdinfo(
@@ -584,17 +599,15 @@ mod macos {
                 error = %std::io::Error::last_os_error(),
                 "proc_pidfdinfo(PROC_PIDFDSOCKETINFO) did not return socket info"
             );
-            return false;
+            return None;
         }
 
-        let Some(tcp) = parse_tcp_socket(&socket_fdinfo) else {
-            return false;
-        };
+        let tcp = parse_tcp_socket(&socket_fdinfo)?;
         if tcp.kind != SOCKINFO_TCP || !TCP_STATES_OF_INTEREST.contains(&tcp.state) {
-            return false;
+            return None;
         }
 
-        match_connection_raw(key, &tcp)
+        connection_key_from_raw(&tcp)
     }
 
     #[cfg(test)]
@@ -713,34 +726,16 @@ mod macos {
         buffer.get(offset..offset + 16)?.try_into().ok()
     }
 
-    fn match_connection_raw(key: &ConnKey, socket: &ParsedTcpSocket) -> bool {
-        let client_ip = match extract_ip_bytes(socket.vflag, &socket.local_addr_raw) {
-            Some(ip) => ip,
-            None => return false,
-        };
-        let client_port = match decode_port(socket.local_port_raw) {
-            Some(port) => port,
-            None => return false,
-        };
+    fn connection_key_from_raw(socket: &ParsedTcpSocket) -> Option<ConnKey> {
+        let client_ip = extract_ip_bytes(socket.vflag, &socket.local_addr_raw)?;
+        let client_port = decode_port(socket.local_port_raw)?;
+        let proxy_ip = extract_ip_bytes(socket.vflag, &socket.remote_addr_raw)?;
+        let proxy_port = decode_port(socket.remote_port_raw)?;
 
-        if client_ip != key.client_addr.ip() || client_port != key.client_addr.port() {
-            return false;
-        }
-
-        if let Some(proxy_addr) = key.proxy_addr {
-            let proxy_ip = match extract_ip_bytes(socket.vflag, &socket.remote_addr_raw) {
-                Some(ip) => ip,
-                None => return false,
-            };
-            let proxy_port = match decode_port(socket.remote_port_raw) {
-                Some(port) => port,
-                None => return false,
-            };
-
-            return proxy_ip == proxy_addr.ip() && proxy_port == proxy_addr.port();
-        }
-
-        true
+        Some(ConnKey {
+            client_addr: std::net::SocketAddr::new(client_ip, client_port),
+            proxy_addr: Some(std::net::SocketAddr::new(proxy_ip, proxy_port)),
+        })
     }
 
     fn decode_port(raw_port: i32) -> Option<u16> {
@@ -763,7 +758,9 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
-use macos::lookup_socket_pid_macos;
+fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
+    macos::lookup_socket_pid_map_macos()
+}
 
 #[cfg(target_os = "windows")]
 fn get_process_info(pid: u32) -> (String, Option<String>) {
@@ -865,6 +862,18 @@ static BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY: std::sync::LazyLock<usize> =
 static BACKGROUND_PROCESS_RESOLUTION_SEMAPHORE: std::sync::LazyLock<Semaphore> =
     std::sync::LazyLock::new(|| Semaphore::new(*BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY));
 
+static PROCESS_RESOLUTION_CONCURRENCY: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| {
+        std::env::var("BIFROST_PROCESS_RESOLUTION_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4)
+    });
+
+static PROCESS_RESOLUTION_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(*PROCESS_RESOLUTION_CONCURRENCY)));
+
 static APP_POLICY_PROCESS_RESOLUTION_RETRIES: std::sync::LazyLock<u32> =
     std::sync::LazyLock::new(|| {
         std::env::var("BIFROST_APP_POLICY_PROCESS_RESOLUTION_RETRIES")
@@ -918,6 +927,9 @@ fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
                         client_addr: SocketAddr::new(tcp.local_addr, tcp.local_port),
                         proxy_addr: Some(SocketAddr::new(tcp.remote_addr, tcp.remote_port)),
                     };
+                    connections_to_pids
+                        .entry(ConnKey::from_peer_addr(&key.client_addr))
+                        .or_insert(pid);
                     connections_to_pids.entry(key).or_insert(pid);
                 }
             }
@@ -971,14 +983,14 @@ pub fn resolve_client_process_for_connection_with_retry(
 }
 
 pub async fn resolve_client_process_async(peer_addr: &SocketAddr) -> Option<ClientProcess> {
-    resolve_client_process_async_with_retry(peer_addr, 3, 10).await
+    resolve_client_process_async_with_retry(peer_addr, 6, 10).await
 }
 
 pub async fn resolve_client_process_async_for_connection(
     peer_addr: &SocketAddr,
     local_addr: &SocketAddr,
 ) -> Option<ClientProcess> {
-    resolve_client_process_async_for_connection_with_retry(peer_addr, local_addr, 3, 10).await
+    resolve_client_process_async_for_connection_with_retry(peer_addr, local_addr, 6, 10).await
 }
 
 pub async fn resolve_client_process_async_with_retry(
@@ -986,8 +998,9 @@ pub async fn resolve_client_process_async_with_retry(
     max_retries: u32,
     delay_ms: u64,
 ) -> Option<ClientProcess> {
-    if let Some(cached) = PROCESS_RESOLVER.resolve_cached(peer_addr) {
-        return Some(cached);
+    let key = ConnKey::from_peer_addr(peer_addr);
+    if let Some(cached) = PROCESS_RESOLVER.get_from_cache(&key) {
+        return cached;
     }
 
     if !peer_addr.ip().is_loopback() {
@@ -995,11 +1008,11 @@ pub async fn resolve_client_process_async_with_retry(
     }
 
     let peer_addr = *peer_addr;
-    match tokio::task::spawn_blocking(move || {
+    let result = resolve_with_limited_blocking_task(key, move || {
         PROCESS_RESOLVER.resolve_with_retry(&peer_addr, max_retries, delay_ms)
     })
-    .await
-    {
+    .await;
+    match result {
         Ok(process) => process,
         Err(err) => {
             warn!(peer_addr = %peer_addr, error = %err, "Async process resolution task failed");
@@ -1014,15 +1027,18 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
     max_retries: u32,
     delay_ms: u64,
 ) -> Option<ClientProcess> {
-    if let Some(cached) = PROCESS_RESOLVER.resolve_cached_for_connection(peer_addr, local_addr) {
-        debug!(
-            peer_addr = %peer_addr,
-            local_addr = %local_addr,
-            client_app = %cached.name,
-            client_pid = cached.pid,
-            "Client process resolution cache hit for connection"
-        );
-        return Some(cached);
+    let key = ConnKey::from_connection(peer_addr, local_addr);
+    if let Some(cached) = PROCESS_RESOLVER.get_from_cache(&key) {
+        if let Some(ref process) = cached {
+            debug!(
+                peer_addr = %peer_addr,
+                local_addr = %local_addr,
+                client_app = %process.name,
+                client_pid = process.pid,
+                "Client process resolution cache hit for connection"
+            );
+        }
+        return cached;
     }
 
     if !peer_addr.ip().is_loopback() {
@@ -1039,7 +1055,7 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
 
     let peer_addr = *peer_addr;
     let local_addr = *local_addr;
-    match tokio::task::spawn_blocking(move || {
+    let result = resolve_with_limited_blocking_task(key, move || {
         PROCESS_RESOLVER.resolve_for_connection_with_retry(
             &peer_addr,
             &local_addr,
@@ -1047,8 +1063,8 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
             delay_ms,
         )
     })
-    .await
-    {
+    .await;
+    match result {
         Ok(Some(process)) => {
             debug!(
                 peer_addr = %peer_addr,
@@ -1089,6 +1105,19 @@ pub fn spawn_async_process_resolver<F>(
 ) where
     F: FnOnce(String, ClientProcess) + Send + 'static,
 {
+    spawn_async_process_resolver_with_finish(peer_addr, local_addr, record_id, callback, || {});
+}
+
+pub fn spawn_async_process_resolver_with_finish<F, G>(
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    record_id: String,
+    callback: F,
+    finish: G,
+) where
+    F: FnOnce(String, ClientProcess) + Send + 'static,
+    G: FnOnce() + Send + 'static,
+{
     tokio::spawn(async move {
         debug!(
             record_id,
@@ -1096,15 +1125,17 @@ pub fn spawn_async_process_resolver<F>(
             local_addr = %local_addr,
             "Scheduling background client process backfill"
         );
-        let permit = match BACKGROUND_PROCESS_RESOLUTION_SEMAPHORE.acquire().await {
+        let permit = match BACKGROUND_PROCESS_RESOLUTION_SEMAPHORE.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
                 debug!(
                     record_id,
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
-                    "Background client process backfill skipped because semaphore is closed"
+                    limit = *BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY,
+                    "Background client process backfill skipped because concurrency limit is saturated"
                 );
+                finish();
                 return;
             }
         };
@@ -1112,7 +1143,8 @@ pub fn spawn_async_process_resolver<F>(
         #[cfg(not(target_os = "macos"))]
         tokio::time::sleep(Duration::from_millis(25)).await;
 
-        let result = tokio::task::spawn_blocking(move || {
+        let key = ConnKey::from_connection(&peer_addr, &local_addr);
+        let result = resolve_with_limited_blocking_task(key, move || {
             PROCESS_RESOLVER.resolve_for_connection_with_retry(&peer_addr, &local_addr, 20, 50)
         })
         .await;
@@ -1120,7 +1152,7 @@ pub fn spawn_async_process_resolver<F>(
 
         match result {
             Ok(Some(process)) => {
-                info!(
+                debug!(
                     record_id,
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
@@ -1131,7 +1163,7 @@ pub fn spawn_async_process_resolver<F>(
                 callback(record_id, process);
             }
             Ok(None) => {
-                warn!(
+                debug!(
                     record_id,
                     peer_addr = %peer_addr,
                     local_addr = %local_addr,
@@ -1148,7 +1180,95 @@ pub fn spawn_async_process_resolver<F>(
                 );
             }
         }
+        finish();
     });
+}
+
+async fn resolve_with_limited_blocking_task<F>(
+    key: ConnKey,
+    resolver: F,
+) -> Result<Option<ClientProcess>, tokio::task::JoinError>
+where
+    F: FnOnce() -> Option<ClientProcess> + Send + 'static,
+{
+    resolve_with_limited_blocking_task_for_semaphore(
+        key,
+        Arc::clone(&PROCESS_RESOLUTION_SEMAPHORE),
+        *PROCESS_RESOLUTION_CONCURRENCY,
+        PROCESS_RESOLUTION_WAIT_TIMEOUT,
+        resolver,
+    )
+    .await
+}
+
+async fn resolve_with_limited_blocking_task_for_semaphore<F>(
+    key: ConnKey,
+    semaphore: Arc<Semaphore>,
+    concurrency_limit: usize,
+    timeout_duration: Duration,
+    resolver: F,
+) -> Result<Option<ClientProcess>, tokio::task::JoinError>
+where
+    F: FnOnce() -> Option<ClientProcess> + Send + 'static,
+{
+    let started_at = Instant::now();
+    let permit = match tokio::time::timeout(timeout_duration, semaphore.acquire_owned()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            debug!(
+                ?key,
+                concurrency_limit,
+                "Client process resolution skipped because concurrency limiter is closed"
+            );
+            return Ok(None);
+        }
+        Err(_) => {
+            debug!(
+                ?key,
+                concurrency_limit,
+                timeout_ms = timeout_duration.as_millis(),
+                "Client process resolution skipped after waiting for concurrency capacity"
+            );
+            return Ok(None);
+        }
+    };
+
+    let elapsed = started_at.elapsed();
+    let remaining_timeout = timeout_duration.saturating_sub(elapsed);
+    if remaining_timeout.is_zero() {
+        debug!(
+            ?key,
+            concurrency_limit,
+            timeout_ms = timeout_duration.as_millis(),
+            "Client process resolution skipped because concurrency wait exhausted the timeout budget"
+        );
+        return Ok(None);
+    }
+
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        resolver()
+    });
+    wait_for_process_resolution_with_timeout(task, key, remaining_timeout).await
+}
+
+async fn wait_for_process_resolution_with_timeout(
+    task: JoinHandle<Option<ClientProcess>>,
+    key: ConnKey,
+    timeout_duration: Duration,
+) -> Result<Option<ClientProcess>, tokio::task::JoinError> {
+    match tokio::time::timeout(timeout_duration, task).await {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                ?key,
+                timeout_ms = timeout_duration.as_millis(),
+                "Client process resolution timed out; continuing without app info"
+            );
+            PROCESS_RESOLVER.update_cache(key, None);
+            Ok(None)
+        }
+    }
 }
 
 pub fn app_policy_process_resolution_retry_config() -> (u32, u64) {
@@ -1166,274 +1286,4 @@ pub fn format_client_info(peer_addr: &SocketAddr, process: Option<&ClientProcess
 }
 
 #[cfg(test)]
-mod tests {
-    #[cfg(target_os = "macos")]
-    use super::macos::describe_process_tcp_sockets;
-    use super::*;
-    #[cfg(target_os = "macos")]
-    use std::env;
-    use std::net::{IpAddr, Ipv4Addr};
-    #[cfg(target_os = "macos")]
-    use std::path::PathBuf;
-
-    #[cfg(target_os = "macos")]
-    use std::process::Stdio;
-
-    #[cfg(target_os = "macos")]
-    use tokio::io::AsyncWriteExt;
-
-    #[cfg(target_os = "macos")]
-    use tokio::process::Command;
-
-    #[test]
-    fn test_format_client_info_with_process() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
-        let process = ClientProcess {
-            pid: 1234,
-            name: "Chrome".to_string(),
-            path: Some("/Applications/Chrome.app".to_string()),
-        };
-        let result = format_client_info(&addr, Some(&process));
-        assert_eq!(result, "Chrome");
-    }
-
-    #[test]
-    fn test_format_client_info_without_process() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 12345);
-        let result = format_client_info(&addr, None);
-        assert_eq!(result, "192.168.1.100");
-    }
-
-    #[test]
-    fn test_process_resolver_cache() {
-        let resolver = ProcessResolver::new();
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 54321);
-
-        let _ = resolver.resolve(&addr);
-
-        let cached = resolver.get_from_cache(&ConnKey::from_peer_addr(&addr));
-        assert!(cached.is_some());
-    }
-
-    #[test]
-    fn test_process_resolver_cached_lookup_miss() {
-        let resolver = ProcessResolver::new();
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 54321);
-
-        let cached = resolver.resolve_cached(&addr);
-        assert!(cached.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_process_resolver_async_returns_cached_hit() {
-        let resolver = ProcessResolver::new();
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 54321);
-        let process = ClientProcess {
-            pid: 1234,
-            name: "Chrome".to_string(),
-            path: Some("/Applications/Chrome.app".to_string()),
-        };
-
-        resolver.update_cache(ConnKey::from_peer_addr(&addr), Some(process.clone()));
-
-        let resolved = resolver.resolve_async(addr, 3, 10).await;
-        assert_eq!(
-            resolved.as_ref().map(|process| process.name.as_str()),
-            Some("Chrome")
-        );
-        assert_eq!(resolved.as_ref().map(|process| process.pid), Some(1234));
-    }
-
-    #[test]
-    fn test_process_resolver_retry_caches_miss() {
-        let resolver = ProcessResolver::new();
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1);
-
-        let resolved = resolver.resolve_with_retry(&addr, 0, 0);
-        assert!(resolved.is_none());
-        assert!(matches!(
-            resolver.get_from_cache(&ConnKey::from_peer_addr(&addr)),
-            Some(None)
-        ));
-    }
-
-    #[test]
-    fn test_conn_key_uses_proxy_addr() {
-        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 51000);
-        let proxy_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-        let proxy_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
-
-        assert_ne!(
-            ConnKey::from_connection(&peer_addr, &proxy_a),
-            ConnKey::from_connection(&peer_addr, &proxy_b)
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    fn find_test_program(program: &str) -> Option<PathBuf> {
-        let mut candidates = Vec::new();
-
-        if program.contains(std::path::MAIN_SEPARATOR) {
-            candidates.push(PathBuf::from(program));
-        } else {
-            if let Some(path) = env::var_os("PATH") {
-                candidates.extend(env::split_paths(&path).map(|entry| entry.join(program)));
-            }
-
-            if let Some(home) = env::var_os("HOME") {
-                let home = PathBuf::from(home);
-                candidates.push(home.join(".local/share/mise/shims").join(program));
-                candidates.push(home.join(".mise/shims").join(program));
-                candidates.push(home.join(".asdf/shims").join(program));
-            }
-
-            candidates.push(PathBuf::from("/opt/homebrew/bin").join(program));
-            candidates.push(PathBuf::from("/usr/local/bin").join(program));
-            candidates.push(PathBuf::from("/usr/bin").join(program));
-        }
-
-        candidates.into_iter().find(|candidate| candidate.is_file())
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn resolve_process_from_external_client(
-        program: &str,
-        args: &[&str],
-        envs: &[(&str, &str)],
-    ) -> Result<ClientProcess, String> {
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|error| format!("bind listener: {error}"))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|error| format!("listener local_addr: {error}"))?;
-        let url = format!("http://{local_addr}/resolver-test");
-        let resolved_program = find_test_program(program)
-            .ok_or_else(|| format!("unable to locate executable for test program {program}"))?;
-
-        let mut command = Command::new(&resolved_program);
-        command.args(args.iter().map(|arg| arg.replace("{url}", &url)));
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::piped());
-        // Ensure the spawned client connects DIRECTLY to our local listener.
-        // Some environments export proxy variables (e.g. http_proxy) pointing to `bifrost`,
-        // which would make the peer process be the proxy instead of the intended client.
-        for key in [
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "no_proxy",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "NO_PROXY",
-        ] {
-            command.env_remove(key);
-        }
-        command.env("NO_PROXY", "*");
-        command.env("no_proxy", "*");
-        for (key, value) in envs {
-            command.env(key, value.replace("{url}", &url));
-        }
-
-        let child = command
-            .spawn()
-            .map_err(|error| format!("spawn {program}: {error}"))?;
-        let child_pid = child.id();
-
-        let (mut stream, peer_addr) = listener
-            .accept()
-            .await
-            .map_err(|error| format!("accept connection from {program}: {error}"))?;
-
-        let resolved =
-            resolve_client_process_async_for_connection_with_retry(&peer_addr, &local_addr, 20, 50)
-                .await
-                .ok_or_else(|| {
-                    let socket_dump = child_pid
-                        .map(|pid| describe_process_tcp_sockets(pid).join(" | "))
-                        .unwrap_or_else(|| "child pid unavailable".to_string());
-                    format!(
-                        "resolver returned None for {program} peer={peer_addr} local={local_addr}; sockets={socket_dump}"
-                    )
-                })?;
-
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-            .await
-            .map_err(|error| format!("write response to {program}: {error}"))?;
-
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|error| format!("wait for {program}: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "{program} exited with {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        Ok(resolved)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn assert_process_name_matches(process: &ClientProcess, expected_tokens: &[&str]) {
-        let process_name = process.name.to_lowercase();
-        let process_path = process.path.as_deref().unwrap_or_default().to_lowercase();
-        assert!(
-            expected_tokens
-                .iter()
-                .any(|token| process_name.contains(token) || process_path.contains(token)),
-            "expected process {:?} / {:?} to match one of {:?}",
-            process.name,
-            process.path,
-            expected_tokens
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn test_process_resolver_detects_curl_client() {
-        let process = resolve_process_from_external_client("curl", &["-sS", "{url}"], &[])
-            .await
-            .expect("resolve curl client process");
-
-        assert_process_name_matches(&process, &["curl"]);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn test_process_resolver_detects_node_client() {
-        let process = resolve_process_from_external_client(
-            "node",
-            &[
-                "-e",
-                "const http = require('http'); const url = process.env.TEST_URL; http.get(url, (res) => { res.resume(); res.on('end', () => process.exit(0)); }).on('error', (err) => { console.error(err); process.exit(1); });",
-            ],
-            &[("TEST_URL", "{url}")],
-        )
-        .await
-        .expect("resolve node client process");
-
-        assert_process_name_matches(&process, &["node"]);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn test_process_resolver_detects_python_client() {
-        let process = resolve_process_from_external_client(
-            "python3",
-            &[
-                "-c",
-                "import os, sys, urllib.request; urllib.request.urlopen(os.environ['TEST_URL']).read(); sys.exit(0)",
-            ],
-            &[("TEST_URL", "{url}")],
-        )
-        .await
-        .expect("resolve python client process");
-
-        assert_process_name_matches(&process, &["python"]);
-    }
-}
+mod tests;
