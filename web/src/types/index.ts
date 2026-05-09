@@ -453,6 +453,7 @@ export interface FilterCondition {
   field: string;
   operator: string;
   value: string;
+  enabled?: boolean;
 }
 
 export interface TrafficTypeMetrics {

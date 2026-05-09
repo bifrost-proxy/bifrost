@@ -60,6 +60,7 @@ const deserializeFilters = (str: string): FilterCondition[] => {
       field: typeof v.field === "string" ? v.field : "",
       operator: typeof v.operator === "string" ? v.operator : "",
       value: typeof v.value === "string" ? v.value : "",
+      enabled: typeof v.enabled === "boolean" ? v.enabled : true,
     }))
     .filter((v) => v.id && v.field && v.operator);
 };

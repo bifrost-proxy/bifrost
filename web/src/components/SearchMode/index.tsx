@@ -16,7 +16,10 @@ import {
   StopOutlined,
 } from "@ant-design/icons";
 import { useSearchStore, compactToSummary } from "../../stores/useSearchStore";
-import { useTrafficStore } from "../../stores/useTrafficStore";
+import {
+  isFilterConditionApplicable,
+  useTrafficStore,
+} from "../../stores/useTrafficStore";
 import { useFilterPanelStore } from "../../stores/useFilterPanelStore";
 import type {
   SearchFilters,
@@ -80,11 +83,7 @@ export default function SearchMode({
       content_types: toolbarFilters.type,
       has_rule_hit: toolbarFilters.rule.length > 0 ? true : undefined,
       conditions: filterConditions
-        .filter((condition) =>
-          condition.operator === "is_empty" ||
-          condition.operator === "is_not_empty" ||
-          condition.value.trim().length > 0,
-        )
+        .filter(isFilterConditionApplicable)
         .map(({ field, operator, value }) => ({
           field,
           operator,
@@ -105,12 +104,7 @@ export default function SearchMode({
   const handleSearch = useCallback(() => {
     if (
       keyword.trim() ||
-      filterConditions.some(
-        (condition) =>
-          condition.operator === "is_empty" ||
-          condition.operator === "is_not_empty" ||
-          condition.value.trim().length > 0,
-      ) ||
+      filterConditions.some(isFilterConditionApplicable) ||
       selectedClientIps.length > 0 ||
       selectedClientApps.length > 0 ||
       selectedDomains.length > 0 ||
@@ -135,12 +129,7 @@ export default function SearchMode({
 
   const canSearch =
     keyword.trim().length > 0 ||
-    filterConditions.some(
-      (condition) =>
-        condition.operator === "is_empty" ||
-        condition.operator === "is_not_empty" ||
-        condition.value.trim().length > 0,
-    ) ||
+    filterConditions.some(isFilterConditionApplicable) ||
     selectedClientIps.length > 0 ||
     selectedClientApps.length > 0 ||
     selectedDomains.length > 0 ||
