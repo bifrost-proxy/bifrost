@@ -101,13 +101,15 @@ example.com host://127.0.0.1 includeFilter://m:GET excludeFilter:///admin/
 | :-------- | :--------- | :---------------------------------- |
 | `m:`      | HTTP 方法  | `m:GET` `m:GET,POST,PUT`            |
 | `s:`      | 状态码     | `s:200` `s:200-299` `s:200,404,500` |
-| `h:`      | 请求头存在 | `h:X-Custom-Header`                 |
+| `h:`      | 请求头存在或匹配 | `h:X-Custom-Header` `h:Content-Type=json` |
 | `reqH:`   | 请求头匹配 | `reqH:Content-Type=/json/`          |
 | `resH:`   | 响应头匹配 | `resH:Content-Type=/json/`          |
 | `i:`      | 客户端 IP  | `i:192.168.1.1` `i:192.168.0.0/16`  |
-| `b:`      | 响应体匹配 | `b:/error/`                         |
-| `/path/`  | 路径包含   | `/api/`                             |
+| `/path`   | 路径包含   | `/api`                              |
 | `/regex/` | 路径正则   | `/^\/api\/v\d+/`                    |
+| `domain.com/path` | URL host/path | `api.example.com/v1` |
+
+> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，匹配结果不会生效。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
 
 ### 6. 规则属性
 

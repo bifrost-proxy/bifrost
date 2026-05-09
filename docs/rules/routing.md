@@ -86,6 +86,31 @@ www.example.com xhost://127.0.0.1:8080
 
 ---
 
+## http / https
+
+`http://` 和 `https://` 是显式上游协议转发规则。它们和 `host://` 一样会保留原请求路径与查询参数，但会把上游协议固定为 HTTP 或 HTTPS。
+
+### 语法
+
+```txt
+pattern http://target[:port]
+pattern https://target[:port]
+```
+
+### 示例
+
+```bash
+# 强制走 HTTP 上游
+api.example.com http://127.0.0.1:3000
+
+# 强制走 HTTPS 上游
+api.example.com https://backend.example.com
+```
+
+若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket.md) 中的 `ws://` / `wss://`。
+
+---
+
 ## http3
 
 为命中的请求启用上游 HTTP/3 尝试。
@@ -200,6 +225,25 @@ pattern pac://{pac-script}
 function FindProxyForURL(url, host) { return "PROXY proxy.com:8080"; }
 ```
 ````
+
+---
+
+## tunnel
+
+`tunnel://` 用于重定向 CONNECT 隧道目标，适合只想改隧道上游地址、不解密 HTTPS 内容的场景。若需要按 HTTPS path 匹配或改写明文内容，应使用 `tlsIntercept://` 让代理看到解密后的 HTTP 请求。
+
+### 语法
+
+```txt
+pattern tunnel://target[:port]
+```
+
+### 示例
+
+```bash
+# 把 CONNECT 隧道转到指定主机
+api.example.com tunnel://127.0.0.1:8443
+```
 
 ---
 

@@ -170,6 +170,57 @@ www.example.com/api referer://https://www.example.com/
 
 ---
 
+## auth
+
+设置 Basic Auth 的 `Authorization` 请求头。当前实现会把规则值整体当作 `user:password`，并写入 `Authorization: Basic <base64(user:password)>`。
+
+### 语法
+
+```txt
+pattern auth://user:password
+pattern auth://{basic-auth}
+```
+
+### 示例
+
+```bash
+# 生成 Authorization: Basic dXNlcjpwYXNz
+www.example.com auth://user:pass
+
+# 推荐把账号密码放入内嵌值，避免在规则行暴露
+www.example.com auth://{basic-auth}
+```
+
+内嵌值定义：
+
+````
+``` basic-auth
+user:pass
+```
+````
+
+> 如果需要设置 Bearer token 或任意自定义 `Authorization` 值，请使用 `reqHeaders://Authorization=Bearer...` 或 `reqHeaders://{headers}`，不要用 `auth://`。
+
+---
+
+## forwardedFor
+
+设置 `X-Forwarded-For` 请求头，用于模拟客户端来源 IP。
+
+### 语法
+
+```txt
+pattern forwardedFor://ip
+```
+
+### 示例
+
+```bash
+www.example.com forwardedFor://203.0.113.10
+```
+
+---
+
 ## method
 
 修改请求方法。

@@ -22,7 +22,7 @@ Bifrost 会根据 value 的格式自动识别其类型，支持以下 6 种：
 | 本地文件    | `/path/to/file` | `<USER_HOME>/mock.json`         | 从本地文件加载内容       |
 | 远程资源    | `http(s)://url` | `https://example.com/data.json` | 从远程 URL 加载内容      |
 
-> ⚠️ **重要**：普通内联值和内联参数仍然不能直接包含空格，因为规则解析器使用空格分隔多个操作符。小括号内容会作为一个整体解析，可以包含空格；多行内容、大段 JSON/HTML/JS/CSS、PAC 脚本仍建议使用 **Values 引用**、**本地文件** 或 **远程资源**。
+> ⚠️ **重要**：普通内联值和内联参数仍然不能直接包含空格，因为规则解析器使用空格分隔多个操作符。小括号内容会作为一个整体解析，可以包含空格。多行内容优先使用规则文件内嵌值；只有特别大的 JSON/HTML/JS/CSS、PAC 脚本，或需要被很多规则长期共享的内容，才建议使用全局 **Values 引用**、**本地文件** 或 **远程资源**。
 
 ### 识别规则
 
@@ -90,6 +90,8 @@ pattern resHeaders://{customHeaders}       # 引用名为 customHeaders 的值
 ### Values 存储机制
 
 Values 以文件形式存储在 Bifrost 数据目录的 `values/` 子目录中，每个 key 对应一个 `.txt` 文件。
+
+日常规则不要默认创建全局 Values。短值直接写内联 value；较长但只属于当前规则文件的内容，优先使用下面的“内嵌值”。全局 Values 主要适合特别大的内容，或需要被很多规则长期共享的内容。
 
 **创建/编辑 Values：**
 
@@ -433,6 +435,7 @@ key1=value1&key2=value2&keyN=valueN
 | `reqScript` | 执行请求阶段脚本（同时列于请求修改类） |
 | `resScript` | 执行响应阶段脚本（同时列于响应修改类） |
 | `decode` | 执行解码脚本（请求/响应解码） |
+| `bp` | 绑定二进制协议 parser 引用，通常与 `decode://bp` 配合；只影响 Traffic 落库、详情展示与搜索，不改写真实转发流量 |
 
 ### `devtools`
 

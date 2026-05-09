@@ -904,27 +904,108 @@ rm -rf /tmp/bifrost-test-logs
 
 ---
 
-### TC-CSA-32：顶层 `bifrost --help` 的 start 参考区块与实际参数保持一致
+### TC-CSA-32：顶层 `bifrost --help` 短链化并指向快速开始文档
 
 **操作步骤**：
 1. 执行顶层帮助命令并保存输出：
    ```bash
    ./target/debug/bifrost --help > /tmp/bifrost-root-help.txt
    ```
-2. 执行 `start` 子命令帮助并保存输出：
+2. 校验顶层帮助不再包含旧的长篇手写参考区块：
+   ```bash
+   ! rg --fixed-strings 'SUBCOMMAND REFERENCE' /tmp/bifrost-root-help.txt
+   ! rg --fixed-strings 'RULE TEMPLATE VARIABLES' /tmp/bifrost-root-help.txt
+   ! rg --fixed-strings 'RULES QUICK START' /tmp/bifrost-root-help.txt
+   ```
+3. 校验顶层帮助包含关键文档链接：
+   ```bash
+   rg --fixed-strings 'docs/cli-quick-start.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/cli.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/getting-started.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/rule.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/operation.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/pattern.md' /tmp/bifrost-root-help.txt
+   rg --fixed-strings 'docs/rules/README.md' /tmp/bifrost-root-help.txt
+   ```
+4. 校验快速开始文档按使用场景组织，并承接原顶层 help 的实用说明：
+   ```bash
+   rg --fixed-strings '先选场景' docs/cli-quick-start.md
+   rg --fixed-strings '场景 1：使用主服务和多端口安全调试' docs/cli-quick-start.md
+   rg --fixed-strings '优先复用主服务，用多端口隔离规则和流量' docs/cli-quick-start.md
+   rg --fixed-strings '默认启动会启用系统代理，让浏览器和桌面应用自然进入 Bifrost' docs/cli-quick-start.md
+   rg --fixed-strings '默认不要开启全局 TLS 抓包，也不要用 `--unsafe-ssl` 跳过上游证书校验' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost port bind --port 18888' docs/cli-quick-start.md
+   rg --fixed-strings 'curl -x http://127.0.0.1:18888' docs/cli-quick-start.md
+   rg --fixed-strings '只有当你明确不希望影响系统网络、正在跑自动化测试、并发实验或破坏性配置验证时，才考虑加 `--no-system-proxy` 或设置临时 `BIFROST_DATA_DIR`' docs/cli-quick-start.md
+   rg --fixed-strings '场景 4：按需调试 HTTPS 和路径规则' docs/cli-quick-start.md
+   rg --fixed-strings '不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围' docs/cli-quick-start.md
+   rg --fixed-strings '遇到 SSL pinning 应用时，优先排除应用或域名' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost start --intercept-include "api.example.com"' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost start --app-intercept-include "*Chrome,*curl"' docs/cli-quick-start.md
+   rg --fixed-strings '场景 6：从流量记录定位问题' docs/cli-quick-start.md
+   rg --fixed-strings '场景 8：同一个服务服务多个应用或开发任务' docs/cli-quick-start.md
+   rg --fixed-strings '一个常驻 Bifrost 共享证书、配置和流量库；每个任务用独立端口绑定独立规则' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost port bind --port 18881 --rule-text "app-a.example.com tlsIntercept:// host://127.0.0.1:3001"' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost traffic list --listener-port 18881 --limit 50' docs/cli-quick-start.md
+   rg --fixed-strings '只分析 `listener_port=18882` 的流量' docs/cli-quick-start.md
+   rg --fixed-strings '不要停止整个主服务' docs/cli-quick-start.md
+   rg --fixed-strings '场景 10：远程操作另一台 Bifrost' docs/cli-quick-start.md
+   rg --fixed-strings '场景 12：和 Agent 协作开发业务 Skill' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost install-skill -t codex -y' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost port bind --port 18882' docs/cli-quick-start.md
+   rg --fixed-strings '如果目标 App 有 SSL pinning，不要强行抓包它的 TLS 明文' docs/cli-quick-start.md
+   rg --fixed-strings 'curl -x http://127.0.0.1:18882 https://api.example.com/v1/me' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost traffic list --listener-port 18882 --limit 50' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost traffic list --client-app Chrome --limit 50' docs/cli-quick-start.md
+   rg --fixed-strings '请使用 bifrost traffic list/search/get 读取 api.example.com 的真实流量' docs/cli-quick-start.md
+   rg --fixed-strings '不要 mock，不要猜' docs/cli-quick-start.md
+   rg --fixed-strings '命令快捷别名' docs/cli-quick-start.md
+   rg --fixed-strings 'BIFROST_DATA_DIR' docs/cli-quick-start.md
+   rg --fixed-strings 'RUST_LOG' docs/cli-quick-start.md
+   rg --fixed-strings '规则快速入门' docs/cli-quick-start.md
+   rg --fixed-strings '简单值优先直接写在规则里，不要默认拆成全局 Values' docs/cli-quick-start.md
+   rg --fixed-strings '优先使用规则文件内嵌值' docs/cli-quick-start.md
+   rg --fixed-strings '只有特别大的 mock body、PAC 脚本、大段 header 块' docs/cli-quick-start.md
+   ```
+5. 校验 CLI 详细命令文档包含命令覆盖索引、环境变量、规则变量和容易误解的远程/本机说明：
+   ```bash
+   rg --fixed-strings '命令覆盖索引' docs/cli.md
+   rg --fixed-strings '环境变量' docs/cli.md
+   rg --fixed-strings '规则变量速查' docs/cli.md
+   rg --fixed-strings '| `--client-app <APP>` | 按客户端应用或进程名过滤' docs/cli.md
+   rg --fixed-strings '`install-skill` 只安装 Bifrost Agent Skill 文档' docs/cli.md
+   rg --fixed-strings '`bifrost start` 默认会启用系统代理' docs/cli.md
+   rg --fixed-strings 'TLS 抓包不是默认建议，应按需通过规则级 `tlsIntercept://`、`--intercept-include` 或 `--app-intercept-include` 收窄到目标域名/应用' docs/cli.md
+   rg --fixed-strings '遇到 SSL pinning 应用时，用 `tlsPassthrough://`、`--intercept-exclude` 或 `--app-intercept-exclude` 排除' docs/cli.md
+   rg --fixed-strings '需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA' docs/cli.md
+   rg --fixed-strings '`--no-system-proxy`、`--unsafe-ssl` 和 `--skip-cert-check` 是测试/诊断选项，不应作为普通启动路径' docs/cli.md
+   rg --fixed-strings '同一个 Bifrost 服务可以同时服务多个应用或开发任务' docs/cli.md
+   rg --fixed-strings '只分析 `listener_port=18882` 的流量' docs/cli.md
+   rg --fixed-strings '默认优先写内联 value 或规则文件内嵌值' docs/cli.md
+   rg --fixed-strings '默认不要把普通 host、token 片段、短 header 或小 mock body 拆到全局 Values' docs/cli.md
+   rg --fixed-strings '`setting` 始终管理本机数据目录；`remote` 才会操作已连接的远端 Bifrost' docs/cli.md
+   rg --fixed-strings '`--system-proxy` 修改操作系统代理配置；`--cli-proxy` 写入 shell rc 文件中的代理环境变量' docs/cli.md
+   rg --fixed-strings '| `remote` | 通过 relay 操作远端 Bifrost' docs/cli.md
+   rg --fixed-strings '| `im` | 管理 IM Gateway provider、target、route、schedule、消息历史 |' docs/cli.md
+   ```
+6. 校验 operation 手册同样说明全局 Values 的推荐边界：
+   ```bash
+   rg --fixed-strings '多行内容优先使用规则文件内嵌值' docs/operation.md
+   rg --fixed-strings '日常规则不要默认创建全局 Values' docs/operation.md
+   ```
+7. 校验安装启动文档同样推荐默认系统代理、自动 CA 和多端口，而不是临时数据目录作为默认路径：
+   ```bash
+   rg --fixed-strings '`bifrost start` 默认会启用系统代理' docs/getting-started.md
+   rg --fixed-strings 'TLS 抓包按需开启，不建议默认全局 `--intercept`' docs/getting-started.md
+   rg --fixed-strings '优先使用域名白名单、应用白名单或规则级 `tlsIntercept://`' docs/getting-started.md
+   rg --fixed-strings '遇到 SSL pinning 应用时，应使用 `--app-intercept-exclude`、`--intercept-exclude` 或规则级 `tlsPassthrough://` 排除' docs/getting-started.md
+   rg --fixed-strings '需要 TLS 抓包时，启动流程会自动生成并安装 Bifrost CA' docs/getting-started.md
+   rg --fixed-strings '日常使用不建议为了临时排障创建新的 `BIFROST_DATA_DIR`' docs/getting-started.md
+   rg --fixed-strings '优先启动一次主服务，再使用 `bifrost port bind ...` 创建独立调试端口' docs/getting-started.md
+   ```
+8. 校验 `start --help` 仍保留完整 `start` 参数说明：
    ```bash
    ./target/debug/bifrost start --help > /tmp/bifrost-start-help.txt
-   ```
-3. 校验顶层帮助的 `start` 参考区块包含关键参数：
-   ```bash
-   rg --fixed-strings -- '--no-system-proxy' /tmp/bifrost-root-help.txt
-   rg --fixed-strings -- '--proxy-bypass' /tmp/bifrost-root-help.txt
-   rg --fixed-strings -- '--cli-proxy' /tmp/bifrost-root-help.txt
-   rg --fixed-strings -- '--cli-proxy-no-proxy' /tmp/bifrost-root-help.txt
-   rg --fixed-strings -- '-y, --yes' /tmp/bifrost-root-help.txt
-   ```
-4. 校验 `start --help` 也包含同一组关键参数：
-   ```bash
    rg --fixed-strings -- '--no-system-proxy' /tmp/bifrost-start-help.txt
    rg --fixed-strings -- '--proxy-bypass' /tmp/bifrost-start-help.txt
    rg --fixed-strings -- '--cli-proxy' /tmp/bifrost-start-help.txt
@@ -933,10 +1014,23 @@ rm -rf /tmp/bifrost-test-logs
    ```
 
 **预期结果**：
-- 顶层 `bifrost --help` 的 `SUBCOMMAND REFERENCE` 中能看到 `start [OPTIONS]`
-- 顶层帮助包含 `--no-system-proxy`、`--proxy-bypass`、`--cli-proxy`、`--cli-proxy-no-proxy`、`-y, --yes`
-- `bifrost start --help` 包含同一组关键参数
-- 两份帮助输出对 `start` 参数的关键集合描述一致，不会遗漏 `--no-system-proxy`
+- 顶层 `bifrost --help` 不再包含 `SUBCOMMAND REFERENCE`、`RULE TEMPLATE VARIABLES`、`RULES QUICK START`
+- 顶层帮助末尾包含 CLI 快速开始、CLI 详细命令、安装启动、规则语法、操作符、匹配器、规则协议手册等关键文档链接
+- `docs/cli-quick-start.md` 存在，并按使用场景组织，同时包含默认系统代理、TLS 抓包按需开启、SSL pinning 排除建议、主服务+多端口默认调试路径、同一服务服务多个应用/开发任务、Agent 协作开发业务 Skill、命令快捷别名、环境变量、规则快速入门、默认优先内联/规则文件内嵌 value、以及 curl 验证说明
+- `docs/cli.md` 包含当前顶层命令覆盖索引、环境变量手册、规则变量速查、`--client-app` 应用流量过滤、`install-skill` 边界、全局 Values 推荐边界、同一服务多任务隔离、默认系统代理、TLS 按需抓包/自动 CA/SSL pinning 排除建议，以及 `setting`/`remote`、系统代理/CLI 代理等容易混淆概念的明确说明
+- `docs/operation.md` 说明日常规则不要默认创建全局 Values，多行内容优先使用规则文件内嵌值
+- `docs/getting-started.md` 说明默认启动启用系统代理，TLS 抓包按需开启且启动时自动处理 CA，日常排障优先主服务+多端口而不是临时数据目录
+- `bifrost start --help` 仍包含 `--no-system-proxy`、`--proxy-bypass`、`--cli-proxy`、`--cli-proxy-no-proxy`、`--yes`，子命令详细 help 未退化
+
+**实际结果（2026-05-09）**：
+- 已使用 `./target/debug/bifrost --help` 真实执行顶层帮助检查，未匹配到 `SUBCOMMAND REFERENCE`、`RULE TEMPLATE VARIABLES`、`RULES QUICK START`
+- 顶层帮助实际输出包含 `docs/cli-quick-start.md`、`docs/cli.md`、`docs/getting-started.md`、`docs/rule.md`、`docs/operation.md`、`docs/pattern.md`、`docs/rules/README.md`
+- `docs/cli-quick-start.md` 实际按使用场景组织，包含 `先选场景`、默认系统代理、TLS 抓包按需开启、SSL pinning 排除建议、主服务+多端口调试、同一服务服务多个应用/开发任务、流量定位、远程操作、Agent 协作开发业务 Skill 等场景，并保留命令快捷别名、`BIFROST_DATA_DIR`、`RUST_LOG`、规则快速入门和 `curl -x http://127.0.0.1:18888` 验证示例；默认路径实际说明不要默认用全局 `--intercept`、临时 `BIFROST_DATA_DIR`、`--no-system-proxy` 或 `--unsafe-ssl`；多任务场景实际说明共享主服务、每个任务独立端口和规则、按 `listener_port` 过滤流量、结束时只销毁任务端口；Agent 场景实际包含 `install-skill -t codex`、`port bind --port 18882`、`--client-app`/`--listener-port` 流量过滤、traffic 证据读取指令和“不要 mock，不要猜”的约束；规则示例实际说明简单值优先写规则内联 value，较长内容优先规则文件内嵌值，特别大的 mock body/PAC/header 才建议全局 Values
+- `docs/cli.md` 实际包含命令覆盖索引、环境变量、规则变量速查、`--client-app` 应用过滤、`install-skill` 边界、全局 Values 推荐边界、同一服务多任务隔离、默认系统代理、TLS 按需抓包/自动 CA/SSL pinning 排除建议、`setting`/`remote` 边界、系统代理/CLI 代理边界、`remote` 和 `im` 命令入口说明
+- `docs/operation.md` 实际说明日常规则不要默认创建全局 Values，多行内容优先使用规则文件内嵌值
+- `docs/getting-started.md` 实际说明默认启动启用系统代理，TLS 抓包按需开启且启动时自动处理 CA，日常排障优先主服务+多端口而不是临时数据目录
+- `./target/debug/bifrost start --help` 实际包含 `--no-system-proxy`、`--proxy-bypass`、`--cli-proxy`、`--cli-proxy-no-proxy`、`--yes`
+- 结论：通过
 
 ---
 

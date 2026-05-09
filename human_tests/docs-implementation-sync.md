@@ -71,6 +71,65 @@
 - 文档不再宣称小括号内不能有空格，也不再使用 `{X: 1}` 这类会被误读为 Values 引用的内联 header/cookie/CORS 示例。
 - `tpl` / `redirect` 示例使用当前 `TemplateEngine` 支持的 `${path}`、`${reqHeaders.name}` 等变量，不使用会退化为完整 URL 的 `${url.path}` / `${url.pathname}` 示例。
 
+### TC-DIS-05 全量 docs 链接与架构索引不漂移
+
+操作步骤：
+
+1. 执行相对链接检查脚本，遍历 `docs/**/*.md` 的 Markdown 链接，忽略外部 URL 和纯 anchor，确认所有相对文件路径都存在。
+2. 执行 `source ~/.zshrc && rg -n "bifrost-command|bifrost-power|crates/agent|crates/skills" docs/architecture.md`。
+3. 执行 `source ~/.zshrc && rg -n "remote-invoke|临时端口绑定|Agent Skill" docs/overview.md`。
+
+预期结果：
+
+- docs 内部相对链接无缺失。
+- `docs/architecture.md` 覆盖当前 workspace 新增 crate，不再只列旧 crate。
+- `docs/overview.md` 能发现多端口、remote-invoke、Agent Skill 等当前核心能力。
+
+### TC-DIS-06 过滤器文档与运行时 resolver 边界一致
+
+操作步骤：
+
+1. 执行 `source ~/.zshrc && rg -n "Filter::Body\\(_regex\\) => false|fn parse_filter|reqH:|resH:" crates/bifrost-core/src/rule/filter.rs crates/bifrost-core/src/rule/resolver.rs`。
+2. 执行 `source ~/.zshrc && ! rg -n "includeFilter://p:|excludeFilter://p:|includeFilter://H:|excludeFilter://H:|请求体包含|响应体包含|响应体匹配|p:/path|s:4\\b" docs/rule.md docs/rules/filters.md`。
+3. 打开 `docs/rule.md` 与 `docs/rules/filters.md`，确认两处都说明 `b:` / `B:` 当前只被 parser 接受、运行时不参与 body 匹配，并推荐用 `bifrost search --req-body/--res-body` 做内容筛选。
+
+预期结果：
+
+- 源码显示 body filter 当前 resolver 结果为不命中。
+- 文档不再推荐不存在的 `p:`、大写 `H:` 响应头过滤或 `s:4` 代表 4xx 的错误写法。
+- 文档明确记录 body filter 边界，不误导用户写无法生效的生产规则。
+
+### TC-DIS-07 CLI 示例覆盖当前 help 且可独立执行
+
+操作步骤：
+
+1. 执行 `source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run -q -p bifrost-cli -- traffic list --help`。
+2. 执行 `source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run -q -p bifrost-cli -- search --help`。
+3. 执行 `source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run -q -p bifrost-cli -- remote file --help`。
+4. 执行 `source ~/.zshrc && rg -n "client-ip|has-rule-hit|is-websocket|is-sse|is-tunnel|remote file stat|remote file glob|remote file hash|remote file edit|completions elvish|completions powershell|默认访问控制模式为 `interactive`" docs/cli.md docs/getting-started.md docs/cli-quick-start.md`。
+5. 执行 `source ~/.zshrc && ! rg -n "访问默认限制为本机|18888 http://httpbin|18888 https://httpbin|--scope shell|remote file write .* --content " docs/cli.md docs/getting-started.md docs/cli-quick-start.md`。
+
+预期结果：
+
+- CLI help 中存在文档声明的 traffic/search/remote file 参数与子命令。
+- 文档覆盖当前 help 暴露的关键过滤器、remote file 操作、补全 shell 和默认访问控制语义。
+- 快速开始里的普通 curl 示例使用默认主端口 `9900`，不会引用尚未绑定的临时端口。
+- 文档不再出现已失效的 `--scope shell` 或不存在的 `remote file write --content` 示例。
+
+## 本次执行记录
+
+执行日期：2026-05-09。
+
+| 用例 | 实际结果 |
+| --- | --- |
+| TC-DIS-01 | 通过。`cargo run -q -p bifrost-cli -- --help` 输出包含 `restart`、`setting`、`remote`、`keep-awake`、`im`，`docs/cli.md` 中均存在对应说明或示例。 |
+| TC-DIS-02 | 通过。源码中存在 parser 脚本的 Admin API、运行时类型和 WebUI/API 字段；`script add --help` 只暴露 `request`、`response`、`decode`；文档已说明 parser 的 API/WebUI 边界。 |
+| TC-DIS-03 | 通过。源码中存在 `bp` 与 `devtools` 协议解析；`docs/operation.md` 与 `docs/rules/README.md` 已能发现并说明对应行为边界。 |
+| TC-DIS-04 | 通过。4 个目标单测均通过；陈旧语法扫描无命中，文档不再使用 `${url.path}` / `${url.pathname}` / `${headers.*}` 等不匹配当前实现的模板变量。 |
+| TC-DIS-05 | 通过。docs 相对链接检查无缺失；架构文档覆盖 `bifrost-command`、`bifrost-power`、`agent`、`skills`；概览文档覆盖临时端口、remote-invoke、Agent Skill。 |
+| TC-DIS-06 | 通过。源码对照确认 `Filter::Body(_regex) => false`；文档不再推荐 `p:`、大写 `H:` 响应头过滤或 `s:4` 这类错误写法，并明确 body filter 当前边界。 |
+| TC-DIS-07 | 通过。`traffic list --help`、`search --help`、`remote file --help` 与文档中的参数/子命令一致；失效示例扫描无命中。 |
+
 ## 清理步骤
 
 - 删除命令中创建的临时 `BIFROST_DATA_DIR`（若 shell 已自动回收 `mktemp` 路径变量不可见，则无需额外操作）。

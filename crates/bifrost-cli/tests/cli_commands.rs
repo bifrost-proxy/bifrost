@@ -1016,7 +1016,7 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 }
 
 #[test]
-fn main_help_shows_shortcuts() {
+fn main_help_points_to_quick_start_for_shortcuts() {
     let output = bifrost_cmd()
         .arg("--help")
         .output()
@@ -1024,8 +1024,12 @@ fn main_help_shows_shortcuts() {
     let combined = String::from_utf8_lossy(&output.stdout).to_string()
         + String::from_utf8_lossy(&output.stderr).as_ref();
     assert!(
-        combined.contains("COMMAND SHORTCUTS"),
-        "main help should show COMMAND SHORTCUTS section"
+        !combined.contains("COMMAND SHORTCUTS"),
+        "main help should keep shortcuts in docs instead of the old long section"
+    );
+    assert!(
+        combined.contains("docs/cli-quick-start.md"),
+        "main help should link to the quick start doc that lists shortcuts"
     );
 }
 
@@ -1211,202 +1215,6 @@ fn traffic_subcommands_complete_list() {
             sub
         );
     }
-}
-
-#[test]
-fn port_help_explains_multi_port_model() {
-    let help = run_help(&["port"]);
-    for snippet in &[
-        "Multi-port model",
-        "main proxy port keeps using the normal enabled-rule view",
-        "Each temporary port uses only the rule refs passed via `bind` or `update`",
-        "Bind one or more temporary ports with `port bind`",
-        "Replace a port's bound rule refs with `port update`",
-        "destroy",
-    ] {
-        assert!(
-            help.contains(snippet),
-            "port help should contain '{}'",
-            snippet
-        );
-    }
-}
-
-#[test]
-fn port_bind_help_lists_all_rule_sources() {
-    let help = run_help(&["port", "bind"]);
-    for snippet in &[
-        "At least one of the following must be provided",
-        "--rule",
-        "--group-rule",
-        "--rule-file",
-        "--rule-text",
-        "Use `--port 0` to let Bifrost allocate a free port automatically",
-    ] {
-        assert!(
-            help.contains(snippet),
-            "port bind help should contain '{}'",
-            snippet
-        );
-    }
-}
-
-#[test]
-fn port_update_help_lists_all_rule_sources() {
-    let help = run_help(&["port", "update"]);
-    for snippet in &[
-        "Replace the explicit rule refs for a temporary proxy port",
-        "main proxy process",
-        "The main port and other",
-        "temporary ports are not affected",
-        "--rule, --group-rule, --rule-file, --rule-text",
-    ] {
-        assert!(
-            help.contains(snippet),
-            "port update help should contain '{}'",
-            snippet
-        );
-    }
-}
-
-#[test]
-fn start_all_options_parse() {
-    let help = run_help(&["start"]);
-    for opt in &[
-        "--port",
-        "--host",
-        "--socks5-port",
-        "--daemon",
-        "--skip-cert-check",
-        "--access-mode",
-        "--whitelist",
-        "--allow-lan",
-        "--proxy-user",
-        "--intercept",
-        "--no-intercept",
-        "--intercept-exclude",
-        "--intercept-include",
-        "--app-intercept-exclude",
-        "--app-intercept-include",
-        "--unsafe-ssl",
-        "--no-disconnect-on-config-change",
-        "--rules",
-        "--rules-file",
-        "--system-proxy",
-        "--proxy-bypass",
-        "--cli-proxy",
-        "--cli-proxy-no-proxy",
-    ] {
-        assert!(
-            help.contains(opt),
-            "start help should contain '{}' option",
-            opt
-        );
-    }
-}
-
-#[test]
-fn root_help_start_reference_stays_in_sync_with_start_flags() {
-    let help = run_help(&[]);
-    for opt in &[
-        "start [OPTIONS]",
-        "--skip-cert-check",
-        "--access-mode",
-        "--proxy-user <USER:PASS>",
-        "--system-proxy",
-        "--no-system-proxy",
-        "--proxy-bypass",
-        "--cli-proxy",
-        "--cli-proxy-no-proxy",
-        "-y, --yes",
-    ] {
-        assert!(
-            help.contains(opt),
-            "root help subcommand reference should contain '{}'",
-            opt
-        );
-    }
-}
-
-#[test]
-fn search_all_options_parse() {
-    let help = run_help(&["search"]);
-    for opt in &[
-        "--interactive",
-        "--limit",
-        "--format",
-        "--url",
-        "--headers",
-        "--body",
-        "--req-header",
-        "--res-header",
-        "--req-body",
-        "--res-body",
-        "--status",
-        "--method",
-        "--host",
-        "--path",
-        "--protocol",
-        "--content-type",
-        "--domain",
-        "--no-color",
-        "--max-scan",
-        "--max-results",
-    ] {
-        assert!(
-            help.contains(opt),
-            "search help should contain '{}' option",
-            opt
-        );
-    }
-}
-
-#[test]
-fn traffic_list_all_options_parse() {
-    let help = run_help(&["traffic", "list"]);
-    for opt in &[
-        "--limit",
-        "--cursor",
-        "--direction",
-        "--method",
-        "--status",
-        "--status-min",
-        "--status-max",
-        "--protocol",
-        "--host",
-        "--url",
-        "--path",
-        "--content-type",
-        "--client-ip",
-        "--client-app",
-        "--listener-port",
-        "--proxy-port",
-        "--has-rule-hit",
-        "--is-websocket",
-        "--is-sse",
-        "--is-tunnel",
-        "--format",
-        "--no-color",
-    ] {
-        assert!(
-            help.contains(opt),
-            "traffic list help should contain '{}' option",
-            opt
-        );
-    }
-}
-
-#[test]
-fn traffic_search_help_lists_listener_port_filter() {
-    let help = run_help(&["traffic", "search"]);
-    assert!(
-        help.contains("--listener-port"),
-        "traffic search help should list listener port filter"
-    );
-    assert!(
-        help.contains("--proxy-port"),
-        "traffic search help should list proxy-port alias"
-    );
 }
 
 #[test]

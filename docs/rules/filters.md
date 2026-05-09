@@ -16,16 +16,19 @@ pattern rules... includeFilter://condition
 
 ### 过滤条件
 
-| 条件类型   | 语法           | 说明           |
-| ---------- | -------------- | -------------- |
-| 方法       | `m:METHOD`     | 匹配请求方法   |
-| 状态码     | `s:CODE`       | 匹配响应状态码 |
-| 请求头     | `h:name=value` | 匹配请求头     |
-| 响应头     | `H:name=value` | 匹配响应头     |
-| 请求体包含 | `b:text`       | 请求体包含文本 |
-| 响应体包含 | `B:text`       | 响应体包含文本 |
-| IP         | `i:ip`         | 匹配客户端 IP  |
-| 路径       | `p:/path`      | 匹配路径       |
+| 条件类型 | 语法 | 说明 |
+| --- | --- | --- |
+| 方法 | `m:METHOD` / `m:GET,POST` | 匹配请求方法 |
+| 状态码 | `s:CODE` / `s:200-299` / `s:200,404,500` | 匹配响应状态码；请求阶段没有状态码时不会命中 |
+| 请求头存在 | `h:name` | 判断请求头是否存在 |
+| 请求头匹配 | `h:name=value` / `reqH:name=/regex/` | `h:` 和 `reqH:` 都匹配请求头；`value` 可为普通文本或 `/regex/` |
+| 响应头匹配 | `resH:name=value` / `resH:name=/regex/` | 匹配响应头；仅响应阶段有意义 |
+| 客户端 IP | `i:ip` / `i:cidr` | 匹配客户端 IP 或 CIDR |
+| 路径包含 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按路径包含匹配 |
+| 路径正则 | `/regex/` | 以 `/` 开头并以 `/` 结尾时，按正则匹配路径 |
+| URL host/path | `example.com` / `example.com/api` | 包含 `.` 的过滤值会按 host 与可选 path 匹配 |
+
+> 当前实现会解析 `b:` / `B:` body 过滤器，但运行时 resolver 尚未读取请求/响应 body 参与过滤，匹配结果恒为不命中。不要把 body 过滤作为可用能力依赖；需要按内容筛选请使用 `bifrost search --req-body/--res-body` 查看流量证据。
 
 ### 方法过滤
 
@@ -52,7 +55,7 @@ www.example.com replaceStatus://200 includeFilter://s:500
 www.example.com resBody://{not-found} includeFilter://s:404
 
 # 对 4xx 响应生效
-www.example.com resHeaders://(X-Error: true) includeFilter://s:4
+www.example.com resHeaders://(X-Error: true) includeFilter://s:400-499
 ```
 
 块变量定义：
@@ -80,7 +83,7 @@ www.example.com resHeaders://(X-Json: true) includeFilter://h:content-type=appli
 
 ```bash
 # 匹配响应头
-www.example.com resBody://(cached) includeFilter://H:X-Cache=HIT
+www.example.com resBody://(cached) includeFilter://resH:X-Cache=HIT
 ```
 
 > 注：`(cached)` 无空格，可使用行内值
@@ -89,10 +92,10 @@ www.example.com resBody://(cached) includeFilter://H:X-Cache=HIT
 
 ```bash
 # 匹配特定路径
-www.example.com resHeaders://(X-Api: true) includeFilter://p:/api/
+www.example.com resHeaders://(X-Api: true) includeFilter:///api
 
 # 匹配路径模式
-www.example.com resDelay://1000 includeFilter://p:/slow/
+www.example.com resDelay://1000 includeFilter:///slow
 ```
 
 ### 多条件组合
@@ -138,7 +141,7 @@ pattern rules... excludeFilter://condition
 www.example.com resDelay://1000 excludeFilter://m:GET
 
 # 排除静态资源
-www.example.com resHeaders://(X-Dynamic: true) excludeFilter://p:.js excludeFilter://p:.css
+www.example.com resHeaders://(X-Dynamic: true) excludeFilter:///\.js$/ excludeFilter:///\.css$/
 
 # 排除成功响应
 www.example.com resHeaders://(X-Error: true) excludeFilter://s:200
@@ -288,7 +291,7 @@ www.example.com/api skip://operation=resHeaders://X-Debug:first
 
 ```bash
 # 多个过滤器
-www.example.com host://backend.local includeFilter://m:POST excludeFilter://p:/health
+www.example.com host://backend.local includeFilter://m:POST excludeFilter:///health
 
 # 过滤器 + 修改规则
 www.example.com resHeaders://(X-Debug: true) includeFilter://h:X-Debug
@@ -297,7 +300,7 @@ www.example.com resHeaders://(X-Debug: true) includeFilter://h:X-Debug
 www.example.com delete://reqHeaders.X-Internal includeFilter://m:GET
 
 # 条件透传
-www.example.com passthrough:// includeFilter://p:/static/
+www.example.com passthrough:// includeFilter:///static
 ```
 
 ---
@@ -308,4 +311,4 @@ www.example.com passthrough:// includeFilter://p:/static/
 2. **优先级**：`excludeFilter` 优先于 `includeFilter`
 3. **状态码过滤**：`s:` 过滤器用于响应阶段的规则
 4. **头部大小写**：头部名称匹配不区分大小写
-5. **性能考虑**：Body 过滤（`b:`/`B:`）需要读取整个 Body，可能影响性能
+5. **Body 过滤边界**：`b:`/`B:` 当前只被解析，不参与运行时匹配；不要在生产规则里依赖它

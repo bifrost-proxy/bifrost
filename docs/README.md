@@ -6,6 +6,7 @@
 
 - [项目概览](./overview.md)
 - [安装与启动](./getting-started.md)
+- [CLI 快速开始](./cli-quick-start.md)
 - [CLI 详细命令](./cli.md)
 - [桌面版安装与构建](./desktop.md)
 
