@@ -2,14 +2,14 @@
 
 ## 2026-05-02 方案修订：对齐文件化记忆标准
 
-本方案废弃原 SQLite/`crates/memory` 在线主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆采用文件化 read-path 方案，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下。
+本方案废弃旧版在线召回主存储，不做旧版本兼容和迁移。Bifrost Agent 的长期记忆采用文件化 read-path 方案，并将所有记忆存放在用户自定义数据目录的 `agent/memory/` 下；Phase 2 运行状态仅保存在 `.memory_state.db`。
 
 ## 目录布局
 
 记忆根目录：
 
 - 正常运行：`$BIFROST_DATA_DIR/agent/memory/`
-- 测试显式覆盖：`$BIFROST_AGENT_HOME/memory/`
+- 测试显式覆盖：临时 `$BIFROST_DATA_DIR/agent/memory/`
 
 文件布局：
 
@@ -18,9 +18,9 @@
 - `raw_memories.md`：原始记忆汇总，用于后续 consolidation。
 - `rollout_summaries/`：每次自动抽取产生的可追溯摘要。
 - `skills/`：保留 memory skill 目录，用于后续 consolidation 生成/更新 skills。
-- `.phase2_state.json`：无数据库 Phase 2 的 bounded input hash 与处理计数状态，用于判断是否需要再次 consolidation。
+- `.memory_state.db`：Phase 2 bounded input hash、处理计数、失败熔断状态。
 
-禁止创建或依赖 `memories.sqlite`。
+禁止创建或依赖 `.phase2_state.json`。
 
 ## 读路径
 
@@ -42,28 +42,28 @@ Bifrost 不再在 turn 前做 topK 数据库召回，也不维护 `scope/kind/us
 - 追加 `MEMORY.md`
 - 追加 `memory_summary.md`
 - 追加 `raw_memories.md`
-- 不创建 SQLite
+- 显式写入不触发 Phase 2 时不创建 SQLite；自动写入完成 Phase 2 后创建 `.memory_state.db`
 
 ### 自动写入
 
 当 `memories.generate_memories != Some(false)` 时，assistant turn 完成后用 `extract_model` 或主模型执行轻量抽取：
 
 1. 输入当前 user message 与 assistant response。
-2. 模型返回 `{"memories":["..."]}`。
-3. 过滤空项和同批重复项。
-4. 写入 `MEMORY.md`、`memory_summary.md`、`raw_memories.md`。
-5. 为每条自动记忆写入 `rollout_summaries/<timestamp>-<hash>-<session>.md`。
+2. 模型返回当前结构化 JSON：`rollout_summary`、`rollout_slug`、`raw_memory`。
+3. `raw_memory` 非空时写入 `raw_memories.md`，并写入对应 `rollout_summaries/<slug>.md`。
+4. 追加 `memory_summary.md` 的简短摘要。
+5. 如果模型没有返回 `raw_memory`，本轮自动写入不落盘，也不走旧的单行 `memories` fallback。
 
-自动写入完成后触发无数据库 Phase 2 consolidation。
+自动写入完成后触发 Phase 2 consolidation。
 
 ## Phase 2 Consolidation
 
-Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使用文件状态实现 Phase 2：
+Bifrost 使用 `.memory_state.db` 存储 Phase 2 任务状态：
 
 1. 获取 `agent/memory/.phase2.lock` 文件锁；锁存在且未过期时跳过本轮，避免多个 session 同时 consolidation 覆盖彼此结果。
 2. 按 `memories.max_raw_memories_for_consolidation` 选择最近 N 条 raw/rollout 输入；未配置时使用内置默认值，且最小为 1。
-3. 只基于“本轮实际进入 prompt 的 bounded input”计算稳定 hash。`.phase2_state.json` 只记录这批输入的 hash/count，不把被 retention 排除或截断之外的内容标记为已 consolidated。
-4. 读取 `.phase2_state.json`，如果 `last_input_hash` 相同则跳过。
+3. 只基于“本轮实际进入 prompt 的 bounded input”计算稳定 hash。SQLite 只记录这批输入的 hash/count，不把被 retention 排除或截断之外的内容标记为已 consolidated。
+4. 读取 `.memory_state.db` 中的 Phase 2 状态，如果 `last_input_hash` 相同则跳过。
 5. 构造 consolidation prompt，输入包括：
    - 当前 `memory_summary.md`
    - 当前 `MEMORY.md`
@@ -82,8 +82,8 @@ Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使�
 }
 ```
 
-8. 成功后通过临时文件 + rename 原子替换 `memory_summary.md`、`MEMORY.md`、`.phase2_state.json`，并写入 `skills/<name>/SKILL.md`。
-9. `.phase2_state.json` 记录 `last_input_hash`、`processed_input_count`、`total_input_count`、`has_more_inputs` 和 `updated_at_unix`。
+8. 成功后通过临时文件 + rename 原子替换 `memory_summary.md`、`MEMORY.md`，写入 `skills/<name>/SKILL.md`，并更新 SQLite Phase 2 状态。
+9. SQLite Phase 2 状态记录 `last_input_hash`、`processed_input_count`、`total_input_count`、`has_more_inputs` 和 `updated_at_unix`。
 
 如果模型输出非法 JSON，保留 turn-end append 产生的原始文件，不更新 Phase 2 状态，后续输入变化时可重试。
 
@@ -96,13 +96,13 @@ Bifrost 不使用数据库存储任务状态，而是在 `agent/memory/` 内使�
 - `MEMORY.md`、`raw_memories.md`、`rollout_summaries/`、`skills/` 布局。
 - `generate_memories` 与 `use_memories` 默认开启，显式 `false` 关闭。
 - 自动抽取后跨独立 session 可消费记忆。
-- `disable_on_external_context` 与旧 alias `no_memories_if_mcp_or_web_search` 的配置字段保留。
+- `disable_on_external_context` 为唯一外部上下文污染开关字段。
 - Admin PATCH 接收 memories 配置字段，包括 `min_rate_limit_remaining_percent`。
-- 无数据库 Phase 2 consolidation：基于 bounded `raw_memories.md`/`rollout_summaries/` 输入重写 `MEMORY.md`、`memory_summary.md`，使用文件锁和原子替换，并支持生成 memory skills。
+- Phase 2 consolidation：基于 bounded `raw_memories.md`/`rollout_summaries/` 输入重写 `MEMORY.md`、`memory_summary.md`，使用文件锁、SQLite 状态和原子替换，并支持生成 memory skills。
 
 不实现：
 
-- 数据库中的 stage1/stage2 job、lease、watermark、retry/backoff 表。用户要求 Bifrost 不使用数据库存储记忆。
+- 数据库中的 stage1/stage2 job、lease、watermark、retry/backoff 表。Bifrost 只用 SQLite 保存 Phase 2 状态，不把记忆正文作为在线召回数据库。
 
 仍未完全对齐，后续可继续补：
 
@@ -135,11 +135,11 @@ E2E 测试：
   - mock 同时验证自动抽取请求和 Phase 2 consolidation 请求；请求识别必须匹配当前 `Memory Writing Agent: Phase 1` / `Memory Writing Agent: Phase 2` prompt 文案，并返回当前 Phase 1 的 `rollout_summary` / `rollout_slug` / `raw_memory` JSON 结构。
   - 真实对话路径会构造系统 prompt 和技能摘要，技能摘要裁剪必须保持 UTF-8 字符边界，避免中文 skill 描述触发 `String::truncate` panic。
   - 断言 `MEMORY.md` 中最终来源为 `phase2_consolidated`，`raw_memories.md` 保留 `source: auto_extract` 追溯材料。
-  - 断言 `.phase2_state.json` 记录 bounded input 元数据：`processed_input_count`、`total_input_count`、`has_more_inputs`。
+  - 断言 `.memory_state.db` 的 Phase 2 状态记录 bounded input 元数据：`processed_input_count`、`total_input_count`、`has_more_inputs`。
 
 真实场景测试：
 
-- `human_tests/long-term-memory.md` 覆盖目录初始化、按需加载说明注入、显式写入、自动写入、Admin 文件 API、WebUI 文件视图、不创建 SQLite、跨独立 session 消费。
+- `human_tests/long-term-memory.md` 覆盖目录初始化、按需加载说明注入、显式写入、自动写入、Admin 文件 API、WebUI 文件视图、SQLite Phase 2 状态、跨独立 session 消费。
 - 每次修改后必须按文档逐条执行并记录实际结果。
 
 ## 2026-05-03 硬化修订（P0/P1/P2 合并落地）
@@ -157,7 +157,7 @@ E2E 测试：
 - 抽取与 consolidation 的模型输出都通过 `strip_markdown_fences + extract_balanced_json` 兜底解析：
   - 优先剥离 ``` / ```json 栅栏。
   - 按括号配对扫描首个平衡 JSON 对象，字符串字面量与转义字符不会误断。
-- `.phase2_state.json` 新增 `failure_count` 与 `pinned_failure_hash`；同一 bounded input hash 连续失败 **5 次**后熔断，直到输入变化才解除。避免模型死循环浪费 token。
+- SQLite Phase 2 状态记录 `failure_count` 与 `pinned_failure_hash`；同一 bounded input hash 连续失败 **5 次**后熔断，直到输入变化才解除。避免模型死循环浪费 token。
 
 ### 自动抽取改为后台 fire-and-forget
 

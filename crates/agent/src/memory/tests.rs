@@ -33,28 +33,21 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct EnvGuard {
-    old_agent_home: Option<String>,
     old_data_dir: Option<String>,
 }
 
 impl EnvGuard {
-    fn set_agent_home(path: &Path) -> Self {
+    fn set_data_dir(path: &Path) -> Self {
         let guard = Self {
-            old_agent_home: std::env::var("BIFROST_AGENT_HOME").ok(),
             old_data_dir: std::env::var("BIFROST_DATA_DIR").ok(),
         };
-        std::env::set_var("BIFROST_AGENT_HOME", path);
-        std::env::remove_var("BIFROST_DATA_DIR");
+        std::env::set_var("BIFROST_DATA_DIR", path);
         guard
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        match &self.old_agent_home {
-            Some(value) => std::env::set_var("BIFROST_AGENT_HOME", value),
-            None => std::env::remove_var("BIFROST_AGENT_HOME"),
-        }
         match &self.old_data_dir {
             Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
             None => std::env::remove_var("BIFROST_DATA_DIR"),
@@ -73,7 +66,7 @@ fn use_memories_disabled_short_circuits() {
         ..AgentConfig::default()
     };
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     assert!(recall_system_message(&config, &AgentSession::new("s"), "hello").is_none());
 }
 
@@ -81,17 +74,17 @@ fn use_memories_disabled_short_circuits() {
 fn memory_read_instructions_use_agent_memory_root() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     ensure_memory_layout().expect("layout");
     fs::write(
         memory_root().join("memory_summary.md"),
-        "Bifrost prefers Codex-style memory loading.",
+        "Bifrost prefers on-demand memory loading.",
     )
     .expect("write summary");
     let prompt = build_memory_read_instructions().expect("prompt");
     assert!(prompt.contains("/memory/memory_summary.md"));
     assert!(prompt.contains("/memory/MEMORY.md"));
-    assert!(prompt.contains("Bifrost prefers Codex-style memory loading."));
+    assert!(prompt.contains("Bifrost prefers on-demand memory loading."));
     assert!(prompt.contains("<oai-mem-citation>"));
 }
 
@@ -99,7 +92,7 @@ fn memory_read_instructions_use_agent_memory_root() {
 fn empty_memory_summary_does_not_inject() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     ensure_memory_layout().expect("layout");
     assert!(build_memory_read_instructions().is_none());
 }
@@ -108,46 +101,43 @@ fn empty_memory_summary_does_not_inject() {
 fn remember_writes_codex_files_without_sqlite() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("explicit");
     let record = remember_explicit(
         &AgentConfig::default(),
         &session,
-        "Prefer Codex-style file memories",
+        "Prefer file-backed memories",
     )
     .expect("remember");
     assert!(record.id.starts_with("manual-"));
     assert!(memory_root().join("MEMORY.md").exists());
     assert!(memory_root().join("memory_summary.md").exists());
     assert!(memory_root().join("raw_memories.md").exists());
-    assert!(!memory_root().join("memories.sqlite").exists());
+    assert!(!memory_root().join(".memory_state.db").exists());
     let summary = fs::read_to_string(memory_root().join("memory_summary.md")).unwrap();
-    assert!(summary.contains("Prefer Codex-style file memories"));
+    assert!(summary.contains("Prefer file-backed memories"));
     let raw = fs::read_to_string(memory_root().join("raw_memories.md")).unwrap();
     assert!(raw.contains("source: user_explicit"));
-    assert!(raw.contains("Prefer Codex-style file memories"));
-}
-
-#[test]
-fn parse_extracted_memories_accepts_json_and_dedupes() {
-    let extracted = parse_extracted_memories(
-        r#"{"memories":["Prefer file-backed memory", "Prefer file-backed memory", ""]}"#,
-    );
-    assert_eq!(extracted.memories, vec!["Prefer file-backed memory"]);
+    assert!(raw.contains("Prefer file-backed memories"));
 }
 
 #[test]
 fn parse_extracted_memories_strips_markdown_fences() {
-    let extracted =
-        parse_extracted_memories("```json\n{\"memories\":[\"hello from fenced block\"]}\n```");
-    assert_eq!(extracted.memories, vec!["hello from fenced block"]);
+    let extracted = parse_extracted_memories(
+        "```json\n{\"rollout_summary\":\"summary\",\"rollout_slug\":\"slug\",\"raw_memory\":\"raw\"}\n```",
+    );
+    assert_eq!(extracted.raw_memory.as_deref(), Some("raw"));
 }
 
 #[test]
 fn parse_extracted_memories_handles_prose_wrapped_json() {
-    let content = "Here is the JSON you asked for:\n```\n{\n  \"memories\": [\"nested { brace } inside\"]\n}\n```\nHope this helps!";
+    let content = "Here is the JSON you asked for:\n```\n{\n  \"rollout_summary\": \"nested { brace } inside\",\n  \"rollout_slug\": null,\n  \"raw_memory\": \"raw body\"\n}\n```\nHope this helps!";
     let extracted = parse_extracted_memories(content);
-    assert_eq!(extracted.memories, vec!["nested { brace } inside"]);
+    assert_eq!(
+        extracted.rollout_summary.as_deref(),
+        Some("nested { brace } inside")
+    );
+    assert_eq!(extracted.raw_memory.as_deref(), Some("raw body"));
 }
 
 #[test]
@@ -177,7 +167,6 @@ fn parse_extracted_memories_codex_format_with_raw_memory() {
 fn parse_extracted_memories_noop_returns_empty() {
     let content = r#"{"rollout_summary":"","rollout_slug":"","raw_memory":""}"#;
     let extracted = parse_extracted_memories(content);
-    assert!(extracted.memories.is_empty());
     assert_eq!(extracted.raw_memory.as_deref(), Some(""));
     assert_eq!(extracted.rollout_slug.as_deref(), Some(""));
 }
@@ -202,7 +191,7 @@ fn parse_consolidated_memory_errors_on_garbage() {
 fn remember_auto_writes_codex_files_without_sqlite() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("auto-session");
     let record = remember_auto(
         &AgentConfig::default(),
@@ -225,14 +214,14 @@ fn remember_auto_writes_codex_files_without_sqlite() {
         .filter_map(Result::ok)
         .count();
     assert_eq!(rollout_summary_count, 1);
-    assert!(!memory_root().join("memories.sqlite").exists());
+    assert!(!memory_root().join(".memory_state.db").exists());
 }
 
 #[test]
 fn phase2_prompt_is_dirty_when_raw_memory_changes() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("phase2-source");
     remember_auto(
         &AgentConfig::default(),
@@ -256,7 +245,7 @@ fn phase2_prompt_is_dirty_when_raw_memory_changes() {
 fn phase2_input_selection_uses_recent_bounded_inputs() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("phase2-bounded");
     remember_auto(
         &AgentConfig::default(),
@@ -291,7 +280,7 @@ fn phase2_input_selection_uses_recent_bounded_inputs() {
 fn phase2_lock_prevents_concurrent_consolidation() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let root = ensure_memory_layout().expect("layout");
 
     let first = Phase2LockGuard::try_acquire(&root)
@@ -347,7 +336,7 @@ async fn append_line_locks_concurrent_writers() {
 fn apply_consolidated_memory_rewrites_summary_memory_and_skills() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let root = ensure_memory_layout().expect("layout");
     let consolidated = parse_consolidated_memory(
         r#"{
@@ -382,7 +371,7 @@ fn apply_consolidated_memory_rewrites_summary_memory_and_skills() {
 fn apply_consolidated_memory_preserves_user_authored_skill() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let root = ensure_memory_layout().expect("layout");
     let user_skill_dir = root.join("skills").join("shared-name");
     fs::create_dir_all(&user_skill_dir).unwrap();
@@ -418,7 +407,7 @@ fn apply_consolidated_memory_preserves_user_authored_skill() {
 fn forget_memory_removes_auto_entries() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("forget-auto");
     let record = remember_auto(&AgentConfig::default(), &session, "an auto entry").unwrap();
     let removed = forget_memory(&AgentConfig::default(), &session, &record.id).unwrap();
@@ -431,7 +420,7 @@ fn forget_memory_removes_auto_entries() {
 fn forget_memory_last_matches_any_source() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("forget-last");
     remember_explicit(&AgentConfig::default(), &session, "manual 1").unwrap();
     let last_auto = remember_auto(&AgentConfig::default(), &session, "auto last").unwrap();
@@ -443,7 +432,7 @@ fn forget_memory_last_matches_any_source() {
 fn replace_memory_rewrites_content_line() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("replace");
     let record = remember_explicit(&AgentConfig::default(), &session, "original").unwrap();
     let replaced =
@@ -465,7 +454,7 @@ fn extract_balanced_json_handles_nested_braces_in_strings() {
 fn phase2_failure_counter_opens_breaker() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let root = ensure_memory_layout().expect("layout");
     for _ in 0..constants::MEMORY_CONSOLIDATION_FAILURE_LIMIT {
         bump_phase2_failure("test");
@@ -482,7 +471,7 @@ fn phase2_failure_counter_opens_breaker() {
 fn memory_stats_reports_phase2_counters() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let stats = memory_stats().expect("stats");
     assert!(stats.memory_root.ends_with("memory"));
     assert_eq!(stats.phase2_failure_count, 0);
@@ -492,7 +481,7 @@ fn memory_stats_reports_phase2_counters() {
 fn prune_memory_artifacts_caps_raw_memories() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let session = AgentSession::new("prune-raw");
     for i in 0..40 {
         remember_auto(&AgentConfig::default(), &session, &format!("raw-{i}")).unwrap();
@@ -521,7 +510,7 @@ fn prune_memory_artifacts_caps_raw_memories() {
 fn telemetry_event_writes_jsonl() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     ensure_memory_layout().expect("layout");
     telemetry_event("unit.test", 42, true, Some("hello"));
     let path = memory_root().join(".telemetry.jsonl");
@@ -568,20 +557,19 @@ fn truncate_middle_approx_tokens_zero_budget() {
 }
 
 #[test]
-fn write_codex_style_extraction_creates_artifacts() {
+fn write_phase1_extraction_creates_artifacts() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     ensure_memory_layout().expect("layout");
     let extracted = ExtractedMemories {
-        memories: vec![],
         raw_memory: Some(
             "---\ndescription: test\ntask: fix\n---\n### Task 1\nReusable: check first".to_string(),
         ),
         rollout_summary: Some("# Fixed auth\n\n## Task 1: fix\nOutcome: success".to_string()),
         rollout_slug: Some("fix-auth-bug".to_string()),
     };
-    write::write_codex_style_extraction("test-session", &extracted).expect("write");
+    write::write_phase1_extraction("test-session", &extracted).expect("write");
 
     let rollout_path = memory_root()
         .join("rollout_summaries")
@@ -740,7 +728,7 @@ fn state_db_roundtrip() {
 fn state_db_load_save_used_in_load_phase2_state() {
     let _lock = env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
-    let _guard = EnvGuard::set_agent_home(temp.path());
+    let _guard = EnvGuard::set_data_dir(temp.path());
     let root = ensure_memory_layout().expect("layout");
     // Initially empty — should return default state
     let default_state = consolidation::load_phase2_state(&root);
@@ -756,10 +744,8 @@ fn state_db_load_save_used_in_load_phase2_state() {
     let loaded = consolidation::load_phase2_state(&root);
     assert_eq!(loaded.last_input_hash, "hash42");
     assert_eq!(loaded.failure_count, 3);
-    // Also verify JSON file was written (backward compat)
-    let json_path = root.join(".phase2_state.json");
-    assert!(json_path.exists(), "JSON backward compat file should exist");
-    let json_state: Phase2State =
-        serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
-    assert_eq!(json_state.last_input_hash, "hash42");
+    assert!(
+        !root.join(".phase2_state.json").exists(),
+        "Phase 2 state should live only in SQLite"
+    );
 }

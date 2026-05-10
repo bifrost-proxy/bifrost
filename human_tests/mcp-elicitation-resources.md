@@ -86,15 +86,17 @@ MCP Elicitation 和 Resources 协议模块为 Bifrost Agent 提供：
 
 **操作步骤**：
 1. 检查 `list_resources_tool_def()` 返回的 JSON 结构
-2. 确认 name 为 `"mcp__list_resources"`
+2. 确认 name 为 `"list_mcp_resources"`
 3. 确认 parameters 包含 `server` 和 `cursor` 属性
 4. 检查 `read_resource_tool_def()` 的 required 包含 `["server", "uri"]`
 5. 确认 `all_resource_tool_defs()` 返回 3 个定义
+6. 确认 `all_resource_tool_definitions()` 返回可加入 Chat Completions `tools` 的 3 个 `ToolDefinition`
 
 **预期结果**：
-- 工具名称符合 `mcp__` 前缀约定
+- 工具名称符合 Codex canonical MCP resource 名称：`list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource`
 - read_resource 要求 server 和 uri 为必填
 - list 类工具无必填参数
+- schema 禁止额外参数，避免模型传入无效字段
 
 ### TC-MER-08: McpRequestSender trait 解耦验证
 
@@ -144,3 +146,9 @@ MCP Elicitation 和 Resources 协议模块为 Bifrost Agent 提供：
 ## 清理步骤
 
 无需清理（纯代码模块，无运行时副作用）。
+
+## 本轮执行记录
+
+| 用例 | 状态 | 日期 | 实际结果 |
+| --- | --- | --- | --- |
+| TC-MER-07 | 通过 | 2026-05-11 | `cargo test -p bifrost-agent mcp::resources::tests::test_all_resource_tool_definitions_are_function_tools` 通过；`cargo test -p bifrost-agent mcp::tests::mcp_resource_tools_stay_direct_when_server_tools_are_deferred` 通过，确认 canonical resource tools 可转 ToolDefinition 且不会随 server tools deferred。 |

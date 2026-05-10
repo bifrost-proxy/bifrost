@@ -5,8 +5,8 @@
 //! - Tracks conversation history, token usage, and compaction state
 //! - Expired sessions are cleaned up by the session manager
 //!
-//! Turn loop (inspired by Codex's session/turn.rs):
-//! 1. Build prompt prefix and run Codex-style pre-sampling compaction when needed
+//! Turn loop:
+//! 1. Build prompt prefix and run pre-sampling compaction when needed
 //! 2. Add the new user message and send to model with available tools
 //! 3. If model returns tool_calls or pending input → mid-turn compaction check → loop
 //! 4. If model returns text → return as final response
@@ -33,9 +33,11 @@ use crate::tools::tool_search::{
 };
 use crate::tools::ToolHandler;
 use crate::tools::ToolRegistry;
+use crate::turn_runtime::{local_tool_supports_parallel, CodexTurnEvent, CodexTurnEventKind};
 use crate::types::{ChatImageInput, ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
 use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
+use futures::stream::{FuturesOrdered, StreamExt};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -209,6 +211,12 @@ pub struct AgentSession {
     /// checked out by the running loop.
     pub stop_signal: Option<AgentStopSignalHandle>,
 
+    /// Last turn's runtime event stream.
+    ///
+    /// The loop records turn phases so tool routing, cancellation, and history
+    /// state are observable without scraping logs.
+    pub last_turn_events: Vec<CodexTurnEvent>,
+
     /// Optional provider-neutral progress sink for IM renderers.
     pub progress_sender: Option<AgentTurnProgressSender>,
 }
@@ -245,6 +253,7 @@ impl AgentSession {
             plan_sender: None,
             active_turn_status: None,
             stop_signal: None,
+            last_turn_events: Vec::new(),
             progress_sender: None,
         }
     }
@@ -262,8 +271,10 @@ impl AgentSession {
     /// skills, so this deliberately clears conversation state and rebuilds the
     /// skill registry from the new directory.
     pub fn reinitialize_work_dir(&mut self, work_dir: String) {
+        let turn_events = std::mem::take(&mut self.last_turn_events);
         self.work_dir = Some(work_dir);
         self.clear();
+        self.last_turn_events = turn_events;
         self.slash_router = SlashCommandRouter::with_default_builtins();
         self.skill_registry = None;
         self.attach_default_skill_registry();
@@ -342,6 +353,21 @@ impl AgentSession {
         self.memory_cleared = true;
         // Drop the recorder so a new file will be created for the fresh session
         self.recorder = None;
+        self.last_turn_events.clear();
+    }
+
+    pub fn clear_turn_events(&mut self) {
+        self.last_turn_events.clear();
+    }
+
+    pub fn record_turn_event(&mut self, kind: CodexTurnEventKind) {
+        let seq = self.last_turn_events.len() as u64;
+        self.last_turn_events.push(CodexTurnEvent::new(seq, kind));
+    }
+
+    pub fn record_turn_event_entry(&mut self, mut event: CodexTurnEvent) {
+        event.seq = self.last_turn_events.len() as u64;
+        self.last_turn_events.push(event);
     }
 
     /// Drop the last `num_turns` user turns from history (rollback).
@@ -497,8 +523,8 @@ impl AgentSession {
     /// Build the full message list for a model call.
     ///
     /// Enforces `max_history_messages` limit by dropping the oldest non-summary
-    /// messages while preserving the compaction summary wherever Codex-style
-    /// replacement history placed it.
+    /// messages while preserving the compaction summary wherever replacement
+    /// history placed it.
     fn build_messages(
         &self,
         prompt_prefix: &[ChatMessage],
@@ -1113,6 +1139,7 @@ fn stopped_turn_result(
     recorder: &mut Option<&mut ConversationRecorder>,
     tool_calls_log: Vec<ToolCallLog>,
 ) -> TurnResult {
+    session.record_turn_event(CodexTurnEventKind::TurnStopped);
     crate::tools::goal::goal_runtime_apply(
         session,
         crate::tools::goal::GoalRuntimeEvent::TaskAborted {
@@ -1146,6 +1173,12 @@ fn append_cancelled_tool_results(
     const CANCELLED_TOOL_OUTPUT: &str = "Tool call cancelled because /stop was requested.";
     for tc in tool_calls.iter().skip(start_index) {
         session.add_tool_result(&tc.id, CANCELLED_TOOL_OUTPUT);
+        session.record_turn_event_entry(
+            CodexTurnEvent::new(0, CodexTurnEventKind::ToolCallCompleted)
+                .with_tool(tc.name(), tc.id.clone())
+                .with_success(false)
+                .with_detail("cancelled"),
+        );
         if let Some(rec) = recorder.as_deref_mut() {
             if let Err(e) = rec.record_tool_result_with_call_id(
                 &session.session_key,
@@ -1166,11 +1199,171 @@ fn append_cancelled_tool_results(
     }
 }
 
-/// Run a single turn of the agent conversation (backward-compatible wrapper).
+#[allow(clippy::too_many_arguments)]
+fn record_tool_call_started(
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    tc: &ToolCallMessage,
+    iteration: usize,
+) -> std::time::Instant {
+    info!(
+        tool = %tc.name(),
+        call_id = %tc.id,
+        "executing tool call"
+    );
+    if let Some(sender) = &session.progress_sender {
+        let _ = sender.send(AgentTurnProgressEvent::ToolStarted {
+            tool_name: tc.name().to_string(),
+            arguments: tc.arguments().to_string(),
+        });
+    }
+    session.record_turn_event_entry(
+        CodexTurnEvent::new(0, CodexTurnEventKind::ToolCallStarted)
+            .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+            .with_tool(tc.name(), tc.id.clone()),
+    );
+    if let Some(rec) = recorder.as_deref_mut() {
+        if let Err(e) = rec.record_tool_call_with_id(
+            &session.session_key,
+            tc.name(),
+            tc.arguments(),
+            Some(&tc.id),
+        ) {
+            warn!(error = %e, "failed to record tool call");
+        }
+    }
+    std::time::Instant::now()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_tool_call_completion(
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    tool_calls_log: &mut Vec<ToolCallLog>,
+    tool_defs: &mut Vec<crate::types::ToolDefinition>,
+    visible_tool_names: &mut HashSet<String>,
+    config: &AgentConfig,
+    tc: &ToolCallMessage,
+    result: crate::types::ToolResult,
+    tool_started_at: std::time::Instant,
+    tool_output_limit: usize,
+    iteration: usize,
+    local_tool_count: usize,
+    mcp_tool_count: usize,
+) {
+    debug!(
+        tool = %tc.name(),
+        success = result.success,
+        output_len = result.output.len(),
+        output_preview = %telemetry_preview(&result.output),
+        "tool call completed"
+    );
+
+    if tc.name() == TOOL_SEARCH_TOOL_NAME && result.success {
+        for definition in parse_loadable_tool_definitions(&result.output) {
+            if visible_tool_names.insert(definition.name().to_string()) {
+                debug!(
+                    tool = %definition.name(),
+                    "loaded deferred tool definition from tool_search"
+                );
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::DeferredToolLoaded)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_tool(definition.name(), tc.id.clone()),
+                );
+                tool_defs.push(definition);
+            }
+        }
+    }
+
+    // Apply tool output token limit truncation with 1.2x serialization
+    // budget (matching Codex's policy * 1.2) to account for JSON escaping
+    // overhead when the text is serialized into the API request payload.
+    let output = if tool_output_limit > 0 {
+        let budget = (tool_output_limit as u64)
+            .saturating_mul(12)
+            .saturating_div(10) as usize;
+        truncate_tool_output(&result.output, budget)
+    } else {
+        result.output.clone()
+    };
+
+    let log = ToolCallLog {
+        tool_name: tc.name().to_string(),
+        arguments: tc.arguments().to_string(),
+        result: result.output.clone(),
+        success: result.success,
+    };
+    if let Some(sender) = &session.progress_sender {
+        let duration_ms = u64::try_from(tool_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let _ = sender.send(AgentTurnProgressEvent::ToolFinished {
+            log: log.clone(),
+            duration_ms,
+        });
+    }
+    tool_calls_log.push(log);
+
+    if let Some(rec) = recorder.as_deref_mut() {
+        if let Err(e) = rec.record_tool_result_with_call_id(
+            &session.session_key,
+            tc.name(),
+            &result.output,
+            result.success,
+            Some(&tc.id),
+        ) {
+            warn!(error = %e, "failed to record tool result");
+        }
+    }
+
+    session.add_tool_result(&tc.id, &output);
+    session.record_turn_event_entry(
+        CodexTurnEvent::new(0, CodexTurnEventKind::ToolCallCompleted)
+            .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+            .with_tool(tc.name(), tc.id.clone())
+            .with_success(result.success),
+    );
+    refresh_active_turn_status(
+        session,
+        config,
+        ActiveTurnProgress {
+            state: "tool_calls",
+            current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+            completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
+            max_loop_iterations: config.get_max_turn_iterations(),
+            local_tool_count,
+            mcp_tool_count,
+        },
+    );
+
+    // Skip ToolCompleted accounting for update_goal; the goal handler itself
+    // fires ToolCompletedGoal with suppressed steering.
+    if tc.name() != crate::tools::goal::UPDATE_GOAL_TOOL_NAME {
+        crate::tools::goal::goal_runtime_apply(
+            session,
+            crate::tools::goal::GoalRuntimeEvent::ToolCompleted,
+        );
+    }
+}
+
+fn is_parallel_local_tool_call(
+    tools: &ToolRegistry,
+    mcp: Option<&McpManager>,
+    tool_name: &str,
+) -> bool {
+    tools.contains_tool(tool_name)
+        && local_tool_supports_parallel(tool_name)
+        && tool_name != TOOL_SEARCH_TOOL_NAME
+        && crate::tools::goal::goal_tool_names()
+            .iter()
+            .all(|goal_tool| goal_tool != &tool_name)
+        && !mcp.is_some_and(|manager| manager.is_mcp_tool(tool_name))
+}
+
+/// Run a single turn of the agent conversation.
 ///
-/// This implements the core turn loop (same pattern as Codex's session/turn.rs):
+/// This implements the core turn loop:
 /// 1. Handle built-in commands (/clear, /reset)
-/// 2. Build prompt prefix and run Codex-style pre-sampling compaction when needed
+/// 2. Build prompt prefix and run pre-sampling compaction when needed
 /// 3. Add the user message and send to model with available tools
 /// 4. If model returns tool_calls → execute → mid-turn compaction check → loop
 /// 5. If model returns text → return as final response
@@ -1239,6 +1432,8 @@ pub async fn run_turn_with_mcp_multimodal(
     if !config.enabled {
         return Err("agent is disabled".to_string());
     }
+    session.clear_turn_events();
+    session.record_turn_event(CodexTurnEventKind::TurnStarted);
 
     // Handle built-in commands
     let trimmed = user_message.trim();
@@ -1654,19 +1849,6 @@ pub async fn run_turn_with_mcp_multimodal(
     ) {
         let agent_home = crate::config::agent_home_dir();
         let mut files = persistence::list_conversations(&agent_home, Some(&session.session_key));
-        if files.is_empty() {
-            let legacy_dir = config.resolve_work_dir();
-            let legacy_files =
-                persistence::list_conversations(&legacy_dir, Some(&session.session_key));
-            if !legacy_files.is_empty() {
-                warn!(
-                    agent_home = %agent_home.display(),
-                    fallback_dir = %legacy_dir.display(),
-                    "resume fell back to legacy work_dir session path"
-                );
-                files = legacy_files;
-            }
-        }
         // Exclude the current recorder's file (it was just created for this request
         // and contains no conversation data yet).
         if let Some(ref rec) = recorder {
@@ -1818,7 +2000,7 @@ pub async fn run_turn_with_mcp_multimodal(
         resolved
     };
 
-    // Build Codex-style prompt prefix:
+    // Build prompt prefix:
     // system(base instructions) + developer sections + contextual user sections.
     // Route-level `system_prompt_override` is treated as a base prompt override,
     // not as a full prompt replacement, so tools/skills/AGENTS/env still apply.
@@ -1846,8 +2028,8 @@ pub async fn run_turn_with_mcp_multimodal(
         }
     }
 
-    // Merge tool definitions: local tools + direct MCP tools. Codex-style
-    // deferred MCP tools are available through turn-scoped `tool_search`.
+    // Merge tool definitions: local tools + direct MCP tools. Deferred MCP
+    // tools are available through turn-scoped `tool_search`.
     let mut tool_defs = tools.definitions();
     let local_tool_count = tool_defs.len();
     let mut visible_tool_names = tool_defs
@@ -1960,12 +2142,16 @@ pub async fn run_turn_with_mcp_multimodal(
             history_len = session.history.len(),
             "sending model request"
         );
+        session.record_turn_event_entry(
+            CodexTurnEvent::new(0, CodexTurnEventKind::ModelRequestStarted)
+                .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX)),
+        );
 
         let response =
             chat_completion_or_stop(client, config, session, &messages, &tool_defs).await;
 
         // Retry with exponential backoff on transient errors;
-        // Codex-style degradation on context window overflow:
+        // Degradation on context window overflow:
         //   1. Emergency compact (best effort — preserves most context)
         //   2. Loop trim oldest messages until within budget
         //   3. Give up only when history is exhausted
@@ -2314,6 +2500,11 @@ pub async fn run_turn_with_mcp_multimodal(
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.total_tokens);
         }
+        session.record_turn_event_entry(
+            CodexTurnEvent::new(0, CodexTurnEventKind::ModelResponseCompleted)
+                .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                .with_detail(format!("finish_reason={}", response.finish_reason)),
+        );
         refresh_active_turn_status(
             session,
             config,
@@ -2509,12 +2700,12 @@ pub async fn run_turn_with_mcp_multimodal(
                 content.clone(),
             );
 
+            session.record_turn_event(CodexTurnEventKind::TurnCompleted);
             if let Some(sender) = &session.progress_sender {
                 let _ = sender.send(AgentTurnProgressEvent::AssistantFinal {
                     content: content.clone(),
                 });
             }
-
             return Ok(TurnResult {
                 response: content,
                 tool_calls_log,
@@ -2566,9 +2757,20 @@ pub async fn run_turn_with_mcp_multimodal(
 
         // Record the assistant message with tool calls
         session.add_assistant_tool_calls(&response.tool_calls);
+        session.record_turn_event_entry(
+            CodexTurnEvent::new(0, CodexTurnEventKind::AssistantToolCallsRecorded)
+                .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                .with_detail(format!("tool_calls={}", response.tool_calls.len())),
+        );
 
-        // Execute each tool call
-        for (tool_index, tc) in response.tool_calls.iter().enumerate() {
+        // Execute tool calls as ordered batches. Local tools that do not
+        // mutate turn/session routing state run through FuturesOrdered, which
+        // lets work overlap while still appending tool results to history in the
+        // model-provided order. Stateful tools, tool_search, and MCP tools stay
+        // ordered so their side effects are visible at the correct point.
+        let mut tool_index = 0;
+        while tool_index < response.tool_calls.len() {
+            let tc = &response.tool_calls[tool_index];
             if stop_requested(session) {
                 info!(
                     session_key = %session.session_key,
@@ -2584,31 +2786,108 @@ pub async fn run_turn_with_mcp_multimodal(
                 );
                 return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
             }
-            info!(
-                tool = %tc.name(),
-                call_id = %tc.id,
-                "executing tool call"
-            );
-            if let Some(sender) = &session.progress_sender {
-                let _ = sender.send(AgentTurnProgressEvent::ToolStarted {
-                    tool_name: tc.name().to_string(),
-                    arguments: tc.arguments().to_string(),
-                });
-            }
-            let tool_started_at = std::time::Instant::now();
 
-            // Record tool call
-            if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.record_tool_call_with_id(
-                    &session.session_key,
-                    tc.name(),
-                    tc.arguments(),
-                    Some(&tc.id),
-                ) {
-                    warn!(error = %e, "failed to record tool call");
+            if is_parallel_local_tool_call(tools, mcp.as_deref(), tc.name()) {
+                let batch_start = tool_index;
+                let mut batch_end = batch_start;
+                while batch_end < response.tool_calls.len()
+                    && is_parallel_local_tool_call(
+                        tools,
+                        mcp.as_deref(),
+                        response.tool_calls[batch_end].name(),
+                    )
+                {
+                    batch_end += 1;
                 }
+
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::ToolBatchStarted)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_detail(format!(
+                            "mode=parallel,count={}",
+                            batch_end.saturating_sub(batch_start)
+                        )),
+                );
+
+                let mut futures = FuturesOrdered::new();
+                for batch_index in batch_start..batch_end {
+                    let batch_tc = &response.tool_calls[batch_index];
+                    let tool_started_at =
+                        record_tool_call_started(session, &mut recorder, batch_tc, iteration);
+                    let handler = tools
+                        .handler(batch_tc.name())
+                        .expect("parallel local tool was resolved before scheduling");
+                    let arguments = batch_tc.arguments().to_string();
+                    let batch_work_dir = work_dir.clone();
+                    futures.push_back(async move {
+                        let result = handler.execute(&arguments, &batch_work_dir).await;
+                        (batch_index, result, tool_started_at)
+                    });
+                }
+
+                let mut next_cancel_index = batch_start;
+                let stop_signal = session.stop_signal.clone();
+                while !futures.is_empty() {
+                    let next = if let Some(signal) = stop_signal.as_ref() {
+                        tokio::select! {
+                            result = futures.next() => Some(result),
+                            _ = signal.cancelled() => None,
+                        }
+                    } else {
+                        Some(futures.next().await)
+                    };
+
+                    let Some(Some((completed_index, result, tool_started_at))) = next else {
+                        info!(
+                            session_key = %session.session_key,
+                            "agent turn stopped during parallel tool batch"
+                        );
+                        append_cancelled_tool_results(
+                            session,
+                            &mut recorder,
+                            &mut tool_calls_log,
+                            &response.tool_calls,
+                            next_cancel_index,
+                        );
+                        return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
+                    };
+                    next_cancel_index = completed_index.saturating_add(1);
+                    let completed_tc = &response.tool_calls[completed_index];
+                    apply_tool_call_completion(
+                        session,
+                        &mut recorder,
+                        &mut tool_calls_log,
+                        &mut tool_defs,
+                        &mut visible_tool_names,
+                        config,
+                        completed_tc,
+                        result,
+                        tool_started_at,
+                        tool_output_limit,
+                        iteration,
+                        local_tool_count,
+                        mcp_tool_count,
+                    );
+                }
+
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::ToolBatchCompleted)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_detail(format!(
+                            "mode=parallel,count={}",
+                            batch_end.saturating_sub(batch_start)
+                        )),
+                );
+                tool_index = batch_end;
+                continue;
             }
 
+            session.record_turn_event_entry(
+                CodexTurnEvent::new(0, CodexTurnEventKind::ToolBatchStarted)
+                    .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                    .with_detail("mode=ordered,count=1"),
+            );
+            let tool_started_at = record_tool_call_started(session, &mut recorder, tc, iteration);
             let stop_signal = session.stop_signal.clone();
             let tool_execution = async {
                 if let Some(result) =
@@ -2668,90 +2947,27 @@ pub async fn run_turn_with_mcp_multimodal(
                 );
                 return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
             };
-
-            debug!(
-                tool = %tc.name(),
-                success = result.success,
-                output_len = result.output.len(),
-                output_preview = %telemetry_preview(&result.output),
-                "tool call completed"
-            );
-
-            if tc.name() == TOOL_SEARCH_TOOL_NAME && result.success {
-                for definition in parse_loadable_tool_definitions(&result.output) {
-                    if visible_tool_names.insert(definition.name().to_string()) {
-                        debug!(
-                            tool = %definition.name(),
-                            "loaded deferred tool definition from tool_search"
-                        );
-                        tool_defs.push(definition);
-                    }
-                }
-            }
-
-            // Apply tool output token limit truncation with 1.2x serialization
-            // budget (matching Codex's policy * 1.2) to account for JSON escaping
-            // overhead when the text is serialized into the API request payload
-            let output = if tool_output_limit > 0 {
-                let budget = (tool_output_limit as u64)
-                    .saturating_mul(12)
-                    .saturating_div(10) as usize;
-                truncate_tool_output(&result.output, budget)
-            } else {
-                result.output.clone()
-            };
-
-            let log = ToolCallLog {
-                tool_name: tc.name().to_string(),
-                arguments: tc.arguments().to_string(),
-                result: result.output.clone(),
-                success: result.success,
-            };
-            if let Some(sender) = &session.progress_sender {
-                let duration_ms =
-                    u64::try_from(tool_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let _ = sender.send(AgentTurnProgressEvent::ToolFinished {
-                    log: log.clone(),
-                    duration_ms,
-                });
-            }
-            tool_calls_log.push(log);
-
-            // Record tool result
-            if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.record_tool_result_with_call_id(
-                    &session.session_key,
-                    tc.name(),
-                    &result.output,
-                    result.success,
-                    Some(&tc.id),
-                ) {
-                    warn!(error = %e, "failed to record tool result");
-                }
-            }
-
-            // Add tool result to history
-            session.add_tool_result(&tc.id, &output);
-            refresh_active_turn_status(
+            apply_tool_call_completion(
                 session,
+                &mut recorder,
+                &mut tool_calls_log,
+                &mut tool_defs,
+                &mut visible_tool_names,
                 config,
-                ActiveTurnProgress {
-                    state: "tool_calls",
-                    current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
-                    completed_loop_iterations: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
-                    max_loop_iterations: config.get_max_turn_iterations(),
-                    local_tool_count,
-                    mcp_tool_count,
-                },
+                tc,
+                result,
+                tool_started_at,
+                tool_output_limit,
+                iteration,
+                local_tool_count,
+                mcp_tool_count,
             );
-            // Codex-aligned: skip ToolCompleted accounting for update_goal (the goal
-            // handler itself fires ToolCompletedGoal with suppressed steering).
-            if tc.name() != crate::tools::goal::UPDATE_GOAL_TOOL_NAME {
-                crate::tools::goal::goal_runtime_apply(
-                    session,
-                    crate::tools::goal::GoalRuntimeEvent::ToolCompleted,
-                );
-            }
+            session.record_turn_event_entry(
+                CodexTurnEvent::new(0, CodexTurnEventKind::ToolBatchCompleted)
+                    .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                    .with_detail("mode=ordered,count=1"),
+            );
+            tool_index += 1;
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
@@ -2767,6 +2983,7 @@ pub async fn run_turn_with_mcp_multimodal(
                     "switching session work directory"
                 );
                 session.reinitialize_work_dir(new_dir.clone());
+                session.record_turn_event(CodexTurnEventKind::TurnCompleted);
                 return Ok(TurnResult {
                     response: format!(
                         "已切换工作目录到: {}\n\n会话历史已清空，已重新加载项目配置。",
@@ -3359,7 +3576,10 @@ mod tests {
     use super::*;
     use crate::config::ModelProviderConfig;
     use crate::types::ToolCallMessage;
+    use async_trait::async_trait;
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_tool_call(id: &str) -> ToolCallMessage {
         ToolCallMessage::function_call(
@@ -3523,6 +3743,71 @@ mod tests {
         })
     }
 
+    fn chat_tool_calls_response(
+        tool_calls: Vec<ToolCallMessage>,
+        total_tokens: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": "tool_calls"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": total_tokens.saturating_sub(1),
+                "completion_tokens": 1,
+                "total_tokens": total_tokens
+            }
+        })
+    }
+
+    struct ParallelGate {
+        started: AtomicUsize,
+        notify: tokio::sync::Notify,
+    }
+
+    struct BarrierTool {
+        name: &'static str,
+        gate: Arc<ParallelGate>,
+    }
+
+    #[async_trait]
+    impl ToolHandler for BarrierTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test-only barrier tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, _arguments: &str, _work_dir: &Path) -> crate::types::ToolResult {
+            let started = self.gate.started.fetch_add(1, Ordering::SeqCst) + 1;
+            if started >= 2 {
+                self.gate.notify.notify_waiters();
+            }
+            while self.gate.started.load(Ordering::SeqCst) < 2 {
+                self.gate.notify.notified().await;
+            }
+            crate::types::ToolResult {
+                success: true,
+                output: format!("done:{}", self.name),
+            }
+        }
+    }
+
     async fn provider_config_for_responses(responses: Vec<serde_json::Value>) -> AgentConfig {
         let url = chat_response_url(responses).await;
         provider_config_for_url(url)
@@ -3566,6 +3851,26 @@ mod tests {
         assert!(
             session.recorder.is_none(),
             "recorder should be dropped after clear"
+        );
+    }
+
+    #[test]
+    fn reinitialize_work_dir_preserves_current_turn_events() {
+        let dir = tempfile::tempdir().expect("work dir");
+        let mut session = AgentSession::new("switch-events");
+        session.record_turn_event(CodexTurnEventKind::TurnStarted);
+        session.record_turn_event(CodexTurnEventKind::ToolBatchStarted);
+
+        session.reinitialize_work_dir(dir.path().to_string_lossy().to_string());
+
+        assert_eq!(session.last_turn_events.len(), 2);
+        assert_eq!(
+            session.last_turn_events[0].kind,
+            CodexTurnEventKind::TurnStarted
+        );
+        assert_eq!(
+            session.last_turn_events[1].kind,
+            CodexTurnEventKind::ToolBatchStarted
         );
     }
 
@@ -3932,6 +4237,84 @@ mod tests {
             .history
             .iter()
             .any(|message| message.content.as_deref() == Some("final answer")));
+    }
+
+    #[tokio::test]
+    async fn codex_parallel_tool_batch_preserves_history_order() {
+        let tool_calls = vec![
+            ToolCallMessage::function_call(
+                "call-a".to_string(),
+                "parallel_a".to_string(),
+                "{}".to_string(),
+            ),
+            ToolCallMessage::function_call(
+                "call-b".to_string(),
+                "parallel_b".to_string(),
+                "{}".to_string(),
+            ),
+        ];
+        let config = provider_config_for_responses(vec![
+            chat_tool_calls_response(tool_calls, 22),
+            chat_text_response("final answer", 24),
+        ])
+        .await;
+        let gate = Arc::new(ParallelGate {
+            started: AtomicUsize::new(0),
+            notify: tokio::sync::Notify::new(),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(BarrierTool {
+            name: "parallel_a",
+            gate: Arc::clone(&gate),
+        }));
+        tools.register(Arc::new(BarrierTool {
+            name: "parallel_b",
+            gate,
+        }));
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("parallel-tools");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_turn(
+                &client,
+                &config,
+                &mut session,
+                &tools,
+                "run both tools",
+                None,
+            ),
+        )
+        .await
+        .expect("parallel tools should not block each other")
+        .unwrap();
+
+        assert_eq!(result.response, "final answer");
+        assert_eq!(
+            result
+                .tool_calls_log
+                .iter()
+                .map(|log| log.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parallel_a", "parallel_b"]
+        );
+        assert_eq!(
+            session
+                .history
+                .iter()
+                .filter(|message| message.role == "tool")
+                .map(|message| message.content.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["done:parallel_a", "done:parallel_b"]
+        );
+        assert!(session.last_turn_events.iter().any(|event| {
+            event.kind == CodexTurnEventKind::ToolBatchStarted
+                && event.detail.as_deref() == Some("mode=parallel,count=2")
+        }));
+        assert!(session
+            .last_turn_events
+            .iter()
+            .any(|event| event.kind == CodexTurnEventKind::TurnCompleted));
     }
 
     #[tokio::test]

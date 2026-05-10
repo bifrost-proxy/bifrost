@@ -136,8 +136,6 @@ struct PtyShellArgs {
 struct WriteStdinArgs {
     session_id: String,
     #[serde(default)]
-    input: Option<String>,
-    #[serde(default)]
     chars: Option<String>,
     #[serde(default)]
     yield_time_ms: Option<u64>,
@@ -412,7 +410,7 @@ impl ToolHandler for WriteStdinTool {
     }
 
     fn description(&self) -> &str {
-        "Writes characters to an existing exec/PTTY session and returns recent output. Accepts Codex-compatible `chars` and legacy `input`."
+        "Writes characters to an existing exec/PTY session and returns recent output."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -425,11 +423,7 @@ impl ToolHandler for WriteStdinTool {
                 },
                 "chars": {
                     "type": "string",
-                    "description": "Bytes to write to stdin (may be empty to poll). Codex-compatible field."
-                },
-                "input": {
-                    "type": "string",
-                    "description": "Legacy alias for chars."
+                    "description": "Bytes to write to stdin (may be empty to poll)."
                 },
                 "yield_time_ms": {
                     "type": "integer",
@@ -455,7 +449,7 @@ impl ToolHandler for WriteStdinTool {
             }
         };
 
-        let input = args.chars.or(args.input).unwrap_or_default();
+        let input = args.chars.unwrap_or_default();
         let yield_time_ms = args.yield_time_ms.unwrap_or(500);
 
         let session = match self.session_manager.get_session(&args.session_id) {
@@ -924,7 +918,7 @@ mod tests {
         // Write to stdin
         let write_args = serde_json::json!({
             "session_id": session_id,
-            "input": "hello from stdin\n",
+            "chars": "hello from stdin\n",
             "yield_time_ms": 1000
         });
         let write_result = stdin_tool

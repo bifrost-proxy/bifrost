@@ -14,11 +14,11 @@ use std::fs;
 use std::path::Path;
 use tracing::info;
 
-/// Write Codex-style Phase 1 extraction output:
+/// Write Phase 1 extraction output:
 ///   - `rollout_summary` → `rollout_summaries/<slug>.md`
 ///   - `raw_memory` → appended to `raw_memories.md`
 ///   - brief summary line → appended to `memory_summary.md`
-pub(crate) fn write_codex_style_extraction(
+pub(crate) fn write_phase1_extraction(
     session_key: &str,
     extracted: &ExtractedMemories,
 ) -> Result<(), String> {
@@ -83,12 +83,13 @@ pub(crate) fn write_codex_style_extraction(
         rollout_slug = %slug,
         has_raw_memory = extracted.raw_memory.is_some(),
         has_rollout_summary = extracted.rollout_summary.is_some(),
-        "codex-style extraction written"
+        "phase1 extraction written"
     );
-    telemetry_event("auto_extract.codex_write", 1, true, Some(&slug));
+    telemetry_event("auto_extract.phase1_write", 1, true, Some(&slug));
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn remember_auto_from_session_key(
     session_key: &str,
     content: &str,
@@ -128,7 +129,7 @@ pub(crate) fn remember_auto(
     remember_auto_from_session_key(&session.session_key, content)
 }
 
-/// Explicitly remember text by appending to Codex-compatible files.
+/// Explicitly remember text by appending to memory files.
 pub fn remember_explicit(
     _config: &AgentConfig,
     session: &AgentSession,

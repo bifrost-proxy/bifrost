@@ -430,8 +430,8 @@ Settings -> Agent 页面消费 `/im-gateway/agent` 配置和 `/agent/sessions*` 
 
 Agent 复用 Bifrost data dir 约定：
 
-- agent home 解析顺序：`BIFROST_AGENT_HOME`、`$BIFROST_DATA_DIR/agent/`、`~/.bifrost/agent/`，证据 `crates/agent/src/config.rs:L826-L845`。
-- config 加载顺序：user-level `$BIFROST_DATA_DIR/agent/config.toml`、project-level `.bifrost/agent/config.toml`、env override，证据 `crates/agent/src/config.rs:L847-L895`。
+- agent home 解析顺序：`$BIFROST_DATA_DIR/agent/`、`~/.bifrost/agent/`，不再支持历史 `BIFROST_AGENT_HOME` 或 `~/.bifrost-agent/`。
+- config 加载顺序：user-level `$BIFROST_DATA_DIR/agent/config.toml`、project-level `.bifrost/agent/config.toml`、env override。
 - provider API key 从环境变量解析，不直接落 session history；证据 `crates/agent/src/config.rs:L507-L558`。
 
 未发现 TLS、Traffic Recorder 或 Remote Invoke 将 session rollout 直接转存为 memory。搜索证据：`rg -n -i "rollout|memory|memories" crates web design docs human_tests README.md` 只命中 `MemoriesConfig` 中 rollout 配置字段、agent skill 文档和本地任务派发设计；无自动导入 rollout 的实现。

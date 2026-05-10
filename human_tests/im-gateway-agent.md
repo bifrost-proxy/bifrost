@@ -207,9 +207,9 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```
 - **预期结果**: 返回 `{"success": true}`
 
-### TC-IMA-19: MCP 配置从 TOML 加载验证
+### TC-IMA-19: MCP 配置从当前 TOML 加载验证
 
-- **前置条件**: `~/.bifrost-agent/config.toml` 中配置了 `[mcp_servers.lark]` 段
+- **前置条件**: `$BIFROST_DATA_DIR/agent/config.toml` 或 `~/.bifrost/agent/config.toml` 中配置了 `[mcp_servers.lark]` 段
 - **操作步骤**: `curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/agent | jq '.mcp_servers'`
 - **预期结果**: 返回的 JSON 包含:
   - `lark` 对象，其中 `enabled: true`
@@ -334,16 +334,16 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - lark 卡片显示：名称 "lark"、标签 "HTTP"、URL 地址、enabled 开关
   - 点击 Edit 后弹出 Modal，显示 JSON 配置
 
-### TC-IMA-29: Agent Tab 数据目录统一 - 旧目录兼容加载
+### TC-IMA-29: Agent Tab 数据目录统一 - 旧目录不再加载
 
 - **操作步骤**:
-  1. 确保 `~/.bifrost-agent/config.toml` 存在（旧位置）
-  2. 启动 Bifrost，检查启动日志
-  3. 通过 GET API 获取配置
+  1. 在临时 HOME 下仅创建 `~/.bifrost-agent/config.toml`，不要创建 `~/.bifrost/agent/config.toml`
+  2. 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost
+  3. 通过 GET API 获取配置，并检查日志
 - **预期结果**:
-  - 启动日志包含 `loaded legacy user-level config path=.../.bifrost-agent/config.toml`
-  - GET API 返回的配置包含 TOML 中的设置（如 model、work_dir、mcp_servers）
-  - AgentConfigStore 的 JSON 文件存储在 `~/.bifrost/agent/agent_config.json`
+  - 启动日志不包含 `~/.bifrost-agent`
+  - GET API 不加载旧 TOML 中的 model、work_dir、mcp_servers
+  - AgentConfigStore 的 JSON 文件存储在 `$BIFROST_DATA_DIR/agent/agent_config.json` 或 `~/.bifrost/agent/agent_config.json`
 
 ### TC-IMA-30: Agent Tab 暗色主题 - 双主题兼容性
 

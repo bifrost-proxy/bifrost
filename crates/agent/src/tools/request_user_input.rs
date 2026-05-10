@@ -1,4 +1,4 @@
-//! Codex-compatible request_user_input schema and validation.
+//! request_user_input schema and validation.
 
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;

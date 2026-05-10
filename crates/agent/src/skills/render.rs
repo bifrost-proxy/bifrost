@@ -94,7 +94,7 @@ pub(crate) fn default_char_budget() -> usize {
     DEFAULT_SKILL_METADATA_CHAR_BUDGET
 }
 
-/// Render skill lines with budget-aware truncation (Codex-aligned 3-tier strategy).
+/// Render skill lines with budget-aware truncation.
 ///
 /// Skills are sorted by scope priority (System > Global > User > Repo) then by name,
 /// so that higher-priority skills are preserved first when budget is tight.

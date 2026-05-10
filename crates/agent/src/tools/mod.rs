@@ -5,12 +5,12 @@
 //! - `write_file`: Write content to a file
 //! - `read_file`: Read file contents (with offset/limit)
 //! - `list_directory`: List directory entries
-//! - `apply_patch`: Apply Codex-compatible structured diff patches
-//! - `exec_command`: Codex-compatible command execution surface
+//! - `apply_patch`: Apply structured diff patches
+//! - `exec_command`: Run shell commands with optional PTY-backed sessions
 //! - `pty_shell`: PTY-backed persistent shell sessions with session management
 //! - `write_stdin`: Write to PTY session stdin
 //! - `view_image`: Load local image files as data URLs
-//! - `request_user_input`: Validate Codex-style user input requests
+//! - `request_user_input`: Validate structured user input requests
 //! - `tool_search`: turn-scoped deferred tool discovery (registered only when
 //!   deferred tools exist)
 //! - `get_goal`/`create_goal`/`update_goal`: Goal tracking system for task management
@@ -92,7 +92,7 @@ impl ToolRegistry {
         registry.register(Arc::new(set_title::SetTitleTool));
         registry.register(Arc::new(view_image::ViewImageTool));
         registry.register(Arc::new(request_user_input::RequestUserInputTool));
-        // Codex-compatible structured patch tool
+        // Structured patch tool.
         registry.register(Arc::new(apply_patch_diff::ApplyDiffTool));
         // PTY shell tools (persistent sessions)
         registry.register(Arc::new(pty_shell::PtyShellTool::new(
@@ -129,13 +129,23 @@ impl ToolRegistry {
 
     /// Execute a tool by name with the given arguments.
     pub async fn execute(&self, name: &str, arguments: &str, work_dir: &Path) -> ToolResult {
-        match self.tools.get(name) {
+        match self.handler(name) {
             Some(handler) => handler.execute(arguments, work_dir).await,
             None => ToolResult {
                 success: false,
                 output: format!("unknown tool: {name}"),
             },
         }
+    }
+
+    /// Resolve a local tool handler by its registered tool name.
+    pub fn handler(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
+        self.tools.get(name).cloned()
+    }
+
+    /// Returns true when the name can be handled by this local registry.
+    pub fn contains_tool(&self, name: &str) -> bool {
+        self.handler(name).is_some()
     }
 
     /// List all registered tool names.
@@ -148,8 +158,6 @@ impl ToolRegistry {
 
 fn model_visible_tool_priority(name: &str) -> (u8, &str) {
     let priority = match name {
-        // Match Codex's unified exec lesson: session-capable terminal tools
-        // should be seen before legacy one-shot shell tools.
         "shell_pty" => 0,
         "write_stdin" => 1,
         "exec_command" => 2,
@@ -183,5 +191,23 @@ mod tests {
         assert!(shell_pty < shell);
         assert!(write_stdin < shell);
         assert!(exec_command < shell);
+    }
+
+    #[tokio::test]
+    async fn unknown_shell_aliases_are_rejected() {
+        let registry = ToolRegistry::with_defaults(5);
+        assert!(!registry.contains_tool("shell_command"));
+        assert!(!registry.contains_tool("local_shell"));
+
+        let work_dir = tempfile::tempdir().expect("work dir");
+        let result = registry
+            .execute(
+                "shell_command",
+                r#"{"command":"printf alias-ok"}"#,
+                work_dir.path(),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.output.contains("unknown tool: shell_command"));
     }
 }

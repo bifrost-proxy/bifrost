@@ -1,4 +1,4 @@
-//! SQLite state database for memory consolidation state (Codex-aligned).
+//! SQLite state database for memory consolidation state.
 
 use crate::memory::types::Phase2State;
 use rusqlite::Connection;

@@ -176,7 +176,7 @@ IM Gateway Tab 的 `fetchData` 在失败时通过 `message.error()` 暴露错误
 
 ### E2E env 与 storage size guard 回归（feat/agent review fixpass）
 
-`im_gateway_agent` E2E 中涉及 `BIFROST_AGENT_HOME` / `BIFROST_DATA_DIR` 的测试改用 `temp-env` 作用域。由于 e2e runner 要求 test future 为 `Send`，temp-env 的 non-Send guard 放在 `spawn_blocking` 内，并在该作用域内使用单线程 Tokio runtime 执行原异步测试体，避免 guard 跨 await 暴露给 runner。
+`im_gateway_agent` E2E 中涉及 `BIFROST_DATA_DIR` 的测试使用当前 `$BIFROST_DATA_DIR/agent` 布局，并通过 `temp-env` 作用域隔离环境。由于 e2e runner 要求 test future 为 `Send`，temp-env 的 non-Send guard 放在 `spawn_blocking` 内，并在该作用域内使用单线程 Tokio runtime 执行原异步测试体，避免 guard 跨 await 暴露给 runner。
 
 规则文件大小限制抽到 `bifrost-core/src/limits.rs`：`MAX_RULE_FILE_BYTES = 256 * 1024 * 1024`，`ensure_file_size_within_limit(path, limit)` 统一处理 metadata 检查和错误返回。`bifrost-storage/src/rules.rs` 的 load/load_summary 路径复用该 helper。
 

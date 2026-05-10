@@ -1,4 +1,4 @@
-//! Agent configuration with Codex-compatible config.toml support.
+//! Agent configuration with Bifrost agent config.toml support.
 //!
 //! Config loading order (later overrides earlier):
 //! 1. `$BIFROST_DATA_DIR/agent/config.toml` (user-level, default `~/.bifrost/agent/`)
@@ -14,17 +14,13 @@ use tracing::{debug, warn};
 const AGENT_SUBDIR: &str = "agent";
 /// Config file name.
 const CONFIG_FILENAME: &str = "config.toml";
-/// Environment variable for overriding agent home (legacy compat).
-const AGENT_HOME_ENV: &str = "BIFROST_AGENT_HOME";
-/// Legacy home directory name (for migration detection).
-const LEGACY_AGENT_HOME_DIR: &str = ".bifrost-agent";
 
 // ---------------------------------------------------------------------------
 // AgentConfig
 // ---------------------------------------------------------------------------
 
 /// Agent configuration for the model API and runtime behavior.
-/// Compatible subset of Codex's ConfigToml.
+/// Runtime configuration for the Bifrost agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Whether the agent is enabled.
@@ -40,17 +36,11 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
 
-    /// Custom model providers (Codex-compatible format).
+    /// Custom model providers.
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderConfig>,
 
     // -- Prompt instructions --
-    /// Deprecated alias for `base_instructions` (Codex's `instructions` field).
-    ///
-    /// Kept for existing config.toml / JSON files and older WebUI clients.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-
     /// Base/system instructions override. When set, replaces the built-in model prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
@@ -102,7 +92,7 @@ pub struct AgentConfig {
     pub project_doc_fallback_filenames: Option<Vec<String>>,
 
     // -- Runtime settings --
-    /// Shell command timeout in seconds (default 600 / 10m, closer to Codex-style interactive shell defaults).
+    /// Shell command timeout in seconds (default 600 / 10m).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_timeout_secs: Option<u64>,
 
@@ -122,7 +112,7 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_output_token_limit: Option<usize>,
 
-    /// Request timeout in seconds (default 600 / 10m, closer to Codex-style model request defaults).
+    /// Request timeout in seconds (default 600 / 10m).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
 
@@ -130,16 +120,16 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
 
-    // -- History & Session (Codex-compatible) --
-    /// History persistence settings (Codex's `history` field).
+    // -- History & Session --
+    /// History persistence settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryConfig>,
 
-    /// When true, session is not persisted on disk (Codex's `ephemeral` field).
+    /// When true, session is not persisted on disk.
     #[serde(default)]
     pub ephemeral: bool,
 
-    // -- Memories subsystem (Codex-compatible) --
+    // -- Memories subsystem --
     /// Memories subsystem settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories: Option<MemoriesConfig>,
@@ -155,7 +145,7 @@ pub struct AgentConfig {
 // ModelProviderConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for a model provider (based on Codex's ModelProviderInfo).
+/// Configuration for a model provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProviderConfig {
     pub name: Option<String>,
@@ -220,7 +210,7 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_tools: Option<Vec<String>>,
 
-    // Enhanced fields (Codex-compatible)
+    // Extended server fields.
     /// Whether this server is required (startup failure is an error).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
@@ -282,7 +272,7 @@ pub struct SkillConfigEntry {
 }
 
 // ---------------------------------------------------------------------------
-// History Configuration (Codex-compatible)
+// History Configuration
 // ---------------------------------------------------------------------------
 
 /// History persistence mode.
@@ -311,17 +301,14 @@ pub struct HistoryConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Memories Configuration (Codex-compatible)
+// Memories Configuration
 // ---------------------------------------------------------------------------
 
-/// Memories subsystem settings (compatible with Codex's MemoriesToml).
+/// Memories subsystem settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct MemoriesConfig {
     /// When `true`, external context sources mark the thread `memory_mode` as polluted.
-    #[serde(
-        alias = "no_memories_if_mcp_or_web_search",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_on_external_context: Option<bool>,
     /// When `false`, newly created threads are stored with `memory_mode = "disabled"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -408,7 +395,6 @@ impl Default for AgentConfig {
             model: Some(AgentConfig::DEFAULT_MODEL.to_string()),
             model_provider: Some("aidp_crawl".to_string()),
             model_providers: HashMap::new(),
-            instructions: None,
             base_instructions: None,
             developer_instructions: None,
             user_instructions: None,
@@ -624,7 +610,7 @@ impl AgentConfig {
         })
     }
 
-    /// Resolve the API key (backward-compatible convenience method).
+    /// Resolve the API key for the selected provider.
     pub fn resolve_api_key(&self) -> Result<String, String> {
         let effective = self.resolve_effective_config()?;
         if effective.api_key.is_empty() {
@@ -943,19 +929,12 @@ pub fn list_builtin_providers() -> Vec<ProviderInfo> {
 /// Determine the agent home directory.
 ///
 /// Resolution order:
-/// 1. `BIFROST_AGENT_HOME` env var (legacy compat)
-/// 2. `$BIFROST_DATA_DIR/agent/` (preferred, unified with Bifrost data dir)
-/// 3. `$HOME/.bifrost/agent/` (default)
+/// 1. `$BIFROST_DATA_DIR/agent/` when `BIFROST_DATA_DIR` is set
+/// 2. `$HOME/.bifrost/agent/` (default)
 pub fn agent_home_dir() -> PathBuf {
-    // Legacy override via env var
-    if let Ok(path) = std::env::var(AGENT_HOME_ENV) {
-        return PathBuf::from(path);
-    }
-    // Prefer BIFROST_DATA_DIR if set
     if let Ok(data_dir) = std::env::var("BIFROST_DATA_DIR") {
         return PathBuf::from(data_dir).join(AGENT_SUBDIR);
     }
-    // Default: ~/.bifrost/agent/
     dirs_home()
         .map(|h| h.join(".bifrost").join(AGENT_SUBDIR))
         .unwrap_or_else(|| PathBuf::from(".bifrost").join(AGENT_SUBDIR))
@@ -971,20 +950,9 @@ pub fn load_config(work_dir: Option<&Path>) -> AgentConfig {
     if let Some(user_cfg) = load_toml_config(&user_config_path) {
         config = merge_config(config, user_cfg);
         debug!(path = %user_config_path.display(), "loaded user-level config");
-    } else {
-        // Fallback: try legacy ~/.bifrost-agent/config.toml
-        if let Some(legacy_home) = dirs_home() {
-            let legacy_path = legacy_home
-                .join(LEGACY_AGENT_HOME_DIR)
-                .join(CONFIG_FILENAME);
-            if let Some(legacy_cfg) = load_toml_config(&legacy_path) {
-                config = merge_config(config, legacy_cfg);
-                debug!(path = %legacy_path.display(), "loaded legacy user-level config");
-            }
-        }
     }
 
-    // 2. Project-level config: .bifrost/agent/config.toml (or legacy .bifrost-agent/config.toml)
+    // 2. Project-level config: .bifrost/agent/config.toml
     let project_dir = work_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -995,15 +963,6 @@ pub fn load_config(work_dir: Option<&Path>) -> AgentConfig {
     if let Some(proj_cfg) = load_toml_config(&project_config_path) {
         config = merge_config(config, proj_cfg);
         debug!(path = %project_config_path.display(), "loaded project-level config");
-    } else {
-        // Fallback: try legacy project .bifrost-agent/config.toml
-        let legacy_project_path = project_dir
-            .join(LEGACY_AGENT_HOME_DIR)
-            .join(CONFIG_FILENAME);
-        if let Some(proj_cfg) = load_toml_config(&legacy_project_path) {
-            config = merge_config(config, proj_cfg);
-            debug!(path = %legacy_project_path.display(), "loaded legacy project-level config");
-        }
     }
 
     // 3. Environment variable overrides
@@ -1035,7 +994,6 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
             merged.extend(overlay.model_providers);
             merged
         },
-        instructions: overlay.instructions.or(base.instructions),
         base_instructions: overlay.base_instructions.or(base.base_instructions),
         developer_instructions: overlay
             .developer_instructions
@@ -1107,13 +1065,13 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 /// Returns the user's home directory (e.g. `~`).
-/// Used as the root for Codex-compatible paths like `~/.agents/skills/`.
+/// Used as the root for user-scoped agent paths.
 pub fn user_home_dir() -> PathBuf {
     dirs_home().unwrap_or_else(|| PathBuf::from("."))
 }
 
 // ---------------------------------------------------------------------------
-// AgentConfigStore (JSON persistence - backward compat)
+// AgentConfigStore (JSON runtime state)
 // ---------------------------------------------------------------------------
 
 const AGENT_CONFIG_FILE: &str = "agent_config.json";
@@ -1318,7 +1276,6 @@ enabled = true
     #[test]
     fn test_agent_home_dir_default() {
         // Clear env to test default path
-        std::env::remove_var(AGENT_HOME_ENV);
         std::env::remove_var("BIFROST_DATA_DIR");
         let home = agent_home_dir();
         // Default path should be ~/.bifrost/agent (unified with Bifrost data dir)

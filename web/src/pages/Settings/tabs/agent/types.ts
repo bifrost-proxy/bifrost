@@ -98,7 +98,6 @@ export interface AgentConfig {
   model?: string;
   model_provider?: string;
   model_providers: Record<string, Record<string, unknown>>;
-  instructions?: string;
   base_instructions?: string;
   developer_instructions?: string;
   user_instructions?: string;

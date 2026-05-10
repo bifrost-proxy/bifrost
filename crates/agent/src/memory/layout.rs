@@ -5,12 +5,12 @@ use crate::memory::constants::MEMORY_SKILLS_SUBDIR;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Return the Codex-compatible memory root: `$agent_home/memory`.
+/// Return the memory root: `$agent_home/memory`.
 pub fn memory_root() -> PathBuf {
     agent_home_dir().join("memory")
 }
 
-/// Ensure the Codex-compatible memory folder layout exists.
+/// Ensure the memory folder layout exists.
 pub fn ensure_memory_layout() -> Result<PathBuf, String> {
     let root = memory_root();
     fs::create_dir_all(root.join("rollout_summaries"))

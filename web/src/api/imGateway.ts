@@ -22,7 +22,6 @@ export interface ImProviderConfig {
   event_types: string[];
   agent_config?: {
     work_dir?: string;
-    instructions?: string;
     base_instructions?: string;
     developer_instructions?: string;
     user_instructions?: string;

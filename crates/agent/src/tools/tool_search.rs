@@ -1,4 +1,4 @@
-//! Codex-style deferred tool search.
+//! Deferred tool search.
 
 use crate::tools::ToolHandler;
 use crate::types::{ToolDefinition, ToolResult};

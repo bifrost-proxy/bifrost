@@ -479,7 +479,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "im_gateway_agent_chat_codex_prompt_layers",
-            "Validate POST /api/im-gateway/agent/chat sends Codex-style system/developer/user prompt layers",
+            "Validate POST /api/im-gateway/agent/chat sends system/developer/user prompt layers",
             "admin",
             || async move {
                 let mock = ChatCompletionMock::start().await?;
@@ -584,7 +584,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .filter_map(|message| message.get("role").and_then(|value| value.as_str()))
                     .collect();
                 if roles.get(0..4) != Some(&["system", "developer", "user", "user"][..]) {
-                    return Err(format!("Expected Codex-style roles, got: {roles:?}"));
+                    return Err(format!("Expected layered prompt roles, got: {roles:?}"));
                 }
                 let joined = messages
                     .iter()
@@ -1222,18 +1222,17 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "im_gateway_agent_long_term_memory_remember_recall",
-            "Validate Codex-style file memories inject read-path instructions without SQLite",
+            "Validate file memories inject read-path instructions from the current data-dir layout",
             "admin",
             || async move {
                 let mock = ChatCompletionMock::start().await?;
                 let temp_dir = tempfile::tempdir()
                     .map_err(|e| format!("failed to create temp dir: {e}"))?;
-                let agent_home = temp_dir.path().to_string_lossy().to_string();
+                let data_dir = temp_dir.path().to_string_lossy().to_string();
                 tokio::task::spawn_blocking(move || {
                     temp_env::with_vars(
                     [
-                        ("BIFROST_AGENT_HOME", Some(agent_home.as_str())),
-                        ("BIFROST_DATA_DIR", None::<&str>),
+                        ("BIFROST_DATA_DIR", Some(data_dir.as_str())),
                     ],
                     || {
                         tokio::runtime::Builder::new_current_thread()
@@ -1241,17 +1240,17 @@ pub fn get_all_tests() -> Vec<TestCase> {
                             .build()
                             .expect("temp env runtime")
                             .block_on(async move {
-                let memory_root = temp_dir.path().join("memory");
+                let memory_root = temp_dir.path().join("agent").join("memory");
                 std::fs::create_dir_all(&memory_root)
                     .map_err(|e| format!("failed to create memory root: {e}"))?;
                 std::fs::write(
                     memory_root.join("memory_summary.md"),
-                    "Bifrost should use Codex-style on-demand memory loading.",
+                    "Bifrost should use on-demand memory loading.",
                 )
                 .map_err(|e| format!("failed to write memory summary: {e}"))?;
                 std::fs::write(
                     memory_root.join("MEMORY.md"),
-                    "# Memory\n\n- Codex-style memory evidence lives here.\n",
+                    "# Memory\n\n- Memory evidence lives here.\n",
                 )
                 .map_err(|e| format!("failed to write MEMORY.md: {e}"))?;
 
@@ -1317,7 +1316,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                             content.contains("## Memory")
                                 && content.contains("memory_summary.md (already provided below; do NOT open again)")
                                 && content.contains("MEMORY.md (searchable registry; primary file to query)")
-                                && content.contains("Bifrost should use Codex-style on-demand memory loading.")
+                                && content.contains("Bifrost should use on-demand memory loading.")
                                 && content.contains("<oai-mem-citation>")
                         })
                         .unwrap_or(false)
@@ -1325,10 +1324,6 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if !injected {
                     return Err(format!("memory read-path instructions were not injected: {messages:?}"));
                 }
-                if memory_root.join("memories.sqlite").exists() {
-                    return Err("file-backed memory path created memories.sqlite".to_string());
-                }
-
                 Ok(())
                             })
                     },
@@ -1346,12 +1341,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let mock = ChatCompletionMock::start().await?;
                 let temp_dir = tempfile::tempdir()
                     .map_err(|e| format!("failed to create temp dir: {e}"))?;
-                let agent_home = temp_dir.path().to_string_lossy().to_string();
+                let data_dir = temp_dir.path().to_string_lossy().to_string();
                 tokio::task::spawn_blocking(move || {
                     temp_env::with_vars(
                     [
-                        ("BIFROST_AGENT_HOME", Some(agent_home.as_str())),
-                        ("BIFROST_DATA_DIR", None::<&str>),
+                        ("BIFROST_DATA_DIR", Some(data_dir.as_str())),
                     ],
                     || {
                         tokio::runtime::Builder::new_current_thread()
@@ -1359,7 +1353,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                             .build()
                             .expect("temp env runtime")
                             .block_on(async move {
-                let memory_root = temp_dir.path().join("memory");
+                let memory_root = temp_dir.path().join("agent").join("memory");
 
                 let mut config = AgentConfig {
                     model: Some("mock-model".to_string()),
@@ -1439,13 +1433,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || rollout_count == 0
                 {
                     return Err(format!(
-                        "auto memory was not persisted to Codex files; summary={summary:?}; memory={memory:?}; raw={raw:?}; rollout_count={rollout_count}"
+                        "auto memory was not persisted to memory files; summary={summary:?}; memory={memory:?}; raw={raw:?}; rollout_count={rollout_count}"
                     ));
                 }
-                if memory_root.join("memories.sqlite").exists() {
-                    return Err("auto memory path created memories.sqlite".to_string());
-                }
-
                 let recall_config = AgentConfig {
                     memories: Some(bifrost_agent::config::MemoriesConfig {
                         use_memories: Some(true),

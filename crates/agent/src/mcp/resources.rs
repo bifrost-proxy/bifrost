@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use crate::types::ToolDefinition;
 use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
@@ -306,26 +307,40 @@ impl std::fmt::Debug for ResourcesManager {
 // Tool Definitions
 // ---------------------------------------------------------------------------
 
+pub const LIST_MCP_RESOURCES_TOOL_NAME: &str = "list_mcp_resources";
+pub const LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME: &str = "list_mcp_resource_templates";
+pub const READ_MCP_RESOURCE_TOOL_NAME: &str = "read_mcp_resource";
+
+pub fn is_resource_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        LIST_MCP_RESOURCES_TOOL_NAME
+            | LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME
+            | READ_MCP_RESOURCE_TOOL_NAME
+    )
+}
+
 /// Create the `list_mcp_resources` virtual tool definition.
 ///
 /// This tool allows the model to list available resources from MCP servers.
 pub fn list_resources_tool_def() -> Value {
     serde_json::json!({
-        "name": "mcp__list_resources",
-        "description": "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information.",
+        "name": LIST_MCP_RESOURCES_TOOL_NAME,
+        "description": "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.",
         "parameters": {
             "type": "object",
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "Optional MCP server name. When omitted, lists resources from all configured servers."
+                    "description": "Optional MCP server name. When omitted, lists resources from every configured server."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor returned by a previous list_mcp_resources call for pagination."
+                    "description": "Opaque cursor returned by a previous list_mcp_resources call for the same server."
                 }
             },
-            "required": []
+            "required": [],
+            "additionalProperties": false
         }
     })
 }
@@ -335,21 +350,22 @@ pub fn list_resources_tool_def() -> Value {
 /// This tool allows the model to list parameterized resource templates.
 pub fn list_resource_templates_tool_def() -> Value {
     serde_json::json!({
-        "name": "mcp__list_resource_templates",
-        "description": "Lists resource templates provided by MCP servers. Resource templates are parameterized URIs that can be used to access dynamic resources.",
+        "name": LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME,
+        "description": "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.",
         "parameters": {
             "type": "object",
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "Optional MCP server name. When omitted, lists templates from all configured servers."
+                    "description": "Optional MCP server name. When omitted, lists resource templates from all configured servers."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor returned by a previous list call for pagination."
+                    "description": "Opaque cursor returned by a previous list_mcp_resource_templates call for the same server."
                 }
             },
-            "required": []
+            "required": [],
+            "additionalProperties": false
         }
     })
 }
@@ -359,21 +375,22 @@ pub fn list_resource_templates_tool_def() -> Value {
 /// This tool allows the model to read a specific resource by URI.
 pub fn read_resource_tool_def() -> Value {
     serde_json::json!({
-        "name": "mcp__read_resource",
-        "description": "Read the contents of a specific MCP resource by URI. Use list_mcp_resources first to discover available resource URIs.",
+        "name": READ_MCP_RESOURCE_TOOL_NAME,
+        "description": "Read a specific resource from an MCP server given the server name and resource URI.",
         "parameters": {
             "type": "object",
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "The MCP server name that owns this resource."
+                    "description": "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."
                 },
                 "uri": {
                     "type": "string",
-                    "description": "The resource URI to read (as returned by list_mcp_resources)."
+                    "description": "Resource URI to read. Must be one of the URIs returned by list_mcp_resources."
                 }
             },
-            "required": ["server", "uri"]
+            "required": ["server", "uri"],
+            "additionalProperties": false
         }
     })
 }
@@ -388,6 +405,19 @@ pub fn all_resource_tool_defs() -> Vec<Value> {
         list_resource_templates_tool_def(),
         read_resource_tool_def(),
     ]
+}
+
+pub fn all_resource_tool_definitions() -> Vec<ToolDefinition> {
+    all_resource_tool_defs()
+        .into_iter()
+        .filter_map(|def| {
+            Some(ToolDefinition::function(
+                def.get("name")?.as_str()?.to_string(),
+                def.get("description")?.as_str()?.to_string(),
+                def.get("parameters").cloned(),
+            ))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -445,9 +475,10 @@ mod tests {
     #[test]
     fn test_list_resources_tool_def_structure() {
         let def = list_resources_tool_def();
-        assert_eq!(def["name"], "mcp__list_resources");
+        assert_eq!(def["name"], "list_mcp_resources");
         assert!(def["description"].as_str().unwrap().contains("resources"));
         assert_eq!(def["parameters"]["type"], "object");
+        assert_eq!(def["parameters"]["additionalProperties"], false);
         assert!(def["parameters"]["properties"]["server"].is_object());
         assert!(def["parameters"]["properties"]["cursor"].is_object());
     }
@@ -455,7 +486,7 @@ mod tests {
     #[test]
     fn test_list_resource_templates_tool_def_structure() {
         let def = list_resource_templates_tool_def();
-        assert_eq!(def["name"], "mcp__list_resource_templates");
+        assert_eq!(def["name"], "list_mcp_resource_templates");
         assert!(def["description"].as_str().unwrap().contains("templates"));
         assert_eq!(def["parameters"]["type"], "object");
     }
@@ -463,7 +494,7 @@ mod tests {
     #[test]
     fn test_read_resource_tool_def_structure() {
         let def = read_resource_tool_def();
-        assert_eq!(def["name"], "mcp__read_resource");
+        assert_eq!(def["name"], "read_mcp_resource");
         assert!(def["description"].as_str().unwrap().contains("Read"));
         assert_eq!(def["parameters"]["type"], "object");
 
@@ -477,6 +508,20 @@ mod tests {
     fn test_all_resource_tool_defs_count() {
         let defs = all_resource_tool_defs();
         assert_eq!(defs.len(), 3);
+    }
+
+    #[test]
+    fn test_all_resource_tool_definitions_are_function_tools() {
+        let defs = all_resource_tool_definitions();
+        let names = defs.iter().map(ToolDefinition::name).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource"
+            ]
+        );
     }
 
     #[test]

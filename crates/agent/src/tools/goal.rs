@@ -238,7 +238,7 @@ impl GoalState {
         (tokens_used, time_used_seconds)
     }
 
-    fn bootstrap_legacy_accounting(&mut self, total_tokens_used: u64, now: u64) {
+    fn bootstrap_active_accounting(&mut self, total_tokens_used: u64, now: u64) {
         if !self.is_accounting_active() || self.active_total_tokens_baseline.is_some() {
             return;
         }
@@ -269,7 +269,7 @@ impl GoalState {
             return false;
         }
 
-        self.bootstrap_legacy_accounting(total_tokens_used, now);
+        self.bootstrap_active_accounting(total_tokens_used, now);
 
         let baseline = self
             .active_total_tokens_baseline
@@ -453,7 +453,7 @@ pub fn goal_runtime_apply(session: &mut AgentSession, event: GoalRuntimeEvent) -
             if let Some(goal) = session.current_goal.as_mut() {
                 let now = current_time_secs();
                 let total_tokens_used = session.total_tokens_used.unwrap_or(0);
-                goal.bootstrap_legacy_accounting(total_tokens_used, now);
+                goal.bootstrap_active_accounting(total_tokens_used, now);
             }
             None
         }
@@ -637,8 +637,8 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         };
     }
 
-    // Codex-aligned: fire ToolCompletedGoal BEFORE the actual mutation to flush
-    // accounting with suppressed steering (matches goal.rs:169 in Codex).
+    // Fire ToolCompletedGoal before the actual mutation to flush accounting
+    // with suppressed steering.
     account_goal_progress_suppressed(session);
 
     let now = current_time_secs();

@@ -283,7 +283,7 @@ pub fn check_symlink_safety(path: &Path) -> Result<(), String> {
 /// Clear all contents of a memory root directory, with symlink safety guard.
 ///
 /// Refuses to operate on symlinked directories. Preserves the root directory
-/// itself and certain lock/state files (`.phase2.lock`, `.phase2_state.json`).
+/// itself and phase-2 lock files (`.phase2.lock`).
 /// After clearing, recreates the standard directory structure via
 /// `ensure_extensions_layout`.
 pub fn clear_memory_root_contents(memory_root: &Path) -> Result<(), String> {
@@ -297,7 +297,7 @@ pub fn clear_memory_root_contents(memory_root: &Path) -> Result<(), String> {
         .map_err(|err| format!("read memory root {}: {err}", memory_root.display()))?;
 
     // Files to preserve during clear
-    const PRESERVED_FILES: &[&str] = &[".phase2.lock", ".phase2_state.json"];
+    const PRESERVED_FILES: &[&str] = &[".phase2.lock"];
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -531,7 +531,7 @@ mod tests {
         clear_memory_root_contents(&memory_root).unwrap();
 
         assert!(memory_root.join(".phase2.lock").exists());
-        assert!(memory_root.join(".phase2_state.json").exists());
+        assert!(!memory_root.join(".phase2_state.json").exists());
         assert!(!memory_root.join("MEMORY.md").exists());
     }
 

@@ -33,9 +33,6 @@ pub struct ImProviderAgentConfig {
     /// Provider-specific default working directory for agent sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
-    /// Deprecated alias for provider-specific base instructions / system prompt override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
     /// Provider-specific base/system instructions override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,

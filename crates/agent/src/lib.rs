@@ -49,6 +49,7 @@ pub mod skill_authoring;
 pub mod skills;
 pub mod slash;
 pub mod tools;
+pub mod turn_runtime;
 pub mod types;
 
 // Re-export main types for convenience

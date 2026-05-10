@@ -1,9 +1,8 @@
-//! Memory parsing utilities: JSON extraction, markdown fences, memory lines, schemas.
+//! Memory parsing utilities: JSON extraction, markdown fences, and schemas.
 
 use crate::memory::types::{ConsolidatedMemory, ExtractedMemories};
 
-/// JSON Schema for Phase 1 structured output (Codex-aligned).
-/// Matches Codex `output_schema()` exactly: only 3 required fields.
+/// JSON Schema for Phase 1 structured output.
 pub(crate) fn phase1_output_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -20,30 +19,17 @@ pub(crate) fn phase1_output_schema() -> serde_json::Value {
 /// Parse Phase 1 extracted memories from raw model output.
 pub(crate) fn parse_extracted_memories(content: &str) -> ExtractedMemories {
     let trimmed = strip_markdown_fences(content.trim());
-    let mut extracted = serde_json::from_str::<ExtractedMemories>(trimmed)
+    serde_json::from_str::<ExtractedMemories>(trimmed)
         .or_else(|_| {
             extract_balanced_json(trimmed)
                 .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing json")))
                 .and_then(serde_json::from_str::<ExtractedMemories>)
         })
-        .unwrap_or_else(|_| ExtractedMemories {
-            memories: parse_memory_lines(trimmed),
+        .unwrap_or(ExtractedMemories {
             raw_memory: None,
             rollout_summary: None,
             rollout_slug: None,
-        });
-
-    // Deduplicate and normalize the legacy memories field
-    let mut output = Vec::new();
-    for memory in std::mem::take(&mut extracted.memories) {
-        let memory = normalize_memory_line(&memory);
-        if memory.is_empty() || output.iter().any(|existing: &String| existing == &memory) {
-            continue;
-        }
-        output.push(memory);
-    }
-    extracted.memories = output;
-    extracted
+        })
 }
 
 /// Parse Phase 2 consolidated memory output.
@@ -118,22 +104,4 @@ pub(crate) fn extract_balanced_json(content: &str) -> Option<&str> {
         }
     }
     None
-}
-
-pub(crate) fn parse_memory_lines(content: &str) -> Vec<String> {
-    content
-        .lines()
-        .map(normalize_memory_line)
-        .filter(|line| !line.is_empty())
-        .collect()
-}
-
-pub(crate) fn normalize_memory_line(line: &str) -> String {
-    line.trim()
-        .trim_start_matches(|ch: char| ch == '-' || ch == '*' || ch.is_ascii_digit())
-        .trim_start_matches(['.', ')', ':', ' '])
-        .trim()
-        .trim_matches('"')
-        .trim()
-        .to_string()
 }

@@ -1,11 +1,11 @@
 //! System prompt builder for the agent.
 //!
-//! # Architecture (Codex-aligned)
+//! # Architecture
 //!
 //! The prompt is assembled from multiple independent sections:
 //!
 //! 1. **Base Instructions** - System-level instructions loaded from external markdown template.
-//!    Priority: `override > config.base_instructions > config.instructions > default template`
+//!    Priority: `override > config.base_instructions > default template`
 //!
 //! 2. **Environment Context** - Runtime info (cwd, shell, OS, arch, date) rendered as XML.
 //!
@@ -19,9 +19,8 @@
 //!
 //! # Message Roles
 //!
-//! Unlike Codex (which uses the Responses API's `instructions` field), Bifrost uses
-//! the Chat Completions API, so all context is combined into a single `system` message.
-//! However, the XML-tagged structure allows the model to distinguish section boundaries.
+//! Bifrost combines all context into a single `system` message. XML-tagged sections
+//! keep the prompt boundaries explicit for the model.
 
 mod render;
 mod types;
@@ -53,10 +52,6 @@ pub struct PromptMessages {
     pub prefix: Vec<ChatMessage>,
     pub base_instructions: String,
 }
-
-// ---------------------------------------------------------------------------
-// Public API (backward compatible)
-// ---------------------------------------------------------------------------
 
 /// Build the system prompt for the agent.
 ///
@@ -181,22 +176,13 @@ pub fn build_system_prompt_with_skill_registry(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve base instructions with 3-tier priority:
+/// Resolve base instructions with 2-tier priority:
 /// 1. Config-level `base_instructions` override
-/// 2. Deprecated config-level `instructions` alias
-/// 3. Default template from external markdown
+/// 2. Default template from external markdown
 fn resolve_base_instructions(config: &AgentConfig) -> BaseInstructions {
-    // Tier 1: Codex-style base instructions override
     if let Some(ref instructions) = config.base_instructions {
         return BaseInstructions::new(instructions);
     }
-
-    // Tier 2: Deprecated alias
-    if let Some(ref instructions) = config.instructions {
-        return BaseInstructions::new(instructions);
-    }
-
-    // Tier 3: Default template
     BaseInstructions::new(BASE_INSTRUCTIONS_DEFAULT)
 }
 
@@ -377,27 +363,6 @@ mod tests {
         };
         let instructions = resolve_base_instructions(&config);
         assert_eq!(instructions.text, "Custom instructions");
-    }
-
-    #[test]
-    fn test_resolve_base_instructions_legacy_alias() {
-        let config = AgentConfig {
-            instructions: Some("Legacy instructions".to_string()),
-            ..AgentConfig::default()
-        };
-        let instructions = resolve_base_instructions(&config);
-        assert_eq!(instructions.text, "Legacy instructions");
-    }
-
-    #[test]
-    fn test_base_instructions_take_precedence_over_legacy_alias() {
-        let config = AgentConfig {
-            instructions: Some("Legacy instructions".to_string()),
-            base_instructions: Some("Base instructions".to_string()),
-            ..AgentConfig::default()
-        };
-        let instructions = resolve_base_instructions(&config);
-        assert_eq!(instructions.text, "Base instructions");
     }
 
     #[test]
