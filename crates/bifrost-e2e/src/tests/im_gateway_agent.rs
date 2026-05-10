@@ -1365,6 +1365,106 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
+        TestCase::standalone(
+            "im_gateway_agent_retry_sanitizes_orphan_tool_history",
+            "Validate transient retry rebuilds and sanitizes malformed tool history before Chat Completions retry",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start_fail_once_before_tool_loop().await?;
+
+                let mut config = AgentConfig {
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
+                    max_turn_iterations: Some(4),
+                    request_timeout_secs: Some(20),
+                    ..AgentConfig::default()
+                };
+                config.model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock.url()),
+                        env_key: None,
+                        api_key: None,
+                        http_headers: Some(HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer test".to_string(),
+                        )])),
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+
+                let client = bifrost_agent::AgentClient::new();
+                let tools = ToolRegistry::with_defaults(5);
+                let mut session = AgentSession::new("retry-sanitize-e2e");
+                session.history.push(bifrost_agent::types::ChatMessage::tool_result(
+                    "stale-tool-call",
+                    "stale tool output",
+                ));
+
+                let result = run_turn(
+                    &client,
+                    &config,
+                    &mut session,
+                    &tools,
+                    "list the current directory after retry",
+                    None,
+                )
+                .await
+                .map_err(|e| format!("retry turn failed: {e}"))?;
+                if result.tool_calls_log.is_empty() {
+                    return Err("expected retry flow to execute a tool call".to_string());
+                }
+
+                let requests = mock.requests.lock();
+                if requests.len() < 3 {
+                    return Err(format!(
+                        "expected retry scenario to emit at least 3 model requests, got {}",
+                        requests.len()
+                    ));
+                }
+                for (idx, request) in requests.iter().enumerate() {
+                    if let Some(error) = validate_chat_messages_json(request) {
+                        return Err(format!(
+                            "mock observed malformed message history on request {}: {}",
+                            idx + 1,
+                            error
+                        ));
+                    }
+                }
+
+                let first_roles = requests[0]
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| "first request missing messages".to_string())?
+                    .iter()
+                    .filter_map(|message| message.get("role").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>();
+                let retry_roles = requests[1]
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| "retry request missing messages".to_string())?
+                    .iter()
+                    .filter_map(|message| message.get("role").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>();
+                if first_roles != retry_roles {
+                    return Err(format!(
+                        "retry request roles diverged from first request: first={first_roles:?}, retry={retry_roles:?}"
+                    ));
+                }
+                if retry_roles.contains(&"tool") {
+                    return Err(format!(
+                        "retry request still contained orphan tool role: {retry_roles:?}"
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
     ]
 }
 
@@ -1563,6 +1663,125 @@ impl ChatCompletionMock {
 
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}/chat/completions", self.port)
+    }
+
+    async fn start_fail_once_before_tool_loop() -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("bind mock chat server: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("mock local addr: {e}"))?
+            .port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = Arc::clone(&requests);
+        let request_count_for_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let requests = Arc::clone(&requests_for_server);
+                let request_count = Arc::clone(&request_count_for_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let requests = Arc::clone(&requests);
+                        let request_count = Arc::clone(&request_count);
+                        async move {
+                            let current_call = request_count.fetch_add(1, Ordering::SeqCst) + 1;
+                            let body_bytes = req
+                                .into_body()
+                                .collect()
+                                .await
+                                .map(|b| b.to_bytes())
+                                .unwrap_or_else(|_| Bytes::new());
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}));
+                            requests.lock().push(body.clone());
+
+                            if let Some(error) = validate_chat_messages_json(&body) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(Bytes::from(
+                                            json!({"error": {"message": error}}).to_string(),
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+
+                            if current_call == 1 {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "text/plain")
+                                        .body(Full::new(Bytes::from("temporary")))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let has_tools = body
+                                .get("tools")
+                                .and_then(|value| value.as_array())
+                                .map(|items| !items.is_empty())
+                                .unwrap_or(false);
+                            let last_role = body
+                                .get("messages")
+                                .and_then(|value| value.as_array())
+                                .and_then(|messages| messages.last())
+                                .and_then(|message| message.get("role"))
+                                .and_then(|role| role.as_str());
+                            let should_call_tool = has_tools && last_role != Some("tool");
+                            let message = if should_call_tool {
+                                json!({
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": format!("call-{current_call}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_directory",
+                                            "arguments": "{\"path\":\".\"}"
+                                        }
+                                    }]
+                                })
+                            } else {
+                                json!({
+                                    "role": "assistant",
+                                    "content": format!("tool loop complete after request {current_call}")
+                                })
+                            };
+                            let response = json!({
+                                "choices": [{
+                                    "message": message,
+                                    "finish_reason": if should_call_tool { "tool_calls" } else { "stop" }
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 10,
+                                    "completion_tokens": 5,
+                                    "total_tokens": 15
+                                }
+                            });
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(response.to_string())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        Ok(Self { port, requests })
     }
 }
 

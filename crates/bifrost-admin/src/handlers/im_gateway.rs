@@ -3643,9 +3643,11 @@ async fn handle_agent(
                     "plan_steps": null
                 }));
             }
-            let detail = service
-                .agent_session_manager
-                .get_session_detail(&session_key);
+            let detail = resolve_agent_api_status_detail(
+                &service.agent_session_manager,
+                &session_key,
+                body.work_dir,
+            );
             let response = build_agent_api_status_text(detail.as_ref(), &config);
             return json_response(&serde_json::json!({
                 "success": true,
@@ -4313,6 +4315,27 @@ fn build_agent_api_status_text(
         None => {
             "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
         }
+    }
+}
+
+fn resolve_agent_api_status_detail(
+    manager: &bifrost_agent::AgentSessionManager,
+    session_key: &str,
+    requested_work_dir: Option<String>,
+) -> Option<SessionDetail> {
+    let has_requested_work_dir = requested_work_dir
+        .as_deref()
+        .is_some_and(|work_dir| !work_dir.trim().is_empty());
+    if !has_requested_work_dir && manager.get_session_detail(session_key).is_none() {
+        return None;
+    }
+
+    match manager.try_take_session_with_work_dir(session_key, requested_work_dir) {
+        Some(session) => {
+            manager.return_session(session);
+            manager.get_session_detail(session_key)
+        }
+        None => manager.get_session_detail(session_key),
     }
 }
 
@@ -5124,6 +5147,51 @@ mod tests {
             agent_config.base_instructions.as_deref(),
             Some("keep provider prompt")
         );
+    }
+
+    #[test]
+    fn agent_api_status_detail_applies_work_dir_for_fresh_status_session() {
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
+
+        let detail = resolve_agent_api_status_detail(
+            &manager,
+            "status-fresh-workdir",
+            Some("/tmp/bifrost-status-workdir".to_string()),
+        )
+        .expect("requested work_dir should create status detail");
+
+        assert_eq!(
+            detail.work_dir.as_deref(),
+            Some("/tmp/bifrost-status-workdir")
+        );
+        assert_eq!(detail.message_count, 0);
+    }
+
+    #[test]
+    fn agent_api_status_detail_overrides_existing_idle_session_work_dir() {
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
+        let session = manager
+            .try_take_session_with_work_dir("status-existing-workdir", Some("/tmp/old".to_string()))
+            .expect("initial session should be available");
+        manager.return_session(session);
+
+        let detail = resolve_agent_api_status_detail(
+            &manager,
+            "status-existing-workdir",
+            Some("/tmp/new".to_string()),
+        )
+        .expect("existing status detail should remain available");
+
+        assert_eq!(detail.work_dir.as_deref(), Some("/tmp/new"));
+    }
+
+    #[test]
+    fn agent_api_status_detail_keeps_new_session_text_when_no_work_dir_requested() {
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
+
+        let detail = resolve_agent_api_status_detail(&manager, "status-no-workdir", None);
+
+        assert!(detail.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

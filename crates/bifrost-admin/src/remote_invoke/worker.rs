@@ -100,6 +100,12 @@ impl ActiveCallControl {
         *self.stdin_tx.lock() = Some(tx);
     }
 
+    fn prepare_stdin_channel(&self) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        self.set_stdin_sender(stdin_tx);
+        stdin_rx
+    }
+
     async fn send_stdin(&self, bytes: Vec<u8>) -> Result<()> {
         let tx = self.stdin_tx.lock().clone();
         let Some(tx) = tx else {
@@ -2596,6 +2602,7 @@ impl RemoteInvokeWorker {
 
         let call_started_at = now_millis();
         let active_call = Arc::new(ActiveCallControl::new(grant_id.clone(), call_started_at));
+        let stdin_rx = command_accepts_stdin(&command).then(|| active_call.prepare_stdin_channel());
         self.active_calls
             .write()
             .insert(call_id.clone(), Arc::clone(&active_call));
@@ -2726,18 +2733,6 @@ impl RemoteInvokeWorker {
             let mut next_stdout_offset: u64 = 0;
             // PR #4c-2: register a session in the global ring so tee/resume can work.
             let _session_registered = session_ring::register_session_str(&cid);
-
-            let stdin_rx = if command
-                .stdin_mode
-                .is_some_and(|mode| mode != super::types::StdinMode::None)
-                || command.pty.as_ref().is_some_and(|pty| pty.enabled)
-            {
-                let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-                active_call_for_task.set_stdin_sender(stdin_tx);
-                Some(stdin_rx)
-            } else {
-                None
-            };
 
             let result = executor
                 .execute_with_stdout_sink(&command, stdin_rx, |chunk| {
@@ -3729,6 +3724,13 @@ fn normalize_shell_policy_binding(
     }))
 }
 
+fn command_accepts_stdin(command: &RemoteCommand) -> bool {
+    command
+        .stdin_mode
+        .is_some_and(|mode| mode != super::types::StdinMode::None)
+        || command.pty.as_ref().is_some_and(|pty| pty.enabled)
+}
+
 fn resolve_shell_command_policy_for_grant(
     command: &mut RemoteCommand,
     grants: &Arc<RwLock<HashMap<String, GrantInfo>>>,
@@ -4116,7 +4118,7 @@ mod tests {
         load_raw_config, save_raw_config, GrantMatch, RawConfig, RawGrantPolicy,
     };
     use crate::remote_invoke::ssh_keys::SshKeyStatus;
-    use crate::remote_invoke::types::ShellExecMode;
+    use crate::remote_invoke::types::{ShellExecMode, StdinMode};
     use crate::state::AdminState;
     use base64::Engine;
     use bifrost_command::{CanonicalQueryCommand, SearchArgs};
@@ -4180,6 +4182,57 @@ mod tests {
             last_used_at: None,
             last_caller_info: None,
         }
+    }
+
+    #[tokio::test]
+    async fn active_call_accepts_stdin_before_executor_start() {
+        let active_call = ActiveCallControl::new("grant-early-stdin".to_string(), 1000);
+        let mut stdin_rx = active_call.prepare_stdin_channel();
+
+        active_call
+            .send_stdin(b"early input\n".to_vec())
+            .await
+            .expect("pre-attached stdin sender should accept early bytes");
+
+        let received = stdin_rx.recv().await.expect("stdin frame should be queued");
+        assert_eq!(received, b"early input\n");
+    }
+
+    #[test]
+    fn command_accepts_stdin_for_stdin_mode_or_pty() {
+        let mut command = RemoteCommand {
+            kind: CommandKind::ShellExec,
+            command: "shell.exec".to_string(),
+            args_json: None,
+            query: None,
+            policy_id: None,
+            exec_mode: None,
+            argv: None,
+            shell: None,
+            command_text: None,
+            cwd: None,
+            env: None,
+            stdin_mode: None,
+            timeout_ms: None,
+            pty: None,
+            output_mode: None,
+            grant_id: None,
+            caller_fingerprint: None,
+            ssh_fingerprint: None,
+            file_access: Default::default(),
+        };
+
+        assert!(!command_accepts_stdin(&command));
+        command.stdin_mode = Some(StdinMode::Stream);
+        assert!(command_accepts_stdin(&command));
+        command.stdin_mode = Some(StdinMode::None);
+        assert!(!command_accepts_stdin(&command));
+        command.pty = Some(crate::remote_invoke::types::RemotePtyRequest {
+            enabled: true,
+            rows: None,
+            cols: None,
+        });
+        assert!(command_accepts_stdin(&command));
     }
 
     #[test]

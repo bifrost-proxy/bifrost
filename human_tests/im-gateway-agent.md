@@ -1101,6 +1101,39 @@ rm -rf ./.bifrost-test
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用
 
+### TC-IMA-88: Agent transient retry 不再复用孤儿 tool 快照
+
+- **操作步骤**:
+  1. 执行精准单元回归，验证 turn retry 前会重新 build/sanitize messages：
+     ```bash
+     cargo test -p bifrost-agent test_retryable_error_rebuilds_messages_before_retry -- --nocapture
+     ```
+  2. 执行 client 边界兜底回归：
+     ```bash
+     cargo test -p bifrost-agent sanitize_request_messages -- --nocapture
+     ```
+  3. 执行 client HTTP 请求体边界回归，验证真实发出的请求不会携带孤儿 `tool`：
+     ```bash
+     cargo test -p bifrost-agent chat_completion_sanitizes_messages_before_http_request -- --nocapture
+     ```
+  4. 执行 E2E 重试链路回归：
+     ```bash
+     cargo run -p bifrost-e2e -- --test im_gateway_agent_retry_sanitizes_orphan_tool_history --jobs 1 --timeout 240
+     ```
+  5. 检查 mock Chat Completions 收到的第 1 次失败请求、第 2 次 retry 请求与后续 tool-result 请求。
+  6. 确认输出中没有 `messages with role 'tool' must be a response`、`messages.[].role=tool has no preceding assistant tool_calls` 或 `assistant tool_calls were not followed by tool results`。
+- **预期结果**:
+  - 单元测试证明 retry 前重新构造请求，首次请求与 retry 请求角色序列一致。
+  - 即使 session 历史中预先插入孤儿 `role=tool`，首次请求和 retry 请求都不会携带该非法片段。
+  - E2E 输出 `PASS im_gateway_agent_retry_sanitizes_orphan_tool_history`。
+  - 首次请求返回 transient 500 后，retry 仍能继续完成至少一轮 tool call + tool result 闭环。
+  - client 侧兜底 sanitize 不会删除合法的 `assistant(tool_calls)` + `tool` 成对片段。
+- **执行记录（2026-05-10）**:
+  - `cargo test -p bifrost-agent test_retryable_error_rebuilds_messages_before_retry -- --nocapture`：PASS，验证首次请求与 retry 请求角色序列一致，且均不含孤儿 `tool`
+  - `cargo test -p bifrost-agent sanitize_request_messages -- --nocapture`：PASS，验证 client 边界会丢弃孤儿 `tool`，同时保留合法 tool segment
+  - `cargo test -p bifrost-agent chat_completion_sanitizes_messages_before_http_request -- --nocapture`：PASS，验证真实 HTTP 请求体中孤儿 `tool` 已被移除，仅发送 `system -> user`
+  - `cargo run -p bifrost-e2e -- --test im_gateway_agent_retry_sanitizes_orphan_tool_history --jobs 1 --timeout 240`：PASS，mock 首次返回 500 后 retry 请求仍为合法消息序列，随后继续完成 tool loop，未出现 400 invalid parameter
+
 ## 飞书卡片折叠面板与 Session Title
 
 ### TC-IMA-69: 飞书卡片折叠面板 - 工具调用记录默认折叠
