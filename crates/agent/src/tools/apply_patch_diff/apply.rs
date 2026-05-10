@@ -197,7 +197,7 @@ fn unicode_normalize(s: &str) -> String {
 }
 
 /// Find the line index where `pattern` appears in `lines`, starting from `start`.
-/// Uses Codex-aligned four-level matching: exact → trim_end → trim → Unicode normalise.
+/// Uses four-level matching: exact → trim_end → trim → Unicode normalise.
 /// Does NOT use substring `contains` matching.
 pub fn seek_sequence(lines: &[&str], pattern: &str, start: usize) -> Option<usize> {
     let pattern_trimmed = pattern.trim();
@@ -340,7 +340,7 @@ fn compute_replacements(
     Ok(replacements)
 }
 
-/// Find a multi-line block pattern in file lines. Uses Codex-aligned four-level matching:
+/// Find a multi-line block pattern in file lines. Uses four-level matching:
 /// exact → trim_end → trim → Unicode normalise.
 fn seek_line_block(lines: &[&str], pattern: &[String], start: usize) -> Option<usize> {
     if pattern.is_empty() {
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_seek_sequence_does_not_use_contains() {
-        // Codex-aligned: seek_sequence must NOT match via substring contains.
+        // seek_sequence must NOT match via substring contains.
         let lines = vec!["fn some_function() {", "    call_helper();", "}"];
         // "function" is a substring of "some_function" but must NOT match.
         assert_eq!(seek_sequence(&lines, "function", 0), None);
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_seek_sequence_unicode_normalise() {
-        // Codex-aligned: typographic chars should be normalised to ASCII.
+        // Typographic chars should be normalised to ASCII.
         let lines = vec!["let x \u{2014} 42;"];
         // Pattern uses ASCII dash, should still match via Unicode normalisation.
         assert_eq!(seek_sequence(&lines, "let x - 42;", 0), Some(0));

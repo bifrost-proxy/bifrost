@@ -1,7 +1,7 @@
-//! Agent turn loop integration for Codex-style file-backed memories.
+//! Agent turn loop integration for file-backed memories.
 //!
 //! Bifrost stores agent memories under `$BIFROST_DATA_DIR/agent/memory` and
-//! injects Codex-compatible read-path instructions. The model decides when to
+//! injects read-path instructions. The model decides when to
 //! search `MEMORY.md`, rollout summaries, or memory skills. No database-backed
 //! memory store is used.
 
@@ -22,7 +22,7 @@ pub(crate) mod types;
 pub(crate) mod utils;
 mod write;
 
-// Re-export public API to maintain backward compatibility
+// Re-export public memory API.
 pub use constants::{MEMORY_CONSOLIDATION_TIMEOUT_SECS, MEMORY_EXTRACT_TIMEOUT_SECS};
 pub use extract::{auto_extract_after_turn, auto_extract_after_turn_blocking};
 pub use layout::{ensure_memory_layout, memory_root};

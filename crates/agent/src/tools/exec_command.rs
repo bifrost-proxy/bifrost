@@ -1,7 +1,7 @@
-//! Codex-compatible `exec_command` surface.
+//! `exec_command` tool surface.
 //!
 //! This tool intentionally reuses the existing PTY session backend so Bifrost
-//! keeps one interactive process model while exposing Codex's command schema.
+//! keeps one interactive process model for one-shot and interactive commands.
 
 use crate::tools::pty_shell::{PtySessionManager, PtyShellTool};
 use crate::tools::ToolHandler;
@@ -40,14 +40,6 @@ struct ExecCommandArgs {
     yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
-    #[serde(default)]
-    login: Option<bool>,
-    #[serde(default)]
-    sandbox_permissions: Option<String>,
-    #[serde(default)]
-    justification: Option<String>,
-    #[serde(default)]
-    prefix_rule: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -87,23 +79,6 @@ impl ToolHandler for ExecCommandTool {
                 "max_output_tokens": {
                     "type": "integer",
                     "description": "Maximum number of tokens to return. Excess output will be truncated."
-                },
-                "login": {
-                    "type": "boolean",
-                    "description": "Whether to run the shell with -l/-i semantics. Accepted for Codex compatibility."
-                },
-                "sandbox_permissions": {
-                    "type": "string",
-                    "description": "Sandbox permissions for the command. Accepted for Codex compatibility; Bifrost does not widen privileges from this field."
-                },
-                "justification": {
-                    "type": "string",
-                    "description": "Only set if sandbox_permissions requests elevated permissions."
-                },
-                "prefix_rule": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Suggested prefix command pattern for future approvals."
                 }
             },
             "required": ["cmd"]
@@ -120,13 +95,6 @@ impl ToolHandler for ExecCommandTool {
                 };
             }
         };
-        let _compatibility_only_fields = (
-            &args.login,
-            &args.sandbox_permissions,
-            &args.justification,
-            &args.prefix_rule,
-        );
-
         let run_dir = match args.workdir.as_deref() {
             Some(path) => {
                 let candidate = resolve_path(path, work_dir);

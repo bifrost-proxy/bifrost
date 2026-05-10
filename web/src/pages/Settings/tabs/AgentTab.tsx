@@ -427,7 +427,7 @@ export default function AgentTab() {
 
               <LongTextModalField
                 label="Base Instructions / System Prompt"
-                value={config.base_instructions ?? config.instructions ?? ""}
+                value={config.base_instructions ?? ""}
                 onChange={(value) => handleStringChange("base_instructions", value)}
                 placeholder={config.default_base_instructions || "Built-in default Agent prompt"}
                 description="Overrides the built-in base prompt. Leave empty to inherit the default; use the editor button to copy the default into a custom draft."

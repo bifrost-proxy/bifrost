@@ -61,10 +61,10 @@ cargo build --bin bifrost
 
 预期结果：
 - `/remember` 等价路径追加 `MEMORY.md`、`memory_summary.md` 和 `raw_memories.md`。
-- `agent/memory/memories.sqlite` 不存在。
+- `agent/memory/.memory_state.db` 不存在。
 
 实际结果：
-- 通过。`cargo test -p bifrost-agent memory_runtime::tests:: -- --nocapture` 中该用例 passed，显式写入更新 `MEMORY.md`、`memory_summary.md` 和 `raw_memories.md`，`raw_memories.md` 包含 `source: user_explicit`，且未创建 `memories.sqlite`。
+- 通过。`cargo test -p bifrost-agent memory_runtime::tests:: -- --nocapture` 中该用例 passed，显式写入更新 `MEMORY.md`、`memory_summary.md` 和 `raw_memories.md`，`raw_memories.md` 包含 `source: user_explicit`，且未创建 `.memory_state.db`。
 
 ### TC-LTM-05 E2E 按需加载说明注入
 
@@ -76,12 +76,12 @@ cargo build --bin bifrost
 - messages 包含 `memory_summary.md (already provided below; do NOT open again)`。
 - messages 包含 `MEMORY.md (searchable registry; primary file to query)`。
 - messages 包含预置 summary：`Bifrost should use on-demand memory loading.`。
-- 测试临时 `agent/memory/` 下没有 `memories.sqlite`。
+- 测试临时 `agent/memory/` 下没有 `.memory_state.db`。
 
 实际结果：
 - 通过。2026-05-05 执行 `CARGO_TARGET_DIR=target/ci-fix BIFROST_E2E_RUNNER_JOBS=1 bash e2e-tests/tests/test_long_term_memory_remember_recall.sh`：
   - `im_gateway_agent_long_term_memory_remember_recall` passed，mock 请求包含 read-path instructions 与预置 summary。
-  - `im_gateway_agent_auto_memory_new_session_consumes` passed，自动生成记忆后新 session 消费 `MEM-AUTO-42`，且未创建 `memories.sqlite`。
+  - `im_gateway_agent_auto_memory_new_session_consumes` passed，自动生成记忆后新 session 消费 `MEM-AUTO-42`，且未创建 `.memory_state.db`。
 
 ### TC-LTM-06 Admin API 文件追加与列表
 
@@ -99,7 +99,7 @@ cargo build --bin bifrost
 - POST 返回 201 与文件条目 ID。
 - GET 列表包含 `api file memory`。
 - stats 返回 `memory_root`，并显示 `memory_summary_bytes > 0`、`memory_md_bytes > 0`。
-- `$BIFROST_DATA_DIR/agent/memory/memories.sqlite` 不存在。
+- `$BIFROST_DATA_DIR/agent/memory/.memory_state.db` 不存在。
 
 实际结果：
 - 已尝试启动临时服务并 curl stats；当前沙箱中 `cargo run` 等待 artifact lock，8 秒 ready 窗口内服务未监听，curl 返回 `Could not connect to server`。需在允许本地服务启动/监听的环境复跑 API 断言。
@@ -151,7 +151,7 @@ cargo build --bin bifrost
    - `memories.generate_memories=true`
 4. 第一个独立 session 调用 `POST /_bifrost/api/im-gateway/agent/chat`：
    `{"session_key":"human-memory-source","message":"请记住我是“独孤怼怼”。"}`
-5. 检查 `$BIFROST_DATA_DIR/agent/memory/memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.phase2_state.json` 和 `rollout_summaries/`。
+5. 检查 `$BIFROST_DATA_DIR/agent/memory/memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.memory_state.db` 和 `rollout_summaries/`。
 6. 第二个独立 session 调用同一对话接口：
    `{"session_key":"human-memory-consumer-1","message":"这是新的独立 session。请只根据长期记忆回答：我是谁？"}`
 7. 第三个独立 session 再调用同一对话接口：
@@ -159,14 +159,14 @@ cargo build --bin bifrost
 8. 检查 mock 模型请求日志是否包含 `Memory Writing Agent: Phase 2`、`## Memory`、`MEMORY.md (searchable registry; primary file to query)` 和 `独孤怼怼`。
 
 预期结果：
-- 第一轮对话结束后自动抽取记忆，并触发无数据库 Phase 2 consolidation。
+- 第一轮对话结束后自动抽取记忆，并触发 Phase 2 consolidation。
 - `memory_summary.md` 与 `MEMORY.md` 都包含 `独孤怼怼`。
 - `MEMORY.md` 中最终条目 `source` 为 `phase2_consolidated`。
 - `raw_memories.md` 保留原始追溯材料，包含 `source: auto_extract` 与 `独孤怼怼`。
-- `.phase2_state.json` 存在并记录非空 `last_input_hash`。
-- `.phase2_state.json` 记录 bounded input 元数据：`processed_input_count=1`、`total_input_count=1`、`has_more_inputs=false`、`updated_at_unix>0`。
+- `.memory_state.db` 存在并记录非空 `last_input_hash`。
+- `.memory_state.db` 记录 bounded input 元数据：`processed_input_count=1`、`total_input_count=1`、`has_more_inputs=false`、`updated_at_unix>0`。
 - `rollout_summaries/` 至少新增一个本轮自动抽取摘要文件。
-- `$BIFROST_DATA_DIR/agent/memory/memories.sqlite` 不存在。
+- `$BIFROST_DATA_DIR/agent/memory/.phase2_state.json` 不存在。
 - 第二个和第三个全新 session 的响应都包含 `独孤怼怼`。
 - 第二个和第三个 session 发给模型的请求中都自动注入 memory read-path instructions，并包含 `memory_summary.md` 摘要里的 `独孤怼怼`。
 
@@ -179,10 +179,10 @@ cargo build --bin bifrost
   - `memory_summary.md`、`MEMORY.md`、`raw_memories.md` 均包含 `独孤怼怼`
   - `MEMORY.md` 包含 `source: phase2_consolidated`
   - `raw_memories.md` 保留 `source: auto_extract`
-  - `.phase2_state.json` 存在并包含非空 `last_input_hash`，且记录 `processed_input_count=1`、`total_input_count=1`、`has_more_inputs=false`、`updated_at_unix>0`
-  - 2026-05-03 复跑 `bash e2e-tests/tests/test_long_term_memory_human_api.sh` 通过，脚本使用真实 Bifrost `127.0.0.1:18883` 与临时 `BIFROST_DATA_DIR`，并额外断言 `.phase2_state.json` 的 bounded input 元数据。
+  - `.memory_state.db` 存在并包含非空 `last_input_hash`，且记录 `processed_input_count=1`、`total_input_count=1`、`has_more_inputs=false`、`updated_at_unix>0`
+  - 2026-05-11 复跑 `bash e2e-tests/tests/test_long_term_memory_human_api.sh` 通过，脚本使用真实 Bifrost `127.0.0.1:18883` 与临时 `BIFROST_DATA_DIR`，并额外断言 SQLite Phase 2 bounded input 元数据。
   - `rollout_summaries/` 生成 markdown 摘要文件
-  - `agent/memory/memories.sqlite` 不存在
+  - `agent/memory/.phase2_state.json` 不存在
   - 第二 session `phase2-consumer-1` 与第三 session `phase2-consumer-2` 均返回 `你是独孤怼怼。`
   - mock 请求日志显示 `consolidate=True`、`extract=True`、`memory_prompt=True has_memory=True asks_identity=True`，确认真实触发 Phase 2，并在新 session 注入 `## Memory` 后消费摘要。
 
@@ -202,7 +202,7 @@ cargo build --bin bifrost
 
 实际结果：
 - 通过。2026-05-05 执行该命令 passed，日志显示：
-  - `codex-style extraction written rollout_slug=auto-memory-source has_raw_memory=true has_rollout_summary=true`
+  - `phase1 extraction written rollout_slug=auto-memory-source has_raw_memory=true has_rollout_summary=true`
   - `phase-2 memory consolidation completed`
   - `memory read instructions injected`
   - `im_gateway_agent_auto_memory_new_session_consumes` 1/1 passed。
@@ -223,7 +223,7 @@ cargo build --bin bifrost
 - 第二个和第三个全新 session 的响应都包含 `独孤怼怼`。
 
 实际结果：
-- 通过。2026-05-05 执行该命令 passed，脚本输出 `[long-term-memory-human-api] PASS`，并验证 `memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.phase2_state.json`、`rollout_summaries/` 和跨独立 session 读取均符合预期。
+- 通过。2026-05-11 执行该命令 passed，脚本输出 `[long-term-memory-human-api] PASS`，并验证 `memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.memory_state.db`、`rollout_summaries/`、无 `.phase2_state.json` 和跨独立 session 读取均符合预期。
 
 ## 清理步骤
 

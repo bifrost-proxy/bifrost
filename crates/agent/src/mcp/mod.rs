@@ -53,6 +53,11 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use self::resources::{
+    is_resource_tool_name, LIST_MCP_RESOURCES_TOOL_NAME, LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME,
+    READ_MCP_RESOURCE_TOOL_NAME,
+};
+
 // ---------------------------------------------------------------------------
 // JSON-RPC types
 // ---------------------------------------------------------------------------
@@ -746,13 +751,13 @@ impl McpManager {
             .collect()
     }
 
-    /// Return Codex-style direct/deferred MCP exposure.
+    /// Return direct/deferred MCP exposure.
     ///
-    /// Bifrost does not yet have Codex App connector explicit-enablement
-    /// metadata, so once the MCP tool count reaches the Codex threshold all MCP
+    /// Once the MCP tool count reaches the configured threshold all MCP server
     /// tools are deferred and made discoverable through `tool_search`.
+    /// MCP resource tools stay direct as part of the core tool surface.
     pub fn tool_exposure(&self) -> McpToolExposure {
-        mcp_tool_exposure_from_definitions(self.list_tools())
+        mcp_tool_exposure_with_resource_tools(self.list_tools(), !self.connections.is_empty())
     }
 
     /// Call a tool on the routed MCP server.
@@ -761,6 +766,10 @@ impl McpManager {
         tool_name: &str,
         arguments: &str,
     ) -> Result<ToolResult, String> {
+        if is_resource_tool_name(tool_name) {
+            return self.call_resource_tool(tool_name, arguments).await;
+        }
+
         let server_name = self
             .tool_routing
             .get(tool_name)
@@ -840,6 +849,166 @@ impl McpManager {
 
     pub fn is_mcp_tool(&self, tool_name: &str) -> bool {
         self.tool_routing.contains_key(tool_name)
+            || (!self.connections.is_empty() && is_resource_tool_name(tool_name))
+    }
+
+    async fn call_resource_tool(
+        &self,
+        tool_name: &str,
+        arguments: &str,
+    ) -> Result<ToolResult, String> {
+        let args = parse_mcp_resource_arguments(arguments)?;
+        let output = match tool_name {
+            LIST_MCP_RESOURCES_TOOL_NAME => {
+                self.list_mcp_resources_for_tool(args.server, args.cursor)
+                    .await?
+            }
+            LIST_MCP_RESOURCE_TEMPLATES_TOOL_NAME => {
+                self.list_mcp_resource_templates_for_tool(args.server, args.cursor)
+                    .await?
+            }
+            READ_MCP_RESOURCE_TOOL_NAME => {
+                let server = args
+                    .server
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "read_mcp_resource requires non-empty `server`".to_string())?;
+                let uri = args
+                    .uri
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "read_mcp_resource requires non-empty `uri`".to_string())?;
+                self.read_mcp_resource_for_tool(server, uri).await?
+            }
+            _ => return Err(format!("unknown MCP resource tool: {tool_name}")),
+        };
+
+        Ok(ToolResult {
+            success: true,
+            output,
+        })
+    }
+
+    async fn list_mcp_resources_for_tool(
+        &self,
+        server: Option<String>,
+        cursor: Option<String>,
+    ) -> Result<String, String> {
+        if cursor.is_some() && server.as_ref().is_none_or(|name| name.trim().is_empty()) {
+            return Err("cursor can only be used when a server is specified".to_string());
+        }
+        if let Some(server_name) = normalize_optional_tool_arg(server) {
+            let conn = self
+                .connections
+                .get(&server_name)
+                .ok_or_else(|| format!("MCP server '{server_name}' not connected"))?;
+            let result = conn
+                .send_request("resources/list", cursor_params(cursor))
+                .await?;
+            return Ok(list_resource_payload(&server_name, result, "resources"));
+        }
+
+        let mut resources = Vec::new();
+        let mut errors = Vec::new();
+        let mut server_names = self.connections.keys().cloned().collect::<Vec<_>>();
+        server_names.sort();
+        for server_name in server_names {
+            let Some(conn) = self.connections.get(&server_name) else {
+                continue;
+            };
+            match conn.send_request("resources/list", None).await {
+                Ok(result) => {
+                    resources.extend(tagged_array_entries(&server_name, result, "resources"));
+                }
+                Err(error) => errors.push(serde_json::json!({
+                    "server": server_name,
+                    "error": error,
+                })),
+            }
+        }
+        Ok(serde_json::json!({
+            "resources": resources,
+            "errors": errors,
+        })
+        .to_string())
+    }
+
+    async fn list_mcp_resource_templates_for_tool(
+        &self,
+        server: Option<String>,
+        cursor: Option<String>,
+    ) -> Result<String, String> {
+        if cursor.is_some() && server.as_ref().is_none_or(|name| name.trim().is_empty()) {
+            return Err("cursor can only be used when a server is specified".to_string());
+        }
+        if let Some(server_name) = normalize_optional_tool_arg(server) {
+            let conn = self
+                .connections
+                .get(&server_name)
+                .ok_or_else(|| format!("MCP server '{server_name}' not connected"))?;
+            let result = conn
+                .send_request("resources/templates/list", cursor_params(cursor))
+                .await?;
+            return Ok(list_resource_payload(
+                &server_name,
+                result,
+                "resourceTemplates",
+            ));
+        }
+
+        let mut resource_templates = Vec::new();
+        let mut errors = Vec::new();
+        let mut server_names = self.connections.keys().cloned().collect::<Vec<_>>();
+        server_names.sort();
+        for server_name in server_names {
+            let Some(conn) = self.connections.get(&server_name) else {
+                continue;
+            };
+            match conn.send_request("resources/templates/list", None).await {
+                Ok(result) => {
+                    resource_templates.extend(tagged_array_entries(
+                        &server_name,
+                        result,
+                        "resourceTemplates",
+                    ));
+                }
+                Err(error) => errors.push(serde_json::json!({
+                    "server": server_name,
+                    "error": error,
+                })),
+            }
+        }
+        Ok(serde_json::json!({
+            "resourceTemplates": resource_templates,
+            "errors": errors,
+        })
+        .to_string())
+    }
+
+    async fn read_mcp_resource_for_tool(
+        &self,
+        server_name: String,
+        uri: String,
+    ) -> Result<String, String> {
+        let conn = self
+            .connections
+            .get(&server_name)
+            .ok_or_else(|| format!("MCP server '{server_name}' not connected"))?;
+        let result = conn
+            .send_request(
+                "resources/read",
+                Some(serde_json::json!({
+                    "uri": uri,
+                })),
+            )
+            .await?;
+        let mut payload = serde_json::Map::new();
+        payload.insert("server".to_string(), serde_json::Value::String(server_name));
+        payload.insert("uri".to_string(), serde_json::Value::String(uri));
+        if let serde_json::Value::Object(map) = result {
+            for (key, value) in map {
+                payload.insert(key, value);
+            }
+        }
+        Ok(serde_json::Value::Object(payload).to_string())
     }
 
     /// Shutdown all MCP servers. Each server gets up to `SHUTDOWN_TIMEOUT_MS`
@@ -859,6 +1028,83 @@ impl McpManager {
     }
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct McpResourceToolArgs {
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
+}
+
+fn parse_mcp_resource_arguments(arguments: &str) -> Result<McpResourceToolArgs, String> {
+    if arguments.trim().is_empty() {
+        return Ok(McpResourceToolArgs::default());
+    }
+    serde_json::from_str(arguments).map_err(|e| format!("failed to parse function arguments: {e}"))
+}
+
+fn normalize_optional_tool_arg(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn cursor_params(cursor: Option<String>) -> Option<serde_json::Value> {
+    normalize_optional_tool_arg(cursor).map(|cursor| {
+        serde_json::json!({
+            "cursor": cursor,
+        })
+    })
+}
+
+fn list_resource_payload(server_name: &str, result: serde_json::Value, array_key: &str) -> String {
+    let next_cursor = result.get("nextCursor").cloned();
+    let entries = tagged_array_entries(server_name, result, array_key);
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "server".to_string(),
+        serde_json::Value::String(server_name.to_string()),
+    );
+    payload.insert(array_key.to_string(), serde_json::Value::Array(entries));
+    if let Some(next_cursor) = next_cursor {
+        payload.insert("nextCursor".to_string(), next_cursor);
+    }
+    serde_json::Value::Object(payload).to_string()
+}
+
+fn tagged_array_entries(
+    server_name: &str,
+    result: serde_json::Value,
+    array_key: &str,
+) -> Vec<serde_json::Value> {
+    result
+        .get(array_key)
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let mut object = match entry {
+                        serde_json::Value::Object(map) => map.clone(),
+                        other => {
+                            let mut map = serde_json::Map::new();
+                            map.insert("value".to_string(), other.clone());
+                            map
+                        }
+                    };
+                    object.insert(
+                        "server".to_string(),
+                        serde_json::Value::String(server_name.to_string()),
+                    );
+                    serde_json::Value::Object(object)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn mcp_tool_exposure_from_definitions(tools: Vec<ToolDefinition>) -> McpToolExposure {
     if tools.len() >= DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD {
         McpToolExposure {
@@ -871,6 +1117,19 @@ pub(crate) fn mcp_tool_exposure_from_definitions(tools: Vec<ToolDefinition>) -> 
             deferred_tools: Vec::new(),
         }
     }
+}
+
+pub(crate) fn mcp_tool_exposure_with_resource_tools(
+    server_tools: Vec<ToolDefinition>,
+    has_connections: bool,
+) -> McpToolExposure {
+    let mut exposure = mcp_tool_exposure_from_definitions(server_tools);
+    if has_connections {
+        let mut resource_tools = resources::all_resource_tool_definitions();
+        resource_tools.extend(exposure.direct_tools);
+        exposure.direct_tools = resource_tools;
+    }
+    exposure
 }
 
 impl Drop for McpManager {
@@ -1163,313 +1422,5 @@ fn validate_or_default_schema(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_valid_tool_name() {
-        assert!(is_valid_tool_name("foo"));
-        assert!(is_valid_tool_name("foo_bar-123"));
-        assert!(!is_valid_tool_name(""));
-        assert!(!is_valid_tool_name("x".repeat(65).as_str()));
-        assert!(!is_valid_tool_name("foo bar"));
-        assert!(!is_valid_tool_name("foo.bar"));
-    }
-
-    #[test]
-    fn test_sanitise_server_prefix_short_passthrough() {
-        let s = sanitise_server_prefix("lark", 10);
-        assert_eq!(s, "lark");
-    }
-
-    #[test]
-    fn test_sanitise_server_prefix_illegal_chars() {
-        let s = sanitise_server_prefix("lark.docs/skill", 8);
-        assert_eq!(s, "lark_docs_skill");
-    }
-
-    #[test]
-    fn test_sanitise_server_prefix_long_gets_hashed() {
-        let s = sanitise_server_prefix("a_very_long_server_name_that_exceeds_budget", 30);
-        // 64 - 4 (mcp_) - 1 (_) - 30 = 29 budget
-        assert!(s.len() <= 29);
-        // Deterministic hash suffix
-        let s2 = sanitise_server_prefix("a_very_long_server_name_that_exceeds_budget", 30);
-        assert_eq!(s, s2);
-    }
-
-    #[test]
-    fn mcp_tool_exposure_keeps_below_threshold_direct() {
-        let tools = (0..(DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD - 1))
-            .map(|idx| {
-                ToolDefinition::function(
-                    format!("mcp_test__tool_{idx}"),
-                    "test tool".to_string(),
-                    Some(serde_json::json!({"type":"object"})),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let exposure = mcp_tool_exposure_from_definitions(tools);
-        assert_eq!(
-            exposure.direct_tools.len(),
-            DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD - 1
-        );
-        assert!(exposure.deferred_tools.is_empty());
-    }
-
-    #[test]
-    fn mcp_tool_exposure_defers_at_codex_threshold() {
-        let tools = (0..DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD)
-            .map(|idx| {
-                ToolDefinition::function(
-                    format!("mcp_test__tool_{idx}"),
-                    "test tool".to_string(),
-                    Some(serde_json::json!({"type":"object"})),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let exposure = mcp_tool_exposure_from_definitions(tools);
-        assert!(exposure.direct_tools.is_empty());
-        assert_eq!(
-            exposure.deferred_tools.len(),
-            DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD
-        );
-    }
-
-    #[test]
-    fn test_split_sse_events_single() {
-        let body = "event: message\ndata: {\"a\":1}\n\n";
-        let events = split_sse_events(body);
-        assert_eq!(events, vec!["{\"a\":1}"]);
-    }
-
-    #[test]
-    fn test_split_sse_events_multi() {
-        let body = "data: {\"a\":1}\n\ndata: {\"b\":2}\n\n";
-        let events = split_sse_events(body);
-        assert_eq!(events, vec!["{\"a\":1}", "{\"b\":2}"]);
-    }
-
-    #[test]
-    fn test_split_sse_events_multiline_data() {
-        let body = "data: {\"a\":1,\ndata: \"b\":2}\n\n";
-        let events = split_sse_events(body);
-        assert_eq!(events, vec!["{\"a\":1,\"b\":2}"]);
-    }
-
-    #[test]
-    fn test_split_sse_events_empty() {
-        assert!(split_sse_events("").is_empty());
-        assert!(split_sse_events("\n\n").is_empty());
-    }
-
-    #[test]
-    fn test_validate_schema_passes_valid() {
-        let s = serde_json::json!({"type": "object", "properties": {}});
-        let out = validate_or_default_schema("s", "t", Some(s.clone()));
-        assert_eq!(out, s);
-    }
-
-    #[test]
-    fn test_validate_schema_substitutes_invalid() {
-        let s = serde_json::json!({"type": "string"});
-        let out = validate_or_default_schema("s", "t", Some(s));
-        assert_eq!(out, serde_json::json!({"type": "object"}));
-    }
-
-    #[test]
-    fn test_validate_schema_substitutes_non_object() {
-        let out = validate_or_default_schema("s", "t", Some(serde_json::json!(["x"])));
-        assert_eq!(out, serde_json::json!({"type": "object"}));
-    }
-
-    #[test]
-    fn test_validate_schema_accepts_ref() {
-        let s = serde_json::json!({"$ref": "#/definitions/Foo"});
-        let out = validate_or_default_schema("s", "t", Some(s.clone()));
-        assert_eq!(out, s);
-    }
-
-    #[test]
-    fn test_mcp_manager_empty() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let configs = HashMap::new();
-            let manager = McpManager::new(&configs).await;
-            assert!(manager.list_tools().is_empty());
-            assert!(!manager.is_mcp_tool("anything"));
-        });
-    }
-
-    #[test]
-    fn test_mcp_manager_disabled_server() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut configs = HashMap::new();
-            configs.insert(
-                "test".to_string(),
-                McpServerConfig {
-                    command: Some("echo".to_string()),
-                    args: None,
-                    env: None,
-                    cwd: None,
-                    url: None,
-                    bearer_token_env_var: None,
-                    enabled: false,
-                    startup_timeout_sec: None,
-                    tool_timeout_sec: None,
-                    enabled_tools: None,
-                    disabled_tools: None,
-                    required: None,
-                    supports_parallel_tool_calls: None,
-                    default_tools_approval_mode: None,
-                    scopes: None,
-                    oauth_resource: None,
-                    http_headers: None,
-                    env_http_headers: None,
-                    tools: None,
-                },
-            );
-            let manager = McpManager::new(&configs).await;
-            assert!(manager.list_tools().is_empty());
-        });
-    }
-
-    #[test]
-    fn test_mcp_default_timeout_constants_match_runtime_policy() {
-        assert_eq!(DEFAULT_STARTUP_TIMEOUT_SEC, 600);
-        assert_eq!(DEFAULT_TOOL_TIMEOUT_SEC, 600);
-    }
-
-    #[test]
-    fn test_json_rpc_request_serialization() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("\"jsonrpc\":\"2.0\""));
-        assert!(json.contains("\"method\":\"tools/list\""));
-        assert!(!json.contains("params"));
-    }
-
-    #[test]
-    fn test_json_rpc_response_parsing_result() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.id, Some(1));
-        assert!(resp.result.is_some());
-        assert!(resp.error.is_none());
-        assert!(resp.method.is_none());
-    }
-
-    #[test]
-    fn test_json_rpc_response_parsing_notification() {
-        let json = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"x":1}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.id.is_none());
-        assert_eq!(resp.method.as_deref(), Some("notifications/progress"));
-    }
-
-    #[test]
-    fn test_json_rpc_error_response_parsing() {
-        let json =
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().message, "Method not found");
-    }
-
-    #[test]
-    fn test_http_transport_detection_no_panic() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut configs = HashMap::new();
-            configs.insert(
-                "http_server".to_string(),
-                McpServerConfig {
-                    command: None,
-                    args: None,
-                    env: None,
-                    cwd: None,
-                    url: Some("http://127.0.0.1:1/mcp".to_string()),
-                    bearer_token_env_var: None,
-                    enabled: true,
-                    startup_timeout_sec: Some(1),
-                    tool_timeout_sec: Some(1),
-                    enabled_tools: None,
-                    disabled_tools: None,
-                    required: None,
-                    supports_parallel_tool_calls: None,
-                    default_tools_approval_mode: None,
-                    scopes: None,
-                    oauth_resource: None,
-                    http_headers: None,
-                    env_http_headers: None,
-                    tools: None,
-                },
-            );
-            let manager = McpManager::new(&configs).await;
-            assert!(manager.list_tools().is_empty());
-        });
-    }
-
-    #[tokio::test]
-    async fn test_route_inbound_frame_matches_pending() {
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(42, tx);
-        route_inbound_frame(
-            "srv",
-            &pending,
-            r#"{"jsonrpc":"2.0","id":42,"result":{"ok":true}}"#,
-        )
-        .await;
-        let got = rx.await.unwrap().unwrap();
-        assert_eq!(got, serde_json::json!({"ok": true}));
-        assert!(pending.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_route_inbound_frame_drops_unknown_id() {
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        route_inbound_frame("srv", &pending, r#"{"jsonrpc":"2.0","id":99,"result":{}}"#).await;
-        assert!(pending.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_route_inbound_frame_ignores_notification() {
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, mut rx) = oneshot::channel::<Result<serde_json::Value, String>>();
-        pending.lock().await.insert(1, tx);
-        route_inbound_frame(
-            "srv",
-            &pending,
-            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
-        )
-        .await;
-        // The pending entry must still be there, untouched.
-        assert!(pending.lock().await.contains_key(&1));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn test_route_inbound_frame_delivers_error() {
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(7, tx);
-        route_inbound_frame(
-            "srv",
-            &pending,
-            r#"{"jsonrpc":"2.0","id":7,"error":{"code":-1,"message":"boom"}}"#,
-        )
-        .await;
-        let got = rx.await.unwrap();
-        assert!(got.is_err());
-        assert!(got.err().unwrap().contains("boom"));
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

@@ -162,7 +162,7 @@ async fn pty_tools_work_end_to_end() {
             "write_stdin",
             &serde_json::json!({
                 "session_id": interactive_session_id,
-                "input": "hello pty\n",
+                "chars": "hello pty\n",
                 "yield_time_ms": 1000,
             })
             .to_string(),

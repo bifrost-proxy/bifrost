@@ -142,6 +142,7 @@
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
 | [agent-development-review-loop.md](./agent-development-review-loop.md) | Agent Development Review Loop | 7 | Agent 开发任务至少两轮目标复核、代码 review、修复问题、测试运行、结果复盘闭环，持续改进引导语、任务模式判定、任务启动工作区检查、并行开发优先 worktree 隔离、证据台账、完成定义、用户目标验证清单、git diff/status 复核、测试失败归因、最终交付验证矩阵，以及 AGENTS/design/human_tests 索引同步 |
+| [agent-codex-alignment.md](./agent-codex-alignment.md) | Agent Codex Alignment | 8 | 默认 prompt 不泄露兼容实现说明、MCP resource canonical 工具名、shell_command/local_shell 历史 alias 已移除、真实 Bifrost 服务 `/agent/chat` 覆盖 MCP resource / update_plan / set_title / tool_search / 并发工具批、turn events、FuturesOrdered 并发工具批与 history 顺序回填、CI 预构建 release binary 回归、P1 工具链回归 |
 
 ### IM Gateway 测试
 
@@ -166,11 +167,11 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [mcp-oauth.md](./mcp-oauth.md) | MCP OAuth | 1 | OAuth token store Auto 模式 keyring 可用性 roundtrip 检测与文件 fallback 回归 |
-| [mcp-elicitation-resources.md](./mcp-elicitation-resources.md) | MCP Elicitation 与 Resources 协议 | 11 | 类型序列化、策略判断、Handler 行为、PauseState RAII、工具定义、trait 解耦、缓存行为、错误处理 |
+| [mcp-elicitation-resources.md](./mcp-elicitation-resources.md) | MCP Elicitation 与 Resources 协议 | 11 | 类型序列化、策略判断、Handler 行为、PauseState RAII、Codex canonical resource 工具定义、trait 解耦、缓存行为、错误处理 |
 
 ---
 
-**总计：91 个测试文件，1603 个测试用例**
+**总计：92 个测试文件，1610 个测试用例**
 
 ## 工作流程
 

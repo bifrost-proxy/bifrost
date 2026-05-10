@@ -56,7 +56,7 @@ Bifrost `crates/agent/src/tools/mod.rs` 当前已有：
 - `write_stdin`
 - `get_goal` / `create_goal` / `update_goal`
 
-MCP 已有工具调用和 resources 的基础实现，但 resource 工具当前使用 `mcp__list_resources` 命名，和标准的 canonical `list_mcp_resources` 仍不一致。
+MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛到 Codex canonical 名称 `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource`，并在存在 MCP server 时作为 direct core tools 暴露，不参与 server tool 的 deferred threshold。
 
 ## 实现计划
 

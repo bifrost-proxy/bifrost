@@ -132,7 +132,6 @@ function ConnectionsPanel({
   const inheritedWorkDir = agentDefaults?.work_dir || "Process working directory";
   const inheritedBaseInstructions =
     agentDefaults?.base_instructions ||
-    agentDefaults?.instructions ||
     agentDefaults?.default_base_instructions ||
     "Built-in default Agent prompt";
   const inheritedDeveloperInstructions =
@@ -148,15 +147,13 @@ function ConnectionsPanel({
     const agentConfig = values.agent_config as
       | {
           work_dir?: string;
-          instructions?: string;
           base_instructions?: string;
           developer_instructions?: string;
           user_instructions?: string;
         }
       | undefined;
     const workDir = agentConfig?.work_dir?.trim();
-    const baseInstructions =
-      agentConfig?.base_instructions?.trim() || agentConfig?.instructions?.trim();
+    const baseInstructions = agentConfig?.base_instructions?.trim();
     const developerInstructions = agentConfig?.developer_instructions?.trim();
     const userInstructions = agentConfig?.user_instructions?.trim();
     if (clearEmptyAgentConfig) {
@@ -203,8 +200,7 @@ function ConnectionsPanel({
       app_secret: undefined,
       agent_config: {
         work_dir: provider.agent_config?.work_dir,
-        base_instructions:
-          provider.agent_config?.base_instructions || provider.agent_config?.instructions,
+        base_instructions: provider.agent_config?.base_instructions,
         developer_instructions: provider.agent_config?.developer_instructions,
         user_instructions: provider.agent_config?.user_instructions,
       },
@@ -456,7 +452,7 @@ function ConnectionsPanel({
                     )}
                   </Descriptions.Item>
                   <Descriptions.Item label="Agent Base Prompt">
-                    {p.agent_config?.base_instructions || p.agent_config?.instructions ? (
+                    {p.agent_config?.base_instructions ? (
                       <Tag color="blue">Configured</Tag>
                     ) : (
                       <Text type="secondary">Global default</Text>

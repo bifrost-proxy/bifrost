@@ -6,8 +6,7 @@
 //! - Update File: apply context-based diff chunks
 //! - Move To: rename files during update
 //!
-//! This is the Codex-style `apply_patch` implementation used for precise,
-//! multi-file structured edits.
+//! This implementation supports precise, multi-file structured edits.
 
 pub mod apply;
 pub mod parser;
@@ -29,12 +28,9 @@ pub struct ApplyDiffTool;
 
 #[derive(Deserialize)]
 struct ApplyDiffArgs {
-    /// Codex-compatible JSON form: the raw patch text under `input`.
+    /// JSON form: the raw patch text under `input`.
     #[serde(default)]
     input: Option<String>,
-    /// Backward-compatible alias for the raw patch text.
-    #[serde(default)]
-    patch: Option<String>,
 }
 
 #[async_trait]
@@ -82,10 +78,6 @@ impl ToolHandler for ApplyDiffTool {
                 "input": {
                     "type": "string",
                     "description": "The raw patch content in *** Begin Patch / *** End Patch format"
-                },
-                "patch": {
-                    "type": "string",
-                    "description": "Backward-compatible alias of input"
                 }
             },
             "required": []
@@ -108,11 +100,10 @@ impl ToolHandler for ApplyDiffTool {
                     };
                 }
             };
-            let Some(patch_text) = args.input.or(args.patch) else {
+            let Some(patch_text) = args.input else {
                 return ToolResult {
                     success: false,
-                    output: "invalid arguments: missing patch content in `input` or `patch`"
-                        .to_string(),
+                    output: "invalid arguments: missing patch content in `input`".to_string(),
                 };
             };
             patch_text
@@ -172,16 +163,16 @@ impl ToolHandler for ApplyDiffTool {
 pub fn apply_patch_tool_definition() -> crate::types::ToolDefinition {
     crate::types::ToolDefinition::function(
         APPLY_PATCH_TOOL_NAME.to_string(),
-        "Apply a patch to modify files. The `patch` parameter should contain the full patch content in the unified diff format starting with `*** Begin Patch` and ending with `*** End Patch`.".to_string(),
+        "Apply a patch to modify files. The `input` parameter should contain the full patch content in the structured diff format starting with `*** Begin Patch` and ending with `*** End Patch`.".to_string(),
         Some(serde_json::json!({
             "type": "object",
             "properties": {
-                "patch": {
+                "input": {
                     "type": "string",
                     "description": "The patch content in the structured diff format. Must start with '*** Begin Patch' and end with '*** End Patch'."
                 }
             },
-            "required": ["patch"]
+            "required": ["input"]
         })),
     )
 }

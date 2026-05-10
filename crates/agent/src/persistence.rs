@@ -7,7 +7,7 @@ use crate::history;
 use crate::tools::goal::GoalState;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -158,16 +158,6 @@ impl ConversationRecorder {
         })
     }
 
-    /// Record a tool call event.
-    pub fn record_tool_call(
-        &mut self,
-        session_key: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> Result<(), String> {
-        self.record_tool_call_with_id(session_key, tool_name, arguments, None)
-    }
-
     /// Record a tool call event with the provider's tool call id.
     pub fn record_tool_call_with_id(
         &mut self,
@@ -187,17 +177,6 @@ impl ConversationRecorder {
                 "arguments": arguments,
             }),
         })
-    }
-
-    /// Record a tool result event.
-    pub fn record_tool_result(
-        &mut self,
-        session_key: &str,
-        tool_name: &str,
-        result: &str,
-        success: bool,
-    ) -> Result<(), String> {
-        self.record_tool_result_with_call_id(session_key, tool_name, result, success, None)
     }
 
     /// Record a tool result event with the provider's tool call id.
@@ -393,8 +372,6 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
 
     let mut messages = Vec::new();
     let mut pending_tool_calls: HashMap<String, ToolCallMessage> = HashMap::new();
-    let mut pending_tool_call_order: VecDeque<String> = VecDeque::new();
-    let mut recovered_tool_call_count = 0usize;
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read line: {e}"))?;
         if line.trim().is_empty() {
@@ -407,7 +384,6 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
         match event.event_type.as_str() {
             event_types::USER_MESSAGE => {
                 pending_tool_calls.clear();
-                pending_tool_call_order.clear();
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     let images: Vec<ChatImageInput> = event
                         .content
@@ -419,13 +395,11 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
             }
             event_types::ASSISTANT_MESSAGE => {
                 pending_tool_calls.clear();
-                pending_tool_call_order.clear();
                 if let Some(msg) = event.content.get("message").and_then(|v| v.as_str()) {
                     messages.push(ChatMessage::assistant(msg));
                 }
             }
             event_types::TOOL_CALL => {
-                recovered_tool_call_count += 1;
                 let tool_name = event
                     .content
                     .get("tool_name")
@@ -436,21 +410,20 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
-                let call_id = event
+                let Some(call_id) = event
                     .content
                     .get("call_id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("recovered-tool-call-{recovered_tool_call_count}"));
+                else {
+                    continue;
+                };
                 let tool_call = ToolCallMessage::function_call(
                     call_id.clone(),
                     tool_name.to_string(),
                     arguments.to_string(),
                 );
-                if !pending_tool_calls.contains_key(&call_id) {
-                    pending_tool_call_order.push_back(call_id.clone());
-                }
                 pending_tool_calls.insert(call_id, tool_call);
             }
             event_types::TOOL_RESULT => {
@@ -460,19 +433,8 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                         .get("call_id")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty());
-                    let tool_call = result_call_id
-                        .and_then(|call_id| {
-                            pending_tool_call_order.retain(|id| id != call_id);
-                            pending_tool_calls.remove(call_id)
-                        })
-                        .or_else(|| {
-                            while let Some(call_id) = pending_tool_call_order.pop_front() {
-                                if let Some(tool_call) = pending_tool_calls.remove(&call_id) {
-                                    return Some(tool_call);
-                                }
-                            }
-                            None
-                        });
+                    let tool_call =
+                        result_call_id.and_then(|call_id| pending_tool_calls.remove(call_id));
                     if let Some(tool_call) = tool_call {
                         let call_id = tool_call.id.clone();
                         messages.push(ChatMessage::assistant_with_tool_calls(vec![tool_call]));
@@ -852,10 +814,16 @@ mod tests {
 
         recorder.record_user_message("test", "run ls").unwrap();
         recorder
-            .record_tool_call("test", "shell", r#"{"command": "ls"}"#)
+            .record_tool_call_with_id("test", "shell", r#"{"command": "ls"}"#, Some("call-shell"))
             .unwrap();
         recorder
-            .record_tool_result("test", "shell", "file1.txt\nfile2.txt", true)
+            .record_tool_result_with_call_id(
+                "test",
+                "shell",
+                "file1.txt\nfile2.txt",
+                true,
+                Some("call-shell"),
+            )
             .unwrap();
         recorder
             .record_assistant_message("test", "Here are the files")
@@ -970,42 +938,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_conversation_matches_legacy_tool_results_in_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-legacy-multi-tools.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"inspect"}}"#
-                .to_string()
-                + "\n"
-                + r#"{"timestamp":2,"event_type":"tool_call","session_key":"s","content":{"tool_name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}}"#
-                + "\n"
-                + r#"{"timestamp":3,"event_type":"tool_call","session_key":"s","content":{"tool_name":"list_directory","arguments":"{\"path\":\".\"}"}}"#
-                + "\n"
-                + r#"{"timestamp":4,"event_type":"tool_result","session_key":"s","content":{"tool_name":"read_file","result":"cargo content","success":true}}"#
-                + "\n"
-                + r#"{"timestamp":5,"event_type":"tool_result","session_key":"s","content":{"tool_name":"list_directory","result":"directory content","success":true}}"#
-                + "\n",
-        )
-        .unwrap();
-
-        let messages = load_conversation(&path).unwrap();
-
-        assert_eq!(messages.len(), 5);
-        assert_eq!(
-            messages[1].tool_calls.as_ref().unwrap()[0].name(),
-            "read_file"
-        );
-        assert_eq!(messages[2].content.as_deref(), Some("cargo content"));
-        assert_eq!(
-            messages[3].tool_calls.as_ref().unwrap()[0].name(),
-            "list_directory"
-        );
-        assert_eq!(messages[4].content.as_deref(), Some("directory content"));
-        assert!(history::is_valid_chat_history(&messages));
-    }
-
-    #[test]
     fn test_list_conversations() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1074,10 +1006,21 @@ mod tests {
             .record_user_message("test-events", "hello")
             .unwrap();
         recorder
-            .record_tool_call("test-events", "shell", r#"{"command": "ls"}"#)
+            .record_tool_call_with_id(
+                "test-events",
+                "shell",
+                r#"{"command": "ls"}"#,
+                Some("call-shell"),
+            )
             .unwrap();
         recorder
-            .record_tool_result("test-events", "shell", "file1.txt", true)
+            .record_tool_result_with_call_id(
+                "test-events",
+                "shell",
+                "file1.txt",
+                true,
+                Some("call-shell"),
+            )
             .unwrap();
         recorder
             .record_assistant_message("test-events", "done")
@@ -1092,10 +1035,12 @@ mod tests {
         assert_eq!(events[0].content["message"], "hello");
 
         assert_eq!(events[1].event_type, TOOL_CALL);
+        assert_eq!(events[1].content["call_id"], "call-shell");
         assert_eq!(events[1].content["tool_name"], "shell");
         assert_eq!(events[1].content["arguments"], r#"{"command": "ls"}"#);
 
         assert_eq!(events[2].event_type, TOOL_RESULT);
+        assert_eq!(events[2].content["call_id"], "call-shell");
         assert_eq!(events[2].content["tool_name"], "shell");
         assert_eq!(events[2].content["result"], "file1.txt");
         assert_eq!(events[2].content["success"], true);

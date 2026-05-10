@@ -1,13 +1,8 @@
 //! Skill system: discovery, parsing, and instruction building.
 //!
-//! This module is a thin compatibility layer over `bifrost_skills::SkillStore`.
-//! Historically, the agent crate shipped its own walkdir-based loader that
-//! lived in parallel with the canonical skill store in the `bifrost-skills`
-//! crate. The two implementations drifted (duplicated scope semantics,
-//! diverging disabled-marker handling, and no shared validation).
+//! This module adapts `bifrost_skills::SkillStore` for prompt rendering.
 //!
-//! As of the 2026/05 refactor, all discovery routes through `SkillStore`,
-//! which already enforces:
+//! Skill discovery routes through `SkillStore`, which enforces:
 //! - Scope priority (Repo > User > Global > System) via `apply_effective_scopes`.
 //! - `.disabled` marker filtering.
 //! - Hidden directory skipping (including `.history`, `.drafts`, `.git`).
@@ -18,11 +13,9 @@
 //! prompt-build path; it is wired by session / admin paths that need slash
 //! resolution and hot-reload.
 //!
-//! The surface exposed by this module (`SkillsManager`, `SkillMetadata`,
-//! `SkillScope` re-export, `install_system_skills`) is preserved verbatim so
-//! existing callers (`prompt.rs`, `bifrost-e2e/tests/skill_loading.rs`,
-//! `bifrost-admin`) continue to compile without modification.
-//!
+//! The surface exposed by this module is intentionally small:
+//! `SkillsManager`, `SkillMetadata`, `SkillScope` re-export, and
+//! `install_system_skills`.
 //! Embedded system skills are still bootstrapped from `src/assets/samples/`
 //! via `include_dir!` — that concern is orthogonal to the loader and remains
 //! in this module because it is agent-crate-specific packaging.
@@ -52,8 +45,7 @@ pub const AGENTS_DIR_NAME: &str = ".agents";
 pub const SKILL_FILENAME: &str = "SKILL.md";
 
 /// Re-export the canonical `SkillScope` so the agent crate stays in lockstep
-/// with `bifrost_skills`. The variant set (`Repo`, `User`, `Global`, `System`)
-/// and priority ordering are identical to the legacy agent-local enum.
+/// with `bifrost_skills`.
 pub use bifrost_skills::SkillScope;
 
 /// Embedded system skills directory (compiled into the binary).
@@ -573,7 +565,6 @@ impl SkillsManager {
     ///
     /// Uses progressive disclosure: only outputs name + description + file path.
     /// The model can read the SKILL.md via `read_file` when it decides to use a skill.
-    /// This is backwards-compatible with the original signature (returns String).
     pub fn build_skills_instructions(&self, skills: &[SkillMetadata]) -> String {
         let (text, _report) = self.build_skills_instructions_budgeted(skills, None);
         text
@@ -637,7 +628,7 @@ fn sanitize_single_line(raw: &str) -> String {
 /// shape consumed by prompt injection and the admin API.
 ///
 /// - `name` / `description` come from the validated manifest and are sanitized
-///   to a single line (matches legacy behavior).
+///   to a single line.
 /// - `prompt_content` is the body of SKILL.md (minus YAML frontmatter). Read
 ///   fresh from disk so edits to instructions propagate without rebuilding the
 ///   manifest.
@@ -650,7 +641,7 @@ fn project_record(record: &bifrost_skills::SkillRecord) -> Option<SkillMetadata>
     let name = sanitize_single_line(&record.name);
     let description = sanitize_single_line(&record.description);
 
-    // Length guards (kept consistent with legacy behavior / Codex limits).
+    // Length guards match the manifest limits used by prompt rendering.
     if name.chars().count() > MAX_NAME_LEN {
         warn!(
             path = %record.skill_md_path.display(),

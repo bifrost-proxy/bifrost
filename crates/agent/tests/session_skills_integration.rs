@@ -8,19 +8,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 struct EnvGuard {
-    old_agent_home: Option<String>,
     old_data_dir: Option<String>,
 }
 
 impl EnvGuard {
-    fn set_agent_home(path: &Path) -> Self {
+    fn set_data_dir(path: &Path) -> Self {
         let guard = Self {
-            old_agent_home: std::env::var("BIFROST_AGENT_HOME").ok(),
             old_data_dir: std::env::var("BIFROST_DATA_DIR").ok(),
         };
         unsafe {
-            std::env::set_var("BIFROST_AGENT_HOME", path);
-            std::env::remove_var("BIFROST_DATA_DIR");
+            std::env::set_var("BIFROST_DATA_DIR", path);
         }
         guard
     }
@@ -29,10 +26,6 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
-            match &self.old_agent_home {
-                Some(value) => std::env::set_var("BIFROST_AGENT_HOME", value),
-                None => std::env::remove_var("BIFROST_AGENT_HOME"),
-            }
             match &self.old_data_dir {
                 Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
                 None => std::env::remove_var("BIFROST_DATA_DIR"),
@@ -220,8 +213,9 @@ async fn goal_slash_command_pause_and_resume_updates_status() {
 
 #[tokio::test]
 async fn resume_restores_total_tokens_and_reactivates_interrupted_goal() {
-    let agent_home = tempfile::tempdir().expect("agent home");
-    let _guard = EnvGuard::set_agent_home(agent_home.path());
+    let data_dir = tempfile::tempdir().expect("agent data dir");
+    let _guard = EnvGuard::set_data_dir(data_dir.path());
+    let agent_home = bifrost_agent::config::agent_home_dir();
 
     let goal = GoalState {
         goal_id: "goal-resume-1".to_string(),
@@ -241,7 +235,7 @@ async fn resume_restores_total_tokens_and_reactivates_interrupted_goal() {
     };
 
     let recorder = {
-        let mut recorder = ConversationRecorder::new(agent_home.path(), "resume-goal-session");
+        let mut recorder = ConversationRecorder::new(&agent_home, "resume-goal-session");
         recorder
             .record_user_message("resume-goal-session", "continue")
             .expect("record user");

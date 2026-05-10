@@ -1,4 +1,4 @@
-//! Local image viewing tool compatible with Codex's `view_image` schema.
+//! Local image viewing tool.
 
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;

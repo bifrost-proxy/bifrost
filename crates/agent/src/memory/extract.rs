@@ -11,7 +11,7 @@ use crate::memory::read_path::generate_memories_enabled;
 use crate::memory::retention::prune_memory_artifacts;
 use crate::memory::telemetry::telemetry_event;
 use crate::memory::utils::{now_secs, truncate_middle_approx_tokens};
-use crate::memory::write::{remember_auto_from_session_key, write_codex_style_extraction};
+use crate::memory::write::write_phase1_extraction;
 use crate::memory_guard;
 use crate::memory_prompts::{EXTRACT_INPUT_TEMPLATE, EXTRACT_SYSTEM_PROMPT};
 use crate::session::AgentSession;
@@ -160,23 +160,15 @@ async fn auto_extract_after_turn_inner(
     let extracted = parse_extracted_memories(&content);
     let mut wrote_memory = false;
 
-    // New path: Codex-style structured output (raw_memory + rollout_summary)
     if extracted
         .raw_memory
         .as_ref()
         .is_some_and(|s| !s.trim().is_empty())
     {
-        write_codex_style_extraction(session_key, &extracted)?;
+        write_phase1_extraction(session_key, &extracted)?;
         wrote_memory = true;
     }
 
-    // Legacy fallback: individual memory lines
-    if !wrote_memory {
-        for memory in extracted.memories.iter().take(AUTO_MEMORY_MAX_ITEMS) {
-            remember_auto_from_session_key(session_key, memory)?;
-            wrote_memory = true;
-        }
-    }
     if wrote_memory {
         if let Err(error) = prune_memory_artifacts(config) {
             warn!(error = %error, "memory retention sweep failed");

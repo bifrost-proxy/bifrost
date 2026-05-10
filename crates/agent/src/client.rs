@@ -171,7 +171,7 @@ impl AgentClient {
                 serde_json::to_value(tools).map_err(|e| format!("serialize tools: {e}"))?;
         }
 
-        // P2-2: JSON Schema structured output constraint (Codex-aligned)
+        // JSON Schema structured output constraint.
         if let Some(schema) = output_schema {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",

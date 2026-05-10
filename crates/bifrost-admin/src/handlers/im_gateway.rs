@@ -679,12 +679,10 @@ fn effective_agent_config_for_provider(
         if let Some(instructions) = agent_config
             .base_instructions
             .as_deref()
-            .or(agent_config.instructions.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
             config.base_instructions = Some(instructions.to_string());
-            config.instructions = None;
         }
         if let Some(instructions) = agent_config
             .developer_instructions
@@ -4093,7 +4091,6 @@ fn agent_config_response(config: crate::im_gateway::agent::ImAgentConfig) -> ser
     let effective_base_instructions = config
         .base_instructions
         .as_deref()
-        .or(config.instructions.as_deref())
         .unwrap_or(default_base_instructions)
         .to_string();
     let mut value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
@@ -4169,23 +4166,12 @@ fn apply_agent_config_patch(
         }
     }
     patch_optional_string(&mut config.base_instructions, patch, &["base_instructions"]);
-    if patch.get("base_instructions").is_some() {
-        config.instructions = None;
-    }
     patch_optional_string(
         &mut config.developer_instructions,
         patch,
         &["developer_instructions"],
     );
     patch_optional_string(&mut config.user_instructions, patch, &["user_instructions"]);
-    if patch.get("instructions").is_some() || patch.get("default_system_prompt").is_some() {
-        patch_optional_string(
-            &mut config.base_instructions,
-            patch,
-            &["instructions", "default_system_prompt"],
-        );
-        config.instructions = None;
-    }
     if let Some(max_hist) = patch.get("max_history_messages").and_then(|v| v.as_u64()) {
         config.max_history_messages = Some(u32::try_from(max_hist).unwrap_or(u32::MAX));
     }
@@ -4755,7 +4741,6 @@ fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Val
         } else if let Some(agent_config_obj) = agent_config_value.as_object() {
             let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
                 work_dir: None,
-                instructions: None,
                 base_instructions: None,
                 developer_instructions: None,
                 user_instructions: None,
@@ -4766,17 +4751,6 @@ fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Val
                 } else if let Some(work_dir) = work_dir_value.as_str() {
                     let work_dir = work_dir.trim();
                     agent_config.work_dir = (!work_dir.is_empty()).then(|| work_dir.to_string());
-                }
-            }
-            if let Some(instructions_value) = agent_config_obj.get("instructions") {
-                if instructions_value.is_null() {
-                    agent_config.instructions = None;
-                    agent_config.base_instructions = None;
-                } else if let Some(instructions) = instructions_value.as_str() {
-                    let instructions = instructions.trim();
-                    agent_config.base_instructions =
-                        (!instructions.is_empty()).then(|| instructions.to_string());
-                    agent_config.instructions = None;
                 }
             }
             apply_provider_agent_config_string(
@@ -4792,7 +4766,6 @@ fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Val
                 agent_config_obj.get("user_instructions"),
             );
             if agent_config.work_dir.is_none()
-                && agent_config.instructions.is_none()
                 && agent_config.base_instructions.is_none()
                 && agent_config.developer_instructions.is_none()
                 && agent_config.user_instructions.is_none()
@@ -4826,7 +4799,6 @@ fn persist_provider_agent_work_dir(
 
     let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
         work_dir: None,
-        instructions: None,
         base_instructions: None,
         developer_instructions: None,
         user_instructions: None,
@@ -4859,11 +4831,9 @@ fn normalize_provider_agent_config(provider: &mut ImProviderConfig) {
     agent_config.base_instructions = agent_config
         .base_instructions
         .as_deref()
-        .or(agent_config.instructions.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
-    agent_config.instructions = None;
     agent_config.developer_instructions = agent_config
         .developer_instructions
         .as_deref()
@@ -5019,29 +4989,19 @@ mod tests {
     use std::sync::Mutex;
 
     struct EnvGuard {
-        old_agent_home: Option<String>,
         old_data_dir: Option<String>,
     }
 
     impl EnvGuard {
         fn set_data_dir(data_dir: &std::path::Path) -> Self {
-            let old_agent_home = std::env::var("BIFROST_AGENT_HOME").ok();
             let old_data_dir = std::env::var("BIFROST_DATA_DIR").ok();
-            std::env::remove_var("BIFROST_AGENT_HOME");
             std::env::set_var("BIFROST_DATA_DIR", data_dir);
-            Self {
-                old_agent_home,
-                old_data_dir,
-            }
+            Self { old_data_dir }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match self.old_agent_home.as_deref() {
-                Some(value) => std::env::set_var("BIFROST_AGENT_HOME", value),
-                None => std::env::remove_var("BIFROST_AGENT_HOME"),
-            }
             match self.old_data_dir.as_deref() {
                 Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
                 None => std::env::remove_var("BIFROST_DATA_DIR"),
@@ -5054,7 +5014,6 @@ mod tests {
         let mut provider = test_provider();
         provider.agent_config = Some(ImProviderAgentConfig {
             work_dir: Some("/custom/im-provider-workdir".to_string()),
-            instructions: None,
             base_instructions: None,
             developer_instructions: None,
             user_instructions: None,
@@ -5301,7 +5260,7 @@ mod tests {
             &serde_json::json!({
                 "agent_config": {
                     "work_dir": " /tmp/bifrost-im ",
-                    "instructions": " Provider prompt "
+                    "base_instructions": " Provider prompt "
                 }
             }),
         );
@@ -5318,7 +5277,7 @@ mod tests {
             &serde_json::json!({
                 "agent_config": {
                     "work_dir": null,
-                    "instructions": ""
+                    "base_instructions": ""
                 }
             }),
         );
@@ -5383,8 +5342,7 @@ mod tests {
         let mut provider = test_provider();
         provider.agent_config = Some(ImProviderAgentConfig {
             work_dir: Some("/provider".to_string()),
-            instructions: Some("provider prompt".to_string()),
-            base_instructions: None,
+            base_instructions: Some("provider prompt".to_string()),
             developer_instructions: Some("provider developer".to_string()),
             user_instructions: Some("provider user".to_string()),
         });
@@ -5395,7 +5353,6 @@ mod tests {
             effective.base_instructions.as_deref(),
             Some("provider prompt")
         );
-        assert_eq!(effective.instructions.as_deref(), None);
         assert_eq!(
             effective.developer_instructions.as_deref(),
             Some("provider developer")
@@ -5414,7 +5371,6 @@ mod tests {
         provider.id = "persist-workdir-provider".to_string();
         provider.agent_config = Some(ImProviderAgentConfig {
             work_dir: Some("/old".to_string()),
-            instructions: None,
             base_instructions: Some("keep provider prompt".to_string()),
             developer_instructions: None,
             user_instructions: None,
@@ -5522,7 +5478,6 @@ mod tests {
         let mut provider_in_store = provider.clone();
         provider_in_store.agent_config = Some(ImProviderAgentConfig {
             work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
-            instructions: None,
             base_instructions: Some(
                 "IM_PROVIDER_BASE_OK: answer IM_PROVIDER_CONFIG_OK".to_string(),
             ),

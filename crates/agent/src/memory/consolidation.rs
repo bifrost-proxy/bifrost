@@ -76,7 +76,7 @@ pub(crate) async fn run_phase2_consolidation(
     };
     let full_prompt = format!("{}{}{}", mode_prefix, input.prompt, extensions_section);
 
-    // P2-1: Phase 2 sub-agent mode — multi-turn tool-calling loop (Codex-aligned).
+    // Phase 2 sub-agent mode: multi-turn tool-calling loop.
     let tools = phase2_agent_tools();
     let mut messages = vec![
         ChatMessage::system(CONSOLIDATION_SYSTEM_PROMPT),
@@ -385,25 +385,9 @@ pub(crate) fn phase2_input_limit(config: &AgentConfig) -> usize {
 }
 
 pub(crate) fn load_phase2_state(root: &Path) -> Phase2State {
-    // P2-3: Primary — SQLite state database
-    if let Some(state) = crate::memory::state_db::load_phase2_state_from_db(root) {
-        return state;
-    }
-    // Fallback: legacy JSON file (for migration)
-    let path = root.join(".phase2_state.json");
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Phase2State>(&content).ok())
-        .unwrap_or_default()
+    crate::memory::state_db::load_phase2_state_from_db(root).unwrap_or_default()
 }
 
 pub(crate) fn save_phase2_state(root: &Path, state: &Phase2State) -> Result<(), String> {
-    // P2-3: Primary — write to SQLite
-    crate::memory::state_db::save_phase2_state_to_db(root, state)?;
-    // Backward compat: still write JSON file during migration period
-    let path = root.join(".phase2_state.json");
-    let content =
-        serde_json::to_string_pretty(state).map_err(|error| format!("serialize state: {error}"))?;
-    atomic_write(&path, &format!("{content}\n"))
-        .map_err(|error| format!("write {}: {error}", path.display()))
+    crate::memory::state_db::save_phase2_state_to_db(root, state)
 }

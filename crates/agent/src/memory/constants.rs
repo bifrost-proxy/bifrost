@@ -4,9 +4,6 @@
 pub(crate) const MEMORY_SUMMARY_TOKEN_LIMIT_CHARS: usize = 24_000;
 /// Default maximum raw memories available for Phase 2 consolidation.
 pub(crate) const DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 512;
-/// Maximum auto-extracted memory items per turn.
-pub(crate) const AUTO_MEMORY_MAX_ITEMS: usize = 8;
-
 /// Approximate bytes per token, aligned with Codex `APPROX_BYTES_PER_TOKEN = 4`.
 pub(crate) const APPROX_BYTES_PER_TOKEN: usize = 4;
 /// Approximate token budget for Phase 1 user message input (~1500 tokens ≈ 6000 bytes).

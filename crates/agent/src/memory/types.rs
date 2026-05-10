@@ -34,10 +34,7 @@ pub struct MemoryFileStats {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExtractedMemories {
-    /// Legacy field: individual memory lines (backward compat with old prompt format)
-    #[serde(default)]
-    pub(crate) memories: Vec<String>,
-    /// Structured raw memory document (Codex-aligned: YAML frontmatter + task-grouped body)
+    /// Structured raw memory document (YAML frontmatter + task-grouped body)
     #[serde(default)]
     pub(crate) raw_memory: Option<String>,
     /// Rollout summary — task-level description of what happened

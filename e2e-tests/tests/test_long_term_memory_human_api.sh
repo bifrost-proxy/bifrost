@@ -13,7 +13,24 @@ MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 BIFROST_BIN="${BIFROST_BIN:-}"
 
+dump_debug() {
+  local exit_code="$1"
+  if [[ "$exit_code" -ne 0 ]]; then
+    echo "[long-term-memory-human-api] DEBUG: temp dir $TEST_DIR" >&2
+    if [[ -f "$BIFROST_LOG" ]]; then
+      echo "[long-term-memory-human-api] DEBUG: bifrost log tail" >&2
+      tail -n 160 "$BIFROST_LOG" >&2 || true
+    fi
+    if [[ -f "$MOCK_LOG" ]]; then
+      echo "[long-term-memory-human-api] DEBUG: mock log tail" >&2
+      tail -n 20 "$MOCK_LOG" >&2 || true
+    fi
+  fi
+}
+
 cleanup() {
+  local exit_code="$?"
+  dump_debug "$exit_code" || true
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
@@ -23,6 +40,7 @@ cleanup() {
     wait "$MOCK_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_DIR"
+  return "$exit_code"
 }
 trap cleanup EXIT
 
@@ -170,14 +188,20 @@ assert_contains "$FIRST_RESPONSE" "独孤怼怼" "first response"
 SUMMARY_FILE="$TEST_DIR/agent/memory/memory_summary.md"
 MEMORY_FILE="$TEST_DIR/agent/memory/MEMORY.md"
 RAW_FILE="$TEST_DIR/agent/memory/raw_memories.md"
-PHASE2_STATE_FILE="$TEST_DIR/agent/memory/.phase2_state.json"
+PHASE2_STATE_DB="$TEST_DIR/agent/memory/.memory_state.db"
 ROLLOUT_DIR="$TEST_DIR/agent/memory/rollout_summaries"
 
 # auto_extract_after_turn runs as a fire-and-forget tokio::spawn after the
 # HTTP response returns, so poll until the phase-2 consolidation has
 # persisted its state artifact (up to 30 s).
 for _ in $(seq 1 60); do
-  if [[ -f "$PHASE2_STATE_FILE" ]] && grep -q '"processed_input_count": 1' "$PHASE2_STATE_FILE" 2>/dev/null; then
+  if [[ -f "$PHASE2_STATE_DB" ]] && python3 - "$PHASE2_STATE_DB" <<'PY' >/dev/null 2>&1
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute("SELECT processed_input_count FROM phase2_state WHERE id = 1").fetchone()
+raise SystemExit(0 if row and row[0] == 1 else 1)
+PY
+  then
     break
   fi
   sleep 0.5
@@ -186,7 +210,7 @@ done
 test -f "$SUMMARY_FILE"
 test -f "$MEMORY_FILE"
 test -f "$RAW_FILE"
-test -f "$PHASE2_STATE_FILE"
+test -f "$PHASE2_STATE_DB"
 test -d "$ROLLOUT_DIR"
 assert_contains "$(cat "$SUMMARY_FILE")" "独孤怼怼" "memory_summary.md"
 assert_contains "$(cat "$MEMORY_FILE")" "source: phase2_consolidated" "MEMORY.md source"
@@ -194,23 +218,27 @@ assert_contains "$(cat "$MEMORY_FILE")" "独孤怼怼" "MEMORY.md content"
 assert_contains "$(cat "$RAW_FILE")" "source: auto_extract" "raw_memories.md source"
 assert_contains "$(cat "$RAW_FILE")" "独孤怼怼" "raw_memories.md content"
 assert_contains "$(cat "$MOCK_LOG")" "Memory Writing Agent: Phase 2" "mock request log"
-python3 - "$PHASE2_STATE_FILE" <<'PY'
-import json
+python3 - "$PHASE2_STATE_DB" <<'PY'
+import sqlite3
 import sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    state = json.load(fh)
-assert state.get("last_input_hash"), state
-assert state.get("processed_input_count") == 1, state
-assert state.get("total_input_count") == 1, state
-assert state.get("has_more_inputs") is False, state
-assert state.get("updated_at_unix", 0) > 0, state
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute(
+    "SELECT last_input_hash, processed_input_count, total_input_count, has_more_inputs, updated_at_unix FROM phase2_state WHERE id = 1"
+).fetchone()
+assert row, "missing phase2_state row"
+last_input_hash, processed_input_count, total_input_count, has_more_inputs, updated_at_unix = row
+assert last_input_hash, row
+assert processed_input_count == 1, row
+assert total_input_count == 1, row
+assert has_more_inputs == 0, row
+assert updated_at_unix > 0, row
 PY
 if [[ "$(find "$ROLLOUT_DIR" -type f -name '*.md' | wc -l | tr -d ' ')" -lt 1 ]]; then
   echo "[long-term-memory-human-api] ASSERT FAILED: rollout_summaries should contain at least one markdown file" >&2
   exit 1
 fi
-if [[ -e "$TEST_DIR/agent/memory/memories.sqlite" ]]; then
-  echo "[long-term-memory-human-api] ASSERT FAILED: memories.sqlite should not exist" >&2
+if [[ -e "$TEST_DIR/agent/memory/.phase2_state.json" ]]; then
+  echo "[long-term-memory-human-api] ASSERT FAILED: .phase2_state.json should not exist" >&2
   exit 1
 fi
 

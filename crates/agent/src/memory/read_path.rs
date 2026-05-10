@@ -22,7 +22,7 @@ pub fn generate_memories_enabled(config: &AgentConfig) -> bool {
     config.get_memories_config().generate_memories != Some(false)
 }
 
-/// Build the Codex-style developer instructions that teach the model when and how to read memory.
+/// Build the developer instructions that teach the model when and how to read memory.
 pub fn build_memory_read_instructions() -> Option<String> {
     let root = match ensure_memory_layout() {
         Ok(root) => root,
