@@ -594,6 +594,155 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_agent_chat_stop_active_loop",
+            "Validate /agent/chat accepts /stop and cancels an active agent loop",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let patch_response = client
+                    .patch(format!("{base}/agent"))
+                    .json(&serde_json::json!({
+                        "enabled": true,
+                        "model": "mock-model",
+                        "model_provider": "mock",
+                        "max_turn_iterations": 4,
+                        "request_timeout_secs": 60,
+                        "memories": {
+                            "use_memories": false,
+                            "generate_memories": false
+                        },
+                        "model_providers": {
+                            "mock": {
+                                "name": "Mock",
+                                "base_url": mock.url(),
+                                "api_key": "test"
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH agent config failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let chat_client = client.clone();
+                let chat_base = base.clone();
+                let chat_handle = tokio::spawn(async move {
+                    chat_client
+                        .post(format!("{chat_base}/agent/chat"))
+                        .json(&serde_json::json!({
+                            "session_key": "stop-loop-e2e",
+                            "message": "AGENT_STOP_E2E please keep this model request open"
+                        }))
+                        .send()
+                        .await
+                        .map_err(|e| format!("POST slow agent chat failed: {e}"))
+                });
+
+                let started_at = std::time::Instant::now();
+                loop {
+                    let seen = mock
+                        .requests
+                        .lock()
+                        .iter()
+                        .any(|body| request_messages_contain(body, "AGENT_STOP_E2E"));
+                    if seen {
+                        break;
+                    }
+                    if started_at.elapsed() > std::time::Duration::from_secs(5) {
+                        return Err("mock did not receive the slow stop E2E request".to_string());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+
+                let status_response = client
+                    .post(format!("{base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": "stop-loop-e2e",
+                        "message": "/status"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST active status failed: {e}"))?;
+                assert_status(&status_response, 200)?;
+                let status_json: serde_json::Value = status_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse active status failed: {e}"))?;
+                if status_json.get("active_status").is_none() {
+                    return Err(format!("Expected active_status while loop is running, got: {status_json}"));
+                }
+
+                let stop_response = client
+                    .post(format!("{base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": "stop-loop-e2e",
+                        "message": "/stop"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST stop failed: {e}"))?;
+                assert_status(&stop_response, 200)?;
+                let stop_json: serde_json::Value = stop_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse stop response failed: {e}"))?;
+                if stop_json.get("stopped").and_then(|value| value.as_bool()) != Some(true) {
+                    return Err(format!("Expected /stop to signal active loop, got: {stop_json}"));
+                }
+
+                let chat_response =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), chat_handle)
+                        .await
+                        .map_err(|_| "slow chat did not return promptly after /stop".to_string())?
+                        .map_err(|e| format!("slow chat task join failed: {e}"))??;
+                assert_status(&chat_response, 200)?;
+                let chat_json: serde_json::Value = chat_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse stopped chat response failed: {e}"))?;
+                if chat_json.get("success").and_then(|value| value.as_bool()) != Some(true)
+                    || !chat_json
+                        .get("response")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .contains("/stop")
+                {
+                    return Err(format!("Expected stopped chat response, got: {chat_json}"));
+                }
+
+                let followup_response = client
+                    .post(format!("{base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": "stop-loop-e2e",
+                        "message": "after stop, respond normally"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST follow-up chat failed: {e}"))?;
+                assert_status(&followup_response, 200)?;
+                let followup_json: serde_json::Value = followup_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse follow-up chat failed: {e}"))?;
+                if followup_json.get("success").and_then(|value| value.as_bool()) != Some(true)
+                {
+                    return Err(format!("Expected follow-up after /stop to succeed, got: {followup_json}"));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_sessions_empty",
             "Validate GET /api/im-gateway/agent/sessions returns empty sessions list",
             "admin",
@@ -1567,6 +1716,11 @@ impl ChatCompletionMock {
                             let is_multimodal_e2e =
                                 request_messages_contain(&body, "MULTIMODAL_IMAGE_E2E")
                                     && request_contains_image_url(&body);
+                            let is_stop_e2e = request_messages_contain(&body, "AGENT_STOP_E2E")
+                                && !request_messages_contain(&body, "已收到 /stop");
+                            if is_stop_e2e {
+                                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            }
                             let has_tools = body
                                 .get("tools")
                                 .and_then(|value| value.as_array())

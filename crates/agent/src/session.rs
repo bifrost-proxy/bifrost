@@ -36,12 +36,57 @@ use crate::types::{ChatImageInput, ChatMessage, ToolCallLog, ToolCallMessage, Tu
 use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
 // AgentSession
 // ---------------------------------------------------------------------------
+
+pub type AgentStopSignalHandle = Arc<AgentStopSignal>;
+
+/// Cooperative stop signal for the turn currently checked out by a session.
+#[derive(Debug)]
+pub struct AgentStopSignal {
+    requested: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl AgentStopSignal {
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub fn request_stop(&self) -> bool {
+        let was_requested = self.requested.swap(true, Ordering::SeqCst);
+        if !was_requested {
+            self.notify.notify_waiters();
+        }
+        !was_requested
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_requested() {
+            return;
+        }
+        loop {
+            self.notify.notified().await;
+            if self.is_requested() {
+                return;
+            }
+        }
+    }
+}
 
 /// Manages conversation history and context state for a single session.
 pub struct AgentSession {
@@ -156,6 +201,11 @@ pub struct AgentSession {
     /// The session manager keeps another handle while the session is checked
     /// out, so `/status` can inspect progress without taking the session lock.
     pub active_turn_status: Option<ActiveTurnStatusHandle>,
+
+    /// Cooperative stop signal owned by the active turn.
+    /// `/stop` sets this through the session manager while the session remains
+    /// checked out by the running loop.
+    pub stop_signal: Option<AgentStopSignalHandle>,
 }
 
 impl AgentSession {
@@ -189,6 +239,7 @@ impl AgentSession {
             plan_repair_attempts: 0,
             plan_sender: None,
             active_turn_status: None,
+            stop_signal: None,
         }
     }
 
@@ -605,6 +656,7 @@ pub struct AgentSessionManager {
     /// Tracks session keys that are currently being processed by a turn loop.
     active_sessions: DashSet<String>,
     active_turn_statuses: DashMap<String, ActiveTurnStatusHandle>,
+    active_stop_signals: DashMap<String, AgentStopSignalHandle>,
     session_ttl_secs: u64,
 }
 
@@ -614,6 +666,7 @@ impl AgentSessionManager {
             sessions: DashMap::new(),
             active_sessions: DashSet::new(),
             active_turn_statuses: DashMap::new(),
+            active_stop_signals: DashMap::new(),
             session_ttl_secs,
         }
     }
@@ -627,6 +680,22 @@ impl AgentSessionManager {
 
     fn attach_active_turn_status(&self, session_key: &str, session: &mut AgentSession) {
         session.active_turn_status = Some(self.create_active_turn_status(session_key));
+    }
+
+    fn create_stop_signal(&self, session_key: &str) -> AgentStopSignalHandle {
+        let signal = Arc::new(AgentStopSignal::new());
+        self.active_stop_signals
+            .insert(session_key.to_string(), Arc::clone(&signal));
+        signal
+    }
+
+    fn attach_stop_signal(&self, session_key: &str, session: &mut AgentSession) {
+        session.stop_signal = Some(self.create_stop_signal(session_key));
+    }
+
+    fn attach_active_turn_handles(&self, session_key: &str, session: &mut AgentSession) {
+        self.attach_active_turn_status(session_key, session);
+        self.attach_stop_signal(session_key, session);
     }
 
     fn apply_work_dir_override(session: &mut AgentSession, work_dir: Option<String>) {
@@ -656,7 +725,7 @@ impl AgentSessionManager {
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key));
-        self.attach_active_turn_status(session_key, &mut session);
+        self.attach_active_turn_handles(session_key, &mut session);
         session
     }
 
@@ -672,7 +741,7 @@ impl AgentSessionManager {
             .remove(session_key)
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key));
-        self.attach_active_turn_status(session_key, &mut session);
+        self.attach_active_turn_handles(session_key, &mut session);
         Some(session)
     }
 
@@ -689,7 +758,7 @@ impl AgentSessionManager {
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
         Self::apply_work_dir_override(&mut session, work_dir);
-        self.attach_active_turn_status(session_key, &mut session);
+        self.attach_active_turn_handles(session_key, &mut session);
         session
     }
 
@@ -708,7 +777,7 @@ impl AgentSessionManager {
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
         Self::apply_work_dir_override(&mut session, work_dir);
-        self.attach_active_turn_status(session_key, &mut session);
+        self.attach_active_turn_handles(session_key, &mut session);
         Some(session)
     }
 
@@ -718,9 +787,11 @@ impl AgentSessionManager {
         let mut session = session;
         let key = session.session_key.clone();
         session.active_turn_status = None;
+        session.stop_signal = None;
         self.sessions.insert(key.clone(), session);
         self.active_sessions.remove(&key);
         self.active_turn_statuses.remove(&key);
+        self.active_stop_signals.remove(&key);
     }
 
     /// Release a session from the active set without returning it.
@@ -729,6 +800,7 @@ impl AgentSessionManager {
     pub fn release_active(&self, session_key: &str) {
         self.active_sessions.remove(session_key);
         self.active_turn_statuses.remove(session_key);
+        self.active_stop_signals.remove(session_key);
     }
 
     /// Remove expired sessions.
@@ -765,6 +837,7 @@ impl AgentSessionManager {
     pub fn clear_session(&self, session_key: &str) {
         self.sessions.remove(session_key);
         self.active_turn_statuses.remove(session_key);
+        self.active_stop_signals.remove(session_key);
         self.active_sessions.remove(session_key);
     }
 
@@ -772,7 +845,23 @@ impl AgentSessionManager {
     pub fn clear_all_sessions(&self) {
         self.sessions.clear();
         self.active_turn_statuses.clear();
+        self.active_stop_signals.clear();
         self.active_sessions.clear();
+    }
+
+    /// Request cooperative cancellation of the active turn for a session.
+    /// Returns true when a running turn was signalled.
+    pub fn request_stop(&self, session_key: &str) -> bool {
+        let Some(signal) = self.active_stop_signals.get(session_key) else {
+            return false;
+        };
+        let requested = signal.request_stop();
+        if let Some(status_handle) = self.active_turn_statuses.get(session_key) {
+            if let Ok(mut status) = status_handle.lock() {
+                status.state = "stopping".to_string();
+            }
+        }
+        requested || self.active_sessions.contains(session_key)
     }
 
     pub fn get_active_turn_status(&self, session_key: &str) -> Option<ActiveTurnStatus> {
@@ -958,6 +1047,91 @@ pub fn handle_session_free_command(
 // Turn Loop
 // ---------------------------------------------------------------------------
 
+const STOPPED_RESPONSE: &str = "已收到 /stop，正在执行的 Agent loop 已停止。";
+const STOPPED_ERROR: &str = "__bifrost_agent_stopped_by_user__";
+
+fn stop_requested(session: &AgentSession) -> bool {
+    session
+        .stop_signal
+        .as_ref()
+        .is_some_and(|signal| signal.is_requested())
+}
+
+async fn chat_completion_or_stop(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &AgentSession,
+    messages: &[ChatMessage],
+    tools: &[crate::types::ToolDefinition],
+) -> Result<Option<crate::types::ModelResponse>, String> {
+    let request = client.chat_completion(config, messages, tools);
+    let Some(signal) = session.stop_signal.clone() else {
+        return request.await.map(Some);
+    };
+    tokio::select! {
+        result = request => result.map(Some),
+        _ = signal.cancelled() => Ok(None),
+    }
+}
+
+fn stopped_turn_result(
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    tool_calls_log: Vec<ToolCallLog>,
+) -> TurnResult {
+    crate::tools::goal::goal_runtime_apply(
+        session,
+        crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+            reason: crate::tools::goal::GoalAbortReason::Interrupted,
+        },
+    );
+    session.add_assistant_message(STOPPED_RESPONSE);
+    if let Some(rec) = recorder.as_deref_mut() {
+        if let Err(e) = rec.record_assistant_message(&session.session_key, STOPPED_RESPONSE) {
+            warn!(error = %e, "failed to record stop assistant message");
+        }
+    }
+    TurnResult {
+        response: STOPPED_RESPONSE.to_string(),
+        tool_calls_log,
+        work_dir_switched: None,
+        title_updated: session.title.clone(),
+        plan_steps: session.current_plan.clone(),
+        goal_needs_continuation: false,
+        goal_objective: None,
+    }
+}
+
+fn append_cancelled_tool_results(
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    tool_calls_log: &mut Vec<ToolCallLog>,
+    tool_calls: &[ToolCallMessage],
+    start_index: usize,
+) {
+    const CANCELLED_TOOL_OUTPUT: &str = "Tool call cancelled because /stop was requested.";
+    for tc in tool_calls.iter().skip(start_index) {
+        session.add_tool_result(&tc.id, CANCELLED_TOOL_OUTPUT);
+        if let Some(rec) = recorder.as_deref_mut() {
+            if let Err(e) = rec.record_tool_result_with_call_id(
+                &session.session_key,
+                tc.name(),
+                CANCELLED_TOOL_OUTPUT,
+                false,
+                Some(&tc.id),
+            ) {
+                warn!(error = %e, "failed to record cancelled tool result");
+            }
+        }
+        tool_calls_log.push(ToolCallLog {
+            tool_name: tc.name().to_string(),
+            arguments: tc.arguments().to_string(),
+            result: CANCELLED_TOOL_OUTPUT.to_string(),
+            success: false,
+        });
+    }
+}
+
 /// Run a single turn of the agent conversation (backward-compatible wrapper).
 ///
 /// This implements the core turn loop (same pattern as Codex's session/turn.rs):
@@ -1088,6 +1262,30 @@ pub async fn run_turn_with_mcp_multimodal(
     ) {
         return Ok(TurnResult {
             response: session.slash_router.help_text(),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+            title_updated: None,
+            plan_steps: None,
+            goal_needs_continuation: false,
+            goal_objective: None,
+        });
+    }
+
+    // /stop reaches this path only when no other loop is active for the session.
+    if matches!(
+        slash_dispatch,
+        Dispatch::Builtin {
+            command: BuiltinCommand::Stop,
+            ..
+        }
+    ) {
+        if let Some(ref mut rec) = recorder {
+            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
+                warn!(error = %e, "failed to record user message");
+            }
+        }
+        return Ok(TurnResult {
+            response: "当前没有正在执行的 Agent loop。".to_string(),
             tool_calls_log: Vec::new(),
             work_dir_switched: None,
             title_updated: None,
@@ -1729,7 +1927,8 @@ pub async fn run_turn_with_mcp_multimodal(
             "sending model request"
         );
 
-        let response = client.chat_completion(config, &messages, &tool_defs).await;
+        let response =
+            chat_completion_or_stop(client, config, session, &messages, &tool_defs).await;
 
         // Retry with exponential backoff on transient errors;
         // Codex-style degradation on context window overflow:
@@ -1737,7 +1936,15 @@ pub async fn run_turn_with_mcp_multimodal(
         //   2. Loop trim oldest messages until within budget
         //   3. Give up only when history is exhausted
         let response = match response {
-            Ok(r) => r,
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                info!(
+                    session_key = %session.session_key,
+                    iteration = iteration + 1,
+                    "agent turn stopped during model request"
+                );
+                return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
+            }
             Err(e) => {
                 if is_context_window_error(&e) {
                     warn!(
@@ -1800,11 +2007,27 @@ pub async fn run_turn_with_mcp_multimodal(
                             memory_message.as_ref(),
                             config.get_max_history_messages(),
                         );
-                        match client
-                            .chat_completion(config, &retry_messages, &tool_defs)
-                            .await
+                        match chat_completion_or_stop(
+                            client,
+                            config,
+                            session,
+                            &retry_messages,
+                            &tool_defs,
+                        )
+                        .await
                         {
-                            Ok(r) => r,
+                            Ok(Some(r)) => r,
+                            Ok(None) => {
+                                info!(
+                                    session_key = %session.session_key,
+                                    "agent turn stopped during post-compact retry"
+                                );
+                                return Ok(stopped_turn_result(
+                                    session,
+                                    &mut recorder,
+                                    tool_calls_log,
+                                ));
+                            }
                             Err(e2) if is_context_window_error(&e2) => {
                                 // Compact wasn't enough, fall through to trim loop
                                 warn!("still over context limit after compact, starting trim loop");
@@ -1820,6 +2043,13 @@ pub async fn run_turn_with_mcp_multimodal(
                                 .await
                                 {
                                     Ok(r) => r,
+                                    Err(e3) if e3 == STOPPED_ERROR => {
+                                        return Ok(stopped_turn_result(
+                                            session,
+                                            &mut recorder,
+                                            tool_calls_log,
+                                        ));
+                                    }
                                     Err(e3) => {
                                         crate::tools::goal::goal_runtime_apply(
                                             session,
@@ -1856,6 +2086,13 @@ pub async fn run_turn_with_mcp_multimodal(
                         .await
                         {
                             Ok(r) => r,
+                            Err(e3) if e3 == STOPPED_ERROR => {
+                                return Ok(stopped_turn_result(
+                                    session,
+                                    &mut recorder,
+                                    tool_calls_log,
+                                ));
+                            }
                             Err(e3) => {
                                 crate::tools::goal::goal_runtime_apply(
                                     session,
@@ -1881,20 +2118,53 @@ pub async fn run_turn_with_mcp_multimodal(
                             retry_in_ms = delay_ms,
                             "transient API error, retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        if let Some(signal) = session.stop_signal.clone() {
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+                                _ = signal.cancelled() => {
+                                    info!(
+                                        session_key = %session.session_key,
+                                        "agent turn stopped during retry backoff"
+                                    );
+                                    return Ok(stopped_turn_result(
+                                        session,
+                                        &mut recorder,
+                                        tool_calls_log,
+                                    ));
+                                }
+                            }
+                        } else {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
                         let retry_messages = session.build_messages(
                             &prompt_prefix,
                             memory_message.as_ref(),
                             config.get_max_history_messages(),
                         );
-                        match client
-                            .chat_completion(config, &retry_messages, &tool_defs)
-                            .await
+                        match chat_completion_or_stop(
+                            client,
+                            config,
+                            session,
+                            &retry_messages,
+                            &tool_defs,
+                        )
+                        .await
                         {
-                            Ok(r) => {
+                            Ok(Some(r)) => {
                                 info!(retry_attempt = retry + 1, "retry succeeded");
                                 succeeded = Some(r);
                                 break;
+                            }
+                            Ok(None) => {
+                                info!(
+                                    session_key = %session.session_key,
+                                    "agent turn stopped during retry model request"
+                                );
+                                return Ok(stopped_turn_result(
+                                    session,
+                                    &mut recorder,
+                                    tool_calls_log,
+                                ));
                             }
                             Err(e2) => {
                                 last_err = e2;
@@ -1996,6 +2266,15 @@ pub async fn run_turn_with_mcp_multimodal(
                 }
             }
         };
+
+        if stop_requested(session) {
+            info!(
+                session_key = %session.session_key,
+                iteration = iteration + 1,
+                "agent turn stopped after model response"
+            );
+            return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
+        }
 
         // Track real token usage from API response
         if let Some(ref usage) = response.usage {
@@ -2231,7 +2510,22 @@ pub async fn run_turn_with_mcp_multimodal(
         session.add_assistant_tool_calls(&response.tool_calls);
 
         // Execute each tool call
-        for tc in &response.tool_calls {
+        for (tool_index, tc) in response.tool_calls.iter().enumerate() {
+            if stop_requested(session) {
+                info!(
+                    session_key = %session.session_key,
+                    tool = %tc.name(),
+                    "agent turn stopped before tool call"
+                );
+                append_cancelled_tool_results(
+                    session,
+                    &mut recorder,
+                    &mut tool_calls_log,
+                    &response.tool_calls,
+                    tool_index,
+                );
+                return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
+            }
             info!(
                 tool = %tc.name(),
                 call_id = %tc.id,
@@ -2250,37 +2544,64 @@ pub async fn run_turn_with_mcp_multimodal(
                 }
             }
 
-            let result = if let Some(result) =
-                crate::tools::goal::execute_goal_tool(session, tc.name(), tc.arguments())
-            {
-                result
-            } else if tc.name() == TOOL_SEARCH_TOOL_NAME {
-                match tool_search_tool.as_ref() {
-                    Some(tool) => tool.execute(tc.arguments(), &work_dir).await,
-                    None => crate::types::ToolResult {
-                        success: false,
-                        output: "tool_search is unavailable because no deferred tools are active"
-                            .to_string(),
-                    },
-                }
-            } else if mcp.as_ref().is_some_and(|m| m.is_mcp_tool(tc.name())) {
-                // Route to MCP server
-                match mcp.as_mut() {
-                    Some(m) => match m.call_tool(tc.name(), tc.arguments()).await {
-                        Ok(r) => r,
-                        Err(e) => crate::types::ToolResult {
+            let stop_signal = session.stop_signal.clone();
+            let tool_execution = async {
+                if let Some(result) =
+                    crate::tools::goal::execute_goal_tool(session, tc.name(), tc.arguments())
+                {
+                    result
+                } else if tc.name() == TOOL_SEARCH_TOOL_NAME {
+                    match tool_search_tool.as_ref() {
+                        Some(tool) => tool.execute(tc.arguments(), &work_dir).await,
+                        None => crate::types::ToolResult {
                             success: false,
-                            output: format!("MCP tool error: {e}"),
+                            output:
+                                "tool_search is unavailable because no deferred tools are active"
+                                    .to_string(),
                         },
-                    },
-                    None => crate::types::ToolResult {
-                        success: false,
-                        output: "MCP manager unavailable".to_string(),
-                    },
+                    }
+                } else if mcp.as_ref().is_some_and(|m| m.is_mcp_tool(tc.name())) {
+                    // Route to MCP server
+                    match mcp.as_mut() {
+                        Some(m) => match m.call_tool(tc.name(), tc.arguments()).await {
+                            Ok(r) => r,
+                            Err(e) => crate::types::ToolResult {
+                                success: false,
+                                output: format!("MCP tool error: {e}"),
+                            },
+                        },
+                        None => crate::types::ToolResult {
+                            success: false,
+                            output: "MCP manager unavailable".to_string(),
+                        },
+                    }
+                } else {
+                    // Route to local tool registry
+                    tools.execute(tc.name(), tc.arguments(), &work_dir).await
+                }
+            };
+            let result = if let Some(signal) = stop_signal {
+                tokio::select! {
+                    result = tool_execution => Some(result),
+                    _ = signal.cancelled() => None,
                 }
             } else {
-                // Route to local tool registry
-                tools.execute(tc.name(), tc.arguments(), &work_dir).await
+                Some(tool_execution.await)
+            };
+            let Some(result) = result else {
+                info!(
+                    session_key = %session.session_key,
+                    tool = %tc.name(),
+                    "agent turn stopped during tool call"
+                );
+                append_cancelled_tool_results(
+                    session,
+                    &mut recorder,
+                    &mut tool_calls_log,
+                    &response.tool_calls,
+                    tool_index,
+                );
+                return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
             };
 
             debug!(
@@ -2892,11 +3213,8 @@ async fn trim_loop_retry(
             memory_message,
             config.get_max_history_messages(),
         );
-        match client
-            .chat_completion(config, &retry_messages, tool_defs)
-            .await
-        {
-            Ok(r) => {
+        match chat_completion_or_stop(client, config, session, &retry_messages, tool_defs).await {
+            Ok(Some(r)) => {
                 info!(
                     iterations = i + 1,
                     total_trimmed = (i + 1) * TRIM_BATCH_SIZE,
@@ -2904,6 +3222,7 @@ async fn trim_loop_retry(
                 );
                 return Ok(r);
             }
+            Ok(None) => return Err(STOPPED_ERROR.to_string()),
             Err(e) if is_context_window_error(&e) => {
                 // Still over limit, continue trimming
                 continue;
@@ -3024,27 +3343,42 @@ mod tests {
         format!("http://{addr}/chat/completions")
     }
 
-    fn chat_text_response(content: &str, total_tokens: u64) -> serde_json::Value {
-        serde_json::json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": content
-                    },
-                    "finish_reason": "stop"
+    async fn slow_chat_response_url(
+        delay: std::time::Duration,
+    ) -> (String, tokio::sync::oneshot::Receiver<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            let mut buffer = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
                 }
-            ],
-            "usage": {
-                "prompt_tokens": total_tokens.saturating_sub(1),
-                "completion_tokens": 1,
-                "total_tokens": total_tokens
+                buffer.extend_from_slice(&chunk[..n]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
-        })
+            tokio::time::sleep(delay).await;
+            let body = chat_text_response("too late", 11).to_string();
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(http.as_bytes()).await;
+        });
+        (format!("http://{addr}/chat/completions"), accepted_rx)
     }
 
-    async fn provider_config_for_responses(responses: Vec<serde_json::Value>) -> AgentConfig {
-        let url = chat_response_url(responses).await;
+    fn provider_config_for_url(url: String) -> AgentConfig {
         let mut model_providers = HashMap::new();
         model_providers.insert(
             "test".to_string(),
@@ -3066,8 +3400,33 @@ mod tests {
             model_providers,
             model_context_window: Some(1_000),
             model_auto_compact_token_limit: Some(100),
+            request_timeout_secs: Some(30),
             ..Default::default()
         }
+    }
+
+    fn chat_text_response(content: &str, total_tokens: u64) -> serde_json::Value {
+        serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": total_tokens.saturating_sub(1),
+                "completion_tokens": 1,
+                "total_tokens": total_tokens
+            }
+        })
+    }
+
+    async fn provider_config_for_responses(responses: Vec<serde_json::Value>) -> AgentConfig {
+        let url = chat_response_url(responses).await;
+        provider_config_for_url(url)
     }
 
     async fn single_summary_provider_config(total_tokens: u64) -> AgentConfig {
@@ -3474,6 +3833,65 @@ mod tests {
             .history
             .iter()
             .any(|message| message.content.as_deref() == Some("final answer")));
+    }
+
+    #[tokio::test]
+    async fn test_stop_request_cancels_in_flight_model_request() {
+        let (url, accepted_rx) = slow_chat_response_url(std::time::Duration::from_secs(30)).await;
+        let config = provider_config_for_url(url);
+        let client = AgentClient::new();
+        let tools = ToolRegistry::new();
+        let manager = std::sync::Arc::new(AgentSessionManager::new(60));
+        let mut session = manager
+            .try_take_session("stop-model-request")
+            .expect("session should be available");
+        let manager_for_stop = std::sync::Arc::clone(&manager);
+
+        let handle = tokio::spawn(async move {
+            let result = run_turn(
+                &client,
+                &config,
+                &mut session,
+                &tools,
+                "please wait for a slow model",
+                None,
+            )
+            .await;
+            (result, session)
+        });
+
+        accepted_rx
+            .await
+            .expect("slow mock should receive the model request");
+        assert!(manager_for_stop.request_stop("stop-model-request"));
+
+        let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+            .await
+            .expect("turn should stop promptly")
+            .expect("join should succeed");
+        let result = result.expect("stop should return a normal turn result");
+        assert!(result.response.contains("已收到 /stop"));
+        assert!(session
+            .history
+            .iter()
+            .any(|message| message.content.as_deref() == Some(STOPPED_RESPONSE)));
+    }
+
+    #[tokio::test]
+    async fn test_stop_when_idle_does_not_call_model() {
+        let config =
+            provider_config_for_responses(vec![chat_text_response("should not call", 1)]).await;
+        let client = AgentClient::new();
+        let tools = ToolRegistry::new();
+        let mut session = AgentSession::new("idle-stop");
+
+        let result = run_turn(&client, &config, &mut session, &tools, "/stop", None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.response, "当前没有正在执行的 Agent loop。");
+        assert!(session.history.is_empty());
+        assert!(session.total_tokens_used.is_none());
     }
 
     #[tokio::test]

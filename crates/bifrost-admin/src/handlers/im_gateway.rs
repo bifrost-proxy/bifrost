@@ -1160,6 +1160,7 @@ async fn run_event_loop(
 ///
 /// Behavior:
 /// - `/status`: show session status (simplified when busy) or busy status
+/// - `/stop`: request cooperative cancellation of the active turn loop
 /// - `/q <text>`: push message to FIFO queue, reply with queue status
 /// - `/rq <N>`: remove queued message #N, reply with updated queue status
 /// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
@@ -1299,6 +1300,18 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         return;
     }
 
+    // /stop — cooperative cancellation of the active turn loop
+    if trimmed == "/stop" {
+        let stopped = agent_session_manager.request_stop(session_key);
+        let reply = if stopped {
+            "🛑 已请求停止当前 Agent loop。"
+        } else {
+            "当前没有正在执行的 Agent loop。"
+        };
+        send_agent_reply(feishu, provider, event, reply, message_log_store).await;
+        return;
+    }
+
     // /q <text> — queue mode
     if let Some(rest) = trimmed.strip_prefix("/q ") {
         let queue_text = rest.trim();
@@ -1380,6 +1393,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
              - /q <消息> — 排队消息\n\
              - /rq <序号> — 取消排队\n\
              - /status — 查看状态\n\
+             - /stop — 立即停止当前 loop\n\
              - /help — 查看帮助",
             trimmed.split_whitespace().next().unwrap_or(trimmed)
         );
@@ -1745,7 +1759,7 @@ async fn process_agent_chat(
                 "session is busy, rejecting concurrent request"
             );
             let busy_msg =
-                "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。";
+                "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /stop 可立即停止当前 loop；/help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。";
             send_agent_reply(feishu, provider, event, busy_msg, message_log_store).await;
             return;
         }
@@ -3657,6 +3671,21 @@ async fn handle_agent(
             }));
         }
 
+        if body.message.trim() == "/stop" {
+            let stopped = service.agent_session_manager.request_stop(&session_key);
+            return json_response(&serde_json::json!({
+                "success": true,
+                "response": if stopped {
+                    "已请求停止当前 Agent loop。"
+                } else {
+                    "当前没有正在执行的 Agent loop。"
+                },
+                "stopped": stopped,
+                "tool_calls": [],
+                "plan_steps": null
+            }));
+        }
+
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
         {
@@ -3677,7 +3706,7 @@ async fn handle_agent(
             None => {
                 return json_response(&serde_json::json!({
                     "success": true,
-                    "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
+                    "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /stop 可立即停止当前 loop；/help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
                     "tool_calls": [],
                     "plan_steps": null
                 }))
