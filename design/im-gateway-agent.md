@@ -717,7 +717,7 @@ tracing = "0.1"
 | Chat API 长期记忆真实链路 | 运行 `e2e-tests/tests/test_long_term_memory_human_api.sh`，验证 `POST /_bifrost/api/im-gateway/agent/chat` 在真实 Bifrost + mock Chat Completions 下触发自动记忆、Phase 2 consolidation、跨独立 session 消费 |
 | Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
-| Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `queue_messages`，验证 turn-end guide drain、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
+| Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `guide_messages` / `queue_messages`，验证 turn-end guide drain、多条 guide 在进入 loop 前通过 `/status` 展示明细并合并消费、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
@@ -740,6 +740,7 @@ tracing = "0.1"
 | TC-GQ-04 | turn-end guide drain 黑盒回归 | 通过 `/agent/chat` 注入 `guide_message`，验证模型 stop 后到达的 guide 不会丢失，而是继续同一 turn loop |
 | TC-GQ-05 | queued FIFO drain 黑盒回归 | 通过 `/agent/chat` 注入 `queue_messages`，验证在同一次 `run_turn_with_mcp` 中按 FIFO 逐条继续处理 |
 | TC-GQ-06 | guide 优先于 queue | 同时注入 `guide_message` 与 `queue_messages`，验证处理顺序为 initial → guide → queued FIFO |
+| TC-GQ-14 | 多 guide pending status 与合并消费 | 通过 `/agent/chat` 注入多条 `guide_messages`，运行中 `/status` 展示尚未进入 loop 的具体 guide 列表，随后 loop 将多条 guide 合并为一条 user message 继续处理 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |

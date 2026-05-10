@@ -1270,7 +1270,8 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
             let reply = build_im_status_text(Some(&detail));
             send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
-        } else if let Some(status) = agent_session_manager.get_active_turn_status(session_key) {
+        } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
+            status.pending_guide_messages = queue_manager.guide_status(session_key);
             let queue_items = queue_manager.queue_status(session_key);
             let queue_info = if queue_items.is_empty() {
                 "无排队消息".to_string()
@@ -1291,9 +1292,10 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
             } else {
                 format!("{} 条排队消息", queue_items.len())
             };
+            let guide_info = format_pending_guide_status(&queue_manager.guide_status(session_key));
             let reply = format!(
-                "会话状态:\n- 状态: 🔵 正在处理中\n- 排队: {}\n\n请等待当前任务完成后再查询详细状态。",
-                queue_info
+                "会话状态:\n- 状态: 🔵 正在处理中\n- 排队: {}\n{}\n\n请等待当前任务完成后再查询详细状态。",
+                queue_info, guide_info
             );
             send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
         }
@@ -1402,19 +1404,22 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
     }
 
     // Default: guide mode — inject into the guide channel
-    let previous = queue_manager.inject_guide(session_key, trimmed.to_string());
-    let reply = if previous.is_some() {
-        "🔀 已更新引导消息（替换前一条未处理的引导），将在当前工具调用完成后生效"
+    let pending_guide_count = queue_manager.inject_guide(session_key, trimmed.to_string());
+    let reply = if pending_guide_count > 1 {
+        format!(
+            "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
+            pending_guide_count
+        )
     } else {
-        "🔀 已注入引导消息，将在当前工具调用完成后生效"
+        "🔀 已注入引导消息，将在当前工具调用完成后生效".to_string()
     };
     info!(
         session_key = %session_key,
         guide_msg_len = trimmed.len(),
-        replaced_previous = previous.is_some(),
+        pending_guide_count = pending_guide_count,
         "guide message injected via IM"
     );
-    send_agent_reply(feishu, provider, event, reply, message_log_store).await;
+    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
 }
 
 /// Format queue status as a user-friendly string.
@@ -1436,6 +1441,18 @@ fn format_queue_status(
                 preview
             ));
         }
+    }
+    text
+}
+
+fn format_pending_guide_status(guides: &[String]) -> String {
+    if guides.is_empty() {
+        return "- 引导消息: 无".to_string();
+    }
+
+    let mut text = format!("- 引导消息: {} 条尚未进入 loop", guides.len());
+    for (idx, guide) in guides.iter().enumerate() {
+        text.push_str(&format!("\n  {}. {}", idx + 1, truncate_str(guide, 80)));
     }
     text
 }
@@ -1552,7 +1569,9 @@ async fn run_agent_chat_with_interleave(
         // so it's not lost when clear_session removes the guide slot.
         // This handles the race where a guide message arrives after the session's
         // turn-end checkpoint but before the select! loop breaks.
-        if let Some(unconsumed) = guide_channel.lock().unwrap().take() {
+        let unconsumed_guides: Vec<String> = guide_channel.lock().unwrap().drain(..).collect();
+        if let Some(unconsumed) = bifrost_agent::session::combine_guide_messages(unconsumed_guides)
+        {
             if !unconsumed.trim().is_empty() {
                 info!(
                     session_key = %session_key,
@@ -1724,7 +1743,7 @@ async fn process_agent_chat(
     system_prompt_override: Option<&str>,
     mcp: Option<&mut ImMcpManager>,
     message_log_store: &Arc<ImMessageLogStore>,
-    guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    guide_channel: Option<bifrost_agent::session::GuideChannel>,
 ) {
     info!(
         session_key = %session_key,
@@ -3609,6 +3628,10 @@ async fn handle_agent(
             /// agent is finishing its turn (guide_channel drain at turn end).
             #[serde(default)]
             guide_message: Option<String>,
+            /// Inject multiple guide messages into guide_channel before starting
+            /// the turn. Used to verify pending guide status and merge behavior.
+            #[serde(default)]
+            guide_messages: Vec<String>,
             /// Inject messages into the pending queue before starting the turn.
             /// Used to test queued message processing. Each message will be
             /// processed sequentially within the same `run_turn_with_mcp` call.
@@ -3645,14 +3668,17 @@ async fn handle_agent(
 
         // ── Session-free command fast path ──────────────────────────────
         if body.message.trim() == "/status" {
-            if let Some(status) = service
+            if let Some(mut status) = service
                 .agent_session_manager
                 .get_active_turn_status(&session_key)
             {
+                let pending_guides = service.queue_manager.guide_status(&session_key);
+                status.pending_guide_messages = pending_guides.clone();
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": bifrost_agent::format_active_turn_status_text(&status),
                     "active_status": status,
+                    "pending_guide_messages": pending_guides,
                     "tool_calls": [],
                     "plan_steps": null
                 }));
@@ -3713,13 +3739,31 @@ async fn handle_agent(
             }
         };
         session.source = "api".to_string();
-        // If guide_message is provided, inject into guide_channel to simulate
-        // a message arriving during the final model response (turn end scenario).
+        // If guide messages are provided, inject into the shared guide channel
+        // to simulate messages arriving before the next guide checkpoint.
+        let mut has_guide_messages = false;
         if let Some(ref guide_msg) = body.guide_message {
-            if !guide_msg.is_empty() {
-                let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(guide_msg.clone())));
-                session.guide_channel = Some(channel);
+            if !guide_msg.trim().is_empty() {
+                service
+                    .queue_manager
+                    .inject_guide(&session_key, guide_msg.clone());
+                has_guide_messages = true;
             }
+        }
+        for guide_msg in &body.guide_messages {
+            if !guide_msg.trim().is_empty() {
+                service
+                    .queue_manager
+                    .inject_guide(&session_key, guide_msg.clone());
+                has_guide_messages = true;
+            }
+        }
+        if has_guide_messages {
+            session.guide_channel = Some(
+                service
+                    .queue_manager
+                    .get_or_create_guide_channel(&session_key),
+            );
         }
         // If queue_messages is provided, inject into session's pending_messages
         // to simulate queued messages arriving during agent processing.

@@ -25,6 +25,7 @@ pub struct ActiveTurnStatus {
     pub message_count: usize,
     pub local_tool_count: usize,
     pub mcp_tool_count: usize,
+    pub pending_guide_messages: Vec<String>,
 }
 
 impl ActiveTurnStatus {
@@ -49,6 +50,7 @@ impl ActiveTurnStatus {
             message_count: 0,
             local_tool_count: 0,
             mcp_tool_count: 0,
+            pending_guide_messages: Vec::new(),
         }
     }
 }
@@ -124,6 +126,11 @@ pub(crate) fn refresh_active_turn_status(
         status.message_count = session.history.len();
         status.local_tool_count = progress.local_tool_count;
         status.mcp_tool_count = progress.mcp_tool_count;
+        status.pending_guide_messages = session
+            .guide_channel
+            .as_ref()
+            .map(|ch| ch.lock().unwrap().iter().cloned().collect())
+            .unwrap_or_default();
     });
 }
 
@@ -144,6 +151,22 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
         _ => format!("~{} / N/A", status.estimated_context_tokens),
     };
     let work_dir_text = status.work_dir.as_deref().unwrap_or("N/A");
+    let guide_text = if status.pending_guide_messages.is_empty() {
+        "- 引导消息: 无".to_string()
+    } else {
+        let mut text = format!(
+            "- 引导消息: {} 条尚未进入 loop",
+            status.pending_guide_messages.len()
+        );
+        for (idx, msg) in status.pending_guide_messages.iter().enumerate() {
+            text.push_str(&format!(
+                "\n  {}. {}",
+                idx + 1,
+                truncate_status_text(msg, 80)
+            ));
+        }
+        text
+    };
 
     format!(
         "会话状态:\n\
@@ -154,6 +177,7 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
          - Context 用量: {}\n\
          - 压缩次数: {}\n\
          - 消息数: {}\n\
+         {}\n\
          - 历史版本: {}\n\
          - MCP 工具数: {}\n\
          - 本地工具数: {}",
@@ -166,10 +190,18 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
         context_text,
         status.compaction_count,
         status.message_count,
+        guide_text,
         status.history_version,
         status.mcp_tool_count,
         status.local_tool_count
     )
+}
+
+fn truncate_status_text(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    format!("{}...", s.chars().take(max_chars).collect::<String>())
 }
 
 #[cfg(test)]
@@ -205,6 +237,7 @@ mod tests {
             message_count: 9,
             local_tool_count: 12,
             mcp_tool_count: 5,
+            pending_guide_messages: vec!["第一条引导".to_string(), "第二条引导".to_string()],
         };
 
         let text = format_active_turn_status_text(&status);
@@ -214,6 +247,9 @@ mod tests {
         assert!(text.contains("实时 token: 累计 51，最近响应 17"));
         assert!(text.contains("Context 用量: ~4000 / 250000 (1.6%)"));
         assert!(text.contains("压缩次数: 1"));
+        assert!(text.contains("引导消息: 2 条尚未进入 loop"));
+        assert!(text.contains("1. 第一条引导"));
+        assert!(text.contains("2. 第二条引导"));
         assert!(text.contains("MCP 工具数: 5"));
     }
 }

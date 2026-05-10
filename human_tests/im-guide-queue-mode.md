@@ -4,7 +4,7 @@
 
 IM Gateway 消息处理的两种模式，用于处理 Agent 正在处理中（session busy）时用户发来的新消息：
 
-- **引导模式（默认）**：用户直接发送消息，消息被注入到 guide channel 中，在当前工具调用批次结束后追加到对话历史，进入下一个模型循环。新消息覆盖前一条未处理的引导消息（覆盖语义）。
+- **引导模式（默认）**：用户直接发送消息，消息被注入到 guide channel 中，在当前工具调用批次结束后追加到对话历史，进入下一个模型循环。多条尚未进入 loop 的引导消息会按到达顺序保留，并在消费时合并成一条 user message。
 - **排队模式**（`/q <消息>`）：消息加入 FIFO 队列，每个 turn 完成后按顺序处理队列消息。最多排队 10 条。
 - **删除排队**（`/rq <序号>`）：通过序号删除指定的排队消息。
 
@@ -31,15 +31,16 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   ```bash
   cargo test -p bifrost-admin -- queue_manager
   ```
-- **预期结果**: 所有 11 个测试用例通过：
-  - `test_guide_inject_overwrite` — 引导消息覆盖语义
+- **预期结果**: 所有 14 个测试用例通过：
+  - `test_guide_inject_appends` — 引导消息按顺序累积
+  - `test_guide_status_is_readonly` — 引导状态查询不影响待消费消息
   - `test_queue_push_pop` — 队列 FIFO 推入弹出
   - `test_queue_remove` — 按序号删除队列消息
   - `test_queue_max_size` — 队列满（10 条）时拒绝新消息
   - `test_clear_session` — 清理 session 同时清除引导和队列
   - `test_guide_channel_producer_consumer_flow` — 生产者/消费者共享通道流
   - `test_guide_and_queue_coexistence` — 引导和队列独立共存
-  - `test_queue_status_is_readonly` — 状态查询不影响队列
+  - `test_queue_status_is_readonly` — 队列状态查询不影响队列
   - `test_session_isolation` — 不同 session 之间完全隔离
   - `test_remove_nonexistent_seq` — 删除不存在的序号返回 false
   - `test_concurrent_access` — 多线程并发读写安全
@@ -51,7 +52,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   grep -n 'guide_channel' crates/agent/src/session.rs
   ```
 - **预期结果**: 找到以下关键位置：
-  - 结构体字段声明 `pub guide_channel: Option<Arc<Mutex<Option<String>>>>`
+  - 结构体字段声明 `pub guide_channel: Option<GuideChannel>`
   - 构造函数初始化 `guide_channel: None`
   - `run_turn_with_mcp` 中的 mid-turn 注入逻辑（检查 guide_channel 并追加到 history）
 
@@ -112,12 +113,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **操作步骤**: 审查 `crates/agent/src/session.rs` 中 `run_turn_with_mcp` 函数，定位 guide 注入代码
 - **预期结果**: 注入逻辑位于工具调用结果处理后、mid-turn compaction 之前：
   ```rust
-  if let Some(ref guide) = session.guide_channel {
-      let guide_msg = guide.lock().unwrap().take();
-      if let Some(guide_msg) = guide_msg {
-          session.add_user_message(&guide_msg);
-          // 同时记录到 recorder
-      }
+  let guide_messages = drain_guide_messages(session);
+  if let Some(guide_msg) = combine_guide_messages(guide_messages) {
+      session.add_user_message(&guide_msg);
+      // 同时记录到 recorder
   }
   ```
 
@@ -186,6 +185,20 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 只有 `real queued` 被继续处理；空白 guide 与空白 queue 项不会进入历史或 pending queue
   - 最终顺序体现为：`hello -> real queued`
 - **执行记录（2026-05-05）**: PASS — `blank-ignore-test` 返回 `ORDER: hello -> real queued`，确认空白 guide / queue 项未参与后续 turn 处理
+
+### TC-GQ-14: 多条尚未进入 loop 的 guide 合并并在 `/status` 展示明细
+
+- **操作步骤**:
+  ```bash
+  SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18131 MOCK_HTTP_PORT=18132 \
+    bash e2e-tests/tests/test_im_guide_queue_human_api.sh
+  ```
+- **预期结果**:
+  - 长模型请求运行期间，同 session 发送 `/status` 返回 `pending_guide_messages: ["第一条引导","第二条引导"]`
+  - `/status.response` 包含 `引导消息: 2 条尚未进入 loop`，并列出两条具体引导内容
+  - 原 chat 完成后，模型请求历史中只新增一条合并后的 user message，内容包含 `引导消息 1` 和 `引导消息 2`
+  - 最终响应包含 `GUIDES_MERGED: 第一条引导 -> 第二条引导`
+- **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18131 MOCK_HTTP_PORT=18132 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，脚本启动临时 Bifrost 与 mock provider，通过 `/agent/chat` 注入两条 `guide_messages`，在首轮慢模型请求期间轮询 `/status` 并断言 pending guide JSON 与文案明细，随后断言最终模型请求收到合并后的单条 guide user message。
 
 ## 清理步骤
 
