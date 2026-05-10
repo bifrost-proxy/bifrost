@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
 use crate::im_gateway::event_router::ImEventRouter;
+use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
     ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig, ImProviderConfig, ImRoute,
@@ -48,6 +49,7 @@ pub struct ImGatewayService {
     pub agent_tools: Arc<ImAgentToolRegistry>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
     pub queue_manager: Arc<SessionQueueManager>,
+    pub progress_registry: Arc<ImAgentProgressRegistry>,
 }
 
 impl ImGatewayService {
@@ -87,6 +89,7 @@ impl ImGatewayService {
                 agent_config.get_session_ttl_secs(),
             )),
             queue_manager: Arc::new(SessionQueueManager::new()),
+            progress_registry: Arc::new(ImAgentProgressRegistry::new()),
         }
     }
 
@@ -162,6 +165,7 @@ impl ImGatewayService {
             let agent_tools = self.agent_tools.clone();
             let agent_session_manager = self.agent_session_manager.clone();
             let queue_manager = self.queue_manager.clone();
+            let progress_registry = self.progress_registry.clone();
             tokio::spawn(async move {
                 run_event_loop(
                     rx,
@@ -176,6 +180,7 @@ impl ImGatewayService {
                     agent_tools,
                     agent_session_manager,
                     queue_manager,
+                    progress_registry,
                 )
                 .await;
             });
@@ -256,6 +261,7 @@ impl ImGatewayService {
                             let agent_tools = self.agent_tools.clone();
                             let agent_session_manager = self.agent_session_manager.clone();
                             let queue_manager = self.queue_manager.clone();
+                            let progress_registry = self.progress_registry.clone();
                             tokio::spawn(async move {
                                 run_event_loop(
                                     rx,
@@ -270,6 +276,7 @@ impl ImGatewayService {
                                     agent_tools,
                                     agent_session_manager,
                                     queue_manager,
+                                    progress_registry,
                                 )
                                 .await;
                             });
@@ -539,6 +546,7 @@ async fn handle_provider_connect(
     let agent_tools = service.agent_tools.clone();
     let agent_session_manager = service.agent_session_manager.clone();
     let queue_manager = service.queue_manager.clone();
+    let progress_registry = service.progress_registry.clone();
     tokio::spawn(async move {
         run_event_loop(
             rx,
@@ -553,6 +561,7 @@ async fn handle_provider_connect(
             agent_tools,
             agent_session_manager,
             queue_manager,
+            progress_registry,
         )
         .await;
     });
@@ -773,6 +782,7 @@ async fn run_event_loop(
     agent_tools: Arc<ImAgentToolRegistry>,
     agent_session_manager: Arc<ImAgentSessionManager>,
     queue_manager: Arc<SessionQueueManager>,
+    progress_registry: Arc<ImAgentProgressRegistry>,
 ) {
     info!(
         provider_id = %provider.id,
@@ -1006,6 +1016,7 @@ async fn run_event_loop(
                                     event: &event,
                                     message_log_store: &message_log_store,
                                     agent_session_manager: &agent_session_manager,
+                                    progress_registry: &progress_registry,
                                 },
                             )
                             .await;
@@ -1041,6 +1052,7 @@ async fn run_event_loop(
                             &agent_tools,
                             &agent_session_manager,
                             &queue_manager,
+                            &progress_registry,
                             &session_key,
                             &agent_message,
                             images,
@@ -1101,6 +1113,7 @@ async fn run_event_loop(
                             event: &event,
                             message_log_store: &message_log_store,
                             agent_session_manager: &agent_session_manager,
+                            progress_registry: &progress_registry,
                         },
                     )
                     .await;
@@ -1132,6 +1145,7 @@ async fn run_event_loop(
                     &agent_tools,
                     &agent_session_manager,
                     &queue_manager,
+                    &progress_registry,
                     &session_key,
                     &message_text,
                     images,
@@ -1171,6 +1185,7 @@ struct BusyMessageContext<'a> {
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     agent_session_manager: &'a Arc<ImAgentSessionManager>,
+    progress_registry: &'a Arc<ImAgentProgressRegistry>,
 }
 
 async fn resolve_event_images(
@@ -1262,6 +1277,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
     let event = ctx.event;
     let message_log_store = ctx.message_log_store;
     let agent_session_manager = ctx.agent_session_manager;
+    let progress_registry = ctx.progress_registry;
     let trimmed = msg_text.trim();
 
     // /status — show session status or busy indicator
@@ -1330,8 +1346,19 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         }
         match queue_manager.push_queue(session_key, queue_text.to_string()) {
             Ok(items) => {
-                let reply = format_queue_status("✅ 已加入排队", &items);
-                send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                let guide_pending = !queue_manager.guide_status(session_key).is_empty();
+                let updated = progress_registry
+                    .update_queue_state(
+                        session_key,
+                        items.clone(),
+                        guide_pending,
+                        Some(format!("已加入排队：{} 条", items.len())),
+                    )
+                    .await;
+                if !updated {
+                    let reply = format_queue_status("✅ 已加入排队", &items);
+                    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                }
             }
             Err(err) => {
                 send_agent_reply(
@@ -1354,8 +1381,19 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
             Ok(seq) => {
                 if queue_manager.remove_queue(session_key, seq) {
                     let items = queue_manager.queue_status(session_key);
-                    let reply = format_queue_status(&format!("🗑️ 已删除 #{seq}"), &items);
-                    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                    let guide_pending = !queue_manager.guide_status(session_key).is_empty();
+                    let updated = progress_registry
+                        .update_queue_state(
+                            session_key,
+                            items.clone(),
+                            guide_pending,
+                            Some(format!("已删除排队消息 #{seq}")),
+                        )
+                        .await;
+                    if !updated {
+                        let reply = format_queue_status(&format!("🗑️ 已删除 #{seq}"), &items);
+                        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                    }
                 } else {
                     send_agent_reply(
                         feishu,
@@ -1419,7 +1457,17 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         pending_guide_count = pending_guide_count,
         "guide message injected via IM"
     );
-    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+    let updated = progress_registry
+        .update_queue_state(
+            session_key,
+            queue_manager.queue_status(session_key),
+            true,
+            Some(format!("已收到引导：{}", truncate_str(trimmed, 48))),
+        )
+        .await;
+    if !updated {
+        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+    }
 }
 
 /// Format queue status as a user-friendly string.
@@ -1457,6 +1505,64 @@ fn format_pending_guide_status(guides: &[String]) -> String {
     text
 }
 
+async fn run_progress_event_coalescer(
+    progress_registry: Arc<ImAgentProgressRegistry>,
+    session_key: String,
+    rx: &mut mpsc::UnboundedReceiver<bifrost_agent::AgentTurnProgressEvent>,
+) {
+    const STATUS_COALESCE_MS: u64 = 300;
+    while let Some(first) = rx.recv().await {
+        let mut immediate = progress_event_needs_immediate_flush(&first);
+        let mut events = vec![first];
+        while let Ok(event) = rx.try_recv() {
+            immediate |= progress_event_needs_immediate_flush(&event);
+            events.push(event);
+        }
+        if !immediate {
+            let deadline = tokio::time::sleep(std::time::Duration::from_millis(STATUS_COALESCE_MS));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => break,
+                    maybe_event = rx.recv() => {
+                        let Some(event) = maybe_event else {
+                            break;
+                        };
+                        let mut batch_is_immediate = progress_event_needs_immediate_flush(&event);
+                        events.push(event);
+                        while let Ok(event) = rx.try_recv() {
+                            let drained_is_immediate = progress_event_needs_immediate_flush(&event);
+                            events.push(event);
+                            if drained_is_immediate {
+                                batch_is_immediate = true;
+                                break;
+                            }
+                        }
+                        if batch_is_immediate {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        progress_registry.apply_events(&session_key, events).await;
+    }
+}
+
+fn progress_event_needs_immediate_flush(event: &bifrost_agent::AgentTurnProgressEvent) -> bool {
+    matches!(
+        event,
+        bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
+            | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
+            | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
+            | bifrost_agent::AgentTurnProgressEvent::TitleUpdated { .. }
+            | bifrost_agent::AgentTurnProgressEvent::AssistantDelta { .. }
+            | bifrost_agent::AgentTurnProgressEvent::AssistantFinal { .. }
+            | bifrost_agent::AgentTurnProgressEvent::TurnFinished { .. }
+            | bifrost_agent::AgentTurnProgressEvent::TurnFailed { .. }
+    )
+}
+
 /// Run agent chat with `tokio::select!` interleaving.
 ///
 /// While the agent turn is executing, this function continues to receive events
@@ -1475,6 +1581,7 @@ async fn run_agent_chat_with_interleave(
     agent_tools: &Arc<ImAgentToolRegistry>,
     agent_session_manager: &Arc<ImAgentSessionManager>,
     queue_manager: &Arc<SessionQueueManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
     session_key: &str,
     initial_message: &str,
     initial_images: Vec<bifrost_agent::ChatImageInput>,
@@ -1510,6 +1617,7 @@ async fn run_agent_chat_with_interleave(
             &agent_config,
             agent_tools,
             agent_session_manager,
+            progress_registry,
             session_key,
             &msg_for_turn,
             &images_for_turn,
@@ -1557,6 +1665,7 @@ async fn run_agent_chat_with_interleave(
                         feishu,
                         message_log_store,
                         agent_session_manager,
+                        progress_registry,
                         agent_config_store,
                         provider_store,
                     )
@@ -1596,20 +1705,6 @@ async fn run_agent_chat_with_interleave(
                     remaining_queue = remaining,
                     "processing next queued message"
                 );
-                let preview = truncate_str(&next_msg, 80);
-                let notice = if remaining > 0 {
-                    format!("📋 正在处理排队消息: {preview}\n（剩余 {remaining} 条排队）")
-                } else {
-                    format!("📋 正在处理排队消息: {preview}")
-                };
-                send_agent_reply(
-                    feishu,
-                    &current_provider,
-                    initial_event,
-                    &notice,
-                    message_log_store,
-                )
-                .await;
                 current_msg = next_msg;
             }
             None => {
@@ -1634,6 +1729,7 @@ async fn handle_concurrent_event_during_chat(
     feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
     message_log_store: &Arc<ImMessageLogStore>,
     agent_session_manager: &Arc<ImAgentSessionManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
     agent_config_store: &Arc<ImAgentConfigStore>,
     provider_store: &Arc<ImProviderStore>,
 ) {
@@ -1691,6 +1787,7 @@ async fn handle_concurrent_event_during_chat(
                 event,
                 message_log_store,
                 agent_session_manager,
+                progress_registry,
             },
         )
         .await;
@@ -1707,6 +1804,7 @@ async fn handle_concurrent_event_during_chat(
                     event,
                     message_log_store,
                     agent_session_manager,
+                    progress_registry,
                 },
             )
             .await;
@@ -1737,6 +1835,7 @@ async fn process_agent_chat(
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
     agent_tools: &Arc<ImAgentToolRegistry>,
     session_manager: &Arc<ImAgentSessionManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
     session_key: &str,
     user_message: &str,
     images: &[bifrost_agent::ChatImageInput],
@@ -1806,13 +1905,71 @@ async fn process_agent_chat(
     session.source = "feishu".to_string();
     session.guide_channel = guide_channel;
 
+    let target_open_id = provider
+        .owner_open_id
+        .as_deref()
+        .or(event.source.user_id.as_deref())
+        .unwrap_or("");
+    let mut progress_enabled = false;
+    let mut progress_tx_for_finish = None;
+    let mut progress_task = None;
+    if !target_open_id.is_empty() {
+        let progress_target = crate::im_gateway::types::ImTarget {
+            id: "__agent_progress__".to_string(),
+            provider_id: provider.id.clone(),
+            display_name: "Agent Progress".to_string(),
+            enabled: true,
+            receive_id_type: "open_id".to_string(),
+            receive_id: target_open_id.to_string(),
+            default_msg_type: "interactive".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        match progress_registry
+            .start_feishu(
+                session_key,
+                feishu.clone(),
+                provider.clone(),
+                progress_target,
+                user_message,
+            )
+            .await
+        {
+            Ok(_) => {
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<bifrost_agent::AgentTurnProgressEvent>();
+                session.progress_sender = Some(progress_tx.clone());
+                progress_tx_for_finish = Some(progress_tx);
+                let progress_registry = Arc::clone(progress_registry);
+                let session_key_for_progress = session_key.to_string();
+                progress_task = Some(tokio::spawn(async move {
+                    run_progress_event_coalescer(
+                        progress_registry,
+                        session_key_for_progress,
+                        &mut progress_rx,
+                    )
+                    .await;
+                }));
+                progress_enabled = true;
+            }
+            Err(error) => {
+                warn!(
+                    session_key = %session_key,
+                    error = %error,
+                    "failed to start IM streaming progress card; falling back to final reply card"
+                );
+            }
+        }
+    }
+
     // Set up plan update channel for real-time plan card rendering.
     // The turn loop pushes plan steps through this channel; a background task
     // sends (first time) or patches (subsequent) a single Feishu card.
-    let (plan_tx, mut plan_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(Vec<bifrost_agent::PlanStep>, Option<String>)>();
-    session.plan_sender = Some(plan_tx);
-    {
+    if !progress_enabled {
+        let (plan_tx, mut plan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(Vec<bifrost_agent::PlanStep>, Option<String>)>(
+            );
+        session.plan_sender = Some(plan_tx);
         let feishu = feishu.clone();
         let provider = provider.clone();
         let target_open_id = provider
@@ -1976,8 +2133,8 @@ async fn process_agent_chat(
             "goal still active, auto-continuing"
         );
 
-        // Send intermediate response to user so they see progress
-        if !turn_result.response.is_empty() {
+        // Send intermediate response when no streaming progress card is active.
+        if !progress_enabled && !turn_result.response.is_empty() {
             send_agent_reply_with_plan(
                 feishu,
                 provider,
@@ -2041,6 +2198,8 @@ async fn process_agent_chat(
 
     // Extract session title before returning the session
     let session_title = session.title.clone();
+    session.progress_sender = None;
+    session.plan_sender = None;
 
     // Return session after turn completes
     session_manager.return_session(session);
@@ -2049,6 +2208,7 @@ async fn process_agent_chat(
     session_manager.cleanup_expired();
 
     // Separate main response and tool calls for card rendering
+    let mut progress_failed = false;
     let (main_response, tool_calls_panel, plan_steps) = match result {
         Ok(turn_result) => {
             let mut response = turn_result.response;
@@ -2079,6 +2239,7 @@ async fn process_agent_chat(
             (response, panel, plan)
         }
         Err(e) => {
+            progress_failed = true;
             error!(
                 session_key = %session_key,
                 error = %e,
@@ -2094,6 +2255,55 @@ async fn process_agent_chat(
             )
         }
     };
+
+    if progress_enabled {
+        if let Some(tx) = progress_tx_for_finish.take() {
+            let event = if progress_failed {
+                bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                    error: main_response.clone(),
+                }
+            } else {
+                bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                    content: main_response.clone(),
+                }
+            };
+            let _ = tx.send(event);
+            drop(tx);
+        }
+        if let Some(task) = progress_task.take() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        }
+        let progress_message_info = progress_registry
+            .finish(session_key, Some(main_response.clone()), progress_failed)
+            .await;
+
+        let log = ImMessageLog {
+            id: uuid_short(),
+            provider_id: provider.id.clone(),
+            direction: MessageDirection::Outbound,
+            status: MessageStatus::Success,
+            timestamp: now_ms(),
+            target_id: Some(
+                progress_message_info
+                    .as_ref()
+                    .map(|info| format!("__agent_progress__:{}", info.card_id))
+                    .unwrap_or_else(|| "__agent_progress__".to_string()),
+            ),
+            target_name: Some("Agent Progress".to_string()),
+            message_id: progress_message_info.and_then(|info| info.message_id),
+            msg_type: Some("interactive".to_string()),
+            content_preview: Some(truncate_str(&main_response, 200)),
+            trigger: Some("agent_streaming".to_string()),
+            error: None,
+            sender_open_id: None,
+            event_id: Some(event.event_id.clone()),
+            reaction_added: None,
+        };
+        if let Err(e) = message_log_store.add(log) {
+            error!(error = %e, "failed to store agent streaming outbound message log");
+        }
+        return;
+    }
 
     // Build an ephemeral target using owner's open_id or event sender
     let target_open_id = provider
@@ -5338,6 +5548,7 @@ mod tests {
             Arc::clone(&service.agent_tools),
             Arc::clone(&service.agent_session_manager),
             Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
         ));
 
         tx.send(ImEvent {
@@ -5448,6 +5659,7 @@ mod tests {
             Arc::clone(&service.agent_tools),
             Arc::clone(&service.agent_session_manager),
             Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
         ));
 
         tx.send(ImEvent {

@@ -256,7 +256,11 @@ export async function waitForToast(page: Page, text: string): Promise<void> {
 
 export async function setSelectValue(page: Page, trigger: Locator, optionText: string): Promise<void> {
   await trigger.click();
-  await page.locator(".ant-select-dropdown").getByText(optionText, { exact: true }).click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .last()
+    .getByText(optionText, { exact: true })
+    .click();
 }
 
 export async function setSliderValue(page: Page, testId: string, targetDelta: number): Promise<void> {

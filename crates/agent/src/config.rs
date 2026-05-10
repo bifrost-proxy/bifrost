@@ -1210,6 +1210,18 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_effective_config_disables_reasoning_fields_with_none() {
+        let config = AgentConfig {
+            model_reasoning_effort: Some("none".to_string()),
+            model_reasoning_summary: Some("none".to_string()),
+            ..Default::default()
+        };
+        let effective = config.resolve_effective_config().unwrap();
+        assert_eq!(effective.reasoning_effort, None);
+        assert_eq!(effective.reasoning_summary, None);
+    }
+
+    #[test]
     fn test_resolve_effective_config_custom_provider() {
         let mut providers = HashMap::new();
         providers.insert(
