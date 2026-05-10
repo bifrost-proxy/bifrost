@@ -240,7 +240,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let sink = Arc::clone(&chunks);
                 let started = Instant::now();
                 let response = executor
-                    .execute_with_stdout_sink(&command, |chunk| {
+                    .execute_with_stdout_sink(&command, None, |chunk| {
                         let sink = Arc::clone(&sink);
                         let elapsed_ms = started.elapsed().as_millis();
                         async move {

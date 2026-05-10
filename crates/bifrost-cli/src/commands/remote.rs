@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::commands::caller_stream_frame::{
@@ -96,6 +97,18 @@ struct ShellExecPayload {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
+    stdin_mode: Option<String>,
+    pty: Option<PtyRequestPayload>,
+    output_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PtyRequestPayload {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cols: Option<u16>,
 }
 
 /// PR #5e-1: caller-side streaming preferences derived from CLI flags.
@@ -110,6 +123,8 @@ struct StreamingPrefs {
     pub resume_call_id: Option<String>,
     pub resume_relay_token: Option<String>,
     pub no_verify_digest: bool,
+    pub interactive: bool,
+    pub stdin: bool,
 }
 
 impl StreamingPrefs {
@@ -595,6 +610,12 @@ struct CommandEnvelope {
     env: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdin_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pty: Option<PtyRequestPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +633,11 @@ struct FrameEnvelopeAad {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncryptedFramePayload {
     chunk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallerInputFramePayload {
+    data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1044,6 +1070,9 @@ fn encrypt_remote_command(
         cwd: shell_exec.and_then(|payload| payload.cwd.clone()),
         env: shell_exec.and_then(|payload| payload.env.clone()),
         timeout_ms: shell_exec.and_then(|payload| payload.timeout_ms),
+        stdin_mode: shell_exec.and_then(|payload| payload.stdin_mode.clone()),
+        pty: shell_exec.and_then(|payload| payload.pty.clone()),
+        output_mode: shell_exec.and_then(|payload| payload.output_mode.clone()),
     })
     .map_err(|e| {
         BifrostError::Config(format!("serialize encrypted command payload failed: {e}"))
@@ -1167,6 +1196,49 @@ fn decrypt_frame_chunk(
     let frame: EncryptedFramePayload = serde_json::from_slice(&plaintext)
         .map_err(|e| BifrostError::Config(format!("decode encrypted frame payload failed: {e}")))?;
     Ok(frame.chunk)
+}
+
+fn encrypt_caller_input_frame(
+    transport: &OpenCallTransportContext,
+    call_id: &str,
+    seq: u64,
+    bytes: &[u8],
+) -> bifrost_core::Result<String> {
+    let key_bytes = derive_call_event_key(
+        &transport.shared_secret,
+        call_id,
+        &transport.caller_ephemeral_pub,
+        &transport.client_ephemeral_pub,
+    )?;
+    let unbound = UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).map_err(|_| {
+        BifrostError::Config("initialize caller input frame encryption failed".to_string())
+    })?;
+    let key = LessSafeKey::new(unbound);
+    let mut nonce = [0u8; NONCE_LEN];
+    SystemRandom::new().fill(&mut nonce).map_err(|_| {
+        BifrostError::Config("generate caller input frame nonce failed".to_string())
+    })?;
+    let mut sealed = serde_json::to_vec(&CallerInputFramePayload {
+        data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+    .map_err(|e| BifrostError::Config(format!("serialize caller input frame failed: {e}")))?;
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::empty(),
+        &mut sealed,
+    )
+    .map_err(|_| BifrostError::Config("encrypt caller input frame failed".to_string()))?;
+    let tag = sealed.split_off(sealed.len().saturating_sub(16));
+    serde_json::to_string(&serde_json::json!({
+        "version": ENCRYPTED_OPEN_CALL_VERSION,
+        "call_id": call_id,
+        "seq": seq,
+        "direction": "caller_to_client",
+        "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+        "ciphertext": base64::engine::general_purpose::STANDARD.encode(sealed),
+        "tag": base64::engine::general_purpose::STANDARD.encode(tag),
+    }))
+    .map_err(|e| BifrostError::Config(format!("serialize caller input envelope failed: {e}")))
 }
 
 fn decrypt_exit_payload(
@@ -1415,6 +1487,11 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             command_summary: command_summary.clone(),
             command_kind: command.kind,
             command_encrypted,
+            pty_enabled: command
+                .shell_exec
+                .as_ref()
+                .and_then(|payload| payload.pty.as_ref())
+                .map(|pty| pty.enabled),
         })
         .await;
 
@@ -1477,6 +1554,11 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                     command_summary: command_summary.clone(),
                     command_kind: command.kind,
                     command_encrypted: refreshed_command_encrypted,
+                    pty_enabled: command
+                        .shell_exec
+                        .as_ref()
+                        .and_then(|payload| payload.pty.as_ref())
+                        .map(|pty| pty.enabled),
                 })
                 .await?;
             active_grant_id = refreshed_grant.grant_id;
@@ -1518,6 +1600,15 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             .streaming_prefs
             .as_ref()
             .expect("streaming_prefs present when streaming_enabled");
+        let stdin_forwarder = prefs.stdin.then(|| {
+            spawn_remote_stdin_forwarder(
+                Arc::new(caller.clone()),
+                call_result.call_id.clone(),
+                call_result.relay_token.clone(),
+                transport.clone(),
+                prefs.interactive,
+            )
+        });
         let stream_result = tokio::select! {
             result = run_streaming_dispatch(
                 &caller,
@@ -1533,12 +1624,28 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 synthesized_cancelled_result()
             }
         };
+        if let Some(handle) = stdin_forwarder {
+            handle.abort();
+        }
         if stream_result.exit_code != 0 {
             std::process::exit(stream_result.exit_code);
         }
         return Ok(());
     }
 
+    let stdin_forwarder = command
+        .streaming_prefs
+        .as_ref()
+        .filter(|prefs| prefs.stdin)
+        .map(|prefs| {
+            spawn_remote_stdin_forwarder(
+                Arc::new(caller.clone()),
+                call_result.call_id.clone(),
+                call_result.relay_token.clone(),
+                transport.clone(),
+                prefs.interactive,
+            )
+        });
     let result = tokio::select! {
         result = caller.subscribe_call_events(
             &call_result.call_id,
@@ -1579,6 +1686,9 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             }
         }
     };
+    if let Some(handle) = stdin_forwarder {
+        handle.abort();
+    }
 
     // If the remote client lost its grant crypto (e.g. data corruption / reinstall),
     // the call will fail with a "missing grant shared secret" error.
@@ -2257,6 +2367,19 @@ pub(crate) fn validate_remote_command_exec_flags(
 }
 
 fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRemoteCommand {
+    let interactive = exec_args.interactive;
+    let stdin_enabled = exec_args.stdin || interactive;
+    let pty_enabled = exec_args.pty || interactive;
+    let stdin_mode = stdin_enabled.then(|| "stream".to_string());
+    let pty = pty_enabled.then(|| {
+        let (cols, rows) = current_terminal_size();
+        PtyRequestPayload {
+            enabled: true,
+            rows: Some(rows),
+            cols: Some(cols),
+        }
+    });
+    let output_mode = pty_enabled.then(|| "pty_merged".to_string());
     let shell_exec = if let Some(shell_text) = &exec_args.shell_text {
         ShellExecPayload {
             exec_mode: "shell_text".to_string(),
@@ -2265,6 +2388,9 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            stdin_mode: stdin_mode.clone(),
+            pty: pty.clone(),
+            output_mode: output_mode.clone(),
         }
     } else {
         ShellExecPayload {
@@ -2274,6 +2400,9 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            stdin_mode,
+            pty,
+            output_mode,
         }
     };
 
@@ -2284,11 +2413,13 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         .unwrap_or_else(|| "shell.exec".to_string());
 
     let streaming_prefs = StreamingPrefs {
-        stream: exec_args.stream,
+        stream: exec_args.stream || interactive,
         output_file: exec_args.output_file.as_ref().map(std::path::PathBuf::from),
         resume_call_id: exec_args.resume_call_id.clone(),
         resume_relay_token: exec_args.resume_relay_token.clone(),
-        no_verify_digest: exec_args.no_verify_digest,
+        no_verify_digest: exec_args.no_verify_digest || interactive,
+        interactive,
+        stdin: stdin_enabled,
     };
 
     BuiltRemoteCommand {
@@ -2301,6 +2432,10 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         render: RemoteRenderMode::Raw,
         streaming_prefs: Some(streaming_prefs),
     }
+}
+
+fn current_terminal_size() -> (u16, u16) {
+    crossterm::terminal::size().unwrap_or((80, 24))
 }
 
 fn build_remote_file_command(
@@ -3186,6 +3321,93 @@ async fn wait_for_remote_call_cancel_signal() {
     }
 }
 
+struct RawModeGuard {
+    enabled: bool,
+}
+
+impl RawModeGuard {
+    fn enable(enabled: bool) -> Self {
+        if enabled {
+            let _ = crossterm::terminal::enable_raw_mode();
+        }
+        Self { enabled }
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+struct RemoteStdinForwarder {
+    handle: tokio::task::JoinHandle<()>,
+    _raw_mode: RawModeGuard,
+}
+
+impl RemoteStdinForwarder {
+    fn abort(self) {
+        self.handle.abort();
+    }
+}
+
+fn spawn_remote_stdin_forwarder(
+    caller: Arc<CallerRelayClient>,
+    call_id: String,
+    relay_token: String,
+    transport: OpenCallTransportContext,
+    raw_mode: bool,
+) -> RemoteStdinForwarder {
+    let raw_mode_guard = RawModeGuard::enable(raw_mode);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    std::thread::Builder::new()
+        .name("bifrost-remote-stdin-reader".to_string())
+        .spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0_u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .ok();
+
+    let handle = tokio::spawn(async move {
+        let mut seq = 1_u64;
+        while let Some(bytes) = rx.recv().await {
+            match encrypt_caller_input_frame(&transport, &call_id, seq, &bytes) {
+                Ok(envelope_json) => {
+                    if let Err(error) = caller
+                        .post_call_input(&call_id, &relay_token, envelope_json)
+                        .await
+                    {
+                        warn!(error = %error, call_id = %call_id, "failed to forward local stdin to remote call");
+                        break;
+                    }
+                }
+                Err(error) => {
+                    warn!(error = %error, call_id = %call_id, "failed to encrypt remote stdin frame");
+                    break;
+                }
+            }
+            seq = seq.saturating_add(1);
+        }
+    });
+    RemoteStdinForwarder {
+        handle,
+        _raw_mode: raw_mode_guard,
+    }
+}
+
 fn classify_delete_grant_failure(
     status: reqwest::StatusCode,
     body: &str,
@@ -3279,6 +3501,7 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
     }
 }
 
+#[derive(Clone)]
 struct CallerRelayClient {
     http: reqwest::Client,
     base_url: String,
@@ -3458,6 +3681,8 @@ struct OpenCallRequest {
     command_summary: OpenCallCommandSummary,
     command_kind: CommandKind,
     command_encrypted: EncryptedPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pty_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3757,6 +3982,28 @@ impl CallerRelayClient {
             .map_err(|e| BifrostError::Network(format!("cancel call failed: {e}")))?;
 
         let _ = self.parse_response_data(response, "cancel_call").await?;
+        Ok(())
+    }
+
+    async fn post_call_input(
+        &self,
+        call_id: &str,
+        relay_token: &str,
+        envelope_json: String,
+    ) -> bifrost_core::Result<()> {
+        let url = format!("{}/v4/remote-invoke/calls/{}/input", self.base_url, call_id);
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {relay_token}"))
+            .json(&serde_json::json!({ "envelope_json": envelope_json }))
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("post call input failed: {e}")))?;
+
+        let _ = self
+            .parse_response_data(response, "post_call_input")
+            .await?;
         Ok(())
     }
 
@@ -5266,6 +5513,9 @@ mod tests {
             resume_call_id: None,
             resume_relay_token: None,
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         })));
 
         assert_eq!(built.kind, CommandKind::ShellExec);
@@ -5301,6 +5551,9 @@ mod tests {
             resume_call_id: None,
             resume_relay_token: None,
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         })));
 
         assert_eq!(built.kind, CommandKind::ShellExec);
@@ -5331,6 +5584,9 @@ mod tests {
             resume_call_id: Some("ab12cd34".to_string()),
             resume_relay_token: Some("tok-xyz".to_string()),
             no_verify_digest: true,
+            stdin: false,
+            pty: false,
+            interactive: false,
         })));
 
         let prefs = built
@@ -5345,6 +5601,60 @@ mod tests {
         assert_eq!(prefs.resume_relay_token.as_deref(), Some("tok-xyz"));
         assert!(prefs.no_verify_digest);
         assert!(prefs.is_streaming());
+    }
+
+    #[test]
+    fn test_build_remote_command_interactive_disables_digest_verification() {
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: None,
+            env: vec![],
+            timeout_ms: None,
+            shell_text: Some("python3 -i".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: true,
+        })));
+
+        let prefs = built
+            .streaming_prefs
+            .expect("interactive shell.exec should have streaming prefs");
+        let shell_exec = built
+            .shell_exec
+            .expect("interactive shell.exec should have payload");
+
+        assert!(prefs.stream);
+        assert!(prefs.stdin);
+        assert!(prefs.interactive);
+        assert!(prefs.no_verify_digest);
+        assert_eq!(shell_exec.stdin_mode.as_deref(), Some("stream"));
+        assert_eq!(shell_exec.output_mode.as_deref(), Some("pty_merged"));
+        assert_eq!(shell_exec.pty.as_ref().map(|pty| pty.enabled), Some(true));
+        assert!(shell_exec
+            .pty
+            .as_ref()
+            .and_then(|pty| pty.rows)
+            .is_some_and(|rows| rows > 0));
+        assert!(shell_exec
+            .pty
+            .as_ref()
+            .and_then(|pty| pty.cols)
+            .is_some_and(|cols| cols > 0));
+    }
+
+    #[test]
+    fn test_remote_stdin_forwarder_owns_raw_mode_guard() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let forwarder = RemoteStdinForwarder {
+            handle: runtime.spawn(async {}),
+            _raw_mode: RawModeGuard::enable(false),
+        };
+        forwarder.abort();
     }
 
     #[allow(clippy::field_reassign_with_default)]
@@ -5370,6 +5680,8 @@ mod tests {
             resume_call_id: Some("abc".to_string()),
             resume_relay_token: None,
             no_verify_digest: false,
+            interactive: false,
+            stdin: false,
         };
         let err = validate_streaming_prefs(&prefs).expect_err("should reject missing token");
         assert!(err.contains("--resume-call-id"), "got: {err}");
@@ -5384,6 +5696,8 @@ mod tests {
             resume_call_id: None,
             resume_relay_token: Some("tok".to_string()),
             no_verify_digest: false,
+            interactive: false,
+            stdin: false,
         };
         let err = validate_streaming_prefs(&prefs).expect_err("should reject lone token");
         assert!(err.contains("--resume-relay-token"), "got: {err}");
@@ -5397,6 +5711,8 @@ mod tests {
             resume_call_id: Some("abc".to_string()),
             resume_relay_token: Some("tok".to_string()),
             no_verify_digest: false,
+            interactive: false,
+            stdin: false,
         };
         assert!(validate_streaming_prefs(&prefs).is_ok());
     }
@@ -5420,6 +5736,9 @@ mod tests {
             resume_call_id: Some("resume-xyz".to_string()),
             resume_relay_token: Some("relay-tok-42".to_string()),
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         })));
 
         let prefs = built
@@ -5689,6 +6008,9 @@ mod tests {
                 "production".to_string(),
             )])),
             timeout_ms: Some(600_000),
+            stdin_mode: None,
+            pty: None,
+            output_mode: None,
         };
 
         let payload = encrypt_remote_command(
@@ -5749,6 +6071,7 @@ mod tests {
                 tag: "tag".to_string(),
                 aad: None,
             },
+            pty_enabled: None,
         };
 
         let json = serde_json::to_value(&request).expect("serialize request");
@@ -6164,6 +6487,9 @@ mod tests {
             resume_call_id: Some("abc".to_string()),
             resume_relay_token: Some("tok".to_string()),
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         };
         let err = validate_remote_command_exec_flags(&args).unwrap_err();
         assert!(
@@ -6185,6 +6511,9 @@ mod tests {
             resume_call_id: Some("abc".to_string()),
             resume_relay_token: Some("tok".to_string()),
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         };
         let err = validate_remote_command_exec_flags(&args).unwrap_err();
         assert!(
@@ -6206,6 +6535,9 @@ mod tests {
             resume_call_id: Some("abc".to_string()),
             resume_relay_token: Some("tok".to_string()),
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         };
         assert!(validate_remote_command_exec_flags(&args).is_ok());
     }
@@ -6223,6 +6555,9 @@ mod tests {
             resume_call_id: None,
             resume_relay_token: None,
             no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
         };
         assert!(validate_remote_command_exec_flags(&args).is_ok());
     }

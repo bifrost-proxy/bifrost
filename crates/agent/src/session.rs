@@ -629,6 +629,18 @@ impl AgentSessionManager {
         session.active_turn_status = Some(self.create_active_turn_status(session_key));
     }
 
+    fn apply_work_dir_override(session: &mut AgentSession, work_dir: Option<String>) {
+        let Some(work_dir) = work_dir else {
+            return;
+        };
+        let work_dir = work_dir.trim();
+        if work_dir.is_empty() || session.work_dir.as_deref() == Some(work_dir) {
+            return;
+        }
+        session.reinitialize_work_dir(work_dir.to_string());
+        session.memory_cleared = false;
+    }
+
     /// Check if a session is currently being processed by a turn loop.
     pub fn is_session_active(&self, session_key: &str) -> bool {
         self.active_sessions.contains(session_key)
@@ -675,7 +687,8 @@ impl AgentSessionManager {
             .sessions
             .remove(session_key)
             .map(|(_, s)| s)
-            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir));
+            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
+        Self::apply_work_dir_override(&mut session, work_dir);
         self.attach_active_turn_status(session_key, &mut session);
         session
     }
@@ -693,7 +706,8 @@ impl AgentSessionManager {
             .sessions
             .remove(session_key)
             .map(|(_, s)| s)
-            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir));
+            .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
+        Self::apply_work_dir_override(&mut session, work_dir);
         self.attach_active_turn_status(session_key, &mut session);
         Some(session)
     }
@@ -3693,6 +3707,24 @@ mod tests {
         assert_eq!(sessions[0].session_key, "user-1");
         assert_eq!(sessions[0].message_count, 1);
         assert_eq!(sessions[0].total_tokens_used, Some(500));
+    }
+
+    #[test]
+    fn test_take_session_with_work_dir_overrides_existing_status_session() {
+        let manager = AgentSessionManager::new(3600);
+        let mut status_session = manager
+            .try_take_session_with_work_dir("status-first", None)
+            .expect("first take should create status session");
+        status_session.add_user_message("/status");
+        manager.return_session(status_session);
+
+        let session = manager
+            .try_take_session_with_work_dir("status-first", Some("/tmp/bifrost-work".to_string()))
+            .expect("second take should not be busy");
+
+        assert_eq!(session.work_dir.as_deref(), Some("/tmp/bifrost-work"));
+        assert!(session.history.is_empty());
+        assert!(!session.memory_cleared);
     }
 
     #[test]

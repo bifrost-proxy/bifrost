@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io::{Read as _, Write as _};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -9,9 +10,10 @@ use bifrost_command::{
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
 use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use futures_util::StreamExt;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
 use sha1::{Digest, Sha1};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, warn};
 
@@ -39,6 +41,7 @@ const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
 /// PR#3a: heartbeat tick interval (floor of idle-timeout granularity).
 const HEARTBEAT_INTERVAL_MS: u64 = 10_000;
+const PTY_POST_EXIT_DRAIN_MS: u64 = 500;
 /// PR#3b: elapsed wall-clock after which the executor emits a single
 /// StreamFrame::Reconnect advisory so receivers can swap relay
 /// connections BEFORE the relay's 30-minute hard limit hits. 27 min
@@ -115,6 +118,15 @@ struct ShellPolicyMetadata {
     interactive_allowed: Option<bool>,
     inherit_env: Option<bool>,
     default_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct ShellExecProcessSpec {
+    program: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    inherit_env: bool,
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -242,13 +254,14 @@ impl RemoteInvokeExecutor {
     }
 
     pub async fn execute(&self, command: &RemoteCommand) -> Result<RemoteInvokeResponse> {
-        self.execute_with_stdout_sink(command, |_| async { Ok(()) })
+        self.execute_with_stdout_sink(command, None, |_| async { Ok(()) })
             .await
     }
 
     pub async fn execute_with_stdout_sink<F, Fut>(
         &self,
         command: &RemoteCommand,
+        stdin_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
         mut on_stdout: F,
     ) -> Result<RemoteInvokeResponse>
     where
@@ -293,7 +306,9 @@ impl RemoteInvokeExecutor {
                     }
                 }
                 super::types::CommandKind::ShellExec => {
-                    return self.execute_shell_exec(command, &mut on_stdout).await;
+                    return self
+                        .execute_shell_exec(command, stdin_rx, &mut on_stdout)
+                        .await;
                 }
                 super::types::CommandKind::File => {
                     let body = self.execute_file_op(command).await?;
@@ -1585,6 +1600,7 @@ impl RemoteInvokeExecutor {
     async fn execute_shell_exec<F, Fut>(
         &self,
         command: &RemoteCommand,
+        stdin_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
         on_stdout: &mut F,
     ) -> Result<RemoteInvokeResponse>
     where
@@ -1623,15 +1639,47 @@ impl RemoteInvokeExecutor {
         };
         let idle_timeout_ms: u64 = policy.max_idle_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
         let timeout_ms = wall_clock_timeout_ms.unwrap_or(u64::MAX);
+        if command.pty.as_ref().is_some_and(|pty| pty.enabled) {
+            return self
+                .execute_shell_exec_pty(
+                    command,
+                    stdin_rx,
+                    on_stdout,
+                    &policy,
+                    wall_clock_timeout_ms,
+                    idle_timeout_ms,
+                    timeout_ms,
+                    start,
+                )
+                .await;
+        }
         let mut process = self.build_shell_exec_process(command, &policy)?;
         process.stdout(Stdio::piped());
         process.stderr(Stdio::piped());
-        process.stdin(Stdio::null());
+        if stdin_rx.is_some() {
+            process.stdin(Stdio::piped());
+        } else {
+            process.stdin(Stdio::null());
+        }
         process.kill_on_drop(true);
 
         let mut child = process
             .spawn()
             .map_err(|e| BifrostError::Network(format!("spawn shell.exec failed: {}", e)))?;
+        if let Some(mut stdin_rx) = stdin_rx {
+            if let Some(mut child_stdin) = child.stdin.take() {
+                tokio::spawn(async move {
+                    while let Some(bytes) = stdin_rx.recv().await {
+                        if child_stdin.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                        if child_stdin.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
         let mut stdout_reader = child.stdout.take().ok_or_else(|| {
             BifrostError::Network("shell.exec stdout pipe unavailable".to_string())
         })?;
@@ -1848,51 +1896,261 @@ impl RemoteInvokeExecutor {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_shell_exec_pty<F, Fut>(
+        &self,
+        command: &RemoteCommand,
+        stdin_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+        mut on_stdout: F,
+        policy: &ResolvedShellPolicy,
+        wall_clock_timeout_ms: Option<u64>,
+        idle_timeout_ms: u64,
+        timeout_ms: u64,
+        start: Instant,
+    ) -> Result<RemoteInvokeResponse>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let spec = self.build_shell_exec_process_spec(command, policy)?;
+        let pty_req = command
+            .pty
+            .as_ref()
+            .ok_or_else(|| BifrostError::Config("shell.exec pty request missing".to_string()))?;
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: pty_req.rows.unwrap_or(24).max(1),
+                cols: pty_req.cols.unwrap_or(80).max(1),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| BifrostError::Network(format!("open shell.exec PTY failed: {e}")))?;
+
+        let mut builder = CommandBuilder::new(&spec.program);
+        builder.args(&spec.args);
+        if let Some(cwd) = &spec.cwd {
+            builder.cwd(cwd);
+        }
+        if !spec.inherit_env {
+            builder.env_clear();
+            #[cfg(windows)]
+            {
+                for key in &["SystemRoot", "SystemDrive"] {
+                    if let Ok(val) = std::env::var(key) {
+                        builder.env(key, &val);
+                    }
+                }
+            }
+        }
+        for (key, value) in &spec.env {
+            builder.env(key, value);
+        }
+
+        let mut child = pair
+            .slave
+            .spawn_command(builder)
+            .map_err(|e| BifrostError::Network(format!("spawn shell.exec PTY failed: {e}")))?;
+        let mut killer = child.clone_killer();
+        let mut reader = pair.master.try_clone_reader().map_err(|e| {
+            BifrostError::Network(format!("clone shell.exec PTY reader failed: {e}"))
+        })?;
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        std::thread::Builder::new()
+            .name("bifrost-remote-pty-reader".to_string())
+            .spawn(move || {
+                let mut buf = [0_u8; 65536];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if output_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .map_err(|e| BifrostError::Network(format!("spawn PTY reader thread failed: {e}")))?;
+
+        if let Some(mut stdin_rx) = stdin_rx {
+            let mut writer = pair.master.take_writer().map_err(|e| {
+                BifrostError::Network(format!("open shell.exec PTY writer failed: {e}"))
+            })?;
+            std::thread::Builder::new()
+                .name("bifrost-remote-pty-stdin".to_string())
+                .spawn(move || {
+                    while let Some(bytes) = stdin_rx.blocking_recv() {
+                        if writer.write_all(&bytes).is_err() {
+                            break;
+                        }
+                        if writer.flush().is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map_err(|e| {
+                    BifrostError::Network(format!("spawn PTY stdin thread failed: {e}"))
+                })?;
+        }
+
+        let mut wait_task = tokio::task::spawn_blocking(move || child.wait());
+        let mut output_open = true;
+        let mut exit_status: Option<portable_pty::ExitStatus> = None;
+        let mut stdout_preview = Vec::new();
+        let mut stdout_total_bytes: u64 = 0;
+        let mut stdout_hasher = ring::digest::Context::new(&ring::digest::SHA256);
+
+        let wall_clock = async {
+            match wall_clock_timeout_ms {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(wall_clock);
+        let policy_wall_clock = async {
+            match policy.max_wall_clock_ms {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(policy_wall_clock);
+        let mut idle_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(idle_timeout_ms);
+        let idle_sleep = tokio::time::sleep_until(idle_deadline);
+        tokio::pin!(idle_sleep);
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = heartbeat.tick().await;
+
+        let post_exit_sleep = tokio::time::sleep(Duration::from_secs(365 * 24 * 60 * 60));
+        tokio::pin!(post_exit_sleep);
+
+        loop {
+            tokio::select! {
+                _ = &mut wall_clock => {
+                    let _ = killer.kill();
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec PTY wall-clock timeout after {} ms (policy '{}')",
+                        timeout_ms, policy.policy_id
+                    )));
+                }
+                _ = &mut policy_wall_clock => {
+                    let _ = killer.kill();
+                    let policy_ms = policy.max_wall_clock_ms.unwrap_or(0);
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec PTY exceeded policy max_wall_clock_ms = {} ms (policy '{}')",
+                        policy_ms, policy.policy_id
+                    )));
+                }
+                _ = &mut idle_sleep => {
+                    let _ = killer.kill();
+                    return Err(BifrostError::Network(format!(
+                        "shell.exec PTY idle timeout after {} ms of no output (policy '{}')",
+                        idle_timeout_ms, policy.policy_id
+                    )));
+                }
+                _ = heartbeat.tick() => {}
+                wait_result = &mut wait_task, if exit_status.is_none() => {
+                    let status = wait_result
+                        .map_err(|e| BifrostError::Network(format!("wait shell.exec PTY task failed: {e}")))?
+                        .map_err(|e| BifrostError::Network(format!("wait shell.exec PTY failed: {e}")))?;
+                    exit_status = Some(status);
+                    post_exit_sleep.as_mut().reset(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(PTY_POST_EXIT_DRAIN_MS),
+                    );
+                    if !output_open {
+                        break;
+                    }
+                }
+                _ = &mut post_exit_sleep, if exit_status.is_some() => {
+                    break;
+                }
+                chunk = output_rx.recv(), if output_open => {
+                    match chunk {
+                        Some(chunk) => {
+                            idle_deadline = tokio::time::Instant::now()
+                                + Duration::from_millis(idle_timeout_ms);
+                            idle_sleep.as_mut().reset(idle_deadline);
+                            if exit_status.is_some() {
+                                post_exit_sleep.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_millis(PTY_POST_EXIT_DRAIN_MS),
+                                );
+                            }
+                            stdout_total_bytes += chunk.len() as u64;
+                            stdout_hasher.update(&chunk);
+                            if let Some(cap) = policy.max_output_bytes_total {
+                                if stdout_total_bytes > cap {
+                                    let _ = killer.kill();
+                                    return Err(BifrostError::Network(format!(
+                                        "shell.exec PTY exceeded policy max_output_bytes_total = {} bytes (policy '{}')",
+                                        cap, policy.policy_id
+                                    )));
+                                }
+                            }
+                            append_truncated_bytes(
+                                &mut stdout_preview,
+                                &chunk,
+                                policy.max_output_bytes,
+                            );
+                            on_stdout(chunk).await?;
+                        }
+                        None => {
+                            output_open = false;
+                            if exit_status.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let status =
+            exit_status.unwrap_or_else(|| portable_pty::ExitStatus::with_signal("unknown"));
+        let stdout = String::from_utf8_lossy(&stdout_preview).into_owned();
+        let stdout_sha256_full = if stdout_total_bytes > 0 {
+            let digest = stdout_hasher.finish();
+            let mut out = String::with_capacity(64);
+            for b in digest.as_ref() {
+                out.push_str(&format!("{b:02x}"));
+            }
+            Some(out)
+        } else {
+            None
+        };
+        let stdout_truncated = (stdout_total_bytes as usize) > stdout_preview.len();
+        Ok(RemoteInvokeResponse {
+            exit_code: status.exit_code() as i32,
+            stdout: (!stdout.is_empty()).then_some(stdout.clone()),
+            stderr: None,
+            stdout_digest: (!stdout.is_empty()).then(|| sha1_hex(&stdout)),
+            stderr_digest: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+            stdout_total_bytes: (stdout_total_bytes > 0).then_some(stdout_total_bytes),
+            stderr_total_bytes: None,
+            stdout_sha256_full,
+            stderr_sha256_full: None,
+            stdout_truncated: Some(stdout_truncated),
+            stderr_truncated: Some(false),
+        })
+    }
+
     fn build_shell_exec_process(
         &self,
         command: &RemoteCommand,
         policy: &ResolvedShellPolicy,
     ) -> Result<TokioCommand> {
-        Self::validate_shell_command_against_policy(policy, command)?;
-        if let Some(reason) = &policy.reject_reason {
-            return Err(BifrostError::Config(format!(
-                "policy '{}' is not executable: {}",
-                policy.policy_id, reason
-            )));
-        }
-
-        let exec_mode = command
-            .exec_mode
-            .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
-
-        let mut process = match exec_mode {
-            ShellExecMode::ArgvExec => {
-                let argv = command.argv.as_ref().ok_or_else(|| {
-                    BifrostError::Config("shell.exec argv_exec requires argv".to_string())
-                })?;
-                let (program, args) = argv.split_first().ok_or_else(|| {
-                    BifrostError::Config("shell.exec argv_exec requires non-empty argv".to_string())
-                })?;
-                let mut process = TokioCommand::new(program);
-                process.args(args);
-                process
-            }
-            ShellExecMode::ShellText | ShellExecMode::Template => {
-                let shell_text = command.command_text.as_deref().ok_or_else(|| {
-                    BifrostError::Config("shell.exec requires command_text".to_string())
-                })?;
-                build_shell_text_process(
-                    command.shell.as_deref().or(policy.shell.as_deref()),
-                    shell_text,
-                )
-            }
-        };
-
-        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
-        if let Some(cwd) = effective_cwd {
+        let spec = self.build_shell_exec_process_spec(command, policy)?;
+        let mut process = TokioCommand::new(&spec.program);
+        process.args(&spec.args);
+        if let Some(cwd) = &spec.cwd {
             process.current_dir(cwd);
         }
-        if !policy.inherit_env {
+        if !spec.inherit_env {
             process.env_clear();
             // On Windows, processes (especially .NET apps like PowerShell) need
             // critical system env vars to start. Preserve them after env_clear().
@@ -1905,12 +2163,63 @@ impl RemoteInvokeExecutor {
                 }
             }
         }
-        process.envs(policy.default_env.clone());
-        if let Some(env) = &command.env {
-            process.envs(env);
+        process.envs(spec.env);
+        Ok(process)
+    }
+
+    fn build_shell_exec_process_spec(
+        &self,
+        command: &RemoteCommand,
+        policy: &ResolvedShellPolicy,
+    ) -> Result<ShellExecProcessSpec> {
+        Self::validate_shell_command_against_policy(policy, command)?;
+        if let Some(reason) = &policy.reject_reason {
+            return Err(BifrostError::Config(format!(
+                "policy '{}' is not executable: {}",
+                policy.policy_id, reason
+            )));
         }
 
-        Ok(process)
+        let exec_mode = command
+            .exec_mode
+            .ok_or_else(|| BifrostError::Config("shell.exec requires exec_mode".to_string()))?;
+
+        let (program, args) = match exec_mode {
+            ShellExecMode::ArgvExec => {
+                let argv = command.argv.as_ref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires argv".to_string())
+                })?;
+                let (program, args) = argv.split_first().ok_or_else(|| {
+                    BifrostError::Config("shell.exec argv_exec requires non-empty argv".to_string())
+                })?;
+                (program.clone(), args.to_vec())
+            }
+            ShellExecMode::ShellText | ShellExecMode::Template => {
+                let shell_text = command.command_text.as_deref().ok_or_else(|| {
+                    BifrostError::Config("shell.exec requires command_text".to_string())
+                })?;
+                build_shell_text_argv(
+                    command.shell.as_deref().or(policy.shell.as_deref()),
+                    shell_text,
+                )
+            }
+        };
+
+        let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+        let mut merged_env = policy.default_env.clone();
+        if let Some(command_env) = &command.env {
+            for (key, value) in command_env {
+                merged_env.insert(key.clone(), value.clone());
+            }
+        }
+
+        Ok(ShellExecProcessSpec {
+            program,
+            args,
+            cwd: effective_cwd.cloned(),
+            inherit_env: policy.inherit_env,
+            env: merged_env,
+        })
     }
 
     pub fn select_policy_id_for_command(
@@ -2708,7 +3017,15 @@ fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
     *modes = deduped;
 }
 
+#[cfg(test)]
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
+    let (program, args) = build_shell_text_argv(shell, shell_text);
+    let mut command = TokioCommand::new(program);
+    command.args(args);
+    command
+}
+
+fn build_shell_text_argv(shell: Option<&str>, shell_text: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
         // Resolve the effective shell: skip Unix-style paths that don't exist on Windows
@@ -2716,7 +3033,6 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
         let effective_shell = shell.filter(|s| !is_unix_only_shell_path(s));
 
         if let Some(shell) = effective_shell {
-            let mut command = TokioCommand::new(shell);
             if windows_shell_uses_command_flag(shell) {
                 // Force UTF-8 output encoding for PowerShell to avoid garbled
                 // non-ASCII text (e.g. Chinese chars from ipconfig).
@@ -2724,34 +3040,39 @@ fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioComma
                     "[Console]::OutputEncoding = [Text.Encoding]::UTF8; {}",
                     shell_text
                 );
-                command
-                    .arg("-NoLogo")
-                    .arg("-NoProfile")
-                    .arg("-Command")
-                    .arg(&utf8_shell_text);
+                return (
+                    shell.to_string(),
+                    vec![
+                        "-NoLogo".to_string(),
+                        "-NoProfile".to_string(),
+                        "-Command".to_string(),
+                        utf8_shell_text,
+                    ],
+                );
             } else if windows_shell_uses_login_flag(shell) {
-                command.arg("-lc").arg(shell_text);
+                return (
+                    shell.to_string(),
+                    vec!["-lc".to_string(), shell_text.to_string()],
+                );
             } else {
                 // cmd.exe: prepend chcp 65001 to switch console to UTF-8
                 let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
-                command.arg("/C").arg(&utf8_shell_text);
+                return (shell.to_string(), vec!["/C".to_string(), utf8_shell_text]);
             }
-            return command;
         }
 
         // Default: cmd with UTF-8 code page
         let utf8_shell_text = format!("chcp 65001 > nul && {}", shell_text);
-        let mut command = TokioCommand::new("cmd");
-        command.arg("/C").arg(&utf8_shell_text);
-        command
+        ("cmd".to_string(), vec!["/C".to_string(), utf8_shell_text])
     }
 
     #[cfg(not(windows))]
     {
         let shell = shell.unwrap_or("/bin/sh");
-        let mut command = TokioCommand::new(shell);
-        command.arg("-lc").arg(shell_text);
-        command
+        (
+            shell.to_string(),
+            vec!["-lc".to_string(), shell_text.to_string()],
+        )
     }
 }
 
@@ -3330,6 +3651,130 @@ mod tests {
         assert_eq!(resp.stdout.as_deref(), Some("hello"));
     }
 
+    #[test]
+    fn test_execute_shell_exec_forwards_stdin_stream() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "stdin-shell".to_string(),
+                    name: "stdin-shell".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "stdin_allowed": true,
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("stdin-shell".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some(
+                "python3 -u -c 'import sys; print(sys.stdin.readline().strip())'".to_string(),
+            ),
+            stdin_mode: Some(super::super::types::StdinMode::Stream),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(async {
+                let task = tokio::spawn(async move {
+                    tx.send(b"hello remote stdin\n".to_vec())
+                        .await
+                        .expect("send stdin");
+                });
+                let resp = executor
+                    .execute_with_stdout_sink(&cmd, Some(rx), |_| async { Ok(()) })
+                    .await;
+                task.await.expect("stdin task");
+                resp
+            })
+            .expect("shell exec response");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(resp.stdout.as_deref(), Some("hello remote stdin\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_execute_shell_exec_pty_reports_isatty_true() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        bifrost_storage::set_data_dir(data_dir);
+        RemoteShellStore::new()
+            .expect("store")
+            .save(&RemoteShellSet {
+                schema_version: 1,
+                version: 1,
+                policies: vec![RemoteShellPolicy {
+                    id: "pty-shell".to_string(),
+                    name: "pty-shell".to_string(),
+                    description: None,
+                    enabled: true,
+                    profile_id: None,
+                    metadata: serde_json::json!({
+                        "exec_mode": "shell_text",
+                        "allowed_shell_patterns": ["^(?s:.*)$"],
+                        "stdin_allowed": true,
+                        "interactive_allowed": true,
+                        "max_timeout_ms": 5000
+                    }),
+                }],
+                profiles: vec![],
+            })
+            .expect("save");
+
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            policy_id: Some("pty-shell".to_string()),
+            exec_mode: Some(ShellExecMode::ShellText),
+            command_text: Some(
+                "python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'".to_string(),
+            ),
+            stdin_mode: Some(super::super::types::StdinMode::Stream),
+            pty: Some(super::super::types::RemotePtyRequest {
+                enabled: true,
+                rows: Some(24),
+                cols: Some(80),
+            }),
+            output_mode: Some(super::super::types::OutputMode::PtyMerged),
+            ..Default::default()
+        };
+        let (_tx, rx) = tokio::sync::mpsc::channel(4);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let resp = runtime
+            .block_on(executor.execute_with_stdout_sink(&cmd, Some(rx), |_| async { Ok(()) }))
+            .expect("pty shell exec response");
+        assert_eq!(resp.exit_code, 0);
+        assert!(
+            resp.stdout
+                .as_deref()
+                .unwrap_or_default()
+                .contains("True True"),
+            "expected PTY stdin/stdout to both report isatty true, got {:?}",
+            resp.stdout
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_windows_shell_detection_uses_powershell_command_flag_for_paths() {
@@ -3397,7 +3842,7 @@ mod tests {
         let started = Instant::now();
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let resp = runtime
-            .block_on(executor.execute_with_stdout_sink(&cmd, |chunk| {
+            .block_on(executor.execute_with_stdout_sink(&cmd, None, |chunk| {
                 let sink = Arc::clone(&sink);
                 let elapsed = started.elapsed();
                 async move {

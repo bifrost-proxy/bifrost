@@ -528,24 +528,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wait_for_port_released_returns_quickly_when_port_is_free() {
-        // Find an ephemeral port, close, then probe — should return true fast.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // The OS can hand the just-released ephemeral port to another
+        // concurrently running test or daemon. Retry a few candidates so this
+        // test checks our wait logic instead of a transient port race.
+        let mut attempts = Vec::new();
+        for _ in 0..10 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
 
-        let start = std::time::Instant::now();
-        let freed = wait_for_port_released(port, std::time::Duration::from_secs(2));
-        let elapsed = start.elapsed();
-        assert!(
-            freed,
-            "expected free ephemeral port {} to be reported free",
-            port
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "free port should return almost immediately; took {:?}",
-            elapsed
-        );
+            let start = std::time::Instant::now();
+            let freed = wait_for_port_released(port, std::time::Duration::from_secs(2));
+            let elapsed = start.elapsed();
+            attempts.push((port, freed, elapsed));
+            if freed {
+                assert!(
+                    elapsed < std::time::Duration::from_millis(500),
+                    "free port should return almost immediately; took {:?}",
+                    elapsed
+                );
+                return;
+            }
+        }
+        panic!("expected one free ephemeral port to be reported free; attempts={attempts:?}");
     }
 
     #[cfg(unix)]

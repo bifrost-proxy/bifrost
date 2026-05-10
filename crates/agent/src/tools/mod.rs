@@ -120,6 +120,9 @@ impl ToolRegistry {
                 }
             })
             .collect();
+        definitions.sort_by(|left, right| {
+            model_visible_tool_priority(left.name()).cmp(&model_visible_tool_priority(right.name()))
+        });
         definitions.extend(goal::goal_tool_definitions());
         definitions
     }
@@ -140,5 +143,45 @@ impl ToolRegistry {
         let mut names: Vec<_> = self.tools.keys().cloned().collect();
         names.extend(goal::goal_tool_names().into_iter().map(str::to_string));
         names
+    }
+}
+
+fn model_visible_tool_priority(name: &str) -> (u8, &str) {
+    let priority = match name {
+        // Match Codex's unified exec lesson: session-capable terminal tools
+        // should be seen before legacy one-shot shell tools.
+        "shell_pty" => 0,
+        "write_stdin" => 1,
+        "exec_command" => 2,
+        "shell" => 9,
+        _ => 5,
+    };
+    (priority, name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_visible_tool_definitions_prefer_session_terminal_tools() {
+        let definitions = ToolRegistry::with_defaults(5).definitions();
+        let names = definitions
+            .iter()
+            .map(ToolDefinition::name)
+            .collect::<Vec<_>>();
+        let shell_pty = names.iter().position(|name| *name == "shell_pty").unwrap();
+        let write_stdin = names
+            .iter()
+            .position(|name| *name == "write_stdin")
+            .unwrap();
+        let exec_command = names
+            .iter()
+            .position(|name| *name == "exec_command")
+            .unwrap();
+        let shell = names.iter().position(|name| *name == "shell").unwrap();
+        assert!(shell_pty < shell);
+        assert!(write_stdin < shell);
+        assert!(exec_command < shell);
     }
 }

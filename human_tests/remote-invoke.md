@@ -3116,6 +3116,16 @@ PY
 |---------|---------|------|------|
 | TC-RI-回归-91 | `remote connect` 遇到 relay overload-protect 时应重试并给出可行动提示 | ✅ PASS | `994430` 在前 2 次 `503 overload-protect` 后第 3 次成功配对并写入 `client-retry-ok-123456`；`994431` 在 4 次受限重试后返回 `pairing service is temporarily busy`，不再直接暴露原始 503 文案 |
 
+### TC-RI-回归-91 执行结果（2026-05-10 CI skip-build 稳定性）
+
+执行方式说明：
+- CI run `25608391994` 在 macOS shell shard 3 中暴露脚本稳定性问题：workflow 已下载 `target/release/bifrost` 并以 `--skip-build` 运行 shell E2E，但 `test_remote_connect_overload_retry_e2e.sh` 仍无条件执行 `cargo build --release --bin bifrost`，导致该脚本停在 `Build bifrost (release)...` 并超过 900s。
+- 修复后脚本遵循 `SKIP_BUILD=true`，直接使用 `BIFROST_BIN` 或默认 `target/release/bifrost`，仅在未启用 skip-build 时才本地构建。
+
+| 用例编号 | 用例名称 | 结果 | 说明 |
+|---------|---------|------|------|
+| TC-RI-回归-91 | `remote connect` overload retry shell E2E 在 CI `--skip-build` 下复用已构建二进制 | ✅ PASS | 本地执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh` 通过；输出确认使用现有二进制，瞬时 overload 场景第 3 次连接成功，持续 overload 场景第 4 次后给出可行动错误。 |
+
 ---
 
 ## 协议回归测试：grant_created / call_open 职责分离（TC-RI-回归-92 ~ TC-RI-回归-94）

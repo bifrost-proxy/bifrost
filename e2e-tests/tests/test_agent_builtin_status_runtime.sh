@@ -275,13 +275,34 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   >"$CHAT_RESPONSE" &
 CHAT_PID=$!
 
-sleep 0.8
-
 echo "[agent-builtin-status-runtime] querying /status while turn is active"
-curl -fsS --noproxy '*' -X POST "$BASE/chat" \
-  -H 'Content-Type: application/json' \
-  -d '{"session_key":"agent-status-runtime","message":"/status"}' \
-  >"$STATUS_RESPONSE"
+for _ in $(seq 1 160); do
+  curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"agent-status-runtime","message":"/status"}' \
+    >"$STATUS_RESPONSE"
+  if python3 - "$STATUS_RESPONSE" "$WORK_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+active = response.get("active_status")
+if (
+    response.get("success") is True
+    and isinstance(active, dict)
+    and active.get("session_key") == "agent-status-runtime"
+    and active.get("work_dir") == sys.argv[2]
+    and active.get("current_loop_iteration") == 1
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  sleep 0.25
+done
 
 python3 - "$STATUS_RESPONSE" "$WORK_DIR" <<'PY'
 import json

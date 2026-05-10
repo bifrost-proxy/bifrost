@@ -356,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn test_default_base_instructions_describe_terminal_tool_selection() {
+        let config = AgentConfig::default();
+        let instructions = resolve_base_instructions(&config);
+        assert!(instructions.text.contains("shell_pty"));
+        assert!(instructions.text.contains("wait_for_completion=false"));
+        assert!(instructions.text.contains("write_stdin"));
+        assert!(instructions
+            .text
+            .contains("Use `shell` for short, non-interactive commands"));
+        assert!(instructions.text.contains("long-running foreground jobs"));
+        assert!(instructions.text.contains("commands that wait for stdin"));
+    }
+
+    #[test]
     fn test_resolve_base_instructions_override() {
         let config = AgentConfig {
             base_instructions: Some("Custom instructions".to_string()),

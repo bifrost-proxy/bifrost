@@ -8,6 +8,8 @@
 - caller 不允许指定 `policy_id`
 - target 根据本地 `Shell Access` 配置和该 caller 对应的 grant binding 自动选择唯一策略
 - grant binding / stdin / interactive / policy version snapshot 只保存在 target 本地
+- caller-to-client `call_frame` 可把 caller stdin 加密转发到 target executor active session
+- `--pty` / `--interactive` 在 target 侧必须分配真正 PTY，TTY 程序能看到 `isatty(0)=true`、`isatty(1)=true`
 - relay 只保留最小 `grant_scope`，不保存具体策略绑定
 - 如果没有命中策略、命中多个策略，或者 caller 试图伪造 `policy_id`，都由 target 拒绝
 - `policy_id` / `exec_mode` 只作为 target 侧审计结果写入 Recent Calls
@@ -275,6 +277,76 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 - `remote_shell_policy_update_minimal_args`：仅传 positional ID 也能解析
 - E2E `remote_shell_policy_update_preserves_execution`：创建 policy → 执行成功 → 更新 name → 再次执行仍成功，验证 policy 存储一致性
 
+### TC-RSE-19：Remote Invoke stdin frame 转发到 executor active session
+
+步骤：
+1. 执行 target executor stdin 回归：
+   ```bash
+   cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_forwards_stdin_stream -- --nocapture
+   ```
+2. 执行 caller CLI remote interactive / stdin / pty 参数回归：
+   ```bash
+   cargo test -p bifrost-cli remote:: -- --nocapture
+   ```
+3. 执行可重复 E2E 入口：
+   ```bash
+   # 本轮使用 /tmp 下的一次性临时 harness 执行，测试脚本不落库。
+   # harness 执行上述两个 cargo test，并额外检查 CLI envelope 对 --interactive/--stdin/--pty 的构造。
+   ```
+
+预期：
+- caller command envelope 对 `--stdin` / `--pty` / `--interactive` 写入 `stdin_mode=stream`、`pty.enabled=true`、启动时终端 `pty.rows/cols`、`output_mode=pty_merged`。
+- caller CLI interactive 模式开启 raw mode，把本地 stdin 字节封装为 caller-to-client 加密 `call_frame` 并 POST 到 relay。
+- caller CLI interactive 模式默认跳过普通 streaming Done digest 校验，避免 `pty_merged` 终端字节流经 legacy exit 收敛时被误判为 `stream digest mismatch`。
+- target worker 在 active call map 中找到对应 call，把解密后的 stdin bytes 发送给 executor。
+- executor 对 `stdin_mode=stream` 的 shell command 打开 child stdin，测试程序 `python3 -u -c 'import sys; print(sys.stdin.readline().strip())'` 能读到 `hello remote stdin` 并以 exit code 0 结束。
+- cancel 仍走既有 `call_cancel` 通道；本轮验证 stdin forwarding、CLI raw-mode 入口、启动时终端尺寸传递与 interactive digest 收敛，远端真 PTY 运行期 resize 作为后续增强继续覆盖。
+
+### TC-RSE-20：真实 Remote Invoke 链路执行 `remote exec --interactive` 并转发 stdin
+
+步骤：
+1. 使用当前源码构建的 `bifrost`，隔离启动本地 relay、target Bifrost 和 caller 数据目录；target 必须使用 `--no-system-proxy` 且不能使用 9900 端口。
+2. 在 target 配置允许 `shell_text`、`stdin` 和 `interactive` 的 Shell Access policy。
+3. 通过 pair-code 真实建立 caller 到 target 的 remote connection，并把 grant 升级为 `remote_shell_interactive`，`stdin_allowed=true`，`interactive_allowed=true`。
+4. 使用本地 PTY 启动：
+   ```bash
+   bifrost remote exec --relay-url <relay> --client-id <target-prefix> --interactive \
+     --shell-text "python3 -u -c 'import sys; print(\"REMOTE_INTERACTIVE_READY\"); print(sys.stdin.readline().strip())'"
+   ```
+5. 在本地 PTY 中写入 `REMOTE_INTERACTIVE_INPUT_OK\n`，等待命令退出，并查询 target Recent Calls。
+
+预期：
+- caller CLI 在真实 TTY/raw mode 下运行，`--interactive` 不因非 TTY 被拒绝。
+- target stdout 流包含 `REMOTE_INTERACTIVE_READY` 和 `REMOTE_INTERACTIVE_INPUT_OK`。
+- stdin 通过 caller-to-client encrypted `call_frame` 进入 target active session map，再转发到 executor child stdin。
+- Recent Calls 中新增 `shell.exec` 记录，`policy_id=stream-shell`、`exec_mode=shell_text`、`exit_code=0`。
+
+### TC-RSE-21：`--pty` 真实分配 PTY 且 interactive 退出后恢复本地 raw mode
+
+步骤：
+1. 执行 target executor 真 PTY 回归：
+   ```bash
+   cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_pty_reports_isatty_true -- --nocapture
+   ```
+2. 执行 caller raw-mode 生命周期回归：
+   ```bash
+   cargo test -p bifrost-cli remote::tests::test_remote_stdin_forwarder_owns_raw_mode_guard -- --nocapture
+   ```
+3. 使用当前源码构建的 `bifrost`，隔离启动本地 relay、target Bifrost 和 caller 数据目录；target 必须使用 `--no-system-proxy` 且不能使用 9900 端口。
+4. 在 target 配置允许 `shell_text`、`stdin` 和 `interactive` 的 Shell Access policy。
+5. 通过真实 remote connection 执行：
+   ```bash
+   bifrost remote exec --relay-url <relay> --client-id <target-prefix> --interactive \
+     --shell-text "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"READY\"); print(sys.stdin.readline().strip())'"
+   ```
+6. 在本地 PTY 中写入 `PTY_STDIN_OK\n`，等待命令退出；随后在同一终端执行 `stty -a` 或等效检查，确认终端不残留 raw mode。
+
+预期：
+- target executor 使用真 PTY，Python 输出包含 `True True`，证明 stdin/stdout 都是 TTY。
+- caller stdin 仍通过 encrypted `call_frame` 转发到 target active session，输出包含 `PTY_STDIN_OK`。
+- PTY 输出按 `pty_merged` 合流返回，不要求 stderr 单独还原。
+- interactive 命令退出后本地 raw mode guard 由 caller 主任务生命周期释放，即使 stdin reader 线程仍阻塞在 `stdin.read()`，终端也恢复到可正常回显/换行的 cooked 状态。
+
 ### TC-RSE-08：策略版本变化后旧 grant 失效
 
 步骤：
@@ -357,3 +429,6 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-16 | ⚠️ PARTIAL | 2026-04-24 经 10+ 轮 Windows CI 迭代，完成全部根因修复：1) `inherit_env=true` 保留 PATH 解决命令查找问题；2) 使用裸 `cmd.exe` + 裸 `ping` 避免绝对路径与引号解析问题；3) 末尾追加 `&exit /b 0` 解决 `set /p` 从 nul 读取返回 exit code 1 的问题。macOS 本地验证 E2E 与单元测试全部通过，Windows 真机状态待 CI 补验。 |
 | TC-RSE-17 | ✅ PASS | 2026-04-24 本地验证。`build_shell_text_process` 添加了 Unix 路径 fallback 和 UTF-8 编码处理。macOS 单元测试 `test_build_shell_text_process_default_shell`（验证默认 shell 为 `/bin/sh`）、`test_build_shell_text_process_explicit_shell`（验证显式 `/bin/bash` 正确传递）通过。Windows 专属测试 `test_build_shell_text_process_unix_path_fallback_on_windows`、`test_build_shell_text_process_powershell_utf8_prefix`、`test_is_unix_only_shell_path` 已添加，待 Windows CI 验证。E2E `remote_shell_exec_unix_shell_path_fallback` 在 macOS 上通过（直接使用 `/bin/bash`），Windows CI 将验证 fallback 到 `cmd` 行为。 |
 | TC-RSE-18 | ✅ PASS | 2026-04-24 本地验证。CLI `policy update` 命令解析测试：`remote_shell_policy_update_parses_all_flags`（全参数解析）和 `remote_shell_policy_update_minimal_args`（仅必需 ID）均通过。87 个 CLI 测试全部 OK。E2E `remote_shell_policy_update_preserves_execution` 验证更新 policy name 后命令仍可执行，通过。 |
+| TC-RSE-19 | ✅ PASS | 2026-05-09 本地验证。`cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_forwards_stdin_stream -- --nocapture` 通过，executor 在允许 stdin 的 shell policy 下把 mpsc stdin stream 写入 child stdin，Python 程序读到 `hello remote stdin` 并以 exit code 0 返回。`cargo test -p bifrost-cli remote:: -- --nocapture` 通过，覆盖 remote CLI 参数构造、streaming/cancel 解析和新增 interactive/stdin/pty 字段的回归。本轮一次性临时 harness 已执行同一组验证；测试脚本未落库。 |
+| TC-RSE-20 | ✅ PASS | 2026-05-09 使用 `/tmp` 下的一次性临时 harness（执行后删除，未落库）真实执行 relay/target/caller 链路。首次运行暴露 `--interactive` 仍按普通 streaming Done digest 校验导致 `stream digest mismatch` 的真实 bug；修复为 interactive 默认跳过该 digest 校验并补充单测 `test_build_remote_command_interactive_disables_digest_verification` 后重建 `target/debug/bifrost`。最终通过链路：relay 端口 `50831`，target 端口 `50830`，target 启动参数包含 `--no-system-proxy`；pair-code 连接成功，grant 从 `remote_shell_exec` 升级为 `remote_shell_interactive` 且 `stdin_allowed=true`、`interactive_allowed=true`；本地 PTY 启动 `bifrost remote exec --interactive --shell-text ...`，远端输出 `REMOTE_INTERACTIVE_READY`，随后通过 caller-to-client encrypted `call_frame` 读到 `REMOTE_INTERACTIVE_INPUT_OK`；Recent Calls 新增 `shell.exec` 记录，断言 `policy_id=stream-shell`、`exec_mode=shell_text`、`exit_code=0`、`stdout_digest` 有效。临时 harness summary 为 42/42 PASS。 |
+| TC-RSE-21 | ✅ PASS | 2026-05-10 本地真实链路验证。单元回归 `cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_pty_reports_isatty_true -- --nocapture` 通过，target executor 在 `pty.enabled=true` 时使用真 PTY，Python 输出包含 `True True`。CLI 回归 `cargo test -p bifrost-cli remote::tests::test_remote_stdin_forwarder_owns_raw_mode_guard -- --nocapture` 通过，raw mode guard 由 caller forwarder 主生命周期持有。随后用 `/tmp` 下的一次性临时 harness（执行后删除，未落库）真实启动 relay / target / caller：relay 端口 `56137`、target 端口 `56140`，target 启动包含 `--no-system-proxy`；pair-code 连接成功，grant 升级为 `remote_shell_interactive` 且 `stdin_allowed=true`、`interactive_allowed=true`；本地 Python PTY 中运行 `bifrost remote exec --interactive --shell-text "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"READY\"); print(sys.stdin.readline().strip())'"`，输出包含 `True True`、`READY`、`PTY_STDIN_OK`、`__REMOTE_EXIT:0`；同一 PTY 后续 `stty -a` 显示 `icanon` 与 `echo`，未出现独立 `-icanon` / `-echo`，证明 interactive 退出后 raw mode 已恢复。修复 PTY 子进程退出后 EOF 等待稳定性后，再次真实执行双 Bifrost + relay 链路通过：relay 端口 `63757`、target 端口 `63758`、caller 端口 `63759`；target 启动前写入临时 `config.toml` 指向本地 relay，pair/grant 成功；远端 Python 输出 `True True`、`READY`、`REMOTE_PTY_STDIN_OK`、`__REMOTE_EXIT:0`；Recent Calls 最新 `shell.exec` 为 `policy_id=pty-shell`、`exec_mode=shell_text`、`exit_code=0`。 |

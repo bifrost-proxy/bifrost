@@ -731,7 +731,7 @@ where
         .map_err(|e| BifrostError::Config(format!("decode remote invoke payload json: {}", e)))
 }
 
-fn decrypt_encrypted_payload_without_aad<T>(
+pub fn decrypt_encrypted_payload_without_aad<T>(
     payload: &EncryptedPayload,
     session_key: &[u8; 32],
 ) -> Result<T>
@@ -1207,6 +1207,10 @@ pub struct SshConnectResultRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePtyRequest {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

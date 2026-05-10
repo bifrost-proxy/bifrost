@@ -547,6 +547,15 @@ pub struct RemoteCommandExecArgs {
         help = "Stream stdout as bytes arrive instead of buffering the whole response"
     )]
     pub stream: bool,
+    #[arg(long = "stdin", help = "Forward local stdin to the remote command")]
+    pub stdin: bool,
+    #[arg(long = "pty", help = "Request remote PTY/interactive execution")]
+    pub pty: bool,
+    #[arg(
+        long = "interactive",
+        help = "Shortcut for --pty --stdin --stream with local raw terminal mode"
+    )]
+    pub interactive: bool,
     #[arg(
         long = "output-file",
         value_name = "PATH",

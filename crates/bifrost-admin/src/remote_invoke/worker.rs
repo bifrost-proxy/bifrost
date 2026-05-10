@@ -36,16 +36,16 @@ use super::session_ring;
 use super::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use super::stream_emit;
 use super::types::{
-    build_registration_signature_payload, decrypt_remote_command_payload, derive_call_session_key,
-    derive_open_call_session_key, encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms,
-    scope_allows_command, AuthMethod, CallInfo, CallStatus, CallerInfo, ClientCallExitRequest,
-    ClientCallFrameRequest, ClientCallStreamFrameRequest, ClientHeartbeatRequest,
-    ClientRegistrationChallengeRequest, ClientRegistrationRequest, CommandKind, CommandSummary,
-    DiscoverySession, EncryptedEnvelope, EncryptedPayload, EnvelopeAad, FileAccessScope,
-    FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo, GrantMode, GrantScope,
-    GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig,
-    SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest,
-    WorkerState,
+    build_registration_signature_payload, decrypt_encrypted_payload_without_aad,
+    decrypt_remote_command_payload, derive_call_session_key, derive_open_call_session_key,
+    encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms, scope_allows_command, AuthMethod,
+    CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
+    ClientCallStreamFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
+    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
+    EncryptedPayload, EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision,
+    GrantDecisionRequest, GrantInfo, GrantMode, GrantScope, GrantStatus, PairingRequest,
+    PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig, SshConnectEvent,
+    SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest, WorkerState,
 };
 use crate::state::SharedAdminState;
 
@@ -68,6 +68,7 @@ struct ActiveCallControl {
     started_at: u64,
     cancelled: AtomicBool,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stdin_tx: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
 }
 
 impl ActiveCallControl {
@@ -77,6 +78,7 @@ impl ActiveCallControl {
             started_at,
             cancelled: AtomicBool::new(false),
             task: Mutex::new(None),
+            stdin_tx: Mutex::new(None),
         }
     }
 
@@ -92,6 +94,22 @@ impl ActiveCallControl {
         if let Some(handle) = self.task.lock().take() {
             handle.abort();
         }
+    }
+
+    fn set_stdin_sender(&self, tx: tokio::sync::mpsc::Sender<Vec<u8>>) {
+        *self.stdin_tx.lock() = Some(tx);
+    }
+
+    async fn send_stdin(&self, bytes: Vec<u8>) -> Result<()> {
+        let tx = self.stdin_tx.lock().clone();
+        let Some(tx) = tx else {
+            return Err(BifrostError::Config(
+                "remote call is not accepting stdin".to_string(),
+            ));
+        };
+        tx.send(bytes)
+            .await
+            .map_err(|_| BifrostError::Config("remote call stdin channel is closed".to_string()))
     }
 }
 
@@ -117,6 +135,14 @@ struct ShellGrantProvision {
     shell_policy_set_version_snapshot: Option<u64>,
     interactive_allowed: Option<bool>,
     stdin_allowed: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CallerInputFramePayload {
+    #[serde(default)]
+    data_b64: String,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 /// User-supplied override for the file-access grant auto-seeded when an SSH
@@ -1796,12 +1822,10 @@ impl RemoteInvokeWorker {
                 Ok(v) => self.handle_call_open(v).await,
                 Err(e) => warn!(error = %e, "failed to parse call_open"),
             },
-            "call_frame" => {
-                debug!(
-                    data_len = data.len(),
-                    "call_frame received (stdin forwarding not yet implemented)"
-                );
-            }
+            "call_frame" => match serde_json::from_str::<Value>(data) {
+                Ok(v) => self.handle_call_frame(v).await,
+                Err(e) => warn!(error = %e, "failed to parse call_frame"),
+            },
             "call_cancel" => match serde_json::from_str::<Value>(data) {
                 Ok(v) => {
                     if let Some(call_id) = v.get("call_id").and_then(|c| c.as_str()) {
@@ -2703,8 +2727,20 @@ impl RemoteInvokeWorker {
             // PR #4c-2: register a session in the global ring so tee/resume can work.
             let _session_registered = session_ring::register_session_str(&cid);
 
+            let stdin_rx = if command
+                .stdin_mode
+                .is_some_and(|mode| mode != super::types::StdinMode::None)
+                || command.pty.as_ref().is_some_and(|pty| pty.enabled)
+            {
+                let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+                active_call_for_task.set_stdin_sender(stdin_tx);
+                Some(stdin_rx)
+            } else {
+                None
+            };
+
             let result = executor
-                .execute_with_stdout_sink(&command, |chunk| {
+                .execute_with_stdout_sink(&command, stdin_rx, |chunk| {
                     let relay_client = Arc::clone(&relay_client);
                     let cid = cid.clone();
                     let instance_id = instance_id.clone();
@@ -2954,6 +2990,91 @@ impl RemoteInvokeWorker {
             active_calls.write().remove(&cid);
         });
         *active_call.task.lock() = Some(task);
+    }
+
+    async fn handle_call_frame(&self, data: Value) {
+        let call_id = data
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let envelope_json = data
+            .get("envelope_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if call_id.is_empty() || envelope_json.is_empty() {
+            warn!("call_frame missing call_id or envelope_json");
+            return;
+        }
+
+        let envelope = match serde_json::from_str::<EncryptedEnvelope>(envelope_json) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                warn!(call_id = %call_id, error = %error, "failed to parse caller input frame envelope");
+                return;
+            }
+        };
+        if envelope.direction != FrameDirection::CallerToClient {
+            warn!(call_id = %call_id, direction = ?envelope.direction, "rejecting call_frame with invalid direction");
+            return;
+        }
+
+        let Some(active_call) = self.active_calls.read().get(&call_id).cloned() else {
+            warn!(call_id = %call_id, "call_frame received for inactive call");
+            return;
+        };
+        let grant_crypto_lookup = { self.grant_crypto.read().get(&active_call.grant_id).cloned() };
+        let Some(grant_crypto) = grant_crypto_lookup else {
+            warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
+            return;
+        };
+
+        let session_key = match derive_call_session_key(
+            &grant_crypto.shared_secret,
+            &call_id,
+            Some(&grant_crypto.caller_ephemeral_pub),
+            Some(&grant_crypto.client_ephemeral_pub),
+        ) {
+            Ok(key) => key,
+            Err(error) => {
+                warn!(call_id = %call_id, error = %error, "failed to derive call_frame key");
+                return;
+            }
+        };
+        let payload = EncryptedPayload {
+            version: envelope.version,
+            nonce: envelope.nonce,
+            ciphertext: envelope.ciphertext,
+            tag: envelope.tag,
+            aad: envelope.aad,
+        };
+        let frame = match decrypt_encrypted_payload_without_aad::<CallerInputFramePayload>(
+            &payload,
+            &session_key,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                warn!(call_id = %call_id, error = %error, "failed to decrypt caller input frame");
+                return;
+            }
+        };
+        let bytes = if !frame.data_b64.is_empty() {
+            match base64::engine::general_purpose::STANDARD.decode(frame.data_b64.as_bytes()) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(call_id = %call_id, error = %error, "failed to decode caller input frame data_b64");
+                    return;
+                }
+            }
+        } else {
+            frame.data.unwrap_or_default().into_bytes()
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        if let Err(error) = active_call.send_stdin(bytes).await {
+            warn!(call_id = %call_id, error = %error, "failed to forward call_frame stdin");
+        }
     }
 
     fn decrypt_call_command(

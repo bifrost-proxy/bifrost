@@ -1987,6 +1987,14 @@ GET  /remote/approvals/:approval_id
   - 统一以单一终端输出流回传
   - 不再承诺 stderr 可精确拆分
 
+当前实现要求：
+
+- target executor 收到 `pty.enabled=true` 时必须使用系统 PTY/ConPTY 后端启动子进程，不能退化为普通 `TokioCommand` pipe。
+- caller-to-client `call_frame` 解密后的 stdin bytes 写入 PTY master；PTY master reader 读取合流输出并按 stdout 兼容通道回传。
+- PTY 子进程退出后，executor 需要短暂 drain master 输出并按退出结果收敛，不能因为本端仍持有 writer 或平台 EOF 差异无限等待。
+- `--interactive` 的本地 raw mode guard 由 caller 主任务持有，并在远端命令完成/取消后释放；stdin reader 线程即使仍阻塞在 `stdin.read()`，也不能继续持有 raw mode。
+- 回归验证必须包含 `python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'` 输出 `True True`，以及 interactive 退出后本地终端恢复 cooked mode。
+
 ### 4.2 frame 公共字段
 
 建议所有输出相关 frame 都带统一头部：
