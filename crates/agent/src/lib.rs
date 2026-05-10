@@ -61,7 +61,10 @@ pub use config::{
 pub use session::{
     handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
 };
-pub use session_status::{format_active_turn_status_text, ActiveTurnStatus};
+pub use session_status::{
+    format_active_turn_status_text, ActiveTurnStatus, AgentTurnProgressEvent,
+    AgentTurnProgressSender,
+};
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};
 pub use tools::ToolRegistry;

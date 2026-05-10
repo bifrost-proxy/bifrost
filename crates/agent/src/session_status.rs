@@ -1,8 +1,44 @@
 use crate::config::AgentConfig;
 use crate::session::AgentSession;
+use crate::tools::update_plan::PlanStep;
+use crate::types::ToolCallLog;
 use std::sync::Arc;
 
 pub type ActiveTurnStatusHandle = Arc<std::sync::Mutex<ActiveTurnStatus>>;
+pub type AgentTurnProgressSender = tokio::sync::mpsc::UnboundedSender<AgentTurnProgressEvent>;
+
+/// Provider-neutral progress events emitted by the turn loop for IM renderers.
+#[derive(Debug, Clone)]
+pub enum AgentTurnProgressEvent {
+    Status(ActiveTurnStatus),
+    ToolStarted {
+        tool_name: String,
+        arguments: String,
+    },
+    ToolFinished {
+        log: ToolCallLog,
+        duration_ms: u64,
+    },
+    PlanUpdated {
+        steps: Vec<PlanStep>,
+        title: Option<String>,
+    },
+    TitleUpdated {
+        title: String,
+    },
+    AssistantDelta {
+        content: String,
+    },
+    AssistantFinal {
+        content: String,
+    },
+    TurnFinished {
+        content: String,
+    },
+    TurnFailed {
+        error: String,
+    },
+}
 
 /// Live status for a session while a turn loop is executing.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -77,11 +113,16 @@ pub(crate) fn update_active_turn_status<F>(session: &AgentSession, f: F)
 where
     F: FnOnce(&mut ActiveTurnStatus),
 {
+    let mut snapshot = None;
     if let Some(handle) = &session.active_turn_status {
         if let Ok(mut status) = handle.lock() {
             f(&mut status);
             status.updated_at = current_time_secs();
+            snapshot = Some(status.clone());
         }
+    }
+    if let (Some(sender), Some(status)) = (&session.progress_sender, snapshot) {
+        let _ = sender.send(AgentTurnProgressEvent::Status(status));
     }
 }
 

@@ -5,6 +5,7 @@ pub mod event_store;
 pub mod feishu;
 pub mod markdown_converter;
 pub mod message_log_store;
+pub mod progress_card;
 pub mod provider;
 pub mod provider_store;
 pub mod queue_manager;
@@ -23,6 +24,7 @@ pub use agent::{
 pub use connection::ImConnectionManager;
 pub use event_store::ImEventStore;
 pub use message_log_store::ImMessageLogStore;
+pub use progress_card::{ImAgentProgressRegistry, ImProgressCardCapability};
 pub use provider::ImProvider;
 pub use provider_store::ImProviderStore;
 pub use queue_manager::SessionQueueManager;

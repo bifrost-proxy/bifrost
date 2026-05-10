@@ -22,7 +22,8 @@ use crate::persistence::ConversationRecorder;
 use crate::prompt;
 use crate::session_status::{
     config_context_window_tokens, context_usage_percent, refresh_active_turn_status,
-    ActiveTurnProgress, ActiveTurnStatus, ActiveTurnStatusHandle,
+    ActiveTurnProgress, ActiveTurnStatus, ActiveTurnStatusHandle, AgentTurnProgressEvent,
+    AgentTurnProgressSender,
 };
 use crate::skill_authoring::SkillAuthoringHub;
 use crate::slash::{BuiltinCommand, Dispatch, SlashCommandRouter};
@@ -207,6 +208,9 @@ pub struct AgentSession {
     /// `/stop` sets this through the session manager while the session remains
     /// checked out by the running loop.
     pub stop_signal: Option<AgentStopSignalHandle>,
+
+    /// Optional provider-neutral progress sink for IM renderers.
+    pub progress_sender: Option<AgentTurnProgressSender>,
 }
 
 impl AgentSession {
@@ -241,6 +245,7 @@ impl AgentSession {
             plan_sender: None,
             active_turn_status: None,
             stop_signal: None,
+            progress_sender: None,
         }
     }
 
@@ -2355,6 +2360,11 @@ pub async fn run_turn_with_mcp_multimodal(
                     .or(response.reasoning_content)
                     .unwrap_or_default();
                 if !content.is_empty() {
+                    if let Some(sender) = &session.progress_sender {
+                        let _ = sender.send(AgentTurnProgressEvent::AssistantDelta {
+                            content: content.clone(),
+                        });
+                    }
                     session.add_assistant_message(&content);
                     if let Some(ref mut rec) = recorder {
                         let response_tokens =
@@ -2410,6 +2420,11 @@ pub async fn run_turn_with_mcp_multimodal(
                         .or(response.reasoning_content)
                         .unwrap_or_default();
                     if !content.is_empty() {
+                        if let Some(sender) = &session.progress_sender {
+                            let _ = sender.send(AgentTurnProgressEvent::AssistantDelta {
+                                content: content.clone(),
+                            });
+                        }
                         session.add_assistant_message(&content);
                         if let Some(ref mut rec) = recorder {
                             let response_tokens =
@@ -2494,6 +2509,12 @@ pub async fn run_turn_with_mcp_multimodal(
                 content.clone(),
             );
 
+            if let Some(sender) = &session.progress_sender {
+                let _ = sender.send(AgentTurnProgressEvent::AssistantFinal {
+                    content: content.clone(),
+                });
+            }
+
             return Ok(TurnResult {
                 response: content,
                 tool_calls_log,
@@ -2518,6 +2539,18 @@ pub async fn run_turn_with_mcp_multimodal(
             tool_count = response.tool_calls.len(),
             "model requested tool calls"
         );
+        let process_content = response
+            .content
+            .clone()
+            .or(response.reasoning_content.clone())
+            .unwrap_or_default();
+        if !process_content.trim().is_empty() {
+            if let Some(sender) = &session.progress_sender {
+                let _ = sender.send(AgentTurnProgressEvent::AssistantDelta {
+                    content: process_content,
+                });
+            }
+        }
         refresh_active_turn_status(
             session,
             config,
@@ -2556,6 +2589,13 @@ pub async fn run_turn_with_mcp_multimodal(
                 call_id = %tc.id,
                 "executing tool call"
             );
+            if let Some(sender) = &session.progress_sender {
+                let _ = sender.send(AgentTurnProgressEvent::ToolStarted {
+                    tool_name: tc.name().to_string(),
+                    arguments: tc.arguments().to_string(),
+                });
+            }
+            let tool_started_at = std::time::Instant::now();
 
             // Record tool call
             if let Some(ref mut rec) = recorder {
@@ -2661,12 +2701,21 @@ pub async fn run_turn_with_mcp_multimodal(
                 result.output.clone()
             };
 
-            tool_calls_log.push(ToolCallLog {
+            let log = ToolCallLog {
                 tool_name: tc.name().to_string(),
                 arguments: tc.arguments().to_string(),
                 result: result.output.clone(),
                 success: result.success,
-            });
+            };
+            if let Some(sender) = &session.progress_sender {
+                let duration_ms =
+                    u64::try_from(tool_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let _ = sender.send(AgentTurnProgressEvent::ToolFinished {
+                    log: log.clone(),
+                    duration_ms,
+                });
+            }
+            tool_calls_log.push(log);
 
             // Record tool result
             if let Some(ref mut rec) = recorder {
@@ -2740,6 +2789,11 @@ pub async fn run_turn_with_mcp_multimodal(
         {
             if let Some(new_title) = title_log.result.strip_prefix("SET_TITLE:") {
                 session.title = Some(new_title.to_string());
+                if let Some(sender) = &session.progress_sender {
+                    let _ = sender.send(AgentTurnProgressEvent::TitleUpdated {
+                        title: new_title.to_string(),
+                    });
+                }
                 // Persist title update event
                 if let Some(ref mut rec) = recorder {
                     if let Err(e) = rec.record_title_updated(&session.session_key, new_title) {
@@ -2757,6 +2811,12 @@ pub async fn run_turn_with_mcp_multimodal(
         {
             session.current_plan = Some(steps.clone());
             session.plan_repair_attempts = 0;
+            if let Some(sender) = &session.progress_sender {
+                let _ = sender.send(AgentTurnProgressEvent::PlanUpdated {
+                    steps: steps.clone(),
+                    title: session.title.clone(),
+                });
+            }
             // Push real-time plan update to IM channel (include current title)
             if let Some(ref sender) = session.plan_sender {
                 if let Err(e) = sender.send((steps, session.title.clone())) {

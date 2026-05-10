@@ -1165,6 +1165,71 @@ rm -rf ./.bifrost-test
   - 不包含 `collapsible_panel` 元素
   - 用户只看到 AI 的回复文本
 
+### TC-IMA-90: 飞书流式进度卡片 - Agent loop 执行中持续更新并结束关闭
+
+- **前置条件**:
+  - Feishu Provider 已连接，机器人具备 `im:message:send_as_bot`、`im:message` 和 `cardkit:card:write` 权限。
+  - Agent 已启用，模型 mock 或真实模型会触发至少一次工具调用和一次 `update_plan`。
+- **操作步骤**:
+  1. 在飞书中向 Bot 发送一条会触发工具调用的消息，例如“检查当前项目并列出执行计划”。
+  2. 观察 Bot 首条回复是否为 JSON 2.0 CardKit 流式卡片。
+  3. 在 Agent 执行过程中观察卡片标题、最终输出、任务计划、最新工具状态、工具详情折叠区、底部状态和思考过程折叠区。
+  4. 等待 Agent loop 完成。
+- **预期结果**:
+  - Bot 只使用一张 Agent progress card 展示本次 loop 状态，不再额外发送独立 plan card。
+  - 卡片配置包含 `streaming_mode: true`，执行完成后调用 settings 更新为 `streaming_mode: false`。
+  - 卡片标题默认使用用户消息；Agent 调用 `set_title` 后，标题刷新为工具设置的新标题。
+  - 最终输出区在尚无最终内容时只显示 `处理中...`，不显示“最终输出”等额外标题；完成后直接显示 Agent 最终回复。
+  - 任务计划仅在 `update_plan` 后展示；未产生计划时不渲染任务计划模块；折叠标题展示当前正在处理的任务。
+  - 工具执行状态仅在出现工具事件后展示；详情区域默认折叠，折叠外可见最新工具名和基本状态。
+  - 底部状态默认折叠，通常折叠标题只显示 token 消耗；当 guide/queue 刚被注入或修改时，标题追加一条轻量提示，避免用户误以为输入没有反馈。
+  - 展开底部状态后显示 loop 次数、context 用量、压缩次数、工作路径、queue 和 guide 状态。
+  - 过程思考信息不混入最终输出区；如模型在工具调用前输出过程文本，底部“思考过程”折叠区标题展示一行摘要，展开后展示最后一次完整过程文本。
+  - 最终输出模块位于卡片最后，任务计划、工具状态、底部状态和思考过程的相对顺序保持不变。
+  - 聊天栏摘要在完成后不再停留在 `[生成中...]`。
+- **执行记录（2026-05-10）**:
+  - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 JSON 2.0 streaming card、固定 CardKit element id、可选计划/工具/思考模块、工具耗时、最终输出和折叠状态区渲染。
+  - 修复后复测：`cargo test -p bifrost-admin progress_card` PASS，覆盖更新 uuid 不拼接 `card_id` 且保持短长度、guide 可见提示、最终输出置底等回归。
+  - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，覆盖 guide/queue 状态进入同一卡片并在标题中给出可见 guide 提示。
+  - 默认数据目录真实 Feishu 链路（端口 9900，`--no-system-proxy`）：已观察到 IM 消息到达后立即发送 `interactive` CardKit progress card，随后进入 Agent loop；旧问题 `uuid` 字段校验失败已消失。
+
+### TC-IMA-91: 飞书流式进度卡片 - guide 消息进入后同卡刷新
+
+- **前置条件**:
+  - TC-IMA-90 的 Feishu Provider 和 Agent 配置可用。
+  - 当前 session 正在执行长任务，尚未结束。
+- **操作步骤**:
+  1. 发送一条会持续执行的 Agent 消息。
+  2. 在卡片仍处于执行中时，直接发送一条新的普通消息作为 guide，例如“优先检查失败日志”。
+  3. 观察 IM 会话中的卡片消息和底部折叠状态区。
+- **预期结果**:
+  - 新 guide 消息被注入 guide channel，当前 progress card 不撤回、不重发，仍是同一个 card/message。
+  - 同一卡片折叠状态区标题可见“已收到引导：...”轻量提示；展开后显示“有待处理引导消息”，并保留当前工具、计划、context/token 等最新状态。
+  - 执行过程中不会出现第二张 progress card，也不会调用关闭旧卡 streaming 或撤回旧消息。
+  - Agent 在当前工具调用批次结束后消费 guide，最终输出反映 guide 语义。
+- **执行记录（2026-05-10）**:
+  - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 guide pending 进入同一卡片折叠状态区，且 renderer 不依赖撤回/重发语义。
+  - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，断言状态区标题包含“已收到引导：...”，避免 guide 注入成功但用户无可见反馈。
+  - 默认数据目录真实 Feishu 链路：测试中途发送的新 IM 消息被注入 guide，没有发送第二张 progress card。
+
+### TC-IMA-92: 飞书流式进度卡片 - queue 消息进入后同卡刷新
+
+- **前置条件**:
+  - TC-IMA-90 的 Feishu Provider 和 Agent 配置可用。
+  - 当前 session 正在执行长任务，尚未结束。
+- **操作步骤**:
+  1. 发送一条会持续执行的 Agent 消息。
+  2. 在卡片仍处于执行中时发送 `/q 第二个任务`。
+  3. 可选再发送 `/rq <序号>` 删除排队消息。
+  4. 观察 IM 会话中的卡片消息和底部折叠状态区中的排队状态。
+- **预期结果**:
+  - `/q` 成功后当前 progress card 不撤回、不重发，仍是同一个 card/message。
+  - 同一卡片折叠状态区展开后显示当前排队消息数量；`/rq` 成功后在同一卡片中刷新排队数量；折叠标题仍只显示 token 消耗。
+  - 执行过程中不会出现第二张 progress card，也不会调用关闭旧卡 streaming 或撤回旧消息。
+  - 当前 turn 完成后，排队消息被继续处理，并为下一轮创建新的 progress card；上一轮卡片已在结束时关闭 streaming。
+- **执行记录（2026-05-10）**:
+  - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 queue count 进入同一卡片折叠状态区，且 renderer 输出同卡 guide/queue 状态。
+
 ### TC-IMA-71: Session Title 落库 - set_title 工具持久化
 
 - **操作步骤**:
@@ -1430,6 +1495,28 @@ rm -rf ./.bifrost-test
   - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
   - 窄屏下导航退化为顶部横向滚动，不挤压编辑卡片内容。
 - **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Agent 左侧导航按 URL 切换独立编辑卡片"` 通过；验证默认仅渲染 General、点击 MCP Servers/Runtime 后只渲染对应卡片、URL `agentSection` 记录并刷新恢复、暗色主题下继续切换可读且 `aria-current` 正确。
+
+### TC-IMA-84A: Agent 模型配置可关闭 reasoning 参数
+
+- **前置条件**:
+  - 使用当前分支启动 Bifrost，端口不得使用 9900，必须显式关闭系统代理：
+    ```bash
+    BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy
+    ```
+  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/settings?tab=agent&agentSection=model`
+- **操作步骤**:
+  1. 确认右侧只渲染 `Model Configuration` 编辑卡片。
+  2. 将模型名填写为一个不支持 Chat Completions reasoning 参数的模型，例如 `gpt-5.5-2026-04-01`。
+  3. 将 `Reasoning Effort` 下拉框切换为 `None (disabled)`。
+  4. 将 `Reasoning Summary` 下拉框切换为 `None (disabled)`。
+  5. 执行 `curl -s http://127.0.0.1:18884/_bifrost/api/im-gateway/agent | jq '{model, model_reasoning_effort, model_reasoning_summary}'`。
+  6. 在亮色和暗色主题下各确认一次两个下拉框的当前值可读。
+- **预期结果**:
+  - WebUI 保存成功并显示更新提示。
+  - API 返回 `model_reasoning_effort: "none"` 与 `model_reasoning_summary: "none"`。
+  - Agent 运行时把 `"none"` 解释为禁用，不向 Chat Completions 请求体写入 `reasoning_effort` 或 `reasoning_summary` 字段。
+  - 亮色和暗色主题下两个配置项都位于 Agent → Model 配置卡片内，文字和下拉值清晰可读。
+- **执行记录（2026-05-10）**: PASS — 使用临时数据目录 `/tmp/bifrost-reasoning-human.iLYev0` 启动 `./target/debug/bifrost start -p 18884 --unsafe-ssl --no-system-proxy`，通过 Codex in-app browser 打开 `/_bifrost/settings?tab=agent&agentSection=model`，将模型填为 `gpt-5.5-2026-04-01`，将 `Reasoning Effort` 与 `Reasoning Summary` 均切换为 `None (disabled)`；`curl -fsS http://127.0.0.1:18884/_bifrost/api/im-gateway/agent | jq '{model, model_reasoning_effort, model_reasoning_summary}'` 与临时目录 `agent/agent_config.json` 均返回 `model_reasoning_effort: "none"`、`model_reasoning_summary: "none"`；切换暗色主题后控件和 `None (disabled)` 值仍可见。
 
 ### TC-IMA-85: `/agent/chat` 图片多模态理解真实链路
 

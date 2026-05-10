@@ -639,6 +639,7 @@ export default function AgentTab() {
                     onChange={(val) =>
                       handleSelectChange("model_reasoning_effort", val)
                     }
+                    data-testid="agent-model-reasoning-effort-select"
                     placeholder="Select"
                     style={{ width: 140 }}
                     size="small"
@@ -664,6 +665,7 @@ export default function AgentTab() {
                     onChange={(val) =>
                       handleSelectChange("model_reasoning_summary", val)
                     }
+                    data-testid="agent-model-reasoning-summary-select"
                     placeholder="Select"
                     style={{ width: 140 }}
                     size="small"

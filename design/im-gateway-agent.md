@@ -380,8 +380,8 @@ struct Session {
 | BaseURL | `https://search.bytedance.net/gpt/openapi/online/multimodal/crawl` | API 端点 |
 | API Key | `$MODELHUB_AK` | 从环境变量读取 |
 | Model | `gpt-5.4-2026-03-05` | 模型版本 |
-| ReasoningEffort | `medium` | 推理强度 |
-| ReasoningSummary | `auto` | 推理摘要模式 |
+| ReasoningEffort | `medium` | 推理强度；WebUI 的 Agent → Model 配置可设为 `none`，用于 GPT-5.5 等不支持 Chat Completions `reasoning_effort` 的模型，运行时会省略该请求字段 |
+| ReasoningSummary | `auto` | 推理摘要模式；WebUI 的 Agent → Model 配置可设为 `none`，运行时会省略 `reasoning_summary` 字段 |
 | MaxCompletionTokens | `16384` | 最大生成 token |
 | ByAzure | `true` | 使用 `api-key` header 认证 |
 | SessionTTL | `3600` (1小时) | 会话过期时间 |
@@ -744,6 +744,7 @@ tracing = "0.1"
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
+| TC-IMA-84A | Agent 模型 reasoning 参数开关 | Settings → Agent → Model 可把 Reasoning Effort / Summary 设为 `None (disabled)`，API 持久化为 `model_reasoning_effort=none`、`model_reasoning_summary=none`，运行时不会把对应 Chat Completions 字段发给不支持的模型 |
 | TC-IMA-89 | `/stop` 停止运行中 Agent loop | 同 session 发起长模型请求后发送 `/stop`，验证 stop 请求立即返回 stopped，原 chat 返回停止提示，session 释放后后续 chat 成功 |
 | TC-IMA-53A | 新建 IM Provider 的 agent_config 经 IM 事件链路生效 | Provider 创建时配置 base/developer/user/work_dir 后，IM inbound event 进入 `run_event_loop` 时模型请求使用 Provider 级配置而非全局 fallback |
 

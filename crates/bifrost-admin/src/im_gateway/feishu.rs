@@ -548,6 +548,414 @@ impl FeishuProvider {
         Ok(())
     }
 
+    /// Create a CardKit card entity from JSON 2.0 card data.
+    pub async fn create_card_entity(
+        &self,
+        config: &ImProviderConfig,
+        card: serde_json::Value,
+    ) -> Result<String> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/cardkit/v1/cards", base_url);
+        let data = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card entity: {}", e))
+        })?;
+
+        #[derive(Serialize)]
+        struct CreateCardRequest<'a> {
+            #[serde(rename = "type")]
+            card_type: &'a str,
+            data: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct CreateCardResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+            data: Option<CreateCardData>,
+        }
+
+        #[derive(Deserialize)]
+        struct CreateCardData {
+            card_id: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&CreateCardRequest {
+                card_type: "card_json",
+                data: &data,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu create card entity request failed: {}",
+                    e
+                ))
+            })?;
+
+        let body: CreateCardResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu create card entity response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu create card entity failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        body.data.and_then(|data| data.card_id).ok_or_else(|| {
+            bifrost_core::BifrostError::Network(
+                "feishu create card entity response missing card_id".to_string(),
+            )
+        })
+    }
+
+    /// Send a previously created CardKit card entity.
+    pub async fn send_card_entity(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        card_id: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let content = serde_json::json!({
+            "type": "card",
+            "data": {
+                "card_id": card_id
+            }
+        })
+        .to_string();
+        self.send_message_internal(
+            base_url,
+            &token,
+            &target.receive_id_type,
+            &target.receive_id,
+            "interactive",
+            &content,
+            uuid,
+        )
+        .await
+    }
+
+    /// Replace the full JSON 2.0 payload of a CardKit card entity.
+    pub async fn update_card_entity(
+        &self,
+        config: &ImProviderConfig,
+        card_id: &str,
+        card: serde_json::Value,
+        sequence: u64,
+        uuid: &str,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/cardkit/v1/cards/{}", base_url, card_id);
+        let data = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card entity: {}", e))
+        })?;
+
+        #[derive(Serialize)]
+        struct UpdateCardPayload<'a> {
+            #[serde(rename = "type")]
+            card_type: &'a str,
+            data: &'a str,
+        }
+
+        #[derive(Serialize)]
+        struct UpdateCardRequest<'a> {
+            card: UpdateCardPayload<'a>,
+            sequence: u64,
+            uuid: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct UpdateCardResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&UpdateCardRequest {
+                card: UpdateCardPayload {
+                    card_type: "card_json",
+                    data: &data,
+                },
+                sequence,
+                uuid,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu update card entity request failed: {}",
+                    e
+                ))
+            })?;
+        let body: UpdateCardResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu update card entity response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu update card entity failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Update a text/markdown element content in a CardKit card entity.
+    pub async fn update_card_element_content(
+        &self,
+        config: &ImProviderConfig,
+        card_id: &str,
+        element_id: &str,
+        content: &str,
+        sequence: u64,
+        uuid: &str,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!(
+            "{}/cardkit/v1/cards/{}/elements/{}/content",
+            base_url, card_id, element_id
+        );
+
+        #[derive(Serialize)]
+        struct UpdateContentRequest<'a> {
+            content: &'a str,
+            sequence: u64,
+            uuid: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct UpdateContentResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&UpdateContentRequest {
+                content,
+                sequence,
+                uuid,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu update card element request failed: {}",
+                    e
+                ))
+            })?;
+        let body: UpdateContentResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu update card element response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu update card element failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Replace a CardKit card element with a full JSON 2.0 element.
+    pub async fn update_card_element(
+        &self,
+        config: &ImProviderConfig,
+        card_id: &str,
+        element_id: &str,
+        element: serde_json::Value,
+        sequence: u64,
+        uuid: &str,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!(
+            "{}/cardkit/v1/cards/{}/elements/{}",
+            base_url, card_id, element_id
+        );
+        let element = serde_json::to_string(&element).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card element: {}", e))
+        })?;
+
+        #[derive(Serialize)]
+        struct UpdateElementRequest<'a> {
+            element: &'a str,
+            sequence: u64,
+            uuid: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct UpdateElementResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&UpdateElementRequest {
+                element: &element,
+                sequence,
+                uuid,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu update card element request failed: {}",
+                    e
+                ))
+            })?;
+        let body: UpdateElementResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu update card element response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu update card element failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Update CardKit card settings, used to close streaming mode.
+    pub async fn update_card_settings(
+        &self,
+        config: &ImProviderConfig,
+        card_id: &str,
+        settings: serde_json::Value,
+        sequence: u64,
+        uuid: &str,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/cardkit/v1/cards/{}/settings", base_url, card_id);
+        let settings = serde_json::to_string(&settings).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card settings: {}", e))
+        })?;
+
+        #[derive(Serialize)]
+        struct UpdateSettingsRequest<'a> {
+            settings: &'a str,
+            sequence: u64,
+            uuid: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct UpdateSettingsResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .patch(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&UpdateSettingsRequest {
+                settings: &settings,
+                sequence,
+                uuid,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu update card settings request failed: {}",
+                    e
+                ))
+            })?;
+        let body: UpdateSettingsResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu update card settings response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu update card settings failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Recall a bot-sent message, best-effort used when moving the active progress card.
+    pub async fn recall_message(&self, config: &ImProviderConfig, message_id: &str) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/im/v1/messages/{}", base_url, message_id);
+
+        #[derive(Deserialize)]
+        struct RecallResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+        }
+
+        let resp = self
+            .http
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu recall message request failed: {}",
+                    e
+                ))
+            })?;
+        let body: RecallResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu recall message response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu recall message failed: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
     /// Fetch the bot owner's open_id from the Feishu Application Info API.
     ///
     /// Calls `GET /open-apis/application/v6/applications/:app_id?user_id_type=open_id`

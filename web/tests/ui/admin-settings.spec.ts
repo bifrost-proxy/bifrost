@@ -576,6 +576,73 @@ test("Settings Agent 左侧导航按 URL 切换独立编辑卡片", async ({ pag
   await expect(page.getByTestId("agent-settings-section-runtime")).toHaveCount(0);
 });
 
+test("Settings Agent 模型配置支持关闭 reasoning 参数", async ({ page }) => {
+  const agentConfig = {
+    enabled: true,
+    model: "gpt-5.5-2026-04-01",
+    model_provider: "mock",
+    model_providers: {
+      mock: {
+        name: "Mock Provider",
+        base_url: "https://model.example.test",
+        api_key: "$MODEL_API_KEY",
+      },
+    },
+    model_reasoning_effort: "medium",
+    model_reasoning_summary: "auto",
+    max_completion_tokens: 16384,
+    model_context_window: 250000,
+    mcp_servers: {},
+  };
+  const patches: Record<string, unknown>[] = [];
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    if (route.request().method() === "PATCH") {
+      const patch = route.request().postDataJSON() as Record<string, unknown>;
+      patches.push(patch);
+      Object.assign(agentConfig, patch);
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "mock",
+          name: "Mock Provider",
+          base_url: "https://model.example.test",
+          env_key: "MODEL_API_KEY",
+        },
+      ]),
+    });
+  });
+
+  await openPage(page, "settings?tab=agent&agentSection=model");
+  await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
+
+  await setSelectValue(
+    page,
+    page.getByTestId("agent-model-reasoning-effort-select"),
+    "None (disabled)",
+  );
+  await waitForToast(page, "Updated model reasoning effort");
+  await setSelectValue(
+    page,
+    page.getByTestId("agent-model-reasoning-summary-select"),
+    "None (disabled)",
+  );
+  await waitForToast(page, "Updated model reasoning summary");
+
+  expect(patches).toContainEqual({ model_reasoning_effort: "none" });
+  expect(patches).toContainEqual({ model_reasoning_summary: "none" });
+});
+
 test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值", async ({
   page,
 }) => {

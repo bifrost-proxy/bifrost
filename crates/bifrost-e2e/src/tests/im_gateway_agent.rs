@@ -143,6 +143,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "model": "test-model-e2e",
                     "base_url": "https://test.example.com",
                     "api_key": "test-api-key-e2e",
+                    "model_reasoning_effort": "none",
+                    "model_reasoning_summary": "none",
                     "base_instructions": "Base prompt e2e",
                     "developer_instructions": "Developer prompt e2e",
                     "user_instructions": "User prompt e2e"
@@ -212,6 +214,16 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     != Some("User prompt e2e")
                 {
                     return Err(format!("Expected user_instructions to be patched, got: {json}"));
+                }
+                if json.get("model_reasoning_effort").and_then(|v| v.as_str()) != Some("none") {
+                    return Err(format!(
+                        "Expected model_reasoning_effort none to be patched, got: {json}"
+                    ));
+                }
+                if json.get("model_reasoning_summary").and_then(|v| v.as_str()) != Some("none") {
+                    return Err(format!(
+                        "Expected model_reasoning_summary none to be patched, got: {json}"
+                    ));
                 }
                 if json
                     .get("effective_base_instructions")
@@ -739,6 +751,88 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     return Err(format!("Expected follow-up after /stop to succeed, got: {followup_json}"));
                 }
 
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "im_gateway_agent_streaming_progress_card_renderer",
+            "Validate IM Agent progress snapshot renders Feishu streaming card sections and guide/queue footer state",
+            "admin",
+            || async move {
+                use bifrost_admin::im_gateway::progress_card::{
+                    build_feishu_progress_card, ImAgentProgressSnapshot,
+                };
+                use bifrost_admin::im_gateway::queue_manager::QueueItem;
+                use bifrost_agent::tools::update_plan::{PlanStep, PlanStepStatus};
+
+                let mut snapshot =
+                    ImAgentProgressSnapshot::new("provider:owner", "run streaming card e2e");
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
+                    content: "checking progress card sections".to_string(),
+                });
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
+                    tool_name: "list_directory".to_string(),
+                    arguments: "{\"path\":\".\"}".to_string(),
+                });
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
+                    log: bifrost_agent::ToolCallLog {
+                        tool_name: "list_directory".to_string(),
+                        arguments: "{\"path\":\".\"}".to_string(),
+                        result: "Cargo.toml\ncrates".to_string(),
+                        success: true,
+                    },
+                    duration_ms: 37,
+                });
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::PlanUpdated {
+                    title: Some("Streaming Progress".to_string()),
+                    steps: vec![PlanStep {
+                        step: "Render latest status card".to_string(),
+                        status: PlanStepStatus::InProgress,
+                    }],
+                });
+                snapshot.update_queue_state(
+                    vec![QueueItem {
+                        seq: 1,
+                        message: "next queued message".to_string(),
+                    }],
+                    true,
+                    Some("已收到引导：check latest logs".to_string()),
+                );
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                    content: "streaming card done".to_string(),
+                });
+
+                let card = build_feishu_progress_card(&snapshot, true);
+                if card["schema"] != "2.0" {
+                    return Err(format!("expected card JSON 2.0, got {card}"));
+                }
+                if card["config"]["streaming_mode"] != true {
+                    return Err(format!("expected streaming_mode=true, got {card}"));
+                }
+                let body = card["body"]["elements"].to_string();
+                for needle in [
+                    "agent_output",
+                    "agent_plan_panel",
+                    "agent_plan",
+                    "agent_tool_panel",
+                    "agent_tool_log",
+                    "agent_status_panel",
+                    "agent_footer",
+                    "agent_thinking_panel",
+                    "agent_thinking",
+                    "list_directory",
+                    "37ms",
+                    "1 条排队消息",
+                    "有待处理引导消息",
+                    "已收到引导：check latest logs",
+                    "任务计划：Render latest status card",
+                    "思考过程：checking progress card sections",
+                    "checking progress card sections",
+                ] {
+                    if !body.contains(needle) {
+                        return Err(format!("streaming card body missing {needle}: {body}"));
+                    }
+                }
                 Ok(())
             },
         ),
