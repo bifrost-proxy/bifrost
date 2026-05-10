@@ -1882,7 +1882,15 @@ pub async fn run_turn_with_mcp_multimodal(
                             "transient API error, retrying"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                        match client.chat_completion(config, &messages, &tool_defs).await {
+                        let retry_messages = session.build_messages(
+                            &prompt_prefix,
+                            memory_message.as_ref(),
+                            config.get_max_history_messages(),
+                        );
+                        match client
+                            .chat_completion(config, &retry_messages, &tool_defs)
+                            .await
+                        {
                             Ok(r) => {
                                 info!(retry_attempt = retry + 1, "retry succeeded");
                                 succeeded = Some(r);
@@ -3565,6 +3573,132 @@ mod tests {
             .is_some_and(compact::is_summary_message));
         assert!(result.post_tokens < config.get_compact_threshold_tokens());
         assert!(!compact::should_compact(&session, &config));
+    }
+
+    #[tokio::test]
+    async fn test_retryable_error_rebuilds_messages_before_retry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_request_roles =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let seen_request_roles_server = seen_request_roles.clone();
+
+        tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = Vec::new();
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if header_end.is_none() {
+                        header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                    }
+                    if let Some(pos) = header_end {
+                        let headers = String::from_utf8_lossy(&buffer[..pos]);
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= pos + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                let body_start = header_end.unwrap() + 4;
+                let body: serde_json::Value =
+                    serde_json::from_slice(&buffer[body_start..]).unwrap();
+                let roles = body
+                    .get("messages")
+                    .and_then(|v| v.as_array())
+                    .unwrap()
+                    .iter()
+                    .map(|message| {
+                        message
+                            .get("role")
+                            .and_then(|role| role.as_str())
+                            .unwrap_or("<missing>")
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                seen_request_roles_server.lock().unwrap().push(roles);
+
+                let response = if attempt == 0 {
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\ntemporary"
+                        .to_string()
+                } else {
+                    let payload = serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "retry ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 2,
+                            "total_tokens": 12
+                        }
+                    })
+                    .to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    )
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut config = AgentConfig {
+            model: Some("retry-model".to_string()),
+            model_provider: Some("retry-provider".to_string()),
+            request_timeout_secs: Some(20),
+            max_turn_iterations: Some(2),
+            ..AgentConfig::default()
+        };
+        config.model_providers.insert(
+            "retry-provider".to_string(),
+            ModelProviderConfig {
+                name: Some("retry-provider".to_string()),
+                base_url: Some(format!("http://{addr}/chat/completions")),
+                env_key: None,
+                api_key: Some("retry-key".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+
+        let client = AgentClient::new();
+        let tools = ToolRegistry::new();
+        let mut session = AgentSession::new("retry-rebuild");
+        session
+            .history
+            .push(ChatMessage::tool_result("stale", "stale tool output"));
+
+        let result = run_turn(&client, &config, &mut session, &tools, "hello retry", None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.response, "retry ok");
+        let seen_roles = seen_request_roles.lock().unwrap();
+        assert_eq!(seen_roles.len(), 2);
+        assert_eq!(seen_roles[0], seen_roles[1]);
+        assert!(!seen_roles[0].iter().any(|role| role == "tool"));
     }
 
     #[test]

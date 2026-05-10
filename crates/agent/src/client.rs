@@ -1,6 +1,7 @@
 //! HTTP client for Chat Completions API with tool calling support.
 
 use crate::config::AgentConfig;
+use crate::history;
 use crate::types::{ChatMessage, ModelResponse, TokenUsage, ToolCallMessage, ToolDefinition};
 use bifrost_core::text::truncate_bytes_with_suffix;
 use std::path::Path;
@@ -142,11 +143,25 @@ impl AgentClient {
     ) -> Result<ModelResponse, String> {
         let effective = config.resolve_effective_config()?;
         let url = effective.base_url.trim_end_matches('/').to_string();
+        let (messages, sanitize_report) = sanitize_request_messages(messages);
+
+        if sanitize_report.dropped_anything() {
+            warn!(
+                dropped_orphan_tool_messages = sanitize_report.dropped_orphan_tool_messages,
+                dropped_incomplete_tool_call_messages =
+                    sanitize_report.dropped_incomplete_tool_call_messages,
+                original_message_count = messages.len()
+                    + sanitize_report.dropped_orphan_tool_messages
+                    + sanitize_report.dropped_incomplete_tool_call_messages,
+                sanitized_message_count = messages.len(),
+                "sanitized malformed chat history at client request boundary"
+            );
+        }
 
         // Build request body
         let mut body = serde_json::json!({
             "model": effective.model,
-            "messages": messages,
+            "messages": &messages,
             "max_completion_tokens": effective.max_completion_tokens,
             "stream": false,
         });
@@ -307,6 +322,12 @@ impl AgentClient {
     }
 }
 
+fn sanitize_request_messages(
+    messages: &[ChatMessage],
+) -> (Vec<ChatMessage>, history::HistorySanitizeReport) {
+    history::sanitize_chat_history(messages)
+}
+
 fn truncate(s: &str, max_len: usize) -> String {
     truncate_bytes_with_suffix(s, max_len, "...")
 }
@@ -330,6 +351,11 @@ fn agent_proxy_disabled_by_env() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ToolCallMessage;
+
+    fn tool_call(id: &str, name: &str) -> ToolCallMessage {
+        ToolCallMessage::function_call(id.to_string(), name.to_string(), "{}".to_string())
+    }
 
     #[test]
     fn default_agent_client_uses_direct_model_requests() {
@@ -355,5 +381,154 @@ mod tests {
 
         let client = AgentClient::new_with_bifrost_proxy_and_ca(18889, Some(&cert_path));
         assert_eq!(client.model_proxy_url(), Some("http://127.0.0.1:18889"));
+    }
+
+    #[test]
+    fn sanitize_request_messages_drops_orphan_tool_entries() {
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::tool_result("missing", "stale tool output"),
+            ChatMessage::user("hello"),
+        ];
+
+        let (sanitized, report) = sanitize_request_messages(&messages);
+
+        assert_eq!(report.dropped_orphan_tool_messages, 1);
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(sanitized[0].role, "system");
+        assert_eq!(sanitized[1].role, "user");
+    }
+
+    #[test]
+    fn sanitize_request_messages_preserves_valid_tool_segments() {
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::assistant_with_tool_calls(vec![tool_call("call-1", "shell")]),
+            ChatMessage::tool_result("call-1", "ok"),
+        ];
+
+        let (sanitized, report) = sanitize_request_messages(&messages);
+
+        assert!(!report.dropped_anything());
+        assert_eq!(sanitized.len(), messages.len());
+        assert_eq!(sanitized[0].role, "system");
+        assert_eq!(sanitized[1].role, "assistant");
+        assert_eq!(sanitized[2].role, "tool");
+        assert_eq!(sanitized[2].tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_sanitizes_messages_before_http_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let observed_roles = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed_roles_server = observed_roles.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let mut header_end = None;
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                }
+                if let Some(pos) = header_end {
+                    let headers = String::from_utf8_lossy(&buffer[..pos]);
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if buffer.len() >= pos + 4 + content_len {
+                        break;
+                    }
+                }
+            }
+
+            let body_start = header_end.unwrap() + 4;
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            let roles = body
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .iter()
+                .map(|message| {
+                    message
+                        .get("role")
+                        .and_then(|role| role.as_str())
+                        .unwrap_or("<missing>")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            *observed_roles_server.lock().unwrap() = roles;
+
+            let payload = serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AgentConfig {
+            model: Some("boundary-model".to_string()),
+            model_provider: Some("boundary-provider".to_string()),
+            request_timeout_secs: Some(20),
+            ..AgentConfig::default()
+        };
+        config.model_providers.insert(
+            "boundary-provider".to_string(),
+            crate::config::ModelProviderConfig {
+                name: Some("boundary-provider".to_string()),
+                base_url: Some(format!("http://{addr}/chat/completions")),
+                env_key: None,
+                api_key: Some("boundary-key".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::tool_result("missing", "stale tool output"),
+            ChatMessage::user("hello"),
+        ];
+        let response = AgentClient::new()
+            .chat_completion(&config, &messages, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("ok"));
+        assert_eq!(
+            observed_roles.lock().unwrap().as_slice(),
+            ["system", "user"]
+        );
     }
 }

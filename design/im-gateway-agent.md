@@ -59,6 +59,29 @@ Chat Completions tool calling 的历史不再把 `tool_result` 当作独立可�
 - compaction 输出历史、context overflow trim 后的历史也会 sanitize。
 - 发现修复时写入 warn 日志，包含丢弃的 orphan tool 数和不完整 tool-call 片段数。
 
+### 2026-05-10 重试路径补洞
+
+2026-05-10 在默认数据目录 `~/.bifrost/body_cache/REQ-69ffe7f1-007442_req`、`007505_req`、`007511_req` 中再次发现 400：
+
+```text
+Invalid parameter: messages with role 'tool' must be a response to a preceeding message with 'tool_calls'.
+```
+
+这批请求的直接证据表明：请求体 `messages[1]` 就是孤儿 `role=tool`，其前面没有 `assistant.tool_calls`。同时对应 session JSONL 中当前 turn 的 `tool_call` / `tool_result` 落盘是完整的，因此本次并不是 `load_conversation()` 老恢复链路回归，而是**turn 重试路径复用了首次失败请求前构造的旧 `messages` 快照**。
+
+补丁原则：
+
+- `session.rs` 在 transient retry 前重新执行 `session.build_messages(...)`，确保重试请求基于最新 history 重新裁剪并重新 sanitize，而不是复用失败前的旧快照。
+- `client.rs` 在真正发送 Chat Completions 请求前再做一次 `sanitize_chat_history()` 兜底，防止未来新增调用点绕过上层 invariant。
+- client 边界兜底会记录 `sanitized malformed chat history at client request boundary` warn，便于以后从日志直接定位是否有分支再次泄漏 orphan `tool`。
+- client 边界必须有真实 HTTP 请求体级别回归，证明即使调用方直接传入 `system -> tool -> user`，最终发出的请求也会先移除孤儿 `tool`。
+
+这样可以同时覆盖：
+
+- 首次请求前 history 已被污染但上层遗漏 sanitize；
+- 首次请求失败后 history 发生变化，重试若继续复用旧快照会带入过期非法片段；
+- 未来新增聊天请求路径直接调用 client 而没有经过 `build_messages()`。
+
 ### E2E mock 稳定性
 
 `crates/bifrost-e2e/src/tests/im_gateway_agent.rs` 中的 Chat Completions mock 必须按请求消息状态决定是否返回 `tool_calls`：当请求包含 tools 且最后一条消息不是 `role=tool` 时返回工具调用；当最后一条消息是工具结果时返回普通 stop 响应。
@@ -690,6 +713,7 @@ tracing = "0.1"
 | 配置热更新 | PATCH 配置 → 立即生效 |
 | E2E 启动器服务注入回归 | `ProxyInstance::start_with_admin` 启动后 `/api/im-gateway/agent` 与 `/api/im-gateway/routes` 返回 200，确保测试启动路径与真实 CLI 一样注入 `ImGatewayService` |
 | Agent tool history 恢复回归 | `im_gateway_agent_tool_history_resume_regression` 在长期记忆后台调用存在时仍完成首次工具调用、JSONL 恢复和恢复后再次工具调用 |
+| Agent retry orphan tool 回归 | `im_gateway_agent_retry_sanitizes_orphan_tool_history` 在首次 500 + 历史含孤儿 `tool` 时重试请求仍保持合法消息序列，并继续完成工具调用 |
 | Chat API 长期记忆真实链路 | 运行 `e2e-tests/tests/test_long_term_memory_human_api.sh`，验证 `POST /_bifrost/api/im-gateway/agent/chat` 在真实 Bifrost + mock Chat Completions 下触发自动记忆、Phase 2 consolidation、跨独立 session 消费 |
 | Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
@@ -725,6 +749,22 @@ tracing = "0.1"
 IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模型提供方：真实 CLI 启动和 E2E `ProxyInstance::start_with_admin` 都使用 `ImGatewayService::new_with_agent_proxy_port(data_dir, Some(port))` 创建服务，底层 `AgentClient::new_with_bifrost_proxy_and_ca(port, data_dir/certs/ca.crt)` 会把 Chat Completions 请求代理到 `http://127.0.0.1:<port>`，并只把当前 Bifrost CA 加入 Agent 自己的 reqwest trust store。这样模型请求、响应、状态码和耗时会落入现有 Traffic 记录；对模型域名启用 TLS intercept 时，Agent 不会因为 Bifrost 签发的拦截证书报 `UnknownIssuer`。
 
 库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
+
+## `/agent/chat` `/status` 工作目录语义
+
+`POST /_bifrost/api/im-gateway/agent/chat` 的 `/status` 是 session-free 快速命令，不应进入模型 turn，也不应抢占正在运行的 session。对于 idle session，它仍必须保留普通 chat 请求的 `work_dir` 语义：
+
+1. 如果 session 正在运行，优先返回 active turn status，不修改运行中工作目录。
+2. 如果请求携带非空 `work_dir` 且 session 不存在，创建空 session 并把 status 输出中的 `工作路径` 设置为该请求路径。
+3. 如果 session 已存在且请求携带新的 `work_dir`，使用与普通 chat 相同的 work_dir override 逻辑重初始化 idle session，然后格式化 status。
+4. 如果 session 不存在且请求未携带 `work_dir`，保持“新会话”纯读输出，不额外创建持久 session。
+
+回归覆盖：
+
+- `agent_api_status_detail_applies_work_dir_for_fresh_status_session`
+- `agent_api_status_detail_overrides_existing_idle_session_work_dir`
+- `agent_api_status_detail_keeps_new_session_text_when_no_work_dir_requested`
+- `human_tests/agent-builtin-commands.md` 的 TC-BC-34 通过真实 Admin API 验证新 session `/status` 响应包含请求工作路径。
 
 ## 扩展性考虑
 

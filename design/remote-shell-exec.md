@@ -4785,3 +4785,20 @@ Relay 仅透传路由和连接级字段，不存储或暴露任何审计信息�
 6. **三平台交互能力闭环**：Unix PTY、Windows ConPTY、resize、signal / Ctrl-C、stdin 流式输入、平台专属测试入口全部打通
 
 bifrost-sync-server 优先实现（便于本地调试），验证通过后同步到 bifrost-server-v4。
+
+### 十三、2026-05-10 stdin 早到帧回归修复
+
+`shell.exec` 的 stdin / PTY 输入帧由 caller 通过 encrypted `call_frame` 推送到 target worker。worker 必须在把 call 写入 `active_calls` 前就创建并挂载 stdin channel；否则 caller 在 call_open 后立即发送的首个 stdin frame 会命中 active call 但 `stdin_tx=None`，被误判为“不接受 stdin”并丢弃，远端进程随后可能一直等待输入。
+
+本轮实现约束：
+
+1. `RemoteCommand` 在 `stdin_mode != none` 或 `pty.enabled=true` 时视为接受 stdin。
+2. target worker 在 `active_calls.insert()` 前预先创建 mpsc stdin channel，并把 receiver 移交给 executor task。
+3. executor task 保留 100ms 取消窗口，但该窗口内到达的 stdin frame 会进入 channel buffer，不再丢弃。
+4. 非 stdin / 非 PTY 命令仍不挂载 channel，收到 caller input frame 时继续返回拒绝日志，避免扩大可交互面。
+
+验证计划：
+
+- 单元回归：`active_call_accepts_stdin_before_executor_start` 覆盖 pre-start frame 能进入 channel buffer。
+- 单元回归：`command_accepts_stdin_for_stdin_mode_or_pty` 覆盖 `stdin_mode=stream`、`stdin_mode=none` 和 `pty.enabled=true` 的判定边界。
+- 真实场景：`human_tests/remote-shell-exec.md` 的 TC-RSE-22 使用真实 remote PTY/stdin 链路验证首个 stdin frame 不丢失。

@@ -186,6 +186,7 @@ configure_shell_policies() {
         --mode shell_text \
         --pattern '^(?s:.*)$' \
         --shell /bin/sh \
+        --stdin \
         --timeout-ms 10000 >/dev/null
 
     BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" setting shell policy add \
@@ -289,7 +290,7 @@ pair_and_upgrade_grant() {
     assert_not_empty "$GRANT_ID" "grant_id 不应为空" || return 1
 
     local grant_update_ok=0
-    local update_body='{"grant_scope":"remote_shell_exec","policy_binding":{"mode":"all"},"interactive_allowed":false,"stdin_allowed":false}'
+    local update_body='{"grant_scope":"remote_shell_exec","policy_binding":{"mode":"all"},"interactive_allowed":false,"stdin_allowed":true}'
     for _ in $(seq 1 20); do
         http_patch_json "${CLIENT_ADMIN_URL}/api/remote-invoke/grants/${GRANT_ID}" "$update_body"
         if [[ "$HTTP_STATUS" == "200" ]]; then
@@ -503,6 +504,38 @@ run_argv_streaming_case() {
     rm -f "$argv_log"
 }
 
+run_stdin_first_frame_case() {
+    local prev_started_at stdin_log stdin_exit stdin_output
+
+    log "Running stdin first-frame regression..."
+    prev_started_at="$(latest_shell_exec_started_at)"
+    stdin_log="$(mktemp)"
+
+    if printf 'EARLY_STDIN_OK\n' | BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec \
+        --relay-url "$RELAY_URL" \
+        --client-id "$CLIENT_INSTANCE_SHORT" \
+        --stdin \
+        --shell-text "$PYTHON_BIN -u -c 'import sys; print(\"READY\", flush=True); print(sys.stdin.readline().strip(), flush=True)'" \
+        >"$stdin_log" 2>&1; then
+        stdin_exit=0
+    else
+        stdin_exit=$?
+    fi
+    stdin_output="$(cat "$stdin_log")"
+
+    if [[ "$stdin_exit" -eq 0 ]]; then
+        _log_pass "stdin first-frame command should exit successfully"
+    else
+        _log_fail "stdin first-frame command should exit successfully" "0" "exit=${stdin_exit} output=${stdin_output}"
+        return 1
+    fi
+    assert_body_contains "READY" "$stdin_output" "stdin first-frame command should start remote reader" || return 1
+    assert_body_contains "EARLY_STDIN_OK" "$stdin_output" "stdin first frame should reach remote process" || return 1
+    assert_recent_call_metadata "$prev_started_at" "stream-shell" "shell_text" "stdin-first-frame" || return 1
+
+    rm -f "$stdin_log"
+}
+
 cleanup() {
     if [[ -n "${CALLER_CONNECT_PID:-}" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
@@ -554,6 +587,7 @@ EOF
     pair_and_upgrade_grant
     run_shell_text_streaming_case
     run_argv_streaming_case
+    run_stdin_first_frame_case
 
     print_test_summary
 }
