@@ -695,6 +695,7 @@ tracing = "0.1"
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
 | Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `queue_messages`，验证 turn-end guide drain、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
+| Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
 | Provider agent_config 进入 IM 事件链路 | `im_event_loop_uses_provider_agent_config_for_agent_chat` 创建带 Provider 级 base/developer/user instructions 的新 Provider，注入 IM inbound event，断言 Chat Completions 请求使用 Provider 配置且不泄漏全局 fallback marker |
 
@@ -718,6 +719,7 @@ tracing = "0.1"
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
+| TC-IMA-88 | `/stop` 停止运行中 Agent loop | 同 session 发起长模型请求后发送 `/stop`，验证 stop 请求立即返回 stopped，原 chat 返回停止提示，session 释放后后续 chat 成功 |
 | TC-IMA-53A | 新建 IM Provider 的 agent_config 经 IM 事件链路生效 | Provider 创建时配置 base/developer/user/work_dir 后，IM inbound event 进入 `run_event_loop` 时模型请求使用 Provider 级配置而非全局 fallback |
 
 ## Agent 模型请求代理
@@ -741,6 +743,25 @@ IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模
 - `agent_api_status_detail_overrides_existing_idle_session_work_dir`
 - `agent_api_status_detail_keeps_new_session_text_when_no_work_dir_requested`
 - `human_tests/agent-builtin-commands.md` 的 TC-BC-34 通过真实 Admin API 验证新 session `/status` 响应包含请求工作路径。
+
+## `/agent/chat` `/stop` 停止语义
+
+`POST /_bifrost/api/im-gateway/agent/chat` 收到同 session 的 `/stop` 时，必须作为 session-free 控制命令处理：不等待当前 session lock、不进入模型 turn、不排队。运行中的 `AgentSessionManager` 为每个 active turn 维护 stop signal；`/stop` 只设置该 signal 并立即返回。turn loop 在模型请求、重试等待、工具执行前后检查 signal；命中后返回用户可见的停止提示，标记 goal 为 interrupted，补齐已声明但未执行的 tool result，释放 session。
+
+IM 事件链路也使用同一语义：busy session 收到 `/stop` 时调用 `request_stop(session_key)`，而不是进入 guide 或 queue。空闲 session 收到 `/stop` 返回“当前没有正在执行的 Agent loop”。
+
+边界要求：
+
+1. `/stop` 不清空历史，不修改工作目录，不影响 `/status` 的 active snapshot。
+2. `/stop` 请求本身不抢占 session；正在运行的原 chat 请求会收到“已收到 /stop，正在执行的 Agent loop 已停止。”。
+3. 停止发生在 tool_calls 后时，必须为剩余 tool call 写入取消 tool result，避免恢复后的 OpenAI-compatible history 出现悬空 assistant tool_calls。
+4. session 释放后，同一个 session_key 的后续普通 chat 必须能继续执行。
+
+回归覆盖：
+
+- `session::tests::test_stop_request_cancels_in_flight_model_request`
+- `im_gateway_agent_chat_stop_active_loop`
+- `human_tests/im-gateway-agent.md` 的 TC-IMA-88 通过真实 Admin API 验证 active `/status`、`/stop`、原 chat 停止返回和后续 chat 恢复。
 
 ## 扩展性考虑
 

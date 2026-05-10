@@ -10,6 +10,7 @@ pub enum BuiltinCommand {
     Undo,
     Compact,
     Status,
+    Stop,
     Resume,
     Remember,
     Memories,
@@ -29,6 +30,7 @@ impl BuiltinCommand {
                 | BuiltinCommand::Remember
                 | BuiltinCommand::Memories
                 | BuiltinCommand::Forget
+                | BuiltinCommand::Stop
         )
     }
 }
@@ -71,6 +73,7 @@ impl SlashCommandRouter {
         router.register_builtin("/undo", BuiltinCommand::Undo);
         router.register_builtin("/compact", BuiltinCommand::Compact);
         router.register_builtin("/status", BuiltinCommand::Status);
+        router.register_builtin("/stop", BuiltinCommand::Stop);
         router.register_builtin("/resume", BuiltinCommand::Resume);
         router.register_builtin("/remember", BuiltinCommand::Remember);
         router.register_builtin("/memories", BuiltinCommand::Memories);
@@ -183,6 +186,7 @@ fn builtin_description(cmd: &BuiltinCommand) -> &'static str {
         BuiltinCommand::Undo => "回退最近 N 轮对话（默认 1），用法: /undo [N]",
         BuiltinCommand::Compact => "手动压缩会话历史以节省 token",
         BuiltinCommand::Status => "显示当前会话状态（消息数、token 用量等）",
+        BuiltinCommand::Stop => "立即停止当前正在执行的 Agent loop",
         BuiltinCommand::Resume => "恢复最近一次保存的会话历史",
         BuiltinCommand::Remember => "保存一条长期记忆，用法: /remember <text>",
         BuiltinCommand::Memories => "列出当前可见的所有长期记忆",
@@ -265,6 +269,7 @@ mod tests {
         assert!(text.contains("/undo"));
         assert!(text.contains("/compact"));
         assert!(text.contains("/status"));
+        assert!(text.contains("/stop"));
         assert!(text.contains("/resume"));
         assert!(text.contains("/remember"));
         assert!(text.contains("/memories"));

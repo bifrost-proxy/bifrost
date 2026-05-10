@@ -1499,3 +1499,27 @@ rm -rf ./.bifrost-test
   - 删除本用例创建的临时 `BIFROST_DATA_DIR`。
   - 清理浏览器测试会话。
 - **执行记录（2026-05-06）**: PASS — 执行 `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat` 通过，测试构造 7 张图片的 IM event，验证进入模型请求的 `image_url` content part 被截断为 6 张；执行 `pnpm --dir web exec tsc --noEmit` 通过，验证 Session 详情图片缩略图改用 Ant Design `Image.PreviewGroup` 后类型检查通过，active/history 图片均可点击触发内置放大预览。
+
+### TC-IMA-88: `/stop` 停止运行中 Agent loop
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动真实 Bifrost Admin，启动参数必须包含 `--no-system-proxy`。
+  - Agent 已启用，模型 Provider 指向一个 OpenAI-compatible mock Chat Completions 服务。
+  - mock 服务在收到包含 `AGENT_STOP_E2E` 的请求时延迟响应，用于制造正在执行的 active loop。
+- **操作步骤**:
+  1. PATCH `/_bifrost/api/im-gateway/agent`，启用 Agent，设置 `model_provider=mock`、`request_timeout_secs=60`、关闭 memories。
+  2. 通过 `POST /_bifrost/api/im-gateway/agent/chat` 使用 `session_key=stop-loop-e2e` 发送 `AGENT_STOP_E2E please keep this model request open`，保持请求运行。
+  3. 在 mock 确认已收到模型请求后，用同一 `session_key` 调用 `/agent/chat`，message 为 `/status`。
+  4. 用同一 `session_key` 调用 `/agent/chat`，message 为 `/stop`。
+  5. 等待第 2 步的原始 chat 请求返回。
+  6. 再用同一 `session_key` 发送一条普通 chat，确认 session 已释放且后续对话可继续。
+- **预期结果**:
+  - 第 3 步 `/status` 返回 `success=true` 且包含 `active_status`，说明 session 正在运行。
+  - 第 4 步 `/stop` 立即返回 `success=true`、`stopped=true`，不排队、不等待原始 chat 完成。
+  - 第 2 步原始 chat 在 `/stop` 后快速返回，response 包含 `/stop` 停止提示。
+  - 第 6 步普通 chat 返回 `success=true`，证明 active session 已释放且没有卡死。
+  - 停止过程不修改系统代理，不使用本机默认 `~/.bifrost` 数据目录。
+- **清理步骤**:
+  - 停止 Bifrost 进程和 mock 服务。
+  - 删除本用例创建的临时 `BIFROST_DATA_DIR` 与 E2E target 目录（如适用）。
+- **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && CARGO_TARGET_DIR=target/agent-stop-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_stop_active_loop --test-timeout 120 --port 18886` 通过。用例启动真实 Admin + mock Chat Completions，发起包含 `AGENT_STOP_E2E` 的长请求；同 session `/status` 返回 `active_status`；同 session `/stop` 返回 `stopped=true`；原 chat 快速返回包含 `/stop` 的停止提示；随后同 session 普通 chat 返回 `success=true`。
