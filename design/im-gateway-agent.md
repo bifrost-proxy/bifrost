@@ -726,6 +726,22 @@ IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模
 
 库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
 
+## `/agent/chat` `/status` 工作目录语义
+
+`POST /_bifrost/api/im-gateway/agent/chat` 的 `/status` 是 session-free 快速命令，不应进入模型 turn，也不应抢占正在运行的 session。对于 idle session，它仍必须保留普通 chat 请求的 `work_dir` 语义：
+
+1. 如果 session 正在运行，优先返回 active turn status，不修改运行中工作目录。
+2. 如果请求携带非空 `work_dir` 且 session 不存在，创建空 session 并把 status 输出中的 `工作路径` 设置为该请求路径。
+3. 如果 session 已存在且请求携带新的 `work_dir`，使用与普通 chat 相同的 work_dir override 逻辑重初始化 idle session，然后格式化 status。
+4. 如果 session 不存在且请求未携带 `work_dir`，保持“新会话”纯读输出，不额外创建持久 session。
+
+回归覆盖：
+
+- `agent_api_status_detail_applies_work_dir_for_fresh_status_session`
+- `agent_api_status_detail_overrides_existing_idle_session_work_dir`
+- `agent_api_status_detail_keeps_new_session_text_when_no_work_dir_requested`
+- `human_tests/agent-builtin-commands.md` 的 TC-BC-34 通过真实 Admin API 验证新 session `/status` 响应包含请求工作路径。
+
 ## 扩展性考虑
 
 ### 未来可能的功能扩展

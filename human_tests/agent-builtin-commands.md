@@ -476,6 +476,28 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 
 **本次执行结果**：通过。2026-05-08 执行 `cargo test -p bifrost-agent compact::tests::test_compaction_retries_transient_error_using_provider_budget -- --nocapture`，结果 `1 passed`；执行 `cargo test -p bifrost-agent compact::tests:: -- --nocapture`，结果 `20 passed`。真实 `compact_session` 回归中 mock provider 第一次返回 `500 temporary server error`，第二次返回 summary；断言发生两次 summary 请求，第二次请求未裁剪 history，仍保留 `base instructions`、真实 user message 和末尾 `COMPACTION_PROMPT`，最终 session replacement history 正常安装 summary。
 
+### TC-BC-34: 回归 - `/agent/chat` 首条 `/status` 保留请求 work_dir
+
+**背景**：`POST /_bifrost/api/im-gateway/agent/chat` 的 `/status` fast path 不进入模型 turn，但 API 调用者仍可能在首条请求或 idle session 状态查询中传入 `work_dir`。fast path 必须使用与普通 chat 相同的 idle session work_dir override 语义，否则 status 响应会显示“新会话”且丢失请求工作路径。
+
+**操作步骤**：
+1. 使用当前源码启动 Bifrost，必须设置临时 `BIFROST_DATA_DIR` 并携带 `--no-system-proxy`：
+   `BIFROST_DATA_DIR=<tmp> cargo run --bin bifrost -- start -p <port> --unsafe-ssl --no-system-proxy`。
+2. 通过 Admin API 启用 Agent：
+   `curl -sS -X PATCH http://127.0.0.1:<port>/_bifrost/api/im-gateway/agent -H 'Content-Type: application/json' -d '{"enabled":true}'`。
+3. 发送首条 `/status` chat 请求，携带新 session 和工作目录：
+   `curl -sS -X POST http://127.0.0.1:<port>/_bifrost/api/im-gateway/agent/chat -H 'Content-Type: application/json' -d '{"session_key":"status-workdir-human","message":"/status","work_dir":"/tmp/bifrost-status-human"}'`。
+4. 再发送同一 session 的 `/status`，携带新的工作目录：
+   `curl -sS -X POST http://127.0.0.1:<port>/_bifrost/api/im-gateway/agent/chat -H 'Content-Type: application/json' -d '{"session_key":"status-workdir-human","message":"/status","work_dir":"/tmp/bifrost-status-human-2"}'`。
+
+**预期结果**：
+- 两次响应均为 `success=true`。
+- 第一次响应 `response` 包含 `工作路径: /tmp/bifrost-status-human`，证明首条 `/status` 创建的 idle status session 没有丢失请求 work_dir。
+- 第二次响应 `response` 包含 `工作路径: /tmp/bifrost-status-human-2`，证明 idle session 的 work_dir override 仍生效。
+- 请求不触发模型调用，不需要配置真实模型 key。
+
+**本次执行结果**：通过。2026-05-10 使用临时数据目录和当前源码执行 `BIFROST_DATA_DIR=<tmp> cargo run --bin bifrost -- start -p 63323 --unsafe-ssl --no-system-proxy`，等待 `/_bifrost/api/proxy/address` ready 后 PATCH 启用 Agent。第一次真实 Admin API 请求 `POST /_bifrost/api/im-gateway/agent/chat`，body 为 `{"session_key":"status-workdir-human","message":"/status","work_dir":"/tmp/bifrost-status-human"}`，响应 `success=true` 且 `response` 前两行包含 `会话状态:` / `- 工作路径: /tmp/bifrost-status-human`。第二次同 session 请求携带 `work_dir=/tmp/bifrost-status-human-2`，响应 `success=true` 且 `response` 包含 `- 工作路径: /tmp/bifrost-status-human-2`。验证 `/status` fast path 不进入模型调用也能保留首条和覆盖后的请求工作目录；临时服务和数据目录已清理。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务
