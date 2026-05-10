@@ -57,6 +57,89 @@ impl ShellTool {
             ("bash", "-lc")
         }
     }
+
+    fn persistent_session_guard(command: &str) -> Option<String> {
+        if !looks_like_persistent_session_command(command) {
+            return None;
+        }
+
+        Some(
+            "blocked: `shell` is only for short, non-interactive commands. \
+Commands that are long-running, interactive, TUI/readline-based, delegated \
+agent tasks, or waiting for stdin must use `shell_pty` with \
+`wait_for_completion=false`, then `write_stdin` to observe output, send input, \
+or cancel the session. Example tool arguments: \
+{\"command\":\"<interactive-or-long-running command>\",\
+\"wait_for_completion\":false,\"yield_time_ms\":1000}"
+                .to_string(),
+        )
+    }
+}
+
+fn looks_like_persistent_session_command(command: &str) -> bool {
+    command.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if is_short_probe(&lower) {
+            return false;
+        }
+        let first_word = lower
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| c == '(' || c == '{' || c == ';');
+        matches!(
+            first_word,
+            "codex"
+                | "ssh"
+                | "sftp"
+                | "ftp"
+                | "vim"
+                | "vi"
+                | "nvim"
+                | "less"
+                | "more"
+                | "top"
+                | "htop"
+                | "watch"
+        ) || lower.contains(" codex exec")
+            || lower.contains(" codex review")
+            || ((first_word == "python" || first_word == "python3")
+                && (lower.contains(" -i")
+                    || lower.contains("input(")
+                    || lower.contains("readline")))
+            || (first_word == "node" && lower.contains(" -i"))
+            || matches!(first_word, "bash" | "zsh" | "fish" | "sh")
+                && lower.split_whitespace().count() == 1
+            || (first_word == "tail" && lower.contains(" -f"))
+            || lower.starts_with("npm run dev")
+            || lower.contains(" npm run dev")
+            || lower.starts_with("pnpm dev")
+            || lower.contains(" pnpm dev")
+            || lower.starts_with("yarn dev")
+            || lower.contains(" yarn dev")
+            || lower.starts_with("cargo watch")
+            || lower.contains(" cargo watch")
+            || lower.contains(" --watch")
+            || lower.contains(" read -")
+            || lower.contains(" read ")
+            || lower.contains("input(")
+            || lower.contains("readline")
+    })
+}
+
+fn is_short_probe(lower_line: &str) -> bool {
+    lower_line.contains("command -v codex")
+        || lower_line.contains("which codex")
+        || lower_line.contains("--help")
+        || lower_line.contains("codex --help")
+        || lower_line.contains("codex -h")
+        || lower_line.contains("codex help")
+        || lower_line.contains("codex --version")
+        || lower_line.contains("codex -v")
 }
 
 #[derive(Deserialize)]
@@ -73,7 +156,7 @@ impl ToolHandler for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. Auto-detects zsh/bash based on system. Returns stdout, stderr, and exit code. Use for running scripts, installing packages, compilation, file operations, searching (use `rg` for grep), etc."
+        "Execute a short, non-interactive shell command. Auto-detects zsh/bash based on system. Returns stdout, stderr, and exit code. Use for scripts, compilation, file operations, searching (use `rg` for grep), and help/version probes. Do not use `shell` for commands that are long-running, TUI/readline-based, foreground interactive, delegated agent-style tasks, or waiting for stdin; use `shell_pty` with `wait_for_completion=false` and then `write_stdin` instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -103,6 +186,18 @@ impl ToolHandler for ShellTool {
                 }
             }
         };
+
+        if let Some(output) = Self::persistent_session_guard(&args.command) {
+            warn!(
+                command = %args.command,
+                cwd = %work_dir.display(),
+                "refusing persistent session command through blocking shell tool"
+            );
+            return ToolResult {
+                success: false,
+                output,
+            };
+        }
 
         let timeout_duration = Duration::from_secs(args.timeout.unwrap_or(self.timeout_secs));
         let (shell, flag) = Self::detect_shell();
@@ -307,5 +402,34 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("stdout_text"));
         assert!(result.output.contains("stderr_text"));
+    }
+
+    #[test]
+    fn test_short_probes_are_allowed_in_shell() {
+        assert!(ShellTool::persistent_session_guard("which codex && codex --help").is_none());
+        assert!(ShellTool::persistent_session_guard("codex exec review --help").is_none());
+        assert!(ShellTool::persistent_session_guard("python3 --version").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_shell_rejects_persistent_session_commands() {
+        let tool = ShellTool::new(30);
+        let args = serde_json::json!({
+            "command": "mkdir -p .codex-review && codex exec review --base origin/main"
+        });
+        let result = tool.execute(&args.to_string(), Path::new("/tmp")).await;
+        assert!(!result.success);
+        assert!(result.output.contains("shell_pty"));
+        assert!(result.output.contains("wait_for_completion=false"));
+        assert!(result.output.contains("write_stdin"));
+    }
+
+    #[test]
+    fn test_shell_detects_generic_interactive_and_long_running_commands() {
+        assert!(ShellTool::persistent_session_guard("ssh host.example.com").is_some());
+        assert!(ShellTool::persistent_session_guard("python3 -i").is_some());
+        assert!(ShellTool::persistent_session_guard("python3 -c 'name = input()'").is_some());
+        assert!(ShellTool::persistent_session_guard("npm run dev").is_some());
+        assert!(ShellTool::persistent_session_guard("python3 -c 'print(1)'").is_none());
     }
 }

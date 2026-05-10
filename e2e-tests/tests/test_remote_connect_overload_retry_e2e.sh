@@ -46,6 +46,13 @@ trap cleanup EXIT
 
 log() { echo "[remote-connect-overload-e2e] $*"; }
 
+truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 wait_for_server() {
     local waited=0
     while [[ $waited -lt 30 ]]; do
@@ -166,10 +173,14 @@ PY
     wait_for_server
 }
 
-log "Build bifrost (release)..."
-(cd "$ROOT_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+if truthy "${SKIP_BUILD:-false}"; then
+    log "Use existing bifrost binary at $BIFROST_BIN (SKIP_BUILD=true)..."
+else
+    log "Build bifrost (release)..."
+    (cd "$ROOT_DIR" && SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost >/dev/null 2>&1)
+fi
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" ]]; then
     echo "bifrost binary not found at $BIFROST_BIN" >&2
     exit 1

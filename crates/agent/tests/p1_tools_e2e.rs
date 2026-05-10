@@ -196,7 +196,7 @@ async fn exec_command_tool_works_end_to_end() {
         .execute(
             "exec_command",
             &serde_json::json!({
-                "cmd": "python3 -u -c 'import sys; print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
+                "cmd": "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
                 "tty": true,
                 "yield_time_ms": 5000,
             })
@@ -205,6 +205,7 @@ async fn exec_command_tool_works_end_to_end() {
         )
         .await;
     assert!(interactive.success, "{}", interactive.output);
+    assert!(interactive.output.contains("True True"));
     assert!(interactive.output.contains("exec-ready"));
     let session_id = session_id_from_exec_json(&interactive.output);
 
@@ -223,6 +224,58 @@ async fn exec_command_tool_works_end_to_end() {
         .await;
     assert!(stdin_result.success, "{}", stdin_result.output);
     assert!(stdin_result.output.contains("hello exec"));
+}
+
+#[tokio::test]
+#[ignore = "requires a locally installed and authenticated Codex CLI; run manually for real PTY regression"]
+async fn codex_cli_interactive_starts_in_real_pty() {
+    let registry = ToolRegistry::with_defaults(10);
+    let work_dir = tempfile::tempdir().expect("work dir");
+
+    let started = registry
+        .execute(
+            "exec_command",
+            &serde_json::json!({
+                "cmd": "codex --sandbox read-only",
+                "tty": true,
+                "yield_time_ms": 3000,
+                "max_output_tokens": 4000,
+            })
+            .to_string(),
+            work_dir.path(),
+        )
+        .await;
+    assert!(started.success, "{}", started.output);
+    let started_json: serde_json::Value =
+        serde_json::from_str(&started.output).expect("codex exec json");
+    let output = started_json["output"].as_str().unwrap_or("");
+    assert!(
+        output.contains("Codex")
+            || output.contains("codex")
+            || output.contains("login")
+            || output.contains("OpenAI"),
+        "{}",
+        started_json
+    );
+    let session_id = started_json["session_id"]
+        .as_str()
+        .expect("codex session id")
+        .to_string();
+
+    let interrupted = registry
+        .execute(
+            "write_stdin",
+            &serde_json::json!({
+                "session_id": session_id,
+                "chars": "\u{3}",
+                "yield_time_ms": 1000,
+                "max_output_tokens": 1000,
+            })
+            .to_string(),
+            work_dir.path(),
+        )
+        .await;
+    assert!(interrupted.success, "{}", interrupted.output);
 }
 
 #[tokio::test]

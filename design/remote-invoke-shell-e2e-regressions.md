@@ -36,6 +36,18 @@
 
 这些脚本只验证 connect 成功/失败与 relay URL 选择，不需要完整执行远程命令，因此使用固定有效的 X25519 公钥即可。
 
+### 1.1 CI `--skip-build` 下禁止重复 release 编译
+
+2026-05-10 CI 复测发现 `test_remote_connect_overload_retry_e2e.sh` 在 macOS shell shard 3 中超过 900s。日志显示脚本一直停在 `Build bifrost (release)...`，而 workflow 已经从 `build-cli-macos-aarch64` 下载了 `target/release/bifrost`，并通过 `scripts/ci/run-e2e-shell.sh` 以 `--skip-build` 运行 shell 套件。
+
+该脚本现在遵循统一 E2E 约定：
+
+- 当 `SKIP_BUILD=true` 时，直接使用 `BIFROST_BIN` 或默认 `target/release/bifrost`
+- 如果指定二进制不存在或不可执行，快速失败并输出明确路径
+- 只有未设置 `SKIP_BUILD` 时才本地执行 `cargo build --release --bin bifrost`
+
+这样 macOS shard 不再在已下载 release artifact 后重复进行昂贵 release 编译。
+
 ### 2. 修复 SSH E2E 调用路径
 
 更新 `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：
@@ -112,6 +124,7 @@
 
 - `bash e2e-tests/tests/test_remote_invoke_e2e.sh`
 - `bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
+- `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`
 - `bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
 - `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`
 - `bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`

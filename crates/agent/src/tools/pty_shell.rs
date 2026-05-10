@@ -1,4 +1,4 @@
-//! PTY-like shell execution with persistent sessions.
+//! PTY/PTY-like shell execution with persistent sessions.
 //!
 //! Provides two tools:
 //! - `shell_pty`: Execute commands in persistent shell sessions with session reuse
@@ -6,15 +6,18 @@
 //!
 //! Sessions are managed by `PtySessionManager` which maintains active shell processes
 //! that can be reused across multiple tool invocations. Commands are sent via stdin
-//! with a sentinel marker to detect completion, providing PTY-like interactive behavior
-//! without requiring actual PTY allocation dependencies.
+//! with a sentinel marker to detect completion. `exec_command` uses the real PTY
+//! backend when `tty=true`; plain pipe sessions remain available for existing
+//! non-TTY command execution.
 
 use crate::tools::head_tail_buffer::HeadTailBuffer;
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,14 +28,22 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-/// A persistent shell session with piped stdin/stdout/stderr.
+enum PtySessionBackend {
+    Pipe {
+        child: Mutex<Child>,
+        stdin: Mutex<ChildStdin>,
+    },
+    RealPty {
+        child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+        writer: Mutex<Box<dyn Write + Send>>,
+    },
+}
+
+/// A persistent shell session with either piped stdio or a real PTY.
 pub struct PtySession {
     /// Unique identifier for this session.
     pub session_id: String,
-    /// The shell child process.
-    child: Mutex<Child>,
-    /// Stdin handle for writing commands.
-    stdin: Mutex<ChildStdin>,
+    backend: PtySessionBackend,
     /// Buffered stdout output since last read.
     stdout_buffer: Mutex<HeadTailBuffer>,
     /// Buffered stderr output since last read.
@@ -61,7 +72,12 @@ impl PtySessionManager {
 
     /// Create a new persistent shell session in the given working directory.
     pub fn create_session(&self, work_dir: &Path) -> Result<Arc<PtySession>, String> {
-        create_session_internal(self, work_dir)
+        create_session_internal(self, work_dir, false)
+    }
+
+    /// Create a new real PTY-backed persistent shell session.
+    pub fn create_real_pty_session(&self, work_dir: &Path) -> Result<Arc<PtySession>, String> {
+        create_session_internal(self, work_dir, true)
     }
 
     /// Get an existing session by ID.
@@ -112,6 +128,8 @@ struct PtyShellArgs {
     yield_time_ms: Option<u64>,
     #[serde(default)]
     wait_for_completion: Option<bool>,
+    #[serde(default)]
+    real_pty: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -171,7 +189,7 @@ impl ToolHandler for PtyShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a command in a persistent PTY-like shell session. Sessions persist across calls, allowing stateful interactions (cd, environment variables, running processes). Returns a session_id for reuse."
+        "Execute a command in a persistent PTY-like shell session. Use this for long-running foreground commands, servers/watchers, TUI/readline programs, interactive CLIs, delegated agent-style tasks, and commands that wait for stdin. Sessions persist across calls, allowing stateful interactions (cd, environment variables, running processes). For foreground programs that should remain observable, set `wait_for_completion=false`, keep the returned `session_id`, and continue with `write_stdin`."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -196,7 +214,7 @@ impl ToolHandler for PtyShellTool {
                 },
                 "wait_for_completion": {
                     "type": "boolean",
-                    "description": "Whether to wait for the command to finish via sentinel detection. Set false for interactive foreground programs that will be driven later via write_stdin."
+                    "description": "Whether to wait for the command to finish via sentinel detection. Set false for long-running, interactive, stdin-waiting, or delegated foreground programs that will be observed or driven later via write_stdin."
                 }
             },
             "required": ["command"]
@@ -218,6 +236,8 @@ impl ToolHandler for PtyShellTool {
         let yield_time_ms = args.yield_time_ms.unwrap_or(500);
         let wait_for_completion = args.wait_for_completion.unwrap_or(true);
 
+        let real_pty = args.real_pty.unwrap_or(false);
+
         // Get or create session.
         let session = if let Some(ref sid) = args.session_id {
             match self.session_manager.get_session(sid) {
@@ -230,7 +250,7 @@ impl ToolHandler for PtyShellTool {
                 }
             }
         } else {
-            match create_session_internal(&self.session_manager, work_dir) {
+            match create_session_internal(&self.session_manager, work_dir, real_pty) {
                 Ok(s) => s,
                 Err(e) => {
                     return ToolResult {
@@ -270,7 +290,6 @@ impl ToolHandler for PtyShellTool {
 
         // Write command + sentinel echo to stdin.
         {
-            let mut stdin = session.stdin.lock().await;
             let cmd_str = if wait_for_completion {
                 format!(
                     "{}\n__bifrost_exit_code=$?\nprintf '%s:%s\\n' '{}' \"$__bifrost_exit_code\"\n",
@@ -279,16 +298,10 @@ impl ToolHandler for PtyShellTool {
             } else {
                 format!("{}\n", args.command)
             };
-            if let Err(e) = stdin.write_all(cmd_str.as_bytes()).await {
+            if let Err(e) = session.write_all(cmd_str.as_bytes()).await {
                 return ToolResult {
                     success: false,
                     output: format!("failed to write to session stdin: {e}"),
-                };
-            }
-            if let Err(e) = stdin.flush().await {
-                return ToolResult {
-                    success: false,
-                    output: format!("failed to flush session stdin: {e}"),
                 };
             }
         }
@@ -473,17 +486,10 @@ impl ToolHandler for WriteStdinTool {
 
         // Write input to stdin.
         if !input.is_empty() {
-            let mut stdin = session.stdin.lock().await;
-            if let Err(e) = stdin.write_all(input.as_bytes()).await {
+            if let Err(e) = session.write_all(input.as_bytes()).await {
                 return ToolResult {
                     success: false,
                     output: format!("failed to write to session stdin: {e}"),
-                };
-            }
-            if let Err(e) = stdin.flush().await {
-                return ToolResult {
-                    success: false,
-                    output: format!("failed to flush session stdin: {e}"),
                 };
             }
         }
@@ -557,7 +563,12 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
 fn create_session_internal(
     manager: &PtySessionManager,
     work_dir: &Path,
+    real_pty: bool,
 ) -> Result<Arc<PtySession>, String> {
+    if real_pty {
+        return create_real_pty_session_internal(manager, work_dir);
+    }
+
     let shell = detect_shell();
     let session_id = Uuid::new_v4().to_string();
 
@@ -596,8 +607,10 @@ fn create_session_internal(
 
     let session = Arc::new(PtySession {
         session_id: session_id.clone(),
-        child: Mutex::new(child),
-        stdin: Mutex::new(stdin),
+        backend: PtySessionBackend::Pipe {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+        },
         stdout_buffer: Mutex::new(HeadTailBuffer::default()),
         stderr_buffer: Mutex::new(HeadTailBuffer::default()),
         created_at: Instant::now(),
@@ -649,6 +662,89 @@ fn create_session_internal(
     Ok(session)
 }
 
+fn create_real_pty_session_internal(
+    manager: &PtySessionManager,
+    work_dir: &Path,
+) -> Result<Arc<PtySession>, String> {
+    let shell = detect_shell();
+    let session_id = Uuid::new_v4().to_string();
+
+    info!(
+        session_id = %session_id,
+        shell = shell.program,
+        cwd = %work_dir.display(),
+        "creating new real PTY session"
+    );
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("failed to open PTY: {e}"))?;
+
+    let mut command = CommandBuilder::new(shell.program);
+    command.args(shell.args);
+    command.cwd(work_dir.as_os_str());
+    command.env_remove("BASH_ENV");
+    command.env_remove("ENV");
+    command.env("TERM", "xterm-256color");
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| format!("failed to spawn shell in PTY: {e}"))?;
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("failed to clone PTY reader: {e}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("failed to take PTY writer: {e}"))?;
+
+    let session = Arc::new(PtySession {
+        session_id: session_id.clone(),
+        backend: PtySessionBackend::RealPty {
+            child: Mutex::new(child),
+            writer: Mutex::new(writer),
+        },
+        stdout_buffer: Mutex::new(HeadTailBuffer::default()),
+        stderr_buffer: Mutex::new(HeadTailBuffer::default()),
+        created_at: Instant::now(),
+    });
+
+    let session_stdout = session.clone();
+    std::thread::Builder::new()
+        .name(format!("bifrost-pty-reader-{session_id}"))
+        .spawn(move || {
+            let mut chunk = vec![0_u8; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut buf = session_stdout.stdout_buffer.blocking_lock();
+                        buf.push_chunk(chunk[..n].to_vec());
+                    }
+                    Err(error) => {
+                        debug!(%session_stdout.session_id, ?error, "PTY reader thread errored");
+                        break;
+                    }
+                }
+            }
+            debug!("PTY reader thread ended for session");
+        })
+        .map_err(|e| format!("failed to spawn PTY reader thread: {e}"))?;
+
+    manager.sessions.insert(session_id, session.clone());
+    Ok(session)
+}
+
 impl PtySession {
     /// Get the session's age.
     pub fn age(&self) -> Duration {
@@ -657,14 +753,46 @@ impl PtySession {
 
     /// Check if the session's child process is still running.
     pub async fn is_alive(&self) -> bool {
-        let mut child = self.child.lock().await;
-        matches!(child.try_wait(), Ok(None))
+        match &self.backend {
+            PtySessionBackend::Pipe { child, .. } => {
+                let mut child = child.lock().await;
+                matches!(child.try_wait(), Ok(None))
+            }
+            PtySessionBackend::RealPty { child, .. } => {
+                let mut child = child.lock().await;
+                matches!(child.try_wait(), Ok(None))
+            }
+        }
     }
 
     /// Kill the session's child process.
     pub async fn kill(&self) {
-        let mut child = self.child.lock().await;
-        let _ = child.kill().await;
+        match &self.backend {
+            PtySessionBackend::Pipe { child, .. } => {
+                let mut child = child.lock().await;
+                let _ = child.kill().await;
+            }
+            PtySessionBackend::RealPty { child, .. } => {
+                let mut child = child.lock().await;
+                let _ = child.kill();
+            }
+        }
+    }
+
+    async fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
+        match &self.backend {
+            PtySessionBackend::Pipe { stdin, .. } => {
+                let mut stdin = stdin.lock().await;
+                stdin.write_all(bytes).await?;
+                stdin.flush().await
+            }
+            PtySessionBackend::RealPty { writer, .. } => {
+                let bytes = bytes.to_vec();
+                let mut writer = writer.lock().await;
+                writer.write_all(&bytes)?;
+                writer.flush()
+            }
+        }
     }
 }
 
@@ -688,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_manager_create_and_get() {
         let manager = PtySessionManager::new();
-        let session = create_session_internal(&manager, &tmp_dir()).unwrap();
+        let session = create_session_internal(&manager, &tmp_dir(), false).unwrap();
         let session_id = session.session_id.clone();
 
         let retrieved = manager.get_session(&session_id);
@@ -702,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_manager_remove() {
         let manager = PtySessionManager::new();
-        let session = create_session_internal(&manager, &tmp_dir()).unwrap();
+        let session = create_session_internal(&manager, &tmp_dir(), false).unwrap();
         let session_id = session.session_id.clone();
 
         let removed = manager.remove_session(&session_id);
@@ -859,7 +987,7 @@ mod tests {
         for _ in 0..4 {
             let mgr = manager.clone();
             let handle = tokio::spawn(async move {
-                let session = create_session_internal(&mgr, &PathBuf::from("/tmp")).unwrap();
+                let session = create_session_internal(&mgr, &PathBuf::from("/tmp"), false).unwrap();
                 session.session_id.clone()
             });
             handles.push(handle);
@@ -932,7 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_is_alive() {
         let manager = PtySessionManager::new();
-        let session = create_session_internal(&manager, &tmp_dir()).unwrap();
+        let session = create_session_internal(&manager, &tmp_dir(), false).unwrap();
 
         assert!(session.is_alive().await);
 

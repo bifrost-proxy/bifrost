@@ -57,7 +57,7 @@ impl ToolHandler for ExecCommandTool {
     }
 
     fn description(&self) -> &str {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. Set `tty=true` for interactive commands. In Bifrost Agent, prefer `shell_pty` with `wait_for_completion=false` plus `write_stdin` when the user needs a persistent foreground session, long-running observation, stdin forwarding, or delegated agent-style command."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -142,13 +142,15 @@ impl ToolHandler for ExecCommandTool {
         };
 
         let wait_for_completion = !args.tty.unwrap_or(false);
+        let real_pty = args.tty.unwrap_or(false);
         let timeout_secs = self.timeout_secs;
         let yield_time_ms = args.yield_time_ms.unwrap_or(1000);
         let pty_args = json!({
             "command": command_for_shell(args.shell.as_deref(), &args.cmd),
             "timeout": timeout_secs,
             "yield_time_ms": yield_time_ms,
-            "wait_for_completion": wait_for_completion
+            "wait_for_completion": wait_for_completion,
+            "real_pty": real_pty
         });
 
         let start = Instant::now();
@@ -291,6 +293,33 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(value["exit_code"], 0);
         assert_eq!(value["output"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_exec_command_tty_reports_isatty_true() {
+        let manager = Arc::new(PtySessionManager::new());
+        let tool = ExecCommandTool::new(5, manager);
+        let dir = tempdir().unwrap();
+        let result = tool
+            .execute(
+                r#"{"cmd":"python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'","tty":true,"yield_time_ms":500}"#,
+                dir.path(),
+            )
+            .await;
+        assert!(result.success, "{}", result.output);
+        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert!(
+            value["output"].as_str().unwrap_or("").contains("True True"),
+            "{}",
+            value
+        );
+        assert!(
+            value["session_id"]
+                .as_str()
+                .is_some_and(|sid| !sid.is_empty()),
+            "{}",
+            value
+        );
     }
 
     #[test]

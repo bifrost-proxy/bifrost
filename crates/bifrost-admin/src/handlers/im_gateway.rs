@@ -3630,6 +3630,31 @@ async fn handle_agent(
         );
 
         // ── Session-free command fast path ──────────────────────────────
+        if body.message.trim() == "/status" {
+            if let Some(status) = service
+                .agent_session_manager
+                .get_active_turn_status(&session_key)
+            {
+                return json_response(&serde_json::json!({
+                    "success": true,
+                    "response": bifrost_agent::format_active_turn_status_text(&status),
+                    "active_status": status,
+                    "tool_calls": [],
+                    "plan_steps": null
+                }));
+            }
+            let detail = service
+                .agent_session_manager
+                .get_session_detail(&session_key);
+            let response = build_agent_api_status_text(detail.as_ref(), &config);
+            return json_response(&serde_json::json!({
+                "success": true,
+                "response": response,
+                "tool_calls": [],
+                "plan_steps": null
+            }));
+        }
+
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
         {
@@ -3648,26 +3673,12 @@ async fn handle_agent(
         {
             Some(s) => s,
             None => {
-                if body.message.trim() == "/status" {
-                    if let Some(status) = service
-                        .agent_session_manager
-                        .get_active_turn_status(&session_key)
-                    {
-                        return json_response(&serde_json::json!({
-                            "success": true,
-                            "response": bifrost_agent::format_active_turn_status_text(&status),
-                            "active_status": status,
-                            "tool_calls": [],
-                            "plan_steps": null
-                        }));
-                    }
-                }
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
                     "tool_calls": [],
                     "plan_steps": null
-                }));
+                }))
             }
         };
         session.source = "api".to_string();
@@ -4260,6 +4271,43 @@ fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
                 d.compaction_count,
                 d.history_version,
                 goal_info
+            )
+        }
+        None => {
+            "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
+        }
+    }
+}
+
+fn build_agent_api_status_text(
+    detail: Option<&SessionDetail>,
+    config: &bifrost_agent::config::AgentConfig,
+) -> String {
+    match detail {
+        Some(d) => {
+            let real = d
+                .total_tokens_used
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            let context_window = config
+                .model_context_window
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(bifrost_agent::config::AgentConfig::DEFAULT_MODEL_CONTEXT_WINDOW as u32);
+            let context_percent =
+                ((d.estimated_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0;
+            let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
+            format!(
+                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: 0",
+                work_dir,
+                d.message_count,
+                d.estimated_tokens,
+                real,
+                d.estimated_tokens,
+                context_window,
+                context_percent,
+                d.compaction_count,
+                d.history_version,
             )
         }
         None => {

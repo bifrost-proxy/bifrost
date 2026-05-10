@@ -219,6 +219,8 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 1. mock provider 返回较小 `usage.total_tokens = 17`。
 2. 工具调用产生大体积输出并进入第二轮模型请求。
 3. 运行中 `/status` 断言：
+   - 首轮长模型请求启动后，脚本轮询到真实 `active_status` 再做断言，避免固定 sleep 在 CI 并发调度下抢跑。
+   - 如果 `/status` 在业务请求之前误创建了空闲 session，后续带 `work_dir` 的 turn 必须覆盖该 session 的工作路径并重置上下文。
    - `active_status.current_loop_iteration == 2`
    - `active_status.last_response_tokens == 17`
    - `active_status.estimated_context_tokens > 10017`
@@ -261,6 +263,15 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 8. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 9. `cargo test --workspace --all-features`
 10. 按修改范围执行 `bash scripts/ci/local-ci.sh --skip-e2e`，并用上面的 targeted E2E 覆盖受影响链路。
+
+## 本轮验证结果（2026-05-10）
+
+GitHub Actions `E2E Shell (Linux, shard 1/3)` 暴露首轮 `/status` 采样竞态：固定 `sleep 0.8` 可能先于业务 chat 请求创建空闲 session，导致后续 `work_dir` 丢失并显示 `N/A`。本轮修复：
+
+1. `AgentSessionManager::{take_session_with_work_dir,try_take_session_with_work_dir}` 对已存在 session 也应用显式 `work_dir` override；如果此前只是 `/status` 误创建的空 session，会重置到新的工作目录。
+2. `POST /_bifrost/api/im-gateway/agent/chat` 的 `/status` 改为纯读路径：读取 active status 或 idle session detail；查不到 session 时返回"新会话"，不再 `try_take_session` 创建空 session。
+3. `e2e-tests/tests/test_agent_builtin_status_runtime.sh` 首轮运行中 `/status` 改为轮询真实 `active_status.session_key/work_dir/current_loop_iteration`，不再依赖固定 sleep。
+4. 单元回归覆盖 `/status` 先创建 session、随后业务 turn 带 `work_dir` 的场景。
 
 ## 本轮验证结果（2026-05-08）
 

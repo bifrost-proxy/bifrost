@@ -34,6 +34,7 @@ url = "2.5"
 open = "5"
 bm25 = "2.3.2"
 keyring = { version = "3", optional = true }
+portable-pty = "0.8"
 
 [features]
 default = ["slash-router"]

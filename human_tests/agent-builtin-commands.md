@@ -229,6 +229,8 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - `active_status.context_usage_percent` 为可读数值或 `null`（仅当未配置 context window 时允许为 `null`）
 - 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"
 
+**本次执行结果**：通过。2026-05-10 针对 GitHub Actions Linux shard 1 竞态回归，执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`。脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；首轮长模型请求期间轮询 `/status` 直到返回真实 `active_status`，断言 `active_status.session_key == "agent-status-runtime"`、`active_status.work_dir == <临时 workdir>`、`active_status.current_loop_iteration == 1`，随后空闲 `/status` 仍显示同一工作路径。该回归同时覆盖 `/agent/chat` 的 `/status` 纯读路径不会抢先创建空 session；即使已存在空 session，后续带 `work_dir` 的业务 turn 也会覆盖工作目录，不再显示 `N/A`。
+
 ### TC-BC-21: 回归 - 工具结果追加后 /status 展示当前上下文估算
 
 **背景**：运行中的 Agent 在收到模型响应后会记录 `last_response_tokens`。上下文口径不是简单清空该快照，而是使用"最近 API usage + 最近模型 item 之后新增 items 的估算"。工具结果追加到 `session.history` 后，`/status` 和自动压缩判断必须展示同一套增量 context 口径。
