@@ -7,7 +7,9 @@
 use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use bifrost_agent::session::GuideChannel;
 
 /// A queued message with a sequence number.
 #[derive(Debug, Clone, Serialize)]
@@ -35,9 +37,9 @@ impl Default for SessionQueue {
 
 /// Manages guide-mode injection channels and queue-mode FIFO queues per session.
 pub struct SessionQueueManager {
-    /// Guide message slots: only the latest message is kept (overwrite semantics).
-    /// The turn loop polls this after each tool call batch.
-    guide_slots: DashMap<String, Arc<Mutex<Option<String>>>>,
+    /// Guide message slots: all pending guide messages are kept and merged by
+    /// the turn loop at the next guide checkpoint.
+    guide_slots: DashMap<String, GuideChannel>,
 
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
@@ -57,23 +59,30 @@ impl SessionQueueManager {
     // ── Guide mode ───────────────────────────────────────────────────────
 
     /// Get or create the guide channel for a session.
-    /// The returned `Arc<Mutex<Option<String>>>` is shared between the event loop
+    /// The returned channel is shared between the event loop
     /// (writer) and the turn loop (reader).
-    pub fn get_or_create_guide_channel(&self, session_key: &str) -> Arc<Mutex<Option<String>>> {
+    pub fn get_or_create_guide_channel(&self, session_key: &str) -> GuideChannel {
         self.guide_slots
             .entry(session_key.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(VecDeque::new())))
             .clone()
     }
 
-    /// Inject a guide message for a busy session (overwrite semantics).
-    /// Returns the previous message if one was pending (got replaced).
-    pub fn inject_guide(&self, session_key: &str, msg: String) -> Option<String> {
+    /// Inject a guide message for a busy session.
+    /// Returns the number of guide messages now waiting to enter the loop.
+    pub fn inject_guide(&self, session_key: &str, msg: String) -> usize {
         let channel = self.get_or_create_guide_channel(session_key);
         let mut guard = channel.lock().unwrap();
-        let previous = guard.take();
-        *guard = Some(msg);
-        previous
+        guard.push_back(msg);
+        guard.len()
+    }
+
+    /// Get pending guide messages without modifying state.
+    pub fn guide_status(&self, session_key: &str) -> Vec<String> {
+        self.guide_slots
+            .get(session_key)
+            .map(|entry| entry.lock().unwrap().iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     // ── Queue mode ───────────────────────────────────────────────────────
@@ -145,18 +154,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_guide_inject_overwrite() {
+    fn test_guide_inject_appends() {
         let mgr = SessionQueueManager::new();
-        let prev = mgr.inject_guide("s1", "msg1".into());
-        assert!(prev.is_none());
+        let count = mgr.inject_guide("s1", "msg1".into());
+        assert_eq!(count, 1);
 
-        let prev = mgr.inject_guide("s1", "msg2".into());
-        assert_eq!(prev.as_deref(), Some("msg1"));
+        let count = mgr.inject_guide("s1", "msg2".into());
+        assert_eq!(count, 2);
 
-        // Consumer reads the latest
+        // Consumer reads all pending guides in insertion order.
         let ch = mgr.get_or_create_guide_channel("s1");
-        let taken = ch.lock().unwrap().take();
-        assert_eq!(taken.as_deref(), Some("msg2"));
+        let taken: Vec<String> = ch.lock().unwrap().drain(..).collect();
+        assert_eq!(taken, vec!["msg1".to_string(), "msg2".to_string()]);
+    }
+
+    #[test]
+    fn test_guide_status_is_readonly() {
+        let mgr = SessionQueueManager::new();
+        mgr.inject_guide("s1", "msg1".into());
+        mgr.inject_guide("s1", "msg2".into());
+
+        let status1 = mgr.guide_status("s1");
+        let status2 = mgr.guide_status("s1");
+        assert_eq!(status1, vec!["msg1".to_string(), "msg2".to_string()]);
+        assert_eq!(status2, status1);
+
+        let ch = mgr.get_or_create_guide_channel("s1");
+        let taken: Vec<String> = ch.lock().unwrap().drain(..).collect();
+        assert_eq!(taken, vec!["msg1".to_string(), "msg2".to_string()]);
     }
 
     #[test]
@@ -206,7 +231,7 @@ mod tests {
         mgr.clear_session("s1");
 
         let ch = mgr.get_or_create_guide_channel("s1");
-        assert!(ch.lock().unwrap().is_none());
+        assert!(ch.lock().unwrap().is_empty());
         assert!(mgr.queue_status("s1").is_empty());
     }
 
@@ -223,17 +248,17 @@ mod tests {
         let channel = mgr.get_or_create_guide_channel("session_1");
 
         // Nothing initially
-        assert!(channel.lock().unwrap().is_none());
+        assert!(channel.lock().unwrap().is_empty());
 
         // Simulate event loop injecting a guide message
         mgr.inject_guide("session_1", "请继续分析日志".into());
 
         // Turn loop polls: should see the message
-        let msg = channel.lock().unwrap().take();
-        assert_eq!(msg.as_deref(), Some("请继续分析日志"));
+        let msg: Vec<String> = channel.lock().unwrap().drain(..).collect();
+        assert_eq!(msg, vec!["请继续分析日志".to_string()]);
 
-        // After take(), channel is empty again
-        assert!(channel.lock().unwrap().is_none());
+        // After drain(), channel is empty again
+        assert!(channel.lock().unwrap().is_empty());
     }
 
     /// Test that guide overwrite + queue coexist for the same session.
@@ -249,12 +274,13 @@ mod tests {
         mgr.push_queue("s1", "queued1".into()).unwrap();
         mgr.push_queue("s1", "queued2".into()).unwrap();
 
-        // Guide overwrite
+        // Guide append
         mgr.inject_guide("s1", "guide2".into());
 
-        // Verify guide has latest value
+        // Verify guides keep insertion order
         let ch = mgr.get_or_create_guide_channel("s1");
-        assert_eq!(ch.lock().unwrap().take().as_deref(), Some("guide2"));
+        let guides: Vec<String> = ch.lock().unwrap().drain(..).collect();
+        assert_eq!(guides, vec!["guide1".to_string(), "guide2".to_string()]);
 
         // Verify queue is independent
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("queued1"));
@@ -298,12 +324,13 @@ mod tests {
 
         // s1 is empty
         let ch1 = mgr.get_or_create_guide_channel("s1");
-        assert!(ch1.lock().unwrap().is_none());
+        assert!(ch1.lock().unwrap().is_empty());
         assert!(mgr.queue_status("s1").is_empty());
 
         // s2 is untouched
         let ch2 = mgr.get_or_create_guide_channel("s2");
-        assert_eq!(ch2.lock().unwrap().take().as_deref(), Some("guide-s2"));
+        let guides: Vec<String> = ch2.lock().unwrap().drain(..).collect();
+        assert_eq!(guides, vec!["guide-s2".to_string()]);
         assert_eq!(mgr.queue_status("s2").len(), 2);
     }
 
@@ -334,13 +361,13 @@ mod tests {
 
         // ── The fix: drain guide_channel BEFORE checking queue/clear ──
         // This is what `run_agent_chat_with_interleave` now does after turn completes.
-        let unconsumed = channel.lock().unwrap().take();
-        assert_eq!(unconsumed.as_deref(), Some("请帮我分析这个问题"));
+        let unconsumed: Vec<String> = channel.lock().unwrap().drain(..).collect();
+        assert_eq!(unconsumed, vec!["请帮我分析这个问题".to_string()]);
 
         // If we had called clear_session without draining first, the message
         // would have been lost (the old bug).
         // After draining, clear_session is safe:
-        assert!(channel.lock().unwrap().is_none());
+        assert!(channel.lock().unwrap().is_empty());
         mgr.clear_session("s1");
     }
 
@@ -356,8 +383,8 @@ mod tests {
         mgr.push_queue("s1", "queued_msg".into()).unwrap();
 
         // Fix logic: first drain guide, then check queue
-        let guide = channel.lock().unwrap().take();
-        assert_eq!(guide.as_deref(), Some("guide_msg"));
+        let guide: Vec<String> = channel.lock().unwrap().drain(..).collect();
+        assert_eq!(guide, vec!["guide_msg".to_string()]);
 
         // Queue remains for the next iteration
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("queued_msg"));
@@ -384,9 +411,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             let mut guide_count = 0;
             for _ in 0..200 {
-                if channel_reader.lock().unwrap().take().is_some() {
-                    guide_count += 1;
-                }
+                guide_count += channel_reader.lock().unwrap().drain(..).count();
                 std::thread::sleep(std::time::Duration::from_micros(50));
             }
             guide_count

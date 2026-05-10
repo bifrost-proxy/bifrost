@@ -35,7 +35,7 @@ use crate::tools::ToolRegistry;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallLog, ToolCallMessage, TurnResult};
 use bifrost_skills::{default_roots, SkillRegistry, SkillStore};
 use dashmap::{DashMap, DashSet};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -47,6 +47,7 @@ use tracing::{debug, error, info, warn};
 // ---------------------------------------------------------------------------
 
 pub type AgentStopSignalHandle = Arc<AgentStopSignal>;
+pub type GuideChannel = Arc<std::sync::Mutex<VecDeque<String>>>;
 
 /// Cooperative stop signal for the turn currently checked out by a session.
 #[derive(Debug)]
@@ -151,7 +152,7 @@ pub struct AgentSession {
     /// Guide-mode injection channel.
     /// When set, the turn loop checks this after each tool call batch completes.
     /// If a message is present, it is appended to history before the next model call.
-    pub guide_channel: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    pub guide_channel: Option<GuideChannel>,
 
     /// Pending message queue. When the turn loop finishes (model returns stop
     /// with no tool calls and no guide message), it checks this queue. If there
@@ -1055,6 +1056,34 @@ fn stop_requested(session: &AgentSession) -> bool {
         .stop_signal
         .as_ref()
         .is_some_and(|signal| signal.is_requested())
+}
+
+fn drain_guide_messages(session: &AgentSession) -> Vec<String> {
+    session
+        .guide_channel
+        .as_ref()
+        .map(|ch| ch.lock().unwrap().drain(..).collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+pub fn combine_guide_messages(messages: Vec<String>) -> Option<String> {
+    let messages: Vec<String> = messages
+        .into_iter()
+        .map(|msg| msg.trim().to_string())
+        .filter(|msg| !msg.is_empty())
+        .collect();
+    match messages.len() {
+        0 => None,
+        1 => messages.into_iter().next(),
+        _ => Some(
+            messages
+                .iter()
+                .enumerate()
+                .map(|(idx, msg)| format!("引导消息 {}:\n{}", idx + 1, msg))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+    }
 }
 
 async fn chat_completion_or_stop(
@@ -2313,12 +2342,8 @@ pub async fn run_turn_with_mcp_multimodal(
             // was generating its final response (no tool calls), the mid-turn
             // checkpoint (after tool execution) never consumed it. Check here
             // before ending the turn so the message is not silently lost.
-            let guide_at_end = session
-                .guide_channel
-                .as_ref()
-                .and_then(|ch| ch.lock().unwrap().take())
-                .filter(|msg| !msg.trim().is_empty());
-            if let Some(guide_msg) = guide_at_end {
+            let guide_messages = drain_guide_messages(session);
+            if let Some(guide_msg) = combine_guide_messages(guide_messages) {
                 info!(
                     session_key = %session.session_key,
                     guide_msg_len = guide_msg.len(),
@@ -2743,11 +2768,8 @@ pub async fn run_turn_with_mcp_multimodal(
         // Guide-mode injection: check if an IM user sent a guide message while
         // this tool call batch was executing. If so, append it to history so the
         // model sees it in the next iteration (before compaction to preserve it).
-        let guide_msg = session
-            .guide_channel
-            .as_ref()
-            .and_then(|ch| ch.lock().unwrap().take());
-        if let Some(guide_msg) = guide_msg {
+        let guide_messages = drain_guide_messages(session);
+        if let Some(guide_msg) = combine_guide_messages(guide_messages) {
             info!(
                 session_key = %session.session_key,
                 guide_msg_len = guide_msg.len(),
@@ -3292,6 +3314,23 @@ mod tests {
             .iter()
             .filter(|message| message.content.as_deref() == Some(content))
             .count()
+    }
+
+    #[test]
+    fn test_combine_guide_messages_preserves_order() {
+        let combined = combine_guide_messages(vec![
+            " 第一条 ".to_string(),
+            "".to_string(),
+            "第二条".to_string(),
+        ])
+        .unwrap();
+
+        assert!(combined.contains("引导消息 1:\n第一条"));
+        assert!(combined.contains("引导消息 2:\n第二条"));
+        assert!(
+            combined.find("第一条").unwrap() < combined.find("第二条").unwrap(),
+            "guide message order should be preserved"
+        );
     }
 
     async fn chat_response_url(responses: Vec<serde_json::Value>) -> String {

@@ -76,7 +76,13 @@ class Handler(BaseHTTPRequestHandler):
                 texts.append(content)
         user_texts = [t for t in texts if t.strip()]
 
-        if any("初始消息" in t for t in user_texts):
+        if any("第一条引导" in t for t in user_texts) and any("第二条引导" in t for t in user_texts):
+            content = "GUIDES_MERGED: 第一条引导 -> 第二条引导"
+        elif any("MULTI_GUIDE_INITIAL" in t for t in user_texts):
+            import time
+            time.sleep(3)
+            content = "INITIAL_DONE"
+        elif any("初始消息" in t for t in user_texts):
             content = "ORDER: 初始消息 -> guide 插入 -> queue-1 -> queue-2"
         elif any("第一条" in t for t in user_texts):
             content = "ORDER: 第一条 -> 第二条 -> 第三条"
@@ -158,7 +164,54 @@ BLANK_RESPONSE="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   -H 'Content-Type: application/json' \
   -d '{"session_key":"blank-ignore-test","message":"hello","guide_message":"   ","queue_messages":["","   ","real queued"]}')"
 
-python3 - "$GUIDE_RESPONSE" "$FIFO_RESPONSE" "$PRIORITY_RESPONSE" "$BLANK_RESPONSE" "$MOCK_LOG" <<'PY'
+MULTI_RESPONSE_FILE="$TEST_DIR/multi-guide-response.json"
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_key":"multi-guide-status-test","message":"MULTI_GUIDE_INITIAL","guide_messages":["第一条引导","第二条引导"]}' \
+  >"$MULTI_RESPONSE_FILE" &
+MULTI_PID=$!
+
+STATUS_RESPONSE=""
+for _ in $(seq 1 40); do
+  candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+    -H 'Content-Type: application/json' \
+    -d '{"session_key":"multi-guide-status-test","message":"/status"}')"
+  if python3 - "$candidate" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+guides = payload.get("pending_guide_messages") or []
+active_guides = (payload.get("active_status") or {}).get("pending_guide_messages") or []
+text = payload.get("response", "")
+ok = (
+    payload.get("success") is True
+    and guides == ["第一条引导", "第二条引导"]
+    and active_guides == guides
+    and "引导消息: 2 条尚未进入 loop" in text
+    and "第一条引导" in text
+    and "第二条引导" in text
+)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    STATUS_RESPONSE="$candidate"
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ -z "$STATUS_RESPONSE" ]]; then
+  echo "[im-guide-queue-human-api] /status did not expose pending guide messages" >&2
+  kill "$MULTI_PID" >/dev/null 2>&1 || true
+  wait "$MULTI_PID" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+wait "$MULTI_PID"
+MULTI_RESPONSE="$(cat "$MULTI_RESPONSE_FILE")"
+
+python3 - "$GUIDE_RESPONSE" "$FIFO_RESPONSE" "$PRIORITY_RESPONSE" "$BLANK_RESPONSE" "$MULTI_RESPONSE" "$MOCK_LOG" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -167,22 +220,26 @@ guide = json.loads(sys.argv[1])
 fifo = json.loads(sys.argv[2])
 priority = json.loads(sys.argv[3])
 blank = json.loads(sys.argv[4])
-mock_log = Path(sys.argv[5]).read_text(encoding="utf-8")
+multi = json.loads(sys.argv[5])
+mock_log = Path(sys.argv[6]).read_text(encoding="utf-8")
 
 assert guide.get("success") is True, guide
 assert fifo.get("success") is True, fifo
 assert priority.get("success") is True, priority
 assert blank.get("success") is True, blank
+assert multi.get("success") is True, multi
 
 assert "GUIDE_DRAINED" in guide.get("response", ""), guide
 assert "ORDER: 第一条 -> 第二条 -> 第三条" in fifo.get("response", ""), fifo
 assert "ORDER: 初始消息 -> guide 插入 -> queue-1 -> queue-2" in priority.get("response", ""), priority
 assert "ORDER: hello -> real queued" in blank.get("response", ""), blank
+assert "GUIDES_MERGED: 第一条引导 -> 第二条引导" in multi.get("response", ""), multi
 
 assert "这是 turn 结束前插入的 guide" in mock_log, mock_log
 assert "第二条" in mock_log and "第三条" in mock_log, mock_log
 assert "guide 插入" in mock_log and "queue-1" in mock_log and "queue-2" in mock_log, mock_log
 assert "real queued" in mock_log, mock_log
+assert "引导消息 1:\\n第一条引导" in mock_log and "引导消息 2:\\n第二条引导" in mock_log, mock_log
 PY
 
 echo "[im-guide-queue-human-api] PASS"
