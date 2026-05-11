@@ -1,0 +1,24 @@
+# 测试目标: 验证 replay custom rules 模式覆盖请求修改、响应修改、响应 Body 修改和内容注入规则。
+127.0.0.1 reqHeaders://(X-Trace: old)
+127.0.0.1 reqCookies://(sid=abc,theme=dark)
+127.0.0.1 delete://reqHeaders.X-Remove|urlParams.drop
+127.0.0.1 urlParams://(keep=2&drop=)
+127.0.0.1 reqType://json
+127.0.0.1 reqCharset://utf-8
+127.0.0.1 forwardedFor://1.2.3.4
+127.0.0.1 headerReplace://req.X-Trace:old=new|res.X-Response:old=new
+127.0.0.1 reqCors://(origin=https://app.example.test&methods=POST&headers=X-Test)
+127.0.0.1 reqMerge://({"b":2,"c":3})
+127.0.0.1 statusCode://201
+127.0.0.1 resHeaders://(X-Response: old)
+127.0.0.1 resCookies://rid=xyz
+127.0.0.1 resType://json
+127.0.0.1 resCharset://utf-8
+127.0.0.1 cache://60
+127.0.0.1 attachment://report.json
+127.0.0.1 responseFor://mobile
+127.0.0.1 resCors://(origin=https://app.example.test&methods=GET,POST&headers=X-Test&credentials=false)
+127.0.0.1 trailers://X-Trailer:done
+127.0.0.1 htmlAppend://(<tail>)
+127.0.0.1 resReplace://<tail>=
+127.0.0.1 resMerge://({"response_rule":"ok"})

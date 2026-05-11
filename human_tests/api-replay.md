@@ -457,6 +457,43 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 
 ---
 
+### TC-ARP-21：Replay 规则 Shell E2E 回归脚本
+
+**前置条件**：
+1. 已从当前源码构建 `bifrost` 二进制，例如：
+   ```bash
+   cargo build --bin bifrost
+   ```
+2. 选择未占用的代理端口和 mock 上游端口，并使用临时 `BIFROST_DATA_DIR`。
+
+**操作步骤**：
+1. 执行 Replay 规则 Shell E2E：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-replay-shell-e2e-XXXXXX)"
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   PROXY_PORT=18887 \
+   MOCK_HTTP_PORT=13087 \
+   MOCK_SSE_PORT=13088 \
+   MOCK_WS_PORT=13089 \
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+   bash e2e-tests/tests/test_replay_rules.sh
+   rc=$?
+   rm -rf "$TEST_DATA_DIR"
+   exit "$rc"
+   ```
+2. 重点确认输出中包含：
+   - `Request body mutation rules applied: reqPrepend/reqAppend/reqReplace`
+   - `Response header/cookie/CORS metadata rules applied in replay matrix`
+   - `Applied rules include full replay modify matrix`
+   - `Failed: 0`
+
+**预期结果**：
+- 脚本退出码为 `0`
+- 本地 HTTP/SSE/WebSocket mock 上游和临时 Bifrost 进程全部被清理
+- Replay custom rules 覆盖请求体修改、`reqMerge`、URL 参数删除、请求/响应 headerReplace、CORS、响应 metadata、`resMerge` 和内容注入规则
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

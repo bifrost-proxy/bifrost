@@ -200,14 +200,25 @@ replay_request() {
         rule_config='{"mode":"none"}'
     fi
     
-    local body_field=""
-    if [ -n "$body" ]; then
-        body_field=",\"body\":\"$body\""
-    fi
-
-    # replay HTTP 端点已统一为 unified payload（与 /api/replay/execute/unified 相同）
     local request_json
-    request_json="{\"url\":\"$url\",\"method\":\"$method\",\"headers\":$headers_json$body_field,\"rule_config\":$rule_config,\"timeout_ms\":$timeout}"
+    if [ -n "$body" ]; then
+        request_json=$(jq -n \
+            --arg url "$url" \
+            --arg method "$method" \
+            --argjson headers "$headers_json" \
+            --arg body "$body" \
+            --argjson rule_config "$rule_config" \
+            --argjson timeout "$timeout" \
+            '{url:$url,method:$method,headers:$headers,body:$body,rule_config:$rule_config,timeout_ms:$timeout}')
+    else
+        request_json=$(jq -n \
+            --arg url "$url" \
+            --arg method "$method" \
+            --argjson headers "$headers_json" \
+            --argjson rule_config "$rule_config" \
+            --argjson timeout "$timeout" \
+            '{url:$url,method:$method,headers:$headers,rule_config:$rule_config,timeout_ms:$timeout}')
+    fi
     
     if [ "${DEBUG:-}" = "1" ]; then
         echo "[DEBUG] Request JSON: $request_json" >&2
@@ -476,6 +487,32 @@ test_reqBody_rule() {
     fi
 }
 
+test_request_body_mutation_rules() {
+    echo ""
+    echo "=== Test: Request Body Mutation Rules ==="
+
+    local url="http://127.0.0.1:${MOCK_HTTP_PORT}/test-body-mutations"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture request_body_mutations.txt)
+
+    local response
+    response=$(replay_request "$url" "POST" '[["Content-Type", "text/plain"]]' "hello" "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+
+    local received_body
+    received_body=$(printf '%s' "$response" | jq -r '.data.body | fromjson | .request.body // empty')
+
+    if [ "$status" = "200" ] && [ "$received_body" = "pre-world-post" ]; then
+        _log_pass "Request body mutation rules applied: reqPrepend/reqAppend/reqReplace"
+        passed=$((passed + 1))
+    else
+        _log_fail "Request body mutation rules not applied" "pre-world-post" "status=$status body=$received_body"
+        failed=$((failed + 1))
+    fi
+}
+
 test_delete_header_rule() {
     echo ""
     echo "=== Test: Delete Header Rule ==="
@@ -666,6 +703,140 @@ test_response_modification_rules() {
     fi
 }
 
+test_replay_full_modify_matrix_rules() {
+    echo ""
+    echo "=== Test: Replay Full Modify Matrix Rules ==="
+
+    local url="http://127.0.0.1:${MOCK_HTTP_PORT}/replay-full?drop=1&old=1"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture full_modify_matrix.txt)
+
+    local response
+    response=$(replay_request "$url" "POST" '[["Content-Type", "text/plain"], ["X-Remove", "1"], ["X-Trace", "old"]]' '{"a":1,"b":0}' "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+
+    local body_json
+    body_json=$(printf '%s' "$response" | jq -r '.data.body')
+
+    local response_rule
+    response_rule=$(printf '%s' "$body_json" | jq -r '.response_rule // empty')
+
+    local path
+    path=$(printf '%s' "$body_json" | jq -r '.request.path // empty')
+
+    local keep_param
+    keep_param=$(printf '%s' "$body_json" | jq -r '.request.query_params.keep[0] // empty')
+
+    local drop_param
+    drop_param=$(printf '%s' "$body_json" | jq -r '.request.query_params.drop[0] // "null"')
+
+    local request_body
+    request_body=$(printf '%s' "$body_json" | jq -c '.request.body | fromjson')
+
+    replay_matrix_request_header() {
+        local name="$1"
+        printf '%s' "$body_json" | jq -r --arg name "$name" '.request.headers | to_entries[]? | select(.key | ascii_downcase == $name) | .value' | head -1
+    }
+
+    replay_matrix_response_header() {
+        local name="$1"
+        printf '%s' "$response" | jq -r --arg name "$name" '.data.headers[]? | select(.[0] | ascii_downcase == $name) | .[1]' | head -1
+    }
+
+    replay_matrix_protocol_present() {
+        local name="$1"
+        printf '%s' "$response" | jq -e --arg name "$name" '.data.applied_rules | any(.protocol == $name)' >/dev/null
+    }
+
+    if [ "$status" = "201" ] && [ "$response_rule" = "ok" ]; then
+        _log_pass "Response status and resMerge applied in replay matrix"
+        passed=$((passed + 1))
+    else
+        _log_fail "Response status/resMerge missing in replay matrix" "status=201 response_rule=ok" "status=$status response_rule=$response_rule"
+        failed=$((failed + 1))
+    fi
+
+    if [ "$keep_param" = "2" ] && [ "$drop_param" = "null" ] && [[ "$path" == *"old=1"* ]]; then
+        _log_pass "URL params applied: keep added, drop deleted, old preserved"
+        passed=$((passed + 1))
+    else
+        _log_fail "URL params not applied" "keep=2 drop removed old=1" "path=$path keep=$keep_param drop=$drop_param"
+        failed=$((failed + 1))
+    fi
+
+    if [ "$request_body" = '{"a":1,"b":2,"c":3}' ]; then
+        _log_pass "reqMerge applied to JSON request body"
+        passed=$((passed + 1))
+    else
+        _log_fail "reqMerge not applied to JSON request body" '{"a":1,"b":2,"c":3}' "$request_body"
+        failed=$((failed + 1))
+    fi
+
+    local x_trace content_type origin cors_method cors_headers forwarded_for cookie
+    x_trace=$(replay_matrix_request_header "x-trace")
+    content_type=$(replay_matrix_request_header "content-type")
+    origin=$(replay_matrix_request_header "origin")
+    cors_method=$(replay_matrix_request_header "access-control-request-method")
+    cors_headers=$(replay_matrix_request_header "access-control-request-headers")
+    forwarded_for=$(replay_matrix_request_header "x-forwarded-for")
+    cookie=$(replay_matrix_request_header "cookie")
+
+    if [ "$x_trace" = "new" ] \
+        && [ "$content_type" = "application/json; charset=utf-8" ] \
+        && [ "$origin" = "https://app.example.test" ] \
+        && [ "$cors_method" = "POST" ] \
+        && [ "$cors_headers" = "X-Test" ] \
+        && [ "$forwarded_for" = "1.2.3.4" ] \
+        && [[ "$cookie" == *"sid=abc"* ]] \
+        && [[ "$cookie" == *"theme=dark"* ]]; then
+        _log_pass "Request header/cookie/CORS rules applied in replay matrix"
+        passed=$((passed + 1))
+    else
+        _log_fail "Request header/cookie/CORS rules missing" "trace/content-type/cors/forwarded/cookie applied" "trace=$x_trace content_type=$content_type origin=$origin method=$cors_method headers=$cors_headers forwarded=$forwarded_for cookie=$cookie"
+        failed=$((failed + 1))
+    fi
+
+    local x_response set_cookie res_content_type cache_control disposition response_for allow_origin trailer
+    x_response=$(replay_matrix_response_header "x-response")
+    set_cookie=$(replay_matrix_response_header "set-cookie")
+    res_content_type=$(replay_matrix_response_header "content-type")
+    cache_control=$(replay_matrix_response_header "cache-control")
+    disposition=$(replay_matrix_response_header "content-disposition")
+    response_for=$(replay_matrix_response_header "x-bifrost-response-for")
+    allow_origin=$(replay_matrix_response_header "access-control-allow-origin")
+    trailer=$(replay_matrix_response_header "trailer")
+
+    if [ "$x_response" = "new" ] \
+        && [ "$set_cookie" = "rid=xyz" ] \
+        && [ "$res_content_type" = "application/json; charset=utf-8" ] \
+        && [ "$cache_control" = "max-age=60" ] \
+        && [ "$disposition" = 'attachment; filename="report.json"' ] \
+        && [ "$response_for" = "mobile" ] \
+        && [ "$allow_origin" = "https://app.example.test" ] \
+        && [ "$trailer" = "X-Trailer" ]; then
+        _log_pass "Response header/cookie/CORS metadata rules applied in replay matrix"
+        passed=$((passed + 1))
+    else
+        _log_fail "Response metadata rules missing" "response metadata applied" "x_response=$x_response set_cookie=$set_cookie content_type=$res_content_type cache=$cache_control disposition=$disposition response_for=$response_for allow_origin=$allow_origin trailer=$trailer"
+        failed=$((failed + 1))
+    fi
+
+    local protocol
+    for protocol in reqHeaders reqCookies delete urlParams reqType reqCharset forwardedFor headerReplace reqCors params statusCode resHeaders resCookies resType resCharset cache attachment responseFor resCors trailers htmlAppend resReplace resMerge; do
+        if replay_matrix_protocol_present "$protocol"; then
+            continue
+        fi
+        _log_fail "Applied rules missing protocol in replay matrix" "$protocol" "not present"
+        failed=$((failed + 1))
+        return
+    done
+
+    _log_pass "Applied rules include full replay modify matrix"
+    passed=$((passed + 1))
+}
+
 test_forward_localhost_api_rule() {
     echo ""
     echo "=== Test: Replay HTTPS API Forwarded to Local HTTP ==="
@@ -794,11 +965,13 @@ main() {
     test_urlParams_rule
     test_reqCookies_rule
     test_reqBody_rule
+    test_request_body_mutation_rules
     test_delete_header_rule
     test_multiple_rules
     test_no_rules_mode
     test_sse_replay_with_rules
     test_response_modification_rules
+    test_replay_full_modify_matrix_rules
     test_forward_localhost_api_rule
     test_websocket_replay_with_rules
     

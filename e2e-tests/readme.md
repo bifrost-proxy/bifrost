@@ -18,6 +18,7 @@ tests/                      # E2E / Admin API / 回归测试脚本
 │   ├── test_proxy_admin_api.sh     # Proxy API 测试 (6 tests)
 │   ├── test_system_admin_api.sh    # System API 测试 (10 tests)
 │   ├── test_scripts_admin_api.sh   # Scripts API 测试 (12 tests)
+│   ├── test_replay_rules.sh        # Replay custom rules 回归测试
 │   ├── test_tls_logic_simple.sh    # TLS 逻辑测试脚本
 │   └── test_tls_intercept_e2e.sh   # TLS 拦截 E2E 测试脚本
 
@@ -52,6 +53,10 @@ rules/                      # 规则测试用例 (按类别组织)
     │   ├── cookies.txt             # Set-Cookie 设置
     │   ├── cors.txt                # CORS 头添加
     │   └── delay.txt               # 请求/响应延迟
+    │
+    ├── replay/                 # Replay custom rules 测试
+    │   ├── request_body_mutations.txt # reqPrepend/reqAppend/reqReplace
+    │   └── full_modify_matrix.txt     # 请求/响应修改规则矩阵
     │
     ├── redirect/               # 重定向测试
     │   └── redirect.txt            # 301/302 重定向
@@ -184,6 +189,7 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_proxy_admin_api.sh`     | 6      | 系统代理状态、设置                   |
 | `test_system_admin_api.sh`    | 10     | 系统信息、概览、指标历史             |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
+| `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |
 
 ### 运行 Admin API 测试
 

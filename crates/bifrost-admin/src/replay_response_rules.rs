@@ -7,18 +7,25 @@ pub(crate) fn apply_response_rules(
     body: Option<String>,
 ) -> (u16, Vec<(String, String)>, Option<String>) {
     let mut final_status = status;
+    let mut delete_res_headers = Vec::new();
+    let mut res_headers = Vec::new();
+    let mut res_cookies = Vec::new();
+    let mut attachment = None;
+    let mut res_type = None;
+    let mut res_charset = None;
+    let mut cache = None;
+    let mut header_replace = Vec::new();
+    let mut response_for = None;
+    let mut res_cors = None;
+    let mut trailers = Vec::new();
 
     for rule in &resolved_rules.rules {
         match rule.rule.protocol {
             Protocol::Delete => {
-                for header_name in parse_delete_value(&rule.resolved_value).res_headers {
-                    remove_header(&mut headers, &header_name);
-                }
+                delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                for (key, value) in parse_header_values(&rule.resolved_value) {
-                    set_header(&mut headers, key, value);
-                }
+                res_headers.extend(parse_header_values(&rule.resolved_value));
             }
             Protocol::StatusCode | Protocol::ReplaceStatus => {
                 if let Ok(code) = rule.resolved_value.parse::<u16>() {
@@ -27,71 +34,98 @@ pub(crate) fn apply_response_rules(
             }
             Protocol::ResCookies => {
                 if let Some((name, value)) = parse_cookie_value(&rule.resolved_value) {
-                    headers.push(("Set-Cookie".to_string(), format!("{}={}", name, value)));
+                    res_cookies.push((name, value));
                 }
             }
             Protocol::ResCors => {
-                apply_res_cors(&mut headers, &rule.resolved_value);
+                res_cors = Some(rule.resolved_value.clone());
             }
             Protocol::ResType => {
-                set_header(
-                    &mut headers,
-                    "Content-Type".to_string(),
-                    expand_content_type_shortcut(&rule.resolved_value).to_string(),
-                );
+                res_type = Some(rule.resolved_value.clone());
             }
             Protocol::ResCharset => {
-                apply_charset(&mut headers, &rule.resolved_value);
+                res_charset = Some(rule.resolved_value.clone());
             }
             Protocol::Cache => {
-                set_header(
-                    &mut headers,
-                    "Cache-Control".to_string(),
-                    cache_control_value(&rule.resolved_value),
-                );
+                cache = Some(rule.resolved_value.clone());
             }
             Protocol::Attachment => {
-                set_header(
-                    &mut headers,
-                    "Content-Disposition".to_string(),
-                    attachment_value(&rule.resolved_value),
-                );
+                attachment = Some(rule.resolved_value.clone());
             }
             Protocol::ResponseFor => {
-                set_header(
-                    &mut headers,
-                    "x-bifrost-response-for".to_string(),
-                    rule.resolved_value.clone(),
-                );
+                response_for = Some(rule.resolved_value.clone());
             }
             Protocol::Trailers => {
-                let trailer_names: Vec<String> = parse_header_values(&rule.resolved_value)
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .collect();
-                if !trailer_names.is_empty() {
-                    remove_header(&mut headers, "Content-Length");
-                    set_header(
-                        &mut headers,
-                        "Trailer".to_string(),
-                        trailer_names.join(", "),
-                    );
-                }
+                trailers.extend(parse_header_values(&rule.resolved_value));
             }
             Protocol::HeaderReplace => {
-                for rule in parse_header_replace_value(&rule.resolved_value) {
-                    if rule.target == HeaderReplaceTarget::Response {
-                        replace_header_value(
-                            &mut headers,
-                            &rule.header_name,
-                            &rule.pattern,
-                            &rule.replacement,
-                        );
-                    }
-                }
+                header_replace.extend(parse_header_replace_value(&rule.resolved_value));
             }
             _ => {}
         }
+    }
+
+    for header_name in delete_res_headers {
+        remove_header(&mut headers, &header_name);
+    }
+    for (key, value) in res_headers {
+        set_header(&mut headers, key, value);
+    }
+    for (name, value) in res_cookies {
+        headers.push(("Set-Cookie".to_string(), format!("{}={}", name, value)));
+    }
+    if let Some(attachment) = attachment {
+        set_header(
+            &mut headers,
+            "Content-Disposition".to_string(),
+            attachment_value(&attachment),
+        );
+    }
+    if let Some(res_type) = res_type {
+        set_header(
+            &mut headers,
+            "Content-Type".to_string(),
+            expand_content_type_shortcut(&res_type).to_string(),
+        );
+    }
+    if let Some(res_charset) = res_charset {
+        apply_charset(&mut headers, &res_charset);
+    }
+    if let Some(cache) = cache {
+        set_header(
+            &mut headers,
+            "Cache-Control".to_string(),
+            cache_control_value(&cache),
+        );
+    }
+    for rule in header_replace {
+        if rule.target == HeaderReplaceTarget::Response {
+            replace_header_value(
+                &mut headers,
+                &rule.header_name,
+                &rule.pattern,
+                &rule.replacement,
+            );
+        }
+    }
+    if let Some(response_for) = response_for {
+        set_header(
+            &mut headers,
+            "x-bifrost-response-for".to_string(),
+            response_for,
+        );
+    }
+    if let Some(res_cors) = res_cors {
+        apply_res_cors(&mut headers, &res_cors);
+    }
+    let trailer_names: Vec<String> = trailers.into_iter().map(|(name, _)| name).collect();
+    if !trailer_names.is_empty() {
+        remove_header(&mut headers, "Content-Length");
+        set_header(
+            &mut headers,
+            "Trailer".to_string(),
+            trailer_names.join(", "),
+        );
     }
 
     let final_body =

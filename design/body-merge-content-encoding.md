@@ -45,6 +45,7 @@
   - `body_resMerge_gzip_json`：上游返回 gzip JSON，代理执行 `resMerge`，客户端用 `--compressed` 读到合并后的 JSON，响应头仍是 gzip。
   - `body_https_reqMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
   - `body_https_resMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
+  - `e2e-tests/tests/test_replay_rules.sh`：使用本地 echo/SSE/WebSocket 上游验证 Replay custom rules，其中 `request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵。
 - 真实场景测试：
   - 更新 `human_tests/proxy-rules-advanced.md`，新增压缩 JSON 的 `reqMerge` / `resMerge` 回归用例，并按文档真实执行。
   - 更新 `human_tests/api-replay.md`，新增 Replay Admin API 的 `resMerge` 响应 Body 回归用例和 replay 规则覆盖回归用例，并用临时代理端口真实执行。

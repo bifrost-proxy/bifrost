@@ -1,0 +1,4 @@
+# 测试目标: 验证 replay custom rules 模式会对上游请求体执行 reqPrepend、reqAppend 和 reqReplace。
+127.0.0.1 reqPrepend://(pre-)
+127.0.0.1 reqAppend://(-post)
+127.0.0.1 reqReplace://hello=world
