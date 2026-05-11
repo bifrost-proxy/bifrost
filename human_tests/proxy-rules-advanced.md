@@ -190,6 +190,40 @@
 
 ---
 
+### TC-PRA-07B：reqMerge 压缩 JSON 请求回归
+
+**背景**：真实客户端可能发送 `Content-Encoding: gzip` 的 JSON 请求。代理必须先解压再执行 `reqMerge`，然后按最终请求头重新压缩，避免上游收到未合并或损坏的 Body。
+
+**操作步骤**：
+1. 执行 focused E2E：
+   ```bash
+   cargo run -p bifrost-e2e -- --test body_reqMerge_gzip_json --test-timeout 120 --port 18180
+   ```
+
+**预期结果**：
+- E2E 输出 `PASS body_reqMerge_gzip_json`
+- 上游收到的请求头仍包含 `Content-Encoding: gzip`
+- 上游收到的 gzip Body 解压后是 JSON，包含原始字段 `"original": true`，并包含合并/覆盖后的 `"test": "qwe"` 与 `"keep": 2`
+
+---
+
+### TC-PRA-07C：HTTPS 解包链路 reqMerge 压缩 JSON 请求回归
+
+**背景**：HTTPS 解包后转发到上游的请求也必须执行 `reqMerge`，且不能把明文 Body 搭配 gzip Header 发给上游。
+
+**操作步骤**：
+1. 执行 focused E2E：
+   ```bash
+   cargo run -p bifrost-e2e -- --test body_https_reqMerge_gzip_json --test-timeout 120 --port 18180
+   ```
+
+**预期结果**：
+- E2E 输出 `PASS body_https_reqMerge_gzip_json`
+- HTTP 上游收到的请求头仍包含 `Content-Encoding: gzip`
+- 上游收到的 gzip Body 解压后包含原始字段 `"original": true`，并包含合并/覆盖后的 `"test": "qwe"` 与 `"keep": 2`
+
+---
+
 ### TC-PRA-08：reqPrepend 协议（请求体前置内容）
 
 **操作步骤**：
@@ -600,6 +634,65 @@
 - 响应体 JSON 中包含原始字段（如 `url`、`headers`）
 - 同时包含新增字段 `"injected": true` 和 `"proxy": "bifrost"`
 - JSON 合并操作不破坏原始数据结构
+
+---
+
+### TC-PRA-24B：resMerge 压缩 JSON 响应回归
+
+**背景**：真实接口常返回 `Content-Encoding: gzip` 的 JSON 响应。代理必须在解压后的 JSON 上执行 `resMerge`，相同 key 使用规则值覆盖，并在返回客户端前保持有效 gzip 响应。
+
+**操作步骤**：
+1. 执行 focused E2E：
+   ```bash
+   cargo run -p bifrost-e2e -- --test body_resMerge_gzip_json --test-timeout 120 --port 18180
+   ```
+
+**预期结果**：
+- E2E 输出 `PASS body_resMerge_gzip_json`
+- 客户端响应头仍包含 `Content-Encoding: gzip`
+- 客户端使用压缩解码后读到 JSON，包含原始字段 `"original": true`，并包含合并/覆盖后的 `"test": "qwe"` 与 `"added": 1`
+
+---
+
+### TC-PRA-24C：HTTPS 解包链路 resMerge 压缩 JSON 响应回归
+
+**背景**：真实 HTTPS 接口经过 TLS 解包后，如果上游返回 gzip JSON，代理必须先解压再执行 `resMerge`，并在返回客户端前保持响应编码一致。
+
+**操作步骤**：
+1. 执行 focused E2E：
+   ```bash
+   cargo run -p bifrost-e2e -- --test body_https_resMerge_gzip_json --test-timeout 120 --port 18180
+   ```
+2. 对真实目标接口配置规则，必须包含目标 host 的 TLS 解包前置规则；如果只配置带 path 的 `resMerge`，CONNECT 阶段看不到 path，规则不会进入响应 Body 修改链路：
+   ```bash
+   internal.example.test tlsIntercept://
+   https://internal.example.test/people/api/common/page_permission resMerge://({"test":"qwe"})
+   ```
+3. 使用业务 curl 通过本地 Bifrost 代理请求该接口，并用 `-k --compressed` 验证响应 JSON。
+
+**预期结果**：
+- E2E 输出 `PASS body_https_resMerge_gzip_json`
+- 真实目标接口返回 HTTP 200
+- 最终响应 JSON 顶层包含 `"test": "qwe"`
+
+---
+
+### TC-PRA-24D：脚本与 mock 路径的压缩 Body 修改回归
+
+**背景**：`reqScript` / `resScript` 修改 Body 时也需要与 `Content-Encoding` 保持一致；mock / immediate response 路径不能绕过压缩 Body 规则处理。
+
+**操作步骤**：
+1. 执行 focused 单测：
+   ```bash
+   cargo test -p bifrost-proxy body_to_script_string -- --nocapture
+   cargo test -p bifrost-proxy script_string_to_body -- --nocapture
+   cargo test -p bifrost-proxy immediate_response_body_rules_preserve_gzip_merge -- --nocapture
+   ```
+
+**预期结果**：
+- 脚本输入 gzip body 时拿到的是解码后的文本
+- 脚本输出文本且最终 Header 保留 gzip 时，Body 会重新压缩为有效 gzip
+- mock / immediate gzip JSON 响应经过 `resMerge` 后仍包含 `"test": "qwe"`，且响应 Header 保留 `Content-Encoding: gzip`
 
 ---
 

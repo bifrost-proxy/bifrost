@@ -279,6 +279,112 @@ pub struct ContentInjectionEncoding<'a> {
     pub max_decompress_output_bytes: usize,
 }
 
+pub fn apply_body_rules_preserving_encoding(
+    body: Bytes,
+    rules: &ResolvedRules,
+    phase: Phase,
+    content_type: Option<&str>,
+    encoding: ContentInjectionEncoding<'_>,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+) -> ContentInjectionResult {
+    let source_content_encoding = encoding
+        .source
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    let output_content_encoding = encoding
+        .output
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+
+    let Some(source_content_encoding) = source_content_encoding else {
+        let processed = apply_body_rules(body, rules, phase, content_type, verbose_logging, ctx);
+        return match output_content_encoding {
+            Some(output_content_encoding) => {
+                match compress_body(processed.as_ref(), output_content_encoding) {
+                    Ok(compressed) => ContentInjectionResult {
+                        body: Bytes::from(compressed),
+                        content_encoding: Some(output_content_encoding.to_string()),
+                    },
+                    Err(e) => {
+                        debug!(
+                            "[{}] [{:?}_BODY] Failed to compress {} body ({}), fallback to identity",
+                            ctx.id_str(),
+                            phase,
+                            output_content_encoding,
+                            e
+                        );
+                        ContentInjectionResult {
+                            body: processed,
+                            content_encoding: None,
+                        }
+                    }
+                }
+            }
+            None => ContentInjectionResult {
+                body: processed,
+                content_encoding: None,
+            },
+        };
+    };
+
+    match try_decompress_body_with_limit(
+        body.as_ref(),
+        source_content_encoding,
+        encoding.max_decompress_output_bytes,
+    ) {
+        Ok(decompressed) => {
+            let processed = apply_body_rules(
+                Bytes::from(decompressed),
+                rules,
+                phase,
+                content_type,
+                verbose_logging,
+                ctx,
+            );
+
+            match output_content_encoding {
+                Some(output_content_encoding) => {
+                    match compress_body(processed.as_ref(), output_content_encoding) {
+                        Ok(compressed) => ContentInjectionResult {
+                            body: Bytes::from(compressed),
+                            content_encoding: Some(output_content_encoding.to_string()),
+                        },
+                        Err(e) => {
+                            debug!(
+                                "[{}] [{:?}_BODY] Failed to recompress {} body ({}), fallback to identity",
+                                ctx.id_str(),
+                                phase,
+                                output_content_encoding,
+                                e
+                            );
+                            ContentInjectionResult {
+                                body: processed,
+                                content_encoding: None,
+                            }
+                        }
+                    }
+                }
+                None => ContentInjectionResult {
+                    body: processed,
+                    content_encoding: None,
+                },
+            }
+        }
+        Err(e) => {
+            debug!(
+                "[{}] [{:?}_BODY] Skip encoded body rules: failed to decompress {} body ({}).",
+                ctx.id_str(),
+                phase,
+                source_content_encoding,
+                e
+            );
+            ContentInjectionResult {
+                body,
+                content_encoding: Some(source_content_encoding.to_string()),
+            }
+        }
+    }
+}
+
 pub fn apply_content_injection_preserving_encoding(
     body: Bytes,
     content_type: &str,
@@ -654,6 +760,94 @@ mod tests {
         assert_eq!(parsed["a"], 1);
         assert_eq!(parsed["b"], 3);
         assert_eq!(parsed["c"], 4);
+    }
+
+    #[test]
+    fn test_apply_req_merge_preserving_gzip_encoding() {
+        let compressed = compress_body(br#"{"a":1,"b":2}"#, "gzip").unwrap();
+        let rules = ResolvedRules {
+            req_merge: Some(serde_json::json!({"b": 3, "c": 4})),
+            ..Default::default()
+        };
+
+        let result = apply_body_rules_preserving_encoding(
+            Bytes::from(compressed),
+            &rules,
+            Phase::Request,
+            Some("application/json"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("gzip"),
+                max_decompress_output_bytes: 1024,
+            },
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+        let decompressed =
+            try_decompress_body_with_limit(result.body.as_ref(), "gzip", 1024).unwrap();
+        let parsed: Value = serde_json::from_slice(&decompressed).unwrap();
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"], 3);
+        assert_eq!(parsed["c"], 4);
+    }
+
+    #[test]
+    fn test_apply_res_merge_preserving_gzip_encoding() {
+        let compressed = compress_body(br#"{"ok":true,"test":"old"}"#, "gzip").unwrap();
+        let rules = ResolvedRules {
+            res_merge: Some(serde_json::json!({"test": "qwe"})),
+            ..Default::default()
+        };
+
+        let result = apply_body_rules_preserving_encoding(
+            Bytes::from(compressed),
+            &rules,
+            Phase::Response,
+            Some("application/json"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("gzip"),
+                max_decompress_output_bytes: 1024,
+            },
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+        let decompressed =
+            try_decompress_body_with_limit(result.body.as_ref(), "gzip", 1024).unwrap();
+        let parsed: Value = serde_json::from_slice(&decompressed).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["test"], "qwe");
+    }
+
+    #[test]
+    fn test_apply_res_merge_deletes_gzip_encoding_when_output_identity() {
+        let compressed = compress_body(br#"{"test":"old"}"#, "gzip").unwrap();
+        let rules = ResolvedRules {
+            res_merge: Some(serde_json::json!({"test": "qwe"})),
+            ..Default::default()
+        };
+
+        let result = apply_body_rules_preserving_encoding(
+            Bytes::from(compressed),
+            &rules,
+            Phase::Response,
+            Some("application/json"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            false,
+            &mock_ctx(),
+        );
+
+        assert_eq!(result.content_encoding, None);
+        let parsed: Value = serde_json::from_slice(&result.body).unwrap();
+        assert_eq!(parsed["test"], "qwe");
     }
 
     #[test]

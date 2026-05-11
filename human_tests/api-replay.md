@@ -369,12 +369,12 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
    curl -s -X POST http://127.0.0.1:8800/_bifrost/api/replay/execute/unified \
      -H "Content-Type: application/json" \
      -d '{
-       "url": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
+       "url": "https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
        "method": "GET",
        "headers": [["Accept","application/json"]],
        "rule_config": {
          "mode": "custom",
-         "custom_rules": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:9000/labor_cost/static/"
+         "custom_rules": "https://internal.example.test/labor_cost/static/ http://127.0.0.1:9000/labor_cost/static/"
        },
        "timeout_ms": 15000
      }'
@@ -386,6 +386,112 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 - Echo 服务收到的请求 path 为 `/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg`
 - Echo 服务收到的 query 为 `v=1`
 - Echo 服务没有收到重复路径 `/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg`
+
+---
+
+### TC-ARP-19：Replay 响应 Body 规则执行 resMerge
+
+**前置条件**：
+1. 使用临时数据目录启动 Bifrost，监听 `8087`，并携带 `--unsafe-ssl --skip-cert-check --no-system-proxy`。
+2. 通过 `rule add` / `rule enable` 配置一条 HTTPS API 的 `resMerge://({"test":"qwe"})` 规则，确认 `rule active` 中该规则启用。
+
+**操作步骤**：
+1. 使用 Replay Admin API 执行匹配该规则的 POST 请求：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8087/_bifrost/api/replay/execute/unified \
+     -H "Content-Type: application/json" \
+     -d '{
+       "url": "https://internal.example.test/people/api/common/page_permission",
+       "method": "POST",
+       "headers": [["content-type","application/json"]],
+       "body": "{\"key_list\":[\"page.example\"]}",
+       "rule_config": {"mode":"enabled","selected_rules":[]},
+       "timeout_ms": 20000
+     }'
+   ```
+2. 解析返回 JSON 的 `data.applied_rules` 和 `data.body`。
+3. 查询 `traffic list --host internal.example.test --format json-pretty`，确认 replay 记录的 `rp` 包含 `resMerge`。
+
+**预期结果**：
+- 返回 HTTP 200，响应体包含 `success: true`
+- `data.status` 为 `200`
+- `data.applied_rules` 中包含 `resMerge`
+- `data.body` 解析为 JSON 后，顶层包含 `"test": "qwe"`
+- Traffic 记录显示客户端应用为 `Bifrost Replay`，规则命中列表包含 `resMerge`
+
+---
+
+### TC-ARP-20：Replay 规则覆盖回归（请求修改 + 响应修改 + 内容注入）
+
+**前置条件**：
+1. 使用临时数据目录启动 Bifrost，监听 `8087`，并携带 `--unsafe-ssl --skip-cert-check --no-system-proxy`。
+2. 启动一个本地 echo 上游，监听 `18087`，返回收到的路径、请求头和请求体。
+
+**操作步骤**：
+1. 使用 Replay Admin API 的 `custom` 规则模式执行请求，规则同时覆盖转发、请求头/URL/body 修改和响应头/body 修改：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8087/_bifrost/api/replay/execute/unified \
+     -H "Content-Type: application/json" \
+     -d '{
+       "url": "http://replay-rules.example.test/api?drop=1&old=1",
+       "method": "POST",
+       "headers": [["Content-Type","text/plain"],["X-Remove","1"],["X-Trace","old"]],
+       "body": "{\"a\":1,\"b\":0}",
+       "rule_config": {
+         "mode": "custom",
+         "custom_rules": "http://replay-rules.example.test/api http://127.0.0.1:18087/echo reqHeaders://(X-Trace: old) reqCookies://(sid=abc,theme=dark) delete://reqHeaders.X-Remove|urlParams.drop urlParams://(keep=2&drop=) reqType://json reqCharset://utf-8 forwardedFor://1.2.3.4 headerReplace://req.X-Trace:old=new reqCors://(origin=https://app.example.test&methods=POST&headers=X-Test) reqMerge://({\"b\":2,\"c\":3}) statusCode://201 resHeaders://X-Response:old headerReplace://res.X-Response:old=new resCookies://rid=xyz resType://json resCharset://utf-8 cache://60 attachment://report.json responseFor://mobile resCors://(origin=https://app.example.test&methods=GET,POST&headers=X-Test&credentials=false) trailers://X-Trailer:done htmlAppend://(<tail>) resReplace://<tail>= resMerge://({\"response_rule\":\"ok\"})"
+       },
+       "timeout_ms": 10000
+     }'
+   ```
+2. 解析返回 JSON 的 `data.status`、`data.headers`、`data.body` 和 `data.applied_rules`。
+
+**预期结果**：
+- 返回 HTTP 200，响应体包含 `success: true`
+- `data.status` 为 `201`
+- `data.applied_rules` 至少包含 `reqHeaders`、`reqCookies`、`delete`、`urlParams`、`reqType`、`reqCharset`、`forwardedFor`、`headerReplace`、`reqCors`、`params`、`statusCode`、`resHeaders`、`resCookies`、`resType`、`resCharset`、`cache`、`attachment`、`responseFor`、`resCors`、`trailers`、`htmlAppend`、`resReplace`、`resMerge`
+- echo 上游在 `data.body.request_body` 中看到 `{"a":1,"b":2,"c":3}`，且请求路径不再包含 `drop=1`，包含 `keep=2`
+- echo 上游在 `data.body.headers` 中看到 `x-trace: new`、`content-type: application/json; charset=utf-8`、`origin: https://app.example.test`、`access-control-request-method: POST`、`access-control-request-headers: X-Test`、`cookie` 包含 `sid=abc` 和 `theme=dark`
+- `data.headers` 中包含 `X-Response: new`、`Set-Cookie: rid=xyz`、`Content-Type: application/json; charset=utf-8`、`Cache-Control: max-age=60`、`Content-Disposition: attachment; filename="report.json"`、`x-bifrost-response-for: mobile`、`Access-Control-Allow-Origin: https://app.example.test` 和 `Trailer: X-Trailer`
+- `data.body` 解析为 JSON 后，顶层包含 `"response_rule": "ok"`
+
+---
+
+### TC-ARP-21：Replay 规则 Shell E2E 回归脚本
+
+**前置条件**：
+1. 已从当前源码构建 `bifrost` 二进制，例如：
+   ```bash
+   cargo build --bin bifrost
+   ```
+2. 选择未占用的代理端口和 mock 上游端口，并使用临时 `BIFROST_DATA_DIR`。
+
+**操作步骤**：
+1. 执行 Replay 规则 Shell E2E：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-replay-shell-e2e-XXXXXX)"
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   PROXY_PORT=18887 \
+   MOCK_HTTP_PORT=13087 \
+   MOCK_SSE_PORT=13088 \
+   MOCK_WS_PORT=13089 \
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+   bash e2e-tests/tests/test_replay_rules.sh
+   rc=$?
+   rm -rf "$TEST_DATA_DIR"
+   exit "$rc"
+   ```
+2. 重点确认输出中包含：
+   - `Request body mutation rules applied: reqPrepend/reqAppend/reqReplace`
+   - `Response header/cookie/CORS metadata rules applied in replay matrix`
+   - `Applied rules include full replay modify matrix`
+   - `Failed: 0`
+
+**预期结果**：
+- 脚本退出码为 `0`
+- 本地 HTTP/SSE/WebSocket mock 上游和临时 Bifrost 进程全部被清理
+- Replay custom rules 覆盖请求体修改、`reqMerge`、URL 参数删除、请求/响应 headerReplace、CORS、响应 metadata、`resMerge` 和内容注入规则
+- `e2e-tests/rules/replay/full_modify_matrix.txt` 和 `request_body_mutations.txt` 仅作为 Replay shell E2E fixture 使用，不应被通用规则夹具 runner 当作单规则语义套件执行
 
 ---
 

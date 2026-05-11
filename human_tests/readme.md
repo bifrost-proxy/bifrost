@@ -83,7 +83,7 @@
 | [api-system.md](./api-system.md) | System API | 16 | 系统信息、概览、内存诊断 |
 | [api-scripts.md](./api-scripts.md) | Scripts API | 30 | 脚本 CRUD、重命名、运行测试、名称校验、内置脚本保护 |
 | [api-push.md](./api-push.md) | Push WebSocket API | 11 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端回归 |
-| [api-replay.md](./api-replay.md) | Replay API | 18 | 重放集合管理、请求 CRUD、执行重放、历史查看、路径前缀转发回归 |
+| [api-replay.md](./api-replay.md) | Replay API | 21 | 重放集合管理、请求 CRUD、执行重放、历史查看、路径前缀转发回归、响应 Body 规则 resMerge 回归、Replay request/response 规则覆盖回归、Replay 规则 Shell E2E 回归 |
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
@@ -97,7 +97,7 @@
 | [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 27 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、host 精确路径不补尾斜杠回归、旧版 `^https://` path wildcard 兼容回归 |
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 5 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归、统一代理 UDP relay 端口 fallback 与 Windows ARM runner 并发回归 |
 | [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 8 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归 |
-| [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 66 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归 |
+| [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 71 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、gzip JSON reqMerge/resMerge 合并回归、HTTPS 解包 gzip JSON reqMerge/resMerge 合并回归、脚本与 mock 路径压缩 Body 修改回归、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归 |
 | [bp-protocol-parser.md](./bp-protocol-parser.md) | BP 协议脚本解析 | 17 | `bp://<script>` + `decode://bp` 本地/远程 parser 解析，远程脚本下载缓存，远程下载超时/超大响应失败且不污染缓存，Traffic 详情 decoded body 展示，Body 面板 raw/decoded 切换且 raw 精确展示解码前二进制，`bifrost search` 与 Search SSE 搜索解析后内容，本地 parser 名称路径穿越拒绝，内置 `build_in_bp` 自动释放覆盖与规则编辑智能提示/hover 说明，`decode://bp` 内置校验、`bp://` parser 脚本列表补全、本地 parser 跳转到 Scripts 页面、query 高亮不污染后续协议、远端 URL 和绝对路径兼容，`build_in_bp.js` 对 next_agent PSM 的 BAM metadata/Thrift 双向二进制解包路径验证、默认 Bifrost sync token 换取 server `bam_token`，以及参考脚本/相关文档不暴露明文默认域名 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |

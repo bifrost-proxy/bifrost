@@ -2413,7 +2413,7 @@ new_value
     #[test]
     fn test_parse_passthrough_in_multi_rule_file() {
         let content = r#"
-# BOE
+# Sample
 https://example.com/api/ https://example.com/api/
 https://example.com http://localhost:8000/
 wss://example.com/ ws://localhost:8000/

@@ -562,13 +562,13 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name":"test-host-path-prefix","content":"https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:3000/labor_cost/static/","enabled":true}'
+     -d '{"name":"test-host-path-prefix","content":"https://internal.example.test/labor_cost/static/ http://127.0.0.1:3000/labor_cost/static/","enabled":true}'
    ```
 
 **操作步骤**：
 1. 执行命令：
    ```bash
-   curl -x http://127.0.0.1:8800 -k "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1"
+   curl -x http://127.0.0.1:8800 -k "https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1"
    ```
 2. 检查响应 JSON 中的 `request.parsed_path` 和 `request.query_string`
 3. 清理：
@@ -654,7 +654,7 @@ HTTPServer(("127.0.0.1", 8999), H).serve_forever()'
    ```
 2. 执行 host rule path rewrite E2E 脚本。脚本会使用临时数据目录、非 `9900` 端口、`--no-system-proxy`，启动本地 echo 服务，并创建精确路径规则：
    ```text
-   https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr http://127.0.0.1:<echo_port>/__webpack_hmr
+   https://internal.example.test/labor_cost/static/__webpack_hmr http://127.0.0.1:<echo_port>/__webpack_hmr
    ```
 
 **操作步骤**：

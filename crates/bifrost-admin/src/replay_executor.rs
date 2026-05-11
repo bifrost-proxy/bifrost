@@ -404,37 +404,10 @@ impl ReplayExecutor {
         &self,
         resolved_rules: &ResolvedRules,
         status: u16,
-        mut headers: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
         body: Option<String>,
     ) -> (u16, Vec<(String, String)>, Option<String>) {
-        let mut final_status = status;
-        let mut final_body = body;
-
-        for rule in &resolved_rules.rules {
-            match rule.rule.protocol {
-                Protocol::ResHeaders => {
-                    if let Some(parsed) = parse_headers(&rule.resolved_value) {
-                        for (key, value) in parsed {
-                            let key_lower = key.to_lowercase();
-                            headers.retain(|(k, _)| k.to_lowercase() != key_lower);
-                            headers.push((key, value));
-                        }
-                    }
-                }
-                Protocol::StatusCode | Protocol::ReplaceStatus => {
-                    if let Ok(code) = rule.resolved_value.parse::<u16>() {
-                        final_status = code;
-                    }
-                }
-                Protocol::ResBody => {
-                    let content = extract_inline_content(&rule.resolved_value);
-                    final_body = Some(content);
-                }
-                _ => {}
-            }
-        }
-
-        (final_status, headers, final_body)
+        crate::replay_response_rules::apply_response_rules(resolved_rules, status, headers, body)
     }
 
     #[allow(clippy::too_many_arguments)]

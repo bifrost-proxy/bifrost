@@ -10,6 +10,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::Write;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -86,6 +87,30 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "resMerge 规则添加响应 JSON 字段",
             "body",
             test_resmerge_add_field,
+        ),
+        TestCase::standalone(
+            "body_reqMerge_gzip_json",
+            "reqMerge 规则合并 gzip JSON 请求并保持有效 gzip",
+            "body",
+            test_reqmerge_gzip_json,
+        ),
+        TestCase::standalone(
+            "body_resMerge_gzip_json",
+            "resMerge 规则合并 gzip JSON 响应并保持有效 gzip",
+            "body",
+            test_resmerge_gzip_json,
+        ),
+        TestCase::standalone(
+            "body_https_reqMerge_gzip_json",
+            "HTTPS 解包链路 reqMerge 合并 gzip JSON 请求并保持有效 gzip",
+            "body",
+            test_https_reqmerge_gzip_json,
+        ),
+        TestCase::standalone(
+            "body_https_resMerge_gzip_json",
+            "HTTPS 解包链路 resMerge 合并 gzip JSON 响应并保持有效 gzip",
+            "body",
+            test_https_resmerge_gzip_json,
         ),
         TestCase::standalone(
             "body_resAppend_content",
@@ -508,6 +533,217 @@ async fn test_resmerge_add_field() -> Result<(), String> {
     Ok(())
 }
 
+async fn test_reqmerge_gzip_json() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "test.local host://127.0.0.1:{} reqMerge://({{\"test\":\"qwe\",\"keep\":2}})",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let compressed =
+        bifrost_proxy::transform::compress_body(br#"{"test":"old","original":true}"#, "gzip")
+            .map_err(|e| format!("failed to gzip request fixture: {}", e))?;
+    let mut payload_file =
+        tempfile::NamedTempFile::new().map_err(|e| format!("tempfile failed: {}", e))?;
+    payload_file
+        .write_all(&compressed)
+        .map_err(|e| format!("write gzip request fixture failed: {}", e))?;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .method("POST")
+    .header("Content-Type", "application/json")
+    .header("Content-Encoding", "gzip")
+    .data_binary_file(payload_file.path().to_path_buf())
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+
+    let req = mock.last_request().ok_or("No request received")?;
+    let content_encoding = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.as_str());
+    if content_encoding != Some("gzip") {
+        return Err(format!(
+            "Expected upstream request to keep gzip content-encoding, got {:?}",
+            content_encoding
+        ));
+    }
+    let body_bytes = req.body_bytes.ok_or("No request body bytes")?;
+    let decompressed =
+        bifrost_proxy::transform::try_decompress_body_with_limit(&body_bytes, "gzip", 1024)
+            .map_err(|e| format!("failed to decompress upstream request body: {}", e))?;
+    let parsed: serde_json::Value = serde_json::from_slice(&decompressed)
+        .map_err(|e| format!("invalid merged request JSON: {}", e))?;
+    if parsed["test"] != "qwe" || parsed["original"] != true || parsed["keep"] != 2 {
+        return Err(format!("Unexpected merged request JSON: {}", parsed));
+    }
+
+    Ok(())
+}
+
+async fn test_resmerge_gzip_json() -> Result<(), String> {
+    let upstream_port = start_gzip_json_server(r#"{"test":"old","original":true}"#).await?;
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "gzip-json.local host://127.0.0.1:{} resMerge://({{\"test\":\"qwe\",\"added\":1}})",
+            upstream_port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://gzip-json.local/api",
+    )
+    .compressed()
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header("content-encoding", "gzip")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.body).map_err(|e| format!("invalid JSON body: {}", e))?;
+    if parsed["test"] != "qwe" || parsed["original"] != true || parsed["added"] != 1 {
+        return Err(format!("Unexpected merged response JSON: {}", parsed));
+    }
+
+    Ok(())
+}
+
+async fn test_https_reqmerge_gzip_json() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let rules = [
+        format!("https://test.local/ http://127.0.0.1:{}", mock.port),
+        "https://test.local/ reqMerge://({\"test\":\"qwe\",\"keep\":2})".to_string(),
+    ];
+    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+    let (_proxy, _admin_state) = ProxyInstance::start_with_admin(port, rule_refs, true, true)
+        .await
+        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let compressed =
+        bifrost_proxy::transform::compress_body(br#"{"test":"old","original":true}"#, "gzip")
+            .map_err(|e| format!("failed to gzip request fixture: {}", e))?;
+    let mut payload_file =
+        tempfile::NamedTempFile::new().map_err(|e| format!("tempfile failed: {}", e))?;
+    payload_file
+        .write_all(&compressed)
+        .map_err(|e| format!("write gzip request fixture failed: {}", e))?;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "https://test.local/api",
+    )
+    .insecure()
+    .method("POST")
+    .header("Content-Type", "application/json")
+    .header("Content-Encoding", "gzip")
+    .data_binary_file(payload_file.path().to_path_buf())
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+
+    let req = mock.last_request().ok_or("No request received")?;
+    let content_encoding = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.as_str());
+    if content_encoding != Some("gzip") {
+        return Err(format!(
+            "Expected upstream HTTPS-tunnel request to keep gzip content-encoding, got {:?}",
+            content_encoding
+        ));
+    }
+    let body_bytes = req.body_bytes.ok_or("No request body bytes")?;
+    let decompressed =
+        bifrost_proxy::transform::try_decompress_body_with_limit(&body_bytes, "gzip", 1024)
+            .map_err(|e| format!("failed to decompress upstream request body: {}", e))?;
+    let parsed: serde_json::Value = serde_json::from_slice(&decompressed)
+        .map_err(|e| format!("invalid merged request JSON: {}", e))?;
+    if parsed["test"] != "qwe" || parsed["original"] != true || parsed["keep"] != 2 {
+        return Err(format!(
+            "Unexpected HTTPS-tunnel merged request JSON: {}",
+            parsed
+        ));
+    }
+
+    Ok(())
+}
+
+async fn test_https_resmerge_gzip_json() -> Result<(), String> {
+    let upstream_port = start_gzip_json_server(r#"{"test":"old","original":true}"#).await?;
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let rules = [
+        format!(
+            "https://gzip-json-tunnel.local/ http://127.0.0.1:{}",
+            upstream_port
+        ),
+        "https://gzip-json-tunnel.local/ resMerge://({\"test\":\"qwe\",\"added\":1})".to_string(),
+    ];
+    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+    let (_proxy, _admin_state) = ProxyInstance::start_with_admin(port, rule_refs, true, true)
+        .await
+        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "https://gzip-json-tunnel.local/api",
+    )
+    .insecure()
+    .compressed()
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header("content-encoding", "gzip")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.body).map_err(|e| format!("invalid JSON body: {}", e))?;
+    if parsed["test"] != "qwe" || parsed["original"] != true || parsed["added"] != 1 {
+        return Err(format!(
+            "Unexpected HTTPS-tunnel merged response JSON: {}",
+            parsed
+        ));
+    }
+
+    Ok(())
+}
+
 async fn test_resappend_content() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "original");
@@ -785,6 +1021,48 @@ async fn start_gzip_html_server(html: &'static str) -> Result<u16, String> {
                             Response::builder()
                                 .status(StatusCode::OK)
                                 .header("content-type", "text/html; charset=utf-8")
+                                .header("content-encoding", "gzip")
+                                .body(Full::new(Bytes::from(encoded)))
+                                .unwrap(),
+                        )
+                    }
+                });
+
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    Ok(port)
+}
+
+async fn start_gzip_json_server(json: &'static str) -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("failed to bind gzip json server: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read gzip json server addr: {}", e))?
+        .port();
+    let encoded = bifrost_proxy::transform::compress_body(json.as_bytes(), "gzip")
+        .map_err(|e| format!("failed to gzip json fixture: {}", e))?;
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let io = TokioIo::new(stream);
+            let encoded = encoded.clone();
+
+            tokio::spawn(async move {
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| {
+                    let encoded = encoded.clone();
+                    async move {
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "application/json")
                                 .header("content-encoding", "gzip")
                                 .body(Full::new(Bytes::from(encoded)))
                                 .unwrap(),

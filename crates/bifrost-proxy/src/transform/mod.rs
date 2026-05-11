@@ -7,8 +7,9 @@ mod response;
 
 pub use badge::{maybe_inject_bifrost_badge_html, BIFROST_BADGE_ELEMENT_ID};
 pub use body::{
-    apply_body_rules, apply_content_injection, apply_content_injection_preserving_encoding,
-    ContentInjectionEncoding, ContentInjectionResult, Phase,
+    apply_body_rules, apply_body_rules_preserving_encoding, apply_content_injection,
+    apply_content_injection_preserving_encoding, ContentInjectionEncoding, ContentInjectionResult,
+    Phase,
 };
 pub use compress::compress_body;
 pub use decompress::{
