@@ -1,7 +1,12 @@
 use std::env;
 use std::ffi::OsString;
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BIFROST_VERSION");
@@ -19,6 +24,7 @@ fn main() {
         .canonicalize()
         .unwrap_or_else(|_| manifest_path.join("../../web"));
     let dist_dir = web_dir.join("dist");
+    let gzip_dist_dir = web_dir.join("dist-gzip");
 
     println!("cargo:rerun-if-changed={}", web_dir.join("src").display());
     println!(
@@ -37,6 +43,7 @@ fn main() {
     if env::var("SKIP_FRONTEND_BUILD").is_ok() {
         println!("cargo:warning=Skipping frontend build (SKIP_FRONTEND_BUILD is set)");
         ensure_dist_exists(&dist_dir);
+        generate_gzip_dist(&dist_dir, &gzip_dist_dir);
         return;
     }
 
@@ -46,6 +53,7 @@ fn main() {
             web_dir.display()
         );
         ensure_dist_exists(&dist_dir);
+        generate_gzip_dist(&dist_dir, &gzip_dist_dir);
         return;
     }
 
@@ -118,6 +126,7 @@ fn main() {
                     "cargo:warning=Pre-built frontend found at {}",
                     dist_dir.display()
                 );
+                generate_gzip_dist(&dist_dir, &gzip_dist_dir);
                 return;
             }
             panic!(
@@ -155,6 +164,7 @@ fn main() {
         "cargo:warning=Frontend build completed successfully at {}",
         dist_dir.display()
     );
+    generate_gzip_dist(&dist_dir, &gzip_dist_dir);
 }
 
 fn ensure_dist_exists(dist_dir: &Path) {
@@ -176,6 +186,90 @@ fn ensure_dist_exists(dist_dir: &Path) {
         )
         .expect("Failed to create placeholder index.html");
     }
+}
+
+fn generate_gzip_dist(dist_dir: &Path, gzip_dist_dir: &Path) {
+    if !dist_dir.exists() {
+        panic!(
+            "Cannot gzip missing frontend dist directory at {}",
+            dist_dir.display()
+        );
+    }
+
+    if gzip_dist_dir.exists() {
+        fs::remove_dir_all(gzip_dist_dir).expect("Failed to remove stale gzip dist directory");
+    }
+    fs::create_dir_all(gzip_dist_dir).expect("Failed to create gzip dist directory");
+
+    let mut file_count = 0usize;
+    gzip_directory(dist_dir, dist_dir, gzip_dist_dir, &mut file_count);
+    println!(
+        "cargo:warning=Generated {} gzip frontend assets at {}",
+        file_count,
+        gzip_dist_dir.display()
+    );
+}
+
+fn gzip_directory(
+    root_dir: &Path,
+    current_dir: &Path,
+    gzip_dist_dir: &Path,
+    file_count: &mut usize,
+) {
+    let entries = fs::read_dir(current_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read frontend dist directory {}: {}",
+            current_dir.display(),
+            e
+        )
+    });
+
+    for entry in entries {
+        let entry = entry.expect("Failed to read frontend dist entry");
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("Failed to inspect {}: {}", path.display(), e));
+
+        if file_type.is_dir() {
+            gzip_directory(root_dir, &path, gzip_dist_dir, file_count);
+        } else if file_type.is_file() {
+            gzip_file(root_dir, &path, gzip_dist_dir);
+            *file_count += 1;
+        }
+    }
+}
+
+fn gzip_file(root_dir: &Path, source_path: &Path, gzip_dist_dir: &Path) {
+    let relative_path = source_path.strip_prefix(root_dir).unwrap_or_else(|_| {
+        panic!(
+            "{} is not under {}",
+            source_path.display(),
+            root_dir.display()
+        )
+    });
+    let output_path = gzip_dist_dir.join(relative_path);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| {
+            panic!(
+                "Failed to create gzip output directory {}: {}",
+                parent.display(),
+                e
+            )
+        });
+    }
+
+    let source = fs::read(source_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", source_path.display(), e));
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(&source)
+        .unwrap_or_else(|e| panic!("Failed to gzip {}: {}", source_path.display(), e));
+    let compressed = encoder
+        .finish()
+        .unwrap_or_else(|e| panic!("Failed to finish gzip {}: {}", source_path.display(), e));
+    fs::write(&output_path, compressed)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {}", output_path.display(), e));
 }
 
 fn resolve_command(command: &str) -> String {
