@@ -82,7 +82,7 @@ impl AdminRouter {
         } else if admin_path.starts_with("/api/") {
             Self::handle_api(req, state, push_manager, &admin_path, peer_addr).await
         } else {
-            serve_static_file(&admin_path)
+            serve_static_file(&admin_path, req.headers())
         };
 
         apply_cors_headers(&mut resp, origin.as_deref());

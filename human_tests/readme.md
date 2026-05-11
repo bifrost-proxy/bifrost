@@ -47,6 +47,7 @@
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 3 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器 |
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 16 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 全局右下角 AI skill 引导入口、hover 浮窗、hover 延迟关闭、安装命令复制、仓库 SKILL.md 链接、拖拽位置、点击隐藏，以及亮色/暗色主题验证 |
+| [webui-static-assets.md](./webui-static-assets.md) | WebUI Static Assets | 3 | WebUI 静态资源 gzip 嵌入发布、gzip 客户端直接接收压缩响应、非 gzip 客户端升级提示、SPA 深链 fallback |
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
 | [tls-trust-detection.md](./tls-trust-detection.md) | TLS 信任检测改进（降低误伤） | 10 | 错误分类精细化（definite/probable/decrypt）、PossiblyNotTrusted 中间状态、MIN_DEFINITE 门槛、per-domain 追踪、WebUI 状态展示 |
@@ -171,7 +172,7 @@
 
 ---
 
-**总计：92 个测试文件，1610 个测试用例**
+**总计：93 个测试文件，1613 个测试用例**
 
 ## 工作流程
 

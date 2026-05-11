@@ -104,6 +104,9 @@ nix = { version = "0.28", features = ["net"] }
 tokio-test = "0.4"
 tempfile.workspace = true
 
+[build-dependencies]
+flate2 = "1"
+
 [features]
 default = ["skills-crud"]
 skills-crud = []
