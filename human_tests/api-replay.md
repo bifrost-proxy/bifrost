@@ -491,6 +491,7 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 - 脚本退出码为 `0`
 - 本地 HTTP/SSE/WebSocket mock 上游和临时 Bifrost 进程全部被清理
 - Replay custom rules 覆盖请求体修改、`reqMerge`、URL 参数删除、请求/响应 headerReplace、CORS、响应 metadata、`resMerge` 和内容注入规则
+- `e2e-tests/rules/replay/full_modify_matrix.txt` 和 `request_body_mutations.txt` 仅作为 Replay shell E2E fixture 使用，不应被通用规则夹具 runner 当作单规则语义套件执行
 
 ---
 
