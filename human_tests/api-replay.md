@@ -369,12 +369,12 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
    curl -s -X POST http://127.0.0.1:8800/_bifrost/api/replay/execute/unified \
      -H "Content-Type: application/json" \
      -d '{
-       "url": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
+       "url": "https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
        "method": "GET",
        "headers": [["Accept","application/json"]],
        "rule_config": {
          "mode": "custom",
-         "custom_rules": "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:9000/labor_cost/static/"
+         "custom_rules": "https://internal.example.test/labor_cost/static/ http://127.0.0.1:9000/labor_cost/static/"
        },
        "timeout_ms": 15000
      }'

@@ -292,7 +292,7 @@ test_path_prefix_forward_rule() {
     echo "=== Test: Path Prefix Forward Rule ==="
 
     local asset_path="/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg"
-    local url="https://ejt9lgzgu9.feishu-boe.cn${asset_path}?v=1"
+    local url="https://internal.example.test${asset_path}?v=1"
     local rule_config
     rule_config=$(replay_rule_config_from_fixture path_prefix_forward.txt "MOCK_HTTP_PORT=${MOCK_HTTP_PORT}")
 

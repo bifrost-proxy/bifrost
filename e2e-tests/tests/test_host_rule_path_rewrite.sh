@@ -26,7 +26,7 @@ TEST_DATA_DIR="$ROOT_DIR/.bifrost-e2e-host-path-${PROXY_PORT}-$$"
 RULES_FILE="$TEST_DATA_DIR/rules.txt"
 PROXY_PID=""
 
-TARGET_HOST="ejt9lgzgu9.feishu-boe.cn"
+TARGET_HOST="internal.example.test"
 TARGET_PREFIX="/labor_cost/static/"
 TARGET_FILE="07c1d7e1fb3e13436b958af5f90ec9c8.svg"
 TARGET_QUERY="v=1"

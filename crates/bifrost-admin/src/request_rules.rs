@@ -701,7 +701,7 @@ mod tests {
         };
 
         let result = apply_all_request_rules(
-            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg",
+            "https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg",
             "GET",
             &[],
             None,
@@ -725,7 +725,7 @@ mod tests {
         };
 
         let result = apply_all_request_rules(
-            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/app.js?v=1",
+            "https://internal.example.test/labor_cost/static/app.js?v=1",
             "GET",
             &[],
             None,
@@ -764,12 +764,12 @@ mod tests {
     #[test]
     fn test_apply_forward_rule_from_resolved_custom_rule_uses_source_path_suffix() {
         let rules = parse_rules(
-            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://127.0.0.1:13000/labor_cost/static/",
+            "https://internal.example.test/labor_cost/static/ http://127.0.0.1:13000/labor_cost/static/",
         )
         .unwrap();
         let resolver = RulesResolver::new(rules);
         let ctx = RequestContext::from_url(
-            "https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
+            "https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg?v=1",
         )
         .with_method("GET");
         let resolved_rules = resolver.resolve(&ctx);

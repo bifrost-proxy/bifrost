@@ -12,6 +12,7 @@ pub struct CurlCommand {
     method: Option<String>,
     headers: Vec<(String, String)>,
     data: Option<String>,
+    data_binary_file: Option<PathBuf>,
     insecure: bool,
     ca_cert: Option<PathBuf>,
     verbose: bool,
@@ -39,6 +40,7 @@ impl CurlCommand {
             method: None,
             headers: Vec::new(),
             data: None,
+            data_binary_file: None,
             insecure: false,
             ca_cert: None,
             verbose: true,
@@ -56,6 +58,7 @@ impl CurlCommand {
             method: None,
             headers: Vec::new(),
             data: None,
+            data_binary_file: None,
             insecure: false,
             ca_cert: None,
             verbose: true,
@@ -87,6 +90,11 @@ impl CurlCommand {
 
     pub fn data(mut self, data: &str) -> Self {
         self.data = Some(data.to_string());
+        self
+    }
+
+    pub fn data_binary_file(mut self, path: PathBuf) -> Self {
+        self.data_binary_file = Some(path);
         self
     }
 
@@ -160,6 +168,10 @@ impl CurlCommand {
             args.push("-d".to_string());
             args.push(data.clone());
         }
+        if let Some(ref data_binary_file) = self.data_binary_file {
+            args.push("--data-binary".to_string());
+            args.push(format!("@{}", data_binary_file.to_string_lossy()));
+        }
 
         if self.insecure {
             args.push("-k".to_string());
@@ -219,14 +231,20 @@ fn parse_response(response: &str) -> (Option<u16>, HashMap<String, String>, Stri
     let mut found_status_line = false;
 
     for line in response.lines() {
+        if line.starts_with("HTTP/") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                http_code = parts[1].parse().ok();
+            }
+            headers.clear();
+            body.clear();
+            in_headers = true;
+            found_status_line = true;
+            continue;
+        }
+
         if in_headers {
-            if line.starts_with("HTTP/") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    http_code = parts[1].parse().ok();
-                }
-                found_status_line = true;
-            } else if found_status_line && line.trim().is_empty() {
+            if found_status_line && line.trim().is_empty() {
                 in_headers = false;
             } else if found_status_line && line.contains(':') {
                 if let Some((key, value)) = line.split_once(':') {

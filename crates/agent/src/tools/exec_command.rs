@@ -109,10 +109,14 @@ impl ToolHandler for ExecCommandTool {
             None => work_dir.to_path_buf(),
         };
 
-        let wait_for_completion = !args.tty.unwrap_or(false);
-        let real_pty = args.tty.unwrap_or(false);
-        let timeout_secs = self.timeout_secs;
         let yield_time_ms = args.yield_time_ms.unwrap_or(1000);
+        let real_pty = args.tty.unwrap_or(false);
+        let wait_for_completion = true;
+        let timeout_secs = if real_pty {
+            yield_time_ms.div_ceil(1000).max(1)
+        } else {
+            self.timeout_secs
+        };
         let pty_args = json!({
             "command": command_for_shell(args.shell.as_deref(), &args.cmd),
             "timeout": timeout_secs,
@@ -136,7 +140,8 @@ impl ToolHandler for ExecCommandTool {
             output = truncate_to_token_budget(&output, limit);
         }
 
-        let session_id = if parsed.exit_indicator.as_deref() == Some("running")
+        let session_id = if real_pty
+            || parsed.exit_indicator.as_deref() == Some("running")
             || parsed.exit_indicator.as_deref() == Some("timeout")
         {
             parsed.session_id

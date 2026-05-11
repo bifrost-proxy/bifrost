@@ -26,6 +26,7 @@ pub struct RecordedRequest {
     pub headers: HashMap<String, String>,
     pub header_pairs: Vec<(String, String)>,
     pub body: Option<String>,
+    pub body_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -97,6 +98,11 @@ impl EnhancedMockServer {
                                 } else {
                                     Some(String::from_utf8_lossy(&body_bytes).to_string())
                                 };
+                                let body_bytes = if body_bytes.is_empty() {
+                                    None
+                                } else {
+                                    Some(body_bytes.to_vec())
+                                };
 
                                 let recorded = RecordedRequest {
                                     timestamp: Instant::now(),
@@ -106,6 +112,7 @@ impl EnhancedMockServer {
                                     headers: headers.clone(),
                                     header_pairs,
                                     body,
+                                    body_bytes,
                                 };
                                 requests.write().push(recorded);
 
@@ -388,6 +395,11 @@ impl HttpsMockServer {
                                 } else {
                                     Some(String::from_utf8_lossy(&body_bytes).to_string())
                                 };
+                                let body_bytes = if body_bytes.is_empty() {
+                                    None
+                                } else {
+                                    Some(body_bytes.to_vec())
+                                };
 
                                 requests.write().push(RecordedRequest {
                                     timestamp: Instant::now(),
@@ -397,6 +409,7 @@ impl HttpsMockServer {
                                     headers: headers.clone(),
                                     header_pairs,
                                     body,
+                                    body_bytes,
                                 });
 
                                 let resp = response.read();

@@ -7,13 +7,13 @@ Replay 执行自定义规则或已启用规则时，`http://` / `https://` 转�
 示例：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://localhost:9000/labor_cost/static/
+https://internal.example.test/labor_cost/static/ http://localhost:9000/labor_cost/static/
 ```
 
 Replay 请求：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
+https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
 ```
 
 应转发到：

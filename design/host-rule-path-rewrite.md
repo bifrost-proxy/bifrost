@@ -5,13 +5,13 @@
 当规则同时包含源路径前缀和目标路径前缀时，例如：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/ http://localhost:9000/labor_cost/static/
+https://internal.example.test/labor_cost/static/ http://localhost:9000/labor_cost/static/
 ```
 
 请求：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
+https://internal.example.test/labor_cost/static/07c1d7e1fb3e13436b958af5f90ec9c8.svg
 ```
 
 预期应转发到：
@@ -29,13 +29,13 @@ http://localhost:9000/labor_cost/static/labor_cost/static/07c1d7e1fb3e13436b958a
 当规则是精确文件路径而不是目录前缀时，也必须保留目标路径的文件语义，例如：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr http://localhost:9000/__webpack_hmr
+https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9000/__webpack_hmr
 ```
 
 请求：
 
 ```text
-https://ejt9lgzgu9.feishu-boe.cn/labor_cost/static/__webpack_hmr
+https://internal.example.test/labor_cost/static/__webpack_hmr
 ```
 
 预期应转发到：

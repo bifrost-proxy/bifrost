@@ -44,9 +44,9 @@ use crate::transform::apply_res_rules;
 use crate::transform::collect_all_cookies_from_headers;
 use crate::transform::decompress_body_with_limit;
 use crate::transform::{
-    apply_body_rules, apply_content_injection, apply_content_injection_preserving_encoding,
+    apply_body_rules_preserving_encoding, apply_content_injection_preserving_encoding,
     compress_body, maybe_inject_bifrost_badge_html, try_decompress_body_with_limit,
-    ContentInjectionEncoding, Phase,
+    ContentInjectionEncoding, ContentInjectionResult, Phase,
 };
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -370,6 +370,58 @@ fn header_content_encoding(headers: &hyper::HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn set_content_encoding_header(headers: &mut hyper::HeaderMap, content_encoding: Option<&str>) {
+    headers.remove(hyper::header::CONTENT_ENCODING);
+    if let Some(content_encoding) = content_encoding {
+        if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
+            headers.insert(hyper::header::CONTENT_ENCODING, value);
+        }
+    }
+}
+
+fn body_to_script_string(
+    body: &Bytes,
+    content_encoding: Option<&str>,
+    max_decompress_output_bytes: usize,
+) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+
+    let content_encoding =
+        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    let decoded = if let Some(content_encoding) = content_encoding {
+        try_decompress_body_with_limit(body.as_ref(), content_encoding, max_decompress_output_bytes)
+            .ok()?
+    } else {
+        body.to_vec()
+    };
+
+    String::from_utf8(decoded).ok()
+}
+
+fn script_string_to_body(body: &str, content_encoding: Option<&str>) -> ContentInjectionResult {
+    let content_encoding =
+        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    if let Some(content_encoding) = content_encoding {
+        match compress_body(body.as_bytes(), content_encoding) {
+            Ok(compressed) => ContentInjectionResult {
+                body: Bytes::from(compressed),
+                content_encoding: Some(content_encoding.to_string()),
+            },
+            Err(_) => ContentInjectionResult {
+                body: Bytes::from(body.to_string()),
+                content_encoding: None,
+            },
+        }
+    } else {
+        ContentInjectionResult {
+            body: Bytes::from(body.to_string()),
+            content_encoding: None,
+        }
+    }
+}
+
 fn build_upstream_pool_partition(
     original_host: &str,
     target_host: &str,
@@ -446,6 +498,15 @@ pub fn needs_body_processing(rules: &ResolvedRules) -> bool {
         || !rules.decode_scripts.is_empty()
 }
 
+fn has_response_body_rules(rules: &ResolvedRules) -> bool {
+    rules.res_body.is_some()
+        || !rules.res_replace.is_empty()
+        || !rules.res_replace_regex.is_empty()
+        || rules.res_prepend.is_some()
+        || rules.res_append.is_some()
+        || rules.res_merge.is_some()
+}
+
 pub fn needs_response_override(rules: &ResolvedRules) -> bool {
     rules.res_body.is_some() || rules.status_code.is_some() || rules.replace_status.is_some()
 }
@@ -454,10 +515,13 @@ async fn apply_immediate_response_body_rules(
     response: Response<BoxBody>,
     rules: &ResolvedRules,
     method: &str,
+    max_decompress_output_bytes: usize,
     verbose_logging: bool,
     ctx: &RequestContext,
 ) -> Result<(Response<BoxBody>, Bytes)> {
     let (mut parts, body) = response.into_parts();
+    let source_content_encoding = response_content_encoding(&parts);
+    let output_content_encoding = response_content_encoding(&parts);
     let content_type = parts
         .headers
         .get(hyper::header::CONTENT_TYPE)
@@ -469,16 +533,36 @@ async fn apply_immediate_response_body_rules(
         .await
         .map_err(|e| BifrostError::Network(format!("Failed to read immediate response: {}", e)))?
         .to_bytes();
-    let body_processed = apply_body_rules(
+    let body_processed = apply_body_rules_preserving_encoding(
         body_bytes,
         rules,
         Phase::Response,
         Some(&content_type),
+        ContentInjectionEncoding {
+            source: source_content_encoding.as_deref(),
+            output: output_content_encoding.as_deref(),
+            max_decompress_output_bytes,
+        },
         verbose_logging,
         ctx,
     );
-    let final_body =
-        apply_content_injection(body_processed, &content_type, rules, verbose_logging, ctx);
+    let injection_result = apply_content_injection_preserving_encoding(
+        body_processed.body,
+        &content_type,
+        ContentInjectionEncoding {
+            source: body_processed.content_encoding.as_deref(),
+            output: body_processed.content_encoding.as_deref(),
+            max_decompress_output_bytes,
+        },
+        rules,
+        verbose_logging,
+        ctx,
+    );
+    set_content_encoding_header(
+        &mut parts.headers,
+        injection_result.content_encoding.as_deref(),
+    );
+    let final_body = injection_result.body;
     normalize_res_headers(&mut parts, BodyMode::Known(final_body.len()), method);
 
     Ok((
@@ -754,6 +838,15 @@ pub fn needs_request_body_processing(rules: &ResolvedRules) -> bool {
         || !rules.decode_scripts.is_empty()
 }
 
+fn has_request_body_rules(rules: &ResolvedRules) -> bool {
+    rules.req_body.is_some()
+        || rules.req_prepend.is_some()
+        || rules.req_append.is_some()
+        || !rules.req_replace.is_empty()
+        || !rules.req_replace_regex.is_empty()
+        || rules.req_merge.is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_http_request(
     mut req: Request<Incoming>,
@@ -849,6 +942,7 @@ pub async fn handle_http_request(
                 mock_response,
                 &resolved_rules,
                 &method,
+                max_decompress_output_bytes,
                 verbose_logging,
                 ctx,
             )
@@ -1020,6 +1114,7 @@ pub async fn handle_http_request(
     let req_content_encoding = header_content_encoding(&parts.headers);
 
     apply_req_rules(&mut parts, &resolved_rules, verbose_logging, ctx);
+    let output_req_content_encoding = header_content_encoding(&parts.headers);
 
     if parts.headers.get_all(hyper::header::COOKIE).iter().count() > 1 {
         let merged = crate::transform::merge_cookie_header_values(&parts.headers);
@@ -1091,15 +1186,28 @@ pub async fn handle_http_request(
                             .headers
                             .get(hyper::header::CONTENT_TYPE)
                             .and_then(|v| v.to_str().ok());
-                        let processed = apply_body_rules(
-                            bytes.clone(),
-                            &resolved_rules,
-                            Phase::Request,
-                            req_content_type,
-                            verbose_logging,
-                            ctx,
-                        );
-                        (bytes, processed)
+                        if has_request_body_rules(&resolved_rules) {
+                            let processed = apply_body_rules_preserving_encoding(
+                                bytes.clone(),
+                                &resolved_rules,
+                                Phase::Request,
+                                req_content_type,
+                                ContentInjectionEncoding {
+                                    source: req_content_encoding.as_deref(),
+                                    output: output_req_content_encoding.as_deref(),
+                                    max_decompress_output_bytes,
+                                },
+                                verbose_logging,
+                                ctx,
+                            );
+                            set_content_encoding_header(
+                                &mut parts.headers,
+                                processed.content_encoding.as_deref(),
+                            );
+                            (bytes, processed.body)
+                        } else {
+                            (bytes.clone(), bytes)
+                        }
                     }
                     Ok(BoundedBody::Exceeded(replay_body)) => {
                         let size_display = content_length
@@ -1156,15 +1264,28 @@ pub async fn handle_http_request(
                         .headers
                         .get(hyper::header::CONTENT_TYPE)
                         .and_then(|v| v.to_str().ok());
-                    let processed = apply_body_rules(
-                        bytes.clone(),
-                        &resolved_rules,
-                        Phase::Request,
-                        req_content_type,
-                        verbose_logging,
-                        ctx,
-                    );
-                    (bytes, processed)
+                    if has_request_body_rules(&resolved_rules) {
+                        let processed = apply_body_rules_preserving_encoding(
+                            bytes.clone(),
+                            &resolved_rules,
+                            Phase::Request,
+                            req_content_type,
+                            ContentInjectionEncoding {
+                                source: req_content_encoding.as_deref(),
+                                output: output_req_content_encoding.as_deref(),
+                                max_decompress_output_bytes,
+                            },
+                            verbose_logging,
+                            ctx,
+                        );
+                        set_content_encoding_header(
+                            &mut parts.headers,
+                            processed.content_encoding.as_deref(),
+                        );
+                        (bytes, processed.body)
+                    } else {
+                        (bytes.clone(), bytes)
+                    }
                 }
                 Ok(BoundedBody::Exceeded(replay_body)) => {
                     let size_display = content_length
@@ -1217,15 +1338,21 @@ pub async fn handle_http_request(
             .headers
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok());
-        let processed = apply_body_rules(
+        let processed = apply_body_rules_preserving_encoding(
             new_body.clone(),
             &resolved_rules,
             Phase::Request,
             req_content_type,
+            ContentInjectionEncoding {
+                source: None,
+                output: output_req_content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            },
             verbose_logging,
             ctx,
         );
-        (Bytes::new(), processed)
+        set_content_encoding_header(&mut parts.headers, processed.content_encoding.as_deref());
+        (Bytes::new(), processed.body)
     } else if content_length.unwrap_or(0) == 0 && !has_transfer_encoding {
         (Bytes::new(), Bytes::new())
     } else {
@@ -1253,11 +1380,11 @@ pub async fn handle_http_request(
     let req_script_results = if has_req_scripts && !skip_req_scripts {
         let mut script_method = method.clone();
         let mut script_headers = header_map_to_hashmap(&parts.headers);
-        let mut script_body = if !final_body.is_empty() {
-            String::from_utf8(final_body.to_vec()).ok()
-        } else {
-            None
-        };
+        let mut script_body = body_to_script_string(
+            &final_body,
+            header_content_encoding(&parts.headers).as_deref(),
+            max_decompress_output_bytes,
+        );
 
         let results = execute_request_scripts(
             &admin_state,
@@ -1289,7 +1416,15 @@ pub async fn handle_http_request(
             parts.headers = new_headers;
 
             if let Some(ref new_body) = script_body {
-                final_body = Bytes::from(new_body.clone());
+                let encoded = script_string_to_body(
+                    new_body,
+                    header_content_encoding(&parts.headers).as_deref(),
+                );
+                set_content_encoding_header(
+                    &mut parts.headers,
+                    encoded.content_encoding.as_deref(),
+                );
+                final_body = encoded.body;
             }
         }
 
@@ -2317,37 +2452,81 @@ pub async fn handle_http_request(
                 new_body.len()
             );
         }
-        new_body.clone()
-    } else {
-        let body_processed = apply_body_rules(
-            res_body_bytes.clone(),
+        let body_processed = apply_body_rules_preserving_encoding(
+            new_body.clone(),
             &resolved_rules,
             Phase::Response,
             Some(&content_type),
+            ContentInjectionEncoding {
+                source: None,
+                output: output_res_content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            },
             verbose_logging,
             ctx,
         );
-
         let injection_result = apply_content_injection_preserving_encoding(
-            body_processed,
+            body_processed.body,
             &content_type,
             ContentInjectionEncoding {
-                source: res_content_encoding.as_deref(),
-                output: output_res_content_encoding.as_deref(),
+                source: body_processed.content_encoding.as_deref(),
+                output: body_processed.content_encoding.as_deref(),
                 max_decompress_output_bytes,
             },
             &resolved_rules,
             verbose_logging,
             ctx,
         );
-        res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
-        if let Some(content_encoding) = injection_result.content_encoding.as_deref() {
-            if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
-                res_parts
-                    .headers
-                    .insert(hyper::header::CONTENT_ENCODING, value);
-            }
-        }
+        set_content_encoding_header(
+            &mut res_parts.headers,
+            injection_result.content_encoding.as_deref(),
+        );
+        injection_result.body
+    } else {
+        let (body_for_injection, injection_source_encoding, injection_output_encoding) =
+            if has_response_body_rules(&resolved_rules) {
+                let body_processed = apply_body_rules_preserving_encoding(
+                    res_body_bytes.clone(),
+                    &resolved_rules,
+                    Phase::Response,
+                    Some(&content_type),
+                    ContentInjectionEncoding {
+                        source: res_content_encoding.as_deref(),
+                        output: output_res_content_encoding.as_deref(),
+                        max_decompress_output_bytes,
+                    },
+                    verbose_logging,
+                    ctx,
+                );
+                (
+                    body_processed.body,
+                    body_processed.content_encoding.clone(),
+                    body_processed.content_encoding,
+                )
+            } else {
+                (
+                    res_body_bytes.clone(),
+                    res_content_encoding.clone(),
+                    output_res_content_encoding.clone(),
+                )
+            };
+
+        let injection_result = apply_content_injection_preserving_encoding(
+            body_for_injection,
+            &content_type,
+            ContentInjectionEncoding {
+                source: injection_source_encoding.as_deref(),
+                output: injection_output_encoding.as_deref(),
+                max_decompress_output_bytes,
+            },
+            &resolved_rules,
+            verbose_logging,
+            ctx,
+        );
+        set_content_encoding_header(
+            &mut res_parts.headers,
+            injection_result.content_encoding.as_deref(),
+        );
         injection_result.body
     };
 
@@ -2420,7 +2599,11 @@ pub async fn handle_http_request(
             .unwrap_or("OK")
             .to_string();
         let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
-        let mut res_script_body = String::from_utf8(final_res_body.to_vec()).ok();
+        let mut res_script_body = body_to_script_string(
+            &final_res_body,
+            response_content_encoding(&res_parts).as_deref(),
+            max_decompress_output_bytes,
+        );
         let req_script_headers =
             cloned_headers_hashmap(&mut req_headers_hashmap_cache, &req_headers);
 
@@ -2457,7 +2640,15 @@ pub async fn handle_http_request(
             res_parts.headers = new_headers;
 
             if let Some(ref new_body) = res_script_body {
-                final_res_body = Bytes::from(new_body.clone());
+                let encoded = script_string_to_body(
+                    new_body,
+                    response_content_encoding(&res_parts).as_deref(),
+                );
+                set_content_encoding_header(
+                    &mut res_parts.headers,
+                    encoded.content_encoding.as_deref(),
+                );
+                final_res_body = encoded.body;
             }
         }
 
@@ -3490,6 +3681,70 @@ mod tests {
 
         assert!(needs_request_body_processing(&rules));
         assert!(needs_body_processing(&rules));
+    }
+
+    #[test]
+    fn test_body_to_script_string_decodes_gzip() {
+        let encoded = compress_body(br#"{"a":1}"#, "gzip").unwrap();
+
+        let body = body_to_script_string(&Bytes::from(encoded), Some("gzip"), 1024).unwrap();
+
+        assert_eq!(body, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_script_string_to_body_preserves_gzip() {
+        let result = script_string_to_body(r#"{"test":"qwe"}"#, Some("gzip"));
+
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+        let decoded = try_decompress_body_with_limit(result.body.as_ref(), "gzip", 1024).unwrap();
+        assert_eq!(decoded, br#"{"test":"qwe"}"#);
+    }
+
+    #[test]
+    fn test_script_string_to_body_identity_when_header_removed() {
+        let result = script_string_to_body(r#"{"test":"qwe"}"#, None);
+
+        assert_eq!(result.content_encoding, None);
+        assert_eq!(result.body, Bytes::from_static(br#"{"test":"qwe"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_immediate_response_body_rules_preserve_gzip_merge() {
+        let body = compress_body(br#"{"test":"old","original":true}"#, "gzip").unwrap();
+        let response = Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .header(hyper::header::CONTENT_ENCODING, "gzip")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+        let rules = ResolvedRules {
+            res_merge: Some(serde_json::json!({"test": "qwe"})),
+            ..Default::default()
+        };
+
+        let (response, body) = apply_immediate_response_body_rules(
+            response,
+            &rules,
+            "GET",
+            1024,
+            false,
+            &RequestContext::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(hyper::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip")
+        );
+        let decoded = try_decompress_body_with_limit(body.as_ref(), "gzip", 1024).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(parsed["test"], "qwe");
+        assert_eq!(parsed["original"], true);
     }
 
     #[test]
