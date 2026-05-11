@@ -1,11 +1,13 @@
 ---
-title: 状态跳转
-description: 状态码控制、重定向和响应分支能力。
+title: "状态跳转"
+description: "状态码控制、重定向和响应分支能力。"
 editUrl: false
+sidebar:
+  label: "状态跳转"
+  order: 270
 ---
 
 > 此页面由 `docs/rules/status-redirect.md` 自动同步生成。
-
 # 状态码与重定向规则
 
 本章介绍控制 HTTP 状态码和重定向行为的规则。
@@ -55,14 +57,14 @@ www.example.com/api statusCode://500
 
 ### 配合 Body
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行 Body 建议使用块变量。
 
 ```bash
 # 返回 404 + 自定义内容（使用块变量）
 www.example.com statusCode://404 resBody://{not-found-response}
 
-# 返回 200 + JSON（无空格）
-www.example.com statusCode://200 resBody://({"ok":true})
+# 返回 200 + JSON
+www.example.com statusCode://200 resBody://({"ok": true})
 ```
 
 块变量定义：
@@ -162,10 +164,10 @@ www.example.com/api/v1 redirect://307:https://www.example.com/api/v2
 
 ```bash
 # 使用模板变量（需要反引号）
-www.example.com/go redirect://`https://other.com${url.path}`
+www.example.com/go redirect://`https://other.com${path}`
 
 # 重定向到不同协议
-http://www.example.com redirect://`https://www.example.com${url.path}`
+http://www.example.com redirect://`https://www.example.com${path}`
 ```
 
 ### 测试用例
@@ -178,47 +180,21 @@ http://www.example.com redirect://`https://www.example.com${url.path}`
 
 ---
 
-## locationHref
-
-类似于 redirect，但使用 JavaScript 进行客户端跳转。
-
-### 语法
-
-```
-pattern locationHref://target_url
-```
-
-### 示例
-
-```bash
-# JavaScript 跳转
-www.example.com/old locationHref://https://www.example.com/new
-```
-
-### 与 redirect 的区别
-
-| 规则           | 方式         | 适用场景          |
-| -------------- | ------------ | ----------------- |
-| `redirect`     | HTTP 302/301 | 标准重定向        |
-| `locationHref` | JavaScript   | 需要客户端执行 JS |
-
----
-
 ## 规则组合
 
 状态码规则可以与其他规则组合：
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行 Body 建议使用块变量。
 
 ```bash
 # 状态码 + Body + 头部（使用块变量）
-www.example.com statusCode://404 resBody://{not-found} resHeaders://(X-Error:true)
+www.example.com statusCode://404 resBody://{not-found} resHeaders://(X-Error: true)
 
 # 重定向 + CORS
 www.example.com redirect://https://new.com/ resCors://*
 
 # 替换状态码 + 修改头部
-www.example.com replaceStatus://200 resHeaders://(X-Fixed:true)
+www.example.com replaceStatus://200 resHeaders://(X-Fixed: true)
 
 # 条件状态码修改
 www.example.com replaceStatus://200 includeFilter://s:500 includeFilter://s:502

@@ -1,11 +1,13 @@
 ---
-title: 过滤器
-description: 请求与响应过滤条件的配置方式。
+title: "过滤器"
+description: "请求与响应过滤条件的配置方式。"
 editUrl: false
+sidebar:
+  label: "过滤器"
+  order: 280
 ---
 
 > 此页面由 `docs/rules/filters.md` 自动同步生成。
-
 # 过滤器规则
 
 本章介绍控制规则生效条件的过滤器。
@@ -24,16 +26,19 @@ pattern rules... includeFilter://condition
 
 ### 过滤条件
 
-| 条件类型   | 语法           | 说明           |
-| ---------- | -------------- | -------------- |
-| 方法       | `m:METHOD`     | 匹配请求方法   |
-| 状态码     | `s:CODE`       | 匹配响应状态码 |
-| 请求头     | `h:name=value` | 匹配请求头     |
-| 响应头     | `H:name=value` | 匹配响应头     |
-| 请求体包含 | `b:text`       | 请求体包含文本 |
-| 响应体包含 | `B:text`       | 响应体包含文本 |
-| IP         | `i:ip`         | 匹配客户端 IP  |
-| 路径       | `p:/path`      | 匹配路径       |
+| 条件类型 | 语法 | 说明 |
+| --- | --- | --- |
+| 方法 | `m:METHOD` / `m:GET,POST` | 匹配请求方法 |
+| 状态码 | `s:CODE` / `s:200-299` / `s:200,404,500` | 匹配响应状态码；请求阶段没有状态码时不会命中 |
+| 请求头存在 | `h:name` | 判断请求头是否存在 |
+| 请求头匹配 | `h:name=value` / `reqH:name=/regex/` | `h:` 和 `reqH:` 都匹配请求头；`value` 可为普通文本或 `/regex/` |
+| 响应头匹配 | `resH:name=value` / `resH:name=/regex/` | 匹配响应头；仅响应阶段有意义 |
+| 客户端 IP | `i:ip` / `i:cidr` | 匹配客户端 IP 或 CIDR |
+| 路径包含 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按路径包含匹配 |
+| 路径正则 | `/regex/` | 以 `/` 开头并以 `/` 结尾时，按正则匹配路径 |
+| URL host/path | `example.com` / `example.com/api` | 包含 `.` 的过滤值会按 host 与可选 path 匹配 |
+
+> 当前实现会解析 `b:` / `B:` body 过滤器，但运行时 resolver 尚未读取请求/响应 body 参与过滤，匹配结果恒为不命中。不要把 body 过滤作为可用能力依赖；需要按内容筛选请使用 `bifrost search --req-body/--res-body` 查看流量证据。
 
 ### 方法过滤
 
@@ -50,7 +55,7 @@ www.example.com resHeaders://(X-Method:PUT) includeFilter://m:PUT
 
 ### 状态码过滤
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行响应内容建议使用块变量。
 
 ```bash
 # 只对 500 响应生效
@@ -60,7 +65,7 @@ www.example.com replaceStatus://200 includeFilter://s:500
 www.example.com resBody://{not-found} includeFilter://s:404
 
 # 对 4xx 响应生效
-www.example.com resHeaders://(X-Error:true) includeFilter://s:4
+www.example.com resHeaders://(X-Error: true) includeFilter://s:400-499
 ```
 
 块变量定义：
@@ -81,14 +86,14 @@ www.example.com host://debug.local includeFilter://h:X-Debug
 www.example.com host://admin.local includeFilter://h:X-Role=admin
 
 # 匹配 Content-Type
-www.example.com resHeaders://{X-Json: true} includeFilter://h:content-type=application/json
+www.example.com resHeaders://(X-Json: true) includeFilter://h:content-type=application/json
 ```
 
 ### 响应头过滤
 
 ```bash
 # 匹配响应头
-www.example.com resBody://(cached) includeFilter://H:X-Cache=HIT
+www.example.com resBody://(cached) includeFilter://resH:X-Cache=HIT
 ```
 
 > 注：`(cached)` 无空格，可使用行内值
@@ -97,10 +102,10 @@ www.example.com resBody://(cached) includeFilter://H:X-Cache=HIT
 
 ```bash
 # 匹配特定路径
-www.example.com resHeaders://{X-Api: true} includeFilter://p:/api/
+www.example.com resHeaders://(X-Api: true) includeFilter:///api
 
 # 匹配路径模式
-www.example.com resDelay://1000 includeFilter://p:/slow/
+www.example.com resDelay://1000 includeFilter:///slow
 ```
 
 ### 多条件组合
@@ -117,8 +122,8 @@ www.example.com host://special.local includeFilter://m:POST includeFilter://h:X-
 
 | 测试场景   | 规则                                                   | 请求     | 预期         |
 | ---------- | ------------------------------------------------------ | -------- | ------------ |
-| POST 方法  | `test.com resHeaders://{X:1} includeFilter://m:POST`   | POST     | 应用规则     |
-| POST 方法  | `test.com resHeaders://{X:1} includeFilter://m:POST`   | GET      | 不应用       |
+| POST 方法  | `test.com resHeaders://(X: 1) includeFilter://m:POST`  | POST     | 应用规则     |
+| POST 方法  | `test.com resHeaders://(X: 1) includeFilter://m:POST`  | GET      | 不应用       |
 | 状态码 500 | `test.com replaceStatus://200 includeFilter://s:500`   | 返回 500 | 状态码变 200 |
 | 状态码 500 | `test.com replaceStatus://200 includeFilter://s:500`   | 返回 200 | 不变         |
 | 头部匹配   | `test.com host://debug includeFilter://h:X-Debug=true` | 有头部   | 应用规则     |
@@ -146,10 +151,10 @@ pattern rules... excludeFilter://condition
 www.example.com resDelay://1000 excludeFilter://m:GET
 
 # 排除静态资源
-www.example.com resHeaders://(X-Dynamic:true) excludeFilter://p:.js excludeFilter://p:.css
+www.example.com resHeaders://(X-Dynamic: true) excludeFilter:///\.js$/ excludeFilter:///\.css$/
 
 # 排除成功响应
-www.example.com resHeaders://(X-Error:true) excludeFilter://s:200
+www.example.com resHeaders://(X-Error: true) excludeFilter://s:200
 
 # 排除特定头部
 www.example.com host://default.local excludeFilter://h:X-Special
@@ -159,14 +164,14 @@ www.example.com host://default.local excludeFilter://h:X-Special
 
 | 测试场景 | 规则                                                | 请求 | 预期     |
 | -------- | --------------------------------------------------- | ---- | -------- |
-| 排除 GET | `test.com resHeaders://{X:1} excludeFilter://m:GET` | GET  | 不应用   |
-| 排除 GET | `test.com resHeaders://{X:1} excludeFilter://m:GET` | POST | 应用规则 |
+| 排除 GET | `test.com resHeaders://(X: 1) excludeFilter://m:GET` | GET  | 不应用   |
+| 排除 GET | `test.com resHeaders://(X: 1) excludeFilter://m:GET` | POST | 应用规则 |
 
 ---
 
 ## passthrough
 
-`passthrough://` 使匹配的请求跳过后续规则处理并直接透传。旧的 `ignore://` 写法会自动转换为 `passthrough://`。
+`passthrough://` 用于忽略后续规则并直接透传请求。旧的 `ignore://` 写法会在导入、同步或保存时自动转换为 `passthrough://`。
 
 ### 语法
 
@@ -177,102 +182,20 @@ pattern passthrough://
 ### 示例
 
 ```bash
-# 透传静态资源路径
-*.js passthrough://
-*.css passthrough://
-*.png passthrough://
-
-# 透传特定路径
-www.example.com/health passthrough://
-www.example.com/metrics passthrough://
-
 # 透传特定域名
 internal.example.com passthrough://
+
+# 透传健康检查路径
+*.local/health passthrough://
+*.local/metrics passthrough://
 ```
 
 ### 测试用例
 
-| 测试场景 | 规则                     | 请求     | 预期         |
-| -------- | ------------------------ | -------- | ------------ |
-| 透传路径 | `test.com/skip passthrough://` | `/skip`  | 请求直接通过 |
-| 透传路径 | `test.com/skip passthrough://` | `/other` | 继续匹配规则 |
-
----
-
-## enable
-
-启用特定功能或特性。
-
-### 语法
-
-```
-pattern enable://feature
-```
-
-### 可用特性
-
-| 特性        | 说明                     |
-| ----------- | ------------------------ |
-| `intercept` | 启用 HTTPS 拦截          |
-| `hide`      | 隐藏请求（不在 UI 显示） |
-| `abort`     | 中断请求                 |
-| `proxy`     | 启用代理                 |
-
-### 示例
-
-```bash
-# 启用 HTTPS 拦截
-https://www.example.com enable://intercept
-
-# 隐藏请求
-www.example.com/internal enable://hide
-
-# 中断请求
-www.example.com/blocked enable://abort
-```
-
-### 测试用例
-
-| 测试场景   | 规则                                  | 预期               |
-| ---------- | ------------------------------------- | ------------------ |
-| 中断请求   | `test.com enable://abort`             | 请求被中断         |
-| HTTPS 拦截 | `https://test.com enable://intercept` | HTTPS 流量可被解密 |
-
----
-
-## disable
-
-禁用特定功能或特性。
-
-### 语法
-
-```
-pattern disable://feature
-```
-
-### 可用特性
-
-| 特性        | 说明                        |
-| ----------- | --------------------------- |
-| `intercept` | 禁用 HTTPS 拦截（隧道透传） |
-| `proxy`     | 禁用代理                    |
-| `cache`     | 禁用缓存                    |
-
-### 示例
-
-```bash
-# 禁用 HTTPS 拦截
-https://www.example.com disable://intercept
-
-# 禁用缓存
-www.example.com disable://cache
-```
-
-### 测试用例
-
-| 测试场景 | 规则                                   | 预期           |
-| -------- | -------------------------------------- | -------------- |
-| 禁用拦截 | `https://test.com disable://intercept` | HTTPS 隧道透传 |
+| 测试场景 | 规则 | 请求 | 预期 |
+| --- | --- | --- | --- |
+| 透传域名 | `ignore-this.local passthrough://` | `ignore-this.local` | 请求直接透传 |
+| 透传路径 | `*.local/health passthrough://` | `/health` | 请求直接透传 |
 
 ---
 
@@ -338,20 +261,37 @@ www.example.com delete://reqCookies.a delete://reqCookies.b
 
 ## skip
 
-跳过后续规则匹配。
+跳过指定的已命中规则，并继续尝试匹配剩余规则。
 
 ### 语法
 
-```
-pattern skip://
+```txt
+pattern skip://pattern=patternString
+pattern skip://operation=protocol://value
 ```
 
 ### 示例
 
 ```bash
-# 匹配后跳过
-www.example.com/api skip://
+# 跳过更具体的 pattern，回落到父级规则
+www.example.com/api/blocked skip://pattern=www.example.com/api/blocked
+
+# 跳过某条已经命中的操作
+www.example.com/api skip://operation=resHeaders://X-Debug:first
 ```
+
+### 行为说明
+
+- `pattern=...`：按规则左侧的 pattern 跳过
+- `operation=...`：按 `protocol://value` 跳过
+- 跳过后不会终止匹配；后续规则仍会继续尝试
+
+### 测试用例
+
+| 测试场景 | 规则 | 预期 |
+| --- | --- | --- |
+| 跳过 operation | `test.com skip://operation=resHeaders://X-A:first` | 后续同类规则仍可继续生效 |
+| 跳过 pattern | `test.com/api/blocked skip://pattern=test.com/api/blocked` | 请求回落到更通用的规则 |
 
 ---
 
@@ -361,16 +301,16 @@ www.example.com/api skip://
 
 ```bash
 # 多个过滤器
-www.example.com host://backend.local includeFilter://m:POST excludeFilter://p:/health
+www.example.com host://backend.local includeFilter://m:POST excludeFilter:///health
 
 # 过滤器 + 修改规则
-www.example.com resHeaders://{X-Debug: true} includeFilter://h:X-Debug
+www.example.com resHeaders://(X-Debug: true) includeFilter://h:X-Debug
 
 # 删除 + 过滤器
 www.example.com delete://reqHeaders.X-Internal includeFilter://m:GET
 
-# 条件忽略
-www.example.com passthrough:// includeFilter://p:/static/
+# 条件透传
+www.example.com passthrough:// includeFilter:///static
 ```
 
 ---
@@ -381,4 +321,4 @@ www.example.com passthrough:// includeFilter://p:/static/
 2. **优先级**：`excludeFilter` 优先于 `includeFilter`
 3. **状态码过滤**：`s:` 过滤器用于响应阶段的规则
 4. **头部大小写**：头部名称匹配不区分大小写
-5. **性能考虑**：Body 过滤（`b:`/`B:`）需要读取整个 Body，可能影响性能
+5. **Body 过滤边界**：`b:`/`B:` 当前只被解析，不参与运行时匹配；不要在生产规则里依赖它

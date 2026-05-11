@@ -1,11 +1,13 @@
 ---
-title: 匹配模式
-description: 域名、路径、通配符与正则等匹配模式说明。
+title: "匹配模式"
+description: "域名、路径、通配符与正则等匹配模式说明。"
 editUrl: false
+sidebar:
+  label: "匹配模式"
+  order: 140
 ---
 
 > 此页面由 `docs/pattern.md` 自动同步生成。
-
 # 匹配器
 
 `pattern` 是 Bifrost 规则中的第一部分，用于匹配请求 URL。
@@ -212,7 +214,7 @@ http*://api.example.com cache://3600
 
 ```txt
 192.168.1.1 proxy://127.0.0.1:3000
-10.0.0.0/8 log://
+10.0.0.0/8 reqHeaders://X-Matched-Private=1
 !192.168.0.0/16 proxy://external
 ```
 
@@ -229,7 +231,7 @@ $api.example.com file:///mock
 ```txt
 ^example.com/api/*/info file:///mock/$1.json
 ^example.com/static/** cache://3600
-^api.example.com/v*/users/*** log://
+^api.example.com/v*/users/*** reqHeaders://X-Api-Pattern=path-wildcard
 ```
 
 ### 正则匹配
@@ -242,6 +244,6 @@ $api.example.com file:///mock
 
 ## 扩展阅读
 
-- [规则语法文档](./rule-engine)：了解完整的规则语法结构
-- [操作指令文档](./operations)：学习如何配置操作指令
-- [规则协议手册](./rules)：按协议查看各能力说明与示例
+- [规则语法文档](./rule-engine/)：了解完整的规则语法结构
+- [操作指令文档](./operations/)：学习如何配置操作指令
+- [规则协议手册](./rules/)：按协议查看各能力说明与示例

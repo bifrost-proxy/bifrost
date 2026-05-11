@@ -1,11 +1,13 @@
 ---
-title: 请求改写
-description: 请求头、请求体与相关字段的改写说明。
+title: "请求改写"
+description: "请求头、请求体与相关字段的改写说明。"
 editUrl: false
+sidebar:
+  label: "请求改写"
+  order: 220
 ---
 
 > 此页面由 `docs/rules/request-modification.md` 自动同步生成。
-
 # 请求修改规则
 
 本章介绍修改发送到服务器的请求内容的规则。
@@ -20,13 +22,13 @@ editUrl: false
 
 ```
 pattern reqHeaders://key=value                    # 内联格式（单个头）
-pattern reqHeaders://(key1:value1)                # 小括号格式（无空格）
+pattern reqHeaders://(key1: value1)               # 小括号格式（可包含空格）
 pattern reqHeaders://{varName}                    # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
 
 ### 基础示例
 
@@ -34,8 +36,8 @@ pattern reqHeaders://{varName}                    # 引用内嵌值/Values（推
 # 方式1：内联格式设置单个头
 www.example.com reqHeaders://X-Custom-Header=custom-value
 
-# 方式2：小括号格式（无空格）
-www.example.com reqHeaders://(X-Token:abc123)
+# 方式2：小括号格式（可包含空格）
+www.example.com reqHeaders://(X-Token: abc123)
 
 # 方式3：引用内嵌值（推荐，支持空格和多个头）
 www.example.com reqHeaders://{my-headers}
@@ -54,8 +56,8 @@ pattern reqHeaders://{my-headers}
 ### 特殊头部
 
 ```bash
-# 设置 Host 头部（无空格）
-www.example.com reqHeaders://(Host:backend.example.com)
+# 设置 Host 头部
+www.example.com reqHeaders://(Host: backend.example.com)
 
 # 设置 Content-Type
 www.example.com reqHeaders://Content-Type=application/json
@@ -86,7 +88,7 @@ X-Timestamp: ${now}
 | 测试场景 | 规则 | 预期 |
 | -------- | --------------------------------------- | ---- |
 | 内联格式 | `test.com reqHeaders://X-Custom=value` | 请求包含 `X-Custom: value` |
-| 小括号格式 | `test.com reqHeaders://(X-A:1)` | 请求包含 X-A 头部 |
+| 小括号格式 | `test.com reqHeaders://(X-A: 1)` | 请求包含 X-A 头部 |
 | 覆盖已有头部 | `test.com reqHeaders://Accept=text/plain` | Accept 被覆盖 |
 | 模板变量 | ``test.com reqHeaders://`X-Time=${now}` `` | X-Time 包含时间戳 |
 
@@ -178,6 +180,57 @@ www.example.com/api referer://https://www.example.com/
 
 ---
 
+## auth
+
+设置 Basic Auth 的 `Authorization` 请求头。当前实现会把规则值整体当作 `user:password`，并写入 `Authorization: Basic <base64(user:password)>`。
+
+### 语法
+
+```txt
+pattern auth://user:password
+pattern auth://{basic-auth}
+```
+
+### 示例
+
+```bash
+# 生成 Authorization: Basic dXNlcjpwYXNz
+www.example.com auth://user:pass
+
+# 推荐把账号密码放入内嵌值，避免在规则行暴露
+www.example.com auth://{basic-auth}
+```
+
+内嵌值定义：
+
+````
+``` basic-auth
+user:pass
+```
+````
+
+> 如果需要设置 Bearer token 或任意自定义 `Authorization` 值，请使用 `reqHeaders://Authorization=Bearer...` 或 `reqHeaders://{headers}`，不要用 `auth://`。
+
+---
+
+## forwardedFor
+
+设置 `X-Forwarded-For` 请求头，用于模拟客户端来源 IP。
+
+### 语法
+
+```txt
+pattern forwardedFor://ip
+```
+
+### 示例
+
+```bash
+www.example.com forwardedFor://203.0.113.10
+```
+
+---
+
 ## method
 
 修改请求方法。
@@ -228,11 +281,11 @@ www.example.com/api/resource method://DELETE
 
 ```
 pattern reqCookies://name=value              # 内联格式（单个）
-pattern reqCookies://(name:value)            # 小括号格式（无空格）
+pattern reqCookies://(name: value)           # 小括号格式（可包含空格）
 pattern reqCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
 
 ### 示例
 
@@ -240,8 +293,8 @@ pattern reqCookies://{varName}               # 引用内嵌值（推荐）
 # 设置单个 Cookie（内联格式）
 www.example.com reqCookies://session=abc123
 
-# 小括号格式（无空格）
-www.example.com reqCookies://(token:xyz789)
+# 小括号格式
+www.example.com reqCookies://(token: xyz789)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com reqCookies://{my-cookies}
@@ -260,7 +313,66 @@ user_id: 12345
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
 | 内联格式 | `test.com reqCookies://session=abc` | Cookie 包含 session=abc |
-| 小括号格式 | `test.com reqCookies://(a:1)` | Cookie 包含 a=1 |
+| 小括号格式 | `test.com reqCookies://(a: 1)` | Cookie 包含 a=1 |
+
+---
+
+## reqCors
+
+给上游请求补充 CORS 预检相关请求头。
+
+### 语法
+
+```txt
+pattern reqCors://*
+pattern reqCors://https://frontend.example.com
+pattern reqCors://{cors-config}
+```
+
+### 行为说明
+
+- `reqCors://*`：设置 `Origin: *`
+- `reqCors://https://frontend.example.com`：仅设置 `Origin`
+- `reqCors://{cors-config}`：支持完整预检头配置
+
+内嵌值定义：
+
+````
+``` cors-config
+origin: https://frontend.example.com
+method: POST
+headers: x-trace-id,x-auth-token
+```
+````
+
+对应请求头：
+
+| 配置项 | 请求头 |
+| --- | --- |
+| `origin` | `Origin` |
+| `method` / `methods` | `Access-Control-Request-Method` |
+| `headers` | `Access-Control-Request-Headers` |
+
+### 示例
+
+```bash
+# 只设置 Origin
+www.example.com reqCors://*
+
+# 设置固定 Origin
+www.example.com reqCors://https://frontend.example.com
+
+# 设置完整预检头
+www.example.com reqCors://{cors-config}
+```
+
+### 测试用例
+
+| 测试场景 | 规则 | 预期 |
+| --- | --- | --- |
+| 快捷模式 | `test.com reqCors://*` | 上游收到 `Origin: *` |
+| 固定来源 | `test.com reqCors://https://frontend.example.com` | 上游收到指定 `Origin` |
+| 详细模式 | `test.com reqCors://{cors-config}` | 上游同时收到 `Origin` / `Access-Control-Request-Method` / `Access-Control-Request-Headers` |
 
 ---
 

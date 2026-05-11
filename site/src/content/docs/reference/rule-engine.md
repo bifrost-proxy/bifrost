@@ -1,11 +1,13 @@
 ---
-title: 规则引擎
-description: Bifrost 规则系统的能力全景与配置入口。
+title: "规则引擎"
+description: "Bifrost 规则系统的能力全景与配置入口。"
 editUrl: false
+sidebar:
+  label: "规则引擎"
+  order: 120
 ---
 
 > 此页面由 `docs/rule.md` 自动同步生成。
-
 # 规则语法
 
 Bifrost 通过简洁的规则配置来修改请求和响应。
@@ -18,8 +20,8 @@ pattern operation [operations...] [filters...] [lineProps://...]
 
 | 组成部分      | 是否必填 | 描述                                                          |
 | :------------ | :------- | :------------------------------------------------------------ |
-| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](./patterns)           |
-| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](./operations) |
+| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](./patterns/)           |
+| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](./operations/) |
 | **filters**   | 否       | 过滤条件，详见下文                                            |
 | **lineProps** | 否       | 规则属性，详见下文                                            |
 
@@ -65,6 +67,14 @@ example.com 127.0.0.1:3000/api
 example.com host://127.0.0.1:3000/api
 ```
 
+当右侧已经出现 pattern，且目标值为不带协议的 `domain[/path]`、`domain:port[/path]`、`localhost[/path]`、IP/IPv6 带路径形式时，也会自动识别为 `host://`，下游协议按实际发起请求自动补偿：
+
+```txt
+gamingpop-boe.bifrost.local/manager gamingpop-boe.bifrost.local/manager
+# 等价于
+gamingpop-boe.bifrost.local/manager host://gamingpop-boe.bifrost.local/manager
+```
+
 ### 4. 多行配置
 
 **反斜杠续行**：行末 `\` 将下一行合并
@@ -101,13 +111,15 @@ example.com host://127.0.0.1 includeFilter://m:GET excludeFilter:///admin/
 | :-------- | :--------- | :---------------------------------- |
 | `m:`      | HTTP 方法  | `m:GET` `m:GET,POST,PUT`            |
 | `s:`      | 状态码     | `s:200` `s:200-299` `s:200,404,500` |
-| `h:`      | 请求头存在 | `h:X-Custom-Header`                 |
+| `h:`      | 请求头存在或匹配 | `h:X-Custom-Header` `h:Content-Type=json` |
 | `reqH:`   | 请求头匹配 | `reqH:Content-Type=/json/`          |
 | `resH:`   | 响应头匹配 | `resH:Content-Type=/json/`          |
 | `i:`      | 客户端 IP  | `i:192.168.1.1` `i:192.168.0.0/16`  |
-| `b:`      | 响应体匹配 | `b:/error/`                         |
-| `/path/`  | 路径包含   | `/api/`                             |
+| `/path`   | 路径包含   | `/api`                              |
 | `/regex/` | 路径正则   | `/^\/api\/v\d+/`                    |
+| `domain.com/path` | URL host/path | `api.example.com/v1` |
+
+> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，匹配结果不会生效。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
 
 ### 6. 规则属性
 
@@ -165,4 +177,4 @@ api.example.com h3://
 
 ## 扩展阅读
 
-- [规则协议手册](./rules)：按协议查看各能力说明与示例
+- [规则协议手册](./rules/)：按协议查看各能力说明与示例

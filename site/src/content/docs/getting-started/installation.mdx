@@ -1,11 +1,13 @@
 ---
-title: 安装与启动
-description: 按照 docs/getting-started.md 的最新方式安装和启动 Bifrost。
+title: "安装与启动"
+description: "按照 docs/getting-started.md 的最新方式安装和启动 Bifrost。"
 editUrl: false
+sidebar:
+  label: "安装与启动"
+  order: 20
 ---
 
 > 此页面由 `docs/getting-started.md` 自动同步生成。
-
 # 安装与启动
 
 本文档汇总 Bifrost 的安装、启动、管理端入口与卸载方式。
@@ -33,6 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 ```bash
 brew tap bifrost-proxy/bifrost
 brew install bifrost
+```
+
+### 使用 npm 安装
+
+```bash
+npm i @bifrost-proxy/bifrost
 ```
 
 ### 从源码构建
@@ -86,12 +94,17 @@ bifrost -p 9000 -H 127.0.0.1 start
 # 启用 HTTP + SOCKS5
 bifrost -p 9900 --socks5-port 1080 start
 
-# 启用 TLS 拦截
-bifrost start --intercept
+# 按域名启用 TLS 抓包
+bifrost start --intercept-include "*.api.local"
+
+# 按应用启用 TLS 抓包
+bifrost start --app-intercept-include "*Chrome,*curl"
 
 # 守护进程模式
 bifrost start --daemon
 ```
+
+`bifrost start` 默认会启用系统代理，浏览器和桌面应用通常无需额外配置就会进入 Bifrost。TLS 抓包按需开启，不建议默认全局 `--intercept`；优先使用域名白名单、应用白名单或规则级 `tlsIntercept://`。遇到 SSL pinning 应用时，应使用 `--app-intercept-exclude`、`--intercept-exclude` 或规则级 `tlsPassthrough://` 排除。需要 TLS 抓包时，启动流程会自动生成并安装 Bifrost CA；`bifrost ca generate` / `bifrost ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。只有在 CI、沙箱或明确不想影响系统网络时，才使用 `--no-system-proxy`。
 
 ## 管理端入口
 
@@ -134,10 +147,11 @@ http://127.0.0.1:9900/_bifrost/
 示例：
 
 ```bash
-BIFROST_DATA_DIR=/tmp/bifrost bifrost start
 RUST_LOG=debug bifrost start
 RUST_LOG=bifrost_proxy=debug,info bifrost start
 ```
+
+日常使用不建议为了临时排障创建新的 `BIFROST_DATA_DIR`。优先启动一次主服务，再使用 `bifrost port bind ...` 创建独立调试端口；只有自动化测试、并发实验或破坏性配置验证需要完全隔离状态时，才设置临时数据目录。
 
 ## 卸载
 
