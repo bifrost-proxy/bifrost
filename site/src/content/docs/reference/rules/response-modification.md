@@ -1,11 +1,13 @@
 ---
-title: 响应改写
-description: 响应头、响应体与相关字段的改写说明。
+title: "响应改写"
+description: "响应头、响应体与相关字段的改写说明。"
 editUrl: false
+sidebar:
+  label: "响应改写"
+  order: 230
 ---
 
 > 此页面由 `docs/rules/response-modification.md` 自动同步生成。
-
 # 响应修改规则
 
 本章介绍修改返回给客户端的响应内容的规则。
@@ -20,14 +22,14 @@ editUrl: false
 
 ```
 pattern resHeaders://key=value              # 内联格式（单个头）
-pattern resHeaders://(key1:value1)          # 小括号格式（无空格）
+pattern resHeaders://(key1: value1)         # 小括号格式（可包含空格）
 pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内不能有空格，含空格内容必须使用块变量
+> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
 
 ### 基础示例
 
@@ -35,8 +37,8 @@ pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 # 内联格式设置单个头
 www.example.com resHeaders://X-Custom-Header=custom-value
 
-# 小括号格式（无空格）
-www.example.com resHeaders://(X-Version:1.0)
+# 小括号格式
+www.example.com resHeaders://(X-Version: 1.0)
 
 # 引用内嵌值（推荐，支持空格和多个头）
 www.example.com resHeaders://{my-res-headers}
@@ -54,8 +56,8 @@ X-Server: bifrost
 ### 常用场景
 
 ```bash
-# 添加安全头部（无空格）
-www.example.com resHeaders://(X-Frame-Options:DENY)
+# 添加安全头部
+www.example.com resHeaders://(X-Frame-Options: DENY)
 
 # 设置缓存控制（使用内嵌值处理逗号和空格）
 www.example.com resHeaders://{cache-headers}
@@ -69,7 +71,7 @@ www.example.com resHeaders://X-Debug-Info=proxy-enabled
 | 测试场景     | 规则                                            | 预期                       |
 | ------------ | ----------------------------------------------- | -------------------------- |
 | 内联格式     | `test.com resHeaders://X-Custom=value`          | 响应包含 `X-Custom: value` |
-| 小括号格式   | `test.com resHeaders://(X-A:1)`                 | 响应包含 X-A 头部          |
+| 小括号格式   | `test.com resHeaders://(X-A: 1)`                | 响应包含 X-A 头部          |
 | 覆盖已有头部 | `test.com resHeaders://Content-Type=text/plain` | Content-Type 被覆盖        |
 
 ---
@@ -82,11 +84,11 @@ www.example.com resHeaders://X-Debug-Info=proxy-enabled
 
 ```
 pattern resCookies://name=value              # 内联格式
-pattern resCookies://(name:value)            # 小括号格式（无空格）
+pattern resCookies://(name: value)           # 小括号格式（可包含空格）
 pattern resCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内不能有空格，含空格内容必须使用块变量
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
 
 ### 基础示例
 
@@ -94,8 +96,8 @@ pattern resCookies://{varName}               # 引用内嵌值（推荐）
 # 内联格式
 www.example.com resCookies://session=abc123
 
-# 小括号格式（无空格）
-www.example.com resCookies://(token:xyz789)
+# 小括号格式
+www.example.com resCookies://(token: xyz789)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com resCookies://{my-cookies}
@@ -121,7 +123,7 @@ auth: token123; path=/; httpOnly; secure
 | 测试场景   | 规则                                | 预期                        |
 | ---------- | ----------------------------------- | --------------------------- |
 | 内联格式   | `test.com resCookies://session=abc` | Set-Cookie 包含 session=abc |
-| 小括号格式 | `test.com resCookies://(a:1)`       | 响应包含 Set-Cookie         |
+| 小括号格式 | `test.com resCookies://(a: 1)`      | 响应包含 Set-Cookie         |
 
 ---
 
@@ -134,7 +136,7 @@ auth: token123; path=/; httpOnly; secure
 ```
 
 pattern resCors://\*
-pattern resCors://origin
+pattern resCors://https://app.example.com
 pattern resCors://{options}
 
 ```
@@ -148,8 +150,8 @@ www.example.com resCors://*
 # 允许特定来源
 www.example.com resCors://https://app.example.com
 
-# 允许多个来源（使用 origin 头部动态匹配）
-www.example.com resCors://origin
+# 允许特定来源
+www.example.com resCors://https://app.example.com
 ```
 
 ### 高级选项
@@ -168,8 +170,15 @@ credentials: true
 methods: GET,POST,PUT
 headers: X-Custom
 maxAge: 86400
+expose: X-Trace-Id
 ```
 ````
+
+说明：
+
+- 支持 JSON 值，也支持上面的多行 `key: value` 格式
+- `origin` 为空时默认回退为 `*`
+- `credentials` 为 `true` 时会返回 `Access-Control-Allow-Credentials: true`
 
 ### CORS 头部映射
 
@@ -188,7 +197,7 @@ maxAge: 86400
 | ------------ | ------------------------------------ | -------------------------------------------- |
 | 允许所有来源 | `test.com resCors://*`               | Access-Control-Allow-Origin: \*              |
 | 特定来源     | `test.com resCors://https://app.com` | Access-Control-Allow-Origin: https://app.com |
-| 动态 Origin  | `test.com resCors://origin`          | 使用请求的 Origin 值                         |
+| 详细配置     | `test.com resCors://{cors-config}`   | 返回 methods / headers / max-age 等完整 CORS 头 |
 
 ---
 
@@ -264,6 +273,38 @@ www.example.com resCharset://iso-8859-1
 | 测试场景   | 规则                          | 预期                            |
 | ---------- | ----------------------------- | ------------------------------- |
 | UTF-8 编码 | `test.com resCharset://utf-8` | Content-Type 包含 charset=utf-8 |
+
+---
+
+## responseFor / trailers
+
+这些协议用于设置额外响应元数据。`cache` 与 `attachment` 在下方有独立章节。
+
+### 语法
+
+```txt
+pattern responseFor://value
+pattern trailers://{trailer-headers}
+```
+
+### 示例
+
+```bash
+# 添加 x-bifrost-response-for 响应头
+api.example.com responseFor://mock
+
+# 设置响应 trailers（使用内嵌值）
+api.example.com trailers://{debug-trailers}
+```
+
+内嵌值定义：
+
+````
+``` debug-trailers
+X-Trace-Id: abc123
+X-Debug: true
+```
+````
 
 ---
 

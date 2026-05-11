@@ -30,44 +30,11 @@ export default defineConfig({
       sidebar: [
         {
           label: "开始使用",
-          items: [
-            {
-              label: "项目概览",
-              slug: "getting-started/overview",
-            },
-            {
-              label: "安装与启动",
-              slug: "getting-started/installation",
-            },
-          ],
+          autogenerate: { directory: "getting-started" },
         },
         {
           label: "参考文档",
-          items: [
-            { label: "总览", slug: "reference" },
-            { label: "规则引擎", slug: "reference/rule-engine" },
-            { label: "运行操作", slug: "reference/operations" },
-            { label: "匹配模式", slug: "reference/patterns" },
-            { label: "脚本能力", slug: "reference/scripting" },
-            { label: "Rules 概览", slug: "reference/rules" },
-            {
-              label: "请求改写",
-              slug: "reference/rules/request-modification",
-            },
-            {
-              label: "响应改写",
-              slug: "reference/rules/response-modification",
-            },
-            {
-              label: "URL 改写",
-              slug: "reference/rules/url-manipulation",
-            },
-            { label: "流量控制", slug: "reference/rules/timing-throttle" },
-            { label: "状态跳转", slug: "reference/rules/status-redirect" },
-            { label: "过滤器", slug: "reference/rules/filters" },
-            { label: "WebSocket", slug: "reference/rules/websocket" },
-            { label: "脚本规则", slug: "reference/rules/scripts" },
-          ],
+          autogenerate: { directory: "reference" },
         },
       ],
     }),

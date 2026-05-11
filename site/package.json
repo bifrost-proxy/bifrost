@@ -8,8 +8,10 @@
   },
   "scripts": {
     "docs:sync": "node scripts/sync-docs.mjs",
+    "docs:test": "node --test scripts/docs-sync-lib.test.mjs",
+    "docs:verify": "node scripts/verify-docs-sync.mjs",
     "dev": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro dev",
-    "build": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build",
+    "build": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 node scripts/verify-docs-sync.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro preview"
   },
   "dependencies": {

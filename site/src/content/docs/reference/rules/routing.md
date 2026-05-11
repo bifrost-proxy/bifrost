@@ -1,11 +1,13 @@
 ---
-title: 路由控制
-description: 规则路由、转发与代理控制说明。
+title: "路由控制"
+description: "规则路由、转发与代理控制说明。"
 editUrl: false
+sidebar:
+  label: "路由控制"
+  order: 210
 ---
 
 > 此页面由 `docs/rules/routing.md` 自动同步生成。
-
 # 路由与转发规则
 
 本章介绍控制请求目标地址和转发方式的规则。
@@ -94,6 +96,31 @@ www.example.com xhost://127.0.0.1:8080
 
 ---
 
+## http / https
+
+`http://` 和 `https://` 是显式上游协议转发规则。它们和 `host://` 一样会保留原请求路径与查询参数，但会把上游协议固定为 HTTP 或 HTTPS。
+
+### 语法
+
+```txt
+pattern http://target[:port]
+pattern https://target[:port]
+```
+
+### 示例
+
+```bash
+# 强制走 HTTP 上游
+api.example.com http://127.0.0.1:3000
+
+# 强制走 HTTPS 上游
+api.example.com https://backend.example.com
+```
+
+若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket/) 中的 `ws://` / `wss://`。
+
+---
+
 ## http3
 
 为命中的请求启用上游 HTTP/3 尝试。
@@ -178,114 +205,6 @@ example.com proxy://user:pass@proxy.com:8080
 
 ---
 
-## xproxy
-
-与 `proxy` 类似，但始终执行，不受其他规则影响。
-
-### 语法
-
-```
-pattern xproxy://proxy_host:proxy_port
-```
-
----
-
-## https-proxy
-
-通过 HTTPS 代理转发请求。
-
-### 语法
-
-```
-pattern https-proxy://proxy_host:proxy_port
-```
-
-### 示例
-
-```bash
-*.example.com https-proxy://secure-proxy.com:443
-```
-
----
-
-## socks
-
-通过 SOCKS 代理转发请求。
-
-### 语法
-
-```
-pattern socks://proxy_host:proxy_port
-```
-
-### 参数说明
-
-支持 SOCKS4、SOCKS4a、SOCKS5 协议。
-
-### 示例
-
-```bash
-# SOCKS5 代理
-* socks://127.0.0.1:1080
-
-# 带认证的 SOCKS 代理
-example.com socks://user:pass@socks-proxy.com:1080
-```
-
-### 测试用例
-
-| 测试场景    | 规则                                    | 预期                    |
-| ----------- | --------------------------------------- | ----------------------- |
-| SOCKS5 转发 | `test.com socks://127.0.0.1:SOCKS_PORT` | 请求通过 SOCKS 代理转发 |
-
----
-
-## xsocks
-
-与 `socks` 类似，但始终执行。
-
-### 语法
-
-```
-pattern xsocks://proxy_host:proxy_port
-```
-
----
-
-## tunnel
-
-隧道透传，不拦截请求内容，直接转发。
-
-### 语法
-
-```
-pattern tunnel://target_host:target_port
-```
-
-### 使用场景
-
-- 需要完全透明转发的场景
-- 自定义协议穿透
-- 避免 SSL 拦截
-
-### 示例
-
-```bash
-# 透传到指定服务器
-secure.example.com tunnel://backend.internal:443
-
-# WebSocket 透传
-ws.example.com tunnel://ws-server.internal:8080
-```
-
-### 测试用例
-
-| 测试场景       | 规则                                    | 预期                 |
-| -------------- | --------------------------------------- | -------------------- |
-| HTTPS 隧道透传 | `test.com tunnel://127.0.0.1:MOCK_PORT` | 请求直接转发，不解密 |
-
----
-
 ## pac
 
 使用 PAC (Proxy Auto-Config) 脚本决定路由。
@@ -299,7 +218,7 @@ pattern pac://{pac-script}
 
 ### 示例
 
-> ⚠️ **注意**：小括号内不能有空格，PAC 脚本必须使用块变量
+> ⚠️ **注意**：小括号内容可以包含空格，但 PAC 脚本通常是多行 JavaScript，必须使用块变量或远程 PAC 文件。
 
 ```bash
 # 远程 PAC 文件
@@ -316,6 +235,25 @@ pattern pac://{pac-script}
 function FindProxyForURL(url, host) { return "PROXY proxy.com:8080"; }
 ```
 ````
+
+---
+
+## tunnel
+
+`tunnel://` 用于重定向 CONNECT 隧道目标，适合只想改隧道上游地址、不解密 HTTPS 内容的场景。若需要按 HTTPS path 匹配或改写明文内容，应使用 `tlsIntercept://` 让代理看到解密后的 HTTP 请求。
+
+### 语法
+
+```txt
+pattern tunnel://target[:port]
+```
+
+### 示例
+
+```bash
+# 把 CONNECT 隧道转到指定主机
+api.example.com tunnel://127.0.0.1:8443
+```
 
 ---
 
@@ -341,4 +279,4 @@ www.example.com host://backend.local resCors://*
 1. **端口保留**：使用 `host` 时，原始请求的路径和查询参数会保留
 2. **Host 头部**：默认情况下，`Host` 头部会更新为目标主机
 3. **HTTPS 处理**：对于 HTTPS 请求，需要安装/信任 Bifrost CA 证书才能进行内容修改
-4. **优先级**：`xhost`/`xproxy`/`xsocks` 比普通版本优先级更高
+4. **优先级**：当前文档仅覆盖仓库内已实现并稳定支持的路由协议；如需查看历史设计，请以代码支持集为准

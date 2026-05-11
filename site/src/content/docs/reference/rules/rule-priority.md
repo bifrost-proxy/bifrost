@@ -1,11 +1,13 @@
 ---
-title: 规则优先级
-description: 规则冲突与优先级处理方式。
+title: "规则优先级"
+description: "规则冲突与优先级处理方式。"
 editUrl: false
+sidebar:
+  label: "规则优先级"
+  order: 320
 ---
 
 > 此页面由 `docs/rules/rule-priority.md` 自动同步生成。
-
 # 规则优先级与执行顺序
 
 本章介绍 Bifrost 规则的优先级和执行顺序。
@@ -32,16 +34,16 @@ Bifrost 规则的执行遵循两个核心原则：
 | `host`     | 重定向到指定主机         |
 | `xhost`    | 强制重定向（优先级更高） |
 | `proxy`    | HTTP 代理转发            |
-| `xproxy`   | 强制 HTTP 代理           |
-| `socks`    | SOCKS 代理转发           |
-| `xsocks`   | 强制 SOCKS 代理          |
-| `tunnel`   | 隧道透传                 |
+| `pac`      | PAC 路由                 |
+| `http` / `https` | 显式协议转发      |
+| `ws` / `wss` | WebSocket 转发        |
 | `redirect` | URL 重定向               |
+| `file` / `tpl` / `rawfile` | 本地文件/模板响应 |
 
 **执行特点**：
 
 - 第一个匹配的转发规则生效，后续转发规则被忽略
-- `x` 前缀版本（xhost, xproxy, xsocks）优先级高于普通版本
+- `xhost` 优先级高于普通 `host`
 
 ### 修改类规则（可合并）
 
@@ -72,7 +74,7 @@ www.example.com host://server2.local
 
 **结果**：请求转发到 `server1.local`（第一个匹配的生效）
 
-### x 前缀优先级
+### xhost 优先级
 
 ```bash
 # xhost 优先于 host
@@ -94,10 +96,10 @@ www.example.com proxy://proxy.local:8080
 
 ### 测试用例
 
-| 测试场景        | 规则                                              | 预期结果  |
-| --------------- | ------------------------------------------------- | --------- |
-| host 顺序       | `test.com host://s1` + `test.com host://s2`       | 转发到 s1 |
-| xhost 优先      | `test.com host://s1` + `test.com xhost://s2`      | 转发到 s2 |
+| 测试场景 | 规则 | 预期结果 |
+| --- | --- | --- |
+| host 顺序 | `test.com host://s1` + `test.com host://s2` | 转发到 s1 |
+| xhost 优先 | `test.com host://s1` + `test.com xhost://s2` | 转发到 s2 |
 | host 先于 proxy | `test.com host://s1` + `test.com proxy://p1:8080` | 转发到 s1 |
 
 ---
@@ -220,8 +222,8 @@ www.example.com resHeaders://(X-B:2)
 
 ### 转发类规则优先级
 
-1. `xhost` / `xproxy` / `xsocks`（强制版本）
-2. `host` / `proxy` / `socks` / `tunnel`（普通版本）
+1. `xhost`
+2. `host` / `proxy` / `pac` / `http` / `https` / `ws` / `wss` / `redirect` / `file` / `tpl` / `rawfile`
 3. 同类型：**先定义的优先**
 
 ### 修改类规则合并顺序
@@ -236,6 +238,6 @@ www.example.com resHeaders://(X-B:2)
 
 1. **转发规则互斥**：一个请求只能转发到一个目标
 2. **修改规则可叠加**：多个修改规则可以同时生效
-3. **x 前缀更强**：xhost/xproxy/xsocks 会覆盖普通版本
+3. **xhost 更强**：`xhost` 会覆盖普通 `host`
 4. **顺序敏感**：规则文件中的定义顺序会影响最终结果
 5. **调试技巧**：使用 Bifrost 管理端的 Traffic/Network 面板查看实际生效的规则

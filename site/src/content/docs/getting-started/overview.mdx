@@ -1,11 +1,13 @@
 ---
-title: 项目概览
-description: 用几分钟理解 Bifrost 的定位、能力边界和适合的使用场景。
+title: "项目概览"
+description: "用几分钟理解 Bifrost 的定位、能力边界和适合的使用场景。"
 editUrl: false
+sidebar:
+  label: "项目概览"
+  order: 10
 ---
 
 > 此页面由 `docs/overview.md` 自动同步生成。
-
 # Bifrost 是什么
 
 Bifrost 是一个由 Rust 编写的高性能代理服务器，灵感来源于 Whistle，但目标不只是“转发请求”，而是把规则、脚本、流量观测、TLS MITM 与回放工作流整合进同一套体验里。
@@ -24,6 +26,9 @@ Bifrost 是一个由 Rust 编写的高性能代理服务器，灵感来源于 Wh
 - 提供丰富的 Rules 语法，用于改写、路由、Mock、注入与限流
 - 内置 QuickJS 沙箱脚本能力，适合处理动态逻辑
 - 内置 Web UI，可查看流量、编辑规则、回放请求与追踪脚本日志
+- 支持临时端口绑定，让一个常驻代理服务按入口端口隔离不同任务的规则和流量
+- 支持 remote-invoke，用于在授权后查询远端流量、读取/修改远端文件、执行受策略约束的远端命令
+- 支持 Agent Skill 安装，把真实 traffic 证据交给 Agent 做协议理解与业务自动化沉淀
 
 ## 产品形态
 

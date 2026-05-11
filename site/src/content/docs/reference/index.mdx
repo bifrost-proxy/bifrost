@@ -1,25 +1,39 @@
 ---
-title: 参考文档
-description: 汇总 Bifrost 的规则、脚本、运行与匹配模式文档。
+title: "文档总览"
+description: "Bifrost 文档目录与推荐阅读路径。"
+editUrl: false
+sidebar:
+  label: "文档总览"
+  order: 1
 ---
 
-# 参考文档
+> 此页面由 `docs/README.md` 自动同步生成。
+# Bifrost 文档总览
 
-下面这些页面由仓库根目录的 `docs/` 自动同步生成，适合作为规则和功能能力的权威参考。
+本文档目录用于承载 README 之外的详细说明，避免首页过长。
 
-## 推荐阅读顺序
+## 入门
 
-1. [规则引擎](./rule-engine/)
-2. [运行操作](./operations/)
-3. [匹配模式](./patterns/)
-4. [脚本能力](./scripting/)
-5. [Rules 概览](./rules/)
+- [项目概览](../getting-started/overview/)
+- [安装与启动](../getting-started/installation/)
+- [CLI 快速开始](../getting-started/cli-quick-start/)
+- [CLI 详细命令](./cli/)
+- [桌面版安装与构建](../getting-started/desktop/)
 
-## 细分能力
+## 规则系统
 
-- 请求改写：`Headers`、`Body`、Cookies 与参数调整
-- 响应改写：响应体、状态码、内容注入与代理结果调试
-- URL 改写：域名、路径和查询参数的重写
-- 流量控制：延迟、限速和节流
-- 脚本规则：将动态逻辑接入到 Rules 体系
-- WebSocket：面向长连接与消息流场景的支持
+- [规则语法](./rule-engine/)
+- [匹配模式](./patterns/)
+- [操作符说明](./operations/)
+- [规则协议手册](./rules/)
+
+## 扩展能力
+
+- [Scripts 模块与脚本开发](./scripting/)
+- [Values 使用说明](./values/)
+- [请求重放说明](./replay/)
+
+## 其他
+
+- [项目结构与模块说明](./architecture/)
+- [Agent Skill 安装说明](./agent-skill/)
