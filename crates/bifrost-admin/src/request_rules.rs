@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use base64::Engine;
 use bifrost_core::{Protocol, ResolvedRules as CoreResolvedRules};
 use bytes::Bytes;
+use serde_json::Value;
 use tracing::info;
 use url::Url;
 
@@ -21,12 +22,49 @@ pub struct AppliedRules {
     pub req_cookies: Vec<(String, String)>,
     pub req_del_cookies: Vec<String>,
     pub delete_req_headers: Vec<String>,
+    pub delete_url_params: Vec<String>,
     pub url_params: Vec<(String, String)>,
     pub url_replace: Vec<(String, String)>,
+    pub url_replace_regex: Vec<ReplayRegexReplace>,
     pub req_body: Option<Bytes>,
     pub req_prepend: Option<Bytes>,
     pub req_append: Option<Bytes>,
     pub req_replace: Vec<(String, String)>,
+    pub req_replace_regex: Vec<ReplayRegexReplace>,
+    pub req_merge: Option<Value>,
+    pub req_type: Option<String>,
+    pub req_charset: Option<String>,
+    pub forwarded_for: Option<String>,
+    pub header_replace: Vec<HeaderReplaceRule>,
+    pub req_cors: Option<CorsConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayRegexReplace {
+    pattern: regex::Regex,
+    replacement: String,
+    global: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum HeaderReplaceTarget {
+    Request,
+    Response,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeaderReplaceRule {
+    target: HeaderReplaceTarget,
+    header_name: String,
+    pattern: String,
+    replacement: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CorsConfig {
+    origin: Option<String>,
+    methods: Option<String>,
+    headers: Option<String>,
 }
 
 pub struct AppliedRequest {
@@ -92,23 +130,28 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                     .extend(parse_header_values(&rule.resolved_value));
             }
             Protocol::ReqCookies => {
-                if let Some((key, value)) = parse_cookie_value(&rule.resolved_value) {
-                    applied.req_cookies.push((key, value));
-                }
+                applied
+                    .req_cookies
+                    .extend(parse_header_values(&rule.resolved_value));
             }
             Protocol::Delete => {
-                let headers = parse_delete_headers(&rule.resolved_value);
-                applied.delete_req_headers.extend(headers);
+                let parsed = parse_delete_value(&rule.resolved_value);
+                applied.delete_req_headers.extend(parsed.req_headers);
+                applied.delete_url_params.extend(parsed.url_params);
             }
             Protocol::UrlParams => {
-                if let Some((key, value)) = parse_url_param(&rule.resolved_value) {
-                    applied.url_params.push((key, value));
+                for (key, value) in parse_url_params_value(&rule.resolved_value) {
+                    if value.is_empty() {
+                        applied.delete_url_params.push(key);
+                    } else {
+                        applied.url_params.push((key, value));
+                    }
                 }
             }
             Protocol::UrlReplace => {
-                if let Some((from, to)) = parse_url_replace(&rule.resolved_value) {
-                    applied.url_replace.push((from, to));
-                }
+                let parsed = parse_replace_value(&rule.resolved_value);
+                applied.url_replace.extend(parsed.string_rules);
+                applied.url_replace_regex.extend(parsed.regex_rules);
             }
             Protocol::ReqBody if applied.req_body.is_none() => {
                 let content = extract_inline_content(&rule.resolved_value);
@@ -123,9 +166,31 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 applied.req_append = Some(Bytes::from(content));
             }
             Protocol::ReqReplace => {
-                if let Some((from, to)) = parse_replace_value(&rule.resolved_value) {
-                    applied.req_replace.push((from, to));
+                let parsed = parse_replace_value(&rule.resolved_value);
+                applied.req_replace.extend(parsed.string_rules);
+                applied.req_replace_regex.extend(parsed.regex_rules);
+            }
+            Protocol::Params => {
+                if let Some(value) = parse_merge_value(&rule.resolved_value) {
+                    applied.req_merge = Some(value);
                 }
+            }
+            Protocol::ReqType => {
+                applied.req_type = Some(rule.resolved_value.clone());
+            }
+            Protocol::ReqCharset => {
+                applied.req_charset = Some(rule.resolved_value.clone());
+            }
+            Protocol::ForwardedFor => {
+                applied.forwarded_for = Some(rule.resolved_value.clone());
+            }
+            Protocol::HeaderReplace => {
+                applied
+                    .header_replace
+                    .extend(parse_header_replace_value(&rule.resolved_value));
+            }
+            Protocol::ReqCors => {
+                applied.req_cors = Some(parse_cors_config(&rule.resolved_value));
             }
             _ => {}
         }
@@ -161,7 +226,21 @@ pub fn apply_url_rules(url: &str, rules: &AppliedRules) -> String {
         result = result.replace(from, to);
     }
 
-    if !rules.url_params.is_empty() {
+    for regex_rule in &rules.url_replace_regex {
+        result = if regex_rule.global {
+            regex_rule
+                .pattern
+                .replace_all(&result, regex_rule.replacement.as_str())
+                .into_owned()
+        } else {
+            regex_rule
+                .pattern
+                .replace(&result, regex_rule.replacement.as_str())
+                .into_owned()
+        };
+    }
+
+    if !rules.url_params.is_empty() || !rules.delete_url_params.is_empty() {
         let mut parsed = match Url::parse(&result) {
             Ok(u) => u,
             Err(_) => return result,
@@ -171,6 +250,15 @@ pub fn apply_url_rules(url: &str, rules: &AppliedRules) -> String {
             .query_pairs()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        if !rules.delete_url_params.is_empty() {
+            query_pairs.retain(|(key, _)| {
+                !rules
+                    .delete_url_params
+                    .iter()
+                    .any(|delete_key| delete_key == key)
+            });
+        }
 
         for (key, value) in &rules.url_params {
             if let Some(existing) = query_pairs.iter_mut().find(|(k, _)| k == key) {
@@ -292,7 +380,14 @@ pub fn apply_all_request_rules(
         );
     }
 
-    let final_body = apply_body_rules(original_body, applied_rules, verbose_logging);
+    apply_additional_header_rules(&mut final_headers, applied_rules, verbose_logging);
+
+    let final_body = apply_body_rules(
+        original_body,
+        &final_headers,
+        applied_rules,
+        verbose_logging,
+    );
 
     Ok(AppliedRequest {
         url: final_url,
@@ -414,6 +509,88 @@ fn apply_header_rules(
     headers
 }
 
+fn apply_additional_header_rules(
+    headers: &mut Vec<(String, String)>,
+    rules: &AppliedRules,
+    verbose_logging: bool,
+) {
+    for rule in &rules.header_replace {
+        if rule.target != HeaderReplaceTarget::Request {
+            continue;
+        }
+        for (key, value) in headers.iter_mut() {
+            if key.eq_ignore_ascii_case(&rule.header_name) {
+                let next = value.replace(&rule.pattern, &rule.replacement);
+                if verbose_logging {
+                    info!(
+                        "[REPLAY_RULES] Header replace {} : \"{}\" -> \"{}\"",
+                        rule.header_name, value, next
+                    );
+                }
+                *value = next;
+            }
+        }
+    }
+
+    if let Some(ref content_type) = rules.req_type {
+        apply_single_header(
+            headers,
+            "content-type",
+            expand_content_type_shortcut(content_type),
+            verbose_logging,
+        );
+    }
+
+    if let Some(ref charset) = rules.req_charset {
+        let current = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("text/plain");
+        let base = current.split(';').next().unwrap_or(current).trim();
+        apply_single_header(
+            headers,
+            "content-type",
+            &format!("{}; charset={}", base, charset),
+            verbose_logging,
+        );
+    }
+
+    if let Some(ref forwarded_for) = rules.forwarded_for {
+        let current = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("x-forwarded-for"))
+            .map(|(_, value)| value.clone());
+        let next = current
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("{}, {}", value, forwarded_for))
+            .unwrap_or_else(|| forwarded_for.clone());
+        apply_single_header(headers, "x-forwarded-for", &next, verbose_logging);
+    }
+
+    if let Some(ref cors) = rules.req_cors {
+        if let Some(ref origin) = cors.origin {
+            apply_single_header(headers, "origin", origin, verbose_logging);
+        }
+        if let Some(ref methods) = cors.methods {
+            apply_single_header(
+                headers,
+                "access-control-request-method",
+                methods,
+                verbose_logging,
+            );
+        }
+        if let Some(ref cors_headers) = cors.headers {
+            apply_single_header(
+                headers,
+                "access-control-request-headers",
+                cors_headers,
+                verbose_logging,
+            );
+        }
+    }
+}
+
 fn apply_single_header(
     headers: &mut Vec<(String, String)>,
     header_name: &str,
@@ -499,6 +676,7 @@ fn apply_cookie_rules(
 
 fn apply_body_rules(
     original_body: Option<&[u8]>,
+    headers: &[(String, String)],
     rules: &AppliedRules,
     verbose_logging: bool,
 ) -> Option<Bytes> {
@@ -510,19 +688,6 @@ fn apply_body_rules(
     }
 
     let mut body = original_body.map(|b| b.to_vec()).unwrap_or_default();
-
-    if !rules.req_replace.is_empty() {
-        let mut body_str = String::from_utf8_lossy(&body).to_string();
-        for (from, to) in &rules.req_replace {
-            if body_str.contains(from) {
-                body_str = body_str.replace(from, to);
-                if verbose_logging {
-                    info!("[REPLAY_RULES] Body replace: \"{}\" -> \"{}\"", from, to);
-                }
-            }
-        }
-        body = body_str.into_bytes();
-    }
 
     if let Some(ref prepend) = rules.req_prepend {
         if verbose_logging {
@@ -540,6 +705,55 @@ fn apply_body_rules(
         body.extend_from_slice(append);
     }
 
+    if !rules.req_replace.is_empty() {
+        let mut body_str = String::from_utf8_lossy(&body).to_string();
+        for (from, to) in &rules.req_replace {
+            if body_str.contains(from) {
+                body_str = body_str.replace(from, to);
+                if verbose_logging {
+                    info!("[REPLAY_RULES] Body replace: \"{}\" -> \"{}\"", from, to);
+                }
+            }
+        }
+        body = body_str.into_bytes();
+    }
+
+    if !rules.req_replace_regex.is_empty() {
+        let mut body_str = String::from_utf8_lossy(&body).to_string();
+        for regex_rule in &rules.req_replace_regex {
+            body_str = if regex_rule.global {
+                regex_rule
+                    .pattern
+                    .replace_all(&body_str, regex_rule.replacement.as_str())
+                    .into_owned()
+            } else {
+                regex_rule
+                    .pattern
+                    .replace(&body_str, regex_rule.replacement.as_str())
+                    .into_owned()
+            };
+        }
+        body = body_str.into_bytes();
+    }
+
+    if let Some(ref merge_value) = rules.req_merge {
+        let content_type = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        if content_type.starts_with("application/x-www-form-urlencoded") {
+            if let Some(merged) = merge_form_urlencoded(&body, merge_value) {
+                body = merged.to_vec();
+            }
+        } else if let Ok(original) = serde_json::from_slice::<Value>(&body) {
+            let merged = merge_json(original, merge_value.clone());
+            if let Ok(encoded) = serde_json::to_vec(&merged) {
+                body = encoded;
+            }
+        }
+    }
+
     if body.is_empty() {
         None
     } else {
@@ -548,8 +762,20 @@ fn apply_body_rules(
 }
 
 fn parse_header_values(value: &str) -> Vec<(String, String)> {
-    value
-        .lines()
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let content = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let delimiter = if content.contains('\n') { '\n' } else { ',' };
+    content
+        .split(delimiter)
         .filter_map(parse_header_value)
         .collect::<Vec<_>>()
 }
@@ -576,63 +802,291 @@ fn parse_header_value(value: &str) -> Option<(String, String)> {
     None
 }
 
-fn parse_cookie_value(value: &str) -> Option<(String, String)> {
-    let trimmed = value.trim();
+#[derive(Default)]
+struct ParsedDeleteValue {
+    req_headers: Vec<String>,
+    url_params: Vec<String>,
+}
 
-    if let Some(pos) = trimmed.find('=') {
-        let key = trimmed[..pos].trim().to_string();
-        let val = trimmed[pos + 1..].trim().to_string();
+fn parse_delete_value(value: &str) -> ParsedDeleteValue {
+    let mut result = ParsedDeleteValue::default();
+
+    for part in value.split('|') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if let Some(header) = part
+            .strip_prefix("reqHeaders.")
+            .or_else(|| part.strip_prefix("req."))
+        {
+            result.req_headers.push(header.to_string());
+        } else if let Some(param) = part.strip_prefix("urlParams.") {
+            result.url_params.push(param.to_string());
+        } else if part.starts_with("resHeaders.") || part.starts_with("res.") {
+            continue;
+        } else {
+            result.req_headers.push(part.to_string());
+        }
+    }
+
+    result
+}
+
+fn parse_url_params_value(value: &str) -> Vec<(String, String)> {
+    let content = strip_wrapping_parens(value.trim());
+    let mut params = Vec::new();
+
+    for part in content.split(['&', ',', '\n']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (key, value) = part
+            .split_once('=')
+            .or_else(|| part.split_once(':'))
+            .unwrap_or((part, ""));
+        let key = key.trim();
         if !key.is_empty() {
-            return Some((key, val));
+            params.push((key.to_string(), value.trim().to_string()));
+        }
+    }
+
+    params
+}
+
+struct ParsedReplaceRules {
+    string_rules: Vec<(String, String)>,
+    regex_rules: Vec<ReplayRegexReplace>,
+}
+
+fn parse_replace_value(value: &str) -> ParsedReplaceRules {
+    let mut string_rules = Vec::new();
+    let mut regex_rules = Vec::new();
+
+    for pair in value.split('&') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+
+        let (from, to) = pair
+            .split_once('=')
+            .or_else(|| pair.split_once(' '))
+            .unwrap_or((pair, ""));
+        let from = url_decode(from);
+        let to = url_decode(to);
+        if let Some((pattern, global)) = parse_regex_pattern(&from) {
+            regex_rules.push(ReplayRegexReplace {
+                pattern,
+                replacement: to,
+                global,
+            });
+        } else {
+            string_rules.push((from, to));
+        }
+    }
+
+    ParsedReplaceRules {
+        string_rules,
+        regex_rules,
+    }
+}
+
+fn parse_merge_value(value: &str) -> Option<Value> {
+    if let Ok(json_value) = serde_json::from_str(value) {
+        return Some(json_value);
+    }
+
+    let content = strip_wrapping_parens(value.trim());
+    if content.contains('=') {
+        let mut object = serde_json::Map::new();
+        for pair in content.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                object.insert(
+                    key.trim().to_string(),
+                    Value::String(value.trim().to_string()),
+                );
+            }
+        }
+        if !object.is_empty() {
+            return Some(Value::Object(object));
         }
     }
 
     None
 }
 
-fn parse_delete_headers(value: &str) -> Vec<String> {
-    value
-        .split([',', '\n'])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+fn parse_header_replace_value(value: &str) -> Vec<HeaderReplaceRule> {
+    let mut rules = Vec::new();
+
+    for part in value.split('|') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (target, rest) = if let Some(rest) = part.strip_prefix("req.") {
+            (HeaderReplaceTarget::Request, rest)
+        } else if let Some(rest) = part.strip_prefix("res.") {
+            (HeaderReplaceTarget::Response, rest)
+        } else {
+            continue;
+        };
+
+        let Some((header_name, pattern_replacement)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some((pattern, replacement)) = pattern_replacement.split_once('=') else {
+            continue;
+        };
+
+        rules.push(HeaderReplaceRule {
+            target,
+            header_name: header_name.to_string(),
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+        });
+    }
+
+    rules
 }
 
-fn parse_url_param(value: &str) -> Option<(String, String)> {
-    let trimmed = value.trim();
-    if let Some(pos) = trimmed.find('=') {
-        let key = trimmed[..pos].trim().to_string();
-        let val = trimmed[pos + 1..].trim().to_string();
-        if !key.is_empty() {
-            return Some((key, val));
+fn parse_cors_config(value: &str) -> CorsConfig {
+    let content = strip_wrapping_parens(value.trim());
+    if content.is_empty() || content == "*" {
+        return CorsConfig {
+            origin: Some("*".to_string()),
+            ..Default::default()
+        };
+    }
+
+    let mut config = CorsConfig::default();
+    for part in content.split(['&', ';']) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        match key.as_str() {
+            "origin" => config.origin = Some(value),
+            "methods" | "method" => config.methods = Some(value),
+            "headers" | "header" => config.headers = Some(value),
+            _ => {}
         }
     }
-    None
+    config
 }
 
-fn parse_url_replace(value: &str) -> Option<(String, String)> {
-    let trimmed = value.trim();
-    let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-    if parts.len() == 2 {
-        return Some((parts[0].to_string(), parts[1].to_string()));
+fn strip_wrapping_parens(value: &str) -> &str {
+    if value.starts_with('(') && value.ends_with(')') && value.len() >= 2 {
+        &value[1..value.len() - 1]
+    } else {
+        value
     }
-    if let Some(pos) = trimmed.find('=') {
-        let from = trimmed[..pos].trim().to_string();
-        let to = trimmed[pos + 1..].trim().to_string();
-        if !from.is_empty() {
-            return Some((from, to));
+}
+
+fn url_decode(value: &str) -> String {
+    urlencoding::decode(value)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn parse_regex_pattern(value: &str) -> Option<(regex::Regex, bool)> {
+    let value = value.trim();
+    if !value.starts_with('/') {
+        return None;
+    }
+
+    let global = value.ends_with("/g") || value.ends_with("/gi") || value.ends_with("/ig");
+    let case_insensitive =
+        value.ends_with("/i") || value.ends_with("/gi") || value.ends_with("/ig");
+
+    let end_pos = if global && case_insensitive {
+        value.len().checked_sub(3)?
+    } else if global || case_insensitive {
+        value.len().checked_sub(2)?
+    } else if value.len() > 1 && value.ends_with('/') {
+        value.len() - 1
+    } else {
+        return None;
+    };
+
+    let pattern = &value[1..end_pos];
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let regex = if case_insensitive {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .ok()?
+    } else {
+        regex::Regex::new(pattern).ok()?
+    };
+
+    Some((regex, global))
+}
+
+fn merge_json(base: Value, patch: Value) -> Value {
+    match (base, patch) {
+        (Value::Object(mut base_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                let base_value = base_map.remove(&key).unwrap_or(Value::Null);
+                base_map.insert(key, merge_json(base_value, value));
+            }
+            Value::Object(base_map)
+        }
+        (_, patch) => patch,
+    }
+}
+
+fn merge_form_urlencoded(body: &[u8], patch: &Value) -> Option<Bytes> {
+    let Value::Object(patch_map) = patch else {
+        return None;
+    };
+
+    let mut pairs: Vec<(String, String)> = url::form_urlencoded::parse(body).into_owned().collect();
+    for (key, value) in patch_map {
+        let value_string = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+
+        if let Some(existing) = pairs
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == key)
+        {
+            existing.1 = value_string;
+        } else {
+            pairs.push((key.clone(), value_string));
         }
     }
-    None
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in pairs {
+        serializer.append_pair(&key, &value);
+    }
+    Some(Bytes::from(serializer.finish()))
 }
 
-fn parse_replace_value(value: &str) -> Option<(String, String)> {
-    let trimmed = value.trim();
-    let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-    if parts.len() == 2 {
-        return Some((parts[0].to_string(), parts[1].to_string()));
+fn expand_content_type_shortcut(input: &str) -> &str {
+    match input.to_lowercase().as_str() {
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "javascript" | "mjs" => "application/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" | "text" => "text/plain",
+        "form" => "application/x-www-form-urlencoded",
+        _ => input,
     }
-    None
 }
 
 fn extract_inline_content(value: &str) -> String {
@@ -885,6 +1339,91 @@ b.com status://200 resBody://(value)
                 ("x-use-ppe".to_string(), "1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_replay_request_rules_apply_extended_request_protocols() {
+        let rules = parse_rules(
+            r#"https://example.test/api reqHeaders://(X-Trace: old) reqCookies://(sid=abc,theme=dark) delete://reqHeaders.X-Remove|urlParams.drop urlParams://(keep=2&drop=) reqType://json reqCharset://utf-8 forwardedFor://1.2.3.4 headerReplace://req.X-Trace:old=new reqCors://(origin=https://app.example.test&methods=POST&headers=X-Test) reqMerge://({"b":2,"c":3})"#,
+        )
+        .unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx =
+            RequestContext::from_url("https://example.test/api?drop=1&old=1").with_method("POST");
+        let resolved_rules = resolver.resolve(&ctx);
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        let result = apply_all_request_rules(
+            &ctx.url,
+            "POST",
+            &[
+                ("X-Remove".to_string(), "1".to_string()),
+                ("X-Trace".to_string(), "old".to_string()),
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("X-Forwarded-For".to_string(), "9.9.9.9".to_string()),
+            ],
+            Some(br#"{"a":1,"b":0}"#),
+            &applied_rules,
+            false,
+        )
+        .unwrap();
+        let body = result.body.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let header = |name: &str| {
+            result
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert!(!result.url.contains("drop="));
+        assert!(result.url.contains("old=1"));
+        assert!(result.url.contains("keep=2"));
+        assert!(header("X-Remove").is_none());
+        assert_eq!(header("X-Trace"), Some("new"));
+        assert_eq!(
+            header("Content-Type"),
+            Some("application/json; charset=utf-8")
+        );
+        assert_eq!(header("X-Forwarded-For"), Some("9.9.9.9, 1.2.3.4"));
+        assert_eq!(header("Origin"), Some("https://app.example.test"));
+        assert_eq!(header("Access-Control-Request-Method"), Some("POST"));
+        assert_eq!(header("Access-Control-Request-Headers"), Some("X-Test"));
+        assert!(header("Cookie").unwrap_or_default().contains("sid=abc"));
+        assert!(header("Cookie").unwrap_or_default().contains("theme=dark"));
+        assert_eq!(value["a"], 1);
+        assert_eq!(value["b"], 2);
+        assert_eq!(value["c"], 3);
+    }
+
+    #[test]
+    fn test_replay_request_rules_apply_form_req_merge_and_regex_replace() {
+        let rules = AppliedRules {
+            req_replace_regex: vec![ReplayRegexReplace {
+                pattern: regex::Regex::new(r"item=\d+").unwrap(),
+                replacement: "item=9".to_string(),
+                global: true,
+            }],
+            req_merge: Some(serde_json::json!({"b": "2"})),
+            ..Default::default()
+        };
+
+        let result = apply_all_request_rules(
+            "https://example.test/api",
+            "POST",
+            &[(
+                "Content-Type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            )],
+            Some(b"item=1&a=old"),
+            &rules,
+            false,
+        )
+        .unwrap();
+        let body = String::from_utf8(result.body.unwrap().to_vec()).unwrap();
+
+        assert_eq!(body, "item=9&a=old&b=2");
     }
 
     #[test]

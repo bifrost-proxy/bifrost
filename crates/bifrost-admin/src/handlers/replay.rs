@@ -2287,86 +2287,13 @@ fn resolve_and_apply_rules(
     (resolved_rules, matched_rules, applied_request)
 }
 
-fn extract_inline_content(value: &str) -> String {
-    if value.starts_with('{') && value.ends_with('}') && value.len() > 1 {
-        value[1..value.len() - 1].to_string()
-    } else {
-        value.to_string()
-    }
-}
-
-fn parse_headers(value: &str) -> Option<Vec<(String, String)>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let (content, use_colon) = if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        (&trimmed[1..trimmed.len() - 1], true)
-    } else {
-        (trimmed, trimmed.contains('\n') || trimmed.contains(':'))
-    };
-
-    let mut headers = Vec::new();
-    let delimiter = if content.contains('\n') { '\n' } else { ',' };
-    for part in content.split(delimiter) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let separator = if use_colon { ':' } else { '=' };
-        if let Some(pos) = part.find(separator) {
-            let key = part[..pos].trim().to_string();
-            let val = part[pos + 1..].trim().to_string();
-            if !key.is_empty() {
-                headers.push((key, val));
-            }
-        }
-    }
-
-    if headers.is_empty() {
-        None
-    } else {
-        Some(headers)
-    }
-}
-
 fn apply_response_rules(
     resolved_rules: &bifrost_core::ResolvedRules,
     status: u16,
-    mut headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     body: Option<String>,
 ) -> (u16, Vec<(String, String)>, Option<String>) {
-    use bifrost_core::Protocol;
-
-    let mut final_status = status;
-    let mut final_body = body;
-
-    for rule in &resolved_rules.rules {
-        match rule.rule.protocol {
-            Protocol::ResHeaders => {
-                if let Some(parsed) = parse_headers(&rule.resolved_value) {
-                    for (key, value) in parsed {
-                        let key_lower = key.to_lowercase();
-                        headers.retain(|(k, _)| k.to_lowercase() != key_lower);
-                        headers.push((key, value));
-                    }
-                }
-            }
-            Protocol::StatusCode | Protocol::ReplaceStatus => {
-                if let Ok(code) = rule.resolved_value.parse::<u16>() {
-                    final_status = code;
-                }
-            }
-            Protocol::ResBody => {
-                let content = extract_inline_content(&rule.resolved_value);
-                final_body = Some(content);
-            }
-            _ => {}
-        }
-    }
-
-    (final_status, headers, final_body)
+    crate::replay_response_rules::apply_response_rules(resolved_rules, status, headers, body)
 }
 
 fn resolve_custom_rules(

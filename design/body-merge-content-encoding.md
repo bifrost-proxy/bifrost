@@ -18,6 +18,10 @@
 - HTTPS path 级 Body 规则只能在 TLS 解包后看到路径和响应体；CONNECT 阶段没有 path，所以 relay / 远端代理验证时必须同时配置目标 host 的 `tlsIntercept://`，或通过启动配置把目标 host 纳入 TLS 拦截范围。
 - `reqScript` / `resScript` 进入脚本前按当前 `Content-Encoding` 解码为文本；脚本写回 Body 后，再按脚本最终 Header 重新编码或输出 identity。
 - mock / immediate response 路径同样使用保编码 Body 规则和内容注入，避免 rawfile / 远端 mock 携带压缩响应时绕过修复。
+- Replay Admin API 不复用普通代理的完整 transform 管线，必须在 replay 专属路径补齐规则应用：
+  - 请求侧执行 `reqHeaders` / `reqCookies` / `delete://reqHeaders.*` / `delete://urlParams.*` / `urlParams` / `urlReplace` / `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` / `reqType` / `reqCharset` / `forwardedFor` / `headerReplace://req.*` / `reqCors`。
+  - 响应侧执行 `resHeaders` / `delete://resHeaders.*` / `statusCode` / `replaceStatus` / `resCookies` / `resCors` / `resType` / `resCharset` / `cache` / `attachment` / `responseFor` / `trailers` / `headerReplace://res.*` / `resBody` / `resPrepend` / `resAppend` / `resReplace` / `resMerge`，以及 HTML/JS/CSS 内容注入规则。
+  - `reqDelay` / `resDelay` / `reqSpeed` / `resSpeed` 属于真实代理传输时序控制；Replay Admin API 返回的是执行结果 JSON，不做传输节流语义复现。
 
 ## 依赖项
 
@@ -33,6 +37,9 @@
   - gzip 响应 JSON 同时删除最终 `Content-Encoding` 后，输出为 identity JSON。
   - gzip body 进入脚本前会解码为文本，脚本写回 body 后仍可按 gzip 重新编码。
   - mock / immediate gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
+  - Replay 响应 JSON 经过 `resMerge` 后，`data.body` 里的 JSON 包含新增字段并覆盖相同 key。
+  - Replay request 侧 `reqMerge`、URL 参数删除、请求头替换、Content-Type/charset、CORS 预检头与 forwarded-for 都体现在发给上游的请求中。
+  - Replay response 侧响应头、状态码、cookie、CORS、Content-Type/charset、缓存、附件、responseFor、trailers、响应头替换、内容注入与 Body 修改都体现在 Admin API 的返回数据中。
 - E2E 测试：
   - `body_reqMerge_gzip_json`：curl 发送 gzip JSON 请求，代理执行 `reqMerge`，上游收到仍可解压的 gzip JSON。
   - `body_resMerge_gzip_json`：上游返回 gzip JSON，代理执行 `resMerge`，客户端用 `--compressed` 读到合并后的 JSON，响应头仍是 gzip。
@@ -40,6 +47,7 @@
   - `body_https_resMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
 - 真实场景测试：
   - 更新 `human_tests/proxy-rules-advanced.md`，新增压缩 JSON 的 `reqMerge` / `resMerge` 回归用例，并按文档真实执行。
+  - 更新 `human_tests/api-replay.md`，新增 Replay Admin API 的 `resMerge` 响应 Body 回归用例和 replay 规则覆盖回归用例，并用临时代理端口真实执行。
   - 使用真实目标 `page_permission` 接口验证 `resMerge://({"test":"qwe"})` 命中后，最终 JSON 顶层包含 `"test":"qwe"`；验证规则需包含目标 host 的 TLS 解包前置规则。
 
 ## Review/Fix/Test 闭环方案
