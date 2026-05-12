@@ -10,21 +10,16 @@ use bifrost_agent::types::ToolDefinition;
 use bifrost_agent::{AgentSession, ToolRegistry};
 use std::fs;
 
-fn session_id_from_output(output: &str) -> String {
-    output
-        .lines()
-        .find(|line| line.starts_with("session_id: "))
-        .expect("session_id line")
-        .trim_start_matches("session_id: ")
-        .to_string()
-}
-
 fn session_id_from_exec_json(output: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(output).expect("exec json output");
-    value["session_id"]
-        .as_str()
-        .expect("session id")
-        .to_string()
+    session_id_value_to_string(&value["session_id"])
+}
+
+fn session_id_value_to_string(value: &serde_json::Value) -> String {
+    if let Some(session_id) = value.as_i64() {
+        return session_id.to_string();
+    }
+    value.as_str().expect("session id").to_string()
 }
 
 #[tokio::test]
@@ -109,68 +104,25 @@ async fn apply_patch_tool_works_end_to_end() {
 }
 
 #[tokio::test]
-async fn pty_tools_work_end_to_end() {
+async fn legacy_shell_pty_is_not_registered_by_default() {
     let registry = ToolRegistry::with_defaults(5);
     let work_dir = tempfile::tempdir().expect("work dir");
 
-    let create_session = registry
+    assert!(!registry.contains_tool("shell_pty"));
+    assert!(!registry
+        .definitions()
+        .iter()
+        .any(|definition| definition.name() == "shell_pty"));
+
+    let result = registry
         .execute(
             "shell_pty",
-            r#"{"command":"export P1_TOOL_TEST=bifrost_ok && echo ready"}"#,
+            r#"{"command":"export P1_TOOL_TEST=bifrost_ok && echo ready","wait_for_completion":false}"#,
             work_dir.path(),
         )
         .await;
-    assert!(create_session.success, "{}", create_session.output);
-    assert!(create_session.output.contains("exit_indicator: done"));
-    assert!(create_session.output.contains("exit_code: 0"));
-    assert!(create_session.output.contains("ready"));
-    let session_id = session_id_from_output(&create_session.output);
-
-    let reuse = registry
-        .execute(
-            "shell_pty",
-            &serde_json::json!({
-                "command": "echo $P1_TOOL_TEST",
-                "session_id": session_id,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(reuse.success, "{}", reuse.output);
-    assert!(reuse.output.contains("bifrost_ok"));
-
-    let interactive = registry
-        .execute(
-            "shell_pty",
-            &serde_json::json!({
-                "command": "python3 -u -c 'import sys; print(\"ready\"); print(sys.stdin.readline().strip())'",
-                "wait_for_completion": false,
-                "yield_time_ms": 5000,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(interactive.success, "{}", interactive.output);
-    assert!(interactive.output.contains("exit_indicator: running"));
-    assert!(interactive.output.contains("ready"));
-    let interactive_session_id = session_id_from_output(&interactive.output);
-
-    let stdin_result = registry
-        .execute(
-            "write_stdin",
-            &serde_json::json!({
-                "session_id": interactive_session_id,
-                "chars": "hello pty\n",
-                "yield_time_ms": 1000,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(stdin_result.success, "{}", stdin_result.output);
-    assert!(stdin_result.output.contains("hello pty"));
+    assert!(!result.success);
+    assert!(result.output.contains("unknown tool: shell_pty"));
 }
 
 #[tokio::test]
@@ -181,7 +133,7 @@ async fn exec_command_tool_works_end_to_end() {
     let completed = registry
         .execute(
             "exec_command",
-            r#"{"cmd":"printf exec-ok","yield_time_ms":100,"max_output_tokens":1000}"#,
+            r#"{"cmd":"printf exec-ok","yield_time_ms":500,"max_output_tokens":1000}"#,
             work_dir.path(),
         )
         .await;
@@ -191,6 +143,50 @@ async fn exec_command_tool_works_end_to_end() {
     assert_eq!(completed_json["exit_code"], 0);
     assert_eq!(completed_json["output"], "exec-ok");
     assert!(completed_json["session_id"].is_null());
+
+    let long_running = registry
+        .execute(
+            "exec_command",
+            &serde_json::json!({
+                "cmd": "printf long-start; sleep 0.3; printf long-end",
+                "yield_time_ms": 50,
+                "max_output_tokens": 1000,
+            })
+            .to_string(),
+            work_dir.path(),
+        )
+        .await;
+    assert!(long_running.success, "{}", long_running.output);
+    let long_running_json: serde_json::Value =
+        serde_json::from_str(&long_running.output).expect("long-running exec json");
+    let long_session_id = session_id_value_to_string(&long_running_json["session_id"]);
+
+    let mut final_poll_json = serde_json::Value::Null;
+    for _ in 0..20 {
+        let poll = registry
+            .execute(
+                "write_stdin",
+                &serde_json::json!({
+                    "session_id": long_session_id,
+                    "chars": "",
+                    "yield_time_ms": 100,
+                    "max_output_tokens": 1000,
+                })
+                .to_string(),
+                work_dir.path(),
+            )
+            .await;
+        assert!(poll.success, "{}", poll.output);
+        final_poll_json = serde_json::from_str(&poll.output).expect("long poll json");
+        if !final_poll_json["exit_code"].is_null() {
+            break;
+        }
+    }
+    assert_eq!(final_poll_json["exit_code"], 0);
+    assert!(final_poll_json["output"]
+        .as_str()
+        .unwrap_or("")
+        .contains("long-end"));
 
     let interactive = registry
         .execute(
@@ -257,10 +253,7 @@ async fn codex_cli_interactive_starts_in_real_pty() {
         "{}",
         started_json
     );
-    let session_id = started_json["session_id"]
-        .as_str()
-        .expect("codex session id")
-        .to_string();
+    let session_id = session_id_value_to_string(&started_json["session_id"]);
 
     let interrupted = registry
         .execute(

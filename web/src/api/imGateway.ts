@@ -1,7 +1,7 @@
 import { get, post, del, patch } from "./client";
 
 // Types
-export type ImProviderType = "feishu" | "wechat" | "webhook";
+export type ImProviderType = "feishu" | "weixin" | "wechat" | "webhook";
 export type ConnectionState =
   | "disconnected"
   | "connecting"
@@ -200,6 +200,32 @@ export async function disconnectProvider(
   id: string,
 ): Promise<{ success: boolean; message?: string }> {
   return post(`${BASE}/providers/${id}/disconnect`);
+}
+
+export async function startWeixinLogin(
+  id: string,
+): Promise<{ success: boolean; scan_url: string; expires_in_seconds: number }> {
+  return post(`${BASE}/providers/${id}/weixin-login/start`, {});
+}
+
+export async function getWeixinLoginStatus(id: string): Promise<{
+  success: boolean;
+  status: "idle" | "pending" | "expired" | "confirmed" | "authorized";
+  expires_at?: number;
+  provider?: ImProviderConfig;
+  account?: { account_id: string; user_id: string; base_url: string };
+}> {
+  return get(`${BASE}/providers/${id}/weixin-login/status`);
+}
+
+export async function completeWeixinLogin(
+  id: string,
+): Promise<{
+  success: boolean;
+  provider: ImProviderConfig;
+  account: { account_id: string; user_id: string; base_url: string };
+}> {
+  return post(`${BASE}/providers/${id}/weixin-login/complete`, {});
 }
 
 export async function getProviderPolicy(

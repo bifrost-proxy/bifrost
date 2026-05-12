@@ -345,8 +345,9 @@ mod tests {
     fn test_default_base_instructions_describe_terminal_tool_selection() {
         let config = AgentConfig::default();
         let instructions = resolve_base_instructions(&config);
-        assert!(instructions.text.contains("shell_pty"));
-        assert!(instructions.text.contains("wait_for_completion=false"));
+        assert!(instructions.text.contains("exec_command"));
+        assert!(instructions.text.contains("tty=true"));
+        assert!(!instructions.text.contains("shell_pty"));
         assert!(instructions.text.contains("write_stdin"));
         assert!(instructions
             .text

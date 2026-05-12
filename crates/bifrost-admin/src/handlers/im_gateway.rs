@@ -9,6 +9,7 @@ use bifrost_core::text::truncate_bytes_with_suffix;
 use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -18,9 +19,10 @@ use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
-    ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig, ImProviderConfig, ImRoute,
-    ImRouteAction, ImSchedule, ImTarget, MessageDirection, MessageStatus,
+    ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig, ImProviderConfig,
+    ImProviderType, ImRoute, ImRouteAction, ImSchedule, ImTarget, MessageDirection, MessageStatus,
 };
+use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{
     ImAgentClient, ImAgentConfigStore, ImAgentSessionManager, ImAgentToolRegistry,
     ImConnectionManager, ImEventStore, ImMcpManager, ImMessageLogStore, ImProviderStore,
@@ -35,6 +37,87 @@ const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<Mutex<HashMap<AgentReplyImageCacheKey, String>>> =
     OnceLock::new();
+
+#[derive(Clone)]
+struct PendingWeixinLogin {
+    login: crate::im_gateway::weixin::WeixinLoginStart,
+    created_at_ms: u64,
+}
+
+#[derive(Clone)]
+enum ImProviderClient {
+    Feishu(Arc<crate::im_gateway::feishu::FeishuProvider>),
+    Weixin(Arc<WeixinProvider>),
+}
+
+impl ImProviderClient {
+    fn feishu(&self) -> Option<Arc<crate::im_gateway::feishu::FeishuProvider>> {
+        match self {
+            Self::Feishu(provider) => Some(provider.clone()),
+            Self::Weixin(_) => None,
+        }
+    }
+
+    async fn send_card(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        card: serde_json::Value,
+        opts: crate::im_gateway::types::SendOptions,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => provider.send_card(config, target, card, opts).await,
+            Self::Weixin(provider) => provider.send_card(config, target, card, opts).await,
+        }
+    }
+
+    async fn send_text(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        text: &str,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => provider.send_text(config, target, text).await,
+            Self::Weixin(provider) => provider.send_text(config, target, text).await,
+        }
+    }
+
+    async fn add_reaction(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        reaction: &str,
+    ) -> bifrost_core::Result<bool> {
+        match self {
+            Self::Feishu(provider) => {
+                provider.add_reaction(config, message_id, reaction).await?;
+                Ok(true)
+            }
+            Self::Weixin(_) => Ok(false),
+        }
+    }
+
+    async fn download_message_image_resource(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        image: &ImImageAttachment,
+    ) -> bifrost_core::Result<(String, Vec<u8>)> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .download_message_image_resource(config, message_id, &image.file_key)
+                    .await
+            }
+            Self::Weixin(provider) => {
+                provider
+                    .download_message_image_resource(config, image)
+                    .await
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ImGatewayService
@@ -55,6 +138,7 @@ pub struct ImGatewayService {
     pub agent_session_manager: Arc<ImAgentSessionManager>,
     pub queue_manager: Arc<SessionQueueManager>,
     pub progress_registry: Arc<ImAgentProgressRegistry>,
+    weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
 }
 
 impl ImGatewayService {
@@ -95,6 +179,16 @@ impl ImGatewayService {
             )),
             queue_manager: Arc::new(SessionQueueManager::new()),
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
+            weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    fn provider_client(&self, provider: &ImProviderConfig) -> ImProviderClient {
+        match provider.provider_type {
+            crate::im_gateway::types::ImProviderType::Weixin => {
+                ImProviderClient::Weixin(self.connection_manager.weixin_provider().clone())
+            }
+            _ => ImProviderClient::Feishu(self.connection_manager.feishu_provider().clone()),
         }
     }
 
@@ -124,7 +218,9 @@ impl ImGatewayService {
                 .as_deref()
                 .is_some_and(|s| !s.is_empty());
 
-            if !has_owner {
+            if !has_owner
+                && provider.provider_type == crate::im_gateway::types::ImProviderType::Feishu
+            {
                 let feishu = self.connection_manager.feishu_provider().clone();
                 match feishu.fetch_bot_owner_open_id(&provider).await {
                     Ok(owner_id) => {
@@ -159,7 +255,7 @@ impl ImGatewayService {
             let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
 
             // Spawn the event processing loop
-            let feishu = self.connection_manager.feishu_provider().clone();
+            let client = self.provider_client(&provider);
             let provider_for_loop = provider.clone();
             let event_store = self.event_store.clone();
             let message_log_store = self.message_log_store.clone();
@@ -174,7 +270,7 @@ impl ImGatewayService {
             tokio::spawn(async move {
                 run_event_loop(
                     rx,
-                    feishu,
+                    client,
                     provider_for_loop,
                     event_store,
                     message_log_store,
@@ -255,7 +351,7 @@ impl ImGatewayService {
                                 "supervisor: attempting reconnect"
                             );
                             let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-                            let feishu = self.connection_manager.feishu_provider().clone();
+                            let client = self.provider_client(&provider);
                             let provider_for_loop = provider.clone();
                             let event_store = self.event_store.clone();
                             let message_log_store = self.message_log_store.clone();
@@ -270,7 +366,7 @@ impl ImGatewayService {
                             tokio::spawn(async move {
                                 run_event_loop(
                                     rx,
-                                    feishu,
+                                    client,
                                     provider_for_loop,
                                     event_store,
                                     message_log_store,
@@ -417,6 +513,18 @@ async fn handle_providers(
         if let Some(id) = extract_segment_before(id_and_rest, "/disconnect") {
             return handle_provider_disconnect(req, service, id).await;
         }
+        // Check for /:id/weixin-login/start
+        if let Some(id) = extract_segment_before(id_and_rest, "/weixin-login/start") {
+            return handle_provider_weixin_login_start(req, service, id).await;
+        }
+        // Check for /:id/weixin-login/status
+        if let Some(id) = extract_segment_before(id_and_rest, "/weixin-login/status") {
+            return handle_provider_weixin_login_status(req, service, id).await;
+        }
+        // Check for /:id/weixin-login/complete
+        if let Some(id) = extract_segment_before(id_and_rest, "/weixin-login/complete") {
+            return handle_provider_weixin_login_complete(req, service, id).await;
+        }
         // Check for /:id/messages
         if let Some(id) = extract_segment_before(id_and_rest, "/messages") {
             return handle_provider_messages(req, service, id).await;
@@ -484,6 +592,199 @@ fn handle_provider_status(
     }
 }
 
+async fn handle_provider_weixin_login_start(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+    id: &str,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let Some(provider) = service.provider_store.get(id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if provider.provider_type != crate::im_gateway::types::ImProviderType::Weixin {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is not a weixin provider");
+    }
+    match service
+        .connection_manager
+        .weixin_provider()
+        .start_login(provider.base_url.as_deref())
+        .await
+    {
+        Ok(login) => {
+            service.weixin_login_pending.write().insert(
+                provider.id.clone(),
+                PendingWeixinLogin {
+                    login: login.clone(),
+                    created_at_ms: now_ms(),
+                },
+            );
+            json_response(&serde_json::json!({
+                "success": true,
+                "scan_url": login.scan_url,
+                "expires_in_seconds": login.expires_in_seconds,
+            }))
+        }
+        Err(e) => error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("Failed to start weixin login: {e}"),
+        ),
+    }
+}
+
+async fn handle_provider_weixin_login_status(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+    id: &str,
+) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+    let Some(mut provider) = service.provider_store.get(id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if provider.provider_type != crate::im_gateway::types::ImProviderType::Weixin {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is not a weixin provider");
+    }
+    let Some(pending) = service.weixin_login_pending.read().get(id).cloned() else {
+        return json_response(&serde_json::json!({
+            "success": true,
+            "status": if provider.secret_ref.is_some() { "authorized" } else { "idle" },
+            "provider": sanitize_provider(&provider),
+        }));
+    };
+    let expires_at_ms =
+        pending.created_at_ms + pending.login.expires_in_seconds.saturating_mul(1000);
+    if now_ms() >= expires_at_ms {
+        service.weixin_login_pending.write().remove(id);
+        return json_response(&serde_json::json!({
+            "success": true,
+            "status": "expired",
+            "expires_at": expires_at_ms,
+        }));
+    }
+    match service
+        .connection_manager
+        .weixin_provider()
+        .complete_login(
+            &pending.login.poll_key,
+            provider.base_url.as_deref(),
+            1,
+            std::time::Duration::ZERO,
+        )
+        .await
+    {
+        Ok(account) => {
+            provider.app_id = Some(account.account_id.clone());
+            provider.owner_open_id = Some(account.user_id.clone());
+            provider.base_url = Some(account.base_url.clone());
+            provider.secret_ref = Some(account.bot_token);
+            provider.enabled = true;
+            provider.event_connection_enabled = true;
+            if provider.event_types.is_empty() {
+                provider.event_types = vec!["message.receive".to_string()];
+            }
+            provider.updated_at = now_ms();
+            normalize_provider_agent_config(&mut provider);
+            if let Err(e) = service.provider_store.update(provider.clone()) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+            }
+            service.weixin_login_pending.write().remove(id);
+            json_response(&serde_json::json!({
+                "success": true,
+                "status": "confirmed",
+                "provider": sanitize_provider(&provider),
+                "account": {
+                    "account_id": account.account_id,
+                    "user_id": account.user_id,
+                    "base_url": account.base_url,
+                }
+            }))
+        }
+        Err(e) => {
+            let error = e.to_string();
+            if error.contains("expired") {
+                service.weixin_login_pending.write().remove(id);
+                return json_response(&serde_json::json!({
+                    "success": true,
+                    "status": "expired",
+                    "expires_at": expires_at_ms,
+                }));
+            }
+            json_response(&serde_json::json!({
+                "success": true,
+                "status": "pending",
+                "expires_at": expires_at_ms,
+            }))
+        }
+    }
+}
+
+async fn handle_provider_weixin_login_complete(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+    id: &str,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let Some(mut provider) = service.provider_store.get(id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if provider.provider_type != crate::im_gateway::types::ImProviderType::Weixin {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is not a weixin provider");
+    }
+    let Some(pending) = service.weixin_login_pending.read().get(id).cloned() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "No pending weixin login; start QR login first",
+        );
+    };
+    match service
+        .connection_manager
+        .weixin_provider()
+        .complete_login(
+            &pending.login.poll_key,
+            provider.base_url.as_deref(),
+            20,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+    {
+        Ok(account) => {
+            provider.app_id = Some(account.account_id.clone());
+            provider.owner_open_id = Some(account.user_id.clone());
+            provider.base_url = Some(account.base_url.clone());
+            provider.secret_ref = Some(account.bot_token);
+            provider.enabled = true;
+            provider.event_connection_enabled = true;
+            if provider.event_types.is_empty() {
+                provider.event_types = vec!["message.receive".to_string()];
+            }
+            provider.updated_at = now_ms();
+            normalize_provider_agent_config(&mut provider);
+            if let Err(e) = service.provider_store.update(provider.clone()) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+            }
+            service.weixin_login_pending.write().remove(id);
+            json_response(&serde_json::json!({
+                "success": true,
+                "provider": sanitize_provider(&provider),
+                "account": {
+                    "account_id": account.account_id,
+                    "user_id": account.user_id,
+                    "base_url": account.base_url,
+                }
+            }))
+        }
+        Err(e) => error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("Failed to complete weixin login: {e}"),
+        ),
+    }
+}
+
 /// POST /providers/:id/connect — start event long connection for a provider.
 ///
 /// If `owner_open_id` is not configured, this will auto-detect it from the
@@ -506,13 +807,14 @@ async fn handle_provider_connect(
         _ => return error_response(StatusCode::BAD_REQUEST, "Provider has no secret configured"),
     };
 
-    // Auto-detect owner_open_id if not set
+    // Auto-detect owner_open_id if not set for Feishu. Weixin gets owner from QR login.
     let feishu = service.connection_manager.feishu_provider().clone();
-    if provider
-        .owner_open_id
-        .as_deref()
-        .unwrap_or_default()
-        .is_empty()
+    if provider.provider_type == crate::im_gateway::types::ImProviderType::Feishu
+        && provider
+            .owner_open_id
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
     {
         match feishu.fetch_bot_owner_open_id(&provider).await {
             Ok(owner_id) => {
@@ -541,6 +843,7 @@ async fn handle_provider_connect(
     let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
 
     // Spawn the event processing loop
+    let client = service.provider_client(&provider);
     let provider_for_loop = provider.clone();
     let event_store = service.event_store.clone();
     let message_log_store = service.message_log_store.clone();
@@ -555,7 +858,7 @@ async fn handle_provider_connect(
     tokio::spawn(async move {
         run_event_loop(
             rx,
-            feishu,
+            client,
             provider_for_loop,
             event_store,
             message_log_store,
@@ -581,10 +884,13 @@ async fn handle_provider_connect(
             info!(provider_id = id, "provider event connection started");
             json_response(&serde_json::json!({"success": true, "message": "Connection started"}))
         }
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to start connection: {e}"),
-        ),
+        Err(e) => {
+            service.connection_manager.mark_failed(id, e.to_string());
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to start connection: {e}"),
+            )
+        }
     }
 }
 
@@ -769,12 +1075,13 @@ impl EventDedup {
 
 /// Event processing loop: receives events from the long connection and processes them.
 ///
-/// Security: Only processes messages from the bot owner (owner_open_id).
-/// After owner check, matches routes and executes actions (script or agent chat).
+/// Security: Feishu messages are limited to the configured bot owner.
+/// Weixin is an inbound IM channel and does not apply owner filtering.
+/// After provider-specific checks, matches routes and executes actions.
 #[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut rx: mpsc::UnboundedReceiver<ImEvent>,
-    feishu: Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: ImProviderClient,
     provider: ImProviderConfig,
     event_store: Arc<ImEventStore>,
     message_log_store: Arc<ImMessageLogStore>,
@@ -837,7 +1144,7 @@ async fn run_event_loop(
         };
 
         let online_msg = build_online_notification_message(&provider);
-        let send_result = feishu
+        let send_result = client
             .send_text(&provider, &online_target, &online_msg)
             .await;
 
@@ -908,36 +1215,40 @@ async fn run_event_loop(
             continue;
         }
 
-        // Security check: only process messages from the owner
-        if let Some(ref owner_id) = provider.owner_open_id {
-            let sender_id = event.source.user_id.as_deref().unwrap_or("");
-            if sender_id != owner_id {
-                info!(
-                    provider_id = %event.provider_id,
-                    event_id = %event.event_id,
-                    sender_open_id = %sender_id,
-                    owner_open_id = %owner_id,
-                    "rejecting message from non-owner user"
-                );
-                let log = ImMessageLog {
-                    id: uuid_short(),
-                    provider_id: event.provider_id.clone(),
-                    direction: MessageDirection::Inbound,
-                    status: MessageStatus::Rejected,
-                    timestamp: now_ms(),
-                    target_id: None,
-                    target_name: None,
-                    message_id: event.source.message_id.clone(),
-                    msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
-                    content_preview: event.message.as_ref().map(inbound_message_preview),
-                    trigger: Some("websocket".to_string()),
-                    error: Some(format!("rejected: sender {} is not owner", sender_id)),
-                    sender_open_id: Some(sender_id.to_string()),
-                    event_id: Some(event.event_id.clone()),
-                    reaction_added: None,
-                };
-                let _ = message_log_store.add(log);
-                continue;
+        // Feishu bots use owner_open_id as a safety boundary. Weixin ClawBot is
+        // an inbound IM channel, so owner_open_id only records the login user
+        // and must not filter inbound messages.
+        if provider.provider_type == crate::im_gateway::types::ImProviderType::Feishu {
+            if let Some(ref owner_id) = provider.owner_open_id {
+                let sender_id = event.source.user_id.as_deref().unwrap_or("");
+                if sender_id != owner_id {
+                    info!(
+                        provider_id = %event.provider_id,
+                        event_id = %event.event_id,
+                        sender_open_id = %sender_id,
+                        owner_open_id = %owner_id,
+                        "rejecting message from non-owner user"
+                    );
+                    let log = ImMessageLog {
+                        id: uuid_short(),
+                        provider_id: event.provider_id.clone(),
+                        direction: MessageDirection::Inbound,
+                        status: MessageStatus::Rejected,
+                        timestamp: now_ms(),
+                        target_id: None,
+                        target_name: None,
+                        message_id: event.source.message_id.clone(),
+                        msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
+                        content_preview: event.message.as_ref().map(inbound_message_preview),
+                        trigger: Some("websocket".to_string()),
+                        error: Some(format!("rejected: sender {} is not owner", sender_id)),
+                        sender_open_id: Some(sender_id.to_string()),
+                        event_id: Some(event.event_id.clone()),
+                        reaction_added: None,
+                    };
+                    let _ = message_log_store.add(log);
+                    continue;
+                }
             }
         }
 
@@ -960,10 +1271,13 @@ async fn run_event_loop(
         // Add "OK" reaction to acknowledge receipt
         let mut reaction_added = None;
         if let Some(ref message_id) = event.source.message_id {
-            match feishu.add_reaction(&provider, message_id, "OK").await {
-                Ok(()) => {
+            match client.add_reaction(&provider, message_id, "OK").await {
+                Ok(true) => {
                     info!(message_id = %message_id, "added OK reaction to message");
                     reaction_added = Some(true);
+                }
+                Ok(false) => {
+                    reaction_added = None;
                 }
                 Err(e) => {
                     error!(message_id = %message_id, error = %e, "failed to add OK reaction");
@@ -1014,7 +1328,7 @@ async fn run_event_loop(
                                 &session_key,
                                 BusyMessageContext {
                                     queue_manager: &queue_manager,
-                                    feishu: &feishu,
+                                    client: &client,
                                     provider: &provider,
                                     event: &event,
                                     message_log_store: &message_log_store,
@@ -1026,27 +1340,31 @@ async fn run_event_loop(
                             continue;
                         }
 
-                        // /status — handle directly without entering agent pipeline
-                        if agent_message.trim() == "/status" {
-                            let detail = agent_session_manager.get_session_detail(&session_key);
-                            let reply = build_im_status_text(detail.as_ref());
-                            send_agent_reply(
-                                &feishu,
-                                &provider,
-                                &event,
-                                &reply,
-                                &message_log_store,
-                            )
-                            .await;
+                        let effective_agent_config =
+                            effective_agent_config_for_provider(&agent_config, &provider);
+                        if handle_idle_im_command(
+                            &agent_message,
+                            &session_key,
+                            &effective_agent_config,
+                            IdleImCommandContext {
+                                client: &client,
+                                provider: &provider,
+                                event: &event,
+                                message_log_store: &message_log_store,
+                                agent_session_manager: &agent_session_manager,
+                            },
+                        )
+                        .await
+                        {
                             continue;
                         }
 
                         // Session is free — start processing with select! interleaving
                         let images =
-                            resolve_event_images(&feishu, &provider, &event, &msg.images).await;
+                            resolve_event_images(&client, &provider, &event, &msg.images).await;
                         run_agent_chat_with_interleave(
                             &mut rx,
-                            &feishu,
+                            &client,
                             &provider,
                             &provider_store,
                             &event,
@@ -1062,6 +1380,7 @@ async fn run_event_loop(
                             None,
                             &mut mcp_manager,
                             &message_log_store,
+                            &event_store,
                         )
                         .await;
                     }
@@ -1111,7 +1430,7 @@ async fn run_event_loop(
                         &session_key,
                         BusyMessageContext {
                             queue_manager: &queue_manager,
-                            feishu: &feishu,
+                            client: &client,
                             provider: &provider,
                             event: &event,
                             message_log_store: &message_log_store,
@@ -1123,23 +1442,34 @@ async fn run_event_loop(
                     continue;
                 }
 
-                // /status — handle directly without entering agent pipeline
-                if message_text.trim() == "/status" {
-                    let detail = agent_session_manager.get_session_detail(&session_key);
-                    let reply = build_im_status_text(detail.as_ref());
-                    send_agent_reply(&feishu, &provider, &event, &reply, &message_log_store).await;
+                let agent_config =
+                    effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+                if handle_idle_im_command(
+                    &message_text,
+                    &session_key,
+                    &agent_config,
+                    IdleImCommandContext {
+                        client: &client,
+                        provider: &provider,
+                        event: &event,
+                        message_log_store: &message_log_store,
+                        agent_session_manager: &agent_session_manager,
+                    },
+                )
+                .await
+                {
                     continue;
                 }
 
                 let images = match event.message.as_ref() {
                     Some(message) => {
-                        resolve_event_images(&feishu, &provider, &event, &message.images).await
+                        resolve_event_images(&client, &provider, &event, &message.images).await
                     }
                     None => Vec::new(),
                 };
                 run_agent_chat_with_interleave(
                     &mut rx,
-                    &feishu,
+                    &client,
                     &provider,
                     &provider_store,
                     &event,
@@ -1155,6 +1485,7 @@ async fn run_event_loop(
                     system_prompt.as_deref(),
                     &mut mcp_manager,
                     &message_log_store,
+                    &event_store,
                 )
                 .await;
             }
@@ -1183,7 +1514,7 @@ async fn run_event_loop(
 /// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
 struct BusyMessageContext<'a> {
     queue_manager: &'a Arc<SessionQueueManager>,
-    feishu: &'a Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
@@ -1191,8 +1522,72 @@ struct BusyMessageContext<'a> {
     progress_registry: &'a Arc<ImAgentProgressRegistry>,
 }
 
+struct IdleImCommandContext<'a> {
+    client: &'a ImProviderClient,
+    provider: &'a ImProviderConfig,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    agent_session_manager: &'a Arc<ImAgentSessionManager>,
+}
+
+async fn handle_idle_im_command(
+    msg_text: &str,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    ctx: IdleImCommandContext<'_>,
+) -> bool {
+    let trimmed = msg_text.trim();
+    if trimmed == "/status" {
+        let detail = ctx.agent_session_manager.get_session_detail(session_key);
+        let reply = build_im_status_text(detail.as_ref());
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &reply,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
+    if trimmed == "/stop" {
+        let stopped = ctx.agent_session_manager.request_stop(session_key);
+        let reply = if stopped {
+            "已请求停止当前 Agent loop。"
+        } else {
+            "当前没有正在执行的 Agent loop。"
+        };
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            reply,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
+    if let Some(response) =
+        bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
+    {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &response,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
+    false
+}
+
 async fn resolve_event_images(
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
     images: &[ImImageAttachment],
@@ -1224,8 +1619,8 @@ async fn resolve_event_images(
             );
             continue;
         };
-        match feishu
-            .download_message_image_resource(provider, message_id, &image.file_key)
+        match client
+            .download_message_image_resource(provider, message_id, image)
             .await
         {
             Ok((mime_type, bytes)) => {
@@ -1275,7 +1670,7 @@ fn inbound_message_preview(message: &crate::im_gateway::types::ImEventMessage) -
 
 async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessageContext<'_>) {
     let queue_manager = ctx.queue_manager;
-    let feishu = ctx.feishu;
+    let client = ctx.client;
     let provider = ctx.provider;
     let event = ctx.event;
     let message_log_store = ctx.message_log_store;
@@ -1288,7 +1683,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
             let reply = build_im_status_text(Some(&detail));
-            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+            send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
             status.pending_guide_messages = queue_manager.guide_status(session_key);
             let queue_items = queue_manager.queue_status(session_key);
@@ -1302,7 +1697,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
                 bifrost_agent::format_active_turn_status_text(&status),
                 queue_info
             );
-            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+            send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else {
             // Session is currently being processed (taken out of the pool)
             let queue_items = queue_manager.queue_status(session_key);
@@ -1316,7 +1711,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
                 "会话状态:\n- 状态: 🔵 正在处理中\n- 排队: {}\n{}\n\n请等待当前任务完成后再查询详细状态。",
                 queue_info, guide_info
             );
-            send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+            send_agent_reply(client, provider, event, &reply, message_log_store).await;
         }
         return;
     }
@@ -1329,7 +1724,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         } else {
             "当前没有正在执行的 Agent loop。"
         };
-        send_agent_reply(feishu, provider, event, reply, message_log_store).await;
+        send_agent_reply(client, provider, event, reply, message_log_store).await;
         return;
     }
 
@@ -1338,7 +1733,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         let queue_text = rest.trim();
         if queue_text.is_empty() {
             send_agent_reply(
-                feishu,
+                client,
                 provider,
                 event,
                 "用法: /q <消息内容>",
@@ -1360,12 +1755,12 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
                     .await;
                 if !updated {
                     let reply = format_queue_status("✅ 已加入排队", &items);
-                    send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                    send_agent_reply(client, provider, event, &reply, message_log_store).await;
                 }
             }
             Err(err) => {
                 send_agent_reply(
-                    feishu,
+                    client,
                     provider,
                     event,
                     &format!("❌ {err}"),
@@ -1395,11 +1790,11 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
                         .await;
                     if !updated {
                         let reply = format_queue_status(&format!("🗑️ 已删除 #{seq}"), &items);
-                        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+                        send_agent_reply(client, provider, event, &reply, message_log_store).await;
                     }
                 } else {
                     send_agent_reply(
-                        feishu,
+                        client,
                         provider,
                         event,
                         &format!("❌ 未找到排队消息 #{seq}"),
@@ -1410,7 +1805,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
             }
             Err(_) => {
                 send_agent_reply(
-                    feishu,
+                    client,
                     provider,
                     event,
                     "用法: /rq <序号>（如 /rq 1）",
@@ -1440,7 +1835,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
              - /help — 查看帮助",
             trimmed.split_whitespace().next().unwrap_or(trimmed)
         );
-        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
         return;
     }
 
@@ -1469,7 +1864,7 @@ async fn handle_busy_message(msg_text: &str, session_key: &str, ctx: BusyMessage
         )
         .await;
     if !updated {
-        send_agent_reply(feishu, provider, event, &reply, message_log_store).await;
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
     }
 }
 
@@ -1575,7 +1970,7 @@ fn progress_event_needs_immediate_flush(event: &bifrost_agent::AgentTurnProgress
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_chat_with_interleave(
     rx: &mut mpsc::UnboundedReceiver<ImEvent>,
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     provider_store: &Arc<ImProviderStore>,
     initial_event: &ImEvent,
@@ -1591,6 +1986,7 @@ async fn run_agent_chat_with_interleave(
     system_prompt_override: Option<&str>,
     mcp_manager: &mut ImMcpManager,
     message_log_store: &Arc<ImMessageLogStore>,
+    event_store: &Arc<ImEventStore>,
 ) {
     // Set up the guide channel before starting the turn
     let guide_channel = queue_manager.get_or_create_guide_channel(session_key);
@@ -1612,7 +2008,7 @@ async fn run_agent_chat_with_interleave(
 
         // Run agent chat with interleaved event processing
         let chat_future = AssertUnwindSafe(process_agent_chat(
-            feishu,
+            client,
             &current_provider,
             provider_store,
             initial_event,
@@ -1649,10 +2045,12 @@ async fn run_agent_chat_with_interleave(
                             "process_agent_chat panicked, event loop continues"
                         );
                         agent_session_manager.release_active(session_key);
-                        let _ = send_error_card_to_owner(
-                            feishu,
+                        send_agent_reply(
+                            client,
                             provider,
+                            initial_event,
                             &format!("Agent 内部错误 (panic): {}", truncate_str(panic_msg, 200)),
+                            message_log_store,
                         )
                         .await;
                     }
@@ -1665,12 +2063,13 @@ async fn run_agent_chat_with_interleave(
                         &current_provider,
                         session_key,
                         queue_manager,
-                        feishu,
+                        client,
                         message_log_store,
                         agent_session_manager,
                         progress_registry,
                         agent_config_store,
                         provider_store,
+                        event_store,
                     )
                     .await;
                 }
@@ -1729,12 +2128,13 @@ async fn handle_concurrent_event_during_chat(
     provider: &ImProviderConfig,
     active_session_key: &str,
     queue_manager: &Arc<SessionQueueManager>,
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     message_log_store: &Arc<ImMessageLogStore>,
     agent_session_manager: &Arc<ImAgentSessionManager>,
     progress_registry: &Arc<ImAgentProgressRegistry>,
     agent_config_store: &Arc<ImAgentConfigStore>,
     provider_store: &Arc<ImProviderStore>,
+    event_store: &Arc<ImEventStore>,
 ) {
     let provider = provider_store
         .get(&event.provider_id)
@@ -1749,22 +2149,39 @@ async fn handle_concurrent_event_during_chat(
         return;
     }
 
-    // Security check: only process messages from the owner
-    if let Some(ref owner_id) = provider.owner_open_id {
-        let sender_id = event.source.user_id.as_deref().unwrap_or("");
-        if sender_id != owner_id {
-            debug!(
-                event_id = %event.event_id,
-                "rejecting concurrent event from non-owner"
-            );
-            return;
+    // Feishu preserves the owner boundary; Weixin replies to the sender/chat.
+    if provider.provider_type == ImProviderType::Feishu {
+        if let Some(ref owner_id) = provider.owner_open_id {
+            let sender_id = event.source.user_id.as_deref().unwrap_or("");
+            if sender_id != owner_id {
+                debug!(
+                    event_id = %event.event_id,
+                    "rejecting concurrent event from non-owner"
+                );
+                return;
+            }
         }
     }
 
-    let msg_text = match event.message.as_ref() {
-        Some(m) if !m.text.is_empty() => &m.text,
+    info!(
+        provider_id = %event.provider_id,
+        event_id = %event.event_id,
+        event_type = %event.event_type,
+        message_type = ?event.message.as_ref().and_then(|m| m.raw_type.as_deref()),
+        message_text_len = event.message.as_ref().map(|m| m.text.len()).unwrap_or(0),
+        image_count = event.message.as_ref().map(|m| m.images.len()).unwrap_or(0),
+        has_text = event.message.as_ref().is_some_and(|m| !m.text.trim().is_empty()),
+        "received concurrent inbound event during active agent chat"
+    );
+    if let Err(e) = event_store.add(event.clone()) {
+        error!(error = %e, "failed to store concurrent event");
+    }
+
+    let message = match event.message.as_ref() {
+        Some(m) if !m.text.trim().is_empty() || !m.images.is_empty() => m,
         _ => return,
     };
+    let msg_text = agent_message_text(message);
 
     let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
 
@@ -1774,18 +2191,18 @@ async fn handle_concurrent_event_during_chat(
         let agent_config =
             effective_agent_config_for_provider(&agent_config_store.load(), &provider);
         if let Some(response) =
-            bifrost_agent::handle_session_free_command(&session_key, msg_text, &agent_config)
+            bifrost_agent::handle_session_free_command(&session_key, &msg_text, &agent_config)
         {
-            send_agent_reply(feishu, &provider, event, &response, message_log_store).await;
+            send_agent_reply(client, &provider, event, &response, message_log_store).await;
             return;
         }
         // Route through guide/queue mode
         handle_busy_message(
-            msg_text,
+            &msg_text,
             &session_key,
             BusyMessageContext {
                 queue_manager,
-                feishu,
+                client,
                 provider: &provider,
                 event,
                 message_log_store,
@@ -1798,11 +2215,11 @@ async fn handle_concurrent_event_during_chat(
         // Different session — check if it's also busy
         if agent_session_manager.is_session_active(&session_key) {
             handle_busy_message(
-                msg_text,
+                &msg_text,
                 &session_key,
                 BusyMessageContext {
                     queue_manager,
-                    feishu,
+                    client,
                     provider: &provider,
                     event,
                     message_log_store,
@@ -1814,9 +2231,9 @@ async fn handle_concurrent_event_during_chat(
         } else {
             // Session is free but we can't process it now (MCP is in use).
             // Queue it for later processing.
-            let _ = queue_manager.push_queue(&session_key, msg_text.to_string());
+            let _ = queue_manager.push_queue(&session_key, msg_text);
             send_agent_reply(
-                feishu,
+                client,
                 &provider,
                 event,
                 "⏳ 消息已排队，将在当前任务完成后处理。",
@@ -1830,7 +2247,7 @@ async fn handle_concurrent_event_during_chat(
 /// Process an agent chat: run the full turn loop (with tool calls), send reply via Feishu, log the outbound message.
 #[allow(clippy::too_many_arguments)]
 async fn process_agent_chat(
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     provider_store: &Arc<ImProviderStore>,
     event: &ImEvent,
@@ -1863,7 +2280,7 @@ async fn process_agent_chat(
             session_key = %session_key,
             "handled session-free command without taking session"
         );
-        send_agent_reply(feishu, provider, event, &response, message_log_store).await;
+        send_agent_reply(client, provider, event, &response, message_log_store).await;
         return;
     }
 
@@ -1881,7 +2298,7 @@ async fn process_agent_chat(
             );
             let busy_msg =
                 "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /stop 可立即停止当前 loop；/help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。";
-            send_agent_reply(feishu, provider, event, busy_msg, message_log_store).await;
+            send_agent_reply(client, provider, event, busy_msg, message_log_store).await;
             return;
         }
     };
@@ -1905,14 +2322,10 @@ async fn process_agent_chat(
             session.reinitialize_work_dir(work_dir);
         }
     }
-    session.source = "feishu".to_string();
+    session.source = format!("{:?}", provider.provider_type).to_lowercase();
     session.guide_channel = guide_channel;
 
-    let target_open_id = provider
-        .owner_open_id
-        .as_deref()
-        .or(event.source.user_id.as_deref())
-        .unwrap_or("");
+    let target_open_id = agent_reply_target_id(provider, event).unwrap_or_default();
     let mut progress_enabled = false;
     let mut progress_tx_for_finish = None;
     let mut progress_task = None;
@@ -1928,52 +2341,59 @@ async fn process_agent_chat(
             created_at: 0,
             updated_at: 0,
         };
-        match progress_registry
-            .start_feishu(
-                session_key,
-                feishu.clone(),
-                provider.clone(),
-                progress_target,
-                user_message,
-            )
-            .await
-        {
-            Ok(_) => {
-                let (progress_tx, mut progress_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<bifrost_agent::AgentTurnProgressEvent>();
-                session.progress_sender = Some(progress_tx.clone());
-                progress_tx_for_finish = Some(progress_tx);
-                let progress_registry = Arc::clone(progress_registry);
-                let session_key_for_progress = session_key.to_string();
-                progress_task = Some(tokio::spawn(async move {
-                    run_progress_event_coalescer(
-                        progress_registry,
-                        session_key_for_progress,
-                        &mut progress_rx,
-                    )
-                    .await;
-                }));
-                progress_enabled = true;
-            }
-            Err(error) => {
-                warn!(
-                    session_key = %session_key,
-                    error = %error,
-                    "failed to start IM streaming progress card; falling back to final reply card"
-                );
+        if let Some(feishu) = client.feishu() {
+            match progress_registry
+                .start_feishu(
+                    session_key,
+                    feishu,
+                    provider.clone(),
+                    progress_target,
+                    user_message,
+                )
+                .await
+            {
+                Ok(_) => {
+                    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                        bifrost_agent::AgentTurnProgressEvent,
+                    >();
+                    session.progress_sender = Some(progress_tx.clone());
+                    progress_tx_for_finish = Some(progress_tx);
+                    let progress_registry = Arc::clone(progress_registry);
+                    let session_key_for_progress = session_key.to_string();
+                    progress_task = Some(tokio::spawn(async move {
+                        run_progress_event_coalescer(
+                            progress_registry,
+                            session_key_for_progress,
+                            &mut progress_rx,
+                        )
+                        .await;
+                    }));
+                    progress_enabled = true;
+                }
+                Err(error) => {
+                    warn!(
+                        session_key = %session_key,
+                        error = %error,
+                        "failed to start IM streaming progress card; falling back to final reply card"
+                    );
+                }
             }
         }
+    }
+
+    if should_send_plain_im_task_start_notice(provider, progress_enabled) {
+        send_agent_reply(client, provider, event, "已开始处理。", message_log_store).await;
     }
 
     // Set up plan update channel for real-time plan card rendering.
     // The turn loop pushes plan steps through this channel; a background task
     // sends (first time) or patches (subsequent) a single Feishu card.
-    if !progress_enabled {
+    if !progress_enabled && client.feishu().is_some() {
         let (plan_tx, mut plan_rx) =
             tokio::sync::mpsc::unbounded_channel::<(Vec<bifrost_agent::PlanStep>, Option<String>)>(
             );
         session.plan_sender = Some(plan_tx);
-        let feishu = feishu.clone();
+        let feishu = client.feishu().expect("checked above");
         let provider = provider.clone();
         let target_open_id = provider
             .owner_open_id
@@ -2046,7 +2466,7 @@ async fn process_agent_chat(
                     serde_json::json!({
                         "model": agent_config.model,
                         "provider": agent_config.model_provider,
-                        "source": "feishu",
+                        "source": format!("{:?}", provider.provider_type).to_lowercase(),
                         "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(agent_config, None),
                     }),
                 );
@@ -2139,7 +2559,7 @@ async fn process_agent_chat(
         // Send intermediate response when no streaming progress card is active.
         if !progress_enabled && !turn_result.response.is_empty() {
             send_agent_reply_with_plan(
-                feishu,
+                client,
                 provider,
                 event,
                 &turn_result.response,
@@ -2260,13 +2680,17 @@ async fn process_agent_chat(
     };
 
     let reply_image_base_dir = agent_config.work_dir.as_deref().map(PathBuf::from);
-    let rendered_main_response = render_agent_markdown_for_feishu(
-        feishu,
-        provider,
-        &main_response,
-        reply_image_base_dir.as_deref(),
-    )
-    .await;
+    let rendered_main_response = if let Some(feishu) = client.feishu() {
+        render_agent_markdown_for_feishu(
+            &feishu,
+            provider,
+            &main_response,
+            reply_image_base_dir.as_deref(),
+        )
+        .await
+    } else {
+        main_response.clone()
+    };
 
     if progress_enabled {
         if let Some(tx) = progress_tx_for_finish.take() {
@@ -2321,27 +2745,15 @@ async fn process_agent_chat(
         return;
     }
 
-    // Build an ephemeral target using owner's open_id or event sender
-    let target_open_id = provider
-        .owner_open_id
-        .as_deref()
-        .or(event.source.user_id.as_deref())
-        .unwrap_or("");
-    if target_open_id.is_empty() {
+    let Some(reply_target) = build_agent_reply_target(
+        provider,
+        event,
+        "__agent_reply__",
+        "Agent Reply",
+        "interactive",
+    ) else {
         error!("no target open_id to send agent reply");
         return;
-    }
-
-    let reply_target = crate::im_gateway::types::ImTarget {
-        id: "__agent_reply__".to_string(),
-        provider_id: provider.id.clone(),
-        display_name: "Agent Reply".to_string(),
-        enabled: true,
-        receive_id_type: "open_id".to_string(),
-        receive_id: target_open_id.to_string(),
-        default_msg_type: "interactive".to_string(),
-        created_at: 0,
-        updated_at: 0,
     };
 
     // Build Feishu Card JSON 2.0: main response visible, tool calls in collapsible panel
@@ -2419,7 +2831,7 @@ async fn process_agent_chat(
         }
     });
 
-    let send_result = feishu
+    let send_result = client
         .send_card(
             provider,
             &reply_target,
@@ -2439,8 +2851,8 @@ async fn process_agent_chat(
         direction: MessageDirection::Outbound,
         status,
         timestamp: now_ms(),
-        target_id: Some("__agent_reply__".to_string()),
-        target_name: Some("Agent Reply".to_string()),
+        target_id: Some(reply_target.receive_id.clone()),
+        target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
         content_preview: Some(truncate_str(&main_response, 200)),
@@ -2761,54 +3173,95 @@ fn mime_type_for_image_path(path: &Path) -> Option<&'static str> {
 ///
 /// Extracted helper to share between the main turn loop and session-free command fast path.
 async fn send_agent_reply(
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
     reply_text: &str,
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
-    send_agent_reply_with_title(feishu, provider, event, reply_text, message_log_store, None).await;
+    send_agent_reply_with_title(client, provider, event, reply_text, message_log_store, None).await;
+}
+
+fn agent_reply_target_id(provider: &ImProviderConfig, event: &ImEvent) -> Option<String> {
+    let target = match provider.provider_type {
+        crate::im_gateway::types::ImProviderType::Weixin => event
+            .source
+            .chat_id
+            .as_deref()
+            .or(event.source.user_id.as_deref())
+            .or(provider.owner_open_id.as_deref()),
+        _ => provider
+            .owner_open_id
+            .as_deref()
+            .or(event.source.user_id.as_deref())
+            .or(event.source.chat_id.as_deref()),
+    };
+    target
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn should_send_plain_im_task_start_notice(
+    provider: &ImProviderConfig,
+    progress_enabled: bool,
+) -> bool {
+    provider.provider_type == ImProviderType::Weixin && !progress_enabled
+}
+
+fn build_agent_reply_target(
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    id: &str,
+    display_name: &str,
+    default_msg_type: &str,
+) -> Option<crate::im_gateway::types::ImTarget> {
+    let receive_id = agent_reply_target_id(provider, event)?;
+    Some(crate::im_gateway::types::ImTarget {
+        id: id.to_string(),
+        provider_id: provider.id.clone(),
+        display_name: display_name.to_string(),
+        enabled: true,
+        receive_id_type: "open_id".to_string(),
+        receive_id,
+        default_msg_type: default_msg_type.to_string(),
+        created_at: 0,
+        updated_at: 0,
+    })
 }
 
 /// Send an agent reply with a custom card title.
 async fn send_agent_reply_with_title(
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
     reply_text: &str,
     message_log_store: &Arc<ImMessageLogStore>,
     title: Option<&str>,
 ) {
-    let target_open_id = provider
-        .owner_open_id
-        .as_deref()
-        .or(event.source.user_id.as_deref())
-        .unwrap_or("");
-    if target_open_id.is_empty() {
+    let Some(reply_target) = build_agent_reply_target(
+        provider,
+        event,
+        "__agent_reply__",
+        "Agent Reply",
+        "interactive",
+    ) else {
         error!("no target open_id to send agent reply");
         return;
-    }
-
-    let reply_target = crate::im_gateway::types::ImTarget {
-        id: "__agent_reply__".to_string(),
-        provider_id: provider.id.clone(),
-        display_name: "Agent Reply".to_string(),
-        enabled: true,
-        receive_id_type: "open_id".to_string(),
-        receive_id: target_open_id.to_string(),
-        default_msg_type: "interactive".to_string(),
-        created_at: 0,
-        updated_at: 0,
     };
 
     let card_title = title.unwrap_or("Bifrost AI");
-    let rendered_text = render_agent_markdown_for_feishu(
-        feishu,
-        provider,
-        reply_text,
-        provider_agent_work_dir(provider).as_deref(),
-    )
-    .await;
+    let rendered_text = if let Some(feishu) = client.feishu() {
+        render_agent_markdown_for_feishu(
+            &feishu,
+            provider,
+            reply_text,
+            provider_agent_work_dir(provider).as_deref(),
+        )
+        .await
+    } else {
+        reply_text.to_string()
+    };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
     let card = serde_json::json!({
@@ -2835,7 +3288,7 @@ async fn send_agent_reply_with_title(
         }
     });
 
-    let send_result = feishu
+    let send_result = client
         .send_card(
             provider,
             &reply_target,
@@ -2854,8 +3307,8 @@ async fn send_agent_reply_with_title(
         direction: MessageDirection::Outbound,
         status,
         timestamp: now_ms(),
-        target_id: Some("__agent_reply__".to_string()),
-        target_name: Some("Agent Reply".to_string()),
+        target_id: Some(reply_target.receive_id.clone()),
+        target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
         content_preview: Some(truncate_str(reply_text, 200)),
@@ -2879,7 +3332,7 @@ async fn send_agent_reply_with_title(
 /// This sends a card similar to the final response rendering but can be called mid-continuation.
 #[allow(clippy::too_many_arguments)]
 async fn send_agent_reply_with_plan(
-    feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
     reply_text: &str,
@@ -2888,35 +3341,28 @@ async fn send_agent_reply_with_plan(
     title: Option<&str>,
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
-    let target_open_id = provider
-        .owner_open_id
-        .as_deref()
-        .or(event.source.user_id.as_deref())
-        .unwrap_or("");
-    if target_open_id.is_empty() {
+    let Some(reply_target) = build_agent_reply_target(
+        provider,
+        event,
+        "__agent_reply__",
+        "Agent Reply",
+        "interactive",
+    ) else {
         error!("no target open_id to send agent reply");
         return;
-    }
-
-    let reply_target = crate::im_gateway::types::ImTarget {
-        id: "__agent_reply__".to_string(),
-        provider_id: provider.id.clone(),
-        display_name: "Agent Reply".to_string(),
-        enabled: true,
-        receive_id_type: "open_id".to_string(),
-        receive_id: target_open_id.to_string(),
-        default_msg_type: "interactive".to_string(),
-        created_at: 0,
-        updated_at: 0,
     };
 
-    let rendered_text = render_agent_markdown_for_feishu(
-        feishu,
-        provider,
-        reply_text,
-        provider_agent_work_dir(provider).as_deref(),
-    )
-    .await;
+    let rendered_text = if let Some(feishu) = client.feishu() {
+        render_agent_markdown_for_feishu(
+            &feishu,
+            provider,
+            reply_text,
+            provider_agent_work_dir(provider).as_deref(),
+        )
+        .await
+    } else {
+        reply_text.to_string()
+    };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
     let mut elements = vec![serde_json::json!({
@@ -3002,7 +3448,7 @@ async fn send_agent_reply_with_plan(
         }
     });
 
-    let send_result = feishu
+    let send_result = client
         .send_card(
             provider,
             &reply_target,
@@ -3021,8 +3467,8 @@ async fn send_agent_reply_with_plan(
         direction: MessageDirection::Outbound,
         status,
         timestamp: now_ms(),
-        target_id: Some("__agent_reply__".to_string()),
-        target_name: Some("Agent Reply".to_string()),
+        target_id: Some(reply_target.receive_id.clone()),
+        target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
         content_preview: Some(truncate_str(reply_text, 200)),
@@ -3043,6 +3489,7 @@ async fn send_agent_reply_with_plan(
 }
 
 /// Best-effort helper to send an error notification card to the provider owner.
+#[allow(dead_code)]
 async fn send_error_card_to_owner(
     feishu: &Arc<crate::im_gateway::feishu::FeishuProvider>,
     provider: &ImProviderConfig,
@@ -3316,13 +3763,14 @@ async fn handle_messages_send(
         };
     let content_preview = build_content_preview(&body.msg_type, &prepared);
 
-    // Send via connection manager's feishu provider
+    // Send via the configured provider implementation.
+    let client = service.provider_client(&resolved.provider);
     let result = if body.msg_type == "text" {
         let text = prepared
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default());
-        feishu
+        client
             .send_text(&resolved.provider, &resolved.target, &text)
             .await
     } else if body.msg_type == "image" {
@@ -3334,7 +3782,7 @@ async fn handle_messages_send(
             .send_image(&resolved.provider, &resolved.target, image_key, None)
             .await
     } else {
-        feishu
+        client
             .send_card(
                 &resolved.provider,
                 &resolved.target,
@@ -4024,10 +4472,10 @@ async fn handle_schedule_run(
             created_at: 0,
             updated_at: 0,
         };
-        let feishu = service.connection_manager.feishu_provider();
+        let client = service.provider_client(&provider);
         let content = serde_json::json!({"text": msg});
         let content_str = serde_json::to_string(&content).unwrap_or_default();
-        let send_result = feishu
+        let send_result = client
             .send_text(&provider, &owner_target, &content_str)
             .await;
 
@@ -5663,6 +6111,32 @@ mod tests {
     }
 
     #[test]
+    fn agent_reply_target_uses_weixin_sender_instead_of_owner() {
+        let mut provider = test_provider();
+        provider.provider_type = ImProviderType::Weixin;
+        provider.owner_open_id = Some("owner@im.wechat".to_string());
+        let event = ImEvent {
+            event_id: "evt-1".to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("sender@im.wechat".to_string()),
+                user_id: Some("sender@im.wechat".to_string()),
+                message_id: Some("msg-1".to_string()),
+            },
+            message: None,
+            received_at: 0,
+            raw_digest: None,
+        };
+
+        assert_eq!(
+            agent_reply_target_id(&provider, &event).as_deref(),
+            Some("sender@im.wechat")
+        );
+    }
+
+    #[test]
     fn local_image_fallback_removes_markdown_image_syntax() {
         let fallback = local_image_fallback_markdown("chart", "./missing.png");
 
@@ -5687,6 +6161,43 @@ mod tests {
         ));
         assert!(!is_local_markdown_image_candidate("img_v3_chart"));
         assert!(!is_local_markdown_image_candidate(" "));
+    }
+
+    #[test]
+    fn agent_reply_target_keeps_feishu_owner_boundary() {
+        let mut provider = test_provider();
+        provider.owner_open_id = Some("owner-ou".to_string());
+        let event = ImEvent {
+            event_id: "evt-1".to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("chat-1".to_string()),
+                user_id: Some("sender-ou".to_string()),
+                message_id: Some("msg-1".to_string()),
+            },
+            message: None,
+            received_at: 0,
+            raw_digest: None,
+        };
+
+        assert_eq!(
+            agent_reply_target_id(&provider, &event).as_deref(),
+            Some("owner-ou")
+        );
+    }
+
+    #[test]
+    fn start_notice_is_plain_weixin_only_without_progress_card() {
+        let mut provider = test_provider();
+        provider.provider_type = ImProviderType::Weixin;
+
+        assert!(should_send_plain_im_task_start_notice(&provider, false));
+        assert!(!should_send_plain_im_task_start_notice(&provider, true));
+
+        provider.provider_type = ImProviderType::Feishu;
+        assert!(!should_send_plain_im_task_start_notice(&provider, false));
     }
 
     struct TestChatCompletionMock {
@@ -6192,7 +6703,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(run_event_loop(
             rx,
-            Arc::clone(service.connection_manager.feishu_provider()),
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
             provider.clone(),
             Arc::clone(&service.event_store),
             Arc::clone(&service.message_log_store),
@@ -6303,7 +6814,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(run_event_loop(
             rx,
-            Arc::clone(service.connection_manager.feishu_provider()),
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
             provider.clone(),
             Arc::clone(&service.event_store),
             Arc::clone(&service.message_log_store),
@@ -6336,6 +6847,9 @@ mod tests {
                         source: crate::im_gateway::types::ImImageSource::MessageResource,
                         mime_type: Some("image/png".to_string()),
                         data_base64: Some("iVBORw0KGgo=".to_string()),
+                        download_url: None,
+                        encrypted_query_param: None,
+                        aes_key: None,
                     })
                     .collect(),
                 raw_type: Some("image".to_string()),

@@ -24,6 +24,7 @@ impl std::fmt::Debug for ConnectionHandle {
 #[serde(rename_all = "snake_case")]
 pub enum ImProviderType {
     Feishu,
+    Weixin,
     WeChat,
     Webhook,
 }
@@ -414,6 +415,12 @@ pub struct ImImageAttachment {
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_query_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,8 +7,8 @@
 //! - `list_directory`: List directory entries
 //! - `apply_patch`: Apply structured diff patches
 //! - `exec_command`: Run shell commands with optional PTY-backed sessions
-//! - `pty_shell`: PTY-backed persistent shell sessions with session management
-//! - `write_stdin`: Write to PTY session stdin
+//! - `pty_shell`: legacy PTY-backed persistent shell sessions kept for internal compatibility
+//! - `write_stdin`: Write to exec/PTY-compatible session stdin
 //! - `view_image`: Load local image files as data URLs
 //! - `request_user_input`: Validate structured user input requests
 //! - `tool_search`: turn-scoped deferred tool discovery (registered only when
@@ -77,12 +77,12 @@ impl ToolRegistry {
     /// Create a registry with all built-in tools.
     pub fn with_defaults(shell_timeout_secs: u64) -> Self {
         let mut registry = Self::new();
-        let session_manager = Arc::new(pty_shell::PtySessionManager::new());
+        let pty_session_manager = Arc::new(pty_shell::PtySessionManager::new());
+        let exec_session_manager = Arc::new(exec_command::ExecSessionManager::new());
         // Existing tools
         registry.register(Arc::new(shell::ShellTool::new(shell_timeout_secs)));
         registry.register(Arc::new(exec_command::ExecCommandTool::new(
-            shell_timeout_secs,
-            session_manager.clone(),
+            exec_session_manager.clone(),
         )));
         registry.register(Arc::new(file_ops::WriteFileTool));
         registry.register(Arc::new(file_ops::ReadFileTool));
@@ -94,12 +94,10 @@ impl ToolRegistry {
         registry.register(Arc::new(request_user_input::RequestUserInputTool));
         // Structured patch tool.
         registry.register(Arc::new(apply_patch_diff::ApplyDiffTool));
-        // PTY shell tools (persistent sessions)
-        registry.register(Arc::new(pty_shell::PtyShellTool::new(
-            shell_timeout_secs,
-            session_manager.clone(),
+        registry.register(Arc::new(pty_shell::WriteStdinTool::new(
+            pty_session_manager,
+            exec_session_manager,
         )));
-        registry.register(Arc::new(pty_shell::WriteStdinTool::new(session_manager)));
         registry
     }
 
@@ -158,9 +156,8 @@ impl ToolRegistry {
 
 fn model_visible_tool_priority(name: &str) -> (u8, &str) {
     let priority = match name {
-        "shell_pty" => 0,
+        "exec_command" => 0,
         "write_stdin" => 1,
-        "exec_command" => 2,
         "shell" => 9,
         _ => 5,
     };
@@ -172,25 +169,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_visible_tool_definitions_prefer_session_terminal_tools() {
+    fn model_visible_tool_definitions_prefer_unified_exec_tools() {
         let definitions = ToolRegistry::with_defaults(5).definitions();
         let names = definitions
             .iter()
             .map(ToolDefinition::name)
             .collect::<Vec<_>>();
-        let shell_pty = names.iter().position(|name| *name == "shell_pty").unwrap();
-        let write_stdin = names
-            .iter()
-            .position(|name| *name == "write_stdin")
-            .unwrap();
         let exec_command = names
             .iter()
             .position(|name| *name == "exec_command")
             .unwrap();
+        let write_stdin = names
+            .iter()
+            .position(|name| *name == "write_stdin")
+            .unwrap();
         let shell = names.iter().position(|name| *name == "shell").unwrap();
-        assert!(shell_pty < shell);
-        assert!(write_stdin < shell);
+        assert!(!names.contains(&"shell_pty"));
         assert!(exec_command < shell);
+        assert!(write_stdin < shell);
+        assert!(!ToolRegistry::with_defaults(5).contains_tool("shell_pty"));
     }
 
     #[tokio::test]

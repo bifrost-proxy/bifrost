@@ -12,6 +12,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  QRCode,
   Select,
   Space,
   Spin,
@@ -54,6 +55,80 @@ import LongTextModalField from "./agent/LongTextModalField";
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
+function OverflowText({
+  value,
+  code,
+  width = 240,
+}: {
+  value?: string;
+  code?: boolean;
+  width?: number;
+}) {
+  const { token } = theme.useToken();
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  const text = value?.trim() || "-";
+  const canShowTip = text !== "-";
+
+  return (
+    <>
+      <span
+        onMouseEnter={(event) => {
+          if (!canShowTip) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const maxWidth = 520;
+          setTip({
+            x: Math.max(8, Math.min(rect.left, window.innerWidth - maxWidth - 8)),
+            y: rect.bottom + 8,
+          });
+        }}
+        onMouseLeave={() => setTip(null)}
+        style={{
+          display: "inline-block",
+          maxWidth: width,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          verticalAlign: "bottom",
+        }}
+      >
+        {code ? (
+          <Text code style={{ whiteSpace: "nowrap" }}>
+            {text}
+          </Text>
+        ) : (
+          text
+        )}
+      </span>
+      {canShowTip && tip && (
+        <div
+          className="im-gateway-overflow-tooltip"
+          role="tooltip"
+          style={{
+            position: "fixed",
+            left: tip.x,
+            top: tip.y,
+            zIndex: 3000,
+            maxWidth: 520,
+            maxHeight: 320,
+            overflow: "auto",
+            padding: "8px 10px",
+            borderRadius: token.borderRadius,
+            background: token.colorBgElevated,
+            boxShadow: token.boxShadowSecondary,
+            color: token.colorText,
+            fontSize: token.fontSizeSM,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {text}
+        </div>
+      )}
+    </>
+  );
+}
+
 type ImGatewaySectionId =
   | "connections"
   | "targets"
@@ -91,8 +166,23 @@ function ConnectionsPanel({
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] =
     useState<ImProviderConfig | null>(null);
+  const [weixinLogin, setWeixinLogin] = useState<{
+    providerId: string;
+    scanUrl: string;
+    expiresInSeconds: number;
+    expiresAt: number;
+    status: "pending" | "expired" | "checking";
+  } | null>(null);
+  const [weixinLoginLoading, setWeixinLoginLoading] = useState(false);
+  const [autoPromptedWeixinIds, setAutoPromptedWeixinIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [agentDefaults, setAgentDefaults] = useState<AgentConfig | null>(null);
   const [form] = Form.useForm();
+  const selectedProviderType =
+    (Form.useWatch("provider_type", form) as string | undefined) ||
+    editingProvider?.provider_type ||
+    "feishu";
 
   const fetchStatuses = useCallback(async () => {
     const map: Record<string, ConnectionStatus> = {};
@@ -186,7 +276,7 @@ function ConnectionsPanel({
     setEditingProvider(null);
     form.resetFields();
     form.setFieldsValue({
-      provider_type: "feishu",
+      provider_type: "weixin",
       enabled: true,
       event_connection_enabled: true,
     });
@@ -236,7 +326,18 @@ function ConnectionsPanel({
         await imGatewayApi.createProvider(
           normalizeProviderValues(values, false) as Partial<ImProviderConfig>,
         );
-        if (values.enabled && values.event_connection_enabled && appSecret) {
+        if (values.provider_type === "weixin") {
+          const result = await imGatewayApi.startWeixinLogin(values.id);
+          setWeixinLogin({
+            providerId: values.id,
+            scanUrl: result.scan_url,
+            expiresInSeconds: result.expires_in_seconds,
+            expiresAt: Date.now() + result.expires_in_seconds * 1000,
+            status: "pending",
+          });
+          setAutoPromptedWeixinIds((prev) => new Set(prev).add(values.id));
+          message.success("Provider created. Scan the Weixin QR code to finish login.");
+        } else if (values.enabled && values.event_connection_enabled && appSecret) {
           await imGatewayApi.connectProvider(values.id);
           message.success("Provider created and connected");
         } else {
@@ -274,6 +375,133 @@ function ConnectionsPanel({
       message.error(normalizeApiErrorMessage(err, "Failed to disconnect provider"));
     }
   };
+
+  const handleStartWeixinLogin = async (provider: ImProviderConfig) => {
+    try {
+      setWeixinLoginLoading(true);
+      const result = await imGatewayApi.startWeixinLogin(provider.id);
+      setWeixinLogin({
+        providerId: provider.id,
+        scanUrl: result.scan_url,
+        expiresInSeconds: result.expires_in_seconds,
+        expiresAt: Date.now() + result.expires_in_seconds * 1000,
+        status: "pending",
+      });
+      message.success("Weixin QR code generated");
+    } catch (err) {
+      message.error(normalizeApiErrorMessage(err, "Failed to start Weixin login"));
+    } finally {
+      setWeixinLoginLoading(false);
+    }
+  };
+
+  const refreshWeixinLogin = useCallback(
+    async (providerId: string, showToast = false) => {
+      setWeixinLoginLoading(true);
+      try {
+        const result = await imGatewayApi.startWeixinLogin(providerId);
+        setWeixinLogin({
+          providerId,
+          scanUrl: result.scan_url,
+          expiresInSeconds: result.expires_in_seconds,
+          expiresAt: Date.now() + result.expires_in_seconds * 1000,
+          status: "pending",
+        });
+        setAutoPromptedWeixinIds((prev) => new Set(prev).add(providerId));
+        if (showToast) {
+          message.success("Weixin QR code refreshed");
+        }
+      } catch (err) {
+        message.error(normalizeApiErrorMessage(err, "Failed to refresh Weixin QR"));
+      } finally {
+        setWeixinLoginLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!weixinLogin || weixinLoginLoading) return;
+    const timer = window.setInterval(async () => {
+      if (!weixinLogin) return;
+      const msRemaining = weixinLogin.expiresAt - Date.now();
+      if (msRemaining <= 0) {
+        setWeixinLogin((current) =>
+          current?.providerId === weixinLogin.providerId
+            ? { ...current, status: "expired" }
+            : current,
+        );
+        await refreshWeixinLogin(weixinLogin.providerId);
+        return;
+      }
+      if (msRemaining <= 10_000) {
+        await refreshWeixinLogin(weixinLogin.providerId);
+        return;
+      }
+      try {
+        setWeixinLogin((current) =>
+          current?.providerId === weixinLogin.providerId
+            ? { ...current, status: "checking" }
+            : current,
+        );
+        const status = await imGatewayApi.getWeixinLoginStatus(weixinLogin.providerId);
+        if (status.status === "confirmed" || status.status === "authorized") {
+          await imGatewayApi.connectProvider(weixinLogin.providerId);
+          setWeixinLogin(null);
+          message.success("Weixin login completed and connected");
+          onRefresh();
+          void fetchStatuses();
+          return;
+        }
+        if (status.status === "expired") {
+          setWeixinLogin((current) =>
+            current?.providerId === weixinLogin.providerId
+              ? { ...current, status: "expired" }
+              : current,
+          );
+          await refreshWeixinLogin(weixinLogin.providerId);
+          return;
+        }
+        setWeixinLogin((current) =>
+          current?.providerId === weixinLogin.providerId
+            ? { ...current, status: "pending" }
+            : current,
+        );
+      } catch (err) {
+        setWeixinLogin((current) =>
+          current?.providerId === weixinLogin.providerId
+            ? { ...current, status: "pending" }
+            : current,
+        );
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [
+    fetchStatuses,
+    onRefresh,
+    refreshWeixinLogin,
+    weixinLogin,
+    weixinLoginLoading,
+  ]);
+
+  useEffect(() => {
+    if (weixinLogin || weixinLoginLoading) return;
+    const provider = providers.find((p) => {
+      if (p.provider_type !== "weixin" || !p.enabled) return false;
+      if (autoPromptedWeixinIds.has(p.id)) return false;
+      const status = statusMap[p.id]?.state;
+      return !p.secret_configured || status === "failed";
+    });
+    if (!provider) return;
+    void refreshWeixinLogin(provider.id);
+  }, [
+    autoPromptedWeixinIds,
+    providers,
+    refreshWeixinLogin,
+    statusMap,
+    weixinLogin,
+    weixinLoginLoading,
+  ]);
 
   const handleDelete = async (id: string) => {
     try {
@@ -320,7 +548,7 @@ function ConnectionsPanel({
           marginBottom: 16,
         }}
       >
-        <Text type="secondary">Manage Feishu bot connections</Text>
+        <Text type="secondary">Manage IM bot connections</Text>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
             Refresh
@@ -338,7 +566,7 @@ function ConnectionsPanel({
       {loading && providers.length === 0 ? (
         <Spin style={{ display: "block", margin: "40px auto" }} />
       ) : providers.length === 0 ? (
-        <Empty description="No Feishu bots configured" />
+        <Empty description="No IM providers configured" />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {providers.map((p) => {
@@ -378,6 +606,17 @@ function ConnectionsPanel({
                           onClick={() => handleConnect(p.id)}
                           disabled={!p.secret_configured}
                           data-testid={`settings-im-provider-connect-${p.id}`}
+                        />
+                      </Tooltip>
+                    )}
+                    {p.provider_type === "weixin" && (
+                      <Tooltip title="Scan Weixin QR">
+                        <Button
+                          size="small"
+                          icon={<CloudOutlined />}
+                          onClick={() => handleStartWeixinLogin(p)}
+                          loading={weixinLoginLoading && weixinLogin?.providerId === p.id}
+                          data-testid={`settings-im-provider-weixin-login-${p.id}`}
                         />
                       </Tooltip>
                     )}
@@ -532,7 +771,7 @@ function ConnectionsPanel({
                 label="Provider ID"
                 rules={[{ required: true, message: "Required" }]}
               >
-                <Input placeholder="e.g. feishu-main" />
+                <Input placeholder="e.g. weixin-main" />
               </Form.Item>
               <Form.Item
                 name="provider_type"
@@ -542,22 +781,33 @@ function ConnectionsPanel({
               >
                 <Select
                   placeholder="Select provider type"
-                  options={[{ label: "Feishu", value: "feishu" }]}
+                  options={[
+                    { label: "Weixin", value: "weixin" },
+                    { label: "Feishu", value: "feishu" },
+                  ]}
                 />
               </Form.Item>
-              <Form.Item>
-                <Text type="secondary" style={{ fontSize: 13 }}>
-                  前往{" "}
-                  <a
-                    href="https://open.larkoffice.com/page/launcher?from=backend_oneclick"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    飞书开放平台
-                  </a>{" "}
-                  一键创建机器人应用并获取 App ID 和 App Secret。
-                </Text>
-              </Form.Item>
+              {selectedProviderType === "feishu" ? (
+                <Form.Item>
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    前往{" "}
+                    <a
+                      href="https://open.larkoffice.com/page/launcher?from=backend_oneclick"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      飞书开放平台
+                    </a>{" "}
+                    一键创建机器人应用并获取 App ID 和 App Secret。
+                  </Text>
+                </Form.Item>
+              ) : (
+                <Form.Item>
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    创建后点击列表中的扫码按钮，用微信扫描二维码完成 ClawBot 接入。
+                  </Text>
+                </Form.Item>
+              )}
             </>
           )}
           <Form.Item name="display_name" label="Display Name">
@@ -570,18 +820,33 @@ function ConnectionsPanel({
             <Input placeholder="Optional owner open_id" />
           </Form.Item>
           <Form.Item name="app_id" label="App ID">
-            <Input placeholder="Application ID" />
+            <Input
+              placeholder={
+                selectedProviderType === "weixin"
+                  ? "Filled after QR login"
+                  : "Application ID"
+              }
+              disabled={selectedProviderType === "weixin"}
+            />
           </Form.Item>
           <Form.Item
             name="app_secret"
-            label="App Secret"
+            label={selectedProviderType === "weixin" ? "Bot Token" : "App Secret"}
             extra={
-              editingProvider
+              selectedProviderType === "weixin"
+                ? "Filled by QR login. Manual replacement is only for debugging."
+                : editingProvider
                 ? "Leave blank to keep the existing secret. Enter a new value to replace it."
                 : undefined
             }
           >
-            <Input.Password placeholder="Application secret (stored securely)" />
+            <Input.Password
+              placeholder={
+                selectedProviderType === "weixin"
+                  ? "Filled by QR login"
+                  : "Application secret (stored securely)"
+              }
+            />
           </Form.Item>
           <Form.Item
             name={["agent_config", "work_dir"]}
@@ -646,6 +911,44 @@ function ConnectionsPanel({
             <Switch />
           </Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title="Scan Weixin QR"
+        open={!!weixinLogin}
+        footer={
+          <Space>
+            <Button onClick={() => setWeixinLogin(null)}>Close</Button>
+            <Button
+              type="primary"
+              loading={weixinLoginLoading}
+              onClick={() =>
+                weixinLogin && void refreshWeixinLogin(weixinLogin.providerId, true)
+              }
+            >
+              Refresh QR
+            </Button>
+          </Space>
+        }
+        onCancel={() => setWeixinLogin(null)}
+      >
+        {weixinLogin && (
+          <Space direction="vertical" size={16} style={{ width: "100%", alignItems: "center" }}>
+            <QRCode value={weixinLogin.scanUrl} size={220} />
+            <Text type="secondary">
+              {weixinLogin.status === "checking"
+                ? "Checking authorization..."
+                : weixinLogin.status === "expired"
+                ? "QR code expired. Refreshing automatically..."
+                : `Expires in about ${Math.max(
+                    0,
+                    Math.ceil((weixinLogin.expiresAt - Date.now()) / 1000),
+                  )} seconds. Scan with Weixin; Bifrost will connect automatically.`}
+            </Text>
+            <Text code style={{ wordBreak: "break-all" }}>
+              {weixinLogin.scanUrl}
+            </Text>
+          </Space>
+        )}
       </Modal>
     </div>
   );
@@ -1173,18 +1476,26 @@ function HistoryPanel({
     const secs = ts > 1_000_000_000_000 ? ts / 1000 : ts;
     return new Date(secs * 1000).toLocaleString();
   };
+  const renderOverflowText = (
+    value: string | undefined,
+    options?: { code?: boolean; width?: number },
+  ) => {
+    return (
+      <OverflowText
+        value={value}
+        code={options?.code}
+        width={options?.width ?? 240}
+      />
+    );
+  };
 
   const eventColumns = [
     {
       title: "Event ID",
       dataIndex: "event_id",
       key: "event_id",
-      width: 120,
-      render: (val: string) => (
-        <Text code style={{ fontSize: 11 }}>
-          {val?.slice(0, 10) || "-"}
-        </Text>
-      ),
+      width: 160,
+      render: (val: string) => renderOverflowText(val, { code: true, width: 130 }),
     },
     {
       title: "Provider",
@@ -1196,24 +1507,24 @@ function HistoryPanel({
       title: "Event Type",
       dataIndex: "event_type",
       key: "event_type",
-      width: 160,
+      width: 170,
       render: (val: string) => <Tag>{val}</Tag>,
     },
     {
       title: "Source",
       key: "source",
-      width: 140,
+      width: 360,
       render: (_: unknown, record: ImEvent) =>
-        record.source?.chat_id || record.source?.user_id || "-",
+        renderOverflowText(record.source?.chat_id || record.source?.user_id, {
+          width: 330,
+        }),
     },
     {
       title: "Message",
       key: "message",
-      render: (_: unknown, record: ImEvent) => (
-        <Text ellipsis style={{ maxWidth: 200 }}>
-          {record.message?.text || "-"}
-        </Text>
-      ),
+      width: 420,
+      render: (_: unknown, record: ImEvent) =>
+        renderOverflowText(record.message?.text, { width: 390 }),
     },
     {
       title: "Time",
@@ -1304,6 +1615,7 @@ function HistoryPanel({
           loading={loading}
           pagination={{ pageSize: 20, size: "small" }}
           locale={{ emptyText: <Empty description="No events recorded" /> }}
+          scroll={{ x: 1390 }}
         />
       ),
     },
@@ -1319,6 +1631,7 @@ function HistoryPanel({
           loading={loading}
           pagination={{ pageSize: 20, size: "small" }}
           locale={{ emptyText: <Empty description="No task runs recorded" /> }}
+          scroll={{ x: 900 }}
         />
       ),
     },
@@ -1533,9 +1846,11 @@ export default function ImGatewayTab() {
         style={{
           display: "grid",
           gridTemplateColumns: isCompactNav ? "1fr" : "168px minmax(0, 1fr)",
+          gridTemplateRows: isCompactNav ? "auto minmax(0, 1fr)" : undefined,
           gap: 16,
           height: "100%",
           minHeight: 0,
+          alignContent: "start",
         }}
       >
         <div>{nav}</div>

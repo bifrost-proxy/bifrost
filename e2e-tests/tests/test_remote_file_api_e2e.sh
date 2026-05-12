@@ -48,6 +48,12 @@ run_bifrost() {
     "$BIFROST_BIN" "$@" 2>&1 || true
 }
 
+output_has() {
+    local haystack="$1"
+    shift
+    grep "$@" <<<"$haystack"
+}
+
 ensure_binary() {
     header "check bifrost binary"
     if [[ ! -x "$BIFROST_BIN" ]]; then
@@ -68,7 +74,7 @@ test_remote_file_root_help() {
     out=$(run_bifrost remote file --help)
     local missing=""
     for sub in read list stat glob find hash write edit mkdir move delete patch; do
-        if ! echo "$out" | grep -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
+        if ! output_has "$out" -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
     done
@@ -84,11 +90,11 @@ test_read_help() {
     header "remote file read --help has --max-bytes / --allow-binary / --offset / --limit / --cwd"
     local out
     out=$(run_bifrost remote file read --help)
-    if echo "$out" | grep -q -- "--max-bytes" \
-       && echo "$out" | grep -qi "allow-binary\|binary" \
-       && echo "$out" | grep -q -- "--offset" \
-       && echo "$out" | grep -q -- "--limit" \
-       && echo "$out" | grep -qi "cwd"; then
+    if output_has "$out" -q -- "--max-bytes" \
+       && output_has "$out" -qi "allow-binary\|binary" \
+       && output_has "$out" -q -- "--offset" \
+       && output_has "$out" -q -- "--limit" \
+       && output_has "$out" -qi "cwd"; then
         pass "read --help surface ok"
     else
         fail "read --help missing required flag"
@@ -100,8 +106,8 @@ test_list_help() {
     header "remote file list --help has --depth / --exclude"
     local out
     out=$(run_bifrost remote file list --help)
-    if echo "$out" | grep -q -- "--depth" \
-       && echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -q -- "--depth" \
+       && output_has "$out" -q -- "--exclude"; then
         pass "list --help has --depth / --exclude"
     else
         fail "list --help missing --depth or --exclude"
@@ -113,7 +119,7 @@ test_stat_help() {
     header "remote file stat --help"
     local out
     out=$(run_bifrost remote file stat --help)
-    if echo "$out" | grep -qi "stat\|metadata\|sha256"; then
+    if output_has "$out" -qi "stat\|metadata\|sha256"; then
         pass "stat --help surface ok"
     else
         fail "stat --help abnormal"
@@ -125,9 +131,9 @@ test_glob_help() {
     header "remote file glob --help has --max-matches / --exclude"
     local out
     out=$(run_bifrost remote file glob --help)
-    if echo "$out" | grep -qi "pattern\|glob" \
-       && echo "$out" | grep -q -- "--max-matches" \
-       && echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -qi "pattern\|glob" \
+       && output_has "$out" -q -- "--max-matches" \
+       && output_has "$out" -q -- "--exclude"; then
         pass "glob --help has pattern / --max-matches / --exclude"
     else
         fail "glob --help missing"
@@ -139,11 +145,11 @@ test_find_help() {
     header "remote file find --help has --path / --max-scan / --context-before / --context-after / --exclude"
     local out
     out=$(run_bifrost remote file find --help)
-    if echo "$out" | grep -q -- "--path" \
-       && echo "$out" | grep -q -- "--max-scan" \
-       && echo "$out" | grep -q -- "--context-before" \
-       && echo "$out" | grep -q -- "--context-after" \
-       && echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -q -- "--path" \
+       && output_has "$out" -q -- "--max-scan" \
+       && output_has "$out" -q -- "--context-before" \
+       && output_has "$out" -q -- "--context-after" \
+       && output_has "$out" -q -- "--exclude"; then
         pass "search --help has --path / --max-scan / context / exclude"
     else
         fail "search --help missing flags"
@@ -155,7 +161,7 @@ test_hash_help() {
     header "remote file hash --help has --algo"
     local out
     out=$(run_bifrost remote file hash --help)
-    if echo "$out" | grep -q -- "--algo"; then
+    if output_has "$out" -q -- "--algo"; then
         pass "hash --help has --algo"
     else
         fail "hash --help missing --algo"
@@ -171,9 +177,9 @@ test_write_help() {
     header "remote file write --help has --content-file / --base-sha256 / --allow-overwrite"
     local out
     out=$(run_bifrost remote file write --help)
-    if echo "$out" | grep -q -- "--content-file" \
-       && echo "$out" | grep -qi "base-sha256\|sha256" \
-       && echo "$out" | grep -qi "allow-overwrite\|overwrite"; then
+    if output_has "$out" -q -- "--content-file" \
+       && output_has "$out" -qi "base-sha256\|sha256" \
+       && output_has "$out" -qi "allow-overwrite\|overwrite"; then
         pass "write --help surface ok"
     else
         fail "write --help missing required flag"
@@ -185,8 +191,8 @@ test_edit_help() {
     header "remote file edit --help has --edits / --base-sha256"
     local out
     out=$(run_bifrost remote file edit --help)
-    if echo "$out" | grep -q -- "--edits" \
-       && echo "$out" | grep -qi "base-sha256\|sha256"; then
+    if output_has "$out" -q -- "--edits" \
+       && output_has "$out" -qi "base-sha256\|sha256"; then
         pass "edit --help surface ok"
     else
         fail "edit --help missing required flag"
@@ -198,7 +204,7 @@ test_mkdir_help() {
     header "remote file mkdir --help has --parents"
     local out
     out=$(run_bifrost remote file mkdir --help)
-    if echo "$out" | grep -q -- "--parents"; then
+    if output_has "$out" -q -- "--parents"; then
         pass "mkdir --help has --parents"
     else
         fail "mkdir --help missing --parents"
@@ -210,8 +216,8 @@ test_move_help() {
     header "remote file move --help accepts <FROM> <TO>"
     local out
     out=$(run_bifrost remote file move --help)
-    if echo "$out" | grep -qi "source\|path" \
-       && echo "$out" | grep -qi "destination\|to"; then
+    if output_has "$out" -qi "source\|path" \
+       && output_has "$out" -qi "destination\|to"; then
         pass "mv --help surface ok"
     else
         fail "mv --help missing source/destination"
@@ -223,7 +229,7 @@ test_delete_help() {
     header "remote file delete --help has --recursive"
     local out
     out=$(run_bifrost remote file delete --help)
-    if echo "$out" | grep -q -- "--recursive"; then
+    if output_has "$out" -q -- "--recursive"; then
         pass "rm --help has --recursive"
     else
         fail "rm --help missing --recursive"
@@ -239,7 +245,7 @@ test_patch_help() {
     header "remote file patch --help has --patch-file"
     local out
     out=$(run_bifrost remote file patch --help)
-    if echo "$out" | grep -q -- "--patch-file"; then
+    if output_has "$out" -q -- "--patch-file"; then
         pass "apply-patch --help has --patch-file"
     else
         fail "apply-patch --help missing --patch-file"
@@ -257,7 +263,7 @@ test_output_json_supported() {
     for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
-        if ! echo "$out" | grep -qi -- "--output\|human\|json"; then
+        if ! output_has "$out" -qi -- "--output\|human\|json"; then
             fail "subcommand $sub --help missing output/human/json"
             any_fail=1
         fi
@@ -273,7 +279,7 @@ test_all_subcommands_have_cwd() {
     for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
-        if ! echo "$out" | grep -qi -- "--cwd"; then
+        if ! output_has "$out" -qi -- "--cwd"; then
             fail "subcommand $sub --help missing --cwd"
             any_fail=1
         fi
@@ -288,7 +294,7 @@ test_missing_required_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file read 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "read without path correctly rejected (exit=$rc)"
     else
         fail "read without path not rejected: $out"
@@ -312,7 +318,7 @@ test_missing_required_edit_edits_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file edit test.txt 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "edit without --edits correctly rejected (exit=$rc)"
     else
         fail "edit without --edits not rejected: $out"
@@ -324,7 +330,7 @@ test_missing_required_mv_to_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file move src.txt 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "mv without <TO> correctly rejected (exit=$rc)"
     else
         fail "mv without <TO> not rejected: $out"
@@ -336,7 +342,7 @@ test_missing_required_apply_patch_file_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file patch 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "apply-patch without --patch-file correctly rejected (exit=$rc)"
     else
         fail "apply-patch without --patch-file not rejected: $out"
@@ -352,7 +358,7 @@ test_missing_required_glob_pattern_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file glob 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "glob without pattern correctly rejected (exit=$rc)"
     else
         fail "glob without pattern not rejected: $out"
@@ -364,7 +370,7 @@ test_missing_required_search_pattern_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file find 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "search without pattern correctly rejected (exit=$rc)"
     else
         fail "search without pattern not rejected: $out"
@@ -376,7 +382,7 @@ test_missing_required_hash_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file hash 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "hash without path correctly rejected (exit=$rc)"
     else
         fail "hash without path not rejected: $out"
@@ -388,7 +394,7 @@ test_missing_required_stat_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file stat 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "stat without path correctly rejected (exit=$rc)"
     else
         fail "stat without path not rejected: $out"
@@ -400,7 +406,7 @@ test_missing_required_rm_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file delete 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "rm without path correctly rejected (exit=$rc)"
     else
         fail "rm without path not rejected: $out"
@@ -412,7 +418,7 @@ test_missing_required_mkdir_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file mkdir 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "mkdir without path correctly rejected (exit=$rc)"
     else
         fail "mkdir without path not rejected: $out"
@@ -424,7 +430,7 @@ test_missing_required_write_path_fails() {
     local out rc
     out=$("$BIFROST_BIN" remote file write 2>&1)
     rc=$?
-    if [[ $rc -ne 0 ]] || echo "$out" | grep -qi "required\|missing\|usage\|error"; then
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
         pass "write without path correctly rejected (exit=$rc)"
     else
         fail "write without path not rejected: $out"
@@ -440,11 +446,15 @@ test_read_offset_limit_help_description() {
     local out
     out=$(run_bifrost remote file read --help)
     local ok=1
-    if ! echo "$out" | grep -i -- "--offset" | grep -qi "1-based\|start line"; then
+    local offset_help
+    offset_help=$(output_has "$out" -i -- "--offset" || true)
+    if ! output_has "$offset_help" -qi "1-based\|start line"; then
         fail "read --offset help missing '1-based' or 'start line'"
         ok=0
     fi
-    if ! echo "$out" | grep -i -- "--limit" | grep -qi "line"; then
+    local limit_help
+    limit_help=$(output_has "$out" -i -- "--limit" || true)
+    if ! output_has "$limit_help" -qi "line"; then
         fail "read --limit help missing 'line'"
         ok=0
     fi
@@ -457,8 +467,8 @@ test_search_short_flags_B_A() {
     header "search --help: -B and -A short flags accepted"
     local out
     out=$(run_bifrost remote file find --help)
-    if echo "$out" | grep -qE -- "-B" \
-       && echo "$out" | grep -qE -- "-A"; then
+    if output_has "$out" -qE -- "-B" \
+       && output_has "$out" -qE -- "-A"; then
         pass "search -B / -A short flags present"
     else
         fail "search missing -B / -A short flags"
@@ -470,7 +480,7 @@ test_search_exclude_flag() {
     header "search --help: --exclude flag present"
     local out
     out=$(run_bifrost remote file find --help)
-    if echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -q -- "--exclude"; then
         pass "search --exclude flag present"
     else
         fail "search --exclude flag missing"
@@ -482,7 +492,7 @@ test_list_exclude_flag() {
     header "list --help: --exclude flag present"
     local out
     out=$(run_bifrost remote file list --help)
-    if echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -q -- "--exclude"; then
         pass "list --exclude flag present"
     else
         fail "list --exclude flag missing"
@@ -494,7 +504,7 @@ test_glob_exclude_flag() {
     header "glob --help: --exclude flag present"
     local out
     out=$(run_bifrost remote file glob --help)
-    if echo "$out" | grep -q -- "--exclude"; then
+    if output_has "$out" -q -- "--exclude"; then
         pass "glob --exclude flag present"
     else
         fail "glob --exclude flag missing"
@@ -512,7 +522,7 @@ test_no_phase_text_in_help() {
     for sub in read list stat glob find hash write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
-        if echo "$out" | grep -qi "phase"; then
+        if output_has "$out" -qi "phase"; then
             fail "subcommand $sub --help contains 'Phase' text"
             any_fail=1
         fi
@@ -520,7 +530,7 @@ test_no_phase_text_in_help() {
     # Also check the root help
     local root_out
     root_out=$(run_bifrost remote file --help)
-    if echo "$root_out" | grep -qi "phase"; then
+    if output_has "$root_out" -qi "phase"; then
         fail "remote file --help contains 'Phase' text"
         any_fail=1
     fi
@@ -539,7 +549,7 @@ test_subcommand_about_descriptions() {
     root_out=$(run_bifrost remote file --help)
     local any_fail=0
     for sub in read list stat glob find hash write edit mkdir move delete patch; do
-        if ! echo "$root_out" | grep -qiE "$sub[[:space:]]"; then
+        if ! output_has "$root_out" -qiE "$sub[[:space:]]"; then
             fail "subcommand $sub not visible in root help"
             any_fail=1
         fi
