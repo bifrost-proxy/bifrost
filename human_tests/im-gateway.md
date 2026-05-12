@@ -453,3 +453,99 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - `im messages list` 未传 `--provider` 时复用 provider 选择逻辑，输出包含 `Owner` 与消息内容预览。
   - 多 Provider 交互式场景下，CLI 展示 provider 列表；多 Provider 非交互式场景下返回明确错误，要求传 `--provider`。
 - **执行记录（2026-05-06）**: PASS — 使用 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh` 执行 TC-IMG-37；脚本用临时数据目录 `.bifrost-test-im-cli-provider`、端口 `18891` 和 fake Feishu OpenAPI 服务启动源码版 Bifrost；创建唯一 enabled Provider 后执行 `bifrost im send --text 'hello owner from cli'`，CLI 自动选择 `feishu-main` 并输出 `Message sent via provider 'feishu-main' to __owner__ (message_id: om_owner_cli)`；fake Feishu 捕获 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=text` 和文本内容；`bifrost im messages list` 未传 `--provider` 时同样自动选择 Provider，输出包含 `Owner` 与消息内容预览；脚本最后清理临时数据和进程。
+
+### TC-IMG-38: CLI 发送图片消息时先上传图片再发送 image 消息
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-cli-provider cargo run --bin bifrost -- start -p 18891 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 准备一个 fake Feishu OpenAPI 服务，支持 tenant token、`POST /im/v1/images` 与 `POST /im/v1/messages`，并记录收到的请求。
+  - 已创建一个 enabled Feishu Provider，配置 `owner_open_id=owner-open-id`、`base_url=<fake-feishu-url>`。
+- **操作步骤**:
+  1. 准备一张本地 PNG 图片，例如 `pixel.png`。
+  2. 执行不带 `--provider`、不带 `--target` 的图片发送命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im send --image-file ./pixel.png
+     ```
+  3. 查看 fake Feishu 记录的 `POST /im/v1/images` 请求。
+  4. 查看 fake Feishu 记录的 `POST /im/v1/messages` 请求。
+- **预期结果**:
+  - 单 enabled Provider 场景下，CLI 自动选择该 Provider。
+  - fake Feishu 先收到 `POST /im/v1/images` 图片上传请求，上传成功后返回 `image_key`。
+  - fake Feishu 随后收到 `POST /im/v1/messages?receive_id_type=open_id`，请求体包含 `receive_id=owner-open-id`、`msg_type=image`、`content={"image_key":"<上传返回的 key>"}`。
+  - CLI 输出包含 `Message sent`。
+  - message log 只记录图片 key 摘要，不记录图片 bytes/base64。
+- **执行记录（2026-05-12）**: PASS — 执行 `bash e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh` 通过；脚本使用临时数据目录 `.bifrost-test-im-cli-provider`、端口 `18891`、`--no-system-proxy` 和 fake Feishu OpenAPI 服务。`bifrost im send --image-file <pixel.png>` 自动选择唯一 enabled Provider，fake Feishu 捕获 `POST /im/v1/images` multipart 上传请求并返回 `image_key=img_uploaded_cli`，随后捕获 `POST /im/v1/messages?receive_id_type=open_id`，请求体包含 `receive_id=owner-open-id`、`msg_type=image`、`content={"image_key":"img_uploaded_cli"}`；CLI 输出 `Message sent`，message log 仅显示 `[image:img_uploaded_cli]` 摘要。
+
+### TC-IMG-39: CLI 发送图文卡片时生成 interactive card，并支持本地图片上传
+
+- **前置条件**:
+  - 复用 TC-IMG-38 的临时 Bifrost 服务、fake Feishu OpenAPI 服务和 enabled Feishu Provider。
+- **操作步骤**:
+  1. 执行带标题、Markdown 文本、已有图片 key 的图文卡片发送命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im send --card-title 'Deploy report' --card-text '**Done** with chart' --card-image-key img_v3_chart
+     ```
+  2. 执行带标题、Markdown 文本、本地图片文件的图文卡片发送命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im send --card-title 'Uploaded chart' --card-text 'Chart uploaded' --card-image-file ./pixel.png
+     ```
+  3. 查看 fake Feishu 记录的 `POST /im/v1/images` 和 `POST /im/v1/messages` 请求。
+- **预期结果**:
+  - 两条 CLI 命令输出都包含 `Message sent`。
+  - 已有图片 key 场景下，fake Feishu 收到的请求包含 `msg_type=interactive`。
+  - 已有图片 key 场景下，`content` 解析后包含 header title `Deploy report`。
+  - `elements` 中包含 `tag=img` 且 `img_key=img_v3_chart`，并包含 `tag=markdown` 且内容为 `**Done** with chart`。
+  - 本地图片文件场景下，fake Feishu 先收到图片上传请求，再收到 `msg_type=interactive` 的卡片发送请求，卡片 `img_key` 使用上传返回的 key。
+  - 该路径不要求调用方手写完整 Feishu card JSON。
+- **执行记录（2026-05-12）**: PASS — 执行 `bash e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh` 通过；`bifrost im send --card-title 'Deploy report' --card-text '**Done** with chart' --card-image-key img_v3_chart` 输出 `Message sent`，fake Feishu 捕获 `msg_type=interactive`，`content.header.title.content=Deploy report`，`elements[0].tag=img`、`elements[0].img_key=img_v3_chart`、`elements[1].tag=markdown`、`elements[1].content=**Done** with chart`；`bifrost im send --card-title 'Uploaded chart' --card-text 'Chart uploaded' --card-image-file <pixel.png>` 先触发 `POST /im/v1/images`，再发送 `msg_type=interactive` 卡片，卡片 `elements[0].img_key=img_uploaded_cli`，message log preview 分别为 `Deploy report` 和 `Uploaded chart`。
+
+### TC-IMG-40: 原始 card JSON 直通发送保持兼容
+
+- **前置条件**:
+  - 复用 TC-IMG-38 的临时 Bifrost 服务、fake Feishu OpenAPI 服务和 enabled Feishu Provider。
+- **操作步骤**:
+  1. 执行原始 card JSON 发送命令：
+     ```bash
+     cargo run --bin bifrost -- -p 18891 im send --card-json '{"config":{},"elements":[],"header":{"title":{"tag":"plain_text","content":"Raw card"}}}'
+     ```
+  2. 查看 fake Feishu 记录的最后一条 `POST /im/v1/messages` 请求。
+- **预期结果**:
+  - CLI 输出包含 `Message sent`。
+  - fake Feishu 收到的请求包含 `msg_type=interactive`。
+  - `content` 解析后与调用方提供的 card JSON 一致。
+  - 新增图片和图文卡片参数不破坏既有 `--card-json` / `--card-file` 路径。
+- **执行记录（2026-05-12）**: PASS — 同一次 `test_im_cli_provider_selection_send_owner.sh` 覆盖原始 card JSON 兼容；`bifrost im send --card-json '{"config":{},"elements":[],"header":{"title":{"tag":"plain_text","content":"Raw card"}}}'` 输出 `Message sent`，fake Feishu 捕获 `msg_type=interactive`，解析后的 `content.header.title.content=Raw card` 且 `elements=[]`，证明新增图片/图文卡片参数未破坏原始 card JSON 直通路径。
+
+### TC-IMG-41: Agent 最终输出 Markdown 本地图片时自动上传并替换为 Feishu image_key
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理。
+  - 已配置 Feishu Provider，`agent_config.work_dir` 指向包含 `chart.png` 的临时工作目录。
+  - fake Feishu OpenAPI 服务支持 tenant token、`POST /im/v1/images` 与 `POST /im/v1/messages`，并记录请求。
+- **操作步骤**:
+  1. 构造 Agent 最终回复 Markdown：`结果如下：![chart](./chart.png)`。
+  2. 触发 Agent reply card 发送路径。
+  3. 查看 fake Feishu 的图片上传请求和最终 interactive card 请求。
+- **预期结果**:
+  - Bifrost 先上传 `agent_config.work_dir/chart.png` 到 Feishu 图片接口，获得 `image_key`。
+  - 最终 interactive card 的 Markdown 内容包含 `![chart](<image_key>)`。
+  - 最终 interactive card 中不包含 `./chart.png`、`file://` 或其他本地文件路径。
+  - 如果图片上传失败，最终 Markdown 降级为 `[chart 未能上传]` 这类文本占位，不保留 `![chart](./chart.png)`，避免飞书卡片因非法图片 URL 发送失败。
+- **执行记录（2026-05-12）**: PASS — 执行 focused 单元测试 `cargo test -p bifrost-admin agent_reply_image -- --nocapture`、`cargo test -p bifrost-admin markdown_image_destination -- --nocapture`、`cargo test -p bifrost-admin local_image_fallback -- --nocapture` 通过；代码路径验证本地/`file://`/相对 work_dir 图片会进入上传路径，HTTP 图片和已有 `img_v*` key 不上传，上传失败 fallback 不包含 Markdown 图片语法或本地路径。真实 Feishu 验证使用临时目录 `/tmp/bifrost-im-rich-md-live` 和端口 `28880`，通过 `POST /_bifrost/api/im-gateway/messages/send` 发送包含 `![local-md-card](/tmp/bifrost-im-rich-md-live/md-card-local-image.png)` 的 interactive rich card，Feishu 返回 HTTP 200，`message_id=om_x100b6f1a88dc689cc318ac23d88c5e8`，`request_id=202605121701206A57901A69C3536657A7`；本地消息日志 `id=31085a14`、`status=success`、`msg_type=interactive`；用户在 Feishu 客户端确认已看到卡片内图片，说明本地 Markdown 图片已上传并替换为 Feishu 可渲染的 image key。
+
+### TC-IMG-42: Agent Markdown 图片上传缓存避免流式/重复输出反复上传
+
+- **前置条件**:
+  - 复用 TC-IMG-41 的临时 Provider、工作目录和图片文件。
+- **操作步骤**:
+  1. 连续两次渲染包含同一张图片的 Agent Markdown：`![chart](./chart.png)`。
+  2. 保持图片文件内容、大小和 mtime 不变。
+  3. 查看第二次渲染是否命中缓存。
+- **预期结果**:
+  - 上传缓存 key 包含 `provider_id`、canonical path、文件大小和 mtime。
+  - 同一 Provider 同一文件指纹的第二次渲染复用第一次返回的 `image_key`，不再次调用 Feishu 图片上传接口。
+  - 流式进度卡片只在最终 flush 前做图片上传和 Markdown 替换，不在每个 streaming delta 中重复上传图片。
+- **执行记录（2026-05-12）**: PASS — 代码 review 确认缓存通过全局 `AGENT_REPLY_IMAGE_UPLOAD_CACHE` 按 `provider_id + canonical path + len + modified_ms` 命中；流式路径在 `progress_registry.finish(..., rendered_main_response, ...)` 前调用一次渲染，progress card 的增量刷新仍只做普通 Markdown 转换，不触发图片上传。

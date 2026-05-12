@@ -683,6 +683,8 @@ bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:
 bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
 bifrost im send --text "hello owner"
 bifrost im send --target oncall --text "hello group"
+bifrost im send --image-file ./alert.png
+bifrost im send --card-title "Deploy report" --card-text "**Done**" --card-image-file ./chart.png
 bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
 bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
 bifrost im messages list --direction inbound
@@ -696,7 +698,7 @@ IM Gateway 子命令按对象划分：
 | --- | --- | --- |
 | `provider` | IM 平台连接配置，例如 Feishu、WeChat、Webhook | `list/add/update/delete/test` |
 | `target` | 消息接收目标，例如群、用户、owner | `list/add/update/delete` |
-| `send` | 主动发送消息 | `--text`、`--target`、`--provider` |
+| `send` | 主动发送消息 | `--text`、`--image-file`、`--image-key`、`--card-file`、`--card-json`、`--card-title`、`--card-text`、`--card-image-file`、`--card-image-key`、`--target`、`--provider` |
 | `route` | 把收到的事件路由到脚本 | 按 event、regex、script 触发 |
 | `schedule` | 定时执行脚本并发送结果 | cron 表达式、目标、脚本文件 |
 | `history` / `messages` | 查看事件、任务、消息历史 | 排查路由和发送结果 |

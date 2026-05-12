@@ -5,7 +5,7 @@ use bifrost_core::Result;
 
 use super::types::{
     ConnectionHandle, ImEvent, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation,
-    SendOptions, SendResult,
+    SendOptions, SendResult, UploadedImage,
 };
 
 pub type EventSink = mpsc::UnboundedSender<ImEvent>;
@@ -35,5 +35,22 @@ pub trait ImProvider: Send + Sync {
         config: &ImProviderConfig,
         target: &ImTarget,
         text: &str,
+    ) -> Result<SendResult>;
+
+    async fn upload_image(
+        &self,
+        config: &ImProviderConfig,
+        image_type: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> Result<UploadedImage>;
+
+    async fn send_image(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        image_key: &str,
+        uuid: Option<&str>,
     ) -> Result<SendResult>;
 }

@@ -205,7 +205,7 @@ fn convert_image_urls(line: Cow<'_, str>) -> Cow<'_, str> {
 
 /// Parse `alt](url)` starting after `![`.
 /// Returns (alt, url, end_position) where end_position is one past the closing `)`.
-fn parse_image_syntax(line: &str, start: usize) -> Option<(String, String, usize)> {
+pub(crate) fn parse_image_syntax(line: &str, start: usize) -> Option<(String, String, usize)> {
     let bytes = line.as_bytes();
     // Find closing `]`
     let mut depth = 1;

@@ -43,15 +43,26 @@ port_file = sys.argv[2]
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
-        try:
-            body = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            body = {"raw": raw}
+        raw_bytes = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data"):
+            body = {
+                "multipart": True,
+                "content_type": content_type,
+                "length": len(raw_bytes),
+            }
+        else:
+            raw = raw_bytes.decode("utf-8", errors="replace") if raw_bytes else ""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                body = {"raw": raw}
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"path": self.path, "body": body}, ensure_ascii=False) + "\n")
         if self.path.endswith("/auth/v3/tenant_access_token/internal"):
             payload = {"code": 0, "tenant_access_token": "tenant-token", "expire": 7200}
+        elif self.path.startswith("/im/v1/images"):
+            payload = {"code": 0, "data": {"image_key": "img_uploaded_cli"}}
         elif self.path.startswith("/im/v1/messages"):
             payload = {"code": 0, "data": {"message_id": "om_owner_cli"}}
         else:
@@ -125,6 +136,75 @@ assert send["path"].endswith("receive_id_type=open_id"), send
 assert send["body"]["receive_id"] == "owner-open-id", send
 assert send["body"]["msg_type"] == "text", send
 assert json.loads(send["body"]["content"])["text"] == "hello owner from cli", send
+PY
+
+python3 - "$MOCK_DIR/pixel.png" <<'PY'
+import base64
+import sys
+
+data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+open(sys.argv[1], "wb").write(base64.b64decode(data))
+PY
+
+IMAGE_OUTPUT="$("$BIFROST_BIN" -p "$PORT" im send --image-file "$MOCK_DIR/pixel.png")"
+echo "$IMAGE_OUTPUT"
+grep -q "Message sent" <<<"$IMAGE_OUTPUT"
+
+CARD_OUTPUT="$("$BIFROST_BIN" -p "$PORT" im send --card-title 'Deploy report' --card-text '**Done** with chart' --card-image-key img_v3_chart)"
+echo "$CARD_OUTPUT"
+grep -q "Message sent" <<<"$CARD_OUTPUT"
+
+CARD_FILE_OUTPUT="$("$BIFROST_BIN" -p "$PORT" im send --card-title 'Uploaded chart' --card-text 'Chart uploaded' --card-image-file "$MOCK_DIR/pixel.png")"
+echo "$CARD_FILE_OUTPUT"
+grep -q "Message sent" <<<"$CARD_FILE_OUTPUT"
+
+RAW_CARD_OUTPUT="$("$BIFROST_BIN" -p "$PORT" im send --card-json '{"config":{},"elements":[],"header":{"title":{"tag":"plain_text","content":"Raw card"}}}')"
+echo "$RAW_CARD_OUTPUT"
+grep -q "Message sent" <<<"$RAW_CARD_OUTPUT"
+
+python3 - "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+uploads = [r for r in records if r["path"].startswith("/im/v1/images")]
+assert uploads, "mock did not receive image upload request"
+sends = [r for r in records if r["path"].startswith("/im/v1/messages")]
+image_send = next((r for r in sends if r["body"]["msg_type"] == "image"), None)
+assert image_send is not None, sends
+assert json.loads(image_send["body"]["content"])["image_key"] == "img_uploaded_cli", image_send
+card_send = next((
+    r for r in sends
+    if r["body"]["msg_type"] == "interactive"
+    and json.loads(r["body"]["content"]).get("header", {}).get("title", {}).get("content") == "Deploy report"
+), None)
+assert card_send is not None, sends
+card = json.loads(card_send["body"]["content"])
+assert card["header"]["title"]["content"] == "Deploy report", card
+assert card["elements"][0]["tag"] == "img", card
+assert card["elements"][0]["img_key"] == "img_v3_chart", card
+assert card["elements"][1]["tag"] == "markdown", card
+assert card["elements"][1]["content"] == "**Done** with chart", card
+uploaded_card_send = next((
+    r for r in sends
+    if r["body"]["msg_type"] == "interactive"
+    and json.loads(r["body"]["content"]).get("header", {}).get("title", {}).get("content") == "Uploaded chart"
+), None)
+assert uploaded_card_send is not None, sends
+uploaded_card = json.loads(uploaded_card_send["body"]["content"])
+assert uploaded_card["elements"][0]["tag"] == "img", uploaded_card
+assert uploaded_card["elements"][0]["img_key"] == "img_uploaded_cli", uploaded_card
+assert uploaded_card["elements"][1]["content"] == "Chart uploaded", uploaded_card
+raw_card_send = next((
+    r for r in sends
+    if r["body"]["msg_type"] == "interactive"
+    and json.loads(r["body"]["content"]).get("header", {}).get("title", {}).get("content") == "Raw card"
+), None)
+assert raw_card_send is not None, sends
+assert raw_card_send["body"]["msg_type"] == "interactive", raw_card_send
+raw_card = json.loads(raw_card_send["body"]["content"])
+assert raw_card["header"]["title"]["content"] == "Raw card", raw_card
+assert raw_card["elements"] == [], raw_card
 PY
 
 LOGS="$("$BIFROST_BIN" -p "$PORT" im messages list)"

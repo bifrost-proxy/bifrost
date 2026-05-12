@@ -4013,6 +4013,7 @@ dependencies = [
  "js-sys",
  "log 0.4.29",
  "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

@@ -49,6 +49,10 @@
   - 本地 Admin API
   - Remote CLI
   - WebUI
+- 支持主动发送图片与图文卡片：
+  - 图片来源支持已有 `image_key`，或由 CLI / Admin API 提供图片 bytes/base64 后由 provider 上传获得 `image_key`
+  - 图文卡片支持标题、Markdown 文本、图片 `image_key` 或上传图片，最终映射为 Feishu `interactive` card
+  - 继续保留原始 card JSON 直通能力，避免破坏高级用户手写 Feishu card 的路径
 - 支持 Feishu 长连接事件接收：
   - 消息事件
   - 机器人被 @ 的消息
@@ -168,6 +172,60 @@ IM Gateway
 - `union_id`
 - `email`
 - `chat_id`
+
+### Outbound 图片与图文消息
+
+当前实现现状：
+
+- `send_text` 已支持 Feishu `text` 消息。
+- `send_card` 已支持把调用方提供的原始 Feishu `interactive` card JSON 直通发送；如果调用方自己准备好了带 `img_key` 的卡片 JSON，底层可以发送。
+- 缺口是 provider/API/CLI 没有一等图片消息、图片上传、以及“图片 + 文本”图文卡片构造入口。
+
+补齐方案：
+
+1. Provider 抽象新增图片能力：
+   - `upload_image(config, image_type, file_name, bytes, mime_type) -> UploadedImage`
+   - `send_image(config, target, image_key, uuid) -> SendResult`
+2. Feishu provider 映射：
+   - 上传图片：`POST /im/v1/images`，multipart 字段为 `image_type=message` 和 `image=<file>`，返回 `data.image_key`
+   - 发送图片：`POST /im/v1/messages?receive_id_type=...`，`msg_type=image`，`content={"image_key":"..."}`
+   - 发送图文卡片：仍走 `msg_type=interactive`，卡片元素包含 `img` 和 `markdown`
+3. Admin API `POST /_bifrost/api/im-gateway/messages/send` 兼容字段：
+   - 旧字段 `content` / `text` / `card` 保持不变
+   - 新增 `image`：`{ "image_key": "..."}`
+   - 新增 `image` 上传：`{ "data_base64": "...", "file_name": "chart.png", "mime_type": "image/png", "image_type": "message" }`
+   - 新增 `rich_card`：`{ "title": "...", "text": "...", "image_key": "..." }`
+   - 新增 `rich_card.image`，结构同 `image`，用于上传后生成卡片图片元素
+4. CLI `bifrost im send` 新增参数：
+   - 图片消息：`--image-key <key>` 或 `--image-file <path>`
+   - 图文卡片：`--card-title <title> --card-text <markdown> --card-image-key <key>`
+   - 图文卡片上传图片：`--card-image-file <path>`
+   - 兼容路径：`--text`、`--card-json`、`--card-file` 不变
+5. 安全与边界：
+   - 图片 bytes 只在请求体和 provider 调用中流转，不写入 provider 配置、message log 或文档
+   - message log 只记录 `[image:<image_key>]` 或卡片标题 preview
+   - provider secret 仍只通过本地配置读取，所有响应保持脱敏
+   - 未支持的 `msg_type` 明确拒绝，避免默默当作卡片发送
+6. Agent 最终输出 Markdown 图片：
+   - Agent final reply / session-free reply / continuation reply / streaming progress final flush 在进入 Feishu 卡片前扫描非代码块 Markdown 图片
+   - 本地绝对路径、`file://`、以及相对 Provider `agent_config.work_dir` 的图片会上传到 Feishu，并把 `![alt](path)` 改写为 `![alt](image_key)`
+   - 上传缓存按 `provider_id + canonical path + size + mtime` 命中，避免流式输出或重复回复时反复上传同一张图片造成卡顿
+   - HTTP/HTTPS 图片按链接文本降级；本地图片上传失败时降级为文本占位，禁止把本地路径 Markdown 图片原样送入 Feishu card，避免卡片整体发送失败
+
+验证计划：
+
+- 单元测试：
+  - CLI build send body 覆盖 `--image-key` 和图文卡片参数
+  - Admin handler 覆盖 image payload 归一化、rich card 构造
+  - Agent reply Markdown 图片路径解析、上传失败 fallback、缓存 key 行为
+  - Feishu provider 编译覆盖 multipart 上传和 `msg_type=image` 发送路径
+- E2E 测试：
+  - 更新 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh`，fake Feishu 同时覆盖 token、图片上传、图片消息发送、图文卡片发送
+- human_tests：
+  - 在 `human_tests/im-gateway.md` 增加图片消息、图片上传图文卡片、原始 card JSON 兼容、Agent Markdown 图片自动上传和缓存回归用例，并立即按用例执行
+- Review/Fix/Test：
+  - 第 1 轮复查 provider/API/CLI/doc/test 对齐，复跑 IM 单元与 E2E
+  - 第 2 轮复查兼容性、secret 不泄露、message log preview 和 human_tests 索引，复跑受影响测试
 
 #### Routes
 

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
+use base64::Engine as _;
 use colored::Colorize;
 use serde_json::{json, Value};
 use tracing::debug;
@@ -496,6 +497,14 @@ struct ImSendArgs {
     target: Option<String>,
     card_file: Option<String>,
     card_json: Option<String>,
+    card_title: Option<String>,
+    card_text: Option<String>,
+    card_image_file: Option<String>,
+    card_image_key: Option<String>,
+    card_image_alt: Option<String>,
+    image_file: Option<String>,
+    image_key: Option<String>,
+    image_type: Option<String>,
     text: Option<String>,
 }
 
@@ -520,6 +529,38 @@ fn parse_send_args(args: &[String]) -> Result<ImSendArgs> {
             "--card-json" => {
                 i += 1;
                 parsed.card_json = args.get(i).cloned();
+            }
+            "--card-title" => {
+                i += 1;
+                parsed.card_title = args.get(i).cloned();
+            }
+            "--card-text" => {
+                i += 1;
+                parsed.card_text = args.get(i).cloned();
+            }
+            "--card-image-file" => {
+                i += 1;
+                parsed.card_image_file = args.get(i).cloned();
+            }
+            "--card-image-key" => {
+                i += 1;
+                parsed.card_image_key = args.get(i).cloned();
+            }
+            "--card-image-alt" => {
+                i += 1;
+                parsed.card_image_alt = args.get(i).cloned();
+            }
+            "--image-file" => {
+                i += 1;
+                parsed.image_file = args.get(i).cloned();
+            }
+            "--image-key" => {
+                i += 1;
+                parsed.image_key = args.get(i).cloned();
+            }
+            "--image-type" => {
+                i += 1;
+                parsed.image_type = args.get(i).cloned();
             }
             "--text" => {
                 i += 1;
@@ -556,16 +597,106 @@ fn build_send_body(provider_id: &str, args: &ImSendArgs) -> Result<Value> {
             .map_err(|e| bifrost_core::BifrostError::Parse(format!("invalid card JSON: {}", e)))?;
         body["content"] = card;
         body["msg_type"] = json!("interactive");
+    } else if args.card_title.is_some()
+        || args.card_text.is_some()
+        || args.card_image_file.is_some()
+        || args.card_image_key.is_some()
+        || args.card_image_alt.is_some()
+    {
+        body["rich_card"] = build_rich_card_payload(args)?;
+        body["msg_type"] = json!("interactive");
+    } else if args.image_file.is_some() || args.image_key.is_some() {
+        body["image"] = build_image_payload(
+            args.image_file.as_deref(),
+            args.image_key.as_deref(),
+            args.image_type.as_deref(),
+        )?;
+        body["msg_type"] = json!("image");
     } else if let Some(text_content) = &args.text {
         body["content"] = json!(text_content);
         body["msg_type"] = json!("text");
     } else {
         return Err(bifrost_core::BifrostError::Config(
-            "one of --card-file, --card-json, or --text is required".to_string(),
+            "one of --card-file, --card-json, --card-text, --card-image-file, --card-image-key, --image-file, --image-key, or --text is required".to_string(),
         ));
     }
 
     Ok(body)
+}
+
+fn build_rich_card_payload(args: &ImSendArgs) -> Result<Value> {
+    let mut rich_card = json!({});
+    if let Some(title) = &args.card_title {
+        rich_card["title"] = json!(title);
+    }
+    if let Some(text) = &args.card_text {
+        rich_card["text"] = json!(text);
+    }
+    if let Some(image_key) = &args.card_image_key {
+        rich_card["image_key"] = json!(image_key);
+    }
+    if args.card_image_file.is_some() {
+        rich_card["image"] = build_image_payload(
+            args.card_image_file.as_deref(),
+            None,
+            args.image_type.as_deref(),
+        )?;
+    }
+    if let Some(alt) = &args.card_image_alt {
+        rich_card["image_alt"] = json!(alt);
+    }
+    Ok(rich_card)
+}
+
+fn build_image_payload(
+    image_file: Option<&str>,
+    image_key: Option<&str>,
+    image_type: Option<&str>,
+) -> Result<Value> {
+    let mut image = json!({
+        "image_type": image_type.unwrap_or("message")
+    });
+
+    if let Some(image_key) = image_key.filter(|value| !value.trim().is_empty()) {
+        image["image_key"] = json!(image_key);
+        return Ok(image);
+    }
+
+    let file_path = image_file.ok_or_else(|| {
+        bifrost_core::BifrostError::Config("image file or image key is required".to_string())
+    })?;
+    let bytes = fs::read(Path::new(file_path)).map_err(|e| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to read image file '{}': {}", file_path, e),
+        ))
+    })?;
+    let file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bifrost-image");
+    image["file_name"] = json!(file_name);
+    image["data_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+    if let Some(mime_type) = guess_image_mime_type(file_name) {
+        image["mime_type"] = json!(mime_type);
+    }
+
+    Ok(image)
+}
+
+fn guess_image_mime_type(file_name: &str) -> Option<&'static str> {
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
 }
 
 fn select_provider_interactively(host: &str, port: u16) -> Result<String> {
@@ -1530,6 +1661,8 @@ fn print_im_help() {
     println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx");
     println!("    bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx");
     println!("    bifrost im send --provider feishu-main --text 'hello owner'");
+    println!("    bifrost im send --provider feishu-main --image-file ./alert.png");
+    println!("    bifrost im send --provider feishu-main --card-title 'Deploy' --card-text 'done' --card-image-file ./chart.png");
     println!("    bifrost im send --target oncall --card-file ./card.json");
     println!("    bifrost im route add deploy --provider feishu-main --event message.receive --regex '^/deploy' --script-file ./deploy.sh");
     println!("    bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh");
@@ -1606,6 +1739,49 @@ mod tests {
         assert_eq!(body["msg_type"], "interactive");
         assert!(body["content"]["elements"].is_array());
         assert!(body.get("card").is_none());
+    }
+
+    #[test]
+    fn im_send_builds_image_key_payload() {
+        let args = parse_send_args(&[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--image-key".into(),
+            "img_v3_key".into(),
+        ])
+        .expect("parse send args");
+
+        let body = build_send_body("feishu-main", &args).expect("build send body");
+
+        assert_eq!(body["provider_id"], "feishu-main");
+        assert_eq!(body["target_id"], "__owner__");
+        assert_eq!(body["msg_type"], "image");
+        assert_eq!(body["image"]["image_key"], "img_v3_key");
+        assert_eq!(body["image"]["image_type"], "message");
+    }
+
+    #[test]
+    fn im_send_builds_rich_card_payload() {
+        let args = parse_send_args(&[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--card-title".into(),
+            "Deploy report".into(),
+            "--card-text".into(),
+            "**Done**".into(),
+            "--card-image-key".into(),
+            "img_v3_chart".into(),
+        ])
+        .expect("parse send args");
+
+        let body = build_send_body("feishu-main", &args).expect("build send body");
+
+        assert_eq!(body["provider_id"], "feishu-main");
+        assert_eq!(body["target_id"], "__owner__");
+        assert_eq!(body["msg_type"], "interactive");
+        assert_eq!(body["rich_card"]["title"], "Deploy report");
+        assert_eq!(body["rich_card"]["text"], "**Done**");
+        assert_eq!(body["rich_card"]["image_key"], "img_v3_chart");
     }
 
     #[test]
