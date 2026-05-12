@@ -2,7 +2,7 @@
 //!
 //! Core capabilities (inspired by Codex agent architecture):
 //! - **Turn loop**: prompt → model → tool_calls → execute → repeat
-//! - **Tool system**: Shell execution, file read/write/patch, directory listing
+//! - **Tool system**: Terminal execution, file read/write/patch, directory listing
 //! - **Memory compaction**: Automatic history summarization when context grows too long
 //! - **Token tracking**: Real API token usage tracking + coarse estimates
 //! - **Context management**: History limits, compaction summary preservation
@@ -20,7 +20,7 @@
 //! async fn example() {
 //!     let config = AgentConfig::default();
 //!     let client = AgentClient::new();
-//!     let tools = ToolRegistry::with_defaults(config.get_shell_timeout_secs());
+//!     let tools = ToolRegistry::with_defaults();
 //!     let mut session = AgentSession::new("user-123");
 //!
 //!     let result = run_turn(&client, &config, &mut session, &tools, "echo hello", None)

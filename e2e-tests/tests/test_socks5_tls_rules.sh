@@ -17,7 +17,7 @@ BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
-DATA_DIR="${PROJECT_ROOT}/.bifrost-socks5-tls-rules-test"
+DATA_DIR="${BIFROST_DATA_DIR:-${PROJECT_ROOT}/.bifrost-socks5-tls-rules-test}"
 PROXY_LOG_FILE="${DATA_DIR}/proxy.log"
 RULES_DIR="$E2E_DIR/rules/socks5_tls"
 
@@ -37,6 +37,16 @@ cleanup() {
     HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}" \
     "$E2E_DIR/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
     sleep 1
+    remove_data_dir
+}
+
+remove_data_dir() {
+    local attempt=0
+    while [ $attempt -lt 5 ]; do
+        rm -rf "$DATA_DIR" 2>/dev/null && return 0
+        sleep 0.5
+        attempt=$((attempt + 1))
+    done
     rm -rf "$DATA_DIR"
 }
 
@@ -99,7 +109,7 @@ EOF
     fi
     sleep 1
     
-    rm -rf "$DATA_DIR"
+    remove_data_dir
     mkdir -p "$DATA_DIR/rules"
     
     if [ -z "${MOCK_SERVERS_STARTED:-}" ]; then

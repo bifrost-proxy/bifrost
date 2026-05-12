@@ -34,24 +34,25 @@
   - 拒绝绝对路径，只允许相对路径
 - 旧 `patch.rs` 已移除，避免同一目标保留两套工具。
 
-### Shell PTY
+### Unified Exec Terminal
 
-- 实现位于 `crates/agent/src/tools/pty_shell.rs`。
-- 保留持久 session + `write_stdin` 交互。
-- 新增 `wait_for_completion=false` 前台交互模式，允许先返回 `session_id`，再由 `write_stdin` 驱动前台程序。
-- 为了避免 macOS 交互式 shell 启动脚本、prompt 与控制序列污染 sentinel 检测，session 默认改为启动“干净 shell”（zsh 使用 `-f`，bash 使用 `--noprofile --norc`）。
-- stdout/stderr 改为按原始字节块持续读取，而不是按行读取，确保无换行输出、prompt 前缀和前台交互场景都能稳定保留到缓冲区。
-- 输出补齐：
+- 实现位于 `crates/agent/src/tools/exec_command.rs`。
+- 只保留 `exec_command` + `write_stdin` 一套终端协议；旧 `shell_pty` 持久 shell session 已移除。
+- `exec_command` 负责真实子进程和可选 PTY，长任务在初始 `yield_time_ms` 后返回数字 `session_id`。
+- `write_stdin` 只写入或轮询 `ExecSessionManager` 中的真实进程 session，不再存在 sentinel-based shell fallback。
+- `write_stdin` 属于会话型状态工具，必须按模型给出的顺序执行，不进入 local parallel tool batch，避免同一 `session_id` 的 stdin 写入和输出 drain 乱序。
+- 长任务在初始 yield 前保存到 `ExecSessionManager`，后台 watcher 持续观察真实进程退出；即使模型没有立即继续 poll，后续 `write_stdin` 也能拿到真实 `exit_code` 和尾部输出。
+- `yield_time_ms` 与 Codex unified exec 对齐：`exec_command` 默认 10000ms，非空 `write_stdin` 默认 250ms，空输入 poll 至少 5000ms 且受 `background_terminal_max_timeout` 上限控制。
+- 输出 schema 统一包含：
   - `session_id`
-  - `exit_indicator`
   - `exit_code`
-- `exit_code` 解析不能假设 sentinel 位于行首；交互式 zsh/bash 可能把 prompt 与 sentinel 放在同一行，解析时需在行内查找 sentinel 前缀。
+  - `output`
 
 ## 后续增强方向
 
 - Goal：当前只实现目标状态与预算字段，后续可扩展 token/time usage 挂载到 session runtime 并在完成时回报预算消耗。
 - Apply Patch：运行时已兼容 freeform raw patch，后续可考虑独立 freeform grammar tool 注册方式。
-- Shell PTY：当前是"PTY-like"持久 shell，会话与交互能力已覆盖核心场景，后续可扩展完整的 `tty`/`max_output_tokens`/统一输出 schema。
+- Unified Exec：当前已覆盖 pipe/PTY、stdin 写入、有序轮询、后台结束监听、Ctrl-C 取消与输出截断；后续增强只在 `exec_command`/`write_stdin` 这一套协议内扩展。
 
 ## 测试方案
 
@@ -62,11 +63,13 @@
   - `test_parse_update_chunk_with_bare_context_marker`
   - `test_apply_rejects_absolute_path`
   - `test_apply_diff_tool_accepts_raw_patch_body`
-- `pty_shell`：
-  - `test_pty_shell_simple_command`
-  - `test_pty_shell_reports_non_zero_exit_code`
-  - `test_pty_shell_interactive_mode_returns_running`
-  - `test_write_stdin_to_session`
+- `exec_command`：
+  - `exec_command_returns_completed_output`
+  - `exec_command_yields_session_and_write_stdin_polls_to_exit`
+  - `exec_command_background_watcher_observes_exit_before_next_poll`
+  - `exec_command_write_stdin_drives_pipe_process`
+  - `exec_command_yield_defaults_and_clamps_match_codex_unified_exec`
+  - `test_exec_command_tty_reports_isatty_true`
 - `goal`：create/get/update/duplicate/thread-safety 全覆盖。
 
 ### E2E 测试

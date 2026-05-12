@@ -1,7 +1,7 @@
 //! A capped buffer that preserves a stable prefix ("head") and suffix ("tail"),
 //! dropping the middle once it exceeds the configured maximum.
 //!
-//! This is used for shell command output streaming to prevent memory exhaustion
+//! This is used for terminal command output streaming to prevent memory exhaustion
 //! from commands that produce extremely large outputs. The buffer retains the
 //! beginning and end of the output, which are typically the most useful parts
 //! for debugging and understanding command behavior.
@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-/// Default maximum bytes for shell output buffer (1 MiB, matching Codex).
+/// Default maximum bytes for terminal output buffer (1 MiB, matching Codex).
 pub const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 
 /// A capped buffer that preserves a stable prefix ("head") and suffix ("tail"),

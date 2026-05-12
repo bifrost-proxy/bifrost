@@ -1,14 +1,12 @@
 //! Tool system: ToolHandler trait, ToolRegistry, and built-in tools.
 //!
 //! Built-in tools:
-//! - `shell`: Execute shell commands (zsh/bash, auto-detected)
 //! - `write_file`: Write content to a file
 //! - `read_file`: Read file contents (with offset/limit)
 //! - `list_directory`: List directory entries
 //! - `apply_patch`: Apply structured diff patches
 //! - `exec_command`: Run shell commands with optional PTY-backed sessions
-//! - `pty_shell`: legacy PTY-backed persistent shell sessions kept for internal compatibility
-//! - `write_stdin`: Write to exec/PTY-compatible session stdin
+//! - `write_stdin`: Write to an exec_command session stdin
 //! - `view_image`: Load local image files as data URLs
 //! - `request_user_input`: Validate structured user input requests
 //! - `tool_search`: turn-scoped deferred tool discovery (registered only when
@@ -20,10 +18,8 @@ pub mod exec_command;
 pub mod file_ops;
 pub mod goal;
 pub mod head_tail_buffer;
-pub mod pty_shell;
 pub mod request_user_input;
 pub mod set_title;
-pub mod shell;
 pub mod switch_workdir;
 pub mod tool_search;
 pub mod update_plan;
@@ -54,6 +50,7 @@ pub trait ToolHandler: Send + Sync {
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn ToolHandler>>,
+    exec_session_manager: Option<Arc<exec_command::ExecSessionManager>>,
 }
 
 impl Default for ToolRegistry {
@@ -66,6 +63,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            exec_session_manager: None,
         }
     }
 
@@ -75,12 +73,10 @@ impl ToolRegistry {
     }
 
     /// Create a registry with all built-in tools.
-    pub fn with_defaults(shell_timeout_secs: u64) -> Self {
+    pub fn with_defaults() -> Self {
         let mut registry = Self::new();
-        let pty_session_manager = Arc::new(pty_shell::PtySessionManager::new());
         let exec_session_manager = Arc::new(exec_command::ExecSessionManager::new());
-        // Existing tools
-        registry.register(Arc::new(shell::ShellTool::new(shell_timeout_secs)));
+        registry.exec_session_manager = Some(exec_session_manager.clone());
         registry.register(Arc::new(exec_command::ExecCommandTool::new(
             exec_session_manager.clone(),
         )));
@@ -94,11 +90,17 @@ impl ToolRegistry {
         registry.register(Arc::new(request_user_input::RequestUserInputTool));
         // Structured patch tool.
         registry.register(Arc::new(apply_patch_diff::ApplyDiffTool));
-        registry.register(Arc::new(pty_shell::WriteStdinTool::new(
-            pty_session_manager,
+        registry.register(Arc::new(exec_command::WriteStdinTool::new(
             exec_session_manager,
         )));
         registry
+    }
+
+    /// Apply turn-level terminal runtime options to the shared exec session manager.
+    pub fn configure_exec_sessions(&self, max_background_terminal_timeout_ms: u64) {
+        if let Some(manager) = &self.exec_session_manager {
+            manager.set_max_background_terminal_timeout(max_background_terminal_timeout_ms);
+        }
     }
 
     /// Get tool definitions for the model API `tools` parameter.
@@ -158,7 +160,6 @@ fn model_visible_tool_priority(name: &str) -> (u8, &str) {
     let priority = match name {
         "exec_command" => 0,
         "write_stdin" => 1,
-        "shell" => 9,
         _ => 5,
     };
     (priority, name)
@@ -170,7 +171,7 @@ mod tests {
 
     #[test]
     fn model_visible_tool_definitions_prefer_unified_exec_tools() {
-        let definitions = ToolRegistry::with_defaults(5).definitions();
+        let definitions = ToolRegistry::with_defaults().definitions();
         let names = definitions
             .iter()
             .map(ToolDefinition::name)
@@ -183,16 +184,18 @@ mod tests {
             .iter()
             .position(|name| *name == "write_stdin")
             .unwrap();
-        let shell = names.iter().position(|name| *name == "shell").unwrap();
+        assert!(!names.contains(&"shell"));
         assert!(!names.contains(&"shell_pty"));
-        assert!(exec_command < shell);
-        assert!(write_stdin < shell);
-        assert!(!ToolRegistry::with_defaults(5).contains_tool("shell_pty"));
+        assert!(exec_command < names.len());
+        assert!(write_stdin < names.len());
+        assert!(exec_command < write_stdin);
+        assert!(!ToolRegistry::with_defaults().contains_tool("shell"));
+        assert!(!ToolRegistry::with_defaults().contains_tool("shell_pty"));
     }
 
     #[tokio::test]
     async fn unknown_shell_aliases_are_rejected() {
-        let registry = ToolRegistry::with_defaults(5);
+        let registry = ToolRegistry::with_defaults();
         assert!(!registry.contains_tool("shell_command"));
         assert!(!registry.contains_tool("local_shell"));
 

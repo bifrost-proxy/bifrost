@@ -13,14 +13,14 @@
 - Prompt 风格对齐：默认指令只描述当前 Agent 行为，不写内部兼容说明。
 - 核心工具命名对齐：MCP resource 工具使用 Codex canonical 名称 `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource`。
 - 核心工具暴露对齐：MCP resource 工具在存在 MCP server 时保持直接可见，不进入 deferred `tool_search`。
-- Shell 工具面收敛：只保留当前注册工具名，删除 `shell_command` / `local_shell` 历史 alias。
+- Terminal 工具面收敛：只保留 `exec_command` / `write_stdin`，删除 `shell` / `shell_pty` / `shell_command` / `local_shell` 旧入口。
 - MCP resource 执行对齐：resource list/read 调用走 MCP `resources/list`、`resources/templates/list`、`resources/read`，输出包含 server 字段，便于模型后续 read。
 - Loop 架构对齐：turn 内部记录 Codex-style event stream，不再只能通过同步 Chat Completions loop 推断过程。
 - 工具调度对齐：本地可并发工具使用 `FuturesOrdered` 批量执行，结果按模型 tool_calls 顺序落回 history；状态型工具保持顺序执行。
 
 ### 必须不破坏
 
-- 不改变现有 `exec_command`、`shell_pty`、`write_stdin`、`apply_patch` 的可见顺序和既有行为。
+- 不改变现有 `exec_command`、`write_stdin`、`apply_patch` 的可见顺序和既有行为。
 - 不把权限、沙箱、审批伪实现成空成功；相关能力仍然不支持。
 - 不让 MCP server tool 数量阈值逻辑改变：server tools 仍按 Codex `>= 100` 进入 deferred loading。
 - 历史 shell alias 不再可见也不再可执行，避免扩大隐藏工具面。
@@ -30,7 +30,7 @@
 ### 必须真实验证
 
 - Rust 单元测试验证 MCP resource schema 名称、additionalProperties 边界和 ToolDefinition 转换。
-- Rust 单元测试验证 `shell_command` / `local_shell` 会被拒绝，而不是映射到 `shell`。
+- Rust 单元测试验证 `shell` / `shell_pty` / `shell_command` / `local_shell` 会被拒绝，而不是映射到统一终端工具。
 - Rust 单元测试验证并发本地工具不会互相阻塞，且 history 按 tool_call 原顺序回填。
 - Rust 单元测试验证状态型工具的执行模式保持 ordered。
 - 目标 E2E 验证 agent P1 工具链仍可用。
@@ -70,9 +70,9 @@ Bifrost 原先 resource helper 使用 `mcp__list_resources` 等非 canonical 名
 - server tools 仍独立按 `DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD = 100` 决定 direct/deferred。
 - `McpManager::call_tool` 对 resource tools 做虚拟路由，不依赖 `tool_routing`。
 
-### Shell 工具面
+### Terminal 工具面
 
-Bifrost 只保留当前注册工具名：`shell`、`shell_pty`、`write_stdin`、`exec_command`。`shell_command` / `local_shell` 历史 alias 不再进入 `ToolRegistry::execute`，模型或外部调用如果继续使用这些旧名称会收到 `unknown tool`，从而尽早暴露旧协议。
+Bifrost 只保留统一终端协议：`exec_command`、`write_stdin`。`shell` / `shell_pty` / `shell_command` / `local_shell` 旧入口不再保留实现或注册入口；模型或外部调用如果继续使用旧名称会收到 `unknown tool`，从而尽早暴露旧协议。
 
 ## 依赖项
 
@@ -98,6 +98,7 @@ Bifrost 只保留当前注册工具名：`shell`、`shell_pty`、`write_stdin`�
 - `mcp::resources::tests::test_all_resource_tool_definitions_are_function_tools`：验证 resource helpers 能转成 Chat Completions `ToolDefinition`。
 - `mcp::tests::mcp_resource_tools_stay_direct_when_server_tools_are_deferred`：验证 server tools 达到 deferred threshold 时 resource tools 仍直接可见。
 - `tools::tests::unknown_shell_aliases_are_rejected`：验证 `shell_command` / `local_shell` 不可见且旧名称执行失败。
+- `p1_tools_e2e::legacy_shell_tools_are_not_registered_by_default`：验证 `shell` / `shell_pty` 不注册且执行失败。
 - `turn_runtime::tests::stateful_tools_are_ordered`：验证 `tool_search`、Goal、计划、标题、工作目录切换等工具保持 ordered。
 - `turn_runtime::tests::ordinary_local_tools_can_run_in_parallel`：验证普通本地工具判定为 parallel。
 - `session::tests::codex_parallel_tool_batch_preserves_history_order`：用两个 barrier 测试工具证明 local tool batch 并发执行，且 tool result 按 `response.tool_calls` 原顺序落回 history。
@@ -111,7 +112,7 @@ Bifrost 只保留当前注册工具名：`shell`、`shell_pty`、`write_stdin`�
 
 这些用例覆盖本轮核心工具对齐不破坏既有 P1 工具链。
 
-`test_agent_codex_alignment_chat_api.sh` 是本轮关键真实链路验证：脚本先编译 `bifrost`，再用临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy` 启动真实服务，配置 mock Chat Completions provider 与 stdio MCP fixture，通过真实 `/agent/chat` 覆盖默认 prompt 不泄露兼容实现说明、MCP resource canonical tools、deferred MCP tools 通过 `tool_search` 发现但不直接暴露、`update_plan`、`set_title`、MCP resource read、并发 shell tool batch 和 history 顺序回填。
+`test_agent_codex_alignment_chat_api.sh` 是本轮关键真实链路验证：脚本先编译 `bifrost`，再用临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy` 启动真实服务，配置 mock Chat Completions provider 与 stdio MCP fixture，通过真实 `/agent/chat` 覆盖默认 prompt 不泄露兼容实现说明、MCP resource canonical tools、deferred MCP tools 通过 `tool_search` 发现但不直接暴露、`update_plan`、`set_title`、MCP resource read、并发 `exec_command` tool batch 和 history 顺序回填。
 
 ### 真实场景测试
 

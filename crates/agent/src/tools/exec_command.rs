@@ -15,7 +15,7 @@ use serde_json::json;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -24,7 +24,21 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+pub const MIN_YIELD_TIME_MS: u64 = 250;
+pub const MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS: u64 = 5_000;
+pub const MAX_YIELD_TIME_MS: u64 = 30_000;
+pub const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
+pub const DEFAULT_WRITE_STDIN_YIELD_TIME_MS: u64 = 250;
+pub const DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
+const EXIT_STATUS_POLL_INTERVAL_MS: u64 = 100;
+const TRAILING_OUTPUT_GRACE_MS: u64 = 100;
+
 pub struct ExecCommandTool {
+    session_manager: Arc<ExecSessionManager>,
+}
+
+/// Tool that writes arbitrary input to a running exec_command session's stdin.
+pub struct WriteStdinTool {
     session_manager: Arc<ExecSessionManager>,
 }
 
@@ -34,7 +48,14 @@ impl ExecCommandTool {
     }
 }
 
+impl WriteStdinTool {
+    pub fn new(session_manager: Arc<ExecSessionManager>) -> Self {
+        Self { session_manager }
+    }
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecCommandArgs {
     cmd: String,
     #[serde(default)]
@@ -49,13 +70,10 @@ struct ExecCommandArgs {
     yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    disable_timeout: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecWriteArgs {
     pub session_id: String,
     #[serde(default)]
@@ -66,9 +84,22 @@ pub struct ExecWriteArgs {
     pub max_output_tokens: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteStdinArgs {
+    session_id: i64,
+    #[serde(default)]
+    chars: Option<String>,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+}
+
 pub struct ExecSessionManager {
     sessions: DashMap<String, Arc<ExecSession>>,
     next_session_id: AtomicI32,
+    max_empty_write_stdin_yield_time_ms: AtomicU64,
 }
 
 impl Default for ExecSessionManager {
@@ -82,11 +113,34 @@ impl ExecSessionManager {
         Self {
             sessions: DashMap::new(),
             next_session_id: AtomicI32::new(1),
+            max_empty_write_stdin_yield_time_ms: AtomicU64::new(
+                DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
+            ),
         }
+    }
+
+    pub fn with_max_background_terminal_timeout(max_timeout_ms: u64) -> Self {
+        let manager = Self::new();
+        manager.set_max_background_terminal_timeout(max_timeout_ms);
+        manager
+    }
+
+    pub fn set_max_background_terminal_timeout(&self, max_timeout_ms: u64) {
+        self.max_empty_write_stdin_yield_time_ms.store(
+            max_timeout_ms.max(MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.contains_key(session_id)
+    }
+
+    pub async fn has_completed_session(&self, session_id: &str) -> bool {
+        let Some(session) = self.sessions.get(session_id).map(|entry| entry.clone()) else {
+            return false;
+        };
+        session.is_completed().await
     }
 
     async fn spawn(
@@ -107,20 +161,7 @@ impl ExecSessionManager {
         };
         self.sessions
             .insert(session.session_id.clone(), session.clone());
-
-        if args.disable_timeout.unwrap_or(false) {
-            return Ok(session);
-        }
-        if let Some(timeout_ms) = args.timeout_ms {
-            let session_for_timeout = session.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-                if !session_for_timeout.is_completed().await {
-                    session_for_timeout.mark_timed_out().await;
-                    session_for_timeout.terminate().await;
-                }
-            });
-        }
+        spawn_exit_watcher(session.clone());
 
         Ok(session)
     }
@@ -152,7 +193,9 @@ impl ExecSessionManager {
 
         let poll = session
             .poll(
-                Duration::from_millis(args.yield_time_ms.unwrap_or(500)),
+                Duration::from_millis(
+                    self.write_stdin_yield_time_ms(args.yield_time_ms, input.is_empty()),
+                ),
                 PollMode::OutputOrCompletion,
             )
             .await;
@@ -164,6 +207,97 @@ impl ExecSessionManager {
             success: true,
             output: response,
         }
+    }
+
+    fn exec_yield_time_ms(&self, requested: Option<u64>) -> u64 {
+        clamp_yield_time(requested.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS))
+    }
+
+    fn write_stdin_yield_time_ms(&self, requested: Option<u64>, empty_input: bool) -> u64 {
+        let requested = requested.unwrap_or(DEFAULT_WRITE_STDIN_YIELD_TIME_MS);
+        if empty_input {
+            requested.clamp(
+                MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS,
+                self.max_empty_write_stdin_yield_time_ms
+                    .load(Ordering::Relaxed),
+            )
+        } else {
+            clamp_yield_time(requested)
+        }
+    }
+}
+
+fn clamp_yield_time(yield_time_ms: u64) -> u64 {
+    yield_time_ms.clamp(MIN_YIELD_TIME_MS, MAX_YIELD_TIME_MS)
+}
+
+fn spawn_exit_watcher(session: Arc<ExecSession>) {
+    tokio::spawn(async move {
+        loop {
+            session.refresh_exit_status().await;
+            if session.is_completed().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(EXIT_STATUS_POLL_INTERVAL_MS)).await;
+        }
+    });
+}
+
+#[async_trait]
+impl ToolHandler for WriteStdinTool {
+    fn name(&self) -> &str {
+        "write_stdin"
+    }
+
+    fn description(&self) -> &str {
+        "Writes characters to an existing exec_command session and returns recent output."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "number",
+                    "description": "Identifier of the running unified exec session."
+                },
+                "chars": {
+                    "type": "string",
+                    "description": "Bytes to write to stdin (may be empty to poll)."
+                },
+                "yield_time_ms": {
+                    "type": "integer",
+                    "description": "How long to wait (in milliseconds) for output before yielding. Defaults to 250 for writes; empty polls wait at least 5000 and are capped by background terminal timeout."
+                },
+                "max_output_tokens": {
+                    "type": "integer",
+                    "description": "Maximum number of tokens to return. Excess output will be truncated."
+                }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, arguments: &str, _work_dir: &Path) -> ToolResult {
+        let args: WriteStdinArgs = match serde_json::from_str(arguments) {
+            Ok(args) => args,
+            Err(error) => {
+                return ToolResult {
+                    success: false,
+                    output: format!("invalid arguments: {error}"),
+                };
+            }
+        };
+
+        self.session_manager
+            .write_and_poll(ExecWriteArgs {
+                session_id: args.session_id.to_string(),
+                chars: Some(args.chars.unwrap_or_default()),
+                yield_time_ms: args.yield_time_ms,
+                max_output_tokens: args.max_output_tokens,
+            })
+            .await
     }
 }
 
@@ -208,14 +342,6 @@ impl ToolHandler for ExecCommandTool {
                 "max_output_tokens": {
                     "type": "integer",
                     "description": "Maximum number of tokens to return. Excess output will be truncated."
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Optional background timeout in milliseconds. If omitted, the yielded session may run until completion or explicit cancellation."
-                },
-                "disable_timeout": {
-                    "type": "boolean",
-                    "description": "Disable the background timeout. Included for compatibility; currently equivalent to omitting timeout_ms."
                 }
             },
             "required": ["cmd"],
@@ -247,7 +373,7 @@ impl ToolHandler for ExecCommandTool {
             None => work_dir.to_path_buf(),
         };
 
-        let yield_time_ms = args.yield_time_ms.unwrap_or(1000);
+        let yield_time_ms = self.session_manager.exec_yield_time_ms(args.yield_time_ms);
         let start = Instant::now();
         let session = match self.session_manager.spawn(&args, &run_dir).await {
             Ok(session) => session,
@@ -358,7 +484,6 @@ enum ExecBackend {
 struct ExecState {
     completed: bool,
     exit_code: Option<i32>,
-    timed_out: bool,
 }
 
 pub struct ExecSession {
@@ -451,11 +576,6 @@ impl ExecSession {
         }
     }
 
-    async fn mark_timed_out(&self) {
-        let mut state = self.state.lock().await;
-        state.timed_out = true;
-    }
-
     async fn is_completed(&self) -> bool {
         self.state.lock().await.completed
     }
@@ -494,13 +614,13 @@ impl ExecSession {
         };
 
         if let Some(exit_code) = exit_code {
+            tokio::time::sleep(Duration::from_millis(TRAILING_OUTPUT_GRACE_MS)).await;
             let mut state = self.state.lock().await;
+            if state.completed {
+                return;
+            }
             state.completed = true;
-            state.exit_code = Some(if state.timed_out && exit_code == -1 {
-                124
-            } else {
-                exit_code
-            });
+            state.exit_code = Some(exit_code);
         }
     }
 }
@@ -560,8 +680,13 @@ fn format_poll_response(poll: &ExecPoll, max_output_tokens: Option<usize>) -> St
     let output = max_output_tokens
         .map(|limit| truncate_to_token_budget(&poll.output, limit))
         .unwrap_or_else(|| poll.output.clone());
+    let session_id = if poll.completed {
+        serde_json::Value::Null
+    } else {
+        session_id_value(&poll.session_id)
+    };
     json!({
-        "session_id": session_id_value(&poll.session_id),
+        "session_id": session_id,
         "exit_code": poll.exit_code,
         "original_token_count": original_token_count,
         "output": output
@@ -614,7 +739,6 @@ fn create_pipe_exec_session(
         state: Mutex::new(ExecState {
             completed: false,
             exit_code: None,
-            timed_out: false,
         }),
     });
 
@@ -702,7 +826,6 @@ fn create_pty_exec_session(
         state: Mutex::new(ExecState {
             completed: false,
             exit_code: None,
-            timed_out: false,
         }),
     });
 
@@ -769,6 +892,7 @@ mod tests {
         assert_eq!(value["exit_code"], serde_json::Value::Null);
 
         let mut final_poll = serde_json::Value::Null;
+        let mut combined_output = String::new();
         for _ in 0..20 {
             let poll = manager
                 .write_and_poll(ExecWriteArgs {
@@ -780,12 +904,63 @@ mod tests {
                 .await;
             assert!(poll.success, "{}", poll.output);
             final_poll = serde_json::from_str(&poll.output).unwrap();
+            combined_output.push_str(final_poll["output"].as_str().unwrap_or(""));
             if !final_poll["exit_code"].is_null() {
                 break;
             }
         }
         assert_eq!(final_poll["exit_code"], 0);
-        assert!(final_poll["output"].as_str().unwrap_or("").contains("end"));
+        assert!(final_poll["session_id"].is_null());
+        assert!(combined_output.contains("end"));
+        assert!(!manager.has_session(&session_id));
+    }
+
+    #[tokio::test]
+    async fn exec_command_background_watcher_observes_exit_before_next_poll() {
+        let manager = Arc::new(ExecSessionManager::new());
+        let tool = ExecCommandTool::new(manager.clone());
+        let dir = tempdir().unwrap();
+        let result = tool
+            .execute(
+                r#"{"cmd":"sleep 0.8; printf watched-done","yield_time_ms":50}"#,
+                dir.path(),
+            )
+            .await;
+        assert!(result.success, "{}", result.output);
+        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let session_id = value["session_id"]
+            .as_i64()
+            .expect("session id")
+            .to_string();
+        assert_eq!(value["exit_code"], serde_json::Value::Null);
+
+        for _ in 0..20 {
+            if manager.has_completed_session(&session_id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            manager.has_completed_session(&session_id).await,
+            "background watcher did not observe exit"
+        );
+
+        let poll = manager
+            .write_and_poll(ExecWriteArgs {
+                session_id: session_id.clone(),
+                chars: None,
+                yield_time_ms: Some(1),
+                max_output_tokens: None,
+            })
+            .await;
+        assert!(poll.success, "{}", poll.output);
+        let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+        assert_eq!(value["exit_code"], 0);
+        assert!(value["session_id"].is_null());
+        assert!(value["output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("watched-done"));
         assert!(!manager.has_session(&session_id));
     }
 
@@ -806,7 +981,24 @@ mod tests {
             .as_i64()
             .expect("session id")
             .to_string();
-        assert!(value["output"].as_str().unwrap_or("").contains("ready"));
+        let mut combined_output = value["output"].as_str().unwrap_or("").to_string();
+        for _ in 0..20 {
+            if combined_output.contains("ready") {
+                break;
+            }
+            let poll = manager
+                .write_and_poll(ExecWriteArgs {
+                    session_id: session_id.clone(),
+                    chars: None,
+                    yield_time_ms: Some(50),
+                    max_output_tokens: None,
+                })
+                .await;
+            assert!(poll.success, "{}", poll.output);
+            let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+            combined_output.push_str(value["output"].as_str().unwrap_or(""));
+        }
+        assert!(combined_output.contains("ready"), "{combined_output}");
 
         let poll = manager
             .write_and_poll(ExecWriteArgs {
@@ -819,6 +1011,7 @@ mod tests {
         assert!(poll.success, "{}", poll.output);
         let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
         assert_eq!(value["exit_code"], 0);
+        assert!(value["session_id"].is_null());
         assert!(value["output"]
             .as_str()
             .unwrap_or("")
@@ -878,6 +1071,24 @@ mod tests {
         assert_eq!(value["output"], "nope");
     }
 
+    #[tokio::test]
+    async fn write_stdin_rejects_legacy_protocol_fields() {
+        let tool = WriteStdinTool::new(Arc::new(ExecSessionManager::new()));
+        let dir = tempdir().unwrap();
+
+        let hidden_input = tool
+            .execute(r#"{"session_id":1,"input":"legacy"}"#, dir.path())
+            .await;
+        assert!(!hidden_input.success);
+        assert!(hidden_input.output.contains("unknown field `input`"));
+
+        let string_session_id = tool
+            .execute(r#"{"session_id":"1","chars":""}"#, dir.path())
+            .await;
+        assert!(!string_session_id.success);
+        assert!(string_session_id.output.contains("expected i64"));
+    }
+
     #[test]
     fn exec_command_login_false_uses_non_login_shell_flag() {
         let non_login = ShellCommand::new(Some("zsh"), "printf ok", false);
@@ -885,6 +1096,40 @@ mod tests {
 
         let login = ShellCommand::new(Some("zsh"), "printf ok", true);
         assert_eq!(login.args[0], "-lc");
+    }
+
+    #[test]
+    fn exec_command_yield_defaults_and_clamps_match_codex_unified_exec() {
+        let manager = ExecSessionManager::new();
+        assert_eq!(manager.exec_yield_time_ms(None), 10_000);
+        assert_eq!(manager.exec_yield_time_ms(Some(1)), MIN_YIELD_TIME_MS);
+        assert_eq!(manager.exec_yield_time_ms(Some(60_000)), MAX_YIELD_TIME_MS);
+
+        assert_eq!(
+            manager.write_stdin_yield_time_ms(None, false),
+            DEFAULT_WRITE_STDIN_YIELD_TIME_MS
+        );
+        assert_eq!(
+            manager.write_stdin_yield_time_ms(Some(1), false),
+            MIN_YIELD_TIME_MS
+        );
+        assert_eq!(
+            manager.write_stdin_yield_time_ms(Some(60_000), false),
+            MAX_YIELD_TIME_MS
+        );
+        assert_eq!(
+            manager.write_stdin_yield_time_ms(None, true),
+            MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS
+        );
+
+        manager.set_max_background_terminal_timeout(6_000);
+        assert_eq!(manager.write_stdin_yield_time_ms(Some(60_000), true), 6_000);
+
+        manager.set_max_background_terminal_timeout(1_000);
+        assert_eq!(
+            manager.write_stdin_yield_time_ms(Some(60_000), true),
+            MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS
+        );
     }
 
     #[tokio::test]

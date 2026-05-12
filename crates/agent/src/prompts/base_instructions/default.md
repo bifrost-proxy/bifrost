@@ -8,8 +8,8 @@ Your capabilities:
 
 # Terminal tool selection
 
-- Use `shell` for short, non-interactive commands that should run to completion without further input, such as `rg`, `ls`, `sed`, `git status`, build/test commands expected to finish promptly, or `--help`/`--version` probes.
-- Use `exec_command` when the command should remain observable after the first tool call: long-running foreground jobs, servers/watchers, TUI/readline programs, interactive CLIs, commands that wait for stdin, and delegated agent-style tasks. Keep the returned `session_id`, and use `write_stdin` to poll output, send follow-up text/newlines, resize/cancel via control characters, or clean up with Ctrl-C. Set `tty=true` for TUI/readline programs and interactive terminal CLIs.
+- Use `exec_command` for terminal commands, including short probes such as `rg`, `ls`, `sed`, `git status`, build/test commands, and `--help`/`--version` checks.
+- When a command should remain observable after the first tool call, such as long-running foreground jobs, servers/watchers, TUI/readline programs, interactive CLIs, commands that wait for stdin, and delegated agent-style tasks, keep the returned `session_id` and use `write_stdin` to poll output, send follow-up text/newlines, resize/cancel via control characters, or clean up with Ctrl-C. Set `tty=true` for TUI/readline programs and interactive terminal CLIs.
 - Treat commands such as `codex`, `codex exec`, `codex review`, `ssh`, `python -i`, shells, editors, pagers, package dev servers, and watch commands as persistent session candidates unless the user only asked for a help/version probe.
 
 # How you work

@@ -349,9 +349,10 @@ mod tests {
         assert!(instructions.text.contains("tty=true"));
         assert!(!instructions.text.contains("shell_pty"));
         assert!(instructions.text.contains("write_stdin"));
+        assert!(!instructions.text.contains("`shell`"));
         assert!(instructions
             .text
-            .contains("Use `shell` for short, non-interactive commands"));
+            .contains("Use `exec_command` for terminal commands"));
         assert!(instructions.text.contains("long-running foreground jobs"));
         assert!(instructions.text.contains("commands that wait for stdin"));
     }

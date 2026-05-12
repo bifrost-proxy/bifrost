@@ -814,15 +814,20 @@ mod tests {
 
         recorder.record_user_message("test", "run ls").unwrap();
         recorder
-            .record_tool_call_with_id("test", "shell", r#"{"command": "ls"}"#, Some("call-shell"))
+            .record_tool_call_with_id(
+                "test",
+                "exec_command",
+                r#"{"cmd": "ls"}"#,
+                Some("call-exec-command"),
+            )
             .unwrap();
         recorder
             .record_tool_result_with_call_id(
                 "test",
-                "shell",
+                "exec_command",
                 "file1.txt\nfile2.txt",
                 true,
-                Some("call-shell"),
+                Some("call-exec-command"),
             )
             .unwrap();
         recorder
@@ -852,7 +857,7 @@ mod tests {
             r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"hello"}}"#
                 .to_string()
                 + "\n"
-                + r#"{"timestamp":2,"event_type":"tool_result","session_key":"s","content":{"tool_name":"shell","result":"orphan","success":true}}"#
+                + r#"{"timestamp":2,"event_type":"tool_result","session_key":"s","content":{"tool_name":"exec_command","result":"orphan","success":true}}"#
                 + "\n",
         )
         .unwrap();
@@ -1008,18 +1013,18 @@ mod tests {
         recorder
             .record_tool_call_with_id(
                 "test-events",
-                "shell",
-                r#"{"command": "ls"}"#,
-                Some("call-shell"),
+                "exec_command",
+                r#"{"cmd": "ls"}"#,
+                Some("call-exec-command"),
             )
             .unwrap();
         recorder
             .record_tool_result_with_call_id(
                 "test-events",
-                "shell",
+                "exec_command",
                 "file1.txt",
                 true,
-                Some("call-shell"),
+                Some("call-exec-command"),
             )
             .unwrap();
         recorder
@@ -1035,13 +1040,13 @@ mod tests {
         assert_eq!(events[0].content["message"], "hello");
 
         assert_eq!(events[1].event_type, TOOL_CALL);
-        assert_eq!(events[1].content["call_id"], "call-shell");
-        assert_eq!(events[1].content["tool_name"], "shell");
-        assert_eq!(events[1].content["arguments"], r#"{"command": "ls"}"#);
+        assert_eq!(events[1].content["call_id"], "call-exec-command");
+        assert_eq!(events[1].content["tool_name"], "exec_command");
+        assert_eq!(events[1].content["arguments"], r#"{"cmd": "ls"}"#);
 
         assert_eq!(events[2].event_type, TOOL_RESULT);
-        assert_eq!(events[2].content["call_id"], "call-shell");
-        assert_eq!(events[2].content["tool_name"], "shell");
+        assert_eq!(events[2].content["call_id"], "call-exec-command");
+        assert_eq!(events[2].content["tool_name"], "exec_command");
         assert_eq!(events[2].content["result"], "file1.txt");
         assert_eq!(events[2].content["success"], true);
 

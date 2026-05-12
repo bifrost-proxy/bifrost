@@ -5,7 +5,7 @@
 本次修复聚焦 Bifrost Agent runtime 在真实 IM Gateway / Admin API 对话中出现的提前退出问题，目标包括：
 
 1. 将默认 `max_turn_iterations` 从偏小的开发期值提升到更接近真实代理执行需求的上限，避免长链路工具调用在 30 次左右被硬中断。
-2. 将默认超时策略调整为分层方案：保留较高的迭代上限以避免 30 次左右被硬中断，但模型请求、shell 工具、后台终端、MCP 启动与 MCP tool call 的默认超时保持在 10 分钟量级，避免默认值过长掩盖卡死与异常等待。
+2. 将默认超时策略调整为分层方案：保留较高的迭代上限以避免 30 次左右被硬中断，但模型请求保持在 10 分钟量级，后台终端空轮询上限对齐 Codex unified exec 的 5 分钟，MCP 启动与 MCP tool call 采用显式默认值，避免默认值过长掩盖卡死与异常等待。
 3. 去掉 `AgentClient` 内部与配置体系重复、且可能形成隐藏上限的 builder 级 300 秒超时，确保 runtime 只受显式配置控制。
 4. 通过真实 Bifrost 进程 + Admin API + mock model server 验证：超过 30 轮工具调用的会话可以继续执行直至完成，不再报 `exceeded maximum iterations (30)`。
 
@@ -16,7 +16,6 @@
 - `crates/agent/src/config.rs`
   - `DEFAULT_MAX_TURN_ITERATIONS = 20`
   - `DEFAULT_REQUEST_TIMEOUT = 120`
-  - `DEFAULT_SHELL_TIMEOUT = 30`
   - `DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS = 300_000`
 - `crates/agent/src/mcp.rs`
   - `DEFAULT_STARTUP_TIMEOUT_SEC = 30`
@@ -38,8 +37,7 @@
 
 - `DEFAULT_MAX_TURN_ITERATIONS = 1000`
 - `DEFAULT_REQUEST_TIMEOUT = 600`
-- `DEFAULT_SHELL_TIMEOUT = 600`
-- `DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS = 600_000`
+- `DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS = 300_000`
 
 并同步更新字段注释、默认构造值和相关测试断言，确保：
 
@@ -97,10 +95,9 @@
 ### 单元测试
 
 1. `crates/agent/src/config.rs::test_default_config`
-   - 验证默认 `shell_timeout_secs = 600`
    - 验证默认 `request_timeout_secs = 600`
    - 验证默认 `max_turn_iterations = 1000`
-   - 验证默认 `background_terminal_max_timeout = 600000`
+   - 验证默认 `background_terminal_max_timeout = 300000`
 2. `crates/agent/src/mcp.rs` 现有默认配置回退路径相关测试
    - 验证 `startup_timeout_sec/tool_timeout_sec` 为 `None` 时仍能走新的默认值常量
 3. 新增/更新 `crates/agent/src/client.rs` 相关测试（如果需要）
@@ -113,8 +110,7 @@
 1. `GET /_bifrost/api/im-gateway/agent`
    - 断言默认 `max_turn_iterations = 1000`
    - 断言默认 `request_timeout_secs = 600`
-   - 断言默认 `shell_timeout_secs = 600`
-   - 断言默认 `background_terminal_max_timeout = 600000`
+   - 断言默认 `background_terminal_max_timeout = 300000`
 2. PATCH mock provider 后调用真实 `POST /_bifrost/api/im-gateway/agent/chat`
    - mock 连续触发 35 次 `list_directory` 工具调用
    - 最终成功返回文本响应
@@ -127,7 +123,7 @@
 
 1. `TC-AL-01`：读取默认 Agent 配置，确认迭代上限和各类 timeout 已提升
 2. `TC-AL-02`：执行真实黑盒脚本，验证超过 30 次工具调用的会话仍能完成
-3. `TC-AL-03`：显式 PATCH 600 秒级请求 / shell / 后台终端配置并重新 GET，确认 API 层接受并持久化这些值
+3. `TC-AL-03`：显式 PATCH 600 秒级请求 / 300 秒后台终端配置并重新 GET，确认 API 层接受并持久化这些值
 
 ## 校验要求
 

@@ -92,10 +92,6 @@ pub struct AgentConfig {
     pub project_doc_fallback_filenames: Option<Vec<String>>,
 
     // -- Runtime settings --
-    /// Shell command timeout in seconds (default 600 / 10m).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_timeout_secs: Option<u64>,
-
     /// Max turn iterations (default 1000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turn_iterations: Option<u32>,
@@ -136,7 +132,7 @@ pub struct AgentConfig {
 
     // -- Background terminal --
     /// Maximum poll window for background terminal output (write_stdin), in ms.
-    /// Default: 600000 (10 minutes).
+    /// Default: 300000 (5 minutes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_terminal_max_timeout: Option<u64>,
 }
@@ -375,7 +371,6 @@ impl AgentConfig {
     pub const DEFAULT_MAX_HISTORY: u32 = 50;
     pub const DEFAULT_SESSION_TTL: u64 = 3600;
     pub const DEFAULT_REQUEST_TIMEOUT: u64 = 600;
-    pub const DEFAULT_SHELL_TIMEOUT: u64 = 600;
     pub const DEFAULT_MAX_TURN_ITERATIONS: u32 = 1000;
     /// Default auto-compact threshold as a percentage of context window (90%),
     /// matching Codex's behavior of `(context_window * 9) / 10`.
@@ -383,7 +378,8 @@ impl AgentConfig {
     pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32768;
     pub const DEFAULT_MODEL: &'static str = "gpt-5.4-2026-03-05";
     pub const DEFAULT_MODEL_CONTEXT_WINDOW: i64 = 250_000;
-    pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 600_000;
+    pub const DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 =
+        crate::tools::exec_command::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
     /// Default tool output token limit (matching Codex DEFAULT_MAX_OUTPUT_TOKENS).
     pub const DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT: usize = 10_000;
 }
@@ -407,7 +403,6 @@ impl Default for AgentConfig {
             skills: None,
             project_doc_max_bytes: Some(Self::DEFAULT_PROJECT_DOC_MAX_BYTES),
             project_doc_fallback_filenames: None,
-            shell_timeout_secs: Some(Self::DEFAULT_SHELL_TIMEOUT),
             max_turn_iterations: Some(Self::DEFAULT_MAX_TURN_ITERATIONS),
             max_history_messages: Some(Self::DEFAULT_MAX_HISTORY),
             session_ttl_secs: Some(Self::DEFAULT_SESSION_TTL),
@@ -446,11 +441,6 @@ impl AgentConfig {
     pub fn get_request_timeout_secs(&self) -> u64 {
         self.request_timeout_secs
             .unwrap_or(Self::DEFAULT_REQUEST_TIMEOUT)
-    }
-
-    pub fn get_shell_timeout_secs(&self) -> u64 {
-        self.shell_timeout_secs
-            .unwrap_or(Self::DEFAULT_SHELL_TIMEOUT)
     }
 
     pub fn get_max_turn_iterations(&self) -> u32 {
@@ -1020,7 +1010,6 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
         project_doc_fallback_filenames: overlay
             .project_doc_fallback_filenames
             .or(base.project_doc_fallback_filenames),
-        shell_timeout_secs: overlay.shell_timeout_secs.or(base.shell_timeout_secs),
         max_turn_iterations: overlay.max_turn_iterations.or(base.max_turn_iterations),
         max_history_messages: overlay.max_history_messages.or(base.max_history_messages),
         session_ttl_secs: overlay.session_ttl_secs.or(base.session_ttl_secs),
@@ -1045,11 +1034,6 @@ fn apply_env_overrides(config: &mut AgentConfig) {
     }
     if let Ok(provider) = std::env::var("BIFROST_AGENT_PROVIDER") {
         config.model_provider = Some(provider);
-    }
-    if let Ok(timeout) = std::env::var("BIFROST_AGENT_SHELL_TIMEOUT") {
-        if let Ok(v) = timeout.parse() {
-            config.shell_timeout_secs = Some(v);
-        }
     }
     if let Ok(dir) = std::env::var("BIFROST_AGENT_WORK_DIR") {
         config.work_dir = Some(dir);
@@ -1138,14 +1122,13 @@ mod tests {
         assert_eq!(config.get_model(), "gpt-5.4-2026-03-05");
         assert_eq!(config.get_max_completion_tokens(), 16384);
         assert_eq!(config.get_request_timeout_secs(), 600);
-        assert_eq!(config.get_shell_timeout_secs(), 600);
         assert_eq!(config.get_max_turn_iterations(), 1000);
         assert_eq!(
             config.model_context_window,
             Some(AgentConfig::DEFAULT_MODEL_CONTEXT_WINDOW)
         );
         assert_eq!(config.get_compact_threshold_tokens(), 225_000);
-        assert_eq!(config.get_background_terminal_max_timeout(), 600_000);
+        assert_eq!(config.get_background_terminal_max_timeout(), 300_000);
     }
 
     #[test]
@@ -1210,12 +1193,12 @@ mod tests {
         let base = AgentConfig::default();
         let overlay = AgentConfig {
             model: Some("custom-model".to_string()),
-            shell_timeout_secs: Some(60),
+            max_turn_iterations: Some(60),
             ..Default::default()
         };
         let merged = merge_config(base, overlay);
         assert_eq!(merged.get_model(), "custom-model");
-        assert_eq!(merged.get_shell_timeout_secs(), 60);
+        assert_eq!(merged.get_max_turn_iterations(), 60);
     }
 
     #[test]
@@ -1224,7 +1207,6 @@ mod tests {
 enabled = true
 model = "gpt-4o"
 model_provider = "openai"
-shell_timeout_secs = 45
 max_turn_iterations = 30
 
 [model_providers.custom]
@@ -1240,7 +1222,7 @@ enabled = true
         let config: AgentConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.get_model(), "gpt-4o");
         assert_eq!(config.model_provider.as_deref(), Some("openai"));
-        assert_eq!(config.get_shell_timeout_secs(), 45);
+        assert_eq!(config.get_max_turn_iterations(), 30);
         assert!(config.model_providers.contains_key("custom"));
         assert!(config.mcp_servers.contains_key("test_server"));
     }

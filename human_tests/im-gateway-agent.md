@@ -301,15 +301,15 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 - **操作步骤**:
   ```bash
-  # 修改 shell_timeout_secs 为 90
+  # 修改 max_turn_iterations 为 90
   curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
     -H 'Content-Type: application/json' \
-    -d '{"shell_timeout_secs": 90}'
+    -d '{"max_turn_iterations": 90}'
   ```
 - **预期结果**:
   - API 返回完整的 AgentConfig JSON（不是 `{"success": true}`）
-  - 返回的 JSON 中 `shell_timeout_secs` 为 90
-  - 刷新 WebUI 页面后，Runtime Settings 中 Shell Timeout 显示为 90
+  - 返回的 JSON 中 `max_turn_iterations` 为 90
+  - 刷新 WebUI 页面后，Runtime Settings 中 Max Turn Iterations 显示为 90
 
 ### TC-IMA-27: Agent Tab 配置持久化 - 重启后数据保留
 

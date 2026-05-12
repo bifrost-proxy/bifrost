@@ -90,7 +90,7 @@ bifrost [OPTIONS] [COMMAND]
 | `BIFROST_INSTALL_SKILL_SOURCE` | `install-skill` | 选择 skill 安装源；正常用户通常无需设置。 |
 | `BIFROST_AGENT_HOME` | Agent 运行时 | Agent 配置和记忆目录的兼容覆盖项；默认优先使用 `$BIFROST_DATA_DIR/agent/`。 |
 | `BIFROST_AGENT_MODEL` / `BIFROST_AGENT_PROVIDER` | Agent 运行时 | 覆盖 Agent 默认模型和 provider。只影响 Agent 能力，不影响代理核心规则。 |
-| `BIFROST_AGENT_SHELL_TIMEOUT` / `BIFROST_AGENT_WORK_DIR` | Agent 运行时 | 覆盖 Agent shell 超时和工作目录。 |
+| `BIFROST_AGENT_WORK_DIR` | Agent 运行时 | 覆盖 Agent 默认工作目录。 |
 
 容易混淆的边界：
 

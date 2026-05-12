@@ -156,9 +156,8 @@ BASE="http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/agent"
 echo "[agent-loop-runtime-limits] verifying default agent config"
 DEFAULT_CONFIG="$(curl -fsS --noproxy '*' "$BASE")"
 assert_json_field ".request_timeout_secs" "600" "$DEFAULT_CONFIG" "default request timeout should be 600 seconds"
-assert_json_field ".shell_timeout_secs" "600" "$DEFAULT_CONFIG" "default shell timeout should be 600 seconds"
 assert_json_field ".max_turn_iterations" "1000" "$DEFAULT_CONFIG" "default max turn iterations should be 1000"
-assert_json_field ".background_terminal_max_timeout" "600000" "$DEFAULT_CONFIG" "default background terminal timeout should be 600000 ms"
+assert_json_field ".background_terminal_max_timeout" "300000" "$DEFAULT_CONFIG" "default background terminal timeout should be 300000 ms"
 
 echo "[agent-loop-runtime-limits] configuring agent mock provider without overriding iteration defaults"
 curl -fsS --noproxy '*' -X PATCH "$BASE" \
