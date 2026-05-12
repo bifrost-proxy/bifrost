@@ -10,7 +10,7 @@ sidebar:
 > 此页面由 `docs/cli.md` 自动同步生成。
 # CLI 详细命令
 
-本文档集中说明 `bifrost` CLI 的所有顶层命令、主要子命令、环境变量和规则模板变量。若只想按使用场景快速上手，请先看 [CLI 快速开始](../getting-started/cli-quick-start/)。
+本文档集中说明 `bifrost` CLI 的所有顶层命令、主要子命令、环境变量和规则模板变量。若只想按使用场景快速上手，请先看 [CLI 快速开始](../../getting-started/cli-quick-start/)。
 
 ## 帮助与文档入口
 
@@ -31,12 +31,12 @@ bifrost <command> <subcommand> --help
 
 关键文档：
 
-- [CLI 快速开始](../getting-started/cli-quick-start/)：按使用场景选择命令路径
-- [安装与启动](../getting-started/installation/)：安装方式与首次启动
-- [规则语法](./rule-engine/)：规则整体结构、过滤器、优先级
-- [匹配器](./patterns/)：domain / wildcard / regex / path wildcard 等匹配逻辑
-- [操作符说明](./operations/)：`host://`、`reqHeaders://`、`file://` 等 operation 的值格式
-- [规则协议手册](./rules/)：按协议分类的完整能力说明
+- [CLI 快速开始](../../getting-started/cli-quick-start/)：按使用场景选择命令路径
+- [安装与启动](../../getting-started/installation/)：安装方式与首次启动
+- [规则语法](../rule-engine/)：规则整体结构、过滤器、优先级
+- [匹配器](../patterns/)：domain / wildcard / regex / path wildcard 等匹配逻辑
+- [操作符说明](../operations/)：`host://`、`reqHeaders://`、`file://` 等 operation 的值格式
+- [规则协议手册](../rules/)：按协议分类的完整能力说明
 
 ## 命令覆盖索引
 
@@ -144,7 +144,7 @@ api.example.com reqHeaders://X-Host=${hostname.replace(example,test)}
 api.example.com file://({"literal":"$${host}"})
 ```
 
-更多变量、URL 编码、replace 语法和数据对象格式见 [操作符说明](./operations/)。
+更多变量、URL 编码、replace 语法和数据对象格式见 [操作符说明](../operations/)。
 
 ## `start` 命令
 

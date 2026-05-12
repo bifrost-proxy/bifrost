@@ -50,13 +50,39 @@
 2. 检查 `site/dist/reference/cli/index.html` 是否存在。
 3. 检查 `site/dist/reference/values/index.html` 是否存在。
 4. 检查 `site/dist/reference/rules/rule-priority/index.html` 是否存在。
+5. 检查 `site/dist/reference/getting-started/cli-quick-start/index.html` 是否存在。
 
 预期结果：
 - Astro/Starlight 真实构建成功。
 - 当前 docs 文档对应的 HTML 产物存在。
+- 历史错误深链 `/bifrost/reference/getting-started/cli-quick-start/` 生成静态重定向入口，不再返回 404。
 - 构建过程中会先执行同步校验，若未来 docs 文档漏生成则构建失败。
+
+### TC-DSG-04 全站站内链接无缺失目标
+
+操作步骤：
+1. 执行 `source ~/.zshrc && pnpm --dir site run build`。
+2. 执行 `source ~/.zshrc && pnpm --dir site run site:verify-links`。
+
+预期结果：
+- 构建后的 `site/dist/**/*.html` 中所有站内 `href` / `src` 都能解析到存在的页面或静态资源。
+- 如果未来新增 docs 文档引入错误相对链接、错误绝对路径或缺失静态资源，`site:verify-links` 会失败并列出来源页面与缺失目标。
+
+### TC-DSG-05 清理后部署产物无探针残留
+
+操作步骤：
+1. 临时创建 `docs/future-docs-sync-probe.md` 并执行 `source ~/.zshrc && pnpm --dir site run build`。
+2. 确认 `site/dist/reference/future-docs-sync-probe/index.html` 存在。
+3. 删除 `docs/future-docs-sync-probe.md`。
+4. 再次执行 `source ~/.zshrc && pnpm --dir site run build`。
+5. 检查 `site/dist/reference/future-docs-sync-probe/index.html` 是否不存在。
+
+预期结果：
+- 临时 docs 文档存在时会进入构建产物。
+- 临时 docs 文档删除后，构建前清理 `site/dist`，旧 HTML 不会残留到部署产物。
 
 ## 清理步骤
 
 1. 删除 `docs/future-docs-sync-probe.md`。
-2. 执行 `source ~/.zshrc && pnpm --dir site run docs:sync && pnpm --dir site run docs:verify`。
+2. 删除 `site/dist`。
+3. 执行 `source ~/.zshrc && pnpm --dir site run docs:sync && pnpm --dir site run docs:verify`。

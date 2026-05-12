@@ -42,8 +42,8 @@ pattern ua://{ua.txt}
 
 更多规则侧细节见：
 
-- [operation.md](./operations/)
-- [rule.md](./rule-engine/)
+- [operation.md](../operations/)
+- [rule.md](../rule-engine/)
 
 ## 通过 CLI 管理
 
@@ -69,4 +69,4 @@ if (token) {
 }
 ```
 
-Scripts 侧细节见：[scripts.md](./scripting/)。
+Scripts 侧细节见：[scripts.md](../scripting/)。
