@@ -15,7 +15,7 @@ pub fn parse_header_value(value: &str) -> Option<Vec<(String, String)>> {
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
     for part in content.split(delimiter) {
         let part = part.trim();
-        if part.is_empty() {
+        if part.is_empty() || part.starts_with('#') {
             continue;
         }
         let separator = if use_colon { ':' } else { '=' };
@@ -151,7 +151,22 @@ pub fn parse_cors_config(value: &str) -> bifrost_proxy::CorsConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cors_config;
+    use super::{parse_cors_config, parse_header_value};
+
+    #[test]
+    fn parse_header_value_skips_hash_comment_lines() {
+        let value = "X-Test-Env:test_env\n#comment_marker\nX-Test-Flag:1\n## X-Ignored-Env: ignored comment";
+
+        let headers = parse_header_value(value).unwrap();
+
+        assert_eq!(
+            headers,
+            vec![
+                ("X-Test-Env".to_string(), "test_env".to_string()),
+                ("X-Test-Flag".to_string(), "1".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn parse_cors_config_supports_multiline_legacy_format() {

@@ -2297,6 +2297,41 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-62：回归 - reqHeaders Markdown value 中 `#` 注释行不生成非法 header
+
+**背景**：
+- 示例规则使用 `reqHeaders://{env_block}` 引用 Markdown fenced value。
+- value 中包含 `#comment_marker` 和 `## X-Ignored-Env: ...` 注释行；修复前 `## X-Ignored-Env` 会被当成非法 header 名，HTTPS tunnel 应用请求头失败，表现为 API 前置规则不可用。
+
+**前置条件**：
+- 在仓库根目录执行。
+- 不需要启动常驻代理，不使用 9900 端口，不修改系统代理。
+
+**操作步骤**：
+1. 执行 core parser 回归，确认用户规则原文解析后保留 4 条规则，且 `ppe` value 保留 `#` 注释行：
+   ```bash
+   cargo test -p bifrost-core test_parse_reqheaders_markdown_value_with_hash_lines -- --nocapture
+   ```
+2. 执行 sync normalize 回归，确认远端规则同步归一化不会删除 fenced block 前后的规则：
+   ```bash
+   cargo test -p bifrost-sync preserves_markdown_value_blocks_with_hash_lines_during_normalization -- --nocapture
+   ```
+3. 执行运行时 header 解析回归，确认 `#` 注释行不会生成 request header：
+   ```bash
+   cargo test -p bifrost-cli parse_header_value_skips_hash_comment_lines -- --nocapture
+   cargo test -p bifrost-cli test_reqheaders_markdown_value_skips_hash_comment_lines -- --nocapture
+   cargo test -p bifrost-admin test_parse_header_values_skips_hash_comment_lines -- --nocapture
+   ```
+
+**预期结果**：
+- core parser 测试通过，断言规则数量为 4。
+- sync normalize 测试通过，断言前两条 API 规则、fenced block 中 `#` 行和最后两条转发规则均保留。
+- CLI/Admin header 解析测试通过，最终 request headers 只包含 `X-Test-Env: test_env` 与 `X-Test-Flag: 1`，不包含以 `#` 开头的 header 名。
+
+**执行记录（2026-05-12）**：PASS — 已执行上述 5 条命令；core parser 保留 4 条规则，sync normalize 保留 fenced block 和前后规则，CLI/Admin header 解析均跳过 `#` 注释行。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

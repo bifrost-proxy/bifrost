@@ -776,6 +776,8 @@ fn parse_header_values(value: &str) -> Vec<(String, String)> {
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
     content
         .split(delimiter)
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.starts_with('#'))
         .filter_map(parse_header_value)
         .collect::<Vec<_>>()
 }
@@ -1337,6 +1339,20 @@ b.com status://200 resBody://(value)
             vec![
                 ("x-tt-env".to_string(), "ppe_next_agent_new".to_string()),
                 ("x-use-ppe".to_string(), "1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_header_values_skips_hash_comment_lines() {
+        let result = parse_header_values(
+            "X-Test-Env:test_env\n#comment_marker\nX-Test-Flag:1\n## X-Ignored-Env: ignored comment",
+        );
+        assert_eq!(
+            result,
+            vec![
+                ("X-Test-Env".to_string(), "test_env".to_string()),
+                ("X-Test-Flag".to_string(), "1".to_string())
             ]
         );
     }
