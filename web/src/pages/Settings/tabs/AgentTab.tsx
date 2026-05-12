@@ -42,6 +42,10 @@ import {
   type McpServerConfig,
   type ProviderInfo,
 } from "./agent/types";
+import {
+  AGENT_SECTION_NAV,
+  type AgentSectionId,
+} from "./aiSections";
 import McpServersSection from "./agent/McpServersSection";
 import SkillsSection from "./agent/SkillsSection";
 import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
@@ -52,32 +56,36 @@ import LongTextModalField from "./agent/LongTextModalField";
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
-type AgentSectionId =
-  | "general"
-  | "model"
-  | "runtime"
-  | "history"
-  | "memories"
-  | "skills"
-  | "memory-records"
-  | "mcp-servers"
-  | "sessions";
+const PROVIDER_CONNECTION_DEFAULTS = {
+  request_max_retries: 4,
+  stream_idle_timeout_ms: 300_000,
+  stream_max_retries: 5,
+} as const;
 
-const AGENT_SECTION_NAV: Array<{ id: AgentSectionId; label: string }> = [
-  { id: "general", label: "General" },
-  { id: "model", label: "Model" },
-  { id: "runtime", label: "Runtime" },
-  { id: "history", label: "History" },
-  { id: "memories", label: "Memories" },
-  { id: "skills", label: "Skills" },
-  { id: "memory-records", label: "Memory Records" },
-  { id: "mcp-servers", label: "MCP Servers" },
-  { id: "sessions", label: "Sessions" },
-];
+type ProviderConnectionField = keyof typeof PROVIDER_CONNECTION_DEFAULTS;
+
+const MEMORY_DEFAULTS = {
+  max_raw_memories_for_consolidation: 512,
+  unset_limit: "No limit",
+} as const;
+
+const RUNTIME_DEFAULTS = {
+  max_turn_iterations: DEFAULTS.max_turn_iterations,
+  max_history_messages: DEFAULTS.max_history_messages,
+  session_ttl_secs: DEFAULTS.session_ttl_secs,
+  request_timeout_secs: DEFAULTS.request_timeout_secs,
+  tool_output_token_limit: DEFAULTS.tool_output_token_limit,
+  project_doc_max_bytes: DEFAULTS.project_doc_max_bytes,
+  background_terminal_max_timeout: DEFAULTS.background_terminal_max_timeout,
+} as const;
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function AgentTab() {
+interface AgentTabProps {
+  hideSectionNav?: boolean;
+}
+
+export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -192,6 +200,22 @@ export default function AgentTab() {
     patchField("mcp_servers", servers);
   };
 
+  const handleResetRuntimeDefaults = async () => {
+    Object.keys(RUNTIME_DEFAULTS).forEach((field) => {
+      const existing = updateTimers.current[field];
+      if (existing) clearTimeout(existing);
+      delete updateTimers.current[field];
+      delete pendingFieldValues.current[field];
+    });
+    try {
+      const updated = await patch<AgentConfig>(`${BASE}/agent`, RUNTIME_DEFAULTS);
+      setConfig(updated);
+      message.success("Runtime settings restored to defaults");
+    } catch {
+      message.error("Failed to restore runtime defaults");
+    }
+  };
+
   const getProviderField = useCallback(
     (field: string): unknown => {
       if (!config) return undefined;
@@ -201,6 +225,20 @@ export default function AgentTab() {
     },
     [config],
   );
+
+  const getProviderConnectionPlaceholder = useCallback(
+    (field: ProviderConnectionField): string => {
+      const providerId = config?.model_provider || DEFAULTS.model_provider;
+      const provider = providers.find((p) => p.id === providerId);
+      const value = provider?.[field];
+      if (value != null) return String(value);
+      if (provider) return "Not set";
+      return String(PROVIDER_CONNECTION_DEFAULTS[field]);
+    },
+    [config?.model_provider, providers],
+  );
+
+  const currentModelPlaceholder = `Current model (${config?.model ?? DEFAULTS.model})`;
 
   // Session detail navigation via URL params
   const [searchParams, setSearchParams] = useSearchParams();
@@ -291,7 +329,10 @@ export default function AgentTab() {
         flexDirection: isCompactNav ? "row" : "column",
         gap: 6,
         overflowX: isCompactNav ? "auto" : undefined,
+        overflowY: isCompactNav ? undefined : "auto",
         padding: isCompactNav ? "0 0 4px" : 0,
+        minHeight: 0,
+        maxHeight: "100%",
       }}
     >
       {AGENT_SECTION_NAV.map((section) => {
@@ -339,11 +380,18 @@ export default function AgentTab() {
         overflow: "hidden",
       }}
     >
-      <Row gutter={[16, 16]} align="top" style={{ height: "100%", minHeight: 0 }}>
-        <Col xs={24} lg={5} xl={4}>
-          {nav}
-        </Col>
-        <Col xs={24} lg={19} xl={20} style={{ height: "100%", minHeight: 0 }}>
+      <Row gutter={[16, 16]} style={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
+        {!hideSectionNav && (
+          <Col xs={24} lg={5} xl={4} style={{ height: "100%", minHeight: 0 }}>
+            {nav}
+          </Col>
+        )}
+        <Col
+          xs={24}
+          lg={hideSectionNav ? 24 : 19}
+          xl={hideSectionNav ? 24 : 20}
+          style={{ height: "100%", minHeight: 0 }}
+        >
           <div
             data-testid="agent-settings-section-content"
             style={{
@@ -738,6 +786,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={getProviderField("request_max_retries") as number | undefined}
+                    placeholder={getProviderConnectionPlaceholder("request_max_retries")}
                     onChange={(val) => handleNumberChange("request_max_retries", val)}
                     min={0}
                     max={20}
@@ -759,6 +808,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={getProviderField("stream_idle_timeout_ms") as number | undefined}
+                    placeholder={getProviderConnectionPlaceholder("stream_idle_timeout_ms")}
                     onChange={(val) => handleNumberChange("stream_idle_timeout_ms", val)}
                     min={0}
                     step={10000}
@@ -779,6 +829,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={getProviderField("stream_max_retries") as number | undefined}
+                    placeholder={getProviderConnectionPlaceholder("stream_max_retries")}
                     onChange={(val) => handleNumberChange("stream_max_retries", val)}
                     min={0}
                     max={20}
@@ -807,6 +858,15 @@ export default function AgentTab() {
                 <ThunderboltOutlined />
                 <span>Runtime Settings</span>
               </Space>
+            }
+            extra={
+              <Button
+                size="small"
+                onClick={handleResetRuntimeDefaults}
+                data-testid="agent-runtime-restore-defaults"
+              >
+                Restore Defaults
+              </Button>
             }
             size="small"
           >
@@ -893,13 +953,12 @@ export default function AgentTab() {
                 </Col>
                 <Col>
                   <InputNumber
-                    value={config.tool_output_token_limit}
+                    value={config.tool_output_token_limit ?? DEFAULTS.tool_output_token_limit}
                     onChange={(val) =>
                       handleNumberChange("tool_output_token_limit", val)
                     }
                     min={100}
                     step={1000}
-                    placeholder="10000"
                     style={{ width: 120 }}
                     size="small"
                   />
@@ -1158,6 +1217,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={config.memories?.max_raw_memories_for_consolidation}
+                    placeholder={String(MEMORY_DEFAULTS.max_raw_memories_for_consolidation)}
                     onChange={(val) => {
                       const newMemories = {
                         ...(config.memories ?? {}),
@@ -1188,6 +1248,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={config.memories?.max_unused_days}
+                    placeholder={MEMORY_DEFAULTS.unset_limit}
                     onChange={(val) => {
                       const newMemories = {
                         ...(config.memories ?? {}),
@@ -1217,6 +1278,7 @@ export default function AgentTab() {
                 <Col>
                   <InputNumber
                     value={config.memories?.max_rollout_age_days}
+                    placeholder={MEMORY_DEFAULTS.unset_limit}
                     onChange={(val) => {
                       const newMemories = {
                         ...(config.memories ?? {}),
@@ -1256,7 +1318,7 @@ export default function AgentTab() {
                       );
                       patchField("memories", newMemories);
                     }}
-                    placeholder="Default"
+                    placeholder={currentModelPlaceholder}
                     style={{ width: 200 }}
                     size="small"
                   />
@@ -1284,7 +1346,7 @@ export default function AgentTab() {
                       );
                       patchField("memories", newMemories);
                     }}
-                    placeholder="Default"
+                    placeholder={currentModelPlaceholder}
                     style={{ width: 200 }}
                     size="small"
                   />

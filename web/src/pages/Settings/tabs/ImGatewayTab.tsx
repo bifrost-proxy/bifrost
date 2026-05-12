@@ -51,6 +51,10 @@ import type {
 } from "../../../api/imGateway";
 import type { AgentConfig } from "./agent/types";
 import LongTextModalField from "./agent/LongTextModalField";
+import {
+  IM_GATEWAY_SECTION_NAV as IM_GATEWAY_SECTION_LABELS,
+  type ImGatewaySectionId,
+} from "./aiSections";
 
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
@@ -129,23 +133,80 @@ function OverflowText({
   );
 }
 
-type ImGatewaySectionId =
-  | "connections"
-  | "targets"
-  | "routes"
-  | "schedules"
-  | "history";
+function PanelHeader({
+  description,
+  children,
+}: {
+  description: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 12,
+        marginBottom: 16,
+        flexWrap: "wrap",
+      }}
+    >
+      <Text type="secondary" style={{ flex: "1 1 220px" }}>
+        {description}
+      </Text>
+      <Space wrap>{children}</Space>
+    </div>
+  );
+}
+
+function DetailGrid({
+  items,
+}: {
+  items: Array<{
+    label: string;
+    value: ReactNode;
+  }>;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+        gap: "14px 18px",
+        minWidth: 0,
+      }}
+    >
+      {items.map((item) => (
+        <div
+          key={item.label}
+          style={{
+            display: "grid",
+            gridTemplateColumns: "auto minmax(0, 1fr)",
+            gap: 8,
+            alignItems: "baseline",
+            minWidth: 0,
+          }}
+        >
+          <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
+            {item.label}:
+          </Text>
+          <div style={{ minWidth: 0 }}>{item.value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const IM_GATEWAY_SECTION_NAV: Array<{
   id: ImGatewaySectionId;
   label: string;
   icon: ReactNode;
 }> = [
-  { id: "connections", label: "Connections", icon: <ApiOutlined /> },
-  { id: "targets", label: "Targets", icon: <SendOutlined /> },
-  { id: "routes", label: "Routes", icon: <RocketOutlined /> },
-  { id: "schedules", label: "Schedules", icon: <CloudOutlined /> },
-  { id: "history", label: "History", icon: <HistoryOutlined /> },
+  { ...IM_GATEWAY_SECTION_LABELS[0], icon: <ApiOutlined /> },
+  { ...IM_GATEWAY_SECTION_LABELS[1], icon: <SendOutlined /> },
+  { ...IM_GATEWAY_SECTION_LABELS[2], icon: <RocketOutlined /> },
+  { ...IM_GATEWAY_SECTION_LABELS[3], icon: <CloudOutlined /> },
+  { ...IM_GATEWAY_SECTION_LABELS[4], icon: <HistoryOutlined /> },
 ];
 
 // ─── Connections Panel ───────────────────────────────────────────────────────
@@ -467,7 +528,7 @@ function ConnectionsPanel({
             ? { ...current, status: "pending" }
             : current,
         );
-      } catch (err) {
+      } catch {
         setWeixinLogin((current) =>
           current?.providerId === weixinLogin.providerId
             ? { ...current, status: "pending" }
@@ -541,27 +602,14 @@ function ConnectionsPanel({
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 16,
-        }}
-      >
-        <Text type="secondary">Manage IM bot connections</Text>
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-            Refresh
-          </Button>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={openAddModal}
-          >
-            Add Provider
-          </Button>
-        </Space>
-      </div>
+      <PanelHeader description="Manage IM bot connections">
+        <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
+          Refresh
+        </Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openAddModal}>
+          Add Provider
+        </Button>
+      </PanelHeader>
 
       {loading && providers.length === 0 ? (
         <Spin style={{ display: "block", margin: "40px auto" }} />
@@ -579,14 +627,14 @@ function ConnectionsPanel({
                   borderColor: token.colorBorderSecondary,
                 }}
                 title={
-                  <Space>
+                  <Space wrap style={{ minWidth: 0 }}>
                     <ApiOutlined />
                     <span>{p.display_name || p.id}</span>
                     <Tag>{p.provider_type}</Tag>
                   </Space>
                 }
                 extra={
-                  <Space>
+                  <Space wrap size={8}>
                     {status?.state === "connected" ||
                     status?.state === "connecting" ||
                     status?.state === "reconnecting" ? (
@@ -646,78 +694,90 @@ function ConnectionsPanel({
                   </Space>
                 }
               >
-                <Descriptions size="small" column={3}>
-                  <Descriptions.Item label="Status">
-                    {getStateBadge(status?.state)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="App ID">
-                    <Text code>
-                      {p.app_id
-                        ? `${p.app_id.slice(0, 8)}***`
-                        : "-"}
-                    </Text>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Secret">
-                    {p.secret_configured ? (
-                      <Tag color="green">Configured</Tag>
-                    ) : (
-                      <Tag color="red">Not Set</Tag>
-                    )}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Owner">
-                    {p.owner_open_id ? (
-                      <Text code style={{ fontSize: 11 }}>
-                        {`${p.owner_open_id.slice(0, 12)}...`}
-                      </Text>
-                    ) : (
-                      <Text type="secondary">Auto-detect on connect</Text>
-                    )}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Connection Mode">
-                    {p.event_connection_enabled
-                      ? "Long Connection"
-                      : "Webhook"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Provider Enabled">
-                    {p.enabled ? <Tag color="green">Enabled</Tag> : <Tag>Disabled</Tag>}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Agent Work Dir">
-                    {p.agent_config?.work_dir ? (
-                      <Text code style={{ fontSize: 11 }}>
-                        {p.agent_config.work_dir}
-                      </Text>
-                    ) : (
-                      <Text type="secondary">Global default</Text>
-                    )}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Agent Base Prompt">
-                    {p.agent_config?.base_instructions ? (
-                      <Tag color="blue">Configured</Tag>
-                    ) : (
-                      <Text type="secondary">Global default</Text>
-                    )}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Agent Developer/User">
-                    {p.agent_config?.developer_instructions || p.agent_config?.user_instructions ? (
-                      <Tag color="purple">Configured</Tag>
-                    ) : (
-                      <Text type="secondary">Global default</Text>
-                    )}
-                  </Descriptions.Item>
-                  {status?.reconnect_count != null &&
-                    status.reconnect_count > 0 && (
-                      <Descriptions.Item label="Reconnects">
-                        {status.reconnect_count}
-                      </Descriptions.Item>
-                    )}
-                  {status?.last_error && (
-                    <Descriptions.Item label="Last Error">
-                      <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
-                        {status.last_error}
-                      </Text>
-                    </Descriptions.Item>
-                  )}
-                </Descriptions>
+                <DetailGrid
+                  items={[
+                    { label: "Status", value: getStateBadge(status?.state) },
+                    {
+                      label: "App ID",
+                      value: (
+                        <OverflowText
+                          value={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
+                          code
+                          width={170}
+                        />
+                      ),
+                    },
+                    {
+                      label: "Secret",
+                      value: p.secret_configured ? (
+                        <Tag color="green">Configured</Tag>
+                      ) : (
+                        <Tag color="red">Not Set</Tag>
+                      ),
+                    },
+                    {
+                      label: "Owner",
+                      value: p.owner_open_id ? (
+                        <OverflowText value={p.owner_open_id} code width={170} />
+                      ) : (
+                        <Text type="secondary">Auto-detect on connect</Text>
+                      ),
+                    },
+                    {
+                      label: "Connection Mode",
+                      value: p.event_connection_enabled ? "Long Connection" : "Webhook",
+                    },
+                    {
+                      label: "Provider Enabled",
+                      value: p.enabled ? (
+                        <Tag color="green">Enabled</Tag>
+                      ) : (
+                        <Tag>Disabled</Tag>
+                      ),
+                    },
+                    {
+                      label: "Agent Work Dir",
+                      value: p.agent_config?.work_dir ? (
+                        <OverflowText value={p.agent_config.work_dir} code width={180} />
+                      ) : (
+                        <Text type="secondary">Global default</Text>
+                      ),
+                    },
+                    {
+                      label: "Agent Base Prompt",
+                      value: p.agent_config?.base_instructions ? (
+                        <Tag color="blue">Configured</Tag>
+                      ) : (
+                        <Text type="secondary">Global default</Text>
+                      ),
+                    },
+                    {
+                      label: "Agent Developer/User",
+                      value:
+                        p.agent_config?.developer_instructions ||
+                        p.agent_config?.user_instructions ? (
+                          <Tag color="purple">Configured</Tag>
+                        ) : (
+                          <Text type="secondary">Global default</Text>
+                        ),
+                    },
+                    ...(status?.reconnect_count != null && status.reconnect_count > 0
+                      ? [{ label: "Reconnects", value: status.reconnect_count }]
+                      : []),
+                    ...(status?.last_error
+                      ? [
+                          {
+                            label: "Last Error",
+                            value: (
+                              <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
+                                {status.last_error}
+                              </Text>
+                            ),
+                          },
+                        ]
+                      : []),
+                  ]}
+                />
               </Card>
             );
           })}
@@ -1049,29 +1109,18 @@ function TargetsPanel({
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 16,
-        }}
-      >
-        <Text type="secondary">
-          Message targets define where to send notifications
-        </Text>
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-            Refresh
-          </Button>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => setAddModalOpen(true)}
-          >
-            Add Target
-          </Button>
-        </Space>
-      </div>
+      <PanelHeader description="Message targets define where to send notifications">
+        <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
+          Refresh
+        </Button>
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={() => setAddModalOpen(true)}
+        >
+          Add Target
+        </Button>
+      </PanelHeader>
 
       <Table
         dataSource={targets}
@@ -1081,6 +1130,7 @@ function TargetsPanel({
         loading={loading}
         pagination={false}
         locale={{ emptyText: <Empty description="No targets configured" /> }}
+        scroll={{ x: 760 }}
       />
 
       <Modal
@@ -1190,20 +1240,11 @@ function RoutesPanel({
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 16,
-        }}
-      >
-        <Text type="secondary">
-          Event routes map incoming messages to script actions
-        </Text>
+      <PanelHeader description="Event routes map incoming messages to script actions">
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
           Refresh
         </Button>
-      </div>
+      </PanelHeader>
 
       {loading && routes.length === 0 ? (
         <Spin style={{ display: "block", margin: "40px auto" }} />
@@ -1217,7 +1258,7 @@ function RoutesPanel({
               size="small"
               style={{ borderColor: token.colorBorderSecondary }}
               title={
-                <Space>
+                <Space wrap style={{ minWidth: 0 }}>
                   <RocketOutlined />
                   <span>{r.name || r.id}</span>
                   <Tag color={r.enabled ? "green" : "default"}>
@@ -1226,7 +1267,7 @@ function RoutesPanel({
                 </Space>
               }
               extra={
-                <Space>
+                <Space wrap size={8}>
                   {r.enabled ? (
                     <Tooltip title="Pause">
                       <Button
@@ -1253,36 +1294,38 @@ function RoutesPanel({
                 </Space>
               }
             >
-              <Descriptions size="small" column={3}>
-                <Descriptions.Item label="Provider">
-                  {r.provider_id}
-                </Descriptions.Item>
-                <Descriptions.Item label="Event">
-                  <Tag>{r.event_type}</Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="Matcher">
-                  {r.matcher?.regex && (
-                    <Tag color="blue">regex: {r.matcher.regex}</Tag>
-                  )}
-                  {r.matcher?.keyword && (
-                    <Tag color="cyan">kw: {r.matcher.keyword}</Tag>
-                  )}
-                  {r.matcher?.chat_ids?.length > 0 && (
-                    <Tag>chats: {r.matcher.chat_ids.length}</Tag>
-                  )}
-                  {!r.matcher?.regex &&
-                    !r.matcher?.keyword &&
-                    (!r.matcher?.chat_ids || r.matcher.chat_ids.length === 0) && (
-                      <Text type="secondary">*</Text>
-                    )}
-                </Descriptions.Item>
-                <Descriptions.Item label="Action">
-                  <Tag>{r.action?.type || "script"}</Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="Timeout">
-                  {r.timeout_ms ? `${r.timeout_ms}ms` : "-"}
-                </Descriptions.Item>
-              </Descriptions>
+              <DetailGrid
+                items={[
+                  {
+                    label: "Provider",
+                    value: <OverflowText value={r.provider_id} code width={180} />,
+                  },
+                  { label: "Event", value: <Tag>{r.event_type}</Tag> },
+                  {
+                    label: "Matcher",
+                    value: (
+                      <Space wrap size={[4, 4]}>
+                        {r.matcher?.regex && (
+                          <Tag color="blue">regex: {r.matcher.regex}</Tag>
+                        )}
+                        {r.matcher?.keyword && (
+                          <Tag color="cyan">kw: {r.matcher.keyword}</Tag>
+                        )}
+                        {r.matcher?.chat_ids?.length > 0 && (
+                          <Tag>chats: {r.matcher.chat_ids.length}</Tag>
+                        )}
+                        {!r.matcher?.regex &&
+                          !r.matcher?.keyword &&
+                          (!r.matcher?.chat_ids || r.matcher.chat_ids.length === 0) && (
+                            <Text type="secondary">*</Text>
+                          )}
+                      </Space>
+                    ),
+                  },
+                  { label: "Action", value: <Tag>{r.action?.type || "script"}</Tag> },
+                  { label: "Timeout", value: r.timeout_ms ? `${r.timeout_ms}ms` : "-" },
+                ]}
+              />
             </Card>
           ))}
         </div>
@@ -1295,13 +1338,86 @@ function RoutesPanel({
 
 function SchedulesPanel({
   schedules,
+  targets,
   loading,
   onRefresh,
 }: {
   schedules: ImSchedule[];
+  targets: ImTarget[];
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [selectedSchedule, setSelectedSchedule] = useState<ImSchedule | null>(null);
+  const [scheduleRuns, setScheduleRuns] = useState<ImTaskRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [form] = Form.useForm();
+  const taskType = Form.useWatch("task_type", form) || "script";
+  const triggerType = Form.useWatch("trigger_type", form) || "interval";
+
+  const handleAdd = async () => {
+    try {
+      const values = await form.validateFields();
+      const payload: Partial<ImSchedule> = {
+        id: values.id?.trim() || undefined,
+        name: values.name,
+        enabled: values.enabled ?? true,
+        target_id: values.target_id || "",
+        task_type: values.task_type,
+        trigger:
+          values.trigger_type === "cron"
+            ? {
+                type: "cron",
+                expr: values.cron_expr,
+                timezone: values.timezone || "UTC",
+              }
+            : {
+                type: "interval",
+                every_ms: Number(values.every_ms),
+              },
+        timeout_ms: Number(values.timeout_ms || 30000),
+        max_output_bytes: Number(values.max_output_bytes || 1048576),
+      };
+      if (values.task_type === "agent") {
+        payload.agent = {
+          prompt: values.agent_prompt,
+          session_key: values.agent_session_key || undefined,
+          work_dir: values.agent_work_dir || undefined,
+          system_prompt: values.agent_system_prompt || undefined,
+        };
+      } else {
+        payload.script = {
+          script_text: values.script_text || undefined,
+          script_file: values.script_file || undefined,
+          cwd: values.cwd || undefined,
+        };
+      }
+      await imGatewayApi.createSchedule(payload);
+      message.success("Schedule created");
+      setAddModalOpen(false);
+      form.resetFields();
+      onRefresh();
+    } catch (err) {
+      if ((err as { errorFields?: unknown }).errorFields) return;
+      message.error(err instanceof Error ? err.message : "Failed to create schedule");
+    }
+  };
+
+  const openScheduleDetail = async (schedule: ImSchedule) => {
+    setSelectedSchedule(schedule);
+    setDetailOpen(true);
+    setRunsLoading(true);
+    try {
+      setScheduleRuns(await imGatewayApi.getScheduleRuns(schedule.id));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "Failed to load schedule runs");
+      setScheduleRuns([]);
+    } finally {
+      setRunsLoading(false);
+    }
+  };
+
   const handlePause = async (id: string) => {
     try {
       await imGatewayApi.pauseSchedule(id);
@@ -1350,6 +1466,17 @@ function SchedulesPanel({
       width: 160,
     },
     {
+      title: "Type",
+      dataIndex: "task_type",
+      key: "task_type",
+      width: 90,
+      render: (val: string | undefined) => (
+        <Tag color={val === "agent" ? "blue" : "default"}>
+          {val === "agent" ? "Agent" : "Script"}
+        </Tag>
+      ),
+    },
+    {
       title: "Target",
       dataIndex: "target_id",
       key: "target_id",
@@ -1390,7 +1517,7 @@ function SchedulesPanel({
       key: "actions",
       width: 160,
       render: (_: unknown, record: ImSchedule) => (
-        <Space size="small">
+        <Space size="small" onClick={(event) => event.stopPropagation()}>
           <Tooltip title="Run now">
             <Button
               size="small"
@@ -1430,20 +1557,29 @@ function SchedulesPanel({
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 16,
-        }}
-      >
-        <Text type="secondary">
-          Scheduled tasks run scripts on a cron/interval basis
-        </Text>
+      <PanelHeader description="Scheduled tasks run scripts or Agent prompts on a cron/interval basis">
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={() => {
+            form.setFieldsValue({
+              enabled: true,
+              task_type: "script",
+              trigger_type: "interval",
+              every_ms: 60000,
+              timezone: "UTC",
+              timeout_ms: 30000,
+              max_output_bytes: 1048576,
+            });
+            setAddModalOpen(true);
+          }}
+        >
+          Add
+        </Button>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
           Refresh
         </Button>
-      </div>
+      </PanelHeader>
 
       <Table
         dataSource={schedules}
@@ -1452,9 +1588,375 @@ function SchedulesPanel({
         size="small"
         loading={loading}
         pagination={false}
+        onRow={(record) => ({
+          onClick: () => openScheduleDetail(record),
+          style: { cursor: "pointer" },
+        })}
         locale={{ emptyText: <Empty description="No schedules configured" /> }}
+        scroll={{ x: 890 }}
+      />
+
+      <Modal
+        title="Add Schedule"
+        open={addModalOpen}
+        onCancel={() => setAddModalOpen(false)}
+        onOk={handleAdd}
+        okText="Create"
+        width={720}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Form.Item name="id" label="ID">
+              <Input placeholder="Optional stable id" />
+            </Form.Item>
+            <Form.Item
+              name="name"
+              label="Name"
+              rules={[{ required: true, message: "Name is required" }]}
+            >
+              <Input placeholder="Daily summary" />
+            </Form.Item>
+            <Form.Item name="task_type" label="Task Type" initialValue="script">
+              <Select
+                options={[
+                  { value: "script", label: "Script" },
+                  { value: "agent", label: "Agent" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="target_id" label="Target">
+              <Select
+                allowClear
+                placeholder={taskType === "script" ? "Required for scripts" : "Optional"}
+                options={targets.map((target) => ({
+                  value: target.id,
+                  label: `${target.display_name || target.id} (${target.id})`,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item name="trigger_type" label="Trigger" initialValue="interval">
+              <Select
+                options={[
+                  { value: "interval", label: "Interval" },
+                  { value: "cron", label: "Cron" },
+                ]}
+              />
+            </Form.Item>
+            {triggerType === "interval" ? (
+              <Form.Item
+                name="every_ms"
+                label="Every (ms)"
+                rules={[{ required: true, message: "Interval is required" }]}
+              >
+                <Input type="number" min={1} />
+              </Form.Item>
+            ) : (
+              <Form.Item
+                name="cron_expr"
+                label="Cron"
+                rules={[{ required: true, message: "Cron expression is required" }]}
+              >
+                <Input placeholder="*/5 * * * *" />
+              </Form.Item>
+            )}
+            {triggerType === "cron" && (
+              <Form.Item name="timezone" label="Timezone">
+                <Input placeholder="UTC" />
+              </Form.Item>
+            )}
+            <Form.Item name="timeout_ms" label="Timeout (ms)">
+              <Input type="number" min={1} />
+            </Form.Item>
+            <Form.Item name="max_output_bytes" label="Max Output Bytes">
+              <Input type="number" min={1} />
+            </Form.Item>
+            <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </div>
+
+          {taskType === "agent" ? (
+            <>
+              <Form.Item
+                name="agent_prompt"
+                label="Preset Prompt"
+                rules={[{ required: true, message: "Preset prompt is required" }]}
+              >
+                <Input.TextArea rows={5} placeholder="Run the scheduled Agent task..." />
+              </Form.Item>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Form.Item name="agent_session_key" label="Session Key">
+                  <Input placeholder="Optional session key" />
+                </Form.Item>
+                <Form.Item name="agent_work_dir" label="Working Directory">
+                  <Input placeholder="Optional working directory" />
+                </Form.Item>
+              </div>
+              <Form.Item name="agent_system_prompt" label="System Prompt Override">
+                <Input.TextArea rows={3} placeholder="Optional" />
+              </Form.Item>
+            </>
+          ) : (
+            <>
+              <Form.Item
+                name="script_text"
+                label="Script Text"
+                rules={[
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      if (value || getFieldValue("script_file")) return Promise.resolve();
+                      return Promise.reject(new Error("Script text or file is required"));
+                    },
+                  }),
+                ]}
+              >
+                <Input.TextArea rows={5} placeholder="echo hello" />
+              </Form.Item>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Form.Item name="script_file" label="Script File">
+                  <Input placeholder="/path/to/script.sh" />
+                </Form.Item>
+                <Form.Item name="cwd" label="Working Directory">
+                  <Input placeholder="Optional cwd" />
+                </Form.Item>
+              </div>
+            </>
+          )}
+        </Form>
+      </Modal>
+
+      <ScheduleDetailModal
+        open={detailOpen}
+        schedule={selectedSchedule}
+        runs={scheduleRuns}
+        loading={runsLoading}
+        onClose={() => setDetailOpen(false)}
+        onRefresh={() => selectedSchedule && openScheduleDetail(selectedSchedule)}
       />
     </div>
+  );
+}
+
+function ScheduleDetailModal({
+  open,
+  schedule,
+  runs,
+  loading,
+  onClose,
+  onRefresh,
+}: {
+  open: boolean;
+  schedule: ImSchedule | null;
+  runs: ImTaskRun[];
+  loading: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  if (!schedule) return null;
+
+  const renderTime = (ts?: number) => {
+    if (!ts) return "-";
+    return new Date(ts).toLocaleString();
+  };
+
+  const renderBlock = (value?: string) => (
+    <pre
+      style={{
+        margin: 0,
+        maxHeight: 180,
+        overflow: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        background: "var(--color-bg-elevated, rgba(128, 128, 128, 0.08))",
+        border: "1px solid var(--color-border, rgba(128, 128, 128, 0.28))",
+        borderRadius: 6,
+        padding: 10,
+      }}
+    >
+      {value || "-"}
+    </pre>
+  );
+
+  return (
+    <Modal
+      title={`Schedule Detail · ${schedule.name}`}
+      open={open}
+      onCancel={onClose}
+      footer={[
+        <Button key="refresh" icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
+          Refresh
+        </Button>,
+        <Button key="close" onClick={onClose}>
+          Close
+        </Button>,
+      ]}
+      width={920}
+      destroyOnHidden
+    >
+      <Descriptions size="small" bordered column={2}>
+        <Descriptions.Item label="ID">{schedule.id}</Descriptions.Item>
+        <Descriptions.Item label="Type">
+          <Tag color={schedule.task_type === "agent" ? "blue" : "default"}>
+            {schedule.task_type === "agent" ? "Agent" : "Script"}
+          </Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="Enabled">
+          {schedule.enabled ? "Yes" : "No"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Target">{schedule.target_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="Trigger">
+          {schedule.trigger.type === "cron"
+            ? `${schedule.trigger.expr || "-"} (${schedule.trigger.timezone || "UTC"})`
+            : `every ${schedule.trigger.every_ms}ms`}
+        </Descriptions.Item>
+        <Descriptions.Item label="Next Run">{renderTime(schedule.next_run_at)}</Descriptions.Item>
+        <Descriptions.Item label="Last Run">{renderTime(schedule.last_run_at)}</Descriptions.Item>
+        <Descriptions.Item label="Timeout">{schedule.timeout_ms}ms</Descriptions.Item>
+      </Descriptions>
+
+      <div style={{ marginTop: 16 }}>
+        <Text strong>Task</Text>
+        <div style={{ marginTop: 8 }}>
+          {schedule.task_type === "agent"
+            ? renderBlock(schedule.agent?.prompt)
+            : renderBlock(schedule.script?.script_text || schedule.script?.script_file)}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 20, marginBottom: 8 }}>
+        <Text strong>Run History</Text>
+      </div>
+      <Spin spinning={loading}>
+        {runs.length === 0 ? (
+          <Empty description="No runs yet" />
+        ) : (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            {runs
+              .slice()
+              .reverse()
+              .map((run) => (
+                <RunDetailCard key={run.run_id} run={run} />
+              ))}
+          </Space>
+        )}
+      </Spin>
+    </Modal>
+  );
+}
+
+function RunDetailCard({ run }: { run: ImTaskRun }) {
+  const isAgent = run.task_type === "agent" || !!run.agent_final_response;
+  const formatRunTs = (ts?: number) => {
+    if (!ts) return "-";
+    const ms = ts > 1_000_000_000_000 ? ts : ts * 1000;
+    return new Date(ms).toLocaleString();
+  };
+  const renderBlock = (value?: string) => (
+    <pre
+      style={{
+        margin: 0,
+        maxHeight: 220,
+        overflow: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        background: "var(--color-bg-elevated, rgba(128, 128, 128, 0.08))",
+        border: "1px solid var(--color-border, rgba(128, 128, 128, 0.28))",
+        borderRadius: 6,
+        padding: 10,
+      }}
+    >
+      {value || "-"}
+    </pre>
+  );
+  return (
+    <Card size="small" title={`${run.run_id} · ${run.status}`}>
+      <Descriptions size="small" column={3} bordered>
+        <Descriptions.Item label="Run ID">{run.run_id}</Descriptions.Item>
+        <Descriptions.Item label="Type">
+          <Tag color={isAgent ? "blue" : "default"}>{isAgent ? "Agent" : "Script"}</Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="Status">
+          <Tag color={run.status === "success" || run.status === "completed" ? "green" : run.status === "failed" || run.status === "error" ? "red" : "processing"}>
+            {run.status}
+          </Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="Source">{run.trigger_source}</Descriptions.Item>
+        <Descriptions.Item label="Schedule">{run.schedule_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="Route">{run.route_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="Provider">{run.provider_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="Target">{run.target_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="Started">
+          {formatRunTs(run.started_at)}
+        </Descriptions.Item>
+        <Descriptions.Item label="Ended">
+          {formatRunTs(run.ended_at)}
+        </Descriptions.Item>
+        <Descriptions.Item label="Duration">
+          {run.duration_ms !== undefined ? `${run.duration_ms}ms` : "-"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Exit Code">
+          {run.exit_code !== undefined ? run.exit_code : "-"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Stdout SHA1">
+          <Text code>{run.stdout_digest || "-"}</Text>
+        </Descriptions.Item>
+        <Descriptions.Item label="Stderr SHA1">
+          <Text code>{run.stderr_digest || "-"}</Text>
+        </Descriptions.Item>
+        <Descriptions.Item label="Error">{run.error || "-"}</Descriptions.Item>
+      </Descriptions>
+
+      {isAgent ? (
+        <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
+          <div>
+            <Text strong>Final Result</Text>
+            <div style={{ marginTop: 6 }}>{renderBlock(run.agent_final_response || run.stdout_preview)}</div>
+          </div>
+          {run.agent_plan_steps && run.agent_plan_steps.length > 0 && (
+            <div>
+              <Text strong>Plan Trace</Text>
+              <div style={{ marginTop: 6 }}>
+                {run.agent_plan_steps.map((step, idx) => (
+                  <div key={`${step.step}-${idx}`}>
+                    <Tag>{step.status}</Tag>
+                    <Text>{step.step}</Text>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {run.agent_tool_calls && run.agent_tool_calls.length > 0 && (
+            <div>
+              <Text strong>Tool Calls</Text>
+              <Space direction="vertical" style={{ width: "100%", marginTop: 6 }} size={8}>
+                {run.agent_tool_calls.map((tool, idx) => (
+                  <Card key={`${tool.tool_name}-${idx}`} size="small" type="inner" title={`${tool.tool_name} · ${tool.success ? "success" : "failed"}`}>
+                    <Text type="secondary">Arguments</Text>
+                    {renderBlock(tool.arguments)}
+                    <div style={{ marginTop: 8 }}>
+                      <Text type="secondary">Result</Text>
+                    </div>
+                    {renderBlock(tool.result)}
+                  </Card>
+                ))}
+              </Space>
+            </div>
+          )}
+        </Space>
+      ) : (
+        <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
+          <div>
+            <Text strong>Stdout</Text>
+            <div style={{ marginTop: 6 }}>{renderBlock(run.stdout_preview)}</div>
+          </div>
+          <div>
+            <Text strong>Stderr</Text>
+            <div style={{ marginTop: 6 }}>{renderBlock(run.stderr_preview)}</div>
+          </div>
+        </Space>
+      )}
+    </Card>
   );
 }
 
@@ -1471,6 +1973,7 @@ function HistoryPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const [selectedRun, setSelectedRun] = useState<ImTaskRun | null>(null);
   const formatTs = (ts?: number) => {
     if (!ts) return "-";
     const secs = ts > 1_000_000_000_000 ? ts / 1000 : ts;
@@ -1632,6 +2135,10 @@ function HistoryPanel({
           pagination={{ pageSize: 20, size: "small" }}
           locale={{ emptyText: <Empty description="No task runs recorded" /> }}
           scroll={{ x: 900 }}
+          onRow={(record) => ({
+            onClick: () => setSelectedRun(record),
+            style: { cursor: "pointer" },
+          })}
         />
       ),
     },
@@ -1651,13 +2158,33 @@ function HistoryPanel({
         </Button>
       </div>
       <Tabs items={historyTabItems} size="small" />
+      <Modal
+        title={selectedRun ? `Task Run Detail · ${selectedRun.run_id}` : "Task Run Detail"}
+        open={!!selectedRun}
+        onCancel={() => setSelectedRun(null)}
+        footer={[
+          <Button key="close" onClick={() => setSelectedRun(null)}>
+            Close
+          </Button>,
+        ]}
+        width={920}
+        destroyOnHidden
+      >
+        <div style={{ maxHeight: "70vh", overflowY: "auto", paddingRight: 4 }}>
+          {selectedRun && <RunDetailCard run={selectedRun} />}
+        </div>
+      </Modal>
     </div>
   );
 }
 
 // ─── Main Tab Component ──────────────────────────────────────────────────────
 
-export default function ImGatewayTab() {
+interface ImGatewayTabProps {
+  hideSectionNav?: boolean;
+}
+
+export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const sectionFromUrl = searchParams.get("imGatewaySection");
   const activeSection =
@@ -1694,9 +2221,15 @@ export default function ImGatewayTab() {
         case "routes":
           setRoutes(await imGatewayApi.listRoutes());
           break;
-        case "schedules":
-          setSchedules(await imGatewayApi.listSchedules());
+        case "schedules": {
+          const [s, t] = await Promise.all([
+            imGatewayApi.listSchedules(),
+            imGatewayApi.listTargets(),
+          ]);
+          setSchedules(s);
+          setTargets(t);
           break;
+        }
         case "history": {
           const [e, r] = await Promise.all([
             imGatewayApi.listHistoryEvents(),
@@ -1742,7 +2275,10 @@ export default function ImGatewayTab() {
         flexDirection: isCompactNav ? "row" : "column",
         gap: 6,
         overflowX: isCompactNav ? "auto" : undefined,
+        overflowY: isCompactNav ? undefined : "auto",
         padding: isCompactNav ? "0 0 4px" : 0,
+        minHeight: 0,
+        maxHeight: "100%",
       }}
     >
       {IM_GATEWAY_SECTION_NAV.map((section) => {
@@ -1818,6 +2354,7 @@ export default function ImGatewayTab() {
           <div data-testid="im-gateway-section-schedules">
         <SchedulesPanel
           schedules={schedules}
+          targets={targets}
           loading={loading}
           onRefresh={fetchData}
         />
@@ -1845,21 +2382,28 @@ export default function ImGatewayTab() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: isCompactNav ? "1fr" : "168px minmax(0, 1fr)",
-          gridTemplateRows: isCompactNav ? "auto minmax(0, 1fr)" : undefined,
+          gridTemplateColumns:
+            hideSectionNav || isCompactNav ? "1fr" : "168px minmax(0, 1fr)",
+          gridTemplateRows:
+            !hideSectionNav && isCompactNav ? "auto minmax(0, 1fr)" : undefined,
           gap: 16,
           height: "100%",
           minHeight: 0,
-          alignContent: "start",
+          overflow: "hidden",
         }}
       >
-        <div>{nav}</div>
+        {!hideSectionNav && (
+          <div style={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
+            {nav}
+          </div>
+        )}
         <div
           data-testid="im-gateway-section-content"
           style={{
+            height: "100%",
             minHeight: 0,
             overflowY: "auto",
-            overflowX: "hidden",
+            overflowX: "auto",
             paddingRight: isCompactNav ? 0 : 4,
           }}
         >

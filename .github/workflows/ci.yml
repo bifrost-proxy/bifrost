@@ -914,7 +914,7 @@ jobs:
     name: E2E Rules (${{ matrix.target }}, shard ${{ matrix.rule_shard }})
     needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

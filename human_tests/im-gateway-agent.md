@@ -283,17 +283,18 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ## WebUI Agent Settings 配置管理
 
-### TC-IMA-25: Agent Tab 渲染 - 页面加载及配置展示
+### TC-IMA-25: AI 一级页 Agent 渲染 - 页面加载及配置展示
 
 - **操作步骤**:
-  1. 在浏览器中访问 `http://127.0.0.1:8800/_bifrost/settings?tab=agent`
-  2. 检查 Settings 页面 Tab 列表中是否包含 "Agent" Tab（带 Robot 图标）
-  3. 点击 Agent Tab，检查页面内容
+  1. 在浏览器中访问 `http://127.0.0.1:8800/_bifrost/ai?aiSection=agent-general&agentSection=general`
+  2. 检查主侧栏中是否包含与 Settings 同级的 "AI" 入口（带 Robot 图标）
+  3. 检查 AI 页面左侧子导航中是否包含 Agent 分组和 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions
+  4. 检查右侧 Agent General 内容
 - **预期结果**:
-  - Settings Tab 列表显示 "Agent" Tab（带 Robot 图标）
-  - 页面标题显示 "Agent Configuration"，状态标签显示 "Enabled"/"Disabled"
-  - 显示 5 个折叠区域：General、Model Configuration、Runtime Settings、MCP Servers、Active Sessions
-  - General 和 Model Configuration 默认展开
+  - 主侧栏显示 "AI" 入口，且和 Settings 是同级入口
+  - Settings 页面不再显示 "Agent" 或 "IM Gateway" tab
+  - AI 页面左侧子导航同时整合 Agent 与 IM Gateway 子项
+  - 右侧只渲染 Agent General 卡片，状态标签显示 "Enabled"/"Disabled"
   - Model 字段显示 `gpt-5.4-2026-03-05`
   - Model Provider 字段显示 `aidp_crawl`
 
@@ -404,9 +405,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```
 - **预期结果**:
   - 返回 JSON 数组，包含 14 个 provider
-  - 每个 provider 包含 `id`、`name`、`base_url`、`env_key` 字段
+  - 每个 provider 包含 `id`、`name`、`base_url`、`env_key`、`request_max_retries`、`stream_idle_timeout_ms`、`stream_max_retries` 字段
   - 包含的 provider ID: `openai`, `aidp_crawl`, `azure`, `anthropic`, `gemini`, `groq`, `deepseek`, `ollama`, `lmstudio`, `amazon-bedrock`, `openrouter`, `xai`, `mistral`, `cerebras`
   - `openai.base_url` = `"https://api.openai.com/v1/chat/completions"`
+  - `openai.request_max_retries` = `4`，`openai.stream_idle_timeout_ms` = `300000`，`openai.stream_max_retries` = `5`
   - `ollama.env_key` = `null`（本地推理，无需 API key）
   - `azure.base_url` = `null`（用户必须自行配置）
 
@@ -449,6 +451,40 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 下拉框背景色、文字颜色在暗色主题下清晰可辨
   - URL/Key 信息的 Code 样式块在暗色主题下对比度良好
   - 下拉列表的选中项高亮在暗色主题下可见
+
+### TC-IMA-36A: WebUI Agent 默认值 placeholder
+
+- **操作步骤**:
+  1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=agent-model&agentSection=model`
+  2. 确认右侧只渲染 Agent → Model 配置卡片。
+  3. 在 `Provider Connection` 区域清空或保持未配置 `Request Max Retries`、`Stream Idle Timeout (ms)`、`Stream Max Retries` 三个输入框。
+  4. 观察三个输入框的 placeholder。
+  5. 打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=agent-memories&agentSection=memories`。
+  6. 在 `Memories` 区域清空或保持未配置 `Max Raw Memories`、`Max Unused Days`、`Max Rollout Age (days)`、`Extract Model`、`Consolidation Model` 五个输入框。
+  7. 观察五个输入框的 placeholder。
+- **预期结果**:
+  - `Request Max Retries` 输入框 placeholder 显示当前 provider 默认值 `4`。
+  - `Stream Idle Timeout (ms)` 输入框 placeholder 显示当前 provider 默认值 `300000`。
+  - `Stream Max Retries` 输入框 placeholder 显示当前 provider 默认值 `5`。
+  - `Max Raw Memories` 输入框 placeholder 显示默认值 `512`。
+  - `Max Unused Days` 与 `Max Rollout Age (days)` 输入框 placeholder 显示 `No limit`，表达空值默认不限制。
+  - `Extract Model` 与 `Consolidation Model` 输入框 placeholder 显示 `Current model (<当前 Agent 模型>)`，表达空值继承当前 Agent model。
+  - placeholder 仅作为提示展示，不会在用户未输入时写入 Agent 配置或 Memories 配置。
+  - 亮色和暗色主题下 placeholder 文本均清晰可读。
+
+### TC-IMA-36B: WebUI Runtime Settings 恢复默认值
+
+- **操作步骤**:
+  1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=agent-runtime&agentSection=runtime`。
+  2. 确认右侧只渲染 `Runtime Settings` 卡片。
+  3. 将 `Shell Timeout (secs)`、`Max Turn Iterations`、`Max History Messages`、`Session TTL (secs)`、`Request Timeout (secs)`、`Tool Output Token Limit`、`Project Doc Max Bytes`、`Background Terminal Timeout (ms)` 临时改成非默认值。
+  4. 点击 `Runtime Settings` 卡片右上角的 `Restore Defaults` 按钮。
+  5. 观察页面输入框，并通过 `GET /_bifrost/api/im-gateway/agent` 检查配置。
+- **预期结果**:
+  - 页面提示 `Runtime settings restored to defaults`。
+  - Runtime 输入框恢复为后端默认值：`shell_timeout_secs=600`、`max_turn_iterations=1000`、`max_history_messages=50`、`session_ttl_secs=3600`、`request_timeout_secs=600`、`tool_output_token_limit=10000`、`project_doc_max_bytes=32768`、`background_terminal_max_timeout=600000`。
+  - 后端 Agent 配置返回上述默认值，刷新页面后仍保持一致。
+  - 亮色和暗色主题下右上角按钮可见且可点击。
 
 ### TC-IMA-37: 统一 Sessions 管理 - 列表展示
 
@@ -708,7 +744,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 ### TC-IMA-53: WebUI Add/Edit IM Provider - Agent 配置字段
 
 - **操作步骤**:
-  1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=im-gateway`
+  1. 打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`
   2. 点击 Connections 区域的 Add Provider
   3. 检查弹窗包含 "Agent Working Directory"、"Base Instructions / System Prompt"、"Developer Instructions"、"User Instructions"
   4. 检查这些字段展示默认 Agent 配置作为继承值；字段留空表示继承数据目录默认配置
@@ -1469,32 +1505,35 @@ rm -rf ./.bifrost-test
   - 自动化真实链路回归 `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。用例通过 `model-proxy.test host://127.0.0.1:<mock_port>` 规则把外部模型 host 转到本地 mock，Agent 请求经 Bifrost 端口代理后在 Traffic 中出现 `POST model-proxy.test` 记录。
   - 真实模型 + TLS 拦截回归 `source ~/.zshrc; BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start --host 127.0.0.1 -p 18883 --unsafe-ssl --no-system-proxy --intercept-include search.bytedance.net` 后调用 `/api/im-gateway/agent/chat`：PASS。Agent Chat 返回 `success: true`，Traffic 出现 `REQ-69fa0d05-000003`，`POST https://search.bytedance.net/gpt/openapi/online/multimodal/crawl`，`status=200`，`protocol=https`，`is_tunnel=false`，request body 文件 61531 bytes、response body 文件 493 bytes。验证 Agent 已信任当前 Bifrost CA，不再因 `UnknownIssuer` 在 TLS 拦截下失败。
 
-### TC-IMA-84: Agent 设置页左侧导航按 URL 切换独立编辑卡片
+### TC-IMA-84: AI 一级页合并 Agent/IM Gateway 子导航并按 URL 切换独立面板
 
 - **前置条件**:
   - 使用临时数据目录启动 Bifrost，端口不得使用 9900：
     ```bash
     BIFROST_DATA_DIR=./.bifrost-test-agent-nav cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy
     ```
-  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/settings?tab=agent`
+  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/ai?aiSection=agent-general&agentSection=general`
 - **操作步骤**:
-  1. 确认 Agent 设置页左侧显示卡片导航，包含 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions。
-  2. 确认默认只渲染 `General` 编辑卡片，其他卡片未同时出现在右侧。
-  3. 点击左侧导航中的 `MCP Servers`。
-  4. 确认右侧只渲染 `MCP Servers` 编辑卡片，且 `MCP Servers` 导航项显示当前高亮状态。
-  5. 确认浏览器 URL 包含 `agentSection=mcp-servers`。
-  6. 刷新页面，确认仍恢复到 `MCP Servers` 编辑卡片。
-  7. 点击左侧导航中的 `Runtime`。
-  8. 确认右侧只渲染 `Runtime Settings` 编辑卡片，且 URL 更新为 `agentSection=runtime`。
-  9. 切换到暗色主题后重复点击 `MCP Servers` 与 `Runtime`。
+  1. 确认主侧栏高亮 `AI`，且 Settings 与 AI 是同级入口。
+  2. 确认 AI 页面左侧显示合并后的子导航，包含 Agent 分组的 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions，以及 IM Gateway 分组的 Connections、Targets、Routes、Schedules、History。
+  3. 确认默认只渲染 `General` 编辑卡片，其他卡片未同时出现在右侧。
+  4. 点击左侧导航中的 Agent `MCP Servers`。
+  5. 确认右侧只渲染 `MCP Servers` 编辑卡片，且 `MCP Servers` 导航项显示当前高亮状态。
+  6. 确认浏览器 URL 包含 `aiSection=agent-mcp-servers` 与 `agentSection=mcp-servers`。
+  7. 刷新页面，确认仍恢复到 `MCP Servers` 编辑卡片。
+  8. 点击左侧导航中的 IM Gateway `Routes`。
+  9. 确认右侧只渲染 `Routes` 面板，且 URL 更新为 `aiSection=im-gateway-routes` 与 `imGatewaySection=routes`。
+  10. 点击左侧导航中的 Agent `Runtime`，确认右侧只渲染 `Runtime Settings` 编辑卡片。
+  11. 切换到暗色主题后重复点击 Agent `MCP Servers` 与 IM Gateway `Routes`。
 - **预期结果**:
-  - 左侧导航始终可见并固定在左侧区域，不跟随右侧内容滚动。
+  - AI 页面顶部有正常留白，左侧导航和右侧第一张卡片都不贴住窗口顶部。
+  - 合并后的左侧导航始终可见并固定在左侧区域，不跟随右侧内容滚动。
   - 点击导航项后右侧独立渲染对应编辑卡片，不再把所有卡片堆在一个长页面中。
   - 当前导航项通过高亮和 `aria-current="true"` 标记。
-  - URL 中的 `agentSection` 能记录当前卡片，页面刷新后恢复到同一卡片。
+  - URL 中的 `aiSection`、`agentSection`、`imGatewaySection` 能记录当前卡片，页面刷新后恢复到同一卡片。
   - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
   - 窄屏下导航退化为顶部横向滚动，不挤压编辑卡片内容。
-- **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Agent 左侧导航按 URL 切换独立编辑卡片"` 通过；验证默认仅渲染 General、点击 MCP Servers/Runtime 后只渲染对应卡片、URL `agentSection` 记录并刷新恢复、暗色主题下继续切换可读且 `aria-current` 正确。
+- **执行记录（2026-05-12）**: PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "AI 一级页整合 (Agent|IM Gateway)"`，真实 Chromium 验证 AI 主侧栏入口与 Settings 同级、AI 页顶部留白至少 12px、Agent/IM Gateway 子导航合并、右侧一次只渲染当前面板、`aiSection` + `agentSection` / `imGatewaySection` 刷新恢复、暗色主题切换后可读，以及从 stale session URL 点击 Agent Runtime 会清理 `session/view/historyPath` 并回到 Runtime 卡片。
 
 ### TC-IMA-84A: Agent 模型配置可关闭 reasoning 参数
 
@@ -1503,7 +1542,7 @@ rm -rf ./.bifrost-test
     ```bash
     BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18884 --unsafe-ssl --no-system-proxy
     ```
-  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/settings?tab=agent&agentSection=model`
+  - 浏览器打开 `http://127.0.0.1:18884/_bifrost/ai?aiSection=agent-model&agentSection=model`
 - **操作步骤**:
   1. 确认右侧只渲染 `Model Configuration` 编辑卡片。
   2. 将模型名填写为一个不支持 Chat Completions reasoning 参数的模型，例如 `gpt-5.5-2026-04-01`。
@@ -1516,7 +1555,7 @@ rm -rf ./.bifrost-test
   - API 返回 `model_reasoning_effort: "none"` 与 `model_reasoning_summary: "none"`。
   - Agent 运行时把 `"none"` 解释为禁用，不向 Chat Completions 请求体写入 `reasoning_effort` 或 `reasoning_summary` 字段。
   - 亮色和暗色主题下两个配置项都位于 Agent → Model 配置卡片内，文字和下拉值清晰可读。
-- **执行记录（2026-05-10）**: PASS — 使用临时数据目录 `/tmp/bifrost-reasoning-human.iLYev0` 启动 `./target/debug/bifrost start -p 18884 --unsafe-ssl --no-system-proxy`，通过 Codex in-app browser 打开 `/_bifrost/settings?tab=agent&agentSection=model`，将模型填为 `gpt-5.5-2026-04-01`，将 `Reasoning Effort` 与 `Reasoning Summary` 均切换为 `None (disabled)`；`curl -fsS http://127.0.0.1:18884/_bifrost/api/im-gateway/agent | jq '{model, model_reasoning_effort, model_reasoning_summary}'` 与临时目录 `agent/agent_config.json` 均返回 `model_reasoning_effort: "none"`、`model_reasoning_summary: "none"`；切换暗色主题后控件和 `None (disabled)` 值仍可见。
+- **执行记录（2026-05-10）**: PASS — 使用临时数据目录 `/tmp/bifrost-reasoning-human.iLYev0` 启动 `./target/debug/bifrost start -p 18884 --unsafe-ssl --no-system-proxy`，通过 Codex in-app browser 打开旧版 `/_bifrost/settings?tab=agent&agentSection=model`，将模型填为 `gpt-5.5-2026-04-01`，将 `Reasoning Effort` 与 `Reasoning Summary` 均切换为 `None (disabled)`；`curl -fsS http://127.0.0.1:18884/_bifrost/api/im-gateway/agent | jq '{model, model_reasoning_effort, model_reasoning_summary}'` 与临时目录 `agent/agent_config.json` 均返回 `model_reasoning_effort: "none"`、`model_reasoning_summary: "none"`；切换暗色主题后控件和 `None (disabled)` 值仍可见。本轮 UI 入口改为 `/_bifrost/ai?aiSection=agent-model&agentSection=model`，需执行最新入口回归。
 
 ### TC-IMA-85: `/agent/chat` 图片多模态理解真实链路
 

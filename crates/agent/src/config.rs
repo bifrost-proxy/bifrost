@@ -894,6 +894,9 @@ pub struct ProviderInfo {
     pub name: String,
     pub base_url: Option<String>,
     pub env_key: Option<String>,
+    pub request_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub stream_max_retries: Option<u64>,
 }
 
 /// Get all built-in providers as a list of ProviderInfo (for API/WebUI).
@@ -907,6 +910,9 @@ pub fn list_builtin_providers() -> Vec<ProviderInfo> {
                 name: cfg.name.clone().unwrap_or_else(|| id.to_string()),
                 base_url: cfg.base_url.clone(),
                 env_key: cfg.env_key.clone(),
+                request_max_retries: cfg.request_max_retries,
+                stream_idle_timeout_ms: cfg.stream_idle_timeout_ms,
+                stream_max_retries: cfg.stream_max_retries,
             }
         })
         .collect()
@@ -1148,6 +1154,26 @@ mod tests {
         };
         let effective = config.resolve_effective_config().unwrap();
         assert!(effective.base_url.contains("api.openai.com"));
+    }
+
+    #[test]
+    fn test_builtin_provider_info_includes_connection_defaults() {
+        let providers = list_builtin_providers();
+        let openai = providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("openai provider should be listed");
+        assert_eq!(openai.request_max_retries, Some(4));
+        assert_eq!(openai.stream_idle_timeout_ms, Some(300_000));
+        assert_eq!(openai.stream_max_retries, Some(5));
+
+        let ollama = providers
+            .iter()
+            .find(|provider| provider.id == "ollama")
+            .expect("ollama provider should be listed");
+        assert_eq!(ollama.request_max_retries, None);
+        assert_eq!(ollama.stream_idle_timeout_ms, None);
+        assert_eq!(ollama.stream_max_retries, None);
     }
 
     #[test]

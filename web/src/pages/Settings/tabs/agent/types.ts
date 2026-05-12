@@ -15,12 +15,13 @@ export const DEFAULTS = {
   // When null/undefined, backend derives from context_window × 90% (Codex-compatible).
   model_auto_compact_token_limit: undefined as number | undefined,
   max_completion_tokens: 16_384,
-  max_turn_iterations: 20,
+  max_turn_iterations: 1000,
   max_history_messages: 50,
   session_ttl_secs: 3600,
-  request_timeout_secs: 120,
+  request_timeout_secs: 600,
+  tool_output_token_limit: 10_000,
   project_doc_max_bytes: 32_768,
-  background_terminal_max_timeout: 300_000,
+  background_terminal_max_timeout: 600_000,
 } as const;
 
 /** Derive the effective compact threshold (context_window × 90%). */
@@ -41,7 +42,7 @@ export interface McpServerConfig {
   url?: string;
   bearer_token_env_var?: string;
   enabled: boolean;
-  startup_timeout_secs?: number;
+  startup_timeout_sec?: number;
   tool_timeout_sec?: number;
 }
 
@@ -158,6 +159,9 @@ export interface ProviderInfo {
   name: string;
   base_url: string | null;
   env_key: string | null;
+  request_max_retries?: number | null;
+  stream_idle_timeout_ms?: number | null;
+  stream_max_retries?: number | null;
 }
 
 export interface SkillInfo {

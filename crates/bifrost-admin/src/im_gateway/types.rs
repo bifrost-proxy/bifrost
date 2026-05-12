@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use bifrost_agent::{PlanStep, ToolCallLog};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -264,11 +265,21 @@ fn default_max_output_bytes() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScheduleTrigger {
-    Cron { expr: String, timezone: String },
-    Interval { every_ms: u64 },
+    Cron {
+        expr: String,
+        #[serde(default = "default_schedule_timezone")]
+        timezone: String,
+    },
+    Interval {
+        every_ms: u64,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn default_schedule_timezone() -> String {
+    "UTC".to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskScript {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_text: Option<String>,
@@ -278,6 +289,38 @@ pub struct TaskScript {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+impl TaskScript {
+    pub fn is_empty(&self) -> bool {
+        self.script_text
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+            && self
+                .script_file
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleTaskType {
+    #[default]
+    Script,
+    Agent,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleAgentTask {
+    /// Preset prompt sent to the agent when the schedule fires.
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -299,13 +342,20 @@ pub struct RetryPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImSchedule {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub target_id: String,
     pub trigger: ScheduleTrigger,
+    #[serde(default)]
+    pub task_type: ScheduleTaskType,
+    #[serde(default)]
     pub script: TaskScript,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ScheduleAgentTask>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_max_output_bytes")]
@@ -322,6 +372,61 @@ pub struct ImSchedule {
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+impl ImSchedule {
+    pub fn infer_task_type(&mut self) {
+        if self.task_type == ScheduleTaskType::Script
+            && self
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.prompt.trim().is_empty())
+            && self.script.is_empty()
+        {
+            self.task_type = ScheduleTaskType::Agent;
+        }
+    }
+
+    pub fn validate_for_save(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("schedule name cannot be empty".to_string());
+        }
+        match &self.trigger {
+            ScheduleTrigger::Cron { expr, .. } if expr.trim().is_empty() => {
+                return Err("cron expression cannot be empty".to_string());
+            }
+            ScheduleTrigger::Interval { every_ms } if *every_ms == 0 => {
+                return Err("interval every_ms must be greater than 0".to_string());
+            }
+            _ => {}
+        }
+
+        match self.task_type {
+            ScheduleTaskType::Script => {
+                if self.target_id.trim().is_empty() {
+                    return Err("script schedules require target_id".to_string());
+                }
+                if self.script.is_empty() {
+                    return Err(
+                        "script schedules require script.script_text or script.script_file"
+                            .to_string(),
+                    );
+                }
+            }
+            ScheduleTaskType::Agent => {
+                let prompt = self
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.prompt.trim())
+                    .unwrap_or_default();
+                if prompt.is_empty() {
+                    return Err("agent schedules require agent.prompt".to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +483,14 @@ pub struct ImTaskRun {
     pub stderr_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<ScheduleTaskType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_final_response: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_tool_calls: Vec<ToolCallLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_plan_steps: Option<Vec<PlanStep>>,
 }
 
 // ---------------------------------------------------------------------------

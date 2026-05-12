@@ -15,12 +15,12 @@
 - 能管理定时任务，包括新增、删除、修改、暂停、恢复、手动执行、超时控制和执行历史
 - 后续需要平滑接入 WeChat 等其他 IM 通道
 
-因此本方案把能力命名为 `IM Gateway`，作为 Settings 中的一级 Tab 和 CLI 顶级命令，而不是放进 `Remote Invoke` Tab。
+因此本方案把能力命名为 `IM Gateway`，作为 WebUI 一级 `AI` 页面中的 IM 通道管理区和 CLI 顶级命令，而不是放进 `Remote Invoke` Tab。
 
 ## 设计结论
 
 1. 新增顶级模块 `IM Gateway`。
-2. WebUI 在 Settings 下新增一级 Tab：`IM Gateway`。
+2. WebUI 提供与 Settings 同级的一级 `AI` 入口，并在其中整合 `Agent` 与 `IM Gateway` 子导航。
 3. Feishu 是第一阶段 provider，但内部抽象必须按多 IM provider 设计。
 4. Feishu 必须使用开放平台长连接模式接收事件，不使用 Webhook 作为第一阶段主路径。
 5. `app_id` / `app_secret` 只保存在目标 Bifrost 本地数据目录，不通过 relay 明文传输，不写入 Recent Calls 明文，不写入 caller 本地连接文件。
@@ -33,7 +33,7 @@
 
 ### 目标
 
-- Settings 新增一级 `IM Gateway` Tab，独立于 `Remote Invoke`。
+- WebUI 新增与 `Settings` 同级的一级 `AI` 页面，独立于 `Remote Invoke`。
 - 支持配置 Feishu provider：
   - `app_id`
   - `app_secret`
@@ -95,31 +95,37 @@
 
 ## 用户体验
 
-### Settings 一级 Tab
+### AI 一级页面
 
-Settings 页面新增一级 Tab：
+主侧栏新增与 `Settings` 同级的 `AI` 入口。`AI` 页面把原 Settings 内的 `Agent` 与 `IM Gateway` 两个 tab 合并为一条左侧子导航：
 
 ```text
-Settings
-  - Proxy
-  - Certificate
-  - TLS / Interception
-  - Remote Invoke
-  - IM Gateway
-  - Performance
-  - Access Control
-  - Appearance
-  - Metrics
-  - Sync
+AI
+  Agent
+    - General
+    - Model
+    - Runtime
+    - History
+    - Memories
+    - Skills
+    - Memory Records
+    - MCP Servers
+    - Sessions
+  IM Gateway
+    - Connections
+    - Targets
+    - Routes
+    - Schedules
+    - History
 ```
 
 `Remote Invoke` 继续管理远程授权、连接、Recent Calls、Shell Access、File Access 等远控相关内容。
 
 `IM Gateway` 独立管理 IM 通道、发送、事件接收和任务。
 
-### IM Gateway Tab 内部结构
+### IM Gateway 页面内部结构
 
-内部使用左侧二级导航，每次只在右侧渲染当前面板，并通过 URL 查询参数 `imGatewaySection` 记录当前面板：
+AI 页内部使用左侧二级导航，每次只在右侧渲染当前面板，并通过 URL 查询参数 `aiSection` 记录合并后的当前面板；保留 `agentSection` 与 `imGatewaySection` 用于各子模块刷新恢复：
 
 ```text
 IM Gateway
@@ -130,7 +136,7 @@ IM Gateway
   - History
 ```
 
-刷新或复制链接后应恢复到同一个二级面板，例如 `Settings?tab=im-gateway&imGatewaySection=routes` 直接打开 Routes。桌面端左侧二级导航固定在自身列，右侧面板内容独立滚动；窄屏下导航退化为顶部横向滚动导航。
+刷新或复制链接后应恢复到同一个二级面板，例如 `AI?aiSection=im-gateway-routes&imGatewaySection=routes` 直接打开 Routes。桌面端左侧二级导航固定在自身列，右侧面板内容独立滚动；窄屏下导航退化为顶部横向滚动导航。Settings 页不再展示 `Agent` 或 `IM Gateway` tab。
 
 #### Connections
 
@@ -285,6 +291,7 @@ IM Gateway
 ```mermaid
 flowchart LR
     Settings["Settings"]
+    Ai["AI"]
     RemoteInvoke["Remote Invoke"]
     ImGateway["IM Gateway"]
     Connections["Connections"]
@@ -296,7 +303,7 @@ flowchart LR
     Grants["Remote Invoke Grants"]
 
     Settings --> RemoteInvoke
-    Settings --> ImGateway
+    Ai --> ImGateway
     ImGateway --> Connections
     ImGateway --> Targets
     ImGateway --> Routes
@@ -311,7 +318,7 @@ flowchart LR
 
 说明：
 
-- `IM Gateway` 是 Settings 一级 Tab，不放进 `Remote Invoke` 内部。
+- `IM Gateway` 位于与 Settings 同级的 `AI` 一级页面内，不放进 `Remote Invoke` 内部。
 - `ImProviderPolicy` 是 provider 本地发送、route、schedule、脚本执行权限的事实源。
 - `Remote Invoke Grants` 只管理远程 caller 是否可以执行 `bifrost remote im ...`，不管理 Feishu 长连接事件触发权限。
 - `IM Gateway` 内展示 provider policy 状态摘要和权限缺失提示；Remote Invoke Tab 展示 remote caller grant，不出现两套 provider 权限事实源。
@@ -510,26 +517,25 @@ Remote WebUI / CLI 共同要求：
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Settings                                                                     │
+│ AI                                                                           │
 ├──────────────┬───────────────────────────────────────────────────────────────┤
-│ Proxy        │ IM Gateway                                                    │
-│ Certificate  │ ┌──────────────┬────────────────────────────────────────────┐ │
-│ TLS          │ │ Connections  │ [current section content]                  │ │
-│ Remote Invoke│ │ Targets      │                                            │ │
-│ IM Gateway ◀ │ │ Routes       │                                            │ │
-│ Performance  │ │ Schedules    │                                            │ │
-│ Access       │ │ History      │                                            │ │
-│ Appearance   │ └──────────────┴────────────────────────────────────────────┘ │
-│ Metrics      │                                                               │
-│ Sync         │                                                               │
+│ Agent        │ ┌──────────────┬────────────────────────────────────────────┐ │
+│ General      │ │ Connections  │ [current section content]                  │ │
+│ Model        │ │ Targets      │                                            │ │
+│ Runtime      │ │ Routes       │                                            │ │
+│ Sessions     │ │ Schedules    │                                            │ │
+│ IM Gateway   │ │ History      │                                            │ │
+│ Connections ◀│ └──────────────┴────────────────────────────────────────────┘ │
+│ Targets      │                                                               │
+│ Routes       │                                                               │
 └──────────────┴───────────────────────────────────────────────────────────────┘
 ```
 
 布局原则：
 
-- 左侧复用 Settings 现有一级 Tab 导航。
-- 右侧 `IM Gateway` 内容使用左侧二级导航，不使用顶部 tabs；当前项以 `aria-current="true"` 标记。
-- `imGatewaySection` URL 参数负责恢复 Connections / Targets / Routes / Schedules / History 当前面板。
+- 左侧复用 `AI` 页面自身的合并子导航，并与主侧栏的 Settings 同级。
+- 右侧 `IM Gateway` 内容由 `AI` 子导航切换，不使用顶部 tabs；当前项以 `aria-current="true"` 标记。
+- `aiSection` 与 `imGatewaySection` URL 参数共同负责恢复 Connections / Targets / Routes / Schedules / History 当前面板。
 - 页面不再嵌套大卡片；只对 provider、target、route、schedule 这类重复项使用紧凑 card 或表格行。
 - 所有 secret 只显示 configured / missing，不显示可复制明文。
 
@@ -1371,7 +1377,7 @@ pub enum RemoteImGatewayAction {
   - 所有命令支持 `--format json`，错误码稳定。
 - `web/src/api/remoteInvoke.ts` 和 `RemoteInvokeTab`
   - Grants 只展示 `remote_im_gateway` caller grant，用于说明某个远程 caller 是否能管理 IM Gateway。
-  - Provider 权限不在 Remote Invoke Grants 中编辑，改由 IM Gateway Tab 的 provider policy 编辑。
+  - Provider 权限不在 Remote Invoke Grants 中编辑，改由 AI 页内的 IM Gateway provider policy 编辑。
 
 IM command action 到 provider policy permission 的映射：
 
@@ -1747,7 +1753,7 @@ human_tests/readme.md
 
 | 用例 ID | 名称 | 前置条件 | 操作步骤 | 预期结果 |
 | --- | --- | --- | --- | --- |
-| TC-IMG-01 | Settings 一级 Tab | Bifrost 以临时数据目录启动 | 打开 Settings | 侧边 Tab 中出现 `IM Gateway`，且不是 Remote Invoke 子面板 |
+| TC-IMG-01 | AI 一级页 IM Gateway 子导航 | Bifrost 以临时数据目录启动 | 打开 AI | 主侧栏中出现 `AI`，AI 子导航中出现 `IM Gateway` 分组，且不是 Remote Invoke 子面板 |
 | TC-IMG-02 | 创建 Feishu provider 并脱敏 | fake Feishu 可用 | 在 IM Gateway 创建 provider，输入 app_id/app_secret | 页面只显示 masked app_id 和 secret configured；不显示 secret 明文 |
 | TC-IMG-03 | provider 自动创建本地 policy | 完成 TC-IMG-02 | 打开 IM Gateway provider policy | 出现 `ImProviderPolicy`，identity key 为 masked app_id，默认只允许 read/send |
 | TC-IMG-04 | Feishu 长连接 connected | provider 已启用长连接 | 在 Connections 查看状态 | 状态变为 connected，显示 last_connected_at |
@@ -1854,6 +1860,136 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 - `design/im-gateway.md`
 - `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-13 Handler 模块化拆分
+
+### 问题
+
+`crates/bifrost-admin/src/handlers/im_gateway.rs` 承载了 IM Gateway 的 Provider、Target、Route、Schedule、Agent Chat、Agent API、消息发送、事件循环和通用 helper，单文件超过 7000 行。该结构让路由入口和业务处理混在一起，后续维护者难以定位模块 ownership，也违反单文件 1500 行以内的维护约束。
+
+### 实现逻辑
+
+- `handlers/im_gateway.rs` 只保留公共 imports、真实子模块声明、`ImGatewayService` re-export 和 `handle_im_gateway` 路由分发。
+- 子模块按功能拆分：
+  - `service.rs`: `ImGatewayService`、Provider client wrapper、启动/自动连接/调度循环。
+  - `providers.rs`: Provider CRUD、连接管理、Weixin 登录状态和 Provider 级 Agent 配置合并。
+  - `event_loop.rs`: IM 长连接事件循环、去重和路由触发。
+  - `agent_chat.rs`: IM Agent 对话、忙碌/队列/引导消息和进度事件交错处理。
+  - `agent_reply.rs`: Agent 回复卡片、Markdown 图片上传、错误卡片和 Provider policy。
+  - `messages.rs`: Target、Route 和 outbound message/card/image 发送。
+  - `schedules.rs`: Schedule CRUD、手动运行、Script/Agent schedule 执行和运行通知。
+  - `agent_api.rs`: `/agent` 配置、sessions、memories、MCP status 和 `/agent/chat` HTTP API。
+  - `utils.rs`: 共享响应转换、payload patch、status 文案和通用 helper。
+  - `tests.rs`: 原 handler 模块单元/集成测试。
+- 子模块之间使用真实 Rust `mod` 边界与 `pub(super)` 可见性，不使用 `include!` 机械拼接。
+- 远端 CI 回归中 Windows rules shard 1 在 30 分钟外层 job timeout 下被取消，32 个其它 job 已成功。将 `e2e-windows-rules.timeout-minutes` 放宽到 60，保持内部 suite timeout 不变，避免慢 Windows runner 在无产品失败信号时被外层 envelope 提前取消。
+
+### 测试方案
+
+- 编译验证：`cargo check -p bifrost-admin` 确认真实子模块边界无作用域或可见性错误。
+- 后端回归：`cargo test -p bifrost-admin im_gateway::tests -- --nocapture` 覆盖 Provider config、消息发送、Agent reply、事件循环和图片输入路径。
+- 管理端构建：`cargo check -p bifrost-admin` 的 build script 同步执行 `web` 的 `tsc -b && vite build`。
+- 真实端到端：启动源码版 Bifrost，使用 `/agent/chat` 通过 schedule tools 创建 Script/Agent 两类任务、更新配置并读取 schedules API。
+- CI 回归：推送后使用 GitHub Actions PAT watcher 观察所有 job；如 Windows rules shard 因外层 timeout cancelled，则扩大 envelope 后重新推送并继续 watch 到全绿。
+
+### 校验要求
+
+```bash
+cargo fmt --all -- --check
+cargo check -p bifrost-admin
+cargo test -p bifrost-admin im_gateway::tests -- --nocapture
+BIFROST_DATA_DIR=./.bifrost-e2e-im-regression cargo run --bin bifrost -- start -H 127.0.0.1 -p 18894 --unsafe-ssl --no-system-proxy --skip-cert-check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-12 Scheduled Tasks Script/Agent 升级
+
+### 问题
+
+旧的 IM Gateway Schedules 数据模型默认一个 schedule 只能执行脚本，WebUI 只能查看、暂停、恢复、手动触发和删除，不能从界面手动新增；同时 Agent 没有内置工具管理定时任务，无法在对话中按用户要求查询、创建、更新或删除 cron/interval 任务。Scheduler 模块已有 `ImScheduler` 计算能力，但服务启动时没有常驻调度循环真正消费 `next_run_at`。
+
+### 实现逻辑
+
+- `ImSchedule` 增加 `task_type: script | agent`，保留 `script` 字段兼容旧数据，新增 `agent.prompt/session_key/work_dir/system_prompt` 作为 Agent preset prompt 任务配置。
+- Schedule 保存入口统一执行 normalize/validate：自动生成缺省 id、推断 agent 任务、校验 trigger、校验 script/agent 必填字段，并计算 `next_run_at`。
+- `ImGatewayService::start_scheduler()` 在 Bifrost 启动时开启 cron/interval loop，按 due schedule 执行任务、写入 run history、更新 `last_run_at/next_run_at`，并保留 owner 通知能力。
+- 手动 `/schedules/:id/run` 复用同一执行函数，script 任务继续走 `ImTaskExecutor`，agent 任务走 Agent turn loop 并把模型响应写入 `stdout_preview`。
+- `ImTaskRun` 对 Agent 任务额外保存 `agent_final_response`、`agent_tool_calls`、`agent_plan_steps`；Script 任务保留 `duration_ms`、`stdout_preview`、`stderr_preview`、`exit_code`、`error`。
+- Agent ToolRegistry 注册 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_delete`，工具直接操作 `ImScheduleStore` 并通知 scheduler 重新检查。
+- WebUI Schedules 面板新增 Add 弹窗，支持选择 Script/Agent、Interval/Cron、Target、脚本内容/文件、Agent preset prompt、session key 和 work dir。
+- WebUI Schedule 行支持点击打开详情弹窗，展示任务配置、运行历史、Script stdout/stderr/耗时/错误、Agent 最终结果与工具调用轨迹。
+- WebUI History / Task Runs 行支持点击打开完整 run detail，复用 Schedule run detail 展示 run 元信息、stdout/stderr、Agent final result、tool calls 和 plan trace。
+- WebUI IM Gateway 在窄宽度下将 Connections/Routes 的固定三列详情改为自适应网格，Targets/Schedules 表格开启横向滚动，内容区域保留横向滚动兜底，避免字段逐字竖排或操作列被裁切。
+- CLI `bifrost im schedule add/update` 新增 `--agent-prompt`、`--agent-prompt-file`、`--agent-session-key`、`--agent-work-dir`、`--agent-system-prompt` 参数。
+
+### 测试方案
+
+- 单元测试：`schedule_tools_create_update_list_delete_agent_schedule` 覆盖 Agent 内置 schedule CRUD 工具；CLI parser 测试覆盖 agent prompt create 与切回 script update。
+- E2E/API：使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，验证 API 创建 script/agent schedule、列表中 task_type 正确、手动 run 能产生 run record、Agent tools 能 CRUD agent schedule，Agent run record 保存 final response 与 tool calls。
+- 真实场景测试：更新 `human_tests/im-gateway.md`，新增 Schedules Script/Agent 手动新增、Agent 工具管理、Schedule 详情运行历史、History Task Runs 详情和窄宽度布局回归用例，并在亮色/暗色主题下验证 Schedules Add/Detail 弹窗可读可操作。
+- Review/Fix/Test 第 1 轮：复核用户目标、API/schema/WebUI/CLI/tool diff，运行 targeted Rust tests、Web build 与 API smoke。
+- Review/Fix/Test 第 2 轮：复查第 1 轮修复后的最新 diff、human_tests 索引、scheduler loop 风险和兼容性，再复跑受影响验证命令。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin schedule_tools_create_update_list_delete_agent_schedule
+cargo test -p bifrost-cli parse_schedule
+pnpm --dir web build
+BIFROST_DATA_DIR=./.bifrost-test-schedules cargo run --bin bifrost -- start -p 18888 --unsafe-ssl --no-system-proxy --skip-cert-check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-12 Agent 设置默认值 Placeholder
+
+### 问题
+
+AI → Agent 设置页中部分可选配置为空时会继承运行时默认值，但输入框只显示空白或笼统的 `Default`。用户无法直接判断不填写时会使用什么值，尤其是 Provider Connection 的 retry/timeout 参数和 Memories 的保留/模型参数。
+
+### 实现逻辑
+
+- `GET /_bifrost/api/im-gateway/agent/providers` 的 provider 摘要补充 `request_max_retries`、`stream_idle_timeout_ms`、`stream_max_retries`，让 WebUI 使用后端内置 provider 默认值作为提示来源。
+- Agent → Model → Provider Connection 三个数字输入框在未配置时展示当前 provider 默认值：`4`、`300000`、`5`；提示不写入配置。
+- Agent → Memories 中 `Max Raw Memories` 展示默认 `512`；`Max Unused Days` 与 `Max Rollout Age (days)` 展示 `No limit`；`Extract Model` 与 `Consolidation Model` 展示 `Current model (<当前模型>)`。
+- placeholder 仅表达空值语义，不改变 PATCH 行为和落盘配置。
+- Agent → Runtime Settings 卡片右上角提供 `Restore Defaults` 按钮，一次 PATCH 恢复运行时默认值：shell/request timeout `600`、turn iteration `1000`、history `50`、session TTL `3600`、tool output token limit `10000`、project doc `32768`、background terminal timeout `600000`。
+
+### 测试方案
+
+- WebUI E2E：`tests/ui/admin-settings.spec.ts` 覆盖 Agent Model 和 Memories 两个面板的 placeholder 展示，以及 Runtime Settings 恢复默认值按钮。
+- 真实场景测试：更新并执行 `human_tests/im-gateway-agent.md` 的 `TC-IMA-36A` / `TC-IMA-36B`，覆盖亮色/暗色主题下 Provider Connection、Memories 默认提示和 Runtime 默认值恢复。
+
+### 校验要求
+
+```bash
+pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "AI Agent 默认值显示在输入框 placeholder"
+pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "AI Agent Runtime Settings 支持恢复默认值"
+cargo test -p bifrost-agent list_builtin_providers
+cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway-agent.md`
 - `human_tests/readme.md`
 
 ## 2026-05-06 CLI IM Provider 选择与默认 Owner 发送
