@@ -17,6 +17,7 @@ use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
     ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions, SendResult,
+    UploadedImage,
 };
 
 // ---------------------------------------------------------------------------
@@ -474,6 +475,42 @@ impl ImProvider for FeishuProvider {
         )
         .await
     }
+
+    async fn upload_image(
+        &self,
+        config: &ImProviderConfig,
+        image_type: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> Result<UploadedImage> {
+        self.upload_image(config, image_type, file_name, bytes, mime_type)
+            .await
+    }
+
+    async fn send_image(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        image_key: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let content = serde_json::json!({ "image_key": image_key }).to_string();
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+
+        self.send_message_internal(
+            base_url,
+            &token,
+            &target.receive_id_type,
+            &target.receive_id,
+            "image",
+            &content,
+            uuid,
+        )
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +518,99 @@ impl ImProvider for FeishuProvider {
 // ---------------------------------------------------------------------------
 
 impl FeishuProvider {
+    /// Upload an image and return the Feishu image_key that can be used in
+    /// image messages and card image elements.
+    pub async fn upload_image(
+        &self,
+        config: &ImProviderConfig,
+        image_type: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> Result<UploadedImage> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/im/v1/images", base_url);
+
+        #[derive(Deserialize)]
+        struct UploadResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+            data: Option<UploadResponseData>,
+        }
+
+        #[derive(Deserialize)]
+        struct UploadResponseData {
+            image_key: Option<String>,
+        }
+
+        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());
+        if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
+            part = part.mime_str(mime_type).map_err(|e| {
+                bifrost_core::BifrostError::Config(format!(
+                    "invalid image mime type '{}': {}",
+                    mime_type, e
+                ))
+            })?;
+        }
+
+        let form = reqwest::multipart::Form::new()
+            .text("image_type", image_type.to_string())
+            .part("image", part);
+
+        debug!(
+            image_type = image_type,
+            file_name = file_name,
+            "uploading feishu image"
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!("feishu image upload failed: {}", e))
+            })?;
+
+        let request_id = resp
+            .headers()
+            .get("x-tt-logid")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let body: UploadResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu image upload response parse failed: {}",
+                e
+            ))
+        })?;
+
+        if let Some(code) = body.code {
+            if code != 0 {
+                let msg = body.msg.unwrap_or_default();
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "feishu image upload error: code={}, msg={}",
+                    code, msg
+                )));
+            }
+        }
+
+        let image_key = body.data.and_then(|data| data.image_key).ok_or_else(|| {
+            bifrost_core::BifrostError::Network(
+                "feishu image upload response missing image_key".to_string(),
+            )
+        })?;
+
+        Ok(UploadedImage {
+            image_key,
+            request_id,
+        })
+    }
+
     /// Update an existing interactive card message.
     ///
     /// Uses Feishu PATCH /im/v1/messages/{message_id} API to update card content.

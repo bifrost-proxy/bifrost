@@ -529,6 +529,13 @@ pub struct SendResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadedImage {
+    pub image_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderValidation {
     pub valid: bool,
     #[serde(default)]

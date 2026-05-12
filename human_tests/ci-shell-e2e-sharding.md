@@ -502,6 +502,28 @@
 - 第 3 步只列出 shell tests，不构建、不启动 Bifrost、不修改系统代理；显式 `CARGO_BIN="$(which cargo)"` 证明入口仍保留调用方覆盖能力。
 - 在本机同时存在旧 rustup Cargo 与新版 Homebrew/系统 Cargo 时，shell E2E 子脚本内部的 `cargo test/run` 会继承入口选定的 Cargo，不再因 `$HOME/.cargo/bin/cargo` 旧版本解析 2024 edition 依赖失败。
 
+### TC-CS-26: site docs sync E2E 缺失 site 依赖自举回归
+
+**操作步骤**：
+1. 删除 `site/node_modules`，模拟 GitHub Actions shell shard 只安装 `web/` 依赖、未安装 `site/` 依赖的环境：
+   ```bash
+   rm -rf site/node_modules
+   ```
+2. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_site_docs_sync.sh
+   ```
+3. 执行真实 site docs sync E2E：
+   ```bash
+   bash e2e-tests/tests/test_site_docs_sync.sh
+   ```
+
+**预期结果**：
+- 第 2 步语法检查通过。
+- 第 3 步先输出 `Installing site dependencies for docs sync E2E...`，随后 `docs:sync`、`docs:verify`、Astro build 与 `site:verify-links` 全部通过。
+- 脚本结束后清理临时 `docs/future-docs-sync-probe.md` 与 `site/dist`，不会遗留探针文档。
+- 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -524,6 +546,7 @@
 | TC-CS-23 | 通过 | 2026-05-07 本轮执行：基于 GitHub Actions `CI` run `25469654203` 的 `E2E Shell (Linux, shard 2/3)` artifact，定位到多个 Bifrost 子进程被系统 `Killed`，符合 hosted runner 内存压力症状；随后 run `25470391707` 的 `E2E Shell (Linux, shard 3/3)` artifact 显示所有业务断言通过但仍有 Bifrost 子进程在 cleanup 中被系统 `Killed`，说明 8 路并发仍有资源峰值风险；随后 Ruby YAML 标准库解析 `.github/workflows/ci.yml`，确认 `e2e-shell` 与 `e2e-macos-shell` 的 `BIFROST_E2E_SHELL_JOBS == "4"`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理。完整云端结果由推送后的 GitHub Actions `CI` run 验证。 |
 | TC-CS-24 | 通过 | 2026-05-07 本轮执行：`tail -n 16 scripts/run_all_e2e.sh` 显示 final status 循环后存在显式 `exit 0`；`bash -n scripts/run_all_e2e.sh` 通过；随后使用 `BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 执行最小 shard，选中 `test_badge_injection_e2e.sh`，最终报告 `Total suites : 1`、`Passed : 1`、`Failed : 0`，外层退出码 0。该回归使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-25 | 通过 | 2026-05-09 本轮执行：`rg -n 'CARGO_BIN="\$\{CARGO_BIN:-\$\(resolve_non_shim_command cargo\)\}"' scripts/run_all_e2e.sh` 定位到默认 Cargo 解析逻辑；`bash -n scripts/run_all_e2e.sh` 通过；`which cargo` 输出 `/opt/homebrew/bin/cargo`；`CARGO_BIN="$(which cargo)" bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 只列出 shell tests，未构建、未启动 Bifrost、未使用 9900、未修改系统代理。随后完整本地 shell CI 由 `bash scripts/ci/local-ci.sh --skip-static --e2e-only shell` 验证。 |
+| TC-CS-26 | 通过 | 2026-05-12 本轮执行：CI run `25725290679` 的 `E2E Shell (Linux, shard 3/3)` 失败日志显示 `sh: 1: astro: not found` 与 `Local package.json exists, but node_modules missing`，`E2E Shell (aarch64-apple-darwin, shard 3/3)` 同 shard 上传失败 artifact；修复后执行 `rm -rf site/node_modules` 模拟缺失依赖，`bash -n e2e-tests/tests/test_site_docs_sync.sh` 通过，随后使用本机可用新版 Node 执行 `PATH="/opt/homebrew/bin:$PATH" bash e2e-tests/tests/test_site_docs_sync.sh`，输出 `Installing site dependencies for docs sync E2E...`、`Docs sync verification passed for 27 docs pages.`、探针文档加入后的 `Docs sync verification passed for 28 docs pages.`、`Site link verification passed.`、`Site docs sync E2E passed.`，确认缺少 site 依赖时会自举安装并完成 Astro build。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 

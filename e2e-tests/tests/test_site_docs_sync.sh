@@ -18,10 +18,21 @@ cleanup() {
 
 trap cleanup EXIT
 
+ensure_site_dependencies() {
+  if [[ -x "$SITE_DIR/node_modules/.bin/astro" ]]; then
+    return 0
+  fi
+
+  echo "Installing site dependencies for docs sync E2E..."
+  pnpm --dir "$SITE_DIR" install --frozen-lockfile
+}
+
 if [[ -e "$TEMP_DOC" ]]; then
   echo "Temporary probe doc already exists: $TEMP_DOC" >&2
   exit 1
 fi
+
+ensure_site_dependencies
 
 pnpm --dir "$SITE_DIR" run docs:sync
 pnpm --dir "$SITE_DIR" run docs:verify

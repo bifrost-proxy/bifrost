@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -30,6 +31,10 @@ use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 
 const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
+const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<Mutex<HashMap<AgentReplyImageCacheKey, String>>> =
+    OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // ImGatewayService
@@ -2254,15 +2259,24 @@ async fn process_agent_chat(
         }
     };
 
+    let reply_image_base_dir = agent_config.work_dir.as_deref().map(PathBuf::from);
+    let rendered_main_response = render_agent_markdown_for_feishu(
+        feishu,
+        provider,
+        &main_response,
+        reply_image_base_dir.as_deref(),
+    )
+    .await;
+
     if progress_enabled {
         if let Some(tx) = progress_tx_for_finish.take() {
             let event = if progress_failed {
                 bifrost_agent::AgentTurnProgressEvent::TurnFailed {
-                    error: main_response.clone(),
+                    error: rendered_main_response.clone(),
                 }
             } else {
                 bifrost_agent::AgentTurnProgressEvent::TurnFinished {
-                    content: main_response.clone(),
+                    content: rendered_main_response.clone(),
                 }
             };
             let _ = tx.send(event);
@@ -2272,7 +2286,11 @@ async fn process_agent_chat(
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         }
         let progress_message_info = progress_registry
-            .finish(session_key, Some(main_response.clone()), progress_failed)
+            .finish(
+                session_key,
+                Some(rendered_main_response.clone()),
+                progress_failed,
+            )
             .await;
 
         let log = ImMessageLog {
@@ -2328,7 +2346,7 @@ async fn process_agent_chat(
 
     // Build Feishu Card JSON 2.0: main response visible, tool calls in collapsible panel
     let main_response =
-        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&main_response);
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_main_response);
     let mut elements = vec![serde_json::json!({
         "tag": "markdown",
         "content": main_response,
@@ -2442,6 +2460,303 @@ async fn process_agent_chat(
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AgentReplyImageCacheKey {
+    provider_id: String,
+    path: PathBuf,
+    len: u64,
+    modified_ms: u128,
+}
+
+/// Convert agent Markdown before it is placed into a Feishu card.
+///
+/// Local image references such as `![chart](./chart.png)` or `![chart](/tmp/chart.png)`
+/// are uploaded once per provider/file fingerprint and rewritten to Feishu's
+/// `![chart](image_key)` form. The later Markdown converter preserves image_key
+/// references so Feishu cards can render them as inline images.
+async fn render_agent_markdown_for_feishu(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> String {
+    if !markdown.contains("![") {
+        return markdown.to_string();
+    }
+
+    let mut output = String::with_capacity(markdown.len());
+    let mut inside_code_block = false;
+    let mut code_fence: Option<String> = None;
+
+    for line in markdown.split('\n') {
+        let trimmed = line.trim_start();
+        if inside_code_block {
+            output.push_str(line);
+            output.push('\n');
+            if let Some(ref fence) = code_fence {
+                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
+                    inside_code_block = false;
+                    code_fence = None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(fence) = detect_markdown_code_fence(trimmed) {
+            inside_code_block = true;
+            code_fence = Some(fence);
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        output.push_str(
+            &rewrite_agent_markdown_images_in_line(feishu, provider, line, base_dir).await,
+        );
+        output.push('\n');
+    }
+
+    if output.ends_with('\n') && !markdown.ends_with('\n') {
+        output.pop();
+    }
+    output
+}
+
+fn detect_markdown_code_fence(trimmed: &str) -> Option<String> {
+    let fence_char = trimmed.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let fence_len = trimmed.chars().take_while(|&c| c == fence_char).count();
+    if fence_len < 3 {
+        return None;
+    }
+    Some(trimmed[..fence_len].to_string())
+}
+
+async fn rewrite_agent_markdown_images_in_line(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    line: &str,
+    base_dir: Option<&Path>,
+) -> String {
+    if !line.contains("![") {
+        return line.to_string();
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let mut pos = 0;
+    while pos < line.len() {
+        if line.as_bytes()[pos] == b'!' && pos + 1 < line.len() && line.as_bytes()[pos + 1] == b'['
+        {
+            if let Some((alt, url, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
+            {
+                if is_local_markdown_image_candidate(&url) {
+                    if let Some(image_path) = resolve_agent_reply_image_path(&url, base_dir) {
+                        match upload_agent_reply_image_cached(feishu, provider, &image_path).await {
+                            Ok(image_key) => {
+                                result.push_str(&format!("![{}]({})", alt, image_key));
+                                pos = end;
+                                continue;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    provider_id = %provider.id,
+                                    path = %image_path.display(),
+                                    error = %error,
+                                    "failed to upload local image referenced by agent markdown"
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            provider_id = %provider.id,
+                            image_url = %url,
+                            "failed to resolve local image referenced by agent markdown"
+                        );
+                    }
+                    result.push_str(&local_image_fallback_markdown(&alt, &url));
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+
+        let ch = line[pos..].chars().next().unwrap();
+        result.push(ch);
+        pos += ch.len_utf8();
+    }
+    result
+}
+
+fn local_image_fallback_markdown(alt: &str, _url: &str) -> String {
+    let label = if alt.trim().is_empty() {
+        "图片".to_string()
+    } else {
+        alt.trim().to_string()
+    };
+    format!("[{} 未能上传]", label)
+}
+
+async fn upload_agent_reply_image_cached(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    image_path: &Path,
+) -> bifrost_core::Result<String> {
+    let metadata = tokio::fs::metadata(image_path).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to stat agent reply image '{}': {}",
+                image_path.display(),
+                error
+            ),
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "agent reply image is not a file: {}",
+            image_path.display()
+        )));
+    }
+    if metadata.len() > MAX_AGENT_REPLY_IMAGE_BYTES {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "agent reply image exceeds {} bytes: {}",
+            MAX_AGENT_REPLY_IMAGE_BYTES,
+            image_path.display()
+        )));
+    }
+
+    let cache_key = AgentReplyImageCacheKey {
+        provider_id: provider.id.clone(),
+        path: image_path
+            .canonicalize()
+            .unwrap_or_else(|_| image_path.to_path_buf()),
+        len: metadata.len(),
+        modified_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
+    };
+
+    if let Some(image_key) = agent_reply_image_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return Ok(image_key);
+    }
+
+    let bytes = tokio::fs::read(image_path).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to read agent reply image '{}': {}",
+                image_path.display(),
+                error
+            ),
+        ))
+    })?;
+    let file_name = image_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent-reply-image.png");
+    let uploaded = feishu
+        .upload_image(
+            provider,
+            "message",
+            file_name,
+            bytes,
+            mime_type_for_image_path(image_path),
+        )
+        .await?;
+    let image_key = uploaded.image_key;
+
+    if let Ok(mut cache) = agent_reply_image_cache().lock() {
+        cache.insert(cache_key, image_key.clone());
+    }
+    Ok(image_key)
+}
+
+fn agent_reply_image_cache() -> &'static Mutex<HashMap<AgentReplyImageCacheKey, String>> {
+    AGENT_REPLY_IMAGE_UPLOAD_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn provider_agent_work_dir(provider: &ImProviderConfig) -> Option<PathBuf> {
+    provider
+        .agent_config
+        .as_ref()
+        .and_then(|config| config.work_dir.as_deref())
+        .map(str::trim)
+        .filter(|work_dir| !work_dir.is_empty())
+        .map(PathBuf::from)
+}
+
+fn resolve_agent_reply_image_path(raw_url: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
+    let destination = markdown_image_destination(raw_url);
+    if !is_local_markdown_image_candidate(destination) {
+        return None;
+    }
+
+    if let Some(path) = destination.strip_prefix("file://") {
+        return Some(PathBuf::from(path));
+    }
+
+    let path = PathBuf::from(destination);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        base_dir.map(|base_dir| base_dir.join(path))
+    }
+}
+
+fn is_local_markdown_image_candidate(raw_url: &str) -> bool {
+    let destination = markdown_image_destination(raw_url);
+    !destination.is_empty()
+        && !destination.starts_with("http://")
+        && !destination.starts_with("https://")
+        && !looks_like_feishu_image_key(destination)
+}
+
+fn markdown_image_destination(raw_url: &str) -> &str {
+    let trimmed = raw_url.trim();
+    let trimmed = trimmed
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    if let Some((path, _title)) = trimmed.split_once(" \"") {
+        path.trim()
+    } else if let Some((path, _title)) = trimmed.split_once(" '") {
+        path.trim()
+    } else {
+        trimmed
+    }
+}
+
+fn looks_like_feishu_image_key(value: &str) -> bool {
+    value.starts_with("img_")
+}
+
+fn mime_type_for_image_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
 /// Send an agent reply text via Feishu card and log the outbound message.
 ///
 /// Extracted helper to share between the main turn loop and session-free command fast path.
@@ -2487,8 +2802,15 @@ async fn send_agent_reply_with_title(
     };
 
     let card_title = title.unwrap_or("Bifrost AI");
+    let rendered_text = render_agent_markdown_for_feishu(
+        feishu,
+        provider,
+        reply_text,
+        provider_agent_work_dir(provider).as_deref(),
+    )
+    .await;
     let converted_text =
-        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(reply_text);
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
     let card = serde_json::json!({
         "schema": "2.0",
         "config": {
@@ -2588,8 +2910,15 @@ async fn send_agent_reply_with_plan(
         updated_at: 0,
     };
 
+    let rendered_text = render_agent_markdown_for_feishu(
+        feishu,
+        provider,
+        reply_text,
+        provider_agent_work_dir(provider).as_deref(),
+    )
+    .await;
     let converted_text =
-        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(reply_text);
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
     let mut elements = vec![serde_json::json!({
         "tag": "markdown",
         "content": converted_text,
@@ -2911,10 +3240,46 @@ struct SendMessageRequest {
     text: Option<String>,
     #[serde(default)]
     card: Option<serde_json::Value>,
+    #[serde(default)]
+    image: Option<SendImageRequest>,
+    #[serde(default)]
+    rich_card: Option<SendRichCardRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+struct SendImageRequest {
+    #[serde(default)]
+    image_key: Option<String>,
+    #[serde(default)]
+    data_base64: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default = "default_feishu_image_type")]
+    image_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+struct SendRichCardRequest {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    image_key: Option<String>,
+    #[serde(default)]
+    image: Option<SendImageRequest>,
+    #[serde(default)]
+    image_alt: Option<String>,
 }
 
 fn default_msg_type() -> String {
     "interactive".to_string()
+}
+
+fn default_feishu_image_type() -> String {
+    "message".to_string()
 }
 
 async fn handle_messages_send(
@@ -2943,26 +3308,37 @@ async fn handle_messages_send(
         return error_response(StatusCode::BAD_REQUEST, "Target is disabled");
     }
 
-    // Build content preview
-    let content_preview = build_content_preview(&body.msg_type, &resolved.content);
+    let feishu = service.connection_manager.feishu_provider();
+    let prepared =
+        match prepare_outbound_content(feishu, &resolved.provider, &body, resolved.content).await {
+            Ok(content) => content,
+            Err((status, message)) => return error_response(status, &message),
+        };
+    let content_preview = build_content_preview(&body.msg_type, &prepared);
 
     // Send via connection manager's feishu provider
-    let feishu = service.connection_manager.feishu_provider();
     let result = if body.msg_type == "text" {
-        let text = resolved
-            .content
+        let text = prepared
             .as_str()
             .map(str::to_string)
-            .unwrap_or_else(|| serde_json::to_string(&resolved.content).unwrap_or_default());
+            .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default());
         feishu
             .send_text(&resolved.provider, &resolved.target, &text)
+            .await
+    } else if body.msg_type == "image" {
+        let image_key = prepared
+            .get("image_key")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        feishu
+            .send_image(&resolved.provider, &resolved.target, image_key, None)
             .await
     } else {
         feishu
             .send_card(
                 &resolved.provider,
                 &resolved.target,
-                resolved.content.clone(),
+                prepared.clone(),
                 Default::default(),
             )
             .await
@@ -3104,10 +3480,215 @@ fn normalized_send_content(
     if let Some(card) = &body.card {
         return Ok(card.clone());
     }
+    if let Some(image) = &body.image {
+        return serde_json::to_value(image).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid image payload: {e}"),
+            )
+        });
+    }
+    if let Some(rich_card) = &body.rich_card {
+        return serde_json::to_value(rich_card).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid rich_card payload: {e}"),
+            )
+        });
+    }
     Err((
         StatusCode::BAD_REQUEST,
         "content is required for messages/send".to_string(),
     ))
+}
+
+async fn prepare_outbound_content(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    body: &SendMessageRequest,
+    content: serde_json::Value,
+) -> std::result::Result<serde_json::Value, (StatusCode, String)> {
+    match body.msg_type.as_str() {
+        "image" => {
+            let image = body.image.clone().or_else(|| parse_image_content(&content));
+            let image_key = resolve_image_key(feishu, provider, image.as_ref()).await?;
+            Ok(serde_json::json!({ "image_key": image_key }))
+        }
+        "interactive" => {
+            if let Some(rich_card) = &body.rich_card {
+                build_rich_card_content(feishu, provider, rich_card).await
+            } else {
+                Ok(content)
+            }
+        }
+        "text" => Ok(content),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("unsupported msg_type '{other}'; supported: text, image, interactive"),
+        )),
+    }
+}
+
+fn parse_image_content(content: &serde_json::Value) -> Option<SendImageRequest> {
+    if content.is_null() {
+        return None;
+    }
+    if let Some(image_key) = content.as_str().filter(|value| !value.trim().is_empty()) {
+        return Some(SendImageRequest {
+            image_key: Some(image_key.to_string()),
+            data_base64: None,
+            file_name: None,
+            mime_type: None,
+            image_type: default_feishu_image_type(),
+        });
+    }
+    serde_json::from_value(content.clone()).ok()
+}
+
+async fn resolve_image_key(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    image: Option<&SendImageRequest>,
+) -> std::result::Result<String, (StatusCode, String)> {
+    let image = image.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "image payload is required for msg_type=image".to_string(),
+        )
+    })?;
+
+    if let Some(image_key) = image
+        .image_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(image_key.to_string());
+    }
+
+    let data_base64 = image.data_base64.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "image_key or data_base64 is required for image payload".to_string(),
+        )
+    })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid image data_base64: {e}"),
+            )
+        })?;
+    if bytes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "image data_base64 decoded to empty bytes".to_string(),
+        ));
+    }
+
+    let file_name = image.file_name.as_deref().unwrap_or("bifrost-image");
+    let uploaded = feishu
+        .upload_image(
+            provider,
+            &image.image_type,
+            file_name,
+            bytes,
+            image.mime_type.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to upload image: {e}"),
+            )
+        })?;
+    Ok(uploaded.image_key)
+}
+
+async fn build_rich_card_content(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    rich_card: &SendRichCardRequest,
+) -> std::result::Result<serde_json::Value, (StatusCode, String)> {
+    let title = rich_card
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Bifrost");
+    let text = rich_card
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let image_key = if let Some(image_key) = rich_card
+        .image_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(image_key.to_string())
+    } else if rich_card.image.is_some() {
+        Some(resolve_image_key(feishu, provider, rich_card.image.as_ref()).await?)
+    } else {
+        None
+    };
+
+    if text.is_none() && image_key.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "rich_card requires text, image_key, or image data".to_string(),
+        ));
+    }
+
+    let mut elements = Vec::new();
+    if let Some(image_key) = image_key {
+        let alt = rich_card
+            .image_alt
+            .as_deref()
+            .unwrap_or(title)
+            .trim()
+            .to_string();
+        elements.push(serde_json::json!({
+            "tag": "img",
+            "img_key": image_key,
+            "alt": {
+                "tag": "plain_text",
+                "content": if alt.is_empty() { title } else { &alt }
+            }
+        }));
+    }
+    if let Some(text) = text {
+        let rendered_text = render_agent_markdown_for_feishu(
+            feishu,
+            provider,
+            text,
+            provider_agent_work_dir(provider).as_deref(),
+        )
+        .await;
+        let rendered_text =
+            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": rendered_text
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "config": {
+            "wide_screen_mode": true
+        },
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": title
+            }
+        },
+        "elements": elements
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4650,6 +5231,11 @@ fn build_content_preview(msg_type: &str, content: &serde_json::Value) -> Option<
                 .unwrap_or("[card]");
             Some(truncate_str(title, 200))
         }
+        "image" => content
+            .get("image_key")
+            .and_then(|value| value.as_str())
+            .map(|image_key| truncate_str(&format!("[image:{image_key}]"), 200))
+            .or_else(|| Some("[image]".to_string())),
         _ => Some(format!("[{}]", msg_type)),
     }
 }
@@ -5040,6 +5626,69 @@ mod tests {
         assert!(message.contains(&cwd));
     }
 
+    #[test]
+    fn agent_reply_image_path_resolution_uses_work_dir_and_skips_remote_or_image_key() {
+        let base = std::path::Path::new("/tmp/im-agent-workdir");
+
+        assert_eq!(
+            resolve_agent_reply_image_path("./chart.png", Some(base)).as_deref(),
+            Some(std::path::Path::new("/tmp/im-agent-workdir/./chart.png"))
+        );
+        assert_eq!(
+            resolve_agent_reply_image_path("/tmp/chart.png", Some(base)).as_deref(),
+            Some(std::path::Path::new("/tmp/chart.png"))
+        );
+        assert_eq!(
+            resolve_agent_reply_image_path("file:///tmp/chart.png", Some(base)).as_deref(),
+            Some(std::path::Path::new("/tmp/chart.png"))
+        );
+        assert!(
+            resolve_agent_reply_image_path("https://example.com/chart.png", Some(base)).is_none()
+        );
+        assert!(resolve_agent_reply_image_path("img_v3_chart", Some(base)).is_none());
+        assert!(resolve_agent_reply_image_path("./chart.png", None).is_none());
+    }
+
+    #[test]
+    fn markdown_image_destination_strips_wrappers_and_title() {
+        assert_eq!(markdown_image_destination("<./chart.png>"), "./chart.png");
+        assert_eq!(
+            markdown_image_destination("./chart.png \"Chart title\""),
+            "./chart.png"
+        );
+        assert_eq!(
+            markdown_image_destination("./chart.png 'Chart title'"),
+            "./chart.png"
+        );
+    }
+
+    #[test]
+    fn local_image_fallback_removes_markdown_image_syntax() {
+        let fallback = local_image_fallback_markdown("chart", "./missing.png");
+
+        assert_eq!(fallback, "[chart 未能上传]");
+        assert!(!fallback.contains("!["));
+        assert!(!fallback.contains("./missing.png"));
+
+        let fallback = local_image_fallback_markdown(" ", "/tmp/chart.png");
+        assert_eq!(fallback, "[图片 未能上传]");
+    }
+
+    #[test]
+    fn local_markdown_image_candidate_filters_remote_and_existing_keys() {
+        assert!(is_local_markdown_image_candidate("./chart.png"));
+        assert!(is_local_markdown_image_candidate("/tmp/chart.png"));
+        assert!(is_local_markdown_image_candidate("file:///tmp/chart.png"));
+        assert!(!is_local_markdown_image_candidate(
+            "https://example.com/chart.png"
+        ));
+        assert!(!is_local_markdown_image_candidate(
+            "http://example.com/chart.png"
+        ));
+        assert!(!is_local_markdown_image_candidate("img_v3_chart"));
+        assert!(!is_local_markdown_image_candidate(" "));
+    }
+
     struct TestChatCompletionMock {
         port: u16,
         requests: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -5217,6 +5866,8 @@ mod tests {
             content: serde_json::json!("hello"),
             text: None,
             card: None,
+            image: None,
+            rich_card: None,
         };
 
         let resolved =
@@ -5242,6 +5893,8 @@ mod tests {
             content: serde_json::json!("hello"),
             text: None,
             card: None,
+            image: None,
+            rich_card: None,
         };
 
         let error = resolve_send_message_request(&service, &body)
@@ -5249,6 +5902,53 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert!(error.1.contains("provider_id is required"));
+    }
+
+    #[test]
+    fn send_message_request_accepts_image_key_payload() {
+        let body = SendMessageRequest {
+            provider_id: Some("feishu-main".to_string()),
+            target_id: Some("__owner__".to_string()),
+            msg_type: "image".to_string(),
+            content: serde_json::Value::Null,
+            text: None,
+            card: None,
+            image: Some(SendImageRequest {
+                image_key: Some("img_v3_key".to_string()),
+                data_base64: None,
+                file_name: None,
+                mime_type: None,
+                image_type: default_feishu_image_type(),
+            }),
+            rich_card: None,
+        };
+
+        let content = normalized_send_content(&body).expect("image content");
+        assert_eq!(content["image_key"], "img_v3_key");
+        assert_eq!(content["image_type"], "message");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rich_card_builder_uses_image_key_and_markdown() {
+        let provider = test_provider();
+        let feishu = crate::im_gateway::feishu::FeishuProvider::new();
+        let rich_card = SendRichCardRequest {
+            title: Some("Deploy report".to_string()),
+            text: Some("**Done** with chart".to_string()),
+            image_key: Some("img_v3_chart".to_string()),
+            image: None,
+            image_alt: Some("Chart".to_string()),
+        };
+
+        let card = build_rich_card_content(&feishu, &provider, &rich_card)
+            .await
+            .expect("rich card");
+
+        assert_eq!(card["header"]["title"]["content"], "Deploy report");
+        assert_eq!(card["elements"][0]["tag"], "img");
+        assert_eq!(card["elements"][0]["img_key"], "img_v3_chart");
+        assert_eq!(card["elements"][1]["tag"], "markdown");
+        assert_eq!(card["elements"][1]["content"], "**Done** with chart");
     }
 
     #[test]
