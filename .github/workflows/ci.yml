@@ -588,7 +588,10 @@ jobs:
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
-      BIFROST_E2E_SHELL_JOBS: "4"
+      # macOS arm runners are slower at cold Rust/frontend builds; avoid
+      # parallel cargo-lock contention tripping the per-suite watchdog.
+      BIFROST_E2E_SHELL_JOBS: "2"
+      BIFROST_E2E_SHELL_TEST_TIMEOUT: "1800"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
       BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
