@@ -233,5 +233,5 @@ ws://api.example.com/socket ws://test-server.example.com/socket reqDelay://1000
 
 ## 关联协议
 
-- [host](./routing/#host) - HTTP/HTTPS 请求转发
-- [proxy](./routing/#proxy) - HTTP 代理转发
+- [host](../routing/#host) - HTTP/HTTPS 请求转发
+- [proxy](../routing/#proxy) - HTTP 代理转发

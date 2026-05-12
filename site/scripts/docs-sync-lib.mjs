@@ -403,8 +403,11 @@ export function rewriteMarkdownLinks(markdown, page, targetMap) {
     }
 
     let relativeRoute = normalizePath(
-      path.posix.relative(path.posix.dirname(page.target), toRoutePath(mappedTarget)),
+      path.posix.relative(toRoutePath(page.target), toRoutePath(mappedTarget)),
     );
+    if (!relativeRoute) {
+      relativeRoute = ".";
+    }
     if (toRoutePath(mappedTarget).endsWith("/") && !relativeRoute.endsWith("/")) {
       relativeRoute = `${relativeRoute}/`;
     }

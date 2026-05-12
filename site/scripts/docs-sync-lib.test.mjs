@@ -11,6 +11,7 @@ import {
   sourceToTargetMap,
   syncDocs,
 } from "./docs-sync-lib.mjs";
+import { collectSiteLinkErrors } from "./verify-site-links.mjs";
 
 async function withFixture(files, callback) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "bifrost-docs-sync-"));
@@ -67,7 +68,11 @@ test("rewriteMarkdownLinks rewrites links through discovered site routes", async
   await withFixture(
     {
       "docs/README.md": "# Docs\n\n[CLI](./cli.md)\n[Future](./future/new-topic.md#usage)",
+      "docs/cli-quick-start.md": "# Quick Start\n\n[CLI](./cli.md)\n[Install](./getting-started.md)",
       "docs/cli.md": "# CLI",
+      "docs/getting-started.md": "# Install",
+      "docs/rule.md": "# Rules\n\n[Patterns](./pattern.md)",
+      "docs/pattern.md": "# Patterns",
       "docs/future/new-topic.md": "# Future Topic",
     },
     async (root) => {
@@ -80,6 +85,22 @@ test("rewriteMarkdownLinks rewrites links through discovered site routes", async
 
       assert.match(rewritten, /\[CLI\]\(\.\/cli\/\)/);
       assert.match(rewritten, /\[Future\]\(\.\/future\/new-topic\/#usage\)/);
+
+      const quickStart = pages.find((candidate) => candidate.source === "docs/cli-quick-start.md");
+      const quickStartMarkdown = fs.readFileSync(
+        path.join(root, "docs/cli-quick-start.md"),
+        "utf8",
+      );
+      const rewrittenQuickStart = rewriteMarkdownLinks(quickStartMarkdown, quickStart, map);
+
+      assert.match(rewrittenQuickStart, /\[CLI\]\(\.\.\/\.\.\/reference\/cli\/\)/);
+      assert.match(rewrittenQuickStart, /\[Install\]\(\.\.\/installation\/\)/);
+
+      const rule = pages.find((candidate) => candidate.source === "docs/rule.md");
+      const ruleMarkdown = fs.readFileSync(path.join(root, "docs/rule.md"), "utf8");
+      const rewrittenRule = rewriteMarkdownLinks(ruleMarkdown, rule, map);
+
+      assert.match(rewrittenRule, /\[Patterns\]\(\.\.\/patterns\/\)/);
     },
   );
 });
@@ -110,6 +131,47 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
       const generated = fs.readFileSync(path.join(output, "reference/new-topic.md"), "utf8");
       assert.match(generated, /> 此页面由 `docs\/new-topic\.md` 自动同步生成。/);
       assert.match(generated, /sidebar:\n  label: "New Topic"\n  order:/);
+    },
+  );
+});
+
+test("collectSiteLinkErrors verifies local links under the configured base path", async () => {
+  await withFixture(
+    {
+      "site/dist/index.html": '<a href="/bifrost/reference/getting-started/cli-quick-start/">CLI</a>',
+      "site/dist/reference/getting-started/cli-quick-start/index.html":
+        '<a href="/bifrost/getting-started/cli-quick-start/">Canonical</a>',
+      "site/dist/getting-started/cli-quick-start/index.html": '<a href="../installation/">Install</a>',
+      "site/dist/getting-started/installation/index.html": "<main>Install</main>",
+    },
+    async (root) => {
+      const errors = await collectSiteLinkErrors({
+        distRoot: path.join(root, "site", "dist"),
+        basePath: "/bifrost",
+      });
+
+      assert.deepEqual(errors, []);
+    },
+  );
+});
+
+test("collectSiteLinkErrors reports missing local site targets", async () => {
+  await withFixture(
+    {
+      "site/dist/index.html": [
+        '<a href="/bifrost/reference/missing/">Missing</a>',
+        '<a href="/getting-started/cli-quick-start/">Missing base</a>',
+      ].join("\n"),
+    },
+    async (root) => {
+      const errors = await collectSiteLinkErrors({
+        distRoot: path.join(root, "site", "dist"),
+        basePath: "/bifrost",
+      });
+
+      assert.equal(errors.length, 2);
+      assert.match(errors[0], /reference\/missing/);
+      assert.match(errors[1], /without configured base path/);
     },
   );
 });

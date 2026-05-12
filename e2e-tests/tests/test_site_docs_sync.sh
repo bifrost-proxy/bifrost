@@ -7,9 +7,11 @@ SITE_DIR="$ROOT_DIR/site"
 TEMP_DOC="$ROOT_DIR/docs/future-docs-sync-probe.md"
 TEMP_TARGET="$SITE_DIR/src/content/docs/reference/future-docs-sync-probe.md"
 TEMP_DIST="$SITE_DIR/dist/reference/future-docs-sync-probe/index.html"
+LEGACY_CLI_DIST="$SITE_DIR/dist/reference/getting-started/cli-quick-start/index.html"
 
 cleanup() {
   rm -f "$TEMP_DOC"
+  rm -rf "$SITE_DIR/dist"
   pnpm --dir "$SITE_DIR" run docs:sync >/dev/null
   pnpm --dir "$SITE_DIR" run docs:verify >/dev/null
 }
@@ -61,5 +63,8 @@ grep -q './cli/' "$TEMP_TARGET"
 pnpm --dir "$SITE_DIR" run build
 test -f "$TEMP_DIST"
 grep -q 'Future Docs Sync Probe' "$TEMP_DIST"
+test -f "$LEGACY_CLI_DIST"
+grep -q '/bifrost/getting-started/cli-quick-start/' "$LEGACY_CLI_DIST"
+pnpm --dir "$SITE_DIR" run site:verify-links
 
 echo "Site docs sync E2E passed."

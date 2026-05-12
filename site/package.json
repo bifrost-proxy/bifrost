@@ -10,8 +10,9 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:test": "node --test scripts/docs-sync-lib.test.mjs",
     "docs:verify": "node scripts/verify-docs-sync.mjs",
+    "site:verify-links": "node scripts/verify-site-links.mjs",
     "dev": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro dev",
-    "build": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 node scripts/verify-docs-sync.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build",
+    "build": "rm -rf dist && ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 node scripts/verify-docs-sync.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build && node scripts/verify-site-links.mjs",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro preview"
   },
   "dependencies": {

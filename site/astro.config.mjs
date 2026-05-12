@@ -6,14 +6,23 @@ const siteUrl = new URL(site);
 const base =
   process.env.BASE_PATH ??
   (siteUrl.hostname.endsWith("github.io") ? siteUrl.pathname || "/" : "/");
+const withBase = (route) => `${base === "/" ? "" : base}${route}`;
 
 export default defineConfig({
   site,
   base,
+  redirects: {
+    "/reference/getting-started/overview/": withBase("/getting-started/overview/"),
+    "/reference/getting-started/installation/": withBase("/getting-started/installation/"),
+    "/reference/getting-started/cli-quick-start/":
+      withBase("/getting-started/cli-quick-start/"),
+    "/reference/getting-started/desktop/": withBase("/getting-started/desktop/"),
+  },
   integrations: [
     starlight({
       title: "Bifrost",
       description: "高性能 HTTP/HTTPS/SOCKS5 代理服务器的官网与文档站",
+      favicon: "/favicon.png",
       disable404Route: true,
       social: [
         {

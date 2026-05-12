@@ -117,7 +117,7 @@ api.example.com http://127.0.0.1:3000
 api.example.com https://backend.example.com
 ```
 
-若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket/) 中的 `ws://` / `wss://`。
+若目标是 WebSocket，请优先使用 [WebSocket 规则](../websocket/) 中的 `ws://` / `wss://`。
 
 ---
 

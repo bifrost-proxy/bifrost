@@ -21,7 +21,10 @@
 4. 生成文件写入来源标记、Starlight frontmatter、`sidebar.label` 和 `sidebar.order`。
 5. 生成前清理旧的自动生成页面，避免删除已移除的 docs 文档后站点仍残留旧页面。
 6. `site/astro.config.mjs` 使用 Starlight `autogenerate` 目录导航，让新增页面自动进入侧边栏。
-7. `site/scripts/verify-docs-sync.mjs` 在站点构建前验证每个 `docs/**/*.md` 都存在对应生成目标，并校验来源标记。
+7. `site/astro.config.mjs` 为历史上错误暴露过的 `/reference/getting-started/*` 深链配置静态重定向，保证旧链接和用户收藏不会落到 404。
+8. `site/scripts/verify-docs-sync.mjs` 在站点构建前验证每个 `docs/**/*.md` 都存在对应生成目标，并校验来源标记。
+9. `site/scripts/verify-site-links.mjs` 在 Astro 构建后扫描 `site/dist/**/*.html` 的本地 `href` / `src`，任何指向缺失页面或静态资源的站内链接都会让构建失败。
+10. `pnpm --dir site run build` 在构建前清理 `site/dist`，避免被删除的 docs 页面或 E2E 探针页面残留进部署产物。
 
 ## 依赖项
 
@@ -34,17 +37,18 @@
 ### 单元测试
 
 - `pnpm --dir site run docs:test`
-- 覆盖递归发现、未来新增文档默认路由、README 映射、相对链接重写、旧生成文件清理和生成来源标记。
+- 覆盖递归发现、未来新增文档默认路由、README 映射、相对链接重写、旧生成文件清理、生成来源标记和站点内链扫描。
 
 ### E2E 测试
 
 - `bash e2e-tests/tests/test_site_docs_sync.sh`
-- 覆盖真实仓库 `docs/` 当前全量文档、临时新增未来文档、同步校验脚本和真实 `pnpm --dir site run build` 构建产物。
+- 覆盖真实仓库 `docs/` 当前全量文档、临时新增未来文档、同步校验脚本、历史深链重定向、全站内链扫描和真实 `pnpm --dir site run build` 构建产物。
 
 ### 真实场景测试
 
 - `human_tests/docs-site-generator.md`
 - 覆盖当前文档完整性、未来新增文档自动纳入、部署构建校验和清理后无残留。
+- 覆盖旧路径兼容重定向和站点内链无 404。
 
 ## Review/Fix/Test 闭环方案
 
@@ -65,6 +69,7 @@
 
 - 必须执行 `pnpm --dir site run docs:test`
 - 必须执行 `pnpm --dir site run docs:verify`
+- 必须执行 `pnpm --dir site run site:verify-links`
 - 必须执行 `pnpm --dir site run build`
 - 必须执行 `bash e2e-tests/tests/test_site_docs_sync.sh`
 - 收尾阶段按项目规则执行 rust-project-validate；若 Rust 相关检查因本次仅改站点文档工具不适用，需在最终验证矩阵中说明。

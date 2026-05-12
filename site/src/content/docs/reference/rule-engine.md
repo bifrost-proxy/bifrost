@@ -20,8 +20,8 @@ pattern operation [operations...] [filters...] [lineProps://...]
 
 | 组成部分      | 是否必填 | 描述                                                          |
 | :------------ | :------- | :------------------------------------------------------------ |
-| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](./patterns/)           |
-| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](./operations/) |
+| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](../patterns/)           |
+| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](../operations/) |
 | **filters**   | 否       | 过滤条件，详见下文                                            |
 | **lineProps** | 否       | 规则属性，详见下文                                            |
 
@@ -177,4 +177,4 @@ api.example.com h3://
 
 ## 扩展阅读
 
-- [规则协议手册](./rules/)：按协议查看各能力说明与示例
+- [规则协议手册](../rules/)：按协议查看各能力说明与示例
