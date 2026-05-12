@@ -1,5 +1,29 @@
 use super::*;
 
+fn test_mcp_config() -> McpServerConfig {
+    McpServerConfig {
+        command: None,
+        args: None,
+        env: None,
+        cwd: None,
+        url: None,
+        bearer_token_env_var: None,
+        enabled: true,
+        startup_timeout_sec: Some(1),
+        tool_timeout_sec: Some(1),
+        enabled_tools: None,
+        disabled_tools: None,
+        required: None,
+        supports_parallel_tool_calls: None,
+        default_tools_approval_mode: None,
+        scopes: None,
+        oauth_resource: None,
+        http_headers: None,
+        env_http_headers: None,
+        tools: None,
+    }
+}
+
 #[test]
 fn test_is_valid_tool_name() {
     assert!(is_valid_tool_name("foo"));
@@ -198,6 +222,44 @@ fn test_mcp_manager_disabled_server() {
         );
         let manager = McpManager::new(&configs).await;
         assert!(manager.list_tools().is_empty());
+    });
+}
+
+#[test]
+fn test_mcp_availability_disabled_server_is_not_started() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut configs = HashMap::new();
+        let mut config = test_mcp_config();
+        config.command = Some("missing-command-that-should-not-run".to_string());
+        config.enabled = false;
+        configs.insert("disabled".to_string(), config);
+
+        let statuses = check_server_availability(&configs).await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "disabled");
+        assert_eq!(statuses[0].status, McpServerAvailabilityStatus::Disabled);
+        assert_eq!(statuses[0].tool_count, 0);
+        assert!(statuses[0].error.is_none());
+    });
+}
+
+#[test]
+fn test_mcp_availability_reports_invalid_enabled_server() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut configs = HashMap::new();
+        configs.insert("broken".to_string(), test_mcp_config());
+
+        let statuses = check_server_availability(&configs).await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "broken");
+        assert_eq!(statuses[0].status, McpServerAvailabilityStatus::Unavailable);
+        assert_eq!(statuses[0].tool_count, 0);
+        assert!(statuses[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("neither 'url' nor 'command'")));
     });
 }
 

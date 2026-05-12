@@ -56,6 +56,10 @@ impl ImTaskExecutor {
             stdout_digest: None,
             stderr_digest: None,
             error: None,
+            task_type: Some(super::types::ScheduleTaskType::Script),
+            agent_final_response: None,
+            agent_tool_calls: Vec::new(),
+            agent_plan_steps: None,
         };
 
         // Prepare the script (tempfile or file path)

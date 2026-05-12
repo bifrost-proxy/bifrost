@@ -98,11 +98,18 @@ export interface ImSchedule {
     timezone?: string;
     every_ms?: number;
   };
+  task_type?: "script" | "agent";
   script: {
     script_text?: string;
     script_file?: string;
     cwd?: string;
     env?: Record<string, string>;
+  };
+  agent?: {
+    prompt: string;
+    session_key?: string;
+    work_dir?: string;
+    system_prompt?: string;
   };
   timeout_ms: number;
   max_output_bytes: number;
@@ -126,7 +133,21 @@ export interface ImTaskRun {
   exit_code?: number;
   stdout_preview?: string;
   stderr_preview?: string;
+  stdout_digest?: string;
+  stderr_digest?: string;
   error?: string;
+  task_type?: "script" | "agent";
+  agent_final_response?: string;
+  agent_tool_calls?: Array<{
+    tool_name: string;
+    arguments: string;
+    result: string;
+    success: boolean;
+  }>;
+  agent_plan_steps?: Array<{
+    step: string;
+    status: string;
+  }>;
 }
 
 export interface ImEvent {

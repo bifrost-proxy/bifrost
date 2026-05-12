@@ -1102,6 +1102,7 @@ fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Value> {
     });
     let mut trigger = json!({});
     let mut script = json!({});
+    let mut agent = json!({});
 
     let mut i = 0;
     while i < args.len() {
@@ -1137,13 +1138,51 @@ fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Value> {
             "--script-file" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("script");
                     script["script_file"] = json!(v);
                 }
             }
             "--script" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("script");
                     script["script_text"] = json!(v);
+                }
+            }
+            "--agent-prompt" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("agent");
+                    agent["prompt"] = json!(v);
+                }
+            }
+            "--agent-prompt-file" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("agent");
+                    agent["prompt"] = json!(std::fs::read_to_string(v).map_err(|e| {
+                        bifrost_core::BifrostError::Config(format!(
+                            "read agent prompt file '{v}': {e}"
+                        ))
+                    })?);
+                }
+            }
+            "--agent-session-key" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["session_key"] = json!(v);
+                }
+            }
+            "--agent-work-dir" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["work_dir"] = json!(v);
+                }
+            }
+            "--agent-system-prompt" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["system_prompt"] = json!(v);
                 }
             }
             "--cwd" => {
@@ -1171,6 +1210,10 @@ fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Value> {
     if !script.as_object().is_none_or(|s| s.is_empty()) {
         body["script"] = script;
     }
+    if !agent.as_object().is_none_or(|a| a.is_empty()) {
+        body["agent"] = agent;
+        body["task_type"] = json!("agent");
+    }
 
     Ok(body)
 }
@@ -1178,6 +1221,8 @@ fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Value> {
 fn parse_schedule_update_args(args: &[String]) -> Result<Value> {
     let mut body = json!({});
     let mut trigger = json!({});
+    let mut script = json!({});
+    let mut agent = json!({});
 
     let mut i = 0;
     while i < args.len() {
@@ -1203,6 +1248,56 @@ fn parse_schedule_update_args(args: &[String]) -> Result<Value> {
                     body["enabled"] = json!(v.parse::<bool>().unwrap_or(true));
                 }
             }
+            "--script-file" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("script");
+                    script["script_file"] = json!(v);
+                }
+            }
+            "--script" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("script");
+                    script["script_text"] = json!(v);
+                }
+            }
+            "--agent-prompt" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("agent");
+                    agent["prompt"] = json!(v);
+                }
+            }
+            "--agent-prompt-file" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["task_type"] = json!("agent");
+                    agent["prompt"] = json!(std::fs::read_to_string(v).map_err(|e| {
+                        bifrost_core::BifrostError::Config(format!(
+                            "read agent prompt file '{v}': {e}"
+                        ))
+                    })?);
+                }
+            }
+            "--agent-session-key" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["session_key"] = json!(v);
+                }
+            }
+            "--agent-work-dir" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["work_dir"] = json!(v);
+                }
+            }
+            "--agent-system-prompt" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    agent["system_prompt"] = json!(v);
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1210,6 +1305,13 @@ fn parse_schedule_update_args(args: &[String]) -> Result<Value> {
 
     if !trigger.as_object().is_none_or(|t| t.is_empty()) {
         body["trigger"] = trigger;
+    }
+    if !script.as_object().is_none_or(|s| s.is_empty()) {
+        body["script"] = script;
+    }
+    if !agent.as_object().is_none_or(|a| a.is_empty()) {
+        body["agent"] = agent;
+        body["task_type"] = json!("agent");
     }
 
     Ok(body)
@@ -1236,7 +1338,9 @@ fn print_schedule_list(resp: &Value) {
     for s in schedules {
         let name = s["name"].as_str().unwrap_or("-");
         let target = s["target_id"].as_str().unwrap_or("-");
-        let trigger_type = s["trigger"]["type"].as_str().unwrap_or("-");
+        let trigger_type = s["task_type"]
+            .as_str()
+            .unwrap_or_else(|| s["trigger"]["type"].as_str().unwrap_or("-"));
         let enabled = s["enabled"].as_bool().unwrap_or(false);
         let schedule_expr = s["trigger"]["expr"]
             .as_str()
@@ -1804,6 +1908,47 @@ mod tests {
         ensure_provider_value(&mut body, "feishu-other");
 
         assert_eq!(body["provider_id"], "feishu-main");
+    }
+
+    #[test]
+    fn parse_schedule_add_args_supports_agent_prompt() {
+        let body = parse_schedule_add_args(
+            "daily-agent",
+            &[
+                "--every".into(),
+                "60000".into(),
+                "--agent-prompt".into(),
+                "Summarize traffic".into(),
+                "--agent-session-key".into(),
+                "daily".into(),
+                "--agent-work-dir".into(),
+                "/tmp/project".into(),
+            ],
+        )
+        .expect("parse schedule");
+
+        assert_eq!(body["name"], "daily-agent");
+        assert_eq!(body["task_type"], "agent");
+        assert_eq!(body["trigger"]["type"], "interval");
+        assert_eq!(body["trigger"]["every_ms"], 60000);
+        assert_eq!(body["agent"]["prompt"], "Summarize traffic");
+        assert_eq!(body["agent"]["session_key"], "daily");
+        assert_eq!(body["agent"]["work_dir"], "/tmp/project");
+    }
+
+    #[test]
+    fn parse_schedule_update_args_can_switch_to_script() {
+        let body = parse_schedule_update_args(&[
+            "--script".into(),
+            "echo ok".into(),
+            "--enabled".into(),
+            "true".into(),
+        ])
+        .expect("parse schedule update");
+
+        assert_eq!(body["task_type"], "script");
+        assert_eq!(body["script"]["script_text"], "echo ok");
+        assert_eq!(body["enabled"], true);
     }
 
     #[test]

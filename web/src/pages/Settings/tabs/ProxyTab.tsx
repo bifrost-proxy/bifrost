@@ -1258,7 +1258,7 @@ export default function ProxyTab({
                   Available Network Addresses — scan QR code with your device
                 </Text>
                 <Row gutter={[16, 16]} justify="start">
-                  {proxyAddressInfo.addresses.map((addr) => (
+                  {proxyAddressInfo.addresses.map((addr, index) => (
                     <Col key={addr.ip}>
                       <div style={{ textAlign: "center" }}>
                         <Image
@@ -1270,6 +1270,11 @@ export default function ProxyTab({
                             mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
                           }}
                           fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
+                          data-testid={
+                            index === 0
+                              ? "settings-proxy-qrcode"
+                              : `settings-proxy-qrcode-${addr.ip}`
+                          }
                         />
                         <div style={{ marginTop: 4 }}>
                           <Text code style={{ fontSize: 12 }}>

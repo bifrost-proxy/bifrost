@@ -123,7 +123,11 @@ export default function CertificateTab({
                             mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
                           }}
                           fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                          data-testid={`settings-certificate-qrcode-${ip}`}
+                          data-testid={
+                            index === 0
+                              ? "settings-certificate-qrcode"
+                              : `settings-certificate-qrcode-${ip}`
+                          }
                         />
                         <div style={{ marginTop: 4 }}>
                           <a

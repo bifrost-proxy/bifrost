@@ -15,6 +15,7 @@ import SyncLogin from "./pages/SyncLogin";
 import Login from "./pages/Login";
 import Values from "./pages/Values";
 import Scripts from "./pages/Scripts";
+import AI from "./pages/AI";
 import Groups from "./pages/Groups";
 import GroupDetail from "./pages/Groups/GroupDetail";
 import Notifications from "./pages/Notifications";
@@ -286,6 +287,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="rules" element={<Rules />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
+                <Route path="ai" element={<AI />} />
                 <Route path="devtools" element={<DevTools />} />
                 <Route path="devtools/:pageId" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />
@@ -320,6 +322,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="rules" element={<Rules />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
+                <Route path="ai" element={<AI />} />
                 <Route path="devtools" element={<DevTools />} />
                 <Route path="devtools/:pageId" element={<DevTools />} />
                 <Route path="groups" element={<Groups />} />

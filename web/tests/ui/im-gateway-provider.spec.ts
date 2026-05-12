@@ -17,9 +17,11 @@ test("IM Gateway Provider 创建后会立即启动长连接", async ({ page, req
   });
 
   try {
-    await openPage(page, "settings?tab=im-gateway");
+    await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
     await page.getByRole("button", { name: /Add Provider/i }).click();
     await page.getByLabel("Provider ID").fill(providerId);
+    await page.getByRole("combobox", { name: /Type/ }).click();
+    await page.getByTitle("Feishu").click();
     await page.getByLabel("App ID").fill("cli_test_provider_id");
     await page.getByLabel("App Secret").fill("sk_test_provider_secret");
     await page.getByRole("button", { name: "Create" }).click();
@@ -51,7 +53,7 @@ test("IM Gateway Provider 编辑时可以补填 App Secret 并显示后端错误
     });
     expect(seedResponse.ok()).toBeTruthy();
 
-    await openPage(page, "settings?tab=im-gateway");
+    await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
     await expect(page.locator("body")).toContainText(providerId);
     await expect(page.locator("body")).toContainText("Not Set");
 
@@ -73,6 +75,8 @@ test("IM Gateway Provider 编辑时可以补填 App Secret 并显示后端错误
 
     await page.getByRole("button", { name: /Add Provider/i }).click();
     await page.getByLabel("Provider ID").fill(providerId);
+    await page.getByRole("combobox", { name: /Type/ }).click();
+    await page.getByTitle("Feishu").click();
     await page.getByLabel("App ID").fill(appId);
     await page.getByLabel("App Secret").fill(appSecret);
     await page.getByRole("button", { name: "Create" }).click();

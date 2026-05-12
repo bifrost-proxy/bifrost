@@ -1,7 +1,7 @@
 /**
  * MCP Servers Section - Manage MCP server configurations
  */
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Card,
@@ -20,12 +20,18 @@ import {
   theme,
 } from "antd";
 import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
   DeleteOutlined,
   EditOutlined,
+  LoadingOutlined,
+  PauseCircleOutlined,
   PlusOutlined,
+  ReloadOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import type { McpServerConfig } from "./types";
+import { BASE, type McpServerConfig } from "./types";
+import { get } from "../../../../api/client";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -33,6 +39,20 @@ const { TextArea } = Input;
 interface McpServersSectionProps {
   servers: Record<string, McpServerConfig>;
   onUpdate: (servers: Record<string, McpServerConfig>) => void;
+}
+
+type McpAvailabilityStatus = "available" | "unavailable" | "disabled";
+
+interface McpServerAvailability {
+  name: string;
+  enabled: boolean;
+  status: McpAvailabilityStatus;
+  tool_count: number;
+  error?: string;
+}
+
+interface McpAvailabilityResponse {
+  servers: McpServerAvailability[];
 }
 
 export default function McpServersSection({
@@ -44,6 +64,38 @@ export default function McpServersSection({
   const [editName, setEditName] = useState("");
   const [editJson, setEditJson] = useState("");
   const [isNew, setIsNew] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [availability, setAvailability] = useState<
+    Record<string, McpServerAvailability>
+  >({});
+
+  const refreshAvailability = useCallback(async () => {
+    const names = Object.keys(servers);
+    if (names.length === 0) {
+      setAvailability({});
+      setCheckError(null);
+      return;
+    }
+
+    setChecking(true);
+    setCheckError(null);
+    try {
+      const data = await get<McpAvailabilityResponse>(`${BASE}/agent/mcp-status`);
+      const next = Object.fromEntries(
+        (data.servers || []).map((server) => [server.name, server]),
+      );
+      setAvailability(next);
+    } catch {
+      setCheckError("Failed to check MCP server availability");
+    } finally {
+      setChecking(false);
+    }
+  }, [servers]);
+
+  useEffect(() => {
+    refreshAvailability();
+  }, [refreshAvailability]);
 
   const handleEdit = (name: string) => {
     setEditName(name);
@@ -95,6 +147,38 @@ export default function McpServersSection({
   };
 
   const entries = Object.entries(servers);
+  const renderAvailability = (name: string, cfg: McpServerConfig) => {
+    const status = availability[name];
+    if (!status) {
+      if (checking) {
+        return (
+          <Tag icon={<LoadingOutlined />} color="processing">
+            Checking
+          </Tag>
+        );
+      }
+      return <Tag color="default">{cfg.enabled ? "Not checked" : "Disabled"}</Tag>;
+    }
+    if (status.status === "available") {
+      return (
+        <Tag icon={<CheckCircleOutlined />} color="success">
+          Available
+        </Tag>
+      );
+    }
+    if (status.status === "disabled") {
+      return (
+        <Tag icon={<PauseCircleOutlined />} color="default">
+          Disabled
+        </Tag>
+      );
+    }
+    return (
+      <Tag icon={<CloseCircleOutlined />} color="error">
+        Unavailable
+      </Tag>
+    );
+  };
 
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
@@ -105,9 +189,20 @@ export default function McpServersSection({
           </Text>
         </Col>
         <Col>
-          <Button icon={<PlusOutlined />} size="small" onClick={handleAdd}>
-            Add Server
-          </Button>
+          <Space size="small">
+            <Button
+              icon={<ReloadOutlined />}
+              size="small"
+              loading={checking}
+              onClick={refreshAvailability}
+              data-testid="settings-agent-mcp-refresh"
+            >
+              Refresh Status
+            </Button>
+            <Button icon={<PlusOutlined />} size="small" onClick={handleAdd}>
+              Add Server
+            </Button>
+          </Space>
         </Col>
       </Row>
 
@@ -115,9 +210,15 @@ export default function McpServersSection({
         <Empty description="No MCP servers configured" />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {checkError && (
+            <Text type="danger" style={{ fontSize: 12 }}>
+              {checkError}
+            </Text>
+          )}
           {entries.map(([name, cfg]) => (
             <Card
               key={name}
+              data-testid={`settings-agent-mcp-server-${name}`}
               size="small"
               style={{ borderColor: token.colorBorderSecondary }}
               title={
@@ -127,6 +228,9 @@ export default function McpServersSection({
                   <Tag color={cfg.url ? "blue" : "geekblue"}>
                     {cfg.url ? "HTTP" : "Stdio"}
                   </Tag>
+                  <span data-testid={`settings-agent-mcp-status-${name}`}>
+                    {renderAvailability(name, cfg)}
+                  </span>
                 </Space>
               }
               extra={
@@ -153,6 +257,16 @@ export default function McpServersSection({
               }
             >
               <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                {availability[name]?.status === "available" && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Tools: <Text code>{availability[name].tool_count}</Text>
+                  </Text>
+                )}
+                {availability[name]?.status === "unavailable" && (
+                  <Text type="danger" style={{ fontSize: 12 }}>
+                    {availability[name].error || "MCP server is unavailable"}
+                  </Text>
+                )}
                 {cfg.url && (
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     URL: <Text code>{cfg.url}</Text>

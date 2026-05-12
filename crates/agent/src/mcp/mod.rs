@@ -674,6 +674,76 @@ pub struct McpToolExposure {
     pub deferred_tools: Vec<ToolDefinition>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerAvailabilityStatus {
+    Available,
+    Unavailable,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerAvailability {
+    pub name: String,
+    pub enabled: bool,
+    pub status: McpServerAvailabilityStatus,
+    pub tool_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub async fn check_server_availability(
+    configs: &HashMap<String, McpServerConfig>,
+) -> Vec<McpServerAvailability> {
+    use futures::stream::{self, StreamExt};
+
+    let mut statuses = configs
+        .iter()
+        .filter(|(_, cfg)| !cfg.enabled)
+        .map(|(name, _)| McpServerAvailability {
+            name: name.clone(),
+            enabled: false,
+            status: McpServerAvailabilityStatus::Disabled,
+            tool_count: 0,
+            error: None,
+        })
+        .collect::<Vec<_>>();
+
+    let eligible = configs
+        .iter()
+        .filter(|(_, cfg)| cfg.enabled)
+        .map(|(name, cfg)| (name.clone(), cfg.clone()))
+        .collect::<Vec<_>>();
+
+    let outcomes = stream::iter(eligible.into_iter().map(|(name, cfg)| async move {
+        let outcome = start_one_server(&name, &cfg).await;
+        (name, outcome)
+    }))
+    .buffer_unordered(STARTUP_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    statuses.extend(outcomes.into_iter().map(|(name, outcome)| match outcome {
+        Ok(conn) => McpServerAvailability {
+            name,
+            enabled: true,
+            status: McpServerAvailabilityStatus::Available,
+            tool_count: conn.tools.len(),
+            error: None,
+        },
+        Err(error) => McpServerAvailability {
+            name,
+            enabled: true,
+            status: McpServerAvailabilityStatus::Unavailable,
+            tool_count: 0,
+            error: Some(error),
+        },
+    }));
+
+    statuses.sort_by(|a, b| a.name.cmp(&b.name));
+    statuses
+}
+
 impl McpManager {
     /// Create a new McpManager. Enabled servers start **concurrently** with
     /// bounded parallelism; individual failures are logged and skipped without

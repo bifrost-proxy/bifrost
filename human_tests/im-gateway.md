@@ -2,11 +2,11 @@
 
 ## 功能模块说明
 
-IM Gateway 是 Bifrost 的顶级网关模块，支持飞书等 IM 平台的长连接事件接收、消息发送、事件路由（收到消息后执行脚本并回复）、定时任务等能力。作为 Settings 中的一级 Tab 和 CLI 顶级命令，独立于 Remote Invoke。
+IM Gateway 是 Bifrost 的顶级网关模块，支持飞书等 IM 平台的长连接事件接收、消息发送、事件路由（收到消息后执行脚本并回复）、定时任务等能力。WebUI 中位于与 Settings 同级的 AI 一级页内，并和 Agent 子导航整合；CLI 仍作为顶级命令，独立于 Remote Invoke。
 
 本测试文档覆盖 V1 阶段骨架代码的基本功能验证，重点验证：
 - 服务启动不崩溃
-- WebUI IM Gateway Tab 可见
+- WebUI AI 一级入口和 IM Gateway 子导航可见
 - CLI `im` 命令及子命令可用
 - API 端点正确响应
 - Provider/Target/Route/Schedule CRUD 操作
@@ -20,10 +20,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ## 测试用例列表
 
-### TC-IMG-01: Settings 一级 Tab 显示 IM Gateway
+### TC-IMG-01: AI 一级入口显示 IM Gateway 子导航
 
-- **操作步骤**: 在浏览器中打开 `http://localhost:8800/_bifrost/`，导航到 Settings 页面
-- **预期结果**: 侧边 Tab 中出现 `IM Gateway`，且是独立的一级 Tab，不是 Remote Invoke 子面板
+- **操作步骤**: 在浏览器中打开 `http://localhost:8800/_bifrost/`，导航到 AI 页面
+- **预期结果**: 主侧栏中出现与 Settings 同级的 `AI` 入口；AI 页面左侧子导航包含 IM Gateway 分组和 Connections、Targets、Routes、Schedules、History，不是 Remote Invoke 子面板
 
 ### TC-IMG-02: CLI im help 输出
 
@@ -100,9 +100,9 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **操作步骤**: 执行 `curl -s -X DELETE http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/test-feishu`
 - **预期结果**: 返回成功响应，后续 GET /providers 不再包含 `test-feishu`
 
-### TC-IMG-15: WebUI IM Gateway Tab 内容渲染
+### TC-IMG-15: WebUI AI 页 IM Gateway 内容渲染
 
-- **操作步骤**: 在浏览器中打开 `http://localhost:8800/_bifrost/`，导航到 Settings → IM Gateway
+- **操作步骤**: 在浏览器中打开 `http://localhost:8800/_bifrost/`，导航到 AI → IM Gateway → Connections
 - **预期结果**: 页面正确渲染 IM Gateway 管理界面，包含 Providers、Targets 等区域，无 JS 报错
 
 ## 清理步骤
@@ -230,27 +230,28 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **操作步骤**: 执行 `cargo run --bin bifrost -- -p 8800 im schedule logs test-schedule-1`
 - **预期结果**: 显示执行记录，含 run_id、status、duration、exit_code
 
-### TC-IMG-31: Settings IM Gateway 左侧导航按 URL 切换独立面板
+### TC-IMG-31: AI 页 IM Gateway 左侧导航按 URL 切换独立面板
 
 - **前置条件**:
   - 使用临时数据目录启动 Bifrost，端口不得使用 9900：
     ```bash
     BIFROST_DATA_DIR=./.bifrost-test-im-nav cargo run --bin bifrost -- start -p 18885 --unsafe-ssl --no-system-proxy
     ```
-  - 浏览器打开 `http://127.0.0.1:18885/_bifrost/settings?tab=im-gateway`
+  - 浏览器打开 `http://127.0.0.1:18885/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`
 - **操作步骤**:
-  1. 确认 IM Gateway 页面左侧显示二级导航，包含 Connections、Targets、Routes、Schedules、History。
+  1. 确认 AI 页面左侧显示合并子导航，其中 IM Gateway 分组包含 Connections、Targets、Routes、Schedules、History。
   2. 确认默认只渲染 `Connections` 面板，不再显示顶部二级 Tabs。
   3. 点击左侧导航中的 `Routes`。
-  4. 确认右侧只渲染 `Routes` 面板，且 URL 包含 `imGatewaySection=routes`。
+  4. 确认右侧只渲染 `Routes` 面板，且 URL 包含 `aiSection=im-gateway-routes` 与 `imGatewaySection=routes`。
   5. 刷新页面，确认仍恢复到 `Routes` 面板。
   6. 点击左侧导航中的 `History`，确认右侧渲染 `History` 面板；History 面板内部仍保留 Events / Runs 小 Tabs。
   7. 切换到暗色主题后点击 `Targets`。
 - **预期结果**:
-  - 左侧二级导航固定在 IM Gateway 内容区左侧，不跟随右侧面板内容滚动。
+  - AI 页顶部有正常留白，左侧子导航和右侧面板不贴住窗口顶部。
+  - 左侧二级导航固定在 AI 内容区左侧，不跟随右侧面板内容滚动。
   - 点击导航项后右侧独立渲染对应面板，不再把二级入口放在顶部 Tabs 中。
   - 当前导航项通过高亮和 `aria-current="true"` 标记。
-  - URL 中的 `imGatewaySection` 能记录当前面板，页面刷新后恢复到同一面板。
+  - URL 中的 `aiSection` 与 `imGatewaySection` 能记录当前面板，页面刷新后恢复到同一面板。
   - 亮色与暗色主题下导航项、文本、边框和高亮状态均清晰可读。
 - **执行记录（2026-05-05）**: PASS — `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings IM Gateway 左侧导航按 URL 切换独立面板"` 通过；验证默认仅渲染 Connections、无顶部 Connections 二级 Tab、点击 Routes/History/Targets 后只渲染对应面板、URL `imGatewaySection` 记录并刷新恢复、暗色主题下继续切换且 `aria-current` 正确。
 
@@ -549,3 +550,156 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 同一 Provider 同一文件指纹的第二次渲染复用第一次返回的 `image_key`，不再次调用 Feishu 图片上传接口。
   - 流式进度卡片只在最终 flush 前做图片上传和 Markdown 替换，不在每个 streaming delta 中重复上传图片。
 - **执行记录（2026-05-12）**: PASS — 代码 review 确认缓存通过全局 `AGENT_REPLY_IMAGE_UPLOAD_CACHE` 按 `provider_id + canonical path + len + modified_ms` 命中；流式路径在 `progress_registry.finish(..., rendered_main_response, ...)` 前调用一次渲染，progress card 的增量刷新仍只做普通 Markdown 转换，不触发图片上传。
+
+### TC-IMG-43: Schedules API 支持手动新增 Script 与 Agent 任务
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-im-schedules cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 已通过 API 创建一个 Feishu Provider 和一个 Target，Target id 为 `schedule-target`。
+- **操作步骤**:
+  1. 调用 `POST /_bifrost/api/im-gateway/schedules` 创建 script schedule，body 包含 `task_type=script`、`target_id=schedule-target`、`trigger.type=interval`、`script.script_text=echo script-ok`。
+  2. 调用同一 API 创建 agent schedule，body 包含 `task_type=agent`、`trigger.type=interval`、`agent.prompt=Summarize schedule state`。
+  3. 调用 `GET /_bifrost/api/im-gateway/schedules` 查看列表。
+  4. 调用 `POST /_bifrost/api/im-gateway/schedules/<script-id>/run` 手动触发 script schedule。
+  5. 调用 `GET /_bifrost/api/im-gateway/schedules/<script-id>/runs` 查看 run history。
+- **预期结果**:
+  - 两次创建都返回完整 schedule JSON，而不是只有 `{success:true}`。
+  - Script schedule 保留 `task_type=script`、`script.script_text` 和 `next_run_at`。
+  - Agent schedule 保留 `task_type=agent`、`agent.prompt` 和 `next_run_at`。
+  - Script 手动 run 返回 `status=Success`，`stdout_preview` 包含 `script-ok`。
+  - Run history 中能查到该手动执行记录。
+- **执行记录（2026-05-12）**: PASS — 使用临时数据目录 `.bifrost-test-im-schedules`、端口 `18892`、`--no-system-proxy` 启动源码版 Bifrost；通过 API 创建 `schedule-provider` 与 `schedule-target` 后，`POST /schedules` 创建 `script-schedule` 返回完整 schedule JSON，包含 `task_type=script`、`script.script_text=echo script-ok` 与 `next_run_at`；创建 `agent-schedule` 返回 `task_type=agent`、`agent.prompt=Summarize schedule state` 与 `next_run_at`；`GET /schedules` 同时列出两类任务；`POST /schedules/script-schedule/run` 返回 `status=Success`、`exit_code=0`、`stdout_preview=script-ok\n`；`GET /schedules/script-schedule/runs` 返回对应 `manual_run` 记录。
+
+### TC-IMG-44: Agent 内置 schedule 工具支持查询、新增、更新、删除
+
+- **前置条件**:
+  - 复用 TC-IMG-43 的临时 Bifrost 服务。
+  - 通过 `/agent/chat` 使用测试模型或 mock 模型，使模型依次调用 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete` 工具。
+- **操作步骤**:
+  1. 发送 Agent 请求，要求创建一个 id 为 `agent-tool-schedule` 的 agent schedule，preset prompt 为 `tool prompt`。
+  2. 发送 Agent 请求，要求查询定时任务列表并确认包含 `agent-tool-schedule`。
+  3. 发送 Agent 请求，要求把该 schedule 的 prompt 更新为 `updated tool prompt` 并禁用任务。
+  4. 发送 Agent 请求，要求删除 `agent-tool-schedule`。
+  5. 通过 schedules API 直接读取列表做二次确认。
+- **预期结果**:
+  - Agent 可见工具列表包含 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_delete`。
+  - `schedule_create` 成功后 API 列表出现 `agent-tool-schedule`。
+  - `schedule_update` 后 `enabled=false` 且 `agent.prompt=updated tool prompt`。
+  - `schedule_delete` 后 API 列表不再出现该 schedule。
+  - 工具失败时返回结构化错误，不会静默吞掉 store 错误。
+- **执行记录（2026-05-12）**: PASS — 启动临时 mock Chat Completions 服务并通过 `/agent` PATCH 配置 `model_provider=mock-schedule-tools`；调用真实 `/agent/chat`，mock model 依次返回 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete` tool calls；响应 `tool_calls` 中四个工具均 `success=true`，create 结果包含 `agent-tool-schedule` 与 `agent.prompt=tool prompt`，list 结果包含该任务，update 结果包含 `enabled=false` 与 `agent.prompt=updated tool prompt`，delete 结果为 `{"deleted":"agent-tool-schedule"}`；最后通过 schedules API 验证列表只剩 `script-schedule` 与 `agent-schedule`，不再包含 `agent-tool-schedule`。
+
+### TC-IMG-45: WebUI Schedules 面板可手动新增 Script/Agent 任务且支持明暗主题
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理。
+  - 浏览器打开 `http://127.0.0.1:18892/_bifrost/` 并进入 Settings / IM Gateway / Schedules。
+- **操作步骤**:
+  1. 在亮色主题点击 Schedules 面板右上角 `Add`。
+  2. 选择 `Script`，填写 Name、Target、Interval、Script Text 后创建。
+  3. 再次打开 `Add`，选择 `Agent`，填写 Name、Interval、Preset Prompt 后创建。
+  4. 切换暗色主题，重复打开 Add 弹窗检查字段、按钮、Tag、表格文本可读。
+  5. 刷新页面后回到 Schedules 面板，确认列表仍展示两类任务。
+- **预期结果**:
+  - Add 弹窗在亮色和暗色主题下无文字遮挡、无颜色对比问题。
+  - Script 表单要求 Script Text 或 Script File 至少一项。
+  - Agent 表单要求 Preset Prompt。
+  - 表格新增 Type 列，Script 显示 `Script`，Agent 显示 `Agent`。
+  - 刷新后 schedule 数据从后端恢复，列表不丢失。
+- **执行记录（2026-05-12）**: PASS — 使用 Codex in-app Browser 打开 `http://127.0.0.1:18892/_bifrost/ai?imGatewaySection=schedules`；亮色主题下 Schedules 页面显示说明文案 `Scheduled tasks run scripts or Agent prompts on a cron/interval basis`、`Add` 按钮和 Type 列；通过 Add 弹窗创建 `UI Script Schedule`，选择 `schedule-target`，填写 `echo ui-script-ok` 后列表展示 Type=`Script`；再次通过 Add 弹窗选择 `Agent`，填写 preset prompt `Run UI agent scheduled prompt` 后列表展示 `UI Agent Schedule` 且 Type=`Agent`；点击 moon 图标切换暗色主题后再次打开 Add 弹窗，确认 `Task Type`、`Script Text`、`Create` 等字段可见；刷新页面后 `UI Script Schedule` 与 `UI Agent Schedule` 仍从后端恢复显示。
+
+### TC-IMG-46: WebUI 每个 Schedule 可查看详情和运行历史
+
+- **前置条件**:
+  - 复用 TC-IMG-43 的临时 Bifrost 服务。
+  - 已至少手动执行过一个 Script schedule 和一个 Agent schedule。
+  - Agent schedule 的 mock 模型至少产生一次 tool call 和最终回复。
+- **操作步骤**:
+  1. 在 Schedules 表格点击 Script schedule 行。
+  2. 查看详情弹窗中的任务配置与 Run History。
+  3. 关闭详情弹窗，在 Schedules 表格点击 Agent schedule 行。
+  4. 查看详情弹窗中的 Agent 最终结果、工具调用轨迹和运行耗时。
+- **预期结果**:
+  - Script 详情展示 ID、Type、Target、Trigger、Next Run、Last Run、Timeout。
+  - Script Run History 展示 `duration_ms`、`exit_code`、`stdout_preview`、`stderr_preview`、`error`。
+  - Agent 详情展示 preset prompt。
+  - Agent Run History 展示 `Final Result`、`Tool Calls`、每个工具的 arguments/result/success，以及 plan trace（如果本次运行产生 plan）。
+  - 详情弹窗在暗色主题下仍可读，无文字或按钮遮挡。
+- **执行记录（2026-05-12）**: PASS — 重启临时服务加载最新代码后，先用 mock Chat Completions 服务手动触发 `agent-schedule`，`GET /schedules/agent-schedule/runs` 最新记录包含 `agent_final_response=agent scheduled final result`、`agent_tool_calls` 数量为 1、`stdout_preview=agent scheduled final result`；随后用 Codex in-app Browser 打开 Schedules 页面，点击 `tr[data-row-key="script-schedule"]` 打开详情，确认 Run History 中显示 `Stdout` 与 `script-ok`；关闭后点击 `tr[data-row-key="agent-schedule"]` 打开详情，确认显示 `Final Result`、`Tool Calls`、`schedule_list` 与 `agent scheduled final result`。
+
+### TC-IMG-47: WebUI IM Gateway 窄宽度布局与 Task Runs 详情回归
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 浏览器视口宽度调整到约 760px，确保至少存在一个 provider、target、route、schedule 和一条 task run 历史记录。
+- **操作步骤**:
+  1. 进入 Connections，查看 provider 卡片中的 Status、App ID、Connection Mode、Agent Work Dir、Agent Base Prompt、Agent Developer/User 等字段。
+  2. 进入 Targets，查看 targets 表格在窄宽度下的表头、Receive ID 和 Actions。
+  3. 进入 Routes，查看 route 卡片中的 Provider、Event、Matcher、Action、Timeout。
+  4. 进入 Schedules，查看 schedules 表格并横向滚动到 Actions，点击某一行打开 schedule detail。
+  5. 进入 History / Task Runs，点击一条 Task Run 行。
+- **预期结果**:
+  - Connections 与 Routes 卡片字段自适应换行到多行网格，不出现 `Long Connection`、`Global default` 等逐字竖排。
+  - Targets 与 Schedules 表格在窄宽度下有横向滚动能力，操作按钮不会被裁掉。
+  - IM Gateway 内容区域允许横向滚动兜底，顶部操作按钮可换行，不与说明文字挤压。
+  - History / Task Runs 行可点击打开 `Task Run Detail` 弹窗，展示 run id、type、status、source、schedule/route/provider/target、started/ended/duration、exit code、stdout/stderr digest、error，以及 Script stdout/stderr 或 Agent final result/tool calls/plan trace。
+  - 亮色和暗色主题下弹窗、表格滚动区域和卡片字段均可读。
+- **执行记录（2026-05-12）**: BLOCKED — 代码实现后执行 `cargo check -p bifrost-admin -p bifrost-cli` 通过，构建过程包含 WebUI `tsc -b && vite build` 并成功生成 gzip assets；尝试用 Codex in-app Browser 验证用户当前 `http://localhost:3000` 页面时被浏览器安全策略拒绝访问该 host；随后按项目要求尝试启动临时源码版 Bifrost（`BIFROST_DATA_DIR=./.bifrost-test-layout cargo run --bin bifrost -- start -H 127.0.0.1 -p 18893 --unsafe-ssl --no-system-proxy --skip-cert-check`）用于 `127.0.0.1` 浏览器验证，但当前沙箱禁止绑定端口，返回 `Operation not permitted`。本用例需要在用户当前浏览器手动刷新后完成视觉确认。
+
+### TC-IMG-48: Agent Chat 模式通过内置工具创建和更新两类定时任务
+
+- **前置条件**:
+  - 使用临时数据目录启动源码版 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DATA_DIR=./.bifrost-test-chat-schedules cargo run --bin bifrost -- start -H 127.0.0.1 -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 启动一个 mock Chat Completions 服务，并通过 `PATCH /_bifrost/api/im-gateway/agent` 将 Agent 配置到该 mock 模型。
+- **操作步骤**:
+  1. 调用 `POST /_bifrost/api/im-gateway/agent/chat`，要求 Agent 使用 schedule 工具创建一个 script 定时任务和一个 agent 定时任务。
+  2. mock 模型依次返回 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list` 四个 tool call。
+  3. 调用 `GET /_bifrost/api/im-gateway/schedules` 查看最终任务列表。
+- **预期结果**:
+  - `/agent/chat` 返回 `success=true`，且 `tool_calls` 中四个 schedule 工具调用都成功。
+  - Script 定时任务必须包含非空 `target_id`，后端对缺少 `target_id` 的 script schedule 返回结构化错误。
+  - Script 定时任务被创建后可通过 `schedule_update` 修改名称、启用状态、interval、脚本文本和 timeout。
+  - Agent 定时任务被创建后保留 `task_type=agent` 与 preset prompt。
+  - `schedule_list` 和 schedules API 均能同时看到 script 与 agent 两类任务。
+- **执行记录（2026-05-13）**: PASS — 使用 mock Chat Completions 服务端口 `28992` 与源码版 Bifrost 端口 `18892` 完成真实 `/agent/chat` 链路验证；第一次请求故意让 script schedule 缺少 `target_id`，工具返回 `script schedules require target_id`，确认校验生效；清理后第二次请求让 mock model 依次调用 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list`，四个 `tool_calls` 均 `success=true`；最终 `GET /_bifrost/api/im-gateway/schedules` 显示 `chat-script-schedule` 已更新为 `Chat Script Schedule Updated`、`enabled=false`、`every_ms=180000`、`script.script_text=echo chat-script-v2`、`timeout_ms=60000`，同时 `chat-agent-schedule` 保留 `task_type=agent`、`agent.prompt=Run the chat-created agent schedule`、`every_ms=120000`、`timeout_ms=45000`。
+
+### TC-IMG-49: Handler 模块化拆分后 IM Gateway 功能回归
+
+- **前置条件**:
+  - `crates/bifrost-admin/src/handlers/im_gateway.rs` 已拆分为真实 Rust 子模块，不使用 `include!`。
+  - 使用临时数据目录启动源码版 Bifrost，端口不得使用 9900，必须禁用系统代理。
+- **操作步骤**:
+  1. 执行 `cargo check -p bifrost-admin`，确认真实子模块拆分后可编译，且 WebUI build script 仍能完成。
+  2. 执行 `cargo test -p bifrost-admin im_gateway::tests -- --nocapture`，覆盖 Provider 配置、消息发送、Agent reply、事件循环、图片输入和状态 helper。
+  3. 启动源码版 Bifrost：`BIFROST_DATA_DIR=./.bifrost-e2e-im-regression cargo run --bin bifrost -- start -H 127.0.0.1 -p 18894 --unsafe-ssl --no-system-proxy --skip-cert-check`。
+  4. 通过管理端 API 验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/task-runs`、`/agent` 和 `/agent/chat` 路由仍可访问。
+  5. 将 Agent 配置到 mock Chat Completions 服务，通过 `/agent/chat` 触发 schedule tools 创建 Script/Agent 两类任务、更新 Script 配置并读取 schedules API。
+- **预期结果**:
+  - `handlers/im_gateway.rs` 只保留路由分发和子模块声明，单文件低于 1500 行；每个子模块文件也低于 1500 行。
+  - 后端编译和 handler 单元/集成测试全部通过。
+  - 真实启动的 Bifrost 管理端 API ready，核心 IM Gateway 路由不返回 404/500。
+  - `/agent/chat` 真实链路仍能创建 `task_type=script` 和 `task_type=agent` 两类定时任务，并能更新 Script 任务配置。
+  - schedules API 最终能同时返回更新后的 Script schedule 与 Agent schedule。
+- **执行记录（2026-05-13）**: PASS — 已将 `im_gateway.rs` 从 `include!` 机械拆分改为真实 `mod` 子模块；`wc -l` 确认入口文件 97 行，最大子模块 `agent_chat.rs` 低于 1500 行；`cargo fmt --all -- --check` 通过，`cargo check -p bifrost-admin` 通过，`cargo test -p bifrost-admin im_gateway::tests -- --nocapture` 通过 23 个测试，`cargo test -p bifrost-admin schedule_tools_create_update_list_delete_agent_schedule` 通过，`cargo test -p bifrost-agent mcp_availability` 通过，`cargo test -p bifrost-cli parse_schedule` 通过；启动源码版 Bifrost（临时数据目录 `.bifrost-e2e-im-regression`、端口 `18894`、`--no-system-proxy`），验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/runs`、`/agent` 均返回 200；将 Agent 配置到 mock Chat Completions 后，通过真实 `/agent/chat` 触发 schedule tools 创建 Script/Agent 两类任务并更新 Script 配置，最终 schedules API 同时返回 `chat-script-schedule` 与 `chat-agent-schedule`；WebUI 影响面回归 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts tests/ui/agent-mcp-servers.spec.ts tests/ui/im-gateway-provider.spec.ts --grep "AI|Settings Agent|Settings IM Provider|IM Gateway Provider"` 通过 11 个用例。
+
+### TC-IMG-50: 远端 CI Windows Rules shard 不被外层 timeout 提前取消
+
+- **前置条件**:
+  - 已推送包含 Handler 模块化拆分的 `feat/new_ai` 分支。
+  - GitHub Actions `CI` workflow 已触发 pull_request run。
+- **操作步骤**:
+  1. 使用 GitHub Actions PAT watcher 观察最新 run 的所有 job。
+  2. 如果 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 在 30 分钟外层 timeout 下被取消，检查同一 run 中其它 job 结论与 job step 状态。
+  3. 将 `e2e-windows-rules.timeout-minutes` 放宽到 60 后重新推送。
+  4. 继续 watch 新 run，直到所有 job success 或出现真实失败日志。
+- **预期结果**:
+  - 取消不是 Rust 编译、lint、单元测试或 IM Gateway 功能回归失败。
+  - workflow 外层 timeout 足够覆盖 Windows rules shard 的内部 suite timeout、fixture 启动和 runner 清理开销。
+  - 新 run 不再因为 shard 外层 envelope 被提前取消。
+- **执行记录（2026-05-13）**: IN PROGRESS — 首次远端 CI run `25752880592` 中 32 个 job 成功，仅 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 在 `E2E rules tests` step 运行中被 job 外层 timeout 取消；run-level log zip 中没有该 cancelled shard 的 suite log，其它 Windows rules shards 均成功。已将 `.github/workflows/ci.yml` 的 `e2e-windows-rules.timeout-minutes` 从 30 调整为 60，待重新推送后继续 watch 到最终结论。

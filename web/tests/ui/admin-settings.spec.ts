@@ -235,7 +235,11 @@ test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载�
     `Shell: ${cliProxy.shell || "-"}`,
   );
 
-  const proxyQrSrc = await page.getByTestId("settings-proxy-qrcode").getAttribute("src");
+  const proxyQrSrc = await page
+    .getByTestId("settings-proxy-qrcode")
+    .locator("img")
+    .first()
+    .getAttribute("src");
   expect(proxyQrSrc).toContain("/_bifrost/public/proxy/qrcode");
   if (proxyAddressInfo.addresses && proxyAddressInfo.addresses.length > 0) {
     expect(proxyQrSrc).toContain(encodeURIComponent(proxyAddressInfo.addresses[0].ip));
@@ -248,13 +252,19 @@ test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载�
   await expect(downloadButton).toBeVisible();
 
   if (certInfo.available) {
-    const href = await downloadButton.getAttribute("href");
+    const href = await page
+      .getByRole("link", { name: /Download CA Certificate/ })
+      .getAttribute("href");
     if (!href) {
       throw new Error("Expected certificate download href to be present");
     }
     const downloadResponse = await request.get(new URL(href, page.url()).toString());
     expect(downloadResponse.ok()).toBeTruthy();
-    const certQrSrc = await page.getByTestId("settings-certificate-qrcode").getAttribute("src");
+    const certQrSrc = await page
+      .getByTestId("settings-certificate-qrcode")
+      .locator("img")
+      .first()
+      .getAttribute("src");
     expect(certQrSrc).toContain("/_bifrost/public/cert/qrcode");
   } else {
     await expect(downloadButton).toHaveClass(/ant-btn-disabled/);
@@ -434,7 +444,7 @@ test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }
     await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
   });
 
-  await openPage(page, "settings?tab=agent");
+  await openPage(page, "ai?aiSection=agent-general&agentSection=general");
 
   await expect(page.getByTestId("settings-agent-base-instructions-button")).toBeVisible();
   await expect(page.getByTestId("settings-agent-developer-instructions-button")).toBeVisible();
@@ -467,7 +477,7 @@ test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }
     .toBe("Default base prompt\nwith multiple lines\nEdited base prompt from large modal");
 });
 
-test("Settings Agent 左侧导航按 URL 切换独立编辑卡片", async ({ page }) => {
+test("AI 一级页整合 Agent 子导航并按 URL 切换独立编辑卡片", async ({ page }) => {
   const agentConfig = {
     enabled: true,
     work_dir: "/tmp/agent-ui",
@@ -526,53 +536,71 @@ test("Settings Agent 左侧导航按 URL 切换独立编辑卡片", async ({ pag
     });
   });
 
-  await openPage(page, "settings?tab=agent");
+  await openPage(page, "ai?aiSection=agent-general&agentSection=general");
 
-  const nav = page.getByTestId("agent-settings-section-nav");
+  await expect(
+    page.locator('[data-testid="app-sidebar-nav-item"][data-nav-label="AI"]'),
+  ).toHaveAttribute("data-nav-key", "/ai");
+  const nav = page.getByTestId("ai-section-nav");
   await expect(nav).toBeVisible();
-  await expect(page.getByTestId("agent-settings-nav-general")).toHaveAttribute(
+  const layoutBox = await page.getByTestId("ai-page-layout").boundingBox();
+  const navBox = await nav.boundingBox();
+  expect(layoutBox && navBox && navBox.y - layoutBox.y).toBeGreaterThanOrEqual(12);
+  await expect(page.getByTestId("ai-nav-agent-general")).toHaveAttribute(
     "aria-current",
     "true",
   );
   await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
   await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
 
-  await page.getByTestId("agent-settings-nav-mcp-servers").click();
-  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+  await page.getByTestId("ai-nav-agent-mcp-servers").click();
+  await expect(page.getByTestId("ai-nav-agent-mcp-servers")).toHaveAttribute(
     "aria-current",
     "true",
   );
+  await expect(page).toHaveURL(/aiSection=agent-mcp-servers/);
   await expect(page).toHaveURL(/agentSection=mcp-servers/);
   await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
   await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+  await expect(page.getByTestId("ai-nav-agent-mcp-servers")).toHaveAttribute(
     "aria-current",
     "true",
   );
   await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
   await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
 
-  await page.getByTestId("agent-settings-nav-runtime").click();
-  await expect(page.getByTestId("agent-settings-nav-runtime")).toHaveAttribute(
+  await page.getByTestId("ai-nav-agent-runtime").click();
+  await expect(page.getByTestId("ai-nav-agent-runtime")).toHaveAttribute(
     "aria-current",
     "true",
   );
+  await expect(page).toHaveURL(/aiSection=agent-runtime/);
   await expect(page).toHaveURL(/agentSection=runtime/);
   await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
   await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
 
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByTestId("agent-settings-nav-mcp-servers").click();
+  await page.getByTestId("ai-nav-agent-mcp-servers").click();
+  await expect(page).toHaveURL(/aiSection=agent-mcp-servers/);
   await expect(page).toHaveURL(/agentSection=mcp-servers/);
-  await expect(page.getByTestId("agent-settings-nav-mcp-servers")).toHaveAttribute(
+  await expect(page.getByTestId("ai-nav-agent-mcp-servers")).toHaveAttribute(
     "aria-current",
     "true",
   );
   await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
   await expect(page.getByTestId("agent-settings-section-runtime")).toHaveCount(0);
+
+  await openPage(page, "ai?session=stale-session&view=active");
+  await expect(page.getByTestId("ai-nav-agent-sessions")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await page.getByTestId("ai-nav-agent-runtime").click();
+  await expect(page).not.toHaveURL(/session=/);
+  await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
 });
 
 test("Settings Agent 模型配置支持关闭 reasoning 参数", async ({ page }) => {
@@ -622,7 +650,7 @@ test("Settings Agent 模型配置支持关闭 reasoning 参数", async ({ page }
     });
   });
 
-  await openPage(page, "settings?tab=agent&agentSection=model");
+  await openPage(page, "ai?aiSection=agent-model&agentSection=model");
   await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
 
   await setSelectValue(
@@ -640,6 +668,121 @@ test("Settings Agent 模型配置支持关闭 reasoning 参数", async ({ page }
 
   expect(patches).toContainEqual({ model_reasoning_effort: "none" });
   expect(patches).toContainEqual({ model_reasoning_summary: "none" });
+});
+
+test("AI Agent 默认值显示在输入框 placeholder", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        model: "gpt-placeholder",
+        model_provider: "mock",
+        model_providers: {
+          mock: {
+            name: "Mock Provider",
+            base_url: "https://model.example.test",
+            api_key: "$MODEL_API_KEY",
+          },
+        },
+        model_reasoning_effort: "medium",
+        model_reasoning_summary: "auto",
+        max_completion_tokens: 16384,
+        model_context_window: 250000,
+        memories: {},
+        mcp_servers: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "mock",
+          name: "Mock Provider",
+          base_url: "https://model.example.test",
+          env_key: "MODEL_API_KEY",
+          request_max_retries: 4,
+          stream_idle_timeout_ms: 300000,
+          stream_max_retries: 5,
+        },
+      ]),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-model&agentSection=model");
+  const modelSection = page.getByTestId("agent-settings-section-model");
+  await expect(modelSection.getByText("Provider Connection")).toBeVisible();
+  await expect(modelSection.locator('input[placeholder="4"]')).toBeVisible();
+  await expect(modelSection.locator('input[placeholder="300000"]')).toBeVisible();
+  await expect(modelSection.locator('input[placeholder="5"]')).toBeVisible();
+
+  await openPage(page, "ai?aiSection=agent-memories&agentSection=memories");
+  const memoriesSection = page.getByTestId("agent-settings-section-memories");
+  await expect(memoriesSection.getByText("Memories", { exact: true })).toBeVisible();
+  await expect(memoriesSection.locator('input[placeholder="512"]')).toBeVisible();
+  await expect(memoriesSection.locator('input[placeholder="No limit"]')).toHaveCount(2);
+  await expect(
+    memoriesSection.locator('input[placeholder="Current model (gpt-placeholder)"]'),
+  ).toHaveCount(2);
+});
+
+test("AI Agent Runtime Settings 支持恢复默认值", async ({ page }) => {
+  const agentConfig = {
+    enabled: true,
+    model: "gpt-runtime",
+    model_provider: "mock",
+    model_providers: {},
+    shell_timeout_secs: 30,
+    max_turn_iterations: 20,
+    max_history_messages: 10,
+    session_ttl_secs: 120,
+    request_timeout_secs: 90,
+    tool_output_token_limit: 2000,
+    project_doc_max_bytes: 1024,
+    background_terminal_max_timeout: 300000,
+    mcp_servers: {},
+  };
+  const patches: Record<string, unknown>[] = [];
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    if (route.request().method() === "PATCH") {
+      const patch = route.request().postDataJSON() as Record<string, unknown>;
+      patches.push(patch);
+      Object.assign(agentConfig, patch);
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await openPage(page, "ai?aiSection=agent-runtime&agentSection=runtime");
+  const runtimeSection = page.getByTestId("agent-settings-section-runtime");
+  await expect(runtimeSection.getByText("Runtime Settings")).toBeVisible();
+
+  await runtimeSection.getByTestId("agent-runtime-restore-defaults").click();
+  await waitForToast(page, "Runtime settings restored to defaults");
+
+  expect(patches).toContainEqual({
+    max_turn_iterations: 1000,
+    max_history_messages: 50,
+    session_ttl_secs: 3600,
+    request_timeout_secs: 600,
+    tool_output_token_limit: 10000,
+    project_doc_max_bytes: 32768,
+    background_terminal_max_timeout: 600000,
+  });
+  await expect(runtimeSection.locator('input[value="600"]').first()).toBeVisible();
+  await expect(runtimeSection.locator('input[value="1000"]')).toBeVisible();
+  await expect(runtimeSection.locator('input[value="10000"]')).toBeVisible();
 });
 
 test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值", async ({
@@ -711,7 +854,7 @@ test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值"
     });
   });
 
-  await openPage(page, "settings?tab=im-gateway");
+  await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
   await page.getByTestId("settings-im-provider-edit-modal-provider").click();
   await expect(page.getByRole("dialog", { name: "Edit IM Provider" })).toBeVisible();
   await page.getByTestId("settings-im-provider-base-instructions-button").click();
@@ -743,7 +886,7 @@ test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值"
     .toBe("Provider base edited from large modal");
 });
 
-test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page }) => {
+test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", async ({ page }) => {
   await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
     await route.fulfill({
       status: 200,
@@ -798,10 +941,10 @@ test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page
     await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
   });
 
-  await openPage(page, "settings?tab=im-gateway");
+  await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
 
-  await expect(page.getByTestId("im-gateway-section-nav")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-nav-connections")).toHaveAttribute(
+  await expect(page.getByTestId("ai-section-nav")).toBeVisible();
+  await expect(page.getByTestId("ai-nav-im-gateway-connections")).toHaveAttribute(
     "aria-current",
     "true",
   );
@@ -809,9 +952,10 @@ test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Connections/ })).toHaveCount(0);
 
-  await page.getByTestId("im-gateway-nav-routes").click();
+  await page.getByTestId("ai-nav-im-gateway-routes").click();
+  await expect(page).toHaveURL(/aiSection=im-gateway-routes/);
   await expect(page).toHaveURL(/imGatewaySection=routes/);
-  await expect(page.getByTestId("im-gateway-nav-routes")).toHaveAttribute(
+  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
     "aria-current",
     "true",
   );
@@ -819,13 +963,14 @@ test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page
   await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByTestId("im-gateway-nav-routes")).toHaveAttribute(
+  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
     "aria-current",
     "true",
   );
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
 
-  await page.getByTestId("im-gateway-nav-history").click();
+  await page.getByTestId("ai-nav-im-gateway-history").click();
+  await expect(page).toHaveURL(/aiSection=im-gateway-history/);
   await expect(page).toHaveURL(/imGatewaySection=history/);
   await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
@@ -833,9 +978,10 @@ test("Settings IM Gateway 左侧导航按 URL 切换独立面板", async ({ page
 
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByTestId("im-gateway-nav-targets").click();
+  await page.getByTestId("ai-nav-im-gateway-targets").click();
+  await expect(page).toHaveURL(/aiSection=im-gateway-targets/);
   await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("im-gateway-nav-targets")).toHaveAttribute(
+  await expect(page.getByTestId("ai-nav-im-gateway-targets")).toHaveAttribute(
     "aria-current",
     "true",
   );

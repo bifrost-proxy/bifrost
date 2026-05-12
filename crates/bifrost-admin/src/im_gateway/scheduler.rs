@@ -264,6 +264,7 @@ mod tests {
                 name: "due".to_string(),
                 enabled: true,
                 target_id: "t1".to_string(),
+                task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
                     script_text: Some("echo ok".to_string()),
@@ -271,6 +272,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                 },
+                agent: None,
                 timeout_ms: 30000,
                 max_output_bytes: 4096,
                 concurrency_policy: ConcurrencyPolicy::SkipIfRunning,
@@ -285,6 +287,7 @@ mod tests {
                 name: "not due".to_string(),
                 enabled: true,
                 target_id: "t1".to_string(),
+                task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
                     script_text: Some("echo ok".to_string()),
@@ -292,6 +295,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                 },
+                agent: None,
                 timeout_ms: 30000,
                 max_output_bytes: 4096,
                 concurrency_policy: ConcurrencyPolicy::SkipIfRunning,
@@ -306,6 +310,7 @@ mod tests {
                 name: "disabled".to_string(),
                 enabled: false,
                 target_id: "t1".to_string(),
+                task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
                     script_text: Some("echo ok".to_string()),
@@ -313,6 +318,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                 },
+                agent: None,
                 timeout_ms: 30000,
                 max_output_bytes: 4096,
                 concurrency_policy: ConcurrencyPolicy::SkipIfRunning,
