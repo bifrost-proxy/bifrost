@@ -41,6 +41,7 @@
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
 | [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与 Agent 子系统 | 15 | Skill Creator crate、Agent slash router、Admin CRUD、WebUI Skills 面板（只读详情/删除/导入 zip/固定分页）、E2E create-test-invoke-delete-import、executor 环境白名单、registry watcher 单 slug 热重载、checksum 缺失 manifest、packager import scope 保留、authoring.test 非法状态 |
+| [weixin-provider.md](./weixin-provider.md) | Weixin Provider | 7 | 原生 `weixin` IM provider 扫码登录、二维码自动轮询/刷新、微信文本消息触发 Agent、guide/queue/slash 命令回执、最终纯正文回写、History 表格窄宽度滚动与 Tooltip、图片消息下载后传给多模态模型 |
 | [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
@@ -156,7 +157,7 @@
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 14 | SessionQueueManager 单元测试（14项，含多 guide 累积、pending status、turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（多 guide `/status` 明细与合并消费、turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
 | [agent-builtin-commands.md](./agent-builtin-commands.md) | Agent 内置命令全面测试 | 34 | 11 个内置斜杠命令全覆盖：/help、/status、/clear、/reset、/undo、/compact、/remember、/memories、/forget、/resume、/skill，含无参数边界、未知命令、/resume 空会话回归、并发忙碌时 session-free 立即响应，以及 /status 工作路径、运行中 loop/token/context/压缩次数实时指标、默认 250k context window、/agent/chat /status 纯读不抢占 session、/agent/chat 首条 /status 保留请求 work_dir、/status 抢先创建空 session 后业务 turn 覆盖 work_dir 回归、工具结果追加后 context 增量口径和 CI 高负载采样窗口加固、自动压缩判断使用 last usage + appended items、emergency compaction 统计事件完备、guide/pending queue 继续 loop 前压缩、history 改写后 active status 立即刷新、replacement history summary-last 与非 system initial context reinjection、Codex local compaction 模板/text-only/token budget 对齐、summary 生成请求使用 structured history + user prompt、summary 请求超上下文后移除最老 history item 并重试、summary transient error 按 provider retry budget 退避重试、base instructions token snapshot、mid-turn compact 后 base 不进 history 且非 system context/memory 不重复注入、普通 turn pre-sampling `PreTurn + DoNotInject` 自动压缩 |
-| [agent-builtin-tools-completeness.md](./agent-builtin-tools-completeness.md) | Agent 内置工具完备性 | 14 | `exec_command` 短命令、交互任务 session + `write_stdin`、`exec_command tty=true` 真实 PTY + Codex CLI interactive 回归、真实 `/agent/chat` 由真实模型调度 PTY 与 Codex interactive 追加引导问题、delegated/交互/长任务请求必须使用 `shell_pty`、真实 `/agent/chat` 通过 `shell_pty` 启动 Codex CLI 创建宣传网页并追加引导消息、`view_image` data URL、`request_user_input` 不可交互边界、`tool_search` deferred 暴露、workspace all-features 编译回归、真实 Bifrost chat 默认直暴工具调用、本地 CI 静态门禁、MCP `>= 100` 阈值 deferred loading、真实 Bifrost 注册 100 个 MCP tools 后搜索并调用 |
+| [agent-builtin-tools-completeness.md](./agent-builtin-tools-completeness.md) | Agent 内置工具完备性 | 15 | `exec_command` 短命令、长任务真实进程 session + `write_stdin` 轮询到最终 exit code、交互任务 session + `write_stdin`、默认不注册 `shell_pty` 且内部兼容 poll 不丢输出、`exec_command tty=true` 真实 PTY + Codex CLI interactive 回归、真实 `/agent/chat` 由真实模型调度 PTY 与 Codex interactive 追加引导问题、delegated/交互/长任务请求必须使用 `exec_command` + `write_stdin`、真实 `/agent/chat` 通过 `exec_command` 启动 Codex CLI 创建宣传网页并追加引导消息、`view_image` data URL、`request_user_input` 不可交互边界、`tool_search` deferred 暴露、workspace all-features 编译回归、真实 Bifrost chat 默认直暴工具调用、本地 CI 静态门禁、MCP `>= 100` 阈值 deferred loading、真实 Bifrost 注册 100 个 MCP tools 后搜索并调用 |
 | [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 6 | `/goal` 显式入口、Goal 生命周期、`apply_patch`、raw patch body 兼容、PTY 会话复用与交互输入、交互式 shell prompt 前缀下 exit_code 解析、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、`plan_steps` 最终返回与 helper 回归测试 |
 | [agent-loop-timeouts.md](./agent-loop-timeouts.md) | Agent Loop Runtime Limits | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证默认 600 秒级超时、1000 次迭代上限，以及 35+ 次工具调用不会在 30 次时提前中断 |
@@ -173,7 +174,7 @@
 
 ---
 
-**总计：94 个测试文件，1617 个测试用例**
+**总计：95 个测试文件，1624 个测试用例**
 
 ## 工作流程
 

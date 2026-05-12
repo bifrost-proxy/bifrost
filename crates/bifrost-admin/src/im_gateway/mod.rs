@@ -16,6 +16,7 @@ pub mod scheduler;
 pub mod target_store;
 pub mod task_executor;
 pub mod types;
+pub mod weixin;
 
 pub use agent::{
     run_turn, run_turn_with_mcp, ImAgentClient, ImAgentConfig, ImAgentConfigStore,

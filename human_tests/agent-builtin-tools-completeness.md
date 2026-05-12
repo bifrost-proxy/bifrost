@@ -5,7 +5,7 @@
 覆盖 Bifrost agent 编程内置工具的第一批能力：
 
 1. `exec_command` 短命令一次性完成
-2. `exec_command` 长任务返回 session，并由 `write_stdin` 继续交互
+2. `exec_command` 长任务返回真实进程 session，并由 `write_stdin` 轮询到最终 exit code
 3. `view_image` 读取本地图片并返回 data URL
 4. `request_user_input` 参数校验与当前不可交互边界
 5. `tool_search` 只在 deferred tools 存在时暴露，并返回可加载工具定义
@@ -16,8 +16,8 @@
 10. 真实 Bifrost + 大量 MCP tools 验证 `tool_search` 搜索、加载、调用策略生效
 11. `exec_command tty=true` 使用真实 PTY，并可启动 Codex CLI interactive session
 12. 真实 Bifrost `/agent/chat` 通过真实模型调度 PTY 工具、交互式 Python、Codex CLI interactive session 与追加引导问题
-13. 真实 Bifrost `/agent/chat` 对 delegated agent-style/交互/长任务类请求必须使用 `shell_pty`；以“启动 Codex CLI/派发 Codex 任务”为真实回归样例，不能用 blocking `shell` 执行持续会话命令
-14. 真实 Bifrost `/agent/chat` 派发 Codex CLI 创建宣传网页，并通过 `write_stdin` 持续观察/追加引导消息
+13. 真实 Bifrost `/agent/chat` 对 delegated agent-style/交互/长任务类请求必须使用 `exec_command` + `write_stdin`；以“启动 Codex CLI/派发 Codex 任务”为真实回归样例，不能用 `shell_pty` 或 blocking `shell` 执行持续会话命令
+14. 真实 Bifrost `/agent/chat` 派发 Codex CLI 创建宣传网页，并通过 `exec_command` + `write_stdin` 持续观察/追加引导消息
 
 ## 前置条件
 
@@ -38,14 +38,24 @@ mkdir -p ./.bifrost-test
 - **预期结果**: 测试通过；`exec_command` 返回 JSON，包含 `exit_code: 0`、`output: "hello"`，且不返回持续会话。
 - **本次执行结果**: 2026-05-06 执行通过；`exec_command_returns_completed_output` 测试返回 ok。
 
-### TC-ABT-02: `exec_command` 交互任务通过 `write_stdin` 继续
+### TC-ABT-02: `exec_command` 长任务通过 `write_stdin` 轮询到真实结束
 
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture
   ```
-- **预期结果**: 测试通过；短命令返回完成 JSON；交互命令返回 `session_id`，`write_stdin` 使用 `chars` 字段写入后可读回 `hello exec`。
-- **本次执行结果**: 2026-05-06 执行通过；`exec_command_tool_works_end_to_end` 测试返回 ok。
+- **预期结果**: 测试通过；短命令返回完成 JSON；长命令在 `yield_time_ms` 内未结束时返回数字 `session_id` 且 `exit_code=null`；后续 `write_stdin` 空输入轮询最终返回 `exit_code: 0` 与 `long-end`，证明结束感知来自真实子进程而非 stdout sentinel。
+- **本次执行结果**: 2026-05-12 执行通过；`exec_command_tool_works_end_to_end` 测试返回 ok，覆盖短命令完成、长命令 session 轮询到最终 `exit_code=0`、以及交互命令 stdin 回显。
+
+### TC-ABT-02B: `exec_command` pipe/PTY 交互任务通过 `write_stdin` 继续
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent tools::exec_command -- --nocapture
+  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent tools::pty_shell::tests::test_write_stdin_to_session -- --nocapture
+  ```
+- **预期结果**: 测试通过；pipe 模式启动等待 stdin 的 Python 进程，`write_stdin` 写入后返回真实输出与最终 exit code；长时间运行进程收到 Ctrl-C 后被终止并清理 session；默认 `ToolRegistry` 不再注册 `shell_pty`，避免模型或 API 调用走第二套终端入口；旧 `shell_pty` 模块级回归仍证明内部 fallback poll 不丢输出。
+- **本次执行结果**: 2026-05-12 执行通过；`tools::exec_command` 7 项单元测试全部 ok，`test_write_stdin_to_session` 返回 ok；`p1_tools_e2e` 中 `legacy_shell_pty_is_not_registered_by_default` 确认默认 registry 不再注册 `shell_pty`。
 
 ### TC-ABT-03: `view_image` 返回本地图片 data URL
 
@@ -159,7 +169,7 @@ mkdir -p ./.bifrost-test
 - **预期结果**: `/agent/chat` 返回 `success: true`；响应或 session 详情包含 `AGENT_REAL_PTY_READY`、`True True`、`AGENT_REAL_GUIDE_OK`、`codex --sandbox read-only`、`BIFROST_CODEX_GUIDE_REAL_OK`、`AGENT_REAL_PTY_CHAT_OK`、`BIFROST_CODEX_GUIDE_SENT`；`tool_calls` 包含 `exec_command`、`write_stdin` 和 `tty=true`，证明是 agent 对话真实调度 PTY 工具，而不是 mock 或手动命令。
 - **本次执行结果**: 2026-05-09 执行通过；使用 `/tmp` 下的一次性临时 harness（执行后删除，未落库）启动当前源码构建的 Bifrost，真实端口 `65489`，隔离数据目录 `/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T//bifrost-agent-real-pty-chat-v0wAZQ`，启动参数包含 `--unsafe-ssl --no-system-proxy`。harness 要求 `MODELHUB_AK` 存在并配置真实 `aidp_crawl` provider，未使用 mock provider。真实 `/agent/chat` 返回 `success: true`，`tool_calls` 包含 `exec_command`、`write_stdin` 和 `tty=true`；session/响应中包含 `AGENT_REAL_PTY_READY True True`、`AGENT_REAL_GUIDE_OK`、`codex --sandbox read-only .`、`BIFROST_CODEX_GUIDE_REAL_OK`、`AGENT_REAL_PTY_CHAT_OK`、`BIFROST_CODEX_GUIDE_SENT`，证明 agent 对话经真实模型调度 PTY 工具，启动 Codex CLI interactive session，并向该 session 追加了引导问题。
 
-### TC-ABT-13: delegated/交互/长任务请求必须使用 `shell_pty`
+### TC-ABT-13: delegated/交互/长任务请求必须使用 `exec_command` + `write_stdin`
 
 - **操作步骤**:
   ```bash
@@ -168,16 +178,18 @@ mkdir -p ./.bifrost-test
   # harness 必须要求 MODELHUB_AK 存在并配置真实 aidp_crawl provider，禁止 mock provider。
   # harness 调用 POST /_bifrost/api/im-gateway/agent/chat，使用 Codex CLI 派发作为 delegated agent-style task 回归样例，用户消息使用：
   #   启动codex cli，新建一个任务，检查当前分支的改动内容，做代码review，给出review报告。
-  #   注意：必须给 Codex 派发任务，不要自己做 review；如果需要执行 codex exec/review，也要作为可继续观察的交互会话启动。
+  #   注意：必须给 Codex 派发任务，不要自己做 review；如果需要执行 codex exec/review，也要作为可继续观察的 exec_command 会话启动。
   # harness 检查 session JSONL 中的 tool_call：
-  #   1) 至少出现一次 tool_name = shell_pty，且 command 是持续可观察的前台任务。
-  #   2) 不允许出现 tool_name = shell 且 command 是长任务/交互/等待 stdin/delegated agent-style task。
-  #   3) 如果模型先错误调用 shell，shell tool 必须返回包含 shell_pty/wait_for_completion=false/write_stdin 的失败指引，后续必须改用 shell_pty。
+  #   1) 至少出现一次 tool_name = exec_command，且 cmd 是持续可观察的前台任务。
+  #   2) 后续至少出现一次 tool_name = write_stdin 轮询或输入同一 session_id。
+  #   3) 不允许出现 tool_name = shell_pty。
+  #   4) 不允许出现 tool_name = shell 且 command 是长任务/交互/等待 stdin/delegated agent-style task。
+  #   5) 如果模型先错误调用 shell，shell tool 必须返回包含 exec_command/tty=true/write_stdin 的失败指引，后续必须改用 exec_command。
   ```
-- **预期结果**: `/agent/chat` 返回 `success: true`；session 记录证明真实模型请求经过当前源码构建的 Bifrost；delegated/交互/长任务命令通过 `shell_pty` 建立持续会话并返回 `session_id`；没有 blocking `shell` 执行持续会话命令的成功工具调用。
-- **本次执行结果**: 2026-05-10 执行通过；使用一次性临时 harness（未落库）启动当前源码构建的 Bifrost，端口 `64283`，隔离数据目录 `/tmp/bifrost-agent-codex-dispatch-t5FSsD`，启动参数包含 `--unsafe-ssl --no-system-proxy`。`GET /_bifrost/api/im-gateway/agent/tools` 返回的模型可见工具顺序前四项为 `shell_pty`、`write_stdin`、`exec_command`、`apply_patch`，legacy `shell` 不再排在会话型终端工具前面。真实 `/agent/chat` 使用默认 `aidp_crawl` provider 和真实模型，请求“启动 codex cli，派发一个极小任务”；返回 `success: true`，`tool_calls` 包含 `shell_pty` 启动 `codex exec '只回答 BIFROST_DISPATCH_PTY_OK'`，参数包含 `wait_for_completion=false`，结果返回 `session_id: 67dd40e9-73da-4926-8e6b-f2c260729107` 和 `exit_indicator: running`；随后调用 `write_stdin` 空输入轮询输出。session JSONL `/tmp/bifrost-agent-codex-dispatch-t5FSsD/agent/sessions/2026/05/09/session-codex-dispatch-pty-regression-1778344744.jsonl` 中没有出现 `tool_name = shell` 执行 `codex exec`/`codex review`。清理回合仅调用 `write_stdin` 向该 `session_id` 发送 Ctrl-C，没有启动新命令。
+- **预期结果**: `/agent/chat` 返回 `success: true`；session 记录证明真实模型请求经过当前源码构建的 Bifrost；delegated/交互/长任务命令通过 `exec_command` 建立持续会话并返回数字 `session_id`；后续通过 `write_stdin` 继续观察或输入；没有 `shell_pty` 或 blocking `shell` 执行持续会话命令的成功工具调用。
+- **本次执行结果**: 2026-05-12 执行通过；使用当前源码 `cargo run --bin bifrost -- start -p 18882 --unsafe-ssl --no-system-proxy` 启动真实服务，隔离数据目录 `./.bifrost-test/agent-unified-exec-live`。`GET /_bifrost/api/im-gateway/agent/tools` 返回工具顺序以 `exec_command`、`write_stdin` 开头，`shell_pty=false`。真实 `/agent/chat` 使用默认真实模型 provider，返回 `success: true`；`tool_calls` 为 `set_title`、`exec_command`、`exec_command`、`write_stdin`，其中第二次 `exec_command` 参数为 `yield_time_ms=50`，`write_stdin` 使用数字 `session_id=2` 轮询，最终响应包含 `UNIFIED_EXEC_SHORT_OK` 与 `UNIFIED_EXEC_LONG_DONE`，未出现 `shell_pty`。
 
-### TC-ABT-14: 真实 `/agent/chat` 通过 `shell_pty` 启动 Codex CLI 创建宣传网页并追加引导消息
+### TC-ABT-14: 真实 `/agent/chat` 通过 `exec_command` 启动 Codex CLI 创建宣传网页并追加引导消息
 
 - **操作步骤**:
   ```bash
@@ -190,11 +202,11 @@ mkdir -p ./.bifrost-test
   #   追加引导消息，要求页面包含 BIFROST_PROMO_GUIDE_MARKER。
   # harness 检查生成的 index.html 和 session JSONL：
   #   1) index.html 同时包含 BIFROST_PROMO_PAGE_BASE_MARKER 与 BIFROST_PROMO_GUIDE_MARKER。
-  #   2) session JSONL 中出现 shell_pty、write_stdin 和 codex。
+  #   2) session JSONL 中出现 exec_command、write_stdin 和 codex，且不出现 shell_pty。
   #   3) 不依赖 mock provider 或预写文件。
   ```
-- **预期结果**: `/agent/chat` 返回 `success: true`；真实模型把 Codex CLI 作为可持续观察任务通过 `shell_pty` 启动，后续使用 `write_stdin` 轮询输出/追加引导；Codex 在隔离 work_dir 中生成 `index.html`，且页面包含基础标记和追加引导标记。
-- **本次执行结果**: 2026-05-10 执行通过；使用一次性临时 harness（执行后删除，未落库）启动当前源码构建的 Bifrost，端口 `61674`，启动参数包含 `--unsafe-ssl --no-system-proxy`，真实 `aidp_crawl` provider 可用且未使用 mock。真实 `/agent/chat` 派发 Codex CLI 创建宣传网页，最终生成 `/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T/bifrost-agent-codex-promo-wTQbxo/promo-work/index.html`，文件大小 `13450` bytes，包含 `BIFROST_PROMO_PAGE_BASE_MARKER` 与 `BIFROST_PROMO_GUIDE_MARKER`。session JSONL 统计显示 `shell_pty_count=13`、`write_stdin_count=48`，并包含 `codex` 命令记录，证明 agent 通过真实 PTY 会话持续观察 Codex 输出并追加引导消息。
+- **预期结果**: `/agent/chat` 返回 `success: true`；真实模型把 Codex CLI 作为可持续观察任务通过 `exec_command` 启动，后续使用 `write_stdin` 轮询输出/追加引导；Codex 在隔离 work_dir 中生成 `index.html`，且页面包含基础标记和追加引导标记。
+- **本次执行结果**: 本轮未执行该宣传网页长链路；本次变更的模型可见终端入口、数字 `session_id`、`exec_command` + `write_stdin` 真实模型调度已由 TC-ABT-13 覆盖。该用例仍保留为 Codex CLI 产物生成的扩展回归，后续涉及 Codex CLI 文件产物能力时执行。
 
 ## 清理步骤
 

@@ -10,6 +10,7 @@
 //! backend when `tty=true`; plain pipe sessions remain available for existing
 //! non-TTY command execution.
 
+use crate::tools::exec_command::{ExecSessionManager, ExecWriteArgs};
 use crate::tools::head_tail_buffer::HeadTailBuffer;
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
@@ -109,11 +110,18 @@ impl PtyShellTool {
 /// Tool that writes arbitrary input to a running session's stdin.
 pub struct WriteStdinTool {
     session_manager: Arc<PtySessionManager>,
+    exec_session_manager: Arc<ExecSessionManager>,
 }
 
 impl WriteStdinTool {
-    pub fn new(session_manager: Arc<PtySessionManager>) -> Self {
-        Self { session_manager }
+    pub fn new(
+        session_manager: Arc<PtySessionManager>,
+        exec_session_manager: Arc<ExecSessionManager>,
+    ) -> Self {
+        Self {
+            session_manager,
+            exec_session_manager,
+        }
     }
 }
 
@@ -134,13 +142,31 @@ struct PtyShellArgs {
 
 #[derive(Deserialize)]
 struct WriteStdinArgs {
-    session_id: String,
+    session_id: SessionIdArg,
     #[serde(default)]
     chars: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
     #[serde(default)]
     yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SessionIdArg {
+    Number(i64),
+    String(String),
+}
+
+impl SessionIdArg {
+    fn into_string(self) -> String {
+        match self {
+            Self::Number(value) => value.to_string(),
+            Self::String(value) => value,
+        }
+    }
 }
 
 /// Detect the appropriate shell for the current system.
@@ -418,8 +444,8 @@ impl ToolHandler for WriteStdinTool {
             "type": "object",
             "properties": {
                 "session_id": {
-                    "type": "string",
-                    "description": "The session ID to write input to"
+                    "type": "number",
+                    "description": "Identifier of the running unified exec session."
                 },
                 "chars": {
                     "type": "string",
@@ -434,7 +460,8 @@ impl ToolHandler for WriteStdinTool {
                     "description": "Maximum number of tokens to return. Excess output will be truncated."
                 }
             },
-            "required": ["session_id"]
+            "required": ["session_id"],
+            "additionalProperties": false
         })
     }
 
@@ -449,34 +476,47 @@ impl ToolHandler for WriteStdinTool {
             }
         };
 
-        let input = args.chars.unwrap_or_default();
+        let session_id = args.session_id.into_string();
+        let input = args.chars.or(args.input).unwrap_or_default();
+
+        if self.exec_session_manager.has_session(&session_id) {
+            return self
+                .exec_session_manager
+                .write_and_poll(ExecWriteArgs {
+                    session_id,
+                    chars: Some(input),
+                    yield_time_ms: args.yield_time_ms,
+                    max_output_tokens: args.max_output_tokens,
+                })
+                .await;
+        }
+
         let yield_time_ms = args.yield_time_ms.unwrap_or(500);
 
-        let session = match self.session_manager.get_session(&args.session_id) {
+        let session = match self.session_manager.get_session(&session_id) {
             Some(s) => s,
             None => {
                 return ToolResult {
                     success: false,
-                    output: format!("session not found: {}", args.session_id),
+                    output: format!("session not found: {session_id}"),
                 };
             }
         };
 
         info!(
-            session_id = %args.session_id,
+            session_id = %session_id,
             input_len = input.len(),
             "writing to PTY session stdin"
         );
 
-        // Drain buffers before writing to capture only new output.
-        {
-            let mut stdout_buf = session.stdout_buffer.lock().await;
-            stdout_buf.drain_chunks();
-        }
-        {
-            let mut stderr_buf = session.stderr_buffer.lock().await;
-            stderr_buf.drain_chunks();
-        }
+        // Do not discard pre-existing output before a poll. A long-running
+        // command can finish between tool calls; draining first would lose the
+        // very bytes (and sentinel) the caller is trying to observe.
+        let (stdout_bytes_before_write, stderr_bytes_before_write) = {
+            let stdout_buf = session.stdout_buffer.lock().await;
+            let stderr_buf = session.stderr_buffer.lock().await;
+            (stdout_buf.total_bytes(), stderr_buf.total_bytes())
+        };
 
         // Write input to stdin.
         if !input.is_empty() {
@@ -488,17 +528,24 @@ impl ToolHandler for WriteStdinTool {
             }
         }
 
-        // Poll until output arrives or the yield budget is exhausted. A single
-        // fixed sleep is flaky under heavy test/runtime load.
+        // Poll until relevant output arrives or the yield budget is exhausted.
+        // If this call wrote input, wait for bytes produced after the write
+        // instead of returning immediately because older buffered output exists.
         let deadline = Instant::now() + Duration::from_millis(yield_time_ms);
         loop {
             let has_output = {
                 let stdout_buf = session.stdout_buffer.lock().await;
-                if !stdout_buf.to_bytes().is_empty() {
+                if (input.is_empty() && !stdout_buf.to_bytes().is_empty())
+                    || (!input.is_empty() && stdout_buf.total_bytes() > stdout_bytes_before_write)
+                {
                     true
                 } else {
                     let stderr_buf = session.stderr_buffer.lock().await;
-                    !stderr_buf.to_bytes().is_empty()
+                    if input.is_empty() {
+                        !stderr_buf.to_bytes().is_empty()
+                    } else {
+                        stderr_buf.total_bytes() > stderr_bytes_before_write
+                    }
                 }
             };
             if has_output || Instant::now() >= deadline || !session.is_alive().await {
@@ -517,7 +564,7 @@ impl ToolHandler for WriteStdinTool {
             stderr_buf.to_formatted_string()
         };
 
-        let mut output = format!("session_id: {}\n", args.session_id);
+        let mut output = format!("session_id: {session_id}\n");
         if !stdout_text.is_empty() {
             output.push_str(&format!("stdout:\n{stdout_text}\n"));
         }
@@ -893,7 +940,7 @@ mod tests {
     async fn test_write_stdin_to_session() {
         let manager = Arc::new(PtySessionManager::new());
         let pty_tool = PtyShellTool::new(30, manager.clone());
-        let stdin_tool = WriteStdinTool::new(manager.clone());
+        let stdin_tool = WriteStdinTool::new(manager.clone(), Arc::new(ExecSessionManager::new()));
 
         // Create a session with a foreground command that reads from stdin.
         let args = serde_json::json!({

@@ -8,10 +8,11 @@ use tracing::info;
 use bifrost_core::Result;
 
 use crate::im_gateway::feishu::{self, FeishuProvider};
-use crate::im_gateway::provider::EventSink;
+use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ConnectionStatus, ImProviderConfig, ImProviderType,
 };
+use crate::im_gateway::weixin::WeixinProvider;
 
 // ---------------------------------------------------------------------------
 // Managed Connection
@@ -37,6 +38,7 @@ struct ManagedConnection {
 pub struct ImConnectionManager {
     connections: Arc<RwLock<HashMap<String, ManagedConnection>>>,
     feishu_provider: Arc<FeishuProvider>,
+    weixin_provider: Arc<WeixinProvider>,
 }
 
 impl Default for ImConnectionManager {
@@ -50,12 +52,18 @@ impl ImConnectionManager {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             feishu_provider: Arc::new(FeishuProvider::new()),
+            weixin_provider: Arc::new(WeixinProvider::new()),
         }
     }
 
     /// Get a reference to the Feishu provider for sending messages.
     pub fn feishu_provider(&self) -> &Arc<FeishuProvider> {
         &self.feishu_provider
+    }
+
+    /// Get a reference to the Weixin provider for sending messages and polling.
+    pub fn weixin_provider(&self) -> &Arc<WeixinProvider> {
+        &self.weixin_provider
     }
 
     /// Start a long connection for a provider.
@@ -73,11 +81,50 @@ impl ImConnectionManager {
     ) -> Result<()> {
         match config.provider_type {
             ImProviderType::Feishu => self.start_feishu_connection(config, app_secret, sink).await,
+            ImProviderType::Weixin => self.start_weixin_connection(config, sink).await,
             _ => Err(bifrost_core::BifrostError::Config(format!(
                 "long connection not supported for provider type {:?}",
                 config.provider_type
             ))),
         }
+    }
+
+    async fn start_weixin_connection(
+        &self,
+        config: &ImProviderConfig,
+        sink: EventSink,
+    ) -> Result<()> {
+        let provider_id = config.id.clone();
+        self.weixin_provider.validate_config(config).await?;
+        self.stop_connection(&provider_id);
+
+        let status = ConnectionStatus {
+            state: ConnectionState::Connecting,
+            last_connected_at: None,
+            last_event_at: None,
+            reconnect_count: 0,
+            last_error: None,
+        };
+        let handle = self.weixin_provider.connect_events(config, sink).await?;
+        {
+            let mut conns = self.connections.write();
+            conns.insert(
+                provider_id.clone(),
+                ManagedConnection {
+                    provider_id: provider_id.clone(),
+                    handle,
+                    status,
+                },
+            );
+        }
+        update_connection_state(
+            &self.connections,
+            &provider_id,
+            ConnectionState::Connected,
+            None,
+        );
+        info!(provider_id = %provider_id, "weixin poll connection started");
+        Ok(())
     }
 
     /// Start a Feishu long connection.
@@ -209,6 +256,27 @@ impl ImConnectionManager {
                 conn.status.reconnect_count += 1;
             }
         }
+    }
+
+    pub fn mark_failed(&self, provider_id: &str, error: String) {
+        let mut conns = self.connections.write();
+        let status = ConnectionStatus {
+            state: ConnectionState::Failed,
+            last_connected_at: None,
+            last_event_at: None,
+            reconnect_count: 0,
+            last_error: Some(error),
+        };
+        conns.insert(
+            provider_id.to_string(),
+            ManagedConnection {
+                provider_id: provider_id.to_string(),
+                handle: ConnectionHandle {
+                    shutdown_tx: oneshot::channel().0,
+                },
+                status,
+            },
+        );
     }
 
     /// Get an Arc-like handle to connections for use in spawned tasks.

@@ -66,11 +66,11 @@ impl ShellTool {
         Some(
             "blocked: `shell` is only for short, non-interactive commands. \
 Commands that are long-running, interactive, TUI/readline-based, delegated \
-agent tasks, or waiting for stdin must use `shell_pty` with \
-`wait_for_completion=false`, then `write_stdin` to observe output, send input, \
-or cancel the session. Example tool arguments: \
-{\"command\":\"<interactive-or-long-running command>\",\
-\"wait_for_completion\":false,\"yield_time_ms\":1000}"
+agent tasks, or waiting for stdin must use `exec_command`, then `write_stdin` \
+to observe output, send input, or cancel the session. Use `tty=true` for TUI, \
+readline, or interactive terminal programs. Example tool arguments: \
+{\"cmd\":\"<interactive-or-long-running command>\",\
+\"tty\":true,\"yield_time_ms\":1000}"
                 .to_string(),
         )
     }
@@ -156,7 +156,7 @@ impl ToolHandler for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a short, non-interactive shell command. Auto-detects zsh/bash based on system. Returns stdout, stderr, and exit code. Use for scripts, compilation, file operations, searching (use `rg` for grep), and help/version probes. Do not use `shell` for commands that are long-running, TUI/readline-based, foreground interactive, delegated agent-style tasks, or waiting for stdin; use `shell_pty` with `wait_for_completion=false` and then `write_stdin` instead."
+        "Execute a short, non-interactive shell command. Auto-detects zsh/bash based on system. Returns stdout, stderr, and exit code. Use for scripts, compilation, file operations, searching (use `rg` for grep), and help/version probes. Do not use `shell` for commands that are long-running, TUI/readline-based, foreground interactive, delegated agent-style tasks, or waiting for stdin; use `exec_command` and then `write_stdin` instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -419,8 +419,8 @@ mod tests {
         });
         let result = tool.execute(&args.to_string(), Path::new("/tmp")).await;
         assert!(!result.success);
-        assert!(result.output.contains("shell_pty"));
-        assert!(result.output.contains("wait_for_completion=false"));
+        assert!(result.output.contains("exec_command"));
+        assert!(result.output.contains("tty=true"));
         assert!(result.output.contains("write_stdin"));
     }
 

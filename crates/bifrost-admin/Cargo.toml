@@ -41,6 +41,8 @@ urlencoding = "2"
 url = "2"
 qrcode = "0.14"
 base64 = "0.22"
+aes = "0.8"
+ecb = { version = "0.1", features = ["alloc"] }
 regex = "1"
 ignore = "0.4"
 dashmap = "6"

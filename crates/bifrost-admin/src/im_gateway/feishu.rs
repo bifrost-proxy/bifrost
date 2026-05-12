@@ -1698,6 +1698,9 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
                 source: ImImageSource::MessageResource,
                 mime_type: None,
                 data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
             });
         }
     }
@@ -1899,6 +1902,9 @@ fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImIm
                         source: ImImageSource::MessageResource,
                         mime_type: None,
                         data_base64: None,
+                        download_url: None,
+                        encrypted_query_param: None,
+                        aes_key: None,
                     });
                 }
             }
