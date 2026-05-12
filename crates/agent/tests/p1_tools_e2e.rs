@@ -10,16 +10,9 @@ use bifrost_agent::types::ToolDefinition;
 use bifrost_agent::{AgentSession, ToolRegistry};
 use std::fs;
 
-fn session_id_from_exec_json(output: &str) -> String {
+fn session_id_value_from_exec_json(output: &str) -> serde_json::Value {
     let value: serde_json::Value = serde_json::from_str(output).expect("exec json output");
-    session_id_value_to_string(&value["session_id"])
-}
-
-fn session_id_value_to_string(value: &serde_json::Value) -> String {
-    if let Some(session_id) = value.as_i64() {
-        return session_id.to_string();
-    }
-    value.as_str().expect("session id").to_string()
+    value["session_id"].clone()
 }
 
 #[tokio::test]
@@ -64,7 +57,7 @@ async fn goal_tools_work_end_to_end() {
 
 #[tokio::test]
 async fn apply_patch_tool_works_end_to_end() {
-    let registry = ToolRegistry::with_defaults(5);
+    let registry = ToolRegistry::with_defaults();
     let work_dir = tempfile::tempdir().expect("work dir");
 
     fs::write(
@@ -104,15 +97,30 @@ async fn apply_patch_tool_works_end_to_end() {
 }
 
 #[tokio::test]
-async fn legacy_shell_pty_is_not_registered_by_default() {
-    let registry = ToolRegistry::with_defaults(5);
+async fn legacy_shell_tools_are_not_registered_by_default() {
+    let registry = ToolRegistry::with_defaults();
     let work_dir = tempfile::tempdir().expect("work dir");
 
+    assert!(!registry.contains_tool("shell"));
     assert!(!registry.contains_tool("shell_pty"));
     assert!(!registry
         .definitions()
         .iter()
+        .any(|definition| definition.name() == "shell"));
+    assert!(!registry
+        .definitions()
+        .iter()
         .any(|definition| definition.name() == "shell_pty"));
+
+    let shell_result = registry
+        .execute(
+            "shell",
+            r#"{"command":"printf should-not-run"}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(!shell_result.success);
+    assert!(shell_result.output.contains("unknown tool: shell"));
 
     let result = registry
         .execute(
@@ -126,8 +134,45 @@ async fn legacy_shell_pty_is_not_registered_by_default() {
 }
 
 #[tokio::test]
+async fn terminal_tools_reject_non_schema_legacy_arguments() {
+    let registry = ToolRegistry::with_defaults();
+    let work_dir = tempfile::tempdir().expect("work dir");
+
+    let unsupported_exec_arg = registry
+        .execute(
+            "exec_command",
+            r#"{"cmd":"printf should-not-run","sandbox_permissions":"require_escalated"}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(!unsupported_exec_arg.success);
+    assert!(unsupported_exec_arg.output.contains("unknown field"));
+    assert!(unsupported_exec_arg.output.contains("sandbox_permissions"));
+
+    let hidden_write_input = registry
+        .execute(
+            "write_stdin",
+            r#"{"session_id":1,"input":"legacy hidden input\n"}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(!hidden_write_input.success);
+    assert!(hidden_write_input.output.contains("unknown field `input`"));
+
+    let legacy_string_session = registry
+        .execute(
+            "write_stdin",
+            r#"{"session_id":"legacy-session","chars":""}"#,
+            work_dir.path(),
+        )
+        .await;
+    assert!(!legacy_string_session.success);
+    assert!(legacy_string_session.output.contains("invalid arguments"));
+}
+
+#[tokio::test]
 async fn exec_command_tool_works_end_to_end() {
-    let registry = ToolRegistry::with_defaults(5);
+    let registry = ToolRegistry::with_defaults();
     let work_dir = tempfile::tempdir().expect("work dir");
 
     let completed = registry
@@ -159,9 +204,10 @@ async fn exec_command_tool_works_end_to_end() {
     assert!(long_running.success, "{}", long_running.output);
     let long_running_json: serde_json::Value =
         serde_json::from_str(&long_running.output).expect("long-running exec json");
-    let long_session_id = session_id_value_to_string(&long_running_json["session_id"]);
+    let long_session_id = long_running_json["session_id"].clone();
 
     let mut final_poll_json = serde_json::Value::Null;
+    let mut combined_poll_output = String::new();
     for _ in 0..20 {
         let poll = registry
             .execute(
@@ -178,15 +224,13 @@ async fn exec_command_tool_works_end_to_end() {
             .await;
         assert!(poll.success, "{}", poll.output);
         final_poll_json = serde_json::from_str(&poll.output).expect("long poll json");
+        combined_poll_output.push_str(final_poll_json["output"].as_str().unwrap_or(""));
         if !final_poll_json["exit_code"].is_null() {
             break;
         }
     }
     assert_eq!(final_poll_json["exit_code"], 0);
-    assert!(final_poll_json["output"]
-        .as_str()
-        .unwrap_or("")
-        .contains("long-end"));
+    assert!(combined_poll_output.contains("long-end"));
 
     let interactive = registry
         .execute(
@@ -203,7 +247,7 @@ async fn exec_command_tool_works_end_to_end() {
     assert!(interactive.success, "{}", interactive.output);
     assert!(interactive.output.contains("True True"));
     assert!(interactive.output.contains("exec-ready"));
-    let session_id = session_id_from_exec_json(&interactive.output);
+    let session_id = session_id_value_from_exec_json(&interactive.output);
 
     let stdin_result = registry
         .execute(
@@ -225,7 +269,7 @@ async fn exec_command_tool_works_end_to_end() {
 #[tokio::test]
 #[ignore = "requires a locally installed and authenticated Codex CLI; run manually for real PTY regression"]
 async fn codex_cli_interactive_starts_in_real_pty() {
-    let registry = ToolRegistry::with_defaults(10);
+    let registry = ToolRegistry::with_defaults();
     let work_dir = tempfile::tempdir().expect("work dir");
 
     let started = registry
@@ -253,7 +297,7 @@ async fn codex_cli_interactive_starts_in_real_pty() {
         "{}",
         started_json
     );
-    let session_id = session_id_value_to_string(&started_json["session_id"]);
+    let session_id = started_json["session_id"].clone();
 
     let interrupted = registry
         .execute(
@@ -273,7 +317,7 @@ async fn codex_cli_interactive_starts_in_real_pty() {
 
 #[tokio::test]
 async fn view_image_tool_works_end_to_end() {
-    let registry = ToolRegistry::with_defaults(5);
+    let registry = ToolRegistry::with_defaults();
     let work_dir = tempfile::tempdir().expect("work dir");
     fs::write(
         work_dir.path().join("tiny.png"),
@@ -301,7 +345,7 @@ async fn view_image_tool_works_end_to_end() {
 
 #[tokio::test]
 async fn tool_search_is_hidden_without_deferred_tools() {
-    let registry = ToolRegistry::with_defaults(5);
+    let registry = ToolRegistry::with_defaults();
     assert!(!registry
         .tool_names()
         .iter()

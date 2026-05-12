@@ -403,7 +403,7 @@ mod tests {
     fn sanitize_request_messages_preserves_valid_tool_segments() {
         let messages = vec![
             ChatMessage::system("system"),
-            ChatMessage::assistant_with_tool_calls(vec![tool_call("call-1", "shell")]),
+            ChatMessage::assistant_with_tool_calls(vec![tool_call("call-1", "exec_command")]),
             ChatMessage::tool_result("call-1", "ok"),
         ];
 

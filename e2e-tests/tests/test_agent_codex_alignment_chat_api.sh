@@ -194,6 +194,7 @@ python3 - "$MOCK_PORT" "$MOCK_LOG" "$FINAL_TEXT" <<'PY' &
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(sys.argv[1])
@@ -261,7 +262,8 @@ class Handler(BaseHTTPRequestHandler):
             names = tool_names(payload)
             joined = "\n".join(message_text(message) for message in payload.get("messages", []))
             required_tools = {
-                "shell",
+                "exec_command",
+                "write_stdin",
                 "update_plan",
                 "set_title",
                 "tool_search",
@@ -270,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                 "read_mcp_resource",
             }
             missing = sorted(required_tools - set(names))
-            forbidden = sorted({"shell_command", "local_shell"} & set(names))
+            forbidden = sorted({"shell", "shell_pty", "shell_command", "local_shell"} & set(names))
             leaked_deferred = sorted(name for name in names if name.startswith("mcp_mcpfixture__sample_tool_"))
             leaked_internal_notes = [
                 phrase
@@ -304,20 +306,22 @@ class Handler(BaseHTTPRequestHandler):
                 "tool_calls": [
                     tool_call(
                         "call-parallel-a",
-                        "shell",
+                        "exec_command",
                         json.dumps(
                             {
-                                "command": "python3 -c 'import time; time.sleep(2); print(\"parallel-a\")'"
+                                "cmd": "python3 -c 'import time; time.sleep(1.5); print(\"parallel-a\")'",
+                                "yield_time_ms": 10000
                             },
                             ensure_ascii=False,
                         ),
                     ),
                     tool_call(
                         "call-parallel-b",
-                        "shell",
+                        "exec_command",
                         json.dumps(
                             {
-                                "command": "python3 -c 'import time; time.sleep(2); print(\"parallel-b\")'"
+                                "cmd": "python3 -c 'import time; time.sleep(1.5); print(\"parallel-b\")'",
+                                "yield_time_ms": 10000
                             },
                             ensure_ascii=False,
                         ),
@@ -365,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }
             finish_reason = "tool_calls"
-        else:
+        elif request_no == 2:
             messages = payload.get("messages", [])
             tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
             expected_fragments = [
@@ -387,6 +391,72 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(
                     json.dumps({"mismatches": mismatches, "tool_outputs": tool_outputs}, ensure_ascii=False).encode("utf-8")
+                )
+                return
+
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    tool_call(
+                        "call-background-watch",
+                        "exec_command",
+                        json.dumps(
+                            {
+                                "cmd": "python3 -u -c 'import time; print(\"WATCH_BEGIN\", flush=True); time.sleep(0.8); print(\"WATCH_DONE\", flush=True)'",
+                                "yield_time_ms": 50,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ],
+            }
+            finish_reason = "tool_calls"
+        elif request_no == 3:
+            messages = payload.get("messages", [])
+            tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
+            if not tool_outputs or "\"session_id\":" not in tool_outputs[-1] or "WATCH_BEGIN" not in tool_outputs[-1]:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"missing_background_session": tool_outputs[-1:]}, ensure_ascii=False).encode("utf-8")
+                )
+                return
+            try:
+                session_id = json.loads(tool_outputs[-1])["session_id"]
+            except Exception as exc:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"bad_session_json": tool_outputs[-1], "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
+                return
+            time.sleep(1.0)
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    tool_call(
+                        "call-background-poll",
+                        "write_stdin",
+                        json.dumps(
+                            {
+                                "session_id": session_id,
+                                "chars": "",
+                                "yield_time_ms": 1,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ],
+            }
+            finish_reason = "tool_calls"
+        else:
+            messages = payload.get("messages", [])
+            tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
+            if not tool_outputs or "WATCH_DONE" not in tool_outputs[-1] or "\"exit_code\":0" not in tool_outputs[-1].replace(" ", ""):
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"missing_background_completion": tool_outputs[-2:]}, ensure_ascii=False).encode("utf-8")
                 )
                 return
 
@@ -498,13 +568,15 @@ tool_calls = response.get("tool_calls")
 assert isinstance(tool_calls, list), response
 names = [call.get("tool_name") for call in tool_calls]
 expected_names = [
-    "shell",
-    "shell",
+    "exec_command",
+    "exec_command",
     "update_plan",
     "set_title",
     "tool_search",
     "list_mcp_resources",
     "read_mcp_resource",
+    "exec_command",
+    "write_stdin",
 ]
 assert names[: len(expected_names)] == expected_names, names
 assert all(call.get("success") is True for call in tool_calls[: len(expected_names)]), tool_calls
@@ -523,13 +595,15 @@ first_tool_names = [
 assert "list_mcp_resources" in first_tool_names, first_tool_names
 assert "read_mcp_resource" in first_tool_names, first_tool_names
 assert "tool_search" in first_tool_names, first_tool_names
+assert "write_stdin" in first_tool_names, first_tool_names
 assert "shell_command" not in first_tool_names, first_tool_names
 assert "local_shell" not in first_tool_names, first_tool_names
 assert not any(name.startswith("mcp_mcpfixture__sample_tool_") for name in first_tool_names if name), first_tool_names
 
-# Two 2-second shell calls are in one model tool-call batch. Sequential execution
-# would be comfortably above 4s; keep slack for local machine variance.
-assert elapsed_ms < 3800, f"parallel shell batch took too long: {elapsed_ms}ms"
+# Two exec_command calls are in one model tool-call batch; the rest of this
+# scenario adds an intentional background-completion wait. Sequential first-batch
+# execution is comfortably above this budget on the same local fixture.
+assert elapsed_ms < 7000, f"parallel/background exec_command scenario took too long: {elapsed_ms}ms"
 PY
 
 if grep -q "agent chat api failed" "$BIFROST_LOG"; then

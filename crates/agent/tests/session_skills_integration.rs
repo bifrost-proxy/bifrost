@@ -53,7 +53,7 @@ async fn new_with_work_dir_attaches_skill_registry_for_skill_list() {
         &AgentClient::new(),
         &AgentConfig::default(),
         &mut session,
-        &ToolRegistry::with_defaults(1),
+        &ToolRegistry::with_defaults(),
         "/skill list",
         None,
     )
@@ -106,7 +106,7 @@ async fn reinitialize_work_dir_reloads_repo_local_skills_for_new_session_context
         &AgentClient::new(),
         &AgentConfig::default(),
         &mut session,
-        &ToolRegistry::with_defaults(1),
+        &ToolRegistry::with_defaults(),
         "/skill list",
         None,
     )
@@ -124,7 +124,7 @@ async fn goal_slash_command_runs_through_session_router() {
         &AgentClient::new(),
         &AgentConfig::default(),
         &mut session,
-        &ToolRegistry::with_defaults(1),
+        &ToolRegistry::with_defaults(),
         "/goal set --budget 128 finish the p1 work",
         None,
     )
@@ -142,7 +142,7 @@ async fn goal_slash_command_runs_through_session_router() {
 async fn goal_slash_command_is_session_scoped() {
     let mut session_a = AgentSession::new("goal-session-a");
     let mut session_b = AgentSession::new("goal-session-b");
-    let tools = ToolRegistry::with_defaults(1);
+    let tools = ToolRegistry::with_defaults();
 
     let set_goal = run_turn(
         &AgentClient::new(),
@@ -172,7 +172,7 @@ async fn goal_slash_command_is_session_scoped() {
 #[tokio::test]
 async fn goal_slash_command_pause_and_resume_updates_status() {
     let mut session = AgentSession::new("goal-session-pause-resume");
-    let tools = ToolRegistry::with_defaults(1);
+    let tools = ToolRegistry::with_defaults();
 
     let created = run_turn(
         &AgentClient::new(),
@@ -264,7 +264,7 @@ async fn resume_restores_total_tokens_and_reactivates_interrupted_goal() {
         &AgentClient::new(),
         &AgentConfig::default(),
         &mut session,
-        &ToolRegistry::with_defaults(1),
+        &ToolRegistry::with_defaults(),
         "/resume",
         None,
     )

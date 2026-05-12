@@ -64,14 +64,14 @@ mkdir -p ./.bifrost-test
 - **预期结果**: 测试通过；本轮 Goal、`apply_patch`、PTY 与 `/goal` 接入不会破坏 `bifrost-agent` 既有能力；Goal 工具响应保持 ThreadGoal 契约（`threadId` 可见、内部 `goalId` 不暴露、budget limited 状态为 `budgetLimited`）。
 - **本次执行结果**: 通过。2026-05-05 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent -- --nocapture`，结果 `525 passed`、`p1_tools_e2e 3 passed`、`session_skills_integration 5 passed`；确认 Goal、`apply_patch`、PTY 与 `/goal` 接入的全量回归通过。
 
-### TC-APT-06: PTY exit_code 解析兼容交互式 shell prompt 前缀
+### TC-APT-06: Unified exec PTY 与 stdin 回归
 
 - **操作步骤**:
   ```bash
-  cargo test -p bifrost-agent tools::pty_shell::tests::test_pty_shell -- --nocapture
+  cargo test -p bifrost-agent tools::exec_command -- --nocapture
   ```
-- **预期结果**: 测试通过；当交互式 shell 将 prompt 与 sentinel 输出放在同一行时，`shell_pty` 仍能解析 `exit_code: 0` 与 `exit_code: 1`。
-- **本次执行结果**: 通过。2026-05-05 执行后 PTY shell 指定单测均 passed。
+- **预期结果**: 测试通过；`exec_command` 可启动短命令、长任务、等待 stdin 的 pipe 进程和 `tty=true` 真实 PTY，并由 `write_stdin` 轮询到最终 `exit_code`。
+- **本次执行结果**: 通过。2026-05-12 执行后 unified exec 指定单测均 passed。
 
 ## 清理步骤
 

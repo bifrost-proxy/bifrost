@@ -478,7 +478,6 @@ test("Settings Agent 左侧导航按 URL 切换独立编辑卡片", async ({ pag
     model: "gpt-test",
     model_provider: "mock",
     max_completion_tokens: 4096,
-    shell_timeout_secs: 60,
     max_history_messages: 20,
     model_providers: {
       mock: {

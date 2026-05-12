@@ -175,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
                                     json.dumps(
                                         {
                                             "cmd": "source ~/.zshrc; python3 -c 'print(\"CTX\" * 20000)'",
-                                            "yield_time_ms": 1000,
+                                            "yield_time_ms": 10000,
                                             "max_output_tokens": 30000,
                                         },
                                         ensure_ascii=False,

@@ -18,6 +18,8 @@
 12. 真实 Bifrost `/agent/chat` 通过真实模型调度 PTY 工具、交互式 Python、Codex CLI interactive session 与追加引导问题
 13. 真实 Bifrost `/agent/chat` 对 delegated agent-style/交互/长任务类请求必须使用 `exec_command` + `write_stdin`；以“启动 Codex CLI/派发 Codex 任务”为真实回归样例，不能用 `shell_pty` 或 blocking `shell` 执行持续会话命令
 14. 真实 Bifrost `/agent/chat` 派发 Codex CLI 创建宣传网页，并通过 `exec_command` + `write_stdin` 持续观察/追加引导消息
+15. 终端工具协议运行时与 schema 一致：拒绝未暴露的权限/沙箱字段、隐藏 `input` 字段和旧字符串 session id
+16. 默认模型可见终端工具和 base instructions 只保留 `exec_command` / `write_stdin` 终端协议；历史 `shell` / `shell_pty` 不再注册，真实 `/agent/chat` 工具列表和 prompt 不得出现第二套 shell 入口
 
 ## 前置条件
 
@@ -52,10 +54,19 @@ mkdir -p ./.bifrost-test
 - **操作步骤**:
   ```bash
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent tools::exec_command -- --nocapture
-  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent tools::pty_shell::tests::test_write_stdin_to_session -- --nocapture
   ```
-- **预期结果**: 测试通过；pipe 模式启动等待 stdin 的 Python 进程，`write_stdin` 写入后返回真实输出与最终 exit code；长时间运行进程收到 Ctrl-C 后被终止并清理 session；默认 `ToolRegistry` 不再注册 `shell_pty`，避免模型或 API 调用走第二套终端入口；旧 `shell_pty` 模块级回归仍证明内部 fallback poll 不丢输出。
-- **本次执行结果**: 2026-05-12 执行通过；`tools::exec_command` 7 项单元测试全部 ok，`test_write_stdin_to_session` 返回 ok；`p1_tools_e2e` 中 `legacy_shell_pty_is_not_registered_by_default` 确认默认 registry 不再注册 `shell_pty`。
+- **预期结果**: 测试通过；pipe 模式启动等待 stdin 的 Python 进程，`write_stdin` 写入后返回真实输出与最终 exit code；长时间运行进程收到 Ctrl-C 后被终止并清理 session；`exec_command tty=true` 使用真实 PTY；默认 `ToolRegistry` 不再注册 `shell`/`shell_pty`，避免模型或 API 调用走第二套终端入口。
+- **本次执行结果**: 2026-05-12 执行通过；`tools::exec_command` 单元测试全部 ok；`p1_tools_e2e` 中 `legacy_shell_tools_are_not_registered_by_default` 确认默认 registry 不再注册 `shell`/`shell_pty`。
+
+### TC-ABT-02C: 终端工具运行时拒绝 legacy/未暴露协议字段
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent --test p1_tools_e2e terminal_tools_reject_non_schema_legacy_arguments -- --nocapture
+  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent tools::exec_command::tests::write_stdin_rejects_legacy_protocol_fields -- --nocapture
+  ```
+- **预期结果**: 测试通过；`exec_command` 对 `sandbox_permissions` 等未暴露字段返回 invalid arguments；`write_stdin` 只接受数字 `session_id` 与 `chars`，对隐藏 `input` 字段和旧字符串 session id 返回 invalid arguments。
+- **本次执行结果**: 2026-05-12 执行通过；`terminal_tools_reject_non_schema_legacy_arguments` 验证 `exec_command` 拒绝 `sandbox_permissions`、`write_stdin` 拒绝隐藏 `input` 与字符串 `session_id`；`write_stdin_rejects_legacy_protocol_fields` 模块测试同步通过。
 
 ### TC-ABT-03: `view_image` 返回本地图片 data URL
 
@@ -183,11 +194,10 @@ mkdir -p ./.bifrost-test
   #   1) 至少出现一次 tool_name = exec_command，且 cmd 是持续可观察的前台任务。
   #   2) 后续至少出现一次 tool_name = write_stdin 轮询或输入同一 session_id。
   #   3) 不允许出现 tool_name = shell_pty。
-  #   4) 不允许出现 tool_name = shell 且 command 是长任务/交互/等待 stdin/delegated agent-style task。
-  #   5) 如果模型先错误调用 shell，shell tool 必须返回包含 exec_command/tty=true/write_stdin 的失败指引，后续必须改用 exec_command。
+  #   4) 不允许出现 tool_name = shell；默认模型可见工具列表也不应包含 shell。
   ```
-- **预期结果**: `/agent/chat` 返回 `success: true`；session 记录证明真实模型请求经过当前源码构建的 Bifrost；delegated/交互/长任务命令通过 `exec_command` 建立持续会话并返回数字 `session_id`；后续通过 `write_stdin` 继续观察或输入；没有 `shell_pty` 或 blocking `shell` 执行持续会话命令的成功工具调用。
-- **本次执行结果**: 2026-05-12 执行通过；使用当前源码 `cargo run --bin bifrost -- start -p 18882 --unsafe-ssl --no-system-proxy` 启动真实服务，隔离数据目录 `./.bifrost-test/agent-unified-exec-live`。`GET /_bifrost/api/im-gateway/agent/tools` 返回工具顺序以 `exec_command`、`write_stdin` 开头，`shell_pty=false`。真实 `/agent/chat` 使用默认真实模型 provider，返回 `success: true`；`tool_calls` 为 `set_title`、`exec_command`、`exec_command`、`write_stdin`，其中第二次 `exec_command` 参数为 `yield_time_ms=50`，`write_stdin` 使用数字 `session_id=2` 轮询，最终响应包含 `UNIFIED_EXEC_SHORT_OK` 与 `UNIFIED_EXEC_LONG_DONE`，未出现 `shell_pty`。
+- **预期结果**: `/agent/chat` 返回 `success: true`；session 记录证明真实模型请求经过当前源码构建的 Bifrost；delegated/交互/长任务命令通过 `exec_command` 建立持续会话并返回数字 `session_id`；后续通过 `write_stdin` 继续观察或输入；没有 `shell`、`shell_pty` 执行入口或工具调用。
+- **本次执行结果**: 2026-05-12 执行通过；使用当前源码 `cargo run --bin bifrost -- start -p 18882 --unsafe-ssl --no-system-proxy` 启动真实服务，隔离数据目录 `./.bifrost-test/agent-unified-exec-live`。`GET /_bifrost/api/im-gateway/agent/tools` 返回工具顺序以 `exec_command`、`write_stdin` 开头，且不包含 `shell`/`shell_pty`。真实 `/agent/chat` 使用默认真实模型 provider，返回 `success: true`；`tool_calls` 为 `set_title`、`exec_command`、`exec_command`、`write_stdin`，其中第二次 `exec_command` 参数为 `yield_time_ms=50`，`write_stdin` 使用数字 `session_id=2` 轮询，最终响应包含 `UNIFIED_EXEC_SHORT_OK` 与 `UNIFIED_EXEC_LONG_DONE`，未出现 `shell`/`shell_pty`。
 
 ### TC-ABT-14: 真实 `/agent/chat` 通过 `exec_command` 启动 Codex CLI 创建宣传网页并追加引导消息
 
@@ -208,6 +218,16 @@ mkdir -p ./.bifrost-test
 - **预期结果**: `/agent/chat` 返回 `success: true`；真实模型把 Codex CLI 作为可持续观察任务通过 `exec_command` 启动，后续使用 `write_stdin` 轮询输出/追加引导；Codex 在隔离 work_dir 中生成 `index.html`，且页面包含基础标记和追加引导标记。
 - **本次执行结果**: 本轮未执行该宣传网页长链路；本次变更的模型可见终端入口、数字 `session_id`、`exec_command` + `write_stdin` 真实模型调度已由 TC-ABT-13 覆盖。该用例仍保留为 Codex CLI 产物生成的扩展回归，后续涉及 Codex CLI 文件产物能力时执行。
 
+### TC-ABT-15: 真实 `/agent/chat` 终端协议和工具列表一致性验证
+
+- **操作步骤**:
+  1. 使用当前源码启动本地 Bifrost：`BIFROST_DATA_DIR=/tmp/bifrost-shell-protocol-chat-test BIFROST_AGENT_DISABLE_MODEL_PROXY=1 cargo run --bin bifrost -- start -H 127.0.0.1 -p 18880 --unsafe-ssl --no-system-proxy --skip-cert-check`。
+  2. 启动 OpenAI-compatible 本地 mock model，使其按真实 tool-calling 协议依次请求：长任务 `exec_command`、两次 `write_stdin` 轮询、带 `sandbox_permissions` 的 `exec_command`、带隐藏 `input` 的 `write_stdin`、字符串 `session_id` 的 `write_stdin`。
+  3. `PATCH /_bifrost/api/im-gateway/agent` 指向本地 mock provider，并关闭 memories。
+  4. `POST /_bifrost/api/im-gateway/agent/chat` 派发验证任务，检查响应 `tool_calls` 与 mock 收到的 `tools` 列表。
+- **预期结果**: mock 收到的模型可见工具列表包含 `exec_command`、`write_stdin`，不包含 `shell`、`shell_pty`；默认 base instructions 要求 terminal commands 统一使用 `exec_command`，不得推荐 `shell`；chat 返回 `success: true` 与最终标记；长任务首次返回数字 `session_id` 和 `exit_code=null`，后续 `write_stdin` 轮询到 `exit_code=0` 与末尾输出；三类 legacy/未暴露字段均返回 `invalid arguments`。
+- **本次执行结果**: 2026-05-12 执行通过；真实服务端口 `18880`，隔离数据目录为临时 `BIFROST_DATA_DIR`。`GET /agent` 确认响应不再包含 `shell_timeout_secs`。`POST /agent/chat` 返回 `FINAL_LONG_STATUS_OK`；工具调用依次为 `exec_command`、`write_stdin`、`write_stdin`。首次 `exec_command` 使用 `yield_time_ms=50`，返回数字 `session_id` 且 `exit_code=null`；后续 `write_stdin` 轮询到 `exit_code=0` 和 `LONG_DONE`。mock 首次模型请求的 `tool_names` 包含 `exec_command`、`write_stdin` 且不包含 `shell`、`shell_pty`、`shell_command`、`local_shell`；legacy 参数拒绝由 `terminal_tools_reject_non_schema_legacy_arguments` 覆盖。
+
 ## 清理步骤
 
 ```bash
@@ -217,4 +237,5 @@ rm -rf ./.bifrost-test/agent-exec-command-tty-target
 rm -rf /tmp/bifrost-agent-real-pty-chat-*
 rm -rf /tmp/bifrost-agent-codex-dispatch-*
 rm -rf /tmp/bifrost-agent-codex-promo-*
+rm -rf /tmp/bifrost-shell-protocol-chat-test
 ```

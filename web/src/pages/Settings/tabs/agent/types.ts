@@ -15,7 +15,6 @@ export const DEFAULTS = {
   // When null/undefined, backend derives from context_window × 90% (Codex-compatible).
   model_auto_compact_token_limit: undefined as number | undefined,
   max_completion_tokens: 16_384,
-  shell_timeout_secs: 30,
   max_turn_iterations: 20,
   max_history_messages: 50,
   session_ttl_secs: 3600,
@@ -111,7 +110,6 @@ export interface AgentConfig {
   mcp_servers: Record<string, McpServerConfig>;
   skills?: Record<string, unknown>;
   project_doc_max_bytes?: number;
-  shell_timeout_secs?: number;
   max_turn_iterations?: number;
   max_history_messages?: number;
   session_ttl_secs?: number;

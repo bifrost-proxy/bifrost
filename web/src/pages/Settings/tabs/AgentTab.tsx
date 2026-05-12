@@ -813,24 +813,6 @@ export default function AgentTab() {
             <Space direction="vertical" style={{ width: "100%" }}>
               <Row justify="space-between" align="middle">
                 <Col>
-                  <Text>Shell Timeout (secs)</Text>
-                </Col>
-                <Col>
-                  <InputNumber
-                    value={config.shell_timeout_secs}
-                    onChange={(val) => handleNumberChange("shell_timeout_secs", val)}
-                    min={1}
-                    step={10}
-                    style={{ width: 120 }}
-                    size="small"
-                  />
-                </Col>
-              </Row>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle">
-                <Col>
                   <Text>Max Turn Iterations</Text>
                 </Col>
                 <Col>

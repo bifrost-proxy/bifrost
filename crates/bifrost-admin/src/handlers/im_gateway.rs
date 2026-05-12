@@ -155,9 +155,7 @@ impl ImGatewayService {
         let _ = std::fs::create_dir_all(&agent_data_dir);
         let agent_config_store = Arc::new(ImAgentConfigStore::new(&agent_data_dir));
         let agent_config = agent_config_store.load();
-        let agent_tools = Arc::new(ImAgentToolRegistry::with_defaults(
-            agent_config.get_shell_timeout_secs(),
-        ));
+        let agent_tools = Arc::new(ImAgentToolRegistry::with_defaults());
         let ca_cert_path = data_dir.join("certs").join("ca.crt");
         let agent_client = proxy_port
             .map(|port| ImAgentClient::new_with_bifrost_proxy_and_ca(port, Some(&ca_cert_path)))
@@ -5209,9 +5207,6 @@ fn apply_agent_config_patch(
     }
     if let Some(timeout) = patch.get("request_timeout_secs").and_then(|v| v.as_u64()) {
         config.request_timeout_secs = Some(timeout);
-    }
-    if let Some(shell_timeout) = patch.get("shell_timeout_secs").and_then(|v| v.as_u64()) {
-        config.shell_timeout_secs = Some(shell_timeout);
     }
     if let Some(max_iter) = patch.get("max_turn_iterations").and_then(|v| v.as_u64()) {
         config.max_turn_iterations = Some(u32::try_from(max_iter).unwrap_or(u32::MAX));

@@ -2028,6 +2028,8 @@ pub async fn run_turn_with_mcp_multimodal(
         }
     }
 
+    tools.configure_exec_sessions(config.get_background_terminal_max_timeout());
+
     // Merge tool definitions: local tools + direct MCP tools. Deferred MCP
     // tools are available through turn-scoped `tool_search`.
     let mut tool_defs = tools.definitions();

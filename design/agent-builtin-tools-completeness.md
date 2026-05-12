@@ -8,7 +8,7 @@
 
 编程工具标准包含以下重要工具：
 
-- 环境执行：模型可见主路径收敛为 `exec_command`、`write_stdin`；`shell` 仅保留短命令；旧形态 `shell_pty`/`shell_command`/`local_shell` 不作为默认模型选择路径
+- 环境执行：模型可见主路径只保留 `exec_command`、`write_stdin`；旧形态 `shell`/`shell_pty`/`shell_command`/`local_shell` 不再保留实现或默认入口
 - 文件修改：`apply_patch`
 - 进度与目标：`update_plan`、`get_goal`、`create_goal`、`update_goal`
 - 本地视觉输入：`view_image`
@@ -44,7 +44,7 @@
 
 Bifrost `crates/agent/src/tools/mod.rs` 当前已有：
 
-- `shell`
+- `exec_command`
 - `write_file`
 - `read_file`
 - `list_directory`
@@ -52,7 +52,6 @@ Bifrost `crates/agent/src/tools/mod.rs` 当前已有：
 - `update_plan`
 - `set_title`
 - `apply_patch`
-- `shell_pty`
 - `write_stdin`
 - `get_goal` / `create_goal` / `update_goal`
 
@@ -74,9 +73,9 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 
 2. 扩展 `write_stdin`
    - 兼容标准 `write_stdin` schema：`session_id`、`chars`、`yield_time_ms`、`max_output_tokens`
-   - 模型可见协议使用数字 `session_id`；运行时仍可解析旧字符串 session id 以便清理历史 `shell_pty` 会话
-   - 优先查找 `exec_command` 真实进程会话；旧 `shell_pty` 会话只作为内部兼容 fallback，不再作为 prompt 推荐路径
-   - 空输入轮询不得先清空旧 PTY buffer，避免长命令在两次 poll 之间完成时丢失输出或 sentinel；如果本次写入了新 stdin，则等待写入后新增字节或进程结束再返回
+   - 模型可见协议和运行时解析都只接受数字 `session_id`；旧字符串 session id 和隐藏 `input` 字段必须拒绝，避免形成第二套终端协议
+   - 只查找 `exec_command` 真实进程会话；代码中不再保留 `shell_pty` session manager 或 fallback
+   - 空输入轮询不得先清空旧 buffer，避免长命令在两次 poll 之间完成时丢失输出；如果本次写入了新 stdin，则等待写入后新增字节或进程结束再返回
 
 3. 新增 `view_image`
    - 接受本地图片路径与可选 `detail=original`
@@ -111,10 +110,9 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 
 3. 终端工具形态收敛策略
    - 真实默认数据目录回归显示，用户说“启动 codex cli，新建一个任务/给 Codex 派发任务”时，模型选择 blocking `shell` 执行 `codex exec review`，导致没有 `session_id`、无法用 `write_stdin` 继续观察/输入/取消。这个问题的本质不是 Codex 特例，而是没有把命令分成短命令、长任务、交互任务、等待 stdin 的前台任务。
-   - 对照 `/Users/eden/work/github/codex` 后，关键经验是启用 unified exec 时模型可见工具收敛为 `exec_command` + `write_stdin`，旧 shell 类 handler 主要作为兼容/不可见后端存在；可靠性来自单一路径，而不是并行维护 `shell_pty` 与 `exec_command` 两套模型协议。
-   - 默认 base instructions 必须明确：`shell` 只用于短命令、一次性脚本、编译测试和 help/version 探测；凡是需要持续观察、可能等待 stdin、TUI/readline、server/watch、交互 CLI、delegated agent-style task，都必须使用 `exec_command`，保存返回的 `session_id`，后续通过 `write_stdin` 观察、追加输入或 Ctrl-C 清理；TUI/readline/交互式终端程序设置 `tty=true`。
-   - Bifrost 保留 `shell_pty` 仅用于内部兼容和旧回归，不再加入默认模型可见 definitions；模型可见排序为 `exec_command` / `write_stdin` 优先，legacy `shell` 靠后。
-   - `shell` tool description 同步收窄为短命令，并在运行时对明显需要持续会话的命令做保护性拒绝，返回可直接重试的 `exec_command` 指引；help/version 探测仍允许通过 `shell`。
+   - 对照 `/Users/eden/work/github/codex` 后，关键经验是启用 unified exec 时模型可见工具收敛为 `exec_command` + `write_stdin`；在 Bifrost 当前无兼容压力的前提下，旧 shell 类 handler 应直接删除，可靠性来自单一路径，而不是并行维护 `shell_pty` 与 `exec_command` 两套模型协议。
+   - 默认 base instructions 必须明确：凡是需要执行 shell/terminal 命令，都统一使用 `exec_command`，保存返回的 `session_id`，后续通过 `write_stdin` 观察、追加输入或 Ctrl-C 清理；TUI/readline/交互式终端程序设置 `tty=true`。
+   - Bifrost 源码中历史 `shell` 与 `shell_pty` handler 已删除，`write_stdin` 与 `exec_command` 同文件实现并共享同一个 `ExecSessionManager`；模型可见终端入口只保留 `exec_command` / `write_stdin`。
 
 3. Remote Invoke stdin forwarding
    - caller 侧 `remote command exec --stdin/--pty/--interactive` 在 command envelope 中携带 `stdin_mode`、`pty`（含启动时终端 `rows/cols`）与 `output_mode`。
@@ -141,13 +139,10 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 - `exec_command_write_stdin_drives_pipe_process`：pipe 模式启动等待 stdin 的 Python 进程，`write_stdin` 写入后返回真实输出与最终 exit code。
 - `exec_command_ctrl_c_terminates_running_process`：长时间运行的 pipe 进程收到 `write_stdin` 的 Ctrl-C 后被终止并清理 session，避免后台进程泄漏。
 - `test_exec_command_tty_reports_isatty_true`：`tty=true` 启动 `python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'`，必须输出 `True True`。
-- `test_write_stdin_to_session`：旧 `shell_pty` 前台交互会话在已有 `ready` 输出未消费时，写入 stdin 仍能等待并返回新输出，覆盖“轮询前 drain 导致丢输出”的回归。
-- `test_default_base_instructions_describe_terminal_tool_selection`：默认 base instructions 必须包含短命令走 `shell`、长任务/等待 stdin 走 `exec_command`、`tty=true` 与 `write_stdin` 的通用分流规则，并且不再出现 `shell_pty` 推荐。
-- `test_shell_rejects_persistent_session_commands`：`shell` 执行需要持续会话的 delegated command 时返回失败和 `exec_command` 重试指引。
-- `test_shell_detects_generic_interactive_and_long_running_commands`：`ssh`、`python -i`、`input()`、`npm run dev` 等被识别为持续会话候选，普通 `python -c 'print(1)'` 不被误拦。
-- `test_short_probes_are_allowed_in_shell`：`which codex && codex --help`、`codex exec review --help`、`python3 --version` 等探测命令不被保护逻辑误拦截。
-- `model_visible_tool_definitions_prefer_unified_exec_tools`：模型可见工具列表中 `exec_command`、`write_stdin` 排在 legacy `shell` 前面，且不包含 `shell_pty`。
-- `write_stdin_accepts_chars_and_legacy_input`：同时兼容 `chars` 与旧 `input` 字段。
+- `write_stdin_rejects_legacy_protocol_fields`：`write_stdin` 拒绝旧字符串 session id 和隐藏 `input` 字段，确保运行时协议和 schema 一致。
+- `test_default_base_instructions_describe_terminal_tool_selection`：默认 base instructions 必须包含统一使用 `exec_command`、`tty=true` 与 `write_stdin` 的通用规则，并且不再出现 `shell`/`shell_pty` 推荐。
+- `model_visible_tool_definitions_prefer_unified_exec_tools`：模型可见工具列表中包含 `exec_command`、`write_stdin`，且不包含 legacy `shell`/`shell_pty`。
+- `terminal_tools_reject_non_schema_legacy_arguments`：`exec_command` 拒绝未暴露的权限/沙箱字段，`write_stdin` 拒绝隐藏 `input` 与旧字符串 session id。
 - `view_image_rejects_missing_file`：缺失路径返回明确错误。
 - `view_image_returns_data_url`：PNG/JPEG/GIF/WebP 返回 data URL。
 - `request_user_input_validates_questions`：空 options 或超过 3 个问题返回错误。
@@ -164,7 +159,7 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
   - `view_image_tool_works_end_to_end`
   - `tool_search_is_hidden_without_deferred_tools`
   - `tool_search_returns_deferred_mcp_tools`
-- 新增 shell E2E：
+- 新增 terminal E2E：
   - 本轮一次性临时 harness：执行 PTY isatty 单测、`exec_command + write_stdin` P1 E2E，并在本地存在 `codex` 时主动运行 Codex interactive ignored 回归。该 harness 仅用于本次验证，不落库。
   - 本轮一次性临时 harness：启动真实 Bifrost，配置真实模型 provider，通过 `/agent/chat` 让模型实际调用 `exec_command tty=true`、`write_stdin`、Codex CLI interactive session 和追加引导问题；不允许降级到 mock provider。该 harness 仅用于本次验证，不落库。
   - 本轮一次性临时 harness：启动真实 Bifrost，配置真实模型 provider，通过 `/agent/chat` 发送“启动 codex cli，新建一个任务/给 Codex 派发任务”类提示，作为 delegated agent-style task 回归样例；断言 session JSONL 中出现 `exec_command` + `write_stdin` 且不出现 `shell_pty` 或 blocking `shell` 执行持续会话命令；该 harness 仅用于本次验证，不落库。
@@ -192,9 +187,6 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 - `cargo test -p bifrost-agent exec_command`
 - `cargo test -p bifrost-agent test_exec_command_tty_reports_isatty_true`
 - `cargo test -p bifrost-agent terminal_tool_selection -- --nocapture`
-- `cargo test -p bifrost-agent test_shell_rejects_persistent_session_commands -- --nocapture`
-- `cargo test -p bifrost-agent test_shell_detects_generic_interactive_and_long_running_commands -- --nocapture`
-- `cargo test -p bifrost-agent test_short_probes_are_allowed_in_shell -- --nocapture`
 - `cargo test -p bifrost-agent model_visible_tool_definitions_prefer_unified_exec_tools -- --nocapture`
 - `cargo test -p bifrost-agent --test p1_tools_e2e codex_cli_interactive_starts_in_real_pty -- --ignored --nocapture`
 - `cargo test -p bifrost-agent view_image`
