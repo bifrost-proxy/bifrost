@@ -2316,6 +2316,49 @@ second content
     }
 
     #[test]
+    fn test_parse_reqheaders_markdown_value_with_hash_lines() {
+        let text = r#"
+https://app.example.test/api/ https://app.example.test/api/
+https://app.example.test/api/ reqHeaders://{env_block}
+```env_block
+X-Test-Env:test_env
+#comment_marker
+X-Test-Flag:1
+## X-Ignored-Env: ignored comment
+```
+
+https://app.example.test http://localhost:8000/
+wss://app.example.test/ ws://localhost:8000/
+"#;
+
+        let parser = RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(text).unwrap();
+
+        assert_eq!(
+            rules.len(),
+            4,
+            "all rules before and after the value block should remain"
+        );
+        assert_eq!(rules[0].pattern, "https://app.example.test/api/");
+        assert_eq!(rules[0].protocol, Protocol::Passthrough);
+        assert_eq!(rules[1].pattern, "https://app.example.test/api/");
+        assert_eq!(rules[1].protocol, Protocol::ReqHeaders);
+        assert_eq!(rules[1].value, "{env_block}");
+        assert_eq!(rules[2].pattern, "https://app.example.test");
+        assert_eq!(rules[2].protocol, Protocol::Http);
+        assert_eq!(rules[2].value, "localhost:8000/");
+        assert_eq!(rules[3].pattern, "wss://app.example.test/");
+        assert_eq!(rules[3].protocol, Protocol::Ws);
+        assert_eq!(rules[3].value, "localhost:8000/");
+
+        let env_block = values
+            .get("env_block")
+            .expect("env_block inline value should be extracted");
+        assert!(env_block.contains("#comment_marker"));
+        assert!(env_block.contains("## X-Ignored-Env: ignored comment"));
+    }
+
+    #[test]
     fn test_extract_markdown_blocks_overwrite_existing() {
         let mut values = HashMap::new();
         values.insert("existing".to_string(), "original".to_string());

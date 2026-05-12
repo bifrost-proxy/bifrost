@@ -393,6 +393,33 @@ ${unknown} http://example.com:3000
     }
 
     #[test]
+    fn preserves_markdown_value_blocks_with_hash_lines_during_normalization() {
+        let rule = r#"
+https://app.example.test/api/ https://app.example.test/api/
+https://app.example.test/api/ reqHeaders://{env_block}
+```env_block
+X-Test-Env:test_env
+#comment_marker
+X-Test-Flag:1
+## X-Ignored-Env: ignored comment
+```
+
+https://app.example.test http://localhost:8000/
+wss://app.example.test/ ws://localhost:8000/
+"#;
+        let env = remote_env("example/env-block", rule);
+
+        let actual = normalize_remote_rule(&env, std::slice::from_ref(&env));
+
+        assert!(actual.contains("https://app.example.test/api/ https://app.example.test/api/"));
+        assert!(actual.contains("https://app.example.test/api/ reqHeaders://{env_block}"));
+        assert!(actual.contains("#comment_marker"));
+        assert!(actual.contains("## X-Ignored-Env: ignored comment"));
+        assert!(actual.contains("https://app.example.test http://localhost:8000/"));
+        assert!(actual.contains("wss://app.example.test/ ws://localhost:8000/"));
+    }
+
+    #[test]
     fn converts_unsupported_ignore_rules_to_passthrough() {
         let env = remote_env("jlcj", "verify.zijieapi.com ignore://htmlAppend\n");
         let actual = normalize_remote_rule(&env, std::slice::from_ref(&env));

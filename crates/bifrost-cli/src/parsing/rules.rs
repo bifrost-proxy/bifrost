@@ -906,6 +906,52 @@ x-use-ppe: 1
     }
 
     #[test]
+    fn test_reqheaders_markdown_value_skips_hash_comment_lines() {
+        let rules_text = r#"
+https://app.example.test/api/ https://app.example.test/api/
+https://app.example.test/api/ reqHeaders://{env_block}
+```env_block
+X-Test-Env:test_env
+#comment_marker
+X-Test-Flag:1
+## X-Ignored-Env: ignored comment
+```
+
+https://app.example.test http://localhost:8000/
+wss://app.example.test/ ws://localhost:8000/
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://app.example.test/api/v1/ping",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(resolved.ignored.host);
+        assert_eq!(resolved.host, None);
+        assert_eq!(
+            resolved.req_headers,
+            vec![
+                ("X-Test-Env".to_string(), "test_env".to_string()),
+                ("X-Test-Flag".to_string(), "1".to_string()),
+            ]
+        );
+        assert!(
+            !resolved
+                .req_headers
+                .iter()
+                .any(|(name, _)| name.starts_with('#')),
+            "hash-prefixed comment lines must not become request headers: {:?}",
+            resolved.req_headers
+        );
+    }
+
+    #[test]
     fn test_merge_host_first_match_wins() {
         let parser = bifrost_core::RuleParser::new();
         let rules = parser
