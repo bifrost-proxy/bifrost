@@ -703,3 +703,43 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - workflow 外层 timeout 足够覆盖 Windows rules shard 的内部 suite timeout、fixture 启动和 runner 清理开销。
   - 新 run 不再因为 shard 外层 envelope 被提前取消。
 - **执行记录（2026-05-13）**: IN PROGRESS — 首次远端 CI run `25752880592` 中 32 个 job 成功，仅 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 在 `E2E rules tests` step 运行中被 job 外层 timeout 取消；run-level log zip 中没有该 cancelled shard 的 suite log，其它 Windows rules shards 均成功。已将 `.github/workflows/ci.yml` 的 `e2e-windows-rules.timeout-minutes` 从 30 调整为 60，待重新推送后继续 watch 到最终结论。
+
+### TC-IMG-51: Schedule 绑定消息通道设计一致性
+
+- **前置条件**:
+  - 本用例用于设计文档变更后的真实可检索性检查，不启动 Bifrost 服务。
+  - 技术方案已写入 `design/im-gateway.md`。
+- **操作步骤**:
+  1. 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`。
+  2. 执行 `rg -n "target_id|ConfiguredTarget|default_message_channel|任务通知漂移" design/im-gateway.md`。
+  3. 执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`。
+- **预期结果**:
+  - 技术文档明确说明 `ImSchedule.message_channel` 和旧 `target_id` 的兼容策略。
+  - 技术文档明确说明手动创建 schedule 必须显式选择或传入 IM 通道。
+  - 技术文档明确说明 Agent 创建 schedule 时可从当前 IM 来源或 Agent 默认通道推导绑定通道。
+  - 技术文档明确说明 schedule 执行时优先使用自身保存的 `message_channel`，避免通知漂移到错误群或错误用户。
+  - `human_tests/readme.md` 索引包含本用例覆盖点。
+- **执行记录（2026-05-13）**: PASS — 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`，命中 schedule 消息通道数据模型、手动创建、Agent 创建和执行规则；执行 `rg -n "target_id|ConfiguredTarget|default_message_channel|任务通知漂移" design/im-gateway.md`，命中旧 `target_id` 兼容、`ConfiguredTarget` 补全、Agent 默认通道和通知不漂移约束；执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`，确认 human_tests 用例与索引均可检索。
+
+### TC-IMG-52: 真实 Agent Schedule 使用绑定 IM 通道发送消息
+
+- **前置条件**:
+  - 从 `~/.bifrost` 复制真实用户 IM Provider 与 Agent 配置到临时 `BIFROST_DATA_DIR`。
+  - 用当前源码启动 Bifrost：`BIFROST_DATA_DIR=<temp> cargo run --bin bifrost -- start -p 18955 --unsafe-ssl --no-system-proxy`。
+  - 已确认真实 Feishu `bifrost` provider owner 通道可发送消息。
+- **操作步骤**:
+  1. 调用 `POST /api/im-gateway/schedules` 创建 disabled agent schedule，`message_channel` 绑定 `provider_id=bifrost,target_mode=owner,target_id=owner`。
+  2. schedule 的 agent prompt 要求模型只调用一次 `send_msg`，发送唯一时间戳文本。
+  3. 调用 `POST /api/im-gateway/schedules/<id>/run` 手动触发一次。
+  4. 查询 `GET /api/im-gateway/schedules/<id>/runs`，检查 run 状态和 agent tool calls。
+  5. 检查 `admin/im_gateway_message_logs.json`，确认 schedule 内部 `send_msg` 和 schedule 完成通知均发送成功。
+- **预期结果**:
+  - schedule 保存后包含 `message_channel`，旧 `target_id` 可为空。
+  - 手动 run 返回 `status=Success`，`stdout_preview` 为 agent 最终回复。
+  - run 记录中的 `agent_tool_calls` 包含 `send_msg` 且 `success=true`。
+  - 消息日志包含一条 `trigger=agent_tool:send_msg` 的真实发送成功记录，以及一条 `trigger=schedule:<id>` 的完成通知成功记录。
+  - disabled schedule 不会在测试结束后继续周期触发。
+- **清理步骤**:
+  - 停止测试 Bifrost 进程。
+  - 删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-13）**: PASS — 创建 `real-agent-schedule-20260513-124107`，保存结果包含 `message_channel.provider_id=bifrost,target_mode=owner,target_id=owner` 且 `enabled=false`。手动触发 `/run` 返回 `run_id=8864e487,status=Success,duration_ms=7638,stdout_preview=schedule send_msg succeeded`。运行历史中 `agent_tool_calls[0].tool_name=send_msg,success=true`，工具结果包含真实 `message_id=om_x100b6f74403218acc45ca19e00d32f4`。消息日志同时记录 schedule 内部 `send_msg` 成功和完成通知成功，完成通知 message_id 为 `om_x100b6f74418a5ca8c22d79d534bd554`。

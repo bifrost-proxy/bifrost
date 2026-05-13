@@ -409,6 +409,10 @@ pub(super) async fn handle_provider_connect(
     let agent_config_store = service.agent_config_store.clone();
     let agent_client = service.agent_client.clone();
     let agent_tools = service.agent_tools.clone();
+    let schedule_store = service.schedule_store.clone();
+    let scheduler = service.scheduler.clone();
+    let target_store = service.target_store.clone();
+    let connection_manager = service.connection_manager.clone();
     let agent_session_manager = service.agent_session_manager.clone();
     let queue_manager = service.queue_manager.clone();
     let progress_registry = service.progress_registry.clone();
@@ -424,6 +428,10 @@ pub(super) async fn handle_provider_connect(
             agent_config_store,
             agent_client,
             agent_tools,
+            schedule_store,
+            scheduler,
+            target_store,
+            connection_manager,
             agent_session_manager,
             queue_manager,
             progress_registry,

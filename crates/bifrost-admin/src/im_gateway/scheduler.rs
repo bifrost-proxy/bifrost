@@ -264,6 +264,7 @@ mod tests {
                 name: "due".to_string(),
                 enabled: true,
                 target_id: "t1".to_string(),
+                message_channel: None,
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
@@ -287,6 +288,7 @@ mod tests {
                 name: "not due".to_string(),
                 enabled: true,
                 target_id: "t1".to_string(),
+                message_channel: None,
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
@@ -310,6 +312,7 @@ mod tests {
                 name: "disabled".to_string(),
                 enabled: false,
                 target_id: "t1".to_string(),
+                message_channel: None,
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {

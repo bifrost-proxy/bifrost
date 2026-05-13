@@ -549,11 +549,12 @@ pub(super) async fn handle_agent(
                 "too many /agent/chat images in one request; truncating images"
             );
         }
+        let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
         let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
             &service.agent_client,
             &config,
             &mut session,
-            &service.agent_tools,
+            &turn_tools,
             mcp_opt,
             &body.message,
             &images,
@@ -794,6 +795,15 @@ pub(super) fn apply_agent_config_patch(
         .and_then(|v| v.as_u64())
     {
         config.background_terminal_max_timeout = Some(timeout);
+    }
+    if let Some(channel) = patch.get("default_message_channel") {
+        if channel.is_null() {
+            config.default_message_channel = None;
+        } else if let Ok(binding) =
+            serde_json::from_value::<bifrost_agent::ImMessageChannelBinding>(channel.clone())
+        {
+            config.default_message_channel = Some(binding);
+        }
     }
 
     // Provider-level fields: apply to the active provider in model_providers

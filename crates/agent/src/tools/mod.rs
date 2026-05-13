@@ -48,6 +48,7 @@ pub trait ToolHandler: Send + Sync {
 }
 
 /// Registry of available tools.
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn ToolHandler>>,
     exec_session_manager: Option<Arc<exec_command::ExecSessionManager>>,

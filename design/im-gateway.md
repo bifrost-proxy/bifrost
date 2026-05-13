@@ -1956,6 +1956,134 @@ cargo test --workspace --all-features
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-05-13 Agent send_msg 与默认消息通道设计
+
+### 问题
+
+Agent loop 缺少一个直接向用户发送消息的统一工具。现有 IM Gateway 已有 `messages/send`、飞书回复卡片、schedule run 通知等发送能力，但这些能力分散在不同调用点，且 Agent 视角缺少统一协议。
+
+用户期望是：
+
+- Agent 只看到统一基础协议 `send_msg`。
+- 飞书、微信等 IM 通道的差异由 IM Gateway 自动注入工具描述和参数 schema。
+- Agent 配置模块提供默认发送消息通道。
+- 手动创建定时任务时必须绑定 IM 通道。
+- 如果定时任务由 Agent 在 IM 对话中创建，应自动感知当前消息来源；任务执行时再发送消息，必须使用任务保存的目标来源。
+
+### 数据模型
+
+新增 provider-neutral 通道绑定：
+
+```rust
+pub enum MessageTargetMode {
+    SourceThread,
+    SourceUser,
+    Owner,
+    ConfiguredTarget,
+}
+
+pub struct ImMessageChannelBinding {
+    pub provider_id: String,
+    pub target_id: String,
+    pub target_mode: MessageTargetMode,
+}
+```
+
+`ImAgentConfig` 新增：
+
+```rust
+pub default_message_channel: Option<ImMessageChannelBinding>
+```
+
+`ImSchedule` 新增：
+
+```rust
+pub message_channel: Option<ImMessageChannelBinding>
+```
+
+兼容策略：
+
+- 旧 `ImSchedule.target_id` 保留，用于已有 script schedule 和旧 CLI/API 请求。
+- 保存 schedule 时 normalize：如果传入了 `message_channel`，后续发送优先使用它；如果只传入旧 `target_id`，后端按 target 所属 provider 补出 `message_channel.target_mode=ConfiguredTarget`。
+- Agent schedule 过去允许省略 `target_id`；新逻辑允许省略旧 `target_id`，但必须能从 Agent 当前来源或 `default_message_channel` 推导出 `message_channel`。
+
+### send_msg 注入与解析
+
+Agent runtime 每个 turn 构造 `AgentMessageContext`：
+
+```rust
+pub struct AgentMessageContext {
+    pub inbound_source: Option<ImInboundSource>,
+    pub task_message_channel: Option<ImMessageChannelBinding>,
+    pub agent_default_channel: Option<ImMessageChannelBinding>,
+    pub provider_capability: ImSendCapability,
+}
+```
+
+`send_msg` 工具名固定，description 和 parameters schema 按 `provider_capability` 动态裁剪：
+
+- 飞书可暴露 `text`、`markdown`、`interactive card`。
+- 微信只暴露当前实现支持的消息类型，例如 `text`、`markdown` 或图片；未支持类型不进入 schema。
+- 工具结果只返回 safe summary，不返回 receive id、secret、token 或完整 provider config。
+
+默认发送目标解析优先级：
+
+1. tool call 显式指定的安全目标，例如 `owner` 或某个已配置 target id。
+2. 当前任务保存的 `message_channel`。
+3. 当前 inbound event 的来源通道。
+4. Agent 全局 `default_message_channel`。
+5. 仍无法解析时，`send_msg` 返回明确配置错误。
+
+`send_msg` 是外部可见副作用工具，必须在 agent turn runtime 中标记为 ordered，避免和其他工具并发发送造成消息顺序不可控。
+
+### Schedule 创建规则
+
+手动创建 schedule：
+
+- WebUI/CLI/API 必须显式选择或传入 IM 通道。
+- 对旧请求如果只传 `target_id`，后端可根据 target 补全 provider；如果 target 不存在或无法推导 provider，创建失败。
+- UI 上应把 Provider + Target 作为一个发送通道选择器展示，而不是只展示裸 target id。
+
+Agent 创建 schedule：
+
+- 如果 Agent 当前由 IM 消息触发，`schedule_create` 默认把当前来源写入 `schedule.message_channel`。
+- 如果 Agent 当前由 WebUI/API 触发，`schedule_create` 默认使用 Agent 配置的 `default_message_channel`。
+- 如果两者都不存在，`schedule_create` 必须失败并提示先配置默认发送通道或显式指定目标。
+
+Schedule 执行：
+
+- 执行 script 或 agent task 后需要发送消息时，必须优先使用 schedule 自己保存的 `message_channel`。
+- 不允许使用“最近一次 IM 对话来源”这类全局可变状态，避免任务通知漂移到错误群或错误用户。
+- outbound message log 的 `trigger` 应区分 `agent_tool:send_msg`、`schedule:<id>`、`manual_run:<id>` 等来源。
+
+### 测试方案
+
+- 单元测试：
+  - `schedule_create` 在 IM 来源下自动写入 `message_channel`。
+  - `schedule_create` 在无 IM 来源下使用 `default_message_channel`。
+  - 无来源且无默认通道时创建 Agent schedule 返回结构化错误。
+  - `send_msg` schema 按 Feishu/WeChat capability 裁剪。
+  - `send_msg` 在 turn runtime 中为 ordered 工具。
+- E2E/API：
+  - 使用 fake Feishu/WeChat provider 启动真实 Bifrost，mock model 调用 `send_msg`，断言 fake provider 收到正确 payload。
+  - 通过 `/agent/chat` 创建 schedule，验证 schedule 持久化了 `message_channel`，手动 run 时发送到绑定目标。
+  - 通过 WebUI/API 手动创建 schedule，缺少通道时报错，绑定通道后可运行并发送。
+- 真实场景测试：
+  - 更新 `human_tests/im-gateway-agent.md` 覆盖 `send_msg` 来源感知与默认通道。
+  - 更新 `human_tests/im-gateway.md` 覆盖手动 schedule 通道绑定与执行目标不漂移。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin schedule_tools_create_update_list_delete_agent_schedule
+cargo test -p bifrost-admin handlers::im_gateway::tests::send_message_request -- --nocapture
+cargo test -p bifrost-agent send_msg
+BIFROST_DATA_DIR=./.bifrost-test-send-msg cargo run --bin bifrost -- start -H 127.0.0.1 -p 18895 --unsafe-ssl --no-system-proxy --skip-cert-check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
 ## 2026-05-12 Agent 设置默认值 Placeholder
 
 ### 问题

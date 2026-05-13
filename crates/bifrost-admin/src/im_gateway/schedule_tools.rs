@@ -9,21 +9,33 @@ use serde_json::Value;
 
 use super::schedule_store::ImScheduleStore;
 use super::scheduler::ImScheduler;
-use super::types::{ImSchedule, ScheduleTaskType};
+use super::target_store::ImTargetStore;
+use super::types::{ImMessageChannelBinding, ImSchedule, MessageTargetMode, ScheduleTaskType};
+
+#[derive(Clone, Debug, Default)]
+pub struct ScheduleToolContext {
+    pub message_channel: Option<ImMessageChannelBinding>,
+}
 
 pub fn register_schedule_tools(
     registry: &mut bifrost_agent::ToolRegistry,
     schedule_store: Arc<ImScheduleStore>,
     scheduler: Arc<ImScheduler>,
+    target_store: Arc<ImTargetStore>,
+    context: ScheduleToolContext,
 ) {
     registry.register(Arc::new(ScheduleListTool::new(schedule_store.clone())));
     registry.register(Arc::new(ScheduleCreateTool::new(
         schedule_store.clone(),
         scheduler.clone(),
+        target_store.clone(),
+        context.clone(),
     )));
     registry.register(Arc::new(ScheduleUpdateTool::new(
         schedule_store.clone(),
         scheduler.clone(),
+        target_store,
+        context,
     )));
     registry.register(Arc::new(ScheduleDeleteTool::new(schedule_store, scheduler)));
 }
@@ -89,13 +101,22 @@ impl ToolHandler for ScheduleListTool {
 struct ScheduleCreateTool {
     schedule_store: Arc<ImScheduleStore>,
     scheduler: Arc<ImScheduler>,
+    target_store: Arc<ImTargetStore>,
+    context: ScheduleToolContext,
 }
 
 impl ScheduleCreateTool {
-    fn new(schedule_store: Arc<ImScheduleStore>, scheduler: Arc<ImScheduler>) -> Self {
+    fn new(
+        schedule_store: Arc<ImScheduleStore>,
+        scheduler: Arc<ImScheduler>,
+        target_store: Arc<ImTargetStore>,
+        context: ScheduleToolContext,
+    ) -> Self {
         Self {
             schedule_store,
             scheduler,
+            target_store,
+            context,
         }
     }
 }
@@ -119,7 +140,11 @@ impl ToolHandler for ScheduleCreateTool {
             Ok(schedule) => schedule,
             Err(error) => return error_tool_result(format!("invalid schedule: {error}")),
         };
-        if let Err(error) = normalize_schedule(&mut schedule) {
+        if let Err(error) = normalize_schedule_with_context(
+            &mut schedule,
+            Some(&self.target_store),
+            Some(&self.context),
+        ) {
             return error_tool_result(error);
         }
         match self.schedule_store.add(schedule.clone()) {
@@ -135,13 +160,22 @@ impl ToolHandler for ScheduleCreateTool {
 struct ScheduleUpdateTool {
     schedule_store: Arc<ImScheduleStore>,
     scheduler: Arc<ImScheduler>,
+    target_store: Arc<ImTargetStore>,
+    context: ScheduleToolContext,
 }
 
 impl ScheduleUpdateTool {
-    fn new(schedule_store: Arc<ImScheduleStore>, scheduler: Arc<ImScheduler>) -> Self {
+    fn new(
+        schedule_store: Arc<ImScheduleStore>,
+        scheduler: Arc<ImScheduler>,
+        target_store: Arc<ImTargetStore>,
+        context: ScheduleToolContext,
+    ) -> Self {
         Self {
             schedule_store,
             scheduler,
+            target_store,
+            context,
         }
     }
 }
@@ -188,7 +222,11 @@ impl ToolHandler for ScheduleUpdateTool {
             Ok(schedule) => schedule,
             Err(error) => return error_tool_result(format!("invalid schedule patch: {error}")),
         };
-        if let Err(error) = normalize_schedule(&mut schedule) {
+        if let Err(error) = normalize_schedule_with_context(
+            &mut schedule,
+            Some(&self.target_store),
+            Some(&self.context),
+        ) {
             return error_tool_result(error);
         }
         match self.schedule_store.update(schedule.clone()) {
@@ -266,26 +304,27 @@ fn schedule_write_schema(create: bool) -> Value {
             "id": {"type": "string", "description": "Stable schedule id. Omit on create to generate one."},
             "name": {"type": "string"},
             "enabled": {"type": "boolean"},
-            "target_id": {"type": "string", "description": "Required for script schedules; optional for agent schedules."},
+            "target_id": {"type": "string", "description": "Configured IM target id. Required for script schedules. For agent schedules this is accepted as a compatibility shortcut for message_channel."},
+            "message_channel": {
+                "type": "object",
+                "description": "IM channel binding used for notifications and send_msg defaults. If omitted by an injected agent tool, the current IM source/default channel is used.",
+                "properties": {
+                    "provider_id": {"type": "string"},
+                    "target_id": {"type": "string"},
+                    "target_mode": {"type": "string", "enum": ["source_thread", "source_user", "owner", "configured_target"]}
+                },
+                "required": ["provider_id", "target_id", "target_mode"]
+            },
             "trigger": {
                 "type": "object",
-                "oneOf": [
-                    {
-                        "properties": {
-                            "type": {"const": "cron"},
-                            "expr": {"type": "string"},
-                            "timezone": {"type": "string"}
-                        },
-                        "required": ["type", "expr"]
-                    },
-                    {
-                        "properties": {
-                            "type": {"const": "interval"},
-                            "every_ms": {"type": "integer", "minimum": 1}
-                        },
-                        "required": ["type", "every_ms"]
-                    }
-                ]
+                "description": "Trigger object. Use type=cron with expr/timezone, or type=interval with every_ms.",
+                "properties": {
+                    "type": {"type": "string", "description": "cron or interval"},
+                    "expr": {"type": "string"},
+                    "timezone": {"type": "string"},
+                    "every_ms": {"type": "integer", "minimum": 1}
+                },
+                "required": ["type"]
             },
             "task_type": {"type": "string", "enum": ["script", "agent"]},
             "script": {
@@ -315,17 +354,78 @@ fn schedule_write_schema(create: bool) -> Value {
 }
 
 pub fn normalize_schedule(schedule: &mut ImSchedule) -> Result<(), String> {
+    normalize_schedule_with_context(schedule, None, None)
+}
+
+pub fn normalize_schedule_with_context(
+    schedule: &mut ImSchedule,
+    target_store: Option<&ImTargetStore>,
+    context: Option<&ScheduleToolContext>,
+) -> Result<(), String> {
     let now = now_ms();
     if schedule.id.trim().is_empty() {
         schedule.id = uuid::Uuid::new_v4().as_simple().to_string();
     }
     schedule.infer_task_type();
+    bind_schedule_message_channel(schedule, target_store, context)?;
     schedule.validate_for_save()?;
     if schedule.created_at == 0 {
         schedule.created_at = now;
     }
     schedule.updated_at = now;
     schedule.next_run_at = ImScheduler::compute_next_run_for_schedule(schedule, now);
+    Ok(())
+}
+
+fn bind_schedule_message_channel(
+    schedule: &mut ImSchedule,
+    target_store: Option<&ImTargetStore>,
+    context: Option<&ScheduleToolContext>,
+) -> Result<(), String> {
+    if let Some(channel) = schedule.message_channel.as_mut() {
+        channel.provider_id = channel.provider_id.trim().to_string();
+        channel.target_id = channel.target_id.trim().to_string();
+        if channel.provider_id.is_empty() || channel.target_id.is_empty() {
+            return Err(
+                "message_channel.provider_id and message_channel.target_id are required"
+                    .to_string(),
+            );
+        }
+        if schedule.target_id.trim().is_empty()
+            && matches!(channel.target_mode, MessageTargetMode::ConfiguredTarget)
+        {
+            schedule.target_id = channel.target_id.clone();
+        }
+        return Ok(());
+    }
+
+    if !schedule.target_id.trim().is_empty() {
+        if let Some(store) = target_store {
+            let target_id = schedule.target_id.trim();
+            let Some(target) = store.get(target_id) else {
+                return Err(format!("target '{target_id}' not found"));
+            };
+            schedule.message_channel = Some(ImMessageChannelBinding {
+                provider_id: target.provider_id,
+                target_id: target.id,
+                target_mode: MessageTargetMode::ConfiguredTarget,
+            });
+        }
+        return Ok(());
+    }
+
+    if let Some(channel) = context.and_then(|ctx| ctx.message_channel.clone()) {
+        schedule.message_channel = Some(channel);
+        return Ok(());
+    }
+
+    if schedule.task_type == ScheduleTaskType::Agent {
+        return Err(
+            "agent schedule requires message_channel or target_id unless an agent turn provides an IM source/default channel"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -381,8 +481,22 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = Arc::new(ImScheduleStore::new(temp_dir.path()));
         let scheduler = Arc::new(ImScheduler::new());
-        let create = ScheduleCreateTool::new(store.clone(), scheduler.clone());
-        let update = ScheduleUpdateTool::new(store.clone(), scheduler.clone());
+        let target_store = Arc::new(ImTargetStore::new(temp_dir.path()));
+        let context = ScheduleToolContext {
+            message_channel: Some(ImMessageChannelBinding {
+                provider_id: "weixin-test".to_string(),
+                target_id: "owner-user".to_string(),
+                target_mode: MessageTargetMode::Owner,
+            }),
+        };
+        let create = ScheduleCreateTool::new(
+            store.clone(),
+            scheduler.clone(),
+            target_store.clone(),
+            context.clone(),
+        );
+        let update =
+            ScheduleUpdateTool::new(store.clone(), scheduler.clone(), target_store, context);
         let list = ScheduleListTool::new(store.clone());
         let delete = ScheduleDeleteTool::new(store.clone(), scheduler);
 
@@ -403,6 +517,15 @@ mod tests {
         assert_eq!(
             store.get("daily-agent").expect("created").task_type,
             ScheduleTaskType::Agent
+        );
+        assert_eq!(
+            store
+                .get("daily-agent")
+                .expect("created")
+                .message_channel
+                .expect("channel")
+                .provider_id,
+            "weixin-test"
         );
 
         let updated = update
@@ -427,5 +550,20 @@ mod tests {
             .await;
         assert!(deleted.success, "{}", deleted.output);
         assert!(store.get("daily-agent").is_none());
+    }
+
+    #[test]
+    fn schedule_write_schema_avoids_combinators_for_model_compatibility() {
+        let schema = schedule_write_schema(true);
+        let trigger = schema
+            .pointer("/properties/trigger")
+            .expect("trigger schema");
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"));
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("allOf").is_none());
+        assert!(trigger.get("anyOf").is_none());
+        assert!(trigger.get("oneOf").is_none());
+        assert!(trigger.get("allOf").is_none());
     }
 }

@@ -128,11 +128,14 @@ impl ImGatewayService {
         let agent_config = agent_config_store.load();
         let schedule_store = Arc::new(ImScheduleStore::new(data_dir));
         let scheduler = Arc::new(ImScheduler::new());
+        let target_store = Arc::new(ImTargetStore::new(data_dir));
         let mut agent_tools = ImAgentToolRegistry::with_defaults();
         crate::im_gateway::schedule_tools::register_schedule_tools(
             &mut agent_tools,
             schedule_store.clone(),
             scheduler.clone(),
+            target_store.clone(),
+            crate::im_gateway::schedule_tools::ScheduleToolContext::default(),
         );
         let agent_tools = Arc::new(agent_tools);
         let ca_cert_path = data_dir.join("certs").join("ca.crt");
@@ -141,7 +144,7 @@ impl ImGatewayService {
             .unwrap_or_default();
         Self {
             provider_store: Arc::new(ImProviderStore::new(data_dir)),
-            target_store: Arc::new(ImTargetStore::new(data_dir)),
+            target_store,
             route_store: Arc::new(ImRouteStore::new(data_dir)),
             schedule_store,
             scheduler,
@@ -159,6 +162,32 @@ impl ImGatewayService {
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn build_agent_tool_registry(
+        &self,
+        message_channel: Option<crate::im_gateway::types::ImMessageChannelBinding>,
+    ) -> Arc<ImAgentToolRegistry> {
+        let mut registry = (*self.agent_tools).clone();
+        crate::im_gateway::schedule_tools::register_schedule_tools(
+            &mut registry,
+            self.schedule_store.clone(),
+            self.scheduler.clone(),
+            self.target_store.clone(),
+            crate::im_gateway::schedule_tools::ScheduleToolContext {
+                message_channel: message_channel.clone(),
+            },
+        );
+        registry.register(Arc::new(
+            crate::im_gateway::send_msg_tool::SendMsgTool::new(
+                self.provider_store.clone(),
+                self.target_store.clone(),
+                self.message_log_store.clone(),
+                self.connection_manager.clone(),
+                crate::im_gateway::send_msg_tool::SendMsgToolContext { message_channel },
+            ),
+        ));
+        Arc::new(registry)
     }
 
     pub(super) fn provider_client(&self, provider: &ImProviderConfig) -> ImProviderClient {
@@ -242,6 +271,10 @@ impl ImGatewayService {
             let agent_config_store = self.agent_config_store.clone();
             let agent_client = self.agent_client.clone();
             let agent_tools = self.agent_tools.clone();
+            let schedule_store = self.schedule_store.clone();
+            let scheduler = self.scheduler.clone();
+            let target_store = self.target_store.clone();
+            let connection_manager = self.connection_manager.clone();
             let agent_session_manager = self.agent_session_manager.clone();
             let queue_manager = self.queue_manager.clone();
             let progress_registry = self.progress_registry.clone();
@@ -257,6 +290,10 @@ impl ImGatewayService {
                     agent_config_store,
                     agent_client,
                     agent_tools,
+                    schedule_store,
+                    scheduler,
+                    target_store,
+                    connection_manager,
                     agent_session_manager,
                     queue_manager,
                     progress_registry,
@@ -412,6 +449,10 @@ impl ImGatewayService {
                             let agent_config_store = self.agent_config_store.clone();
                             let agent_client = self.agent_client.clone();
                             let agent_tools = self.agent_tools.clone();
+                            let schedule_store = self.schedule_store.clone();
+                            let scheduler = self.scheduler.clone();
+                            let target_store = self.target_store.clone();
+                            let connection_manager = self.connection_manager.clone();
                             let agent_session_manager = self.agent_session_manager.clone();
                             let queue_manager = self.queue_manager.clone();
                             let progress_registry = self.progress_registry.clone();
@@ -427,6 +468,10 @@ impl ImGatewayService {
                                     agent_config_store,
                                     agent_client,
                                     agent_tools,
+                                    schedule_store,
+                                    scheduler,
+                                    target_store,
+                                    connection_manager,
                                     agent_session_manager,
                                     queue_manager,
                                     progress_registry,
