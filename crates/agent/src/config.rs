@@ -135,6 +135,38 @@ pub struct AgentConfig {
     /// Default: 300000 (5 minutes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_terminal_max_timeout: Option<u64>,
+
+    /// Default IM channel used by injected message tools and agent-created schedules
+    /// when the current turn has no inbound IM source to inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_message_channel: Option<ImMessageChannelBinding>,
+}
+
+/// How a message binding resolves its target inside a provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageTargetMode {
+    /// Send back to the inbound conversation/thread (for example a Feishu chat_id).
+    SourceThread,
+    /// Send back to the inbound sender/user.
+    SourceUser,
+    /// Send to the provider owner configured on the IM provider.
+    Owner,
+    /// Resolve `target_id` through the configured IM target store.
+    ConfiguredTarget,
+}
+
+/// Serializable IM channel binding used by agent config and scheduled tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImMessageChannelBinding {
+    pub provider_id: String,
+    pub target_id: String,
+    #[serde(default = "default_message_target_mode")]
+    pub target_mode: MessageTargetMode,
+}
+
+fn default_message_target_mode() -> MessageTargetMode {
+    MessageTargetMode::ConfiguredTarget
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +445,7 @@ impl Default for AgentConfig {
             ephemeral: false,
             memories: None,
             background_terminal_max_timeout: Some(Self::DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS),
+            default_message_channel: None,
         }
     }
 }
@@ -1030,6 +1063,9 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
         background_terminal_max_timeout: overlay
             .background_terminal_max_timeout
             .or(base.background_terminal_max_timeout),
+        default_message_channel: overlay
+            .default_message_channel
+            .or(base.default_message_channel),
     }
 }
 
@@ -1220,11 +1256,20 @@ mod tests {
         let overlay = AgentConfig {
             model: Some("custom-model".to_string()),
             max_turn_iterations: Some(60),
+            default_message_channel: Some(ImMessageChannelBinding {
+                provider_id: "weixin-main".to_string(),
+                target_id: "owner-id".to_string(),
+                target_mode: MessageTargetMode::Owner,
+            }),
             ..Default::default()
         };
         let merged = merge_config(base, overlay);
         assert_eq!(merged.get_model(), "custom-model");
         assert_eq!(merged.get_max_turn_iterations(), 60);
+        assert_eq!(
+            merged.default_message_channel.as_ref().unwrap().provider_id,
+            "weixin-main"
+        );
     }
 
     #[test]
@@ -1234,6 +1279,11 @@ enabled = true
 model = "gpt-4o"
 model_provider = "openai"
 max_turn_iterations = 30
+
+[default_message_channel]
+provider_id = "weixin-main"
+target_id = "owner-id"
+target_mode = "owner"
 
 [model_providers.custom]
 name = "My Provider"
@@ -1249,6 +1299,10 @@ enabled = true
         assert_eq!(config.get_model(), "gpt-4o");
         assert_eq!(config.model_provider.as_deref(), Some("openai"));
         assert_eq!(config.get_max_turn_iterations(), 30);
+        assert_eq!(
+            config.default_message_channel.unwrap().target_mode,
+            MessageTargetMode::Owner
+        );
         assert!(config.model_providers.contains_key("custom"));
         assert!(config.mcp_servers.contains_key("test_server"));
     }

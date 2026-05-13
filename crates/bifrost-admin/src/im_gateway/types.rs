@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use bifrost_agent::{ImMessageChannelBinding, MessageTargetMode};
 use bifrost_agent::{PlanStep, ToolCallLog};
 use serde::{Deserialize, Serialize};
 
@@ -349,6 +350,10 @@ pub struct ImSchedule {
     pub enabled: bool,
     #[serde(default)]
     pub target_id: String,
+    /// Channel used for schedule notifications and injected send_msg defaults.
+    /// `target_id` is kept as a compatibility shortcut for configured targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_channel: Option<ImMessageChannelBinding>,
     pub trigger: ScheduleTrigger,
     #[serde(default)]
     pub task_type: ScheduleTaskType,

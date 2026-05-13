@@ -26,8 +26,11 @@ pub(super) async fn handle_schedules(
                     schedule.created_at = now;
                 }
                 schedule.updated_at = now;
-                if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule)
-                {
+                if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule_with_context(
+                    &mut schedule,
+                    Some(&service.target_store),
+                    None,
+                ) {
                     return error_response(StatusCode::BAD_REQUEST, &e);
                 }
                 match service.schedule_store.add(schedule.clone()) {
@@ -85,7 +88,11 @@ pub(super) async fn handle_schedule_by_id(
                 return error_response(StatusCode::NOT_FOUND, "Schedule not found");
             };
             apply_schedule_patch(&mut existing, &patch);
-            if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule(&mut existing) {
+            if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule_with_context(
+                &mut existing,
+                Some(&service.target_store),
+                None,
+            ) {
                 return error_response(StatusCode::BAD_REQUEST, &e);
             }
             match service.schedule_store.update(existing.clone()) {
@@ -260,6 +267,97 @@ pub(super) async fn execute_script_schedule_once(
     task_run
 }
 
+fn resolve_schedule_message_target(
+    service: &ImGatewayService,
+    schedule: &ImSchedule,
+) -> (Option<ImTarget>, Option<ImProviderConfig>) {
+    if let Some(channel) = schedule.message_channel.as_ref() {
+        let provider = service.provider_store.get(&channel.provider_id);
+        let Some(provider) = provider else {
+            return (None, None);
+        };
+        let target = match channel.target_mode {
+            crate::im_gateway::types::MessageTargetMode::ConfiguredTarget => {
+                if channel.target_id == "__owner__" || channel.target_id == "owner" {
+                    owner_schedule_target(&provider)
+                } else {
+                    service.target_store.get(&channel.target_id)
+                }
+            }
+            crate::im_gateway::types::MessageTargetMode::Owner => owner_schedule_target(&provider),
+            crate::im_gateway::types::MessageTargetMode::SourceThread => {
+                Some(transient_schedule_target(
+                    &provider,
+                    "__source_thread__",
+                    "Source Thread",
+                    if provider.provider_type == ImProviderType::Feishu {
+                        "chat_id"
+                    } else {
+                        "open_id"
+                    },
+                    &channel.target_id,
+                ))
+            }
+            crate::im_gateway::types::MessageTargetMode::SourceUser => {
+                Some(transient_schedule_target(
+                    &provider,
+                    "__source_user__",
+                    "Source User",
+                    "open_id",
+                    &channel.target_id,
+                ))
+            }
+        };
+        return (target, Some(provider));
+    }
+
+    if schedule.target_id.trim().is_empty() {
+        return (None, None);
+    }
+    match service.target_store.get(&schedule.target_id) {
+        Some(target) => {
+            let provider = service.provider_store.get(&target.provider_id);
+            (Some(target), provider)
+        }
+        None => (None, None),
+    }
+}
+
+fn owner_schedule_target(provider: &ImProviderConfig) -> Option<ImTarget> {
+    let owner_id = provider
+        .owner_open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(transient_schedule_target(
+        provider,
+        "__owner__",
+        "Owner",
+        "open_id",
+        owner_id,
+    ))
+}
+
+fn transient_schedule_target(
+    provider: &ImProviderConfig,
+    id: &str,
+    display_name: &str,
+    receive_id_type: &str,
+    receive_id: &str,
+) -> ImTarget {
+    ImTarget {
+        id: id.to_string(),
+        provider_id: provider.id.clone(),
+        display_name: display_name.to_string(),
+        enabled: true,
+        receive_id_type: receive_id_type.to_string(),
+        receive_id: receive_id.to_string(),
+        default_msg_type: "text".to_string(),
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
 pub(super) async fn execute_agent_schedule_once(
     service: &ImGatewayService,
     schedule: &ImSchedule,
@@ -267,17 +365,7 @@ pub(super) async fn execute_agent_schedule_once(
     trigger_source: crate::im_gateway::types::TriggerSource,
 ) -> crate::im_gateway::types::ImTaskRun {
     let now = now_ms();
-    let (target, provider) = if schedule.target_id.trim().is_empty() {
-        (None, None)
-    } else {
-        match service.target_store.get(&schedule.target_id) {
-            Some(target) => {
-                let provider = service.provider_store.get(&target.provider_id);
-                (Some(target), provider)
-            }
-            None => (None, None),
-        }
-    };
+    let (target, provider) = resolve_schedule_message_target(service, schedule);
     let mut run = crate::im_gateway::types::ImTaskRun {
         run_id,
         trigger_source,
@@ -343,7 +431,7 @@ pub(super) async fn execute_agent_schedule_once(
             &service.agent_client,
             &config,
             &mut session,
-            &service.agent_tools,
+            &service.build_agent_tool_registry(schedule.message_channel.clone()),
             &agent_task.prompt,
             agent_task.system_prompt.as_deref(),
         ),
@@ -424,14 +512,11 @@ pub(super) async fn send_schedule_run_notification(
     schedule: &ImSchedule,
     task_run: &crate::im_gateway::types::ImTaskRun,
 ) {
-    let provider = task_run
-        .provider_id
-        .as_deref()
-        .and_then(|provider_id| service.provider_store.get(provider_id));
+    let (target, provider) = resolve_schedule_message_target(service, schedule);
     let Some(provider) = provider else {
         return;
     };
-    let Some(ref owner_id) = provider.owner_open_id else {
+    let Some(target) = target else {
         return;
     };
 
@@ -449,23 +534,8 @@ pub(super) async fn send_schedule_run_notification(
         task_run.duration_ms.unwrap_or(0),
         stdout
     );
-    let owner_target = crate::im_gateway::types::ImTarget {
-        id: "__owner__".to_string(),
-        provider_id: provider.id.clone(),
-        display_name: "Owner".to_string(),
-        enabled: true,
-        receive_id_type: "open_id".to_string(),
-        receive_id: owner_id.clone(),
-        default_msg_type: "text".to_string(),
-        created_at: 0,
-        updated_at: 0,
-    };
     let client = service.provider_client(&provider);
-    let content = serde_json::json!({"text": msg});
-    let content_str = serde_json::to_string(&content).unwrap_or_default();
-    let send_result = client
-        .send_text(&provider, &owner_target, &content_str)
-        .await;
+    let send_result = client.send_text(&provider, &target, &msg).await;
 
     let (status, message_id, error_msg) = match &send_result {
         Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
@@ -477,8 +547,8 @@ pub(super) async fn send_schedule_run_notification(
         direction: MessageDirection::Outbound,
         status,
         timestamp: now_ms(),
-        target_id: Some("__owner__".to_string()),
-        target_name: Some("Owner".to_string()),
+        target_id: Some(target.id),
+        target_name: Some(target.display_name),
         message_id,
         msg_type: Some("text".to_string()),
         content_preview: Some(truncate_str(&msg, 200)),

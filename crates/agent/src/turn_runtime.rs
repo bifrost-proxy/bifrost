@@ -79,7 +79,8 @@ pub fn local_tool_execution_mode(tool_name: &str) -> ToolExecutionMode {
         // These tools mutate session-level state, depend on an immediately
         // visible runtime side effect, or alter the visible tool set.
         "switch_workdir" | "set_title" | "update_plan" | "request_user_input" | "tool_search"
-        | "write_stdin" | "get_goal" | "create_goal" | "update_goal" => ToolExecutionMode::Ordered,
+        | "write_stdin" | "get_goal" | "create_goal" | "update_goal" | "send_msg"
+        | "schedule_create" | "schedule_update" | "schedule_delete" => ToolExecutionMode::Ordered,
         _ => ToolExecutionMode::Parallel,
     }
 }
@@ -106,6 +107,10 @@ mod tests {
             "get_goal",
             "create_goal",
             "update_goal",
+            "send_msg",
+            "schedule_create",
+            "schedule_update",
+            "schedule_delete",
         ] {
             assert_eq!(local_tool_execution_mode(name), ToolExecutionMode::Ordered);
         }

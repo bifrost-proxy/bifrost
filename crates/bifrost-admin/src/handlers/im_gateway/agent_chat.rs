@@ -483,6 +483,10 @@ pub(super) async fn run_agent_chat_with_interleave(
     agent_client: &Arc<ImAgentClient>,
     agent_config_store: &Arc<ImAgentConfigStore>,
     agent_tools: &Arc<ImAgentToolRegistry>,
+    schedule_store: &Arc<ImScheduleStore>,
+    scheduler: &Arc<ImScheduler>,
+    target_store: &Arc<ImTargetStore>,
+    connection_manager: &Arc<ImConnectionManager>,
     agent_session_manager: &Arc<ImAgentSessionManager>,
     queue_manager: &Arc<SessionQueueManager>,
     progress_registry: &Arc<ImAgentProgressRegistry>,
@@ -521,6 +525,10 @@ pub(super) async fn run_agent_chat_with_interleave(
             agent_client,
             &agent_config,
             agent_tools,
+            schedule_store,
+            scheduler,
+            target_store,
+            connection_manager,
             agent_session_manager,
             progress_registry,
             session_key,
@@ -760,6 +768,10 @@ pub(super) async fn process_agent_chat(
     agent_client: &Arc<ImAgentClient>,
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
     agent_tools: &Arc<ImAgentToolRegistry>,
+    schedule_store: &Arc<ImScheduleStore>,
+    scheduler: &Arc<ImScheduler>,
+    target_store: &Arc<ImTargetStore>,
+    connection_manager: &Arc<ImConnectionManager>,
     session_manager: &Arc<ImAgentSessionManager>,
     progress_registry: &Arc<ImAgentProgressRegistry>,
     session_key: &str,
@@ -985,11 +997,35 @@ pub(super) async fn process_agent_chat(
         None
     };
 
+    let message_channel =
+        crate::im_gateway::send_msg_tool::message_channel_from_event(provider, event)
+            .or_else(|| agent_config.default_message_channel.clone());
+    let mut turn_tool_registry = (**agent_tools).clone();
+    crate::im_gateway::schedule_tools::register_schedule_tools(
+        &mut turn_tool_registry,
+        schedule_store.clone(),
+        scheduler.clone(),
+        target_store.clone(),
+        crate::im_gateway::schedule_tools::ScheduleToolContext {
+            message_channel: message_channel.clone(),
+        },
+    );
+    turn_tool_registry.register(Arc::new(
+        crate::im_gateway::send_msg_tool::SendMsgTool::new(
+            provider_store.clone(),
+            target_store.clone(),
+            message_log_store.clone(),
+            connection_manager.clone(),
+            crate::im_gateway::send_msg_tool::SendMsgToolContext { message_channel },
+        ),
+    ));
+    let turn_tools = Arc::new(turn_tool_registry);
+
     let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
         agent_client,
         agent_config,
         &mut session,
-        agent_tools,
+        &turn_tools,
         mcp,
         user_message,
         images,
@@ -1014,7 +1050,7 @@ pub(super) async fn process_agent_chat(
                 agent_client,
                 agent_config,
                 &mut session,
-                agent_tools,
+                &turn_tools,
                 None, // MCP already consumed in first attempt
                 user_message,
                 images,

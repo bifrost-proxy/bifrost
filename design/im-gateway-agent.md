@@ -249,12 +249,100 @@ pub struct ImAgentConfig {
     pub by_azure: bool,
     /// 是否启用 Agent 功能
     pub enabled: bool,
+    /// Agent 在没有 IM 入站来源时使用的默认消息发送通道
+    pub default_message_channel: Option<ImMessageChannelBinding>,
 }
 ```
 
 **配置持久化**：通过 `ImAgentConfigStore` 存储为 JSON 文件（`im_agent_config.json`），支持热更新。
 
-### 1.1 Provider 级 Agent 基础配置覆盖
+### 1.1 Agent 默认消息通道与 send_msg 工具
+
+Agent loop 需要一个直接向用户发送消息的工具，但模型不应感知飞书、微信等通道的底层差异。对模型暴露的工具名固定为 `send_msg`；实际可发送的消息类型、默认目标和参数 schema 由 IM Gateway 在每个 turn 开始前根据消息来源、任务绑定和 Agent 配置动态注入。
+
+#### 统一消息通道绑定
+
+消息发送目标使用 provider-neutral 的通道绑定表达：
+
+```rust
+pub enum MessageTargetMode {
+    SourceThread,
+    SourceUser,
+    Owner,
+    ConfiguredTarget,
+}
+
+pub struct ImMessageChannelBinding {
+    pub provider_id: String,
+    pub target_id: String,
+    pub target_mode: MessageTargetMode,
+}
+```
+
+字段语义：
+
+- `provider_id`：发送消息使用的 IM Provider，例如 `feishu-main` 或 `wechat-main`。
+- `target_id`：安全目标引用，可以是已配置 target id，也可以是 `__owner__` 这类后端解析的特殊目标；不向模型暴露 open_id、chat_id、secret 等底层字段。
+- `target_mode`：描述 target 的解析方式。`SourceThread` / `SourceUser` 只能来自当前 inbound event；`Owner` 解析为 provider owner；`ConfiguredTarget` 解析为已保存的 `ImTarget`。
+
+Agent 全局配置增加默认发送通道：
+
+```json
+{
+  "default_message_channel": {
+    "provider_id": "feishu-main",
+    "target_id": "__owner__",
+    "target_mode": "owner"
+  }
+}
+```
+
+该配置用于没有 IM 入站来源的 Agent 场景，例如 WebUI `/agent/chat`、Admin API 触发、手动执行 Agent schedule。Provider 级 `agent_config` 仍只覆盖工作目录和 instructions，不覆盖默认发送通道；默认发送通道属于 Agent 全局可见的 outbound 配置，避免同一个 Provider 同时承担 prompt 覆盖和发送策略两种职责。
+
+#### send_msg 注入规则
+
+`send_msg` 不注册进全局 `ToolRegistry::with_defaults()`。IM Gateway 在进入 agent turn 前构造 `AgentMessageContext`，然后为本 turn 克隆一个工具 registry 并注入 `send_msg`：
+
+```rust
+pub struct AgentMessageContext {
+    pub inbound_source: Option<ImInboundSource>,
+    pub task_message_channel: Option<ImMessageChannelBinding>,
+    pub agent_default_channel: Option<ImMessageChannelBinding>,
+    pub provider_capability: ImSendCapability,
+}
+```
+
+注入策略：
+
+1. 飞书/微信消息触发 Agent 时，`inbound_source` 自动携带当前 provider、来源群/用户和 message id。
+2. schedule/route/manual run 触发 Agent 时，优先携带任务保存的 `task_message_channel`。
+3. WebUI/API 触发 Agent 时，使用 `agent_default_channel`。
+4. 三者都不存在时，不注入 `send_msg`，或注入后执行返回明确配置错误：需要配置默认发送通道或显式绑定任务目标。
+
+`send_msg` 作为外部可见副作用工具，必须按 ordered 工具执行，不能进入并行 batch。它的 tool result 只返回 safe summary：`success`、`provider_id`、`target_mode`、`msg_type`、`message_id`、`content_preview` 和错误摘要；不得返回 token、secret、原始 provider config 或真实 receive id。
+
+#### 通道能力裁剪
+
+`send_msg` 的工具名固定，但 description 和 JSON schema 按 provider capability 动态生成：
+
+- 飞书支持 `text`、`markdown`、`interactive card` 时，schema 才出现 `format=card` 与 `card` 字段。
+- 微信如果仅支持 `text` / `markdown`，则 schema 只暴露这两类，不提示卡片能力。
+- 不支持的消息类型在模型可见 schema 中直接不可见，而不是等执行时报错。
+
+基础参数建议：
+
+```json
+{
+  "body": "要发送的文本或 markdown",
+  "format": "text|markdown|card",
+  "target": "default|current_thread|current_user|owner",
+  "card": {}
+}
+```
+
+`target=default` 的解析优先级是：tool call 显式安全目标、任务绑定通道、当前入站来源、Agent 默认发送通道。schedule 执行时必须优先使用 schedule 保存的任务绑定通道，不能因为后续对话来自另一个 IM 来源而漂移。
+
+### 1.2 Provider 级 Agent 基础配置覆盖
 
 IM Provider 支持可选 `agent_config`，用于给不同 IM 通道绑定不同的 Agent 基础运行上下文：
 

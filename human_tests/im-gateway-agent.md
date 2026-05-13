@@ -1682,3 +1682,66 @@ rm -rf ./.bifrost-test
   - 停止 Bifrost 进程和 mock 服务。
   - 删除本用例创建的临时 `BIFROST_DATA_DIR` 与 E2E target 目录（如适用）。
 - **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && CARGO_TARGET_DIR=target/agent-stop-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_stop_active_loop --test-timeout 120 --port 18886` 通过。用例启动真实 Admin + mock Chat Completions，发起包含 `AGENT_STOP_E2E` 的长请求；同 session `/status` 返回 `active_status`；同 session `/stop` 返回 `stopped=true`；原 chat 快速返回包含 `/stop` 的停止提示；随后同 session 普通 chat 返回 `success=true`。
+
+### TC-IMA-93: send_msg 默认消息通道与 schedule 绑定设计一致性
+
+- **前置条件**:
+  - 本用例用于设计文档变更后的真实可检索性检查，不启动 Bifrost 服务。
+  - 技术方案已写入 `design/im-gateway-agent.md` 和 `design/im-gateway.md`。
+- **操作步骤**:
+  1. 执行 `rg -n "default_message_channel|ImMessageChannelBinding|send_msg|AgentMessageContext" design/im-gateway-agent.md design/im-gateway.md`。
+  2. 执行 `rg -n "schedule.message_channel|任务绑定|默认发送通道|来源通道" design/im-gateway-agent.md design/im-gateway.md`。
+  3. 执行 `rg -n "TC-IMA-93|send_msg 默认消息通道" human_tests/im-gateway-agent.md human_tests/readme.md`。
+- **预期结果**:
+  - 技术文档明确说明 Agent 配置中的 `default_message_channel`。
+  - 技术文档明确说明 `send_msg` 是统一工具名，飞书/微信能力通过动态 description 和 schema 裁剪。
+  - 技术文档明确说明手动 schedule 必须绑定 IM 通道，Agent 创建 schedule 时自动继承当前来源或默认通道。
+  - 技术文档明确说明 schedule 执行发送消息时优先使用任务保存的 `message_channel`，不会使用最近 IM 对话来源。
+  - `human_tests/readme.md` 索引包含本用例覆盖点。
+- **执行记录（2026-05-13）**: PASS — 执行 `rg -n "default_message_channel|ImMessageChannelBinding|send_msg|AgentMessageContext" design/im-gateway-agent.md design/im-gateway.md`，命中 Agent 配置默认发送通道、统一 `send_msg` 工具和 turn 级 `AgentMessageContext`；执行 `rg -n "schedule.message_channel|任务绑定|默认发送通道|来源通道" design/im-gateway-agent.md design/im-gateway.md`，命中 schedule 绑定通道、默认通道和任务执行目标不漂移规则；执行 `rg -n "TC-IMA-93|send_msg 默认消息通道" human_tests/im-gateway-agent.md human_tests/readme.md`，确认 human_tests 用例与索引均可检索。
+
+### TC-IMA-94: send_msg 默认通道与 Agent 创建 schedule 真实链路
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动真实 Bifrost Admin，启动参数必须包含 `--no-system-proxy`。
+  - Agent Provider 指向 OpenAI-compatible mock Chat Completions 服务。
+  - IM Provider 使用 Weixin mock 服务，并配置 `owner_open_id`、`app_id`、`secret_ref` 和 `base_url`。
+  - Agent 配置包含 `default_message_channel`，绑定到 Weixin mock provider 的 owner 通道。
+- **操作步骤**:
+  1. 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh`。
+  2. E2E 脚本启动 mock 模型服务和 Weixin sendmessage mock 服务。
+  3. E2E 脚本通过 `/agent/chat` 触发模型返回 `send_msg` 和 `schedule_create` tool calls。
+  4. 检查 mock Weixin sendmessage 请求日志。
+  5. 检查 `/api/im-gateway/schedules` 返回的 schedule JSON。
+- **预期结果**:
+  - 模型请求中的 tools 同时包含 `send_msg` 和 `schedule_create`。
+  - `send_msg` 不需要显式 `provider_id` / `target_id`，会使用 Agent 配置的 `default_message_channel`。
+  - Weixin mock sendmessage 收到 `to_user_id=mock-user@im.wechat`，文本为 `hello via send_msg`。
+  - Agent 创建的 `default-bound-schedule` 即使未显式传入 `target_id` / `message_channel`，也会自动写入 `message_channel.provider_id=weixin-mock`、`target_mode=owner`、`target_id=mock-user@im.wechat`。
+  - Bifrost 进程使用临时数据目录，不修改系统代理。
+- **清理步骤**:
+  - E2E 脚本退出时停止 Bifrost 与 mock 服务。
+  - E2E 脚本删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-13）**: PASS — 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过。脚本真实启动 Bifrost Admin、mock Chat Completions 和 Weixin sendmessage；模型请求校验到 `send_msg` 与 `schedule_create`；`send_msg` 使用默认通道发送到 Weixin owner；schedule 创建结果持久化 `message_channel` 默认绑定。
+
+### TC-IMA-95: 真实用户默认 IM 通道 send_msg 模型兼容链路
+
+- **前置条件**:
+  - 从 `~/.bifrost` 复制真实用户 IM Provider 与 Agent 配置到临时 `BIFROST_DATA_DIR`，避免污染默认数据目录。
+  - 用当前源码启动 Bifrost：`BIFROST_DATA_DIR=<temp> cargo run --bin bifrost -- start -p 18955 --unsafe-ssl --no-system-proxy`。
+  - Agent 配置 `default_message_channel` 绑定到真实可用的 Feishu `bifrost` provider owner 通道。
+- **操作步骤**:
+  1. 通过 `/api/im-gateway/messages/send` 向 `provider_id=bifrost,target_id=owner` 发送一条预检文本。
+  2. 通过 `PATCH /api/im-gateway/agent` 设置 `default_message_channel`。
+  3. 调用 `POST /api/im-gateway/agent/chat`，system prompt 要求模型只调用一次 `send_msg`，发送唯一时间戳文本。
+  4. 检查 chat API 的 `tool_calls`，确认 `send_msg` 成功。
+  5. 检查 `admin/im_gateway_message_logs.json`，确认存在 `trigger=agent_tool:send_msg`、`status=success`、真实 `message_id`。
+- **预期结果**:
+  - 真实模型接口接受 `send_msg` 工具 schema，不因顶层 `anyOf` / `oneOf` 等组合关键字拒绝请求。
+  - `send_msg` 不传 `provider_id` / `target_id` 时使用 Agent 默认通道。
+  - IM provider 返回真实 `message_id`，消息日志记录 `status=success`。
+  - 服务启动参数包含 `--no-system-proxy`，不修改系统代理。
+- **清理步骤**:
+  - 停止测试 Bifrost 进程。
+  - 删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-13）**: PASS — 真实启动当前源码 Bifrost，预检直发 Feishu `bifrost` provider 成功，返回 `om_x100b6f744c70b93cc32aa02b96e1ea3`；首次 `/agent/chat` 暴露 AIDP schema 兼容问题（`send_msg` 顶层 `anyOf` 被拒绝），修复 schema 后重启复测通过。chat 返回 `tool_calls[0].tool_name=send_msg`、`success=true`，工具结果包含真实 `message_id=om_x100b6f74423a54a0c2945f565987a08`；消息日志记录 `trigger=agent_tool:send_msg`、`status=success`、文本 `Bifrost agent chat send_msg real test 20260513-124040`。

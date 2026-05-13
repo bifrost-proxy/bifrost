@@ -14,6 +14,7 @@ pub mod run_store;
 pub mod schedule_store;
 pub mod schedule_tools;
 pub mod scheduler;
+pub mod send_msg_tool;
 pub mod target_store;
 pub mod task_executor;
 pub mod types;
