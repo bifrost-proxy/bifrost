@@ -104,6 +104,7 @@ pub struct ImGatewayService {
     pub message_log_store: Arc<ImMessageLogStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
+    pub agent_data_dir: std::path::PathBuf,
     pub agent_client: Arc<ImAgentClient>,
     pub agent_tools: Arc<ImAgentToolRegistry>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
@@ -129,7 +130,8 @@ impl ImGatewayService {
         let schedule_store = Arc::new(ImScheduleStore::new(data_dir));
         let scheduler = Arc::new(ImScheduler::new());
         let target_store = Arc::new(ImTargetStore::new(data_dir));
-        let mut agent_tools = ImAgentToolRegistry::with_defaults();
+        let mut agent_tools =
+            ImAgentToolRegistry::with_agent_config_and_home(&agent_config, agent_data_dir.clone());
         crate::im_gateway::schedule_tools::register_schedule_tools(
             &mut agent_tools,
             schedule_store.clone(),
@@ -153,6 +155,7 @@ impl ImGatewayService {
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
             connection_manager: Arc::new(ImConnectionManager::new()),
             agent_config_store,
+            agent_data_dir,
             agent_client: Arc::new(agent_client),
             agent_tools,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
@@ -168,7 +171,11 @@ impl ImGatewayService {
         &self,
         message_channel: Option<crate::im_gateway::types::ImMessageChannelBinding>,
     ) -> Arc<ImAgentToolRegistry> {
-        let mut registry = (*self.agent_tools).clone();
+        let agent_config = self.agent_config_store.load();
+        let mut registry = ImAgentToolRegistry::with_agent_config_and_home(
+            &agent_config,
+            self.agent_data_dir.clone(),
+        );
         crate::im_gateway::schedule_tools::register_schedule_tools(
             &mut registry,
             self.schedule_store.clone(),

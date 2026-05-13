@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 bifrost-admin = { path = "../bifrost-admin" }
+bifrost-agent = { path = "../agent" }
 bifrost-command = { path = "../bifrost-command" }
 bifrost-core = { path = "../bifrost-core" }
 bifrost-proxy = { path = "../bifrost-proxy" }

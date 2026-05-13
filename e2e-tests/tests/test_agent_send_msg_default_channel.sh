@@ -231,6 +231,39 @@ channel = schedule.get("message_channel") or {}
 assert channel.get("provider_id") == "weixin-mock", schedule
 assert channel.get("target_mode") == "owner", schedule
 assert channel.get("target_id") == "mock-user@im.wechat", schedule
+
+target_body = json.dumps({
+    "id": "configured-target",
+    "provider_id": "weixin-mock",
+    "receive_id_type": "open_id",
+    "receive_id": "configured-user@im.wechat",
+    "display_name": "Configured User",
+    "default_msg_type": "text",
+    "enabled": True,
+}).encode("utf-8")
+target_req = urllib.request.Request(
+    sys.argv[3] + "/targets",
+    data=target_body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(target_req) as resp:
+    assert resp.status == 200
+
+patch_body = json.dumps({"target_id": "configured-target"}).encode("utf-8")
+patch_req = urllib.request.Request(
+    sys.argv[3] + "/schedules/default-bound-schedule",
+    data=patch_body,
+    headers={"Content-Type": "application/json"},
+    method="PATCH",
+)
+with urllib.request.urlopen(patch_req) as resp:
+    updated = json.loads(resp.read().decode("utf-8"))
+updated_channel = updated.get("message_channel") or {}
+assert updated.get("target_id") == "configured-target", updated
+assert updated_channel.get("provider_id") == "weixin-mock", updated
+assert updated_channel.get("target_mode") == "configured_target", updated
+assert updated_channel.get("target_id") == "configured-target", updated
 PY
 
 echo "[agent-send-msg-default-channel] PASS"

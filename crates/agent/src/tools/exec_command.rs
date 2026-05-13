@@ -934,7 +934,8 @@ mod tests {
             .to_string();
         assert_eq!(value["exit_code"], serde_json::Value::Null);
 
-        for _ in 0..20 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if manager.has_completed_session(&session_id).await {
                 break;
             }

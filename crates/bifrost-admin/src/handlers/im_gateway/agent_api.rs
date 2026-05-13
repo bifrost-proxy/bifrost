@@ -56,8 +56,15 @@ pub(super) async fn handle_agent(
         if req.method() != Method::GET {
             return method_not_allowed();
         }
-        let tools = service.agent_tools.definitions();
+        let config = service.agent_config_store.load();
+        let tools = service
+            .build_agent_tool_registry(config.default_message_channel.clone())
+            .definitions();
         return json_response(&serde_json::json!({ "tools": tools }));
+    }
+
+    if let Some(research_rest) = rest.strip_prefix("/research") {
+        return super::agent_research::handle_agent_research(req, service, research_rest).await;
     }
 
     if let Some(skills_rest) = rest.strip_prefix("/skills") {

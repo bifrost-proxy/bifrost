@@ -151,7 +151,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 52 | AI 一级页内 IM Gateway 子导航、Handler 模块化拆分回归、CI Windows Rules timeout 回归、窄宽度布局滚动回归、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、创建 Provider 时 app_secret 正确保存且响应脱敏、Display Name 可省略、创建后立即连接并通知 owner 且通知包含 Provider 自定义工作目录、两个飞书机器人 token 缓存隔离、编辑 Provider 补填 App Secret、重复 Provider ID 错误展示、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、Schedule 手动新增 Script/Agent、Schedule 详情与运行历史、Schedule 绑定消息通道、真实 Agent Schedule 使用绑定 IM 通道发送消息、History Task Runs 完整详情、Agent Chat 创建和更新 Script/Agent 定时任务、Agent schedule CRUD 工具、CLI messages 命令（list/clear/direction/source 筛选）、IM CLI 未传 provider 时选择 provider 并默认发送给 owner、图片消息上传发送、图文卡片便捷发送、原始 card JSON 兼容、Agent Markdown 图片自动上传与缓存 |
+| [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 53 | AI 一级页内 IM Gateway 子导航、Handler 模块化拆分回归、CI Windows Rules timeout 回归、窄宽度布局滚动回归、CLI im 命令、API CRUD（Provider/Target/Route/Schedule/History）、WebUI 渲染、创建 Provider 时 app_secret 正确保存且响应脱敏、Display Name 可省略、创建后立即连接并通知 owner 且通知包含 Provider 自定义工作目录、两个飞书机器人 token 缓存隔离、编辑 Provider 补填 App Secret、重复 Provider ID 错误展示、owner_open_id 安全过滤、Outbound/Inbound 消息记录、WebSocket 长连接、OK Reaction、Schedule 手动执行与结果发送、Schedule 手动新增 Script/Agent、Schedule 详情与运行历史、Schedule 绑定消息通道、真实 Agent Schedule 使用绑定 IM 通道发送消息、更新 schedule target_id 后重新绑定消息通道、History Task Runs 完整详情、Agent Chat 创建和更新 Script/Agent 定时任务、Agent schedule CRUD 工具、CLI messages 命令（list/clear/direction/source 筛选）、IM CLI 未传 provider 时选择 provider 并默认发送给 owner、图片消息上传发送、图文卡片便捷发送、原始 card JSON 兼容、Agent Markdown 图片自动上传与缓存 |
 | [im-gateway-agent.md](./im-gateway-agent.md) | IM Gateway Agent 对话能力 | 105 | AI 一级页整合 Agent 与 IM Gateway 子导航、Agent 配置 API、分层 prompt、Sessions/History/WebUI、飞书消息触发 Agent、多轮上下文、/clear、/status、/stop、MCP/Skills/AGENTS.md、Provider 级 Agent 配置、动态工作目录、Agent 默认发送通道、send_msg 默认消息通道、send_msg 统一工具与 schedule 绑定消息通道、send_msg 默认通道真实链路、真实用户默认 IM 通道 send_msg 模型兼容链路、Agent 模型 reasoning 参数可在 WebUI 关闭、Provider Connection 与 Memories 默认值 placeholder、Runtime Settings 恢复默认值、retry 与 orphan tool 防回归、飞书卡片折叠面板与流式进度卡片（Agent loop CardKit streaming progress、标题跟随 set_title、可选 plan/tool/thinking 模块、plan 标题显示当前任务、thinking 标题显示一行摘要、最终输出置底、guide/queue 同卡刷新折叠状态区并在标题给出轻量可见反馈）、Session Title、Goal 模式、图片多模态理解、边界测试与回归（CI E2E 启动器、tool message 序列、默认 Bifrost 代理入 Traffic 等） |
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 3 | /help 返回所有可用命令列表及描述、不再返回"未知命令"、真正未知命令仍报错 |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 14 | SessionQueueManager 单元测试（14项，含多 guide 累积、pending status、turn-end guide drain 与 guide 优先于 queue 回归）、guide_channel 字段集成、服务启动、API 验证、handle_busy_message 路由（/q 排队、/rq 删除、默认引导）、tokio::select! 交错处理、并发事件路由、mid-turn 注入、`/agent/chat` 注入式 guide/queue 黑盒真实链路（多 guide `/status` 明细与合并消费、turn-end guide、FIFO drain、guide 优先、空白忽略）、全量测试 |
@@ -164,6 +164,7 @@
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归 |
 | [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
 | [agent-skills-admin-cli.md](./agent-skills-admin-cli.md) | Agent Skills Admin and CLI | 3 | Skill import multipart/bytes 接口、AgentSkillError 错误码分层、IM CLI secret 缺失错误 |
+| [agent-research-pack.md](./agent-research-pack.md) | Agent Research Pack | 25 | 内置全部 Research provider 配置入口、联网搜索、火山联网搜索 Provider 与 ARK_TOKEN 鉴权配置、火山/Tavily/Exa API key 获取指引、`语音大模型` 全源搜索与 Markdown 解析、真实 Sogou 微信搜索及验证码阻断判定、Sogou 微信 CDP 自动启动、本地 SQLite/FTS 知识库、Markdown artifact 沉淀、Research 工具注册、CLI 初始化/搜索/安全 fetch、系统 Research Skill、Agent Settings Research 页面与明暗主题、Research WebUI 关键词搜索 workbench、provider 级流式搜索、Agent research_search 工具 provider 级进度、per-provider limit、CI Rust cache 不恢复 cargo/rustup bin、来源 supported/authorized/logged-in 状态展示、Agent Loop 真实 chat 调用、Sogou 微信公众号 CDP 真实搜索与详情抓取、飞书凭据不可用时生成可上传 Markdown |
 
 ### Agent MCP 协议模块测试
 
@@ -175,7 +176,7 @@
 
 ---
 
-**总计：96 个测试文件，1630 个测试用例**
+**总计：97 个测试文件，1639 个测试用例**
 
 ## 工作流程
 

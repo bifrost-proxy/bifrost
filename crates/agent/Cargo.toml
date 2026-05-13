@@ -31,6 +31,7 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 url = "2.5"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 open = "5"
 bm25 = "2.3.2"
 keyring = { version = "3", optional = true }

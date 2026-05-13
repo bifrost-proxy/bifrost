@@ -68,6 +68,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -87,6 +89,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           save-if: always()
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
@@ -108,6 +111,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           save-if: always()
       - name: Build release binary
         run: cargo build --release --bin bifrost
@@ -144,6 +148,8 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - name: Download release binary
         uses: actions/download-artifact@v4
         with:
@@ -228,6 +234,8 @@ jobs:
         working-directory: packages/bifrost-sync-server
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - name: Download release binary
         uses: actions/download-artifact@v4
         with:
@@ -289,6 +297,8 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
@@ -337,6 +347,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: linux-x86_64
       - name: Build Linux workspace
         run: cargo build --workspace --release --target x86_64-unknown-linux-gnu
@@ -362,6 +373,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: linux-aarch64
       - name: Build Linux CLI (aarch64)
         env:
@@ -391,6 +403,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: linux-armv7
       - name: Build Linux CLI (armv7)
         env:
@@ -420,6 +433,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: linux-musl-x86_64
       - name: Build Linux CLI (x86_64-musl)
         env:
@@ -449,6 +463,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: linux-musl-aarch64
       - name: Build Linux CLI (aarch64-musl)
         env:
@@ -477,6 +492,7 @@ jobs:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: cli-build-aarch64-apple-darwin
           save-if: always()
       - name: Build CLI
@@ -499,6 +515,7 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: cli-build-x86_64-apple-darwin
           save-if: always()
       - name: Build CLI
@@ -539,6 +556,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: e2e-aarch64-apple-darwin
       - name: Download release binary
         uses: actions/download-artifact@v4
@@ -625,6 +643,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: e2e-aarch64-apple-darwin
       - name: Download release binary
         uses: actions/download-artifact@v4
@@ -688,6 +707,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: e2e-aarch64-apple-darwin
       - name: E2E runner tests
         shell: bash
@@ -751,6 +771,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: desktop-bundle-${{ matrix.target }}
       - name: Download workspace binaries
         uses: actions/download-artifact@v4
@@ -852,6 +873,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: cli-build-${{ matrix.target }}
           save-if: always()
       - name: Build CLI
@@ -896,6 +918,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: desktop-windows-${{ matrix.target }}
           save-if: always()
       - name: Download CLI binary
@@ -972,6 +995,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: e2e-${{ matrix.target }}
       - name: Install jq
         shell: powershell
@@ -1053,6 +1077,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: e2e-${{ matrix.target }}
       - name: E2E runner tests
         shell: bash

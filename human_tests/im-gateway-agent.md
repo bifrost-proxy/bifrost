@@ -1713,16 +1713,18 @@ rm -rf ./.bifrost-test
   3. E2E 脚本通过 `/agent/chat` 触发模型返回 `send_msg` 和 `schedule_create` tool calls。
   4. 检查 mock Weixin sendmessage 请求日志。
   5. 检查 `/api/im-gateway/schedules` 返回的 schedule JSON。
+  6. 通过 `/api/im-gateway/targets` 新建 `configured-target`，再 PATCH `/api/im-gateway/schedules/default-bound-schedule`，仅传入 `target_id=configured-target`。
 - **预期结果**:
   - 模型请求中的 tools 同时包含 `send_msg` 和 `schedule_create`。
   - `send_msg` 不需要显式 `provider_id` / `target_id`，会使用 Agent 配置的 `default_message_channel`。
   - Weixin mock sendmessage 收到 `to_user_id=mock-user@im.wechat`，文本为 `hello via send_msg`。
   - Agent 创建的 `default-bound-schedule` 即使未显式传入 `target_id` / `message_channel`，也会自动写入 `message_channel.provider_id=weixin-mock`、`target_mode=owner`、`target_id=mock-user@im.wechat`。
+  - PATCH 旧 `target_id` 后，响应中的 `target_id=configured-target`，且 `message_channel` 不再保留 owner 默认通道，而是更新为 `provider_id=weixin-mock,target_mode=configured_target,target_id=configured-target`。
   - Bifrost 进程使用临时数据目录，不修改系统代理。
 - **清理步骤**:
   - E2E 脚本退出时停止 Bifrost 与 mock 服务。
   - E2E 脚本删除临时 `BIFROST_DATA_DIR`。
-- **执行记录（2026-05-13）**: PASS — 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过。脚本真实启动 Bifrost Admin、mock Chat Completions 和 Weixin sendmessage；模型请求校验到 `send_msg` 与 `schedule_create`；`send_msg` 使用默认通道发送到 Weixin owner；schedule 创建结果持久化 `message_channel` 默认绑定。
+- **执行记录（2026-05-13）**: PASS — 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过。脚本真实启动 Bifrost Admin、mock Chat Completions 和 Weixin sendmessage；模型请求校验到 `send_msg` 与 `schedule_create`；`send_msg` 使用默认通道发送到 Weixin owner；schedule 创建结果持久化 `message_channel` 默认绑定；随后创建 `configured-target` 并 PATCH 旧 `target_id`，确认响应中的 `message_channel` 从 owner 默认通道重新绑定为 `configured_target`。
 
 ### TC-IMA-95: 真实用户默认 IM 通道 send_msg 模型兼容链路
 

@@ -34,6 +34,7 @@ use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 mod agent_api;
 mod agent_chat;
 mod agent_reply;
+mod agent_research;
 mod event_loop;
 mod messages;
 mod providers;

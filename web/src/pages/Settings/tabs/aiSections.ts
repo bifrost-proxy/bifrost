@@ -4,6 +4,7 @@ export type AgentSectionId =
   | "runtime"
   | "history"
   | "memories"
+  | "research"
   | "skills"
   | "memory-records"
   | "mcp-servers"
@@ -15,6 +16,7 @@ export const AGENT_SECTION_NAV: Array<{ id: AgentSectionId; label: string }> = [
   { id: "runtime", label: "Runtime" },
   { id: "history", label: "History" },
   { id: "memories", label: "Memories" },
+  { id: "research", label: "Research" },
   { id: "skills", label: "Skills" },
   { id: "memory-records", label: "Memory Records" },
   { id: "mcp-servers", label: "MCP Servers" },

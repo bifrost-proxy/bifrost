@@ -90,6 +90,15 @@ impl ImAgentProgressSnapshot {
                     duration_ms: None,
                 });
             }
+            AgentTurnProgressEvent::ToolProgress { tool_name, message } => {
+                self.latest_tool = Some(ProgressToolSummary {
+                    tool_name,
+                    arguments: None,
+                    success: None,
+                    result_preview: Some(truncate_str(&message, 160)),
+                    duration_ms: None,
+                });
+            }
             AgentTurnProgressEvent::ToolFinished { log, duration_ms } => {
                 self.latest_tool = Some(ProgressToolSummary {
                     tool_name: log.tool_name.clone(),

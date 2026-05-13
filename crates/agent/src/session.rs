@@ -2812,6 +2812,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 );
 
                 let mut futures = FuturesOrdered::new();
+                let progress_sender = session.progress_sender.clone();
                 for batch_index in batch_start..batch_end {
                     let batch_tc = &response.tool_calls[batch_index];
                     let tool_started_at =
@@ -2821,8 +2822,11 @@ pub async fn run_turn_with_mcp_multimodal(
                         .expect("parallel local tool was resolved before scheduling");
                     let arguments = batch_tc.arguments().to_string();
                     let batch_work_dir = work_dir.clone();
+                    let progress_sender = progress_sender.clone();
                     futures.push_back(async move {
-                        let result = handler.execute(&arguments, &batch_work_dir).await;
+                        let result = handler
+                            .execute_with_progress(&arguments, &batch_work_dir, progress_sender)
+                            .await;
                         (batch_index, result, tool_started_at)
                     });
                 }
@@ -2923,7 +2927,14 @@ pub async fn run_turn_with_mcp_multimodal(
                     }
                 } else {
                     // Route to local tool registry
-                    tools.execute(tc.name(), tc.arguments(), &work_dir).await
+                    tools
+                        .execute_with_progress(
+                            tc.name(),
+                            tc.arguments(),
+                            &work_dir,
+                            session.progress_sender.clone(),
+                        )
+                        .await
                 }
             };
             let result = if let Some(signal) = stop_signal {

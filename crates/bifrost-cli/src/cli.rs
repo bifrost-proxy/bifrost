@@ -541,6 +541,118 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(about = "Manage Bifrost Agent capabilities")]
+    Agent {
+        #[command(subcommand)]
+        action: AgentCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentCommands {
+    #[command(about = "Manage Agent Research Pack")]
+    Research {
+        #[command(subcommand)]
+        action: AgentResearchCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentResearchCommands {
+    #[command(about = "Initialize Research Pack configuration")]
+    Init {
+        #[arg(long, default_value = "personal-cn")]
+        preset: String,
+        #[arg(long = "web-provider", default_value = "generic")]
+        web_provider: String,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(
+            long,
+            help = "Enable Sogou WeChat crawling through an existing Chrome DevTools endpoint, for example http://127.0.0.1:9222"
+        )]
+        wechat_cdp_endpoint: Option<String>,
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    #[command(about = "Test a configured research provider")]
+    Provider {
+        #[command(subcommand)]
+        action: AgentResearchProviderCommands,
+    },
+    #[command(about = "Search configured research providers")]
+    Search {
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        #[arg(long)]
+        wechat: bool,
+        #[arg(
+            long,
+            help = "Fetch top result pages and include markdown content artifacts"
+        )]
+        fetch_content: bool,
+    },
+    #[command(about = "Fetch a URL as research markdown")]
+    Fetch {
+        url: String,
+        #[arg(long)]
+        max_bytes: Option<usize>,
+    },
+    #[command(about = "Search local research knowledge")]
+    Knowledge {
+        #[command(subcommand)]
+        action: AgentResearchKnowledgeCommands,
+    },
+    #[command(about = "Read or generate research reports")]
+    Report {
+        #[command(subcommand)]
+        action: AgentResearchReportCommands,
+    },
+    #[command(about = "Run configured research tasks")]
+    Task {
+        #[command(subcommand)]
+        action: AgentResearchTaskCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentResearchProviderCommands {
+    Test {
+        provider: Option<String>,
+        #[arg(long, default_value = "bifrost research test")]
+        query: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentResearchKnowledgeCommands {
+    Search {
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentResearchReportCommands {
+    Latest {
+        task_id: Option<String>,
+    },
+    Generate {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentResearchTaskCommands {
+    List,
+    Run { task_id: String },
 }
 
 #[derive(Subcommand, Clone)]

@@ -743,3 +743,24 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 停止测试 Bifrost 进程。
   - 删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-05-13）**: PASS — 创建 `real-agent-schedule-20260513-124107`，保存结果包含 `message_channel.provider_id=bifrost,target_mode=owner,target_id=owner` 且 `enabled=false`。手动触发 `/run` 返回 `run_id=8864e487,status=Success,duration_ms=7638,stdout_preview=schedule send_msg succeeded`。运行历史中 `agent_tool_calls[0].tool_name=send_msg,success=true`，工具结果包含真实 `message_id=om_x100b6f74403218acc45ca19e00d32f4`。消息日志同时记录 schedule 内部 `send_msg` 成功和完成通知成功，完成通知 message_id 为 `om_x100b6f74418a5ca8c22d79d534bd554`。
+
+### TC-IMG-53: 回归 - 更新 schedule target_id 后重新绑定消息通道
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动真实 Bifrost Admin，启动参数必须包含 `--no-system-proxy`。
+  - 已创建 `weixin-mock` IM Provider，且 `owner_open_id=mock-user@im.wechat`。
+  - 已通过 Agent `schedule_create` 或 API 创建 `default-bound-schedule`，其初始 `message_channel.target_mode=owner`。
+- **操作步骤**:
+  1. 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh`。
+  2. 脚本先通过 `/agent/chat` 创建使用默认 owner 通道的 `default-bound-schedule`。
+  3. 脚本通过 `/targets` 创建 `configured-target`，再 PATCH `/schedules/default-bound-schedule`，请求体仅包含 `{"target_id":"configured-target"}`。
+  4. 检查 PATCH 响应中的 `target_id` 与 `message_channel`。
+- **预期结果**:
+  - PATCH 响应的 `target_id` 为 `configured-target`。
+  - 旧 owner `message_channel` 不会继续保留。
+  - 响应中的 `message_channel.provider_id=weixin-mock`、`target_mode=configured_target`、`target_id=configured-target`。
+  - 该回归覆盖原 Bug：只更新旧 `target_id` 时，历史 `message_channel` 优先级更高导致 schedule 后续仍发往旧 owner/default 通道。
+- **清理步骤**:
+  - E2E 脚本退出时停止 Bifrost 与 mock 服务。
+  - E2E 脚本删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-13）**: PASS — 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过；脚本在真实 Bifrost Admin 中复现“先由 Agent 默认通道创建 schedule，再仅 PATCH target_id”的路径，确认响应中的 `message_channel` 重新绑定为 `configured_target`，不再保留旧 owner 通道。

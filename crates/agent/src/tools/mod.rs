@@ -19,12 +19,14 @@ pub mod file_ops;
 pub mod goal;
 pub mod head_tail_buffer;
 pub mod request_user_input;
+pub mod research;
 pub mod set_title;
 pub mod switch_workdir;
 pub mod tool_search;
 pub mod update_plan;
 pub mod view_image;
 
+use crate::session_status::AgentTurnProgressSender;
 use crate::types::{ToolDefinition, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -45,6 +47,17 @@ pub trait ToolHandler: Send + Sync {
 
     /// Execute the tool with the given JSON arguments string.
     async fn execute(&self, arguments: &str, work_dir: &Path) -> ToolResult;
+
+    /// Execute the tool with an optional live progress channel.
+    async fn execute_with_progress(
+        &self,
+        arguments: &str,
+        work_dir: &Path,
+        progress_sender: Option<AgentTurnProgressSender>,
+    ) -> ToolResult {
+        let _ = progress_sender;
+        self.execute(arguments, work_dir).await
+    }
 }
 
 /// Registry of available tools.
@@ -97,6 +110,46 @@ impl ToolRegistry {
         registry
     }
 
+    /// Create a registry with built-ins plus config-gated tools.
+    pub fn with_agent_config(config: &crate::config::AgentConfig) -> Self {
+        Self::with_agent_config_and_home(config, crate::config::agent_home_dir())
+    }
+
+    /// Create a registry with built-ins plus config-gated tools using an explicit agent home.
+    pub fn with_agent_config_and_home(
+        config: &crate::config::AgentConfig,
+        agent_home: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let mut registry = Self::with_defaults();
+        let agent_home = agent_home.into();
+        if config
+            .research
+            .as_ref()
+            .is_some_and(|research| research.enabled)
+        {
+            match config
+                .research
+                .clone()
+                .map(|research| {
+                    crate::research::ResearchRuntime::from_config_with_home(
+                        research,
+                        agent_home.clone(),
+                    )
+                })
+                .transpose()
+            {
+                Ok(Some(runtime)) => {
+                    register_research_tools(&mut registry, runtime);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "research tools disabled due to invalid config");
+                }
+            }
+        }
+        registry
+    }
+
     /// Apply turn-level terminal runtime options to the shared exec session manager.
     pub fn configure_exec_sessions(&self, max_background_terminal_timeout_ms: u64) {
         if let Some(manager) = &self.exec_session_manager {
@@ -139,6 +192,27 @@ impl ToolRegistry {
         }
     }
 
+    /// Execute a tool by name with an optional live progress channel.
+    pub async fn execute_with_progress(
+        &self,
+        name: &str,
+        arguments: &str,
+        work_dir: &Path,
+        progress_sender: Option<AgentTurnProgressSender>,
+    ) -> ToolResult {
+        match self.handler(name) {
+            Some(handler) => {
+                handler
+                    .execute_with_progress(arguments, work_dir, progress_sender)
+                    .await
+            }
+            None => ToolResult {
+                success: false,
+                output: format!("unknown tool: {name}"),
+            },
+        }
+    }
+
     /// Resolve a local tool handler by its registered tool name.
     pub fn handler(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
         self.tools.get(name).cloned()
@@ -155,6 +229,17 @@ impl ToolRegistry {
         names.extend(goal::goal_tool_names().into_iter().map(str::to_string));
         names
     }
+}
+
+fn register_research_tools(registry: &mut ToolRegistry, runtime: crate::research::ResearchRuntime) {
+    let runtime = Arc::new(runtime);
+    registry.register(Arc::new(research::ResearchSearchTool::new(runtime.clone())));
+    registry.register(Arc::new(research::ResearchFetchTool::new(runtime.clone())));
+    registry.register(Arc::new(research::KnowledgeSearchTool::new(
+        runtime.clone(),
+    )));
+    registry.register(Arc::new(research::KnowledgeSaveTool::new(runtime.clone())));
+    registry.register(Arc::new(research::ResearchDigestTool::new(runtime)));
 }
 
 fn model_visible_tool_priority(name: &str) -> (u8, &str) {
@@ -192,6 +277,19 @@ mod tests {
         assert!(exec_command < write_stdin);
         assert!(!ToolRegistry::with_defaults().contains_tool("shell"));
         assert!(!ToolRegistry::with_defaults().contains_tool("shell_pty"));
+    }
+
+    #[test]
+    fn research_tools_are_config_gated() {
+        let disabled = crate::config::AgentConfig::default();
+        assert!(!ToolRegistry::with_agent_config(&disabled).contains_tool("research_search"));
+
+        let enabled = crate::config::AgentConfig {
+            research: Some(crate::research::default_enabled_config()),
+            ..crate::config::AgentConfig::default()
+        };
+        assert!(ToolRegistry::with_agent_config(&enabled).contains_tool("research_search"));
+        assert!(ToolRegistry::with_agent_config(&enabled).contains_tool("knowledge_save"));
     }
 
     #[tokio::test]

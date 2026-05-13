@@ -122,12 +122,105 @@ export interface AgentConfig {
   ephemeral?: boolean;
   // Memories subsystem (Codex-compatible)
   memories?: MemoriesConfig;
+  // Research Pack
+  research?: ResearchConfig;
   // Background terminal
   background_terminal_max_timeout?: number;
   // Provider-level fields (resolved from active provider)
   request_max_retries?: number;
   stream_idle_timeout_ms?: number;
   stream_max_retries?: number;
+}
+
+export type ResearchProviderType =
+  | "generic_web_search"
+  | "volc_web_search"
+  | "tavily"
+  | "exa"
+  | "custom_http"
+  | "sogou_wechat_cdp"
+  | "fixed_site"
+  | "mcp";
+
+export interface ResearchProviderConfig {
+  enabled: boolean;
+  type: ResearchProviderType;
+  base_url?: string;
+  api_key?: string;
+  env_key?: string;
+  headers?: Record<string, string>;
+  env_headers?: Record<string, string>;
+  search_url?: string;
+  fetch_url?: string;
+  request_template?: string;
+  rate_limit_per_minute?: number;
+  cdp_endpoint?: string;
+  browser_user_data_dir?: string;
+  site?: "arxiv" | "hacker_news" | "github_repositories";
+  search_type?: "web" | "web_summary" | "image" | string;
+  count?: number;
+  need_content?: boolean;
+  need_url?: boolean;
+  need_summary?: boolean;
+  content_formats?: "text" | "markdown" | string;
+  time_range?: "OneDay" | "OneWeek" | "OneMonth" | "OneYear" | string;
+  query_rewrite?: boolean;
+  sites?: string;
+  block_hosts?: string;
+  auth_info_level?: number;
+  industry?: "finance" | "game" | string;
+}
+
+export interface WechatResearchConfig {
+  enabled: boolean;
+  mode?: "fallback" | string;
+  min_results_before_fallback?: number;
+  provider?: string;
+  rate_limit_per_minute?: number;
+  max_pages_per_query?: number;
+}
+
+export interface ResearchConfig {
+  enabled: boolean;
+  preset?: string;
+  providers: Record<string, ResearchProviderConfig>;
+  provider_order?: string[];
+  wechat?: WechatResearchConfig;
+  cache?: {
+    enabled: boolean;
+    store?: string;
+    db_path?: string;
+    retention_days?: number;
+  };
+  defaults?: {
+    sources?: Array<"web" | "wechat">;
+    limit?: number;
+    fetch_content?: boolean;
+    language?: string;
+  };
+  fetch_policy?: {
+    allow_private_ip?: boolean;
+    allow_localhost?: boolean;
+    max_redirects?: number;
+    max_response_bytes?: number;
+    timeout_secs?: number;
+    user_agent?: string;
+  };
+  tasks?: ResearchTaskConfig[];
+}
+
+export interface ResearchTaskConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: { type: "cron"; expr: string; timezone: string } | { type: "interval"; every_ms: number };
+  queries: string[];
+  sources: Array<"web" | "wechat">;
+  max_results_per_query: number;
+  fetch_content: boolean;
+  dedupe_days?: number;
+  summarize?: boolean;
+  language?: string;
 }
 
 export interface SessionInfo {

@@ -51,6 +51,7 @@ import SkillsSection from "./agent/SkillsSection";
 import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
 import SessionDetailPage from "./agent/SessionDetailPage";
 import MemoriesSection from "./agent/MemoriesSection";
+import ResearchSection from "./agent/ResearchSection";
 import LongTextModalField from "./agent/LongTextModalField";
 
 const { Text } = Typography;
@@ -1355,6 +1356,23 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
             </Space>
           </Card>
         </Col>
+        )}
+
+        {/* Research */}
+        {activeSection === "research" && (
+          <Col
+            xs={24}
+            id="agent-settings-research"
+            data-agent-section="research"
+            data-testid="agent-settings-section-research"
+          >
+            <ResearchSection
+              value={config.research}
+              onChange={(research) =>
+                setConfig((prev) => (prev ? { ...prev, research } : prev))
+              }
+            />
+          </Col>
         )}
 
         {/* Skills */}

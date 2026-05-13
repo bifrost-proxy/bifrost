@@ -1,5 +1,8 @@
 use super::*;
-use crate::im_gateway::types::ImProviderType;
+use crate::im_gateway::types::{
+    ImMessageChannelBinding, ImProviderType, ImSchedule, MessageTargetMode, ScheduleAgentTask,
+    ScheduleTaskType, ScheduleTrigger, TaskScript,
+};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
@@ -397,6 +400,94 @@ pub(super) fn send_message_request_rejects_owner_without_provider() {
 
     assert_eq!(error.0, StatusCode::BAD_REQUEST);
     assert!(error.1.contains("provider_id is required"));
+}
+
+#[test]
+pub(super) fn agent_tool_registry_keeps_research_schedule_and_send_msg_tools() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut config = service.agent_config_store.load();
+    config.research = Some(bifrost_agent::research::default_enabled_config());
+    config.default_message_channel = Some(ImMessageChannelBinding {
+        provider_id: "feishu-main".to_string(),
+        target_id: "__owner__".to_string(),
+        target_mode: MessageTargetMode::Owner,
+    });
+    service
+        .agent_config_store
+        .save(&config)
+        .expect("save agent config");
+
+    let registry = service.build_agent_tool_registry(config.default_message_channel.clone());
+
+    assert!(registry.contains_tool("research_search"));
+    assert!(registry.contains_tool("knowledge_save"));
+    assert!(registry.contains_tool("schedule_create"));
+    assert!(registry.contains_tool("schedule_list"));
+    assert!(registry.contains_tool("send_msg"));
+}
+
+#[test]
+pub(super) fn schedule_patch_updates_and_rebinds_message_channel() {
+    let mut schedule = test_agent_schedule_with_message_channel();
+
+    apply_schedule_patch(
+        &mut schedule,
+        &serde_json::json!({
+            "message_channel": {
+                "provider_id": "weixin-new",
+                "target_id": "new-owner",
+                "target_mode": "owner"
+            }
+        }),
+    );
+
+    let channel = schedule.message_channel.expect("patched channel");
+    assert_eq!(channel.provider_id, "weixin-new");
+    assert_eq!(channel.target_id, "new-owner");
+    assert_eq!(channel.target_mode, MessageTargetMode::Owner);
+}
+
+#[test]
+pub(super) fn schedule_patch_target_id_clears_stale_message_channel() {
+    let mut schedule = test_agent_schedule_with_message_channel();
+
+    apply_schedule_patch(
+        &mut schedule,
+        &serde_json::json!({"target_id": "configured-target"}),
+    );
+
+    assert_eq!(schedule.target_id, "configured-target");
+    assert!(schedule.message_channel.is_none());
+}
+
+fn test_agent_schedule_with_message_channel() -> ImSchedule {
+    ImSchedule {
+        id: "schedule-1".to_string(),
+        name: "Schedule 1".to_string(),
+        enabled: false,
+        target_id: String::new(),
+        message_channel: Some(ImMessageChannelBinding {
+            provider_id: "feishu-old".to_string(),
+            target_id: "old-owner".to_string(),
+            target_mode: MessageTargetMode::Owner,
+        }),
+        trigger: ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: ScheduleTaskType::Agent,
+        script: TaskScript::default(),
+        agent: Some(ScheduleAgentTask {
+            prompt: "run agent".to_string(),
+            ..Default::default()
+        }),
+        timeout_ms: 30_000,
+        max_output_bytes: 1_048_576,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        created_at: 1,
+        updated_at: 1,
+    }
 }
 
 #[test]

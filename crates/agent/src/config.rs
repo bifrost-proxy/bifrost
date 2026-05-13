@@ -130,6 +130,11 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories: Option<MemoriesConfig>,
 
+    // -- Research Pack --
+    /// Web research, local knowledge store, and digest settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<crate::research::ResearchConfig>,
+
     // -- Background terminal --
     /// Maximum poll window for background terminal output (write_stdin), in ms.
     /// Default: 300000 (5 minutes).
@@ -444,6 +449,7 @@ impl Default for AgentConfig {
             history: None,
             ephemeral: false,
             memories: None,
+            research: None,
             background_terminal_max_timeout: Some(Self::DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS),
             default_message_channel: None,
         }
@@ -1060,6 +1066,7 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
         history: overlay.history.or(base.history),
         ephemeral: overlay.ephemeral || base.ephemeral,
         memories: overlay.memories.or(base.memories),
+        research: overlay.research.or(base.research),
         background_terminal_max_timeout: overlay
             .background_terminal_max_timeout
             .or(base.background_terminal_max_timeout),

@@ -552,6 +552,16 @@ pub(super) fn apply_schedule_patch(schedule: &mut ImSchedule, patch: &serde_json
     }
     if let Some(target_id) = patch.get("target_id").and_then(|v| v.as_str()) {
         schedule.target_id = target_id.to_string();
+        if patch.get("message_channel").is_none() {
+            schedule.message_channel = None;
+        }
+    }
+    if let Some(message_channel) = patch.get("message_channel") {
+        if message_channel.is_null() {
+            schedule.message_channel = None;
+        } else if let Ok(channel) = serde_json::from_value(message_channel.clone()) {
+            schedule.message_channel = Some(channel);
+        }
     }
     if let Some(timeout) = patch.get("timeout_ms").and_then(|v| v.as_u64()) {
         schedule.timeout_ms = timeout;

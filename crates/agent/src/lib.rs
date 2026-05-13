@@ -43,6 +43,7 @@ pub mod memory_guard;
 pub mod memory_prompts;
 pub mod persistence;
 pub mod prompt;
+pub mod research;
 pub mod session;
 pub mod session_status;
 pub mod skill_authoring;
@@ -60,6 +61,7 @@ pub use config::{
     ImMessageChannelBinding, McpServerConfig, MemoriesConfig, MessageTargetMode,
     ModelProviderConfig, ProviderInfo, ToolConfig,
 };
+pub use research::{ResearchConfig, ResearchRuntime};
 pub use session::{
     handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
 };

@@ -15,6 +15,10 @@ pub enum AgentTurnProgressEvent {
         tool_name: String,
         arguments: String,
     },
+    ToolProgress {
+        tool_name: String,
+        message: String,
+    },
     ToolFinished {
         log: ToolCallLog,
         duration_ms: u64,

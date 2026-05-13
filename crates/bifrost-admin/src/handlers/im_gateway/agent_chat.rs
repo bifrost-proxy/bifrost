@@ -457,6 +457,7 @@ pub(super) fn progress_event_needs_immediate_flush(
     matches!(
         event,
         bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
+            | bifrost_agent::AgentTurnProgressEvent::ToolProgress { .. }
             | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
             | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::TitleUpdated { .. }

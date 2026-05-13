@@ -2049,6 +2049,7 @@ Agent 创建 schedule：
 - 如果 Agent 当前由 IM 消息触发，`schedule_create` 默认把当前来源写入 `schedule.message_channel`。
 - 如果 Agent 当前由 WebUI/API 触发，`schedule_create` 默认使用 Agent 配置的 `default_message_channel`。
 - 如果两者都不存在，`schedule_create` 必须失败并提示先配置默认发送通道或显式指定目标。
+- `schedule_update` 与管理端 `PATCH /schedules/:id` 必须支持更新 `message_channel`。当调用方只更新旧 `target_id` 且没有同时传入 `message_channel` 时，必须清除旧通道并重新按目标补全 `ConfiguredTarget` 绑定，避免历史默认通道继续覆盖新目标。
 
 Schedule 执行：
 
@@ -2064,9 +2065,10 @@ Schedule 执行：
   - 无来源且无默认通道时创建 Agent schedule 返回结构化错误。
   - `send_msg` schema 按 Feishu/WeChat capability 裁剪。
   - `send_msg` 在 turn runtime 中为 ordered 工具。
+  - `schedule_update` 和 `PATCH /schedules/:id` 修改 `target_id` 后会重新绑定 `message_channel`。
 - E2E/API：
   - 使用 fake Feishu/WeChat provider 启动真实 Bifrost，mock model 调用 `send_msg`，断言 fake provider 收到正确 payload。
-  - 通过 `/agent/chat` 创建 schedule，验证 schedule 持久化了 `message_channel`，手动 run 时发送到绑定目标。
+  - 通过 `/agent/chat` 创建 schedule，验证 schedule 持久化了 `message_channel`；随后 PATCH 旧 `target_id`，验证响应中的 `message_channel` 从默认 owner 改为 `ConfiguredTarget`。
   - 通过 WebUI/API 手动创建 schedule，缺少通道时报错，绑定通道后可运行并发送。
 - 真实场景测试：
   - 更新 `human_tests/im-gateway-agent.md` 覆盖 `send_msg` 来源感知与默认通道。

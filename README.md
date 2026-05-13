@@ -130,6 +130,47 @@ api.example.com reqHeaders://x-debug=1
 chatgpt.com http3://
 ```
 
+## Agent Research Pack
+
+Bifrost Agent 可通过 Research Pack 获得固定站点采集、统一搜索、本地 SQLite/FTS 知识库、网页抓取、Markdown 日报和可选微信公众号 fallback。启用后，Agent 只暴露高层工具：`research_search`、`research_fetch`、`knowledge_search`、`knowledge_save`、`research_digest`，Provider、缓存、去重和安全抓取策略由 Bifrost 内部处理。
+
+默认 preset 会安装一组面向 AI/技术主题的高质量固定站点 source，并把 Tavily/Exa/Volc/custom HTTP/MCP 这类通用 API Provider 作为补充：
+
+- `arxiv`：arXiv Atom API，固定 workflow 为 `search -> Atom normalize -> paper detail markdown -> knowledge/report metadata`。
+- `hacker_news`：HN Algolia Search API，固定 workflow 为 `search_by_date -> story normalize -> page fetch markdown -> knowledge/report metadata`。
+- `github_repositories`：GitHub repository search API，固定 workflow 为 `repo search -> repository normalize -> README/page markdown -> knowledge/report metadata`。
+- `sogou_wechat_cdp`：Sogou 微信搜索 + 浏览器 CDP，固定 workflow 为 `search -> /link normalize -> CDP fetch detail -> markdown artifact`，用于用户交互式登录/验证码后复用浏览器状态。
+
+快速初始化示例：
+
+```bash
+bifrost agent research init \
+  --preset personal-cn \
+  --web-provider volc \
+  --base-url https://your-search-api-endpoint \
+  --api-key '$VOLCENGINE_API_KEY' \
+  --yes
+```
+
+微信公众号可以接入本地 HTTP bridge，也可以接入已打开远程调试端口的浏览器 CDP 会话。CDP 模式用于 Sogou 微信搜索、需要用户交互式登录/验证码后复用浏览器登录态的站点：
+
+```bash
+bifrost agent research init \
+  --preset personal-cn \
+  --wechat-cdp-endpoint http://127.0.0.1:9222 \
+  --yes
+
+bifrost agent research search "AI Agent MCP" --wechat --limit 5
+```
+
+搜索时可直接抓取详情并返回可沉淀的 Markdown artifact：
+
+```bash
+bifrost agent research search "AI Agent MCP" --limit 5 --fetch-content
+```
+
+返回结果会包含标准化源信息和正文沉淀字段，包括 `title`、`url`、`canonical_url`、`source`、`provider`、`site_name`、`author`、`published_at`、`retrieved_at`、`content_markdown` 和 `content_hash`。
+
 ## 文档索引
 
 - 文档总览：[`docs/README.md`](docs/README.md)
@@ -146,3 +187,4 @@ chatgpt.com http3://
 - 请求重放说明：[`docs/replay.md`](docs/replay.md)
 - 项目结构与模块说明：[`docs/architecture.md`](docs/architecture.md)
 - Agent Skill 安装说明：[`docs/agent-skill.md`](docs/agent-skill.md)
+- Agent Research Pack 技术方案：[`design/agent-research-pack.md`](design/agent-research-pack.md)

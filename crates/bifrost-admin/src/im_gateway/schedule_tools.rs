@@ -218,6 +218,21 @@ impl ToolHandler for ScheduleUpdateTool {
         if let Some(patch) = args_value.get("patch") {
             merge_patch_value(&mut merged, patch);
         }
+        if args_value.get("message_channel").is_none()
+            && args_value
+                .get("patch")
+                .and_then(Value::as_object)
+                .is_none_or(|patch| !patch.contains_key("message_channel"))
+            && (args_value.get("target_id").is_some()
+                || args_value
+                    .get("patch")
+                    .and_then(Value::as_object)
+                    .is_some_and(|patch| patch.contains_key("target_id")))
+        {
+            if let Some(object) = merged.as_object_mut() {
+                object.remove("message_channel");
+            }
+        }
         let mut schedule = match serde_json::from_value::<ImSchedule>(merged) {
             Ok(schedule) => schedule,
             Err(error) => return error_tool_result(format!("invalid schedule patch: {error}")),
@@ -474,6 +489,8 @@ fn now_ms() -> u64 {
 mod tests {
     use bifrost_agent::tools::ToolHandler;
 
+    use crate::im_gateway::types::ImTarget;
+
     use super::*;
 
     #[tokio::test]
@@ -495,8 +512,12 @@ mod tests {
             target_store.clone(),
             context.clone(),
         );
-        let update =
-            ScheduleUpdateTool::new(store.clone(), scheduler.clone(), target_store, context);
+        let update = ScheduleUpdateTool::new(
+            store.clone(),
+            scheduler.clone(),
+            target_store.clone(),
+            context,
+        );
         let list = ScheduleListTool::new(store.clone());
         let delete = ScheduleDeleteTool::new(store.clone(), scheduler);
 
@@ -538,6 +559,38 @@ mod tests {
         let stored = store.get("daily-agent").expect("updated");
         assert!(!stored.enabled);
         assert_eq!(stored.agent.expect("agent").prompt, "Updated prompt");
+
+        target_store
+            .add(ImTarget {
+                id: "configured-target".to_string(),
+                provider_id: "feishu-target".to_string(),
+                display_name: "Configured Target".to_string(),
+                receive_id_type: "chat_id".to_string(),
+                receive_id: "oc_configured".to_string(),
+                default_msg_type: "text".to_string(),
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("add target");
+        let rebound = update
+            .execute(
+                r#"{"id":"daily-agent","target_id":"configured-target"}"#,
+                Path::new("."),
+            )
+            .await;
+        assert!(rebound.success, "{}", rebound.output);
+        let rebound_channel = store
+            .get("daily-agent")
+            .expect("rebound")
+            .message_channel
+            .expect("rebound channel");
+        assert_eq!(rebound_channel.provider_id, "feishu-target");
+        assert_eq!(rebound_channel.target_id, "configured-target");
+        assert_eq!(
+            rebound_channel.target_mode,
+            MessageTargetMode::ConfiguredTarget
+        );
 
         let listed = list
             .execute(r#"{"task_type":"agent"}"#, Path::new("."))

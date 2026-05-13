@@ -1,0 +1,31 @@
+{
+  "name": "research",
+  "version": "0.1.0",
+  "description": "用于联网搜索、微信公众号补充检索、本地知识库查询和生成研究日报的 Bifrost 内置技能。",
+  "scope": "system",
+  "entrypoint": {
+    "kind": "inline",
+    "instructions_md": "See SKILL.md"
+  },
+  "allowed_tools": [
+    { "kind": "registry", "name": "research_search" },
+    { "kind": "registry", "name": "research_fetch" },
+    { "kind": "registry", "name": "knowledge_search" },
+    { "kind": "registry", "name": "knowledge_save" },
+    { "kind": "registry", "name": "research_digest" },
+    { "kind": "registry", "name": "read_file" },
+    { "kind": "registry", "name": "write_file" }
+  ],
+  "slash_command": "/research",
+  "triggers": [
+    { "kind": "description_match" },
+    { "kind": "keyword", "any_of": ["搜索", "检索", "日报", "研究", "微信公众号", "web search"] },
+    { "kind": "slash_command" }
+  ],
+  "metadata": {},
+  "created_by": { "agent": { "session_id": "system" } },
+  "created_at_unix": 0,
+  "updated_at_unix": 0,
+  "checksum": "",
+  "schema_version": 1
+}
