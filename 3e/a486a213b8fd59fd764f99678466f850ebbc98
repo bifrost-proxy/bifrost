@@ -1,0 +1,264 @@
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  038485b3d7a039cc 93,198-201,205,247-249,287-421,462-474,558-560 gitai:{"mixed_line_ranges":[{"Single":355},{"Single":371},{"Single":373},{"Single":382},{"Single":387},{"Single":394}],"operations":[{"operation_id":"6a05b5a2f2e02a3600559240","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":93},{"Range":[198,201]},{"Single":205},{"Range":[247,249]},{"Range":[287,421]},{"Range":[462,474]},{"Range":[558,560]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  038485b3d7a039cc 344,355-359,384,392,407,417-423 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a05b5a2f2e02a3600559240","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":344},{"Range":[355,359]},{"Single":384},{"Single":392},{"Single":407},{"Range":[417,423]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/native.rs
+  038485b3d7a039cc 1-2,8-20,26,61 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a05b5a2f2e02a3600559240","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[1,2]},{"Range":[8,20]},{"Single":26},{"Single":61}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "3ea486a213b8fd59fd764f99678466f850ebbc98",
+  "prompts": {
+    "038485b3d7a039cc": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a055af5f2e02a3600558150",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 188,
+      "total_deletions": 37,
+      "accepted_lines": 188,
+      "overriden_lines": 8
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web.rs": [
+      {
+        "hash": "038485b3d7a039cc",
+        "line_ranges": [
+          {
+            "Single": 344
+          },
+          {
+            "Range": [
+              355,
+              359
+            ]
+          },
+          {
+            "Single": 384
+          },
+          {
+            "Single": 392
+          },
+          {
+            "Single": 407
+          },
+          {
+            "Range": [
+              417,
+              423
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a05b5a2f2e02a3600559240",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 344
+              },
+              {
+                "Range": [
+                  355,
+                  359
+                ]
+              },
+              {
+                "Single": 384
+              },
+              {
+                "Single": 392
+              },
+              {
+                "Single": 407
+              },
+              {
+                "Range": [
+                  417,
+                  423
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/native.rs": [
+      {
+        "hash": "038485b3d7a039cc",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              2
+            ]
+          },
+          {
+            "Range": [
+              8,
+              20
+            ]
+          },
+          {
+            "Single": 26
+          },
+          {
+            "Single": 61
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a05b5a2f2e02a3600559240",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  2
+                ]
+              },
+              {
+                "Range": [
+                  8,
+                  20
+                ]
+              },
+              {
+                "Single": 26
+              },
+              {
+                "Single": 61
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs": [
+      {
+        "hash": "038485b3d7a039cc",
+        "line_ranges": [
+          {
+            "Single": 93
+          },
+          {
+            "Range": [
+              198,
+              201
+            ]
+          },
+          {
+            "Single": 205
+          },
+          {
+            "Range": [
+              247,
+              249
+            ]
+          },
+          {
+            "Range": [
+              287,
+              421
+            ]
+          },
+          {
+            "Range": [
+              462,
+              474
+            ]
+          },
+          {
+            "Range": [
+              558,
+              560
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 355
+          },
+          {
+            "Single": 371
+          },
+          {
+            "Single": 373
+          },
+          {
+            "Single": 382
+          },
+          {
+            "Single": 387
+          },
+          {
+            "Single": 394
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a05b5a2f2e02a3600559240",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 93
+              },
+              {
+                "Range": [
+                  198,
+                  201
+                ]
+              },
+              {
+                "Single": 205
+              },
+              {
+                "Range": [
+                  247,
+                  249
+                ]
+              },
+              {
+                "Range": [
+                  287,
+                  421
+                ]
+              },
+              {
+                "Range": [
+                  462,
+                  474
+                ]
+              },
+              {
+                "Range": [
+                  558,
+                  560
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "038485b3d7a039cc": {
+      "tool": "trae",
+      "conversation_id": "6a055af5f2e02a3600558150",
+      "session_id": "6a055af5f2e02a3600558150",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
