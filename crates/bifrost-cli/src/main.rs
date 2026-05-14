@@ -15,12 +15,12 @@ mod process;
 
 use cli::{Cli, Commands, ImportArgs, TrafficCommands};
 use commands::{
-    check_and_print_update_notice, handle_admin_command, handle_ca_command, handle_config_command,
-    handle_export_command, handle_group_command, handle_import_command, handle_install_skill,
-    handle_metrics_command, handle_port_command, handle_rule_command, handle_script_command,
-    handle_sync_command, handle_system_proxy_command, handle_upgrade, handle_value_command,
-    handle_whitelist_command, remote, run_restart, run_search, run_start, run_status,
-    run_status_tui, run_stop, run_traffic_clear, run_traffic_get, run_traffic_list,
+    check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
+    handle_config_command, handle_export_command, handle_group_command, handle_import_command,
+    handle_install_skill, handle_metrics_command, handle_port_command, handle_rule_command,
+    handle_script_command, handle_sync_command, handle_system_proxy_command, handle_upgrade,
+    handle_value_command, handle_whitelist_command, remote, run_restart, run_search, run_start,
+    run_status, run_status_tui, run_stop, run_traffic_clear, run_traffic_get, run_traffic_list,
     spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions, TrafficGetOptions,
     TrafficListOptions,
 };
@@ -227,6 +227,7 @@ fn main() {
         }
         Some(Commands::Value { action }) => handle_value_command(action),
         Some(Commands::Admin { action }) => handle_admin_command(action),
+        Some(Commands::Ai { action }) => handle_ai_command(action),
         Some(Commands::KeepAwake { action }) => {
             commands::keepawake::handle_local(action, get_effective_port(cli.port))
         }

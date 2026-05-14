@@ -88,6 +88,50 @@ resolve_non_shim_command() {
   command -v "$command_name" 2>/dev/null || printf '%s\n' "$command_name"
 }
 
+is_working_cargo_command() {
+  local candidate="$1"
+  local version
+
+  [[ -n "$candidate" ]] || return 1
+  version="$("$candidate" --version 2>/dev/null || true)"
+  [[ "$version" == cargo\ * ]]
+}
+
+resolve_cargo_command() {
+  local candidate
+
+  if command -v rustup >/dev/null 2>&1; then
+    candidate="$(rustup which cargo 2>/dev/null || true)"
+    if is_working_cargo_command "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+
+  local resolver="which"
+  local resolver_args=("-a")
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      resolver="where.exe"
+      resolver_args=()
+      ;;
+  esac
+
+  while IFS= read -r candidate; do
+    candidate="$(trim_line "$candidate")"
+    [[ -n "$candidate" ]] || continue
+    if [[ "$candidate" == *"/mise/shims/"* || "$candidate" == *"\\mise\\shims\\"* ]]; then
+      continue
+    fi
+    if is_working_cargo_command "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <("$resolver" "${resolver_args[@]}" cargo 2>/dev/null)
+
+  printf 'cargo\n'
+}
+
 usage() {
   cat <<'EOF'
 Usage: scripts/run_all_e2e.sh [options]
@@ -951,7 +995,7 @@ trap e2e_cleanup EXIT
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-export CARGO_BIN="${CARGO_BIN:-$(resolve_non_shim_command cargo)}"
+export CARGO_BIN="${CARGO_BIN:-$(resolve_cargo_command)}"
 export NODE_BIN="${NODE_BIN:-$(resolve_non_shim_command node)}"
 export PNPM_BIN="${PNPM_BIN:-$(resolve_non_shim_command pnpm)}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"

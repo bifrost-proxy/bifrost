@@ -1,4 +1,5 @@
 mod admin;
+mod asr;
 mod bifrost_file;
 mod ca;
 mod caller_stream_frame;
@@ -34,6 +35,7 @@ use serde_json::Value;
 use tracing::debug;
 
 pub use admin::*;
+pub use asr::handle_ai_command;
 pub use ca::*;
 pub use config::handle_config_command;
 pub use group::handle_group_command;

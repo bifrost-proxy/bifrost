@@ -75,7 +75,7 @@ pub async fn handle_websocket_upgrade(
         .unwrap()
 }
 
-fn generate_accept_key(key: &str) -> String {
+pub(crate) fn generate_accept_key(key: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
     hasher.update(WS_GUID.as_bytes());

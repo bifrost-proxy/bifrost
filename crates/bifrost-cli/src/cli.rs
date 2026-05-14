@@ -335,6 +335,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AdminCommands,
     },
+    #[command(about = "Manage local AI tools")]
+    Ai {
+        #[command(subcommand)]
+        action: AiCommands,
+    },
     #[command(about = "Inspect and query traffic records")]
     Traffic {
         #[command(subcommand)]
@@ -540,6 +545,44 @@ pub enum Commands {
     Im {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiCommands {
+    #[command(about = "Manage Qwen3-ASR speech-to-text")]
+    Asr {
+        #[command(subcommand)]
+        action: AiAsrCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiAsrCommands {
+    #[command(about = "Start the local Qwen3-ASR model service")]
+    Start {
+        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        model: String,
+        #[arg(long, default_value = "chinese", help = "Recognition language")]
+        language: String,
+    },
+    #[command(about = "Stop the local Qwen3-ASR model service")]
+    Stop,
+    #[command(about = "Show the local Qwen3-ASR model service status")]
+    Status {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Stream-transcribe one audio file to stdout")]
+    StreamFile {
+        #[arg(value_hint = ValueHint::FilePath, help = "Audio file to transcribe")]
+        audio: PathBuf,
+        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        model: String,
+        #[arg(long, default_value = "chinese", help = "Recognition language")]
+        language: String,
+        #[arg(long, default_value = "jsonl", value_parser = ["jsonl"], help = "Output format")]
+        format: String,
     },
 }
 

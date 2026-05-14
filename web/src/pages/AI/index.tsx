@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Grid, theme, Typography } from "antd";
-import { CloudOutlined, RobotOutlined } from "@ant-design/icons";
+import { CloudOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
+import ASR from "../ASR";
 import {
   AGENT_SECTION_NAV,
   type AgentSectionId,
@@ -15,6 +16,12 @@ const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
 type AiSection =
+  | {
+      id: "tools-asr";
+      group: "tools";
+      section: "asr";
+      label: string;
+    }
   | {
       id: `agent-${AgentSectionId}`;
       group: "agent";
@@ -38,6 +45,12 @@ export default function AI() {
 
   const sections = useMemo<AiSection[]>(
     () => [
+      {
+        id: "tools-asr" as const,
+        group: "tools" as const,
+        section: "asr" as const,
+        label: "ASR",
+      },
       ...AGENT_SECTION_NAV.map((section) => ({
         id: `agent-${section.id}` as const,
         group: "agent" as const,
@@ -96,7 +109,7 @@ export default function AI() {
         prev.set("aiSection", activeSection.id);
         if (activeSection.group === "agent") {
           prev.set("agentSection", activeSection.section);
-        } else {
+        } else if (activeSection.group === "im-gateway") {
           prev.set("imGatewaySection", activeSection.section);
         }
         return prev;
@@ -116,9 +129,12 @@ export default function AI() {
           if (section.group === "agent") {
             prev.set("agentSection", section.section);
             prev.delete("imGatewaySection");
-          } else {
+          } else if (section.group === "im-gateway") {
             prev.set("imGatewaySection", section.section);
             prev.delete("agentSection");
+          } else {
+            prev.delete("agentSection");
+            prev.delete("imGatewaySection");
           }
           return prev;
         },
@@ -170,6 +186,7 @@ export default function AI() {
   const imGatewaySections = sections.filter(
     (section) => section.group === "im-gateway",
   );
+  const toolSections = sections.filter((section) => section.group === "tools");
 
   return (
     <div
@@ -209,6 +226,35 @@ export default function AI() {
             maxHeight: "100%",
           }}
         >
+          <div
+            style={{
+              display: "flex",
+              flexDirection: isCompactNav ? "row" : "column",
+              alignItems: isCompactNav ? "center" : "stretch",
+              flex: isCompactNav ? "0 0 auto" : undefined,
+              gap: 6,
+            }}
+          >
+            <Text
+              type="secondary"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                lineHeight: "18px",
+                padding: isCompactNav ? "7px 2px" : "0 2px",
+                textTransform: "uppercase",
+                whiteSpace: "nowrap",
+                flex: isCompactNav ? "0 0 auto" : undefined,
+              }}
+            >
+              <ToolOutlined />
+              Tools
+            </Text>
+            {toolSections.map(renderSectionButton)}
+          </div>
           <div
             style={{
               display: "flex",
@@ -279,8 +325,10 @@ export default function AI() {
         >
           {activeSection.group === "agent" ? (
             <AgentTab hideSectionNav />
-          ) : (
+          ) : activeSection.group === "im-gateway" ? (
             <ImGatewayTab hideSectionNav />
+          ) : (
+            <ASR />
           )}
         </div>
       </div>
