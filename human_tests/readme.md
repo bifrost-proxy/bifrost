@@ -133,13 +133,14 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 4 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，避免 buildx/buildkit 或 HTTP apt mirror 导致失败，并由远端 CI 验证 |
+| [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 5 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，aarch64-musl cross build 对 GHCR 临时超时进行有限重试，避免 buildx/buildkit、HTTP apt mirror 或容器镜像拉取波动导致失败，并由远端 CI 验证 |
 | [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 26 | --shard N/M 参数解析、环境变量透传、分片覆盖完整性、无分片向后兼容、local-ci.sh 分片支持、单分片在 CI 预算内完成、CI skip 列表、格式校验、系统代理用例 CI 禁跑且本地保留、隐藏日志 artifact 上传与失败摘要诊断、CLI offline help alternation 回归、CLI offline Broken pipe 回归、失败日志 dump pipefail guard 回归、unsafe_ssl 自带 HTTPS mock fixture 回归、并行 shell 调度器与顶层 final status 全 PASS 后返回 0 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、Agent/IM human-api 并行端口隔离回归、remote relay fallback 预构建 binary 复用回归、Linux/macOS shell E2E timeout 预算回归、main push CI concurrency 取消旧 run 回归、Linux/macOS shell shard 内部并发预算回归、shell E2E 默认 Cargo 解析回归、site docs sync 缺失 site 依赖自举回归 |
-| [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 4 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E |
+| [ci-macos-cli-e2e-split.md](./ci-macos-cli-e2e-split.md) | CI macOS CLI/E2E 构建拆分 | 5 | macOS rules/shell E2E 仅等待 aarch64 CLI 构建，desktop bundle 与 x86_64 CLI 构建不阻塞 E2E，并确保 Tauri desktop bundle 使用真实 Cargo/Rustc 工具链 |
 | [skill-loading-e2e.md](./skill-loading-e2e.md) | Skill Loading E2E 一致性 | 11 | 4 scope 加载可见性、优先级覆盖、启用/停用一致性（管理端→消费端）、prompt 渐进式披露（metadata 注入、body 按需读取）、slash 命令解析、default_roots 路径对齐、隐藏目录过滤、嵌套发现、单元测试回归 |
 | [linux-install-musl-fallback.md](./linux-install-musl-fallback.md) | Linux 旧 glibc 安装 musl 回退 | 4 | Debian 10 / glibc 2.28 自动选择 musl 预编译包，新 glibc 保持 GNU 包，npm/npx 平台包与 `bifrost upgrade` 同步回退到 musl |
 | [codex-task-dispatch.md](./codex-task-dispatch.md) | Codex 异步任务派发 | 5 | 后台启动 Codex 任务、watch 最近任务、prompt 缺失报错、PATH 隔离无 codex 报错、同名任务历史产物不覆盖 |
 | [codex-task-inspector.md](./codex-task-inspector.md) | Codex 任务巡检 Skill | 6 | 先探测 Codex 实际数据目录（优先 `CODEX_HOME`，否则 `$HOME/.codex`），再按 rollout/session id 读取权威 jsonl；仅在明确指向仓库追踪文件时走 `.codex-tasks`：PID 存活判断、`*-last.md` 结论提取、CI poll 运行中/失败识别，以及本地状态与 CI 状态分层汇总 |
+| [qwen3-asr-local-server.md](./qwen3-asr-local-server.md) | Qwen3-ASR 本地 API Server + WebUI | 15 | Apple Silicon/32GB 依赖检查、Rust 通用下载模块断点续传与后台进度、Qwen3-ASR-1.7B 非交互初始化、WebUI/CLI 启动服务自检自动修复缺失资源和 FFmpeg、CLI/API 转写、长音频切片、`bifrost ai asr` 服务控制与单文件标准输出、AI Tools ASR 异步初始化状态/下载进度/错误、刷新后重连初始化流继续显示后台下载任务、WebUI 单卡片文件输入/转写布局、文件进度仅在文件转写时展示、麦克风 WebSocket 实时入口、麦克风实时电平音轨、ASR 目录 hourly/daily/weekly/monthly 定时任务、点击任务查看逐文件结果/录音元信息/timeline 分段文本与进度详情、API WebSocket 实时转写、缺失模型文件下载进度、CI 禁止模型下载部署 |
 | [docs-site-generator.md](./docs-site-generator.md) | Docs Site Generator | 5 | 文档站点同步完整性、未来新增 docs 文档自动纳入、真实 Astro/Starlight 部署构建路径、历史深链重定向、全站站内链接和部署产物清理验证 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
@@ -175,7 +176,7 @@
 
 ---
 
-**总计：96 个测试文件，1630 个测试用例**
+**总计：97 个测试文件，1639 个测试用例**
 
 ## 工作流程
 

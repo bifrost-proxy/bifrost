@@ -455,7 +455,17 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-aarch64
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-musl
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target aarch64-unknown-linux-musl; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-cli-macos-aarch64:
     name: Build macOS CLI (aarch64-apple-darwin)
@@ -768,10 +778,19 @@ jobs:
         run: |
           echo "APPLE_SIGNING_IDENTITY=-" >> "${GITHUB_ENV}"
           echo "Using ad-hoc signing for macOS desktop CI bundle validation."
+      - name: Verify Rust tool paths
+        shell: bash
+        run: |
+          "$(rustup which cargo)" --version
+          "$(rustup which rustc)" --version
       - name: Build macOS desktop bundle
+        shell: bash
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-        run: pnpm exec tauri build --config desktop/src-tauri/tauri.conf.json --target ${{ matrix.target }} --bundles app
+        run: |
+          export CARGO="$(rustup which cargo)"
+          export RUSTC="$(rustup which rustc)"
+          pnpm exec tauri build --config desktop/src-tauri/tauri.conf.json --target ${{ matrix.target }} --bundles app
       - name: Re-sign macOS app bundle
         shell: bash
         run: |

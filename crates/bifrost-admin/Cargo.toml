@@ -55,12 +55,14 @@ flate2 = "1"
 tar = "0.4"
 brotli = "7"
 zstd = "0.13"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "multipart",
   "rustls-tls",
   "stream",
 ] }
+ureq.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"

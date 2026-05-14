@@ -1,6 +1,11 @@
 pub mod agent_memories;
 pub mod agent_skills;
 pub mod app_icon;
+pub mod asr;
+pub mod asr_jobs;
+mod asr_jobs_timeline;
+mod asr_streaming;
+mod asr_ws;
 pub mod audit;
 pub mod auth;
 pub mod bifrost_file;

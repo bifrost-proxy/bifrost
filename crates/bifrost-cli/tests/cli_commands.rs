@@ -1,7 +1,9 @@
 use std::fs;
 use std::process::Command;
 
-use bifrost_cli::cli::{Cli, Commands, RemoteCommands, SettingCommands, SyncCommands};
+use bifrost_cli::cli::{
+    AiAsrCommands, AiCommands, Cli, Commands, RemoteCommands, SettingCommands, SyncCommands,
+};
 use clap::Parser;
 
 fn bifrost_cmd() -> Command {
@@ -42,6 +44,43 @@ fn sync_subcommands_parse() {
     assert!(help.contains("logout"), "sync help should contain logout");
     assert!(help.contains("run"), "sync help should contain run");
     assert!(help.contains("config"), "sync help should contain config");
+}
+
+#[test]
+fn ai_asr_commands_parse() {
+    let help = run_help(&["ai", "asr"]);
+    assert!(help.contains("start"), "ai asr help should contain start");
+    assert!(help.contains("stop"), "ai asr help should contain stop");
+    assert!(
+        help.contains("stream-file"),
+        "ai asr help should contain stream-file"
+    );
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ai",
+        "asr",
+        "stream-file",
+        "/tmp/input.wav",
+        "--language",
+        "chinese",
+    ])
+    .expect("ai asr stream-file should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ai {
+            action: AiCommands::Asr { action },
+        } => match action {
+            AiAsrCommands::StreamFile {
+                audio, language, ..
+            } => {
+                assert_eq!(audio, std::path::PathBuf::from("/tmp/input.wav"));
+                assert_eq!(language, "chinese");
+            }
+            _ => panic!("unexpected ai asr action"),
+        },
+        _ => panic!("unexpected command"),
+    }
 }
 
 #[test]

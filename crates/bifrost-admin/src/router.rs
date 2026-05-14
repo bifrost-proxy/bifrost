@@ -7,6 +7,7 @@ use crate::cors::apply_cors_headers;
 use crate::handlers::{
     agent_memories::handle_agent_memories,
     app_icon::handle_app_icon,
+    asr::handle_asr,
     audit::handle_audit,
     auth::{extract_bearer_token, handle_auth},
     bifrost_file::handle_bifrost_file,
@@ -44,6 +45,16 @@ use crate::push::SharedPushManager;
 use crate::state::SharedAdminState;
 use crate::static_files::serve_static_file;
 use crate::{is_remote_access_enabled, validate_admin_jwt, ADMIN_PATH_PREFIX};
+
+fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
+    serde_urlencoded::from_str(query).unwrap_or_default()
+}
+
+fn query_token(query: Option<&str>) -> Option<String> {
+    query
+        .and_then(|query| parse_query(query).remove("token"))
+        .filter(|token| !token.trim().is_empty())
+}
 
 pub struct AdminRouter;
 
@@ -110,6 +121,8 @@ impl AdminRouter {
 
         if path.starts_with("/api/agent/memories") {
             handle_agent_memories(req, path).await
+        } else if path.starts_with("/api/asr") {
+            handle_asr(req, path).await
         } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {
@@ -238,7 +251,13 @@ impl AdminRouter {
             return None;
         }
 
-        let token = extract_bearer_token(req);
+        let token = extract_bearer_token(req).or_else(|| {
+            if path == "/api/asr/transcribe-ws" {
+                query_token(req.uri().query())
+            } else {
+                None
+            }
+        });
         let Some(token) = token else {
             return Some(error_response(
                 StatusCode::UNAUTHORIZED,
@@ -405,6 +424,35 @@ mod tests {
             .unwrap();
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", None)
             .expect("None peer_addr should default to non-local and require token");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_accepts_query_token_for_browser_websocket() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let (token, _) = crate::admin_auth::issue_admin_jwt(&state, "admin").expect("issue jwt");
+        let req = Request::builder()
+            .uri(format!("/_bifrost/api/asr/transcribe-ws?token={token}"))
+            .body(())
+            .unwrap();
+        let resp =
+            AdminRouter::check_api_auth(&req, &state, "/api/asr/transcribe-ws", remote_peer());
+        assert!(
+            resp.is_none(),
+            "browser WebSocket should authenticate with query token"
+        );
+    }
+
+    #[test]
+    fn test_check_api_auth_rejects_query_token_for_regular_api() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let (token, _) = crate::admin_auth::issue_admin_jwt(&state, "admin").expect("issue jwt");
+        let req = Request::builder()
+            .uri(format!("/_bifrost/api/asr/status?token={token}"))
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/asr/status", remote_peer())
+            .expect("regular API should still require Authorization header");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

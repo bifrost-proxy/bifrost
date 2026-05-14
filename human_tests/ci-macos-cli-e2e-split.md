@@ -62,6 +62,29 @@
 - YAML 解析无异常。
 - 所有关键 job 均存在。
 
+### TC-CMCE-05: macOS desktop bundle 使用真实 Cargo/Rustc
+
+**操作步骤**：
+1. 检查 `bundle-desktop-macos` 的 Rust tool path 校验步骤：
+   ```bash
+   rg -n 'Verify Rust tool paths|rustup which cargo|rustup which rustc' .github/workflows/ci.yml
+   ```
+2. 检查 `Build macOS desktop bundle` 步骤：
+   ```bash
+   rg -n 'Build macOS desktop bundle|export CARGO="\\$\\(rustup which cargo\\)"|export RUSTC="\\$\\(rustup which rustc\\)"|pnpm exec tauri build' .github/workflows/ci.yml
+   ```
+3. 推送当前分支并观察 GitHub Actions `CI` workflow。
+
+**预期结果**：
+- macOS desktop bundle job 在执行 Tauri 前输出真实 `cargo` 与 `rustc` 版本。
+- `tauri build` 在同一个 shell step 中通过 `CARGO` 和 `RUSTC` 环境变量使用 `rustup which` 解析到的真实工具链二进制。
+- 不再出现 `cargo metadata` 实际调用到 `rustup-init` 并报 `unexpected argument 'metadata'` 的失败。
+- `Bundle macOS (aarch64-apple-darwin)` 和 `Bundle macOS (x86_64-apple-darwin)` 最终进入 success。
+
 ## 清理步骤
 
 - 无清理需求；本测试不创建临时服务实例、不写入数据目录、不修改系统代理。
+
+## 执行记录
+
+- 2026-05-15：通过。执行 `rg -n 'Verify Rust tool paths|rustup which cargo|rustup which rustc' .github/workflows/ci.yml` 与 `rg -n 'Build macOS desktop bundle|export CARGO="\\$\\(rustup which cargo\\)"|export RUSTC="\\$\\(rustup which rustc\\)"|pnpm exec tauri build' .github/workflows/ci.yml`，确认 macOS desktop bundle 在 Tauri 构建前校验真实工具链，并在同一 shell step 中导出 `CARGO/RUSTC`；远端 TC-CMCE-05 由后续 GitHub Actions `CI` run 验证。
