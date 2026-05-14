@@ -1,0 +1,45 @@
+crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs
+  874d04a5d17c5bec 1216-1221
+web/src/pages/Settings/tabs/imGateway/ExternalCliPanel.tsx
+  038485b3d7a039cc 539-542
+web/src/api/imGateway.ts
+  038485b3d7a039cc 96-114
+crates/bifrost-admin/src/handlers/im_gateway/event_loop.rs
+  874d04a5d17c5bec 701-726
+crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs
+  038485b3d7a039cc 117-284
+crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+  038485b3d7a039cc 65
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  038485b3d7a039cc 5-987
+crates/bifrost-admin/src/im_gateway/external_cli/mod.rs
+  038485b3d7a039cc 432-1089
+crates/bifrost-admin/src/im_gateway/chatgpt_web/native.rs
+  038485b3d7a039cc 1-156
+crates/bifrost-admin/src/handlers/im_gateway/agent_api.rs
+  874d04a5d17c5bec 569-573
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  038485b3d7a039cc 9-1189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "49ecd8ad9f4c5ef13ebfab99fd1e485e4e2cce93",
+  "prompts": {
+    "874d04a5d17c5bec": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a057878f2e02a36005584da",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 37,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
