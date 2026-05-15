@@ -1,0 +1,670 @@
+web/src/pages/ASR/components/DirectoryTasksPanel.tsx
+  f17ee04c7258f082 242-247 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[242,247]}]}]}
+crates/bifrost-admin/src/im_gateway/external_cli/mod.rs
+  4fbca6ac34438151 36-745
+crates/bifrost-cli/src/commands/agent.rs
+  4fbca6ac34438151 2-85
+web/src/api/asr.ts
+  f17ee04c7258f082 112-113 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[112,113]}]}]}
+crates/bifrost-admin/src/handlers/asr.rs
+  f17ee04c7258f082 30,500,521,524-525,532-538,540-552,557-562,568-571,574-592 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":30},{"Single":500},{"Single":521},{"Range":[524,525]},{"Range":[532,538]},{"Range":[540,552]},{"Range":[557,562]},{"Range":[568,571]},{"Range":[574,592]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  4fbca6ac34438151 567-994
+crates/bifrost-cli/src/commands/start.rs
+  4fbca6ac34438151 1522-1525
+crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+  4fbca6ac34438151 307-413
+crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs
+  4fbca6ac34438151 109-278
+crates/bifrost-admin/src/handlers/im_gateway/event_loop.rs
+  4fbca6ac34438151 836-967
+crates/bifrost-admin/src/handlers/asr_streaming.rs
+  f17ee04c7258f082 6-28,42,126-138,140-150,152-190,192-200,202,206-230 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[6,28]},{"Single":42},{"Range":[126,138]},{"Range":[140,150]},{"Range":[152,190]},{"Range":[192,200]},{"Single":202},{"Range":[206,230]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs
+  4fbca6ac34438151 7-293
+web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx
+  f17ee04c7258f082 5-197 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[5,197]}]}]}
+crates/bifrost-cli/src/cli.rs
+  4fbca6ac34438151 549-598
+crates/bifrost-admin/src/im_gateway/chatgpt_web/diagnostics.rs
+  4fbca6ac34438151 6-182
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  4fbca6ac34438151 76-1541
+crates/bifrost-cli/src/commands/mod.rs
+  4fbca6ac34438151 2
+crates/bifrost-cli/src/main.rs
+  4fbca6ac34438151 237-239
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  f17ee04c7258f082 15-16,26,31,38-40,255-260,334-349,489-501,521-531,533,535-564,585-592,598,717-756,759,762-766,768,777,824-935,1106,1170-1171,1206-1212,1223-1240,1251-1305 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[15,16]},{"Single":26},{"Single":31},{"Range":[38,40]},{"Range":[255,260]},{"Range":[334,349]},{"Range":[489,501]},{"Range":[521,531]},{"Single":533},{"Range":[535,564]},{"Range":[585,592]},{"Single":598},{"Range":[717,756]},{"Single":759},{"Range":[762,766]},{"Single":768},{"Single":777},{"Range":[824,935]},{"Single":1106},{"Range":[1170,1171]},{"Range":[1206,1212]},{"Range":[1223,1240]},{"Range":[1251,1305]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+  4fbca6ac34438151 153-621
+web/src/pages/ASR/index.tsx
+  f17ee04c7258f082 556-575,579-581 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a06fd8d40f5f77bafa397e7","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[556,575]},{"Range":[579,581]}]}]}
+crates/bifrost-admin/src/handlers/im_gateway/utils.rs
+  4fbca6ac34438151 236-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "f42a90f87624b1d4c10aeed13ddc93d42d867c4d",
+  "prompts": {
+    "4fbca6ac34438151": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0689bcf2e02a3600559256",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4109,
+      "overriden_lines": 0
+    },
+    "f17ee04c7258f082": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a06e268ecb06c44d9971bbb",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 75,
+      "total_deletions": 52,
+      "accepted_lines": 754,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/src/handlers/asr.rs": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Single": 30
+          },
+          {
+            "Single": 500
+          },
+          {
+            "Single": 521
+          },
+          {
+            "Range": [
+              524,
+              525
+            ]
+          },
+          {
+            "Range": [
+              532,
+              538
+            ]
+          },
+          {
+            "Range": [
+              540,
+              552
+            ]
+          },
+          {
+            "Range": [
+              557,
+              562
+            ]
+          },
+          {
+            "Range": [
+              568,
+              571
+            ]
+          },
+          {
+            "Range": [
+              574,
+              592
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 30
+              },
+              {
+                "Single": 500
+              },
+              {
+                "Single": 521
+              },
+              {
+                "Range": [
+                  524,
+                  525
+                ]
+              },
+              {
+                "Range": [
+                  532,
+                  538
+                ]
+              },
+              {
+                "Range": [
+                  540,
+                  552
+                ]
+              },
+              {
+                "Range": [
+                  557,
+                  562
+                ]
+              },
+              {
+                "Range": [
+                  568,
+                  571
+                ]
+              },
+              {
+                "Range": [
+                  574,
+                  592
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs.rs": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              15,
+              16
+            ]
+          },
+          {
+            "Single": 26
+          },
+          {
+            "Single": 31
+          },
+          {
+            "Range": [
+              38,
+              40
+            ]
+          },
+          {
+            "Range": [
+              255,
+              260
+            ]
+          },
+          {
+            "Range": [
+              334,
+              349
+            ]
+          },
+          {
+            "Range": [
+              489,
+              501
+            ]
+          },
+          {
+            "Range": [
+              521,
+              531
+            ]
+          },
+          {
+            "Single": 533
+          },
+          {
+            "Range": [
+              535,
+              564
+            ]
+          },
+          {
+            "Range": [
+              585,
+              592
+            ]
+          },
+          {
+            "Single": 598
+          },
+          {
+            "Range": [
+              717,
+              756
+            ]
+          },
+          {
+            "Single": 759
+          },
+          {
+            "Range": [
+              762,
+              766
+            ]
+          },
+          {
+            "Single": 768
+          },
+          {
+            "Single": 777
+          },
+          {
+            "Range": [
+              824,
+              935
+            ]
+          },
+          {
+            "Single": 1106
+          },
+          {
+            "Range": [
+              1170,
+              1171
+            ]
+          },
+          {
+            "Range": [
+              1206,
+              1212
+            ]
+          },
+          {
+            "Range": [
+              1223,
+              1240
+            ]
+          },
+          {
+            "Range": [
+              1251,
+              1305
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  15,
+                  16
+                ]
+              },
+              {
+                "Single": 26
+              },
+              {
+                "Single": 31
+              },
+              {
+                "Range": [
+                  38,
+                  40
+                ]
+              },
+              {
+                "Range": [
+                  255,
+                  260
+                ]
+              },
+              {
+                "Range": [
+                  334,
+                  349
+                ]
+              },
+              {
+                "Range": [
+                  489,
+                  501
+                ]
+              },
+              {
+                "Range": [
+                  521,
+                  531
+                ]
+              },
+              {
+                "Single": 533
+              },
+              {
+                "Range": [
+                  535,
+                  564
+                ]
+              },
+              {
+                "Range": [
+                  585,
+                  592
+                ]
+              },
+              {
+                "Single": 598
+              },
+              {
+                "Range": [
+                  717,
+                  756
+                ]
+              },
+              {
+                "Single": 759
+              },
+              {
+                "Range": [
+                  762,
+                  766
+                ]
+              },
+              {
+                "Single": 768
+              },
+              {
+                "Single": 777
+              },
+              {
+                "Range": [
+                  824,
+                  935
+                ]
+              },
+              {
+                "Single": 1106
+              },
+              {
+                "Range": [
+                  1170,
+                  1171
+                ]
+              },
+              {
+                "Range": [
+                  1206,
+                  1212
+                ]
+              },
+              {
+                "Range": [
+                  1223,
+                  1240
+                ]
+              },
+              {
+                "Range": [
+                  1251,
+                  1305
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_streaming.rs": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              6,
+              28
+            ]
+          },
+          {
+            "Single": 42
+          },
+          {
+            "Range": [
+              126,
+              138
+            ]
+          },
+          {
+            "Range": [
+              140,
+              150
+            ]
+          },
+          {
+            "Range": [
+              152,
+              190
+            ]
+          },
+          {
+            "Range": [
+              192,
+              200
+            ]
+          },
+          {
+            "Single": 202
+          },
+          {
+            "Range": [
+              206,
+              230
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  6,
+                  28
+                ]
+              },
+              {
+                "Single": 42
+              },
+              {
+                "Range": [
+                  126,
+                  138
+                ]
+              },
+              {
+                "Range": [
+                  140,
+                  150
+                ]
+              },
+              {
+                "Range": [
+                  152,
+                  190
+                ]
+              },
+              {
+                "Range": [
+                  192,
+                  200
+                ]
+              },
+              {
+                "Single": 202
+              },
+              {
+                "Range": [
+                  206,
+                  230
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/api/asr.ts": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              112,
+              113
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  112,
+                  113
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              5,
+              197
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  5,
+                  197
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DirectoryTasksPanel.tsx": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              242,
+              247
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  242,
+                  247
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/index.tsx": [
+      {
+        "hash": "f17ee04c7258f082",
+        "line_ranges": [
+          {
+            "Range": [
+              556,
+              575
+            ]
+          },
+          {
+            "Range": [
+              579,
+              581
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a06fd8d40f5f77bafa397e7",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  556,
+                  575
+                ]
+              },
+              {
+                "Range": [
+                  579,
+                  581
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "f17ee04c7258f082": {
+      "tool": "trae",
+      "conversation_id": "6a06e268ecb06c44d9971bbb",
+      "session_id": "6a06e268ecb06c44d9971bbb",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
