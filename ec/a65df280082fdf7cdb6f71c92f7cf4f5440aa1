@@ -1,0 +1,80 @@
+crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+  4fbca6ac34438151 307-413
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  4fbca6ac34438151 567-994
+crates/bifrost-admin/src/handlers/asr.rs
+  f17ee04c7258f082 30,500,521,524-525,532-538,540-552,557-562,568-571,574-592
+crates/bifrost-admin/src/im_gateway/external_cli/mod.rs
+  4fbca6ac34438151 36-745
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  f17ee04c7258f082 15-16,26,31,38-40,255-260,334-349,489-501,521-531,533,535-564,585-592,598,717-756,759,762-766,768,777,824-935,1106,1170-1171,1206-1212,1223-1240,1251-1282
+crates/bifrost-admin/src/handlers/im_gateway/event_loop.rs
+  4fbca6ac34438151 836-967
+crates/bifrost-cli/src/commands/start.rs
+  4fbca6ac34438151 1522-1525
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  4fbca6ac34438151 76-1541
+crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+  4fbca6ac34438151 153-621
+crates/bifrost-cli/src/commands/mod.rs
+  4fbca6ac34438151 2
+crates/bifrost-cli/src/cli.rs
+  4fbca6ac34438151 549-598
+crates/bifrost-admin/src/handlers/asr_streaming.rs
+  f17ee04c7258f082 6-28,42,126-138,140-150,152-190,192-200,202,206-235,237-248
+crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs
+  4fbca6ac34438151 109-278
+crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs
+  4fbca6ac34438151 7-293
+web/src/pages/ASR/index.tsx
+  f17ee04c7258f082 556-575,579-581
+web/src/pages/ASR/components/DirectoryTasksPanel.tsx
+  f17ee04c7258f082 242-247
+web/src/api/asr.ts
+  f17ee04c7258f082 112-113
+crates/bifrost-admin/src/im_gateway/chatgpt_web/diagnostics.rs
+  4fbca6ac34438151 6-182
+web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx
+  f17ee04c7258f082 5-197
+crates/bifrost-admin/src/handlers/im_gateway/utils.rs
+  4fbca6ac34438151 236-256
+crates/bifrost-cli/src/main.rs
+  4fbca6ac34438151 237-239
+crates/bifrost-cli/src/commands/agent.rs
+  4fbca6ac34438151 2-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "eca65df280082fdf7cdb6f71c92f7cf4f5440aa1",
+  "prompts": {
+    "4fbca6ac34438151": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0689bcf2e02a3600559256",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4095,
+      "overriden_lines": 0
+    },
+    "f17ee04c7258f082": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a06e268ecb06c44d9971bbb",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 730,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
