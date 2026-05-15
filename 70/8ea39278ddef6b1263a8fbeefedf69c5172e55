@@ -1,0 +1,138 @@
+crates/bifrost-admin/src/im_gateway/external_cli/mod.rs
+  4fbca6ac34438151 36-745
+crates/bifrost-cli/src/commands/agent.rs
+  4fbca6ac34438151 2-85
+crates/bifrost-cli/src/commands/start.rs
+  4fbca6ac34438151 1522-1525
+web/src/pages/ASR/components/DirectoryTasksPanel.tsx
+  f17ee04c7258f082 242-247
+web/src/api/asr.ts
+  f17ee04c7258f082 112-113
+crates/bifrost-admin/src/handlers/im_gateway/event_loop.rs
+  4fbca6ac34438151 836-967
+crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs
+  4fbca6ac34438151 109-278
+crates/bifrost-cli/src/main.rs
+  4fbca6ac34438151 237-239
+crates/bifrost-cli/src/cli.rs
+  4fbca6ac34438151 549-598
+crates/bifrost-cli/src/commands/mod.rs
+  4fbca6ac34438151 2
+web/src/pages/ASR/index.tsx
+  f17ee04c7258f082 556-575,579-581
+crates/bifrost-admin/src/handlers/asr_streaming.rs
+  d0a15825f804daae 259,280
+  f17ee04c7258f082 6-28,42,126-138,140-150,152-190,192-200,202,206-230
+crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+  4fbca6ac34438151 307-413
+crates/bifrost-admin/src/handlers/asr.rs
+  f17ee04c7258f082 30,500,521,524-525,532-538,540-552,557-562,568-571,574-592
+crates/bifrost-admin/src/im_gateway/chatgpt_web/diagnostics.rs
+  4fbca6ac34438151 6-142,145-154,156-180
+  9ed8e88c2702e7ed 143-144,155
+crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs
+  9ed8e88c2702e7ed 207-208
+  4fbca6ac34438151 7-206,209-291
+crates/bifrost-admin/src/handlers/im_gateway/utils.rs
+  4fbca6ac34438151 236-256
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  d0a15825f804daae 661-671,674-675,679-711,713,721-722,727,731-732,738-740,754-756,760,768-778,787,791,800,882-884,886-893,901,904-984,987-989,994-995,997,1009-1011,1014-1015,1019-1020,1022-1027,1029-1031,1048-1085,1106-1107,1124-1152,1154-1174
+  f17ee04c7258f082 15-16,26,31,38-40,255-260,334-349,489-501,521-531,533,535-564,585-592,598,767,779-786,788-790,792-799,801-814,817,820-824,826,835,885,894-900,902-903,985-986,990-993,996,998-1008,1012-1013,1016-1018,1021,1028,1032-1047,1086-1105,1108-1120,1344,1408-1409,1444-1450,1461-1478,1489-1543
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  4fbca6ac34438151 76-115,118-132,135,137-144,170-207,225-597,599-1022,1051-1270,1296-1498,1504-1522,1532,1535,1554,1566-1571,1598-1683
+  9ed8e88c2702e7ed 116-117,133-134,136,145-169,208-224,598,1023-1050,1272-1295,1499-1503,1523-1531,1533-1534,1538-1553,1555-1565,1572-1597,1711-1759
+web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx
+  f17ee04c7258f082 5-197
+crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+  9ed8e88c2702e7ed 1-18,446-463,468-492,494-498,640-1268 gitai:{"mixed_line_ranges":[{"Single":646},{"Single":778},{"Single":854}],"operations":[]}
+  4fbca6ac34438151 154-445,464-467,493,499-633
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  d0a15825f804daae 1018,1021
+  4fbca6ac34438151 567-770,773-949,959-998
+  9ed8e88c2702e7ed 771-772,950-958,1005-1017,1019-1020,1022-1063
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "708ea39278ddef6b1263a8fbeefedf69c5172e55",
+  "prompts": {
+    "9ed8e88c2702e7ed": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0600104801bcfd51aab89e",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 897,
+      "overriden_lines": 3
+    },
+    "d0a15825f804daae": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a05faad98e02da010a5142e",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 285,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs": [
+      {
+        "hash": "9ed8e88c2702e7ed",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              18
+            ]
+          },
+          {
+            "Range": [
+              446,
+              463
+            ]
+          },
+          {
+            "Range": [
+              468,
+              492
+            ]
+          },
+          {
+            "Range": [
+              494,
+              498
+            ]
+          },
+          {
+            "Range": [
+              640,
+              1268
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 646
+          },
+          {
+            "Single": 778
+          },
+          {
+            "Single": 854
+          }
+        ],
+        "operations": []
+      }
+    ]
+  },
+  "remote_transcripts": {}
+}
