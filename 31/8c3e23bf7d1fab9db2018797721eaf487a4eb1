@@ -1,0 +1,3658 @@
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  a779cf5eaaaa16fa 650-666,678-695,697-698,702,720-729,893,1066-1068,1296,1298-1300,1302-1303,1305,1308-1312,1321,1352-1355,1368-1554,1567,1571-1593,1595-1604,1607-1608,1613,1670,1897-1899,1902,1946-1949,1971-1981,1986-1993,1998,2040-2043,2665-2673 gitai:{"mixed_line_ranges":[{"Single":1310},{"Single":1403}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[650,666]},{"Range":[678,695]},{"Range":[697,698]},{"Single":702},{"Range":[720,729]},{"Single":893},{"Range":[1066,1068]},{"Single":1296},{"Range":[1298,1300]},{"Range":[1302,1303]},{"Single":1305},{"Range":[1308,1312]},{"Single":1321},{"Range":[1352,1355]},{"Range":[1368,1554]},{"Single":1567},{"Range":[1571,1593]},{"Range":[1595,1604]},{"Range":[1607,1608]},{"Single":1613},{"Single":1670},{"Range":[1897,1899]},{"Single":1902},{"Range":[1946,1949]},{"Range":[1971,1981]},{"Range":[1986,1993]},{"Single":1998},{"Range":[2040,2043]},{"Range":[2665,2673]}]}]}
+crates/bifrost-cli/src/commands/asr.rs
+  a779cf5eaaaa16fa 102-107,152,169-177,185,193,198-217,261,267,275-282,353,426-428,479-480 gitai:{"mixed_line_ranges":[{"Single":480}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[102,107]},{"Single":152},{"Range":[169,177]},{"Single":185},{"Single":193},{"Range":[198,217]},{"Single":261},{"Single":267},{"Range":[275,282]},{"Single":353},{"Range":[426,428]},{"Range":[479,480]}]}]}
+design/cli-status-active-rules.md
+  a779cf5eaaaa16fa 7-8,14-19,22,47-68,73,75-77,79,81-82,85-86,92-93,95-97,102,104-114,121 gitai:{"mixed_line_ranges":[{"Single":19},{"Single":58},{"Single":60},{"Single":63},{"Single":95},{"Single":108},{"Single":121}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[7,8]},{"Range":[14,19]},{"Single":22},{"Range":[47,68]},{"Single":73},{"Range":[75,77]},{"Single":79},{"Range":[81,82]},{"Range":[85,86]},{"Range":[92,93]},{"Range":[95,97]},{"Single":102},{"Range":[104,114]},{"Single":121}]}]}
+web/src/pages/ASR/index.tsx
+  a779cf5eaaaa16fa 597,599,664,702 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":597},{"Single":599},{"Single":664},{"Single":702}]}]}
+human_tests/asr-scheduled-task-plan-b.md
+  a779cf5eaaaa16fa 13-17,163,168,172-196,200-222,325-487,495-510 gitai:{"mixed_line_ranges":[{"Single":14},{"Range":[509,510]}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[13,17]},{"Single":163},{"Single":168},{"Range":[172,196]},{"Range":[200,222]},{"Range":[325,487]},{"Range":[495,510]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/native.rs
+  a779cf5eaaaa16fa 59-69 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[59,69]}]}]}
+human_tests/readme.md
+  a779cf5eaaaa16fa 144,182 gitai:{"mixed_line_ranges":[{"Single":144},{"Single":182}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":144},{"Single":182}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs
+  a779cf5eaaaa16fa 43,45,48-56,104-123,419-499 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":43},{"Single":45},{"Range":[48,56]},{"Range":[104,123]},{"Range":[419,499]}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  a779cf5eaaaa16fa 43,1107-1122 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":43},{"Range":[1107,1122]}]}]}
+human_tests/qwen3-asr-local-server.md
+  a779cf5eaaaa16fa 120,138,149,156-157,195,226,238-239,463 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":120},{"Single":138},{"Single":149},{"Range":[156,157]},{"Single":195},{"Single":226},{"Range":[238,239]},{"Single":463}]}]}
+crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+  a779cf5eaaaa16fa 6,175-261,263-264,266,271-273,275-297,302-352,354-358,360,362,364-366,369-372,374-375,378-381,384-417,419,421-431,433,436-442,444,446-449,451-454,457-458,461-467,469-470,923-998,1080-1081,1083,1092-1097,1103-1104,1108,1116-1120,1130-1226,1245,1253,1258,1486-1938 gitai:{"mixed_line_ranges":[{"Single":387},{"Single":1657}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":6},{"Range":[175,261]},{"Range":[263,264]},{"Single":266},{"Range":[271,273]},{"Range":[275,297]},{"Range":[302,352]},{"Range":[354,358]},{"Single":360},{"Single":362},{"Range":[364,366]},{"Range":[369,372]},{"Range":[374,375]},{"Range":[378,381]},{"Range":[384,417]},{"Single":419},{"Range":[421,431]},{"Single":433},{"Range":[436,442]},{"Single":444},{"Range":[446,449]},{"Range":[451,454]},{"Range":[457,458]},{"Range":[461,467]},{"Range":[469,470]},{"Range":[923,998]},{"Range":[1080,1081]},{"Single":1083},{"Range":[1092,1097]},{"Range":[1103,1104]},{"Single":1108},{"Range":[1116,1120]},{"Range":[1130,1226]},{"Single":1245},{"Single":1253},{"Single":1258},{"Range":[1486,1938]}]}]}
+web/src/pages/ASR/components/DirectoryTasksPanel.tsx
+  a779cf5eaaaa16fa 19-24,38,77,169-181,246,312-322 gitai:{"mixed_line_ranges":[{"Range":[313,316]},{"Range":[320,321]}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[19,24]},{"Single":38},{"Single":77},{"Range":[169,181]},{"Single":246},{"Range":[312,322]}]}]}
+design/qwen3-asr-local-server.md
+  a779cf5eaaaa16fa 34-35,44,47,52,64-71,73-76,78-79,123,144-145,152,188 gitai:{"mixed_line_ranges":[{"Single":34},{"Single":52},{"Single":74}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[34,35]},{"Single":44},{"Single":47},{"Single":52},{"Range":[64,71]},{"Range":[73,76]},{"Range":[78,79]},{"Single":123},{"Range":[144,145]},{"Single":152},{"Single":188}]}]}
+  a63b754e1f9a0314 72 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0aac1fcbf1061c13749c12","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":72}]}]}
+web/src/api/asr.ts
+  a779cf5eaaaa16fa 357-362 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[357,362]}]}]}
+crates/bifrost-admin/src/handlers/asr.rs
+  a779cf5eaaaa16fa 21,29-31,33-35,42-43,73-74,527,529-530,538,545-546,552,577-797,925-926,942-950,955,973-975,1176,1181,1188-1363 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":21},{"Range":[29,31]},{"Range":[33,35]},{"Range":[42,43]},{"Range":[73,74]},{"Single":527},{"Range":[529,530]},{"Single":538},{"Range":[545,546]},{"Single":552},{"Range":[577,797]},{"Range":[925,926]},{"Range":[942,950]},{"Single":955},{"Range":[973,975]},{"Single":1176},{"Single":1181},{"Range":[1188,1363]}]}]}
+crates/bifrost-admin/src/handlers/asr_cli_invoke.rs
+  a779cf5eaaaa16fa 17-20,25,28-34,36-39,57-64,67,73-76,81,88-89,99,108,110-111,117-126,128,131-136,144-228,250-255,262,266-274,276-277,281-361,368,370,373-400,417-438,512-595 gitai:{"mixed_line_ranges":[{"Single":32},{"Single":136},{"Single":197},{"Single":199},{"Single":218},{"Single":220},{"Single":277},{"Single":525}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[17,20]},{"Single":25},{"Range":[28,34]},{"Range":[36,39]},{"Range":[57,64]},{"Single":67},{"Range":[73,76]},{"Single":81},{"Range":[88,89]},{"Single":99},{"Single":108},{"Range":[110,111]},{"Range":[117,126]},{"Single":128},{"Range":[131,136]},{"Range":[144,228]},{"Range":[250,255]},{"Single":262},{"Range":[266,274]},{"Range":[276,277]},{"Range":[281,361]},{"Single":368},{"Single":370},{"Range":[373,400]},{"Range":[417,438]},{"Range":[512,595]}]}]}
+web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx
+  a779cf5eaaaa16fa 22,43-56,69,90,103-107,197-207 gitai:{"mixed_line_ranges":[{"Range":[200,201]},{"Single":204},{"Single":206}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":22},{"Range":[43,56]},{"Single":69},{"Single":90},{"Range":[103,107]},{"Range":[197,207]}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  a779cf5eaaaa16fa 21-29,31-32,39,49-50,55-59,79-80,88-119,310-315,328-352,376-395,446-448,452,457,459-462,474,549-553,584-589,606,639,744,748-750,755,757-761,782,815,918,924,954-961,982-983,1156,1210-1217,1253-1260,1287-1307,1311,1314-1315,1322-1335,1371-1421,1425,1428,1431-1432,1447-1451,1455,1457-1459,1461,1467-1468,1472-1482,1486,1488,1502,1504,1513-1537,1546,1569-1572,1577,1589-1622,1633,1635-1638,1645-1652,1678,1680,1685-1693,1699-1701,1703,1712-1720,1752-1758,1772-1778,1781-1787,1792-1817,1820-1830,1909-1911,1926-1928,1941-1964,1975-1976,1980-1983,1985-2004,2006-2018,2020-2044,2046-2105,2108-2402,2429-2434,2437-2516,2528-2531,2594-2598,2739-2938,2956-2957,2969-2970,2987-2988,3043,3045-3049,3055-3057,3061-3070,3087,3089,3109-3110,3113,3131-3132,3166-3167,3245,3247-3249,3262-3269,3280-3363,3442-3446,3449,3453-3458,3480-3482,3493-3500,3588-3591,3685-3742,3884-3886,3892,3946,3973-3979,4067-4118,4261,4288-4415,4436,4480,4524,4569,4600-4647 gitai:{"mixed_line_ranges":[{"Single":28},{"Single":88},{"Single":91},{"Single":95},{"Single":115},{"Single":918},{"Single":959},{"Range":[1290,1294]},{"Range":[1296,1298]},{"Single":1468},{"Single":1755},{"Range":[1797,1799]},{"Single":1803},{"Single":1806},{"Range":[1808,1811]},{"Range":[1814,1815]},{"Single":1821},{"Single":1823},{"Single":1825},{"Single":1829},{"Single":2438},{"Single":2448},{"Single":2461},{"Single":2479},{"Single":2493},{"Single":2516},{"Range":[2956,2957]},{"Range":[2969,2970]},{"Range":[2987,2988]},{"Single":3266},{"Range":[3287,3288]},{"Single":3449},{"Single":3497},{"Single":3884}],"operations":[{"operation_id":"6a0b1c94dda0bf2309b0ca97","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[21,29]},{"Range":[31,32]},{"Single":39},{"Range":[49,50]},{"Range":[55,59]},{"Range":[79,80]},{"Range":[88,119]},{"Range":[310,315]},{"Range":[328,352]},{"Range":[376,395]},{"Range":[446,448]},{"Single":452},{"Single":457},{"Range":[459,462]},{"Single":474},{"Range":[549,553]},{"Range":[584,589]},{"Single":606},{"Single":639},{"Single":744},{"Range":[748,750]},{"Single":755},{"Range":[757,761]},{"Single":782},{"Single":815},{"Single":918},{"Single":924},{"Range":[954,961]},{"Range":[982,983]},{"Single":1156},{"Range":[1210,1217]},{"Range":[1253,1260]},{"Range":[1287,1307]},{"Single":1311},{"Range":[1314,1315]},{"Range":[1322,1335]},{"Range":[1371,1421]},{"Single":1425},{"Single":1428},{"Range":[1431,1432]},{"Range":[1447,1451]},{"Single":1455},{"Range":[1457,1459]},{"Single":1461},{"Range":[1467,1468]},{"Range":[1472,1482]},{"Single":1486},{"Single":1488},{"Single":1502},{"Single":1504},{"Range":[1513,1537]},{"Single":1546},{"Range":[1569,1572]},{"Single":1577},{"Range":[1589,1622]},{"Single":1633},{"Range":[1635,1638]},{"Range":[1645,1652]},{"Single":1678},{"Single":1680},{"Range":[1685,1693]},{"Range":[1699,1701]},{"Single":1703},{"Range":[1712,1720]},{"Range":[1752,1758]},{"Range":[1772,1778]},{"Range":[1781,1787]},{"Range":[1792,1817]},{"Range":[1820,1830]},{"Range":[1909,1911]},{"Range":[1926,1928]},{"Range":[1941,1964]},{"Range":[1975,1976]},{"Range":[1980,1983]},{"Range":[1985,2004]},{"Range":[2006,2018]},{"Range":[2020,2044]},{"Range":[2046,2105]},{"Range":[2108,2402]},{"Range":[2429,2434]},{"Range":[2437,2516]},{"Range":[2528,2531]},{"Range":[2594,2598]},{"Range":[2739,2938]},{"Range":[2956,2957]},{"Range":[2969,2970]},{"Range":[2987,2988]},{"Single":3043},{"Range":[3045,3049]},{"Range":[3055,3057]},{"Range":[3061,3070]},{"Single":3087},{"Single":3089},{"Range":[3109,3110]},{"Single":3113},{"Range":[3131,3132]},{"Range":[3166,3167]},{"Single":3245},{"Range":[3247,3249]},{"Range":[3262,3269]},{"Range":[3280,3363]},{"Range":[3442,3446]},{"Single":3449},{"Range":[3453,3458]},{"Range":[3480,3482]},{"Range":[3493,3500]},{"Range":[3588,3591]},{"Range":[3685,3742]},{"Range":[3884,3886]},{"Single":3892},{"Single":3946},{"Range":[3973,3979]},{"Range":[4067,4118]},{"Single":4261},{"Range":[4288,4415]},{"Single":4436},{"Single":4480},{"Single":4524},{"Single":4569},{"Range":[4600,4647]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "318c3e23bf7d1fab9db2018797721eaf487a4eb1",
+  "prompts": {
+    "a63b754e1f9a0314": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0aa286cbf1061c13749a9f",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 20,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "a779cf5eaaaa16fa": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0a79d640f5f77bafa39919",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 3568,
+      "total_deletions": 1585,
+      "accepted_lines": 2717,
+      "overriden_lines": 88
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/src/handlers/asr.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 21
+          },
+          {
+            "Range": [
+              29,
+              31
+            ]
+          },
+          {
+            "Range": [
+              33,
+              35
+            ]
+          },
+          {
+            "Range": [
+              42,
+              43
+            ]
+          },
+          {
+            "Range": [
+              73,
+              74
+            ]
+          },
+          {
+            "Single": 527
+          },
+          {
+            "Range": [
+              529,
+              530
+            ]
+          },
+          {
+            "Single": 538
+          },
+          {
+            "Range": [
+              545,
+              546
+            ]
+          },
+          {
+            "Single": 552
+          },
+          {
+            "Range": [
+              577,
+              797
+            ]
+          },
+          {
+            "Range": [
+              925,
+              926
+            ]
+          },
+          {
+            "Range": [
+              942,
+              950
+            ]
+          },
+          {
+            "Single": 955
+          },
+          {
+            "Range": [
+              973,
+              975
+            ]
+          },
+          {
+            "Single": 1176
+          },
+          {
+            "Single": 1181
+          },
+          {
+            "Range": [
+              1188,
+              1363
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 21
+              },
+              {
+                "Range": [
+                  29,
+                  31
+                ]
+              },
+              {
+                "Range": [
+                  33,
+                  35
+                ]
+              },
+              {
+                "Range": [
+                  42,
+                  43
+                ]
+              },
+              {
+                "Range": [
+                  73,
+                  74
+                ]
+              },
+              {
+                "Single": 527
+              },
+              {
+                "Range": [
+                  529,
+                  530
+                ]
+              },
+              {
+                "Single": 538
+              },
+              {
+                "Range": [
+                  545,
+                  546
+                ]
+              },
+              {
+                "Single": 552
+              },
+              {
+                "Range": [
+                  577,
+                  797
+                ]
+              },
+              {
+                "Range": [
+                  925,
+                  926
+                ]
+              },
+              {
+                "Range": [
+                  942,
+                  950
+                ]
+              },
+              {
+                "Single": 955
+              },
+              {
+                "Range": [
+                  973,
+                  975
+                ]
+              },
+              {
+                "Single": 1176
+              },
+              {
+                "Single": 1181
+              },
+              {
+                "Range": [
+                  1188,
+                  1363
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_cli_invoke.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              17,
+              20
+            ]
+          },
+          {
+            "Single": 25
+          },
+          {
+            "Range": [
+              28,
+              34
+            ]
+          },
+          {
+            "Range": [
+              36,
+              39
+            ]
+          },
+          {
+            "Range": [
+              57,
+              64
+            ]
+          },
+          {
+            "Single": 67
+          },
+          {
+            "Range": [
+              73,
+              76
+            ]
+          },
+          {
+            "Single": 81
+          },
+          {
+            "Range": [
+              88,
+              89
+            ]
+          },
+          {
+            "Single": 99
+          },
+          {
+            "Single": 108
+          },
+          {
+            "Range": [
+              110,
+              111
+            ]
+          },
+          {
+            "Range": [
+              117,
+              126
+            ]
+          },
+          {
+            "Single": 128
+          },
+          {
+            "Range": [
+              131,
+              136
+            ]
+          },
+          {
+            "Range": [
+              144,
+              228
+            ]
+          },
+          {
+            "Range": [
+              250,
+              255
+            ]
+          },
+          {
+            "Single": 262
+          },
+          {
+            "Range": [
+              266,
+              274
+            ]
+          },
+          {
+            "Range": [
+              276,
+              277
+            ]
+          },
+          {
+            "Range": [
+              281,
+              361
+            ]
+          },
+          {
+            "Single": 368
+          },
+          {
+            "Single": 370
+          },
+          {
+            "Range": [
+              373,
+              400
+            ]
+          },
+          {
+            "Range": [
+              417,
+              438
+            ]
+          },
+          {
+            "Range": [
+              512,
+              595
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 32
+          },
+          {
+            "Single": 136
+          },
+          {
+            "Single": 197
+          },
+          {
+            "Single": 199
+          },
+          {
+            "Single": 218
+          },
+          {
+            "Single": 220
+          },
+          {
+            "Single": 277
+          },
+          {
+            "Single": 525
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  17,
+                  20
+                ]
+              },
+              {
+                "Single": 25
+              },
+              {
+                "Range": [
+                  28,
+                  34
+                ]
+              },
+              {
+                "Range": [
+                  36,
+                  39
+                ]
+              },
+              {
+                "Range": [
+                  57,
+                  64
+                ]
+              },
+              {
+                "Single": 67
+              },
+              {
+                "Range": [
+                  73,
+                  76
+                ]
+              },
+              {
+                "Single": 81
+              },
+              {
+                "Range": [
+                  88,
+                  89
+                ]
+              },
+              {
+                "Single": 99
+              },
+              {
+                "Single": 108
+              },
+              {
+                "Range": [
+                  110,
+                  111
+                ]
+              },
+              {
+                "Range": [
+                  117,
+                  126
+                ]
+              },
+              {
+                "Single": 128
+              },
+              {
+                "Range": [
+                  131,
+                  136
+                ]
+              },
+              {
+                "Range": [
+                  144,
+                  228
+                ]
+              },
+              {
+                "Range": [
+                  250,
+                  255
+                ]
+              },
+              {
+                "Single": 262
+              },
+              {
+                "Range": [
+                  266,
+                  274
+                ]
+              },
+              {
+                "Range": [
+                  276,
+                  277
+                ]
+              },
+              {
+                "Range": [
+                  281,
+                  361
+                ]
+              },
+              {
+                "Single": 368
+              },
+              {
+                "Single": 370
+              },
+              {
+                "Range": [
+                  373,
+                  400
+                ]
+              },
+              {
+                "Range": [
+                  417,
+                  438
+                ]
+              },
+              {
+                "Range": [
+                  512,
+                  595
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              21,
+              29
+            ]
+          },
+          {
+            "Range": [
+              31,
+              32
+            ]
+          },
+          {
+            "Single": 39
+          },
+          {
+            "Range": [
+              49,
+              50
+            ]
+          },
+          {
+            "Range": [
+              55,
+              59
+            ]
+          },
+          {
+            "Range": [
+              79,
+              80
+            ]
+          },
+          {
+            "Range": [
+              88,
+              119
+            ]
+          },
+          {
+            "Range": [
+              310,
+              315
+            ]
+          },
+          {
+            "Range": [
+              328,
+              352
+            ]
+          },
+          {
+            "Range": [
+              376,
+              395
+            ]
+          },
+          {
+            "Range": [
+              446,
+              448
+            ]
+          },
+          {
+            "Single": 452
+          },
+          {
+            "Single": 457
+          },
+          {
+            "Range": [
+              459,
+              462
+            ]
+          },
+          {
+            "Single": 474
+          },
+          {
+            "Range": [
+              549,
+              553
+            ]
+          },
+          {
+            "Range": [
+              584,
+              589
+            ]
+          },
+          {
+            "Single": 606
+          },
+          {
+            "Single": 639
+          },
+          {
+            "Single": 744
+          },
+          {
+            "Range": [
+              748,
+              750
+            ]
+          },
+          {
+            "Single": 755
+          },
+          {
+            "Range": [
+              757,
+              761
+            ]
+          },
+          {
+            "Single": 782
+          },
+          {
+            "Single": 815
+          },
+          {
+            "Single": 918
+          },
+          {
+            "Single": 924
+          },
+          {
+            "Range": [
+              954,
+              961
+            ]
+          },
+          {
+            "Range": [
+              982,
+              983
+            ]
+          },
+          {
+            "Single": 1156
+          },
+          {
+            "Range": [
+              1210,
+              1217
+            ]
+          },
+          {
+            "Range": [
+              1253,
+              1260
+            ]
+          },
+          {
+            "Range": [
+              1287,
+              1307
+            ]
+          },
+          {
+            "Single": 1311
+          },
+          {
+            "Range": [
+              1314,
+              1315
+            ]
+          },
+          {
+            "Range": [
+              1322,
+              1335
+            ]
+          },
+          {
+            "Range": [
+              1371,
+              1421
+            ]
+          },
+          {
+            "Single": 1425
+          },
+          {
+            "Single": 1428
+          },
+          {
+            "Range": [
+              1431,
+              1432
+            ]
+          },
+          {
+            "Range": [
+              1447,
+              1451
+            ]
+          },
+          {
+            "Single": 1455
+          },
+          {
+            "Range": [
+              1457,
+              1459
+            ]
+          },
+          {
+            "Single": 1461
+          },
+          {
+            "Range": [
+              1467,
+              1468
+            ]
+          },
+          {
+            "Range": [
+              1472,
+              1482
+            ]
+          },
+          {
+            "Single": 1486
+          },
+          {
+            "Single": 1488
+          },
+          {
+            "Single": 1502
+          },
+          {
+            "Single": 1504
+          },
+          {
+            "Range": [
+              1513,
+              1537
+            ]
+          },
+          {
+            "Single": 1546
+          },
+          {
+            "Range": [
+              1569,
+              1572
+            ]
+          },
+          {
+            "Single": 1577
+          },
+          {
+            "Range": [
+              1589,
+              1622
+            ]
+          },
+          {
+            "Single": 1633
+          },
+          {
+            "Range": [
+              1635,
+              1638
+            ]
+          },
+          {
+            "Range": [
+              1645,
+              1652
+            ]
+          },
+          {
+            "Single": 1678
+          },
+          {
+            "Single": 1680
+          },
+          {
+            "Range": [
+              1685,
+              1693
+            ]
+          },
+          {
+            "Range": [
+              1699,
+              1701
+            ]
+          },
+          {
+            "Single": 1703
+          },
+          {
+            "Range": [
+              1712,
+              1720
+            ]
+          },
+          {
+            "Range": [
+              1752,
+              1758
+            ]
+          },
+          {
+            "Range": [
+              1772,
+              1778
+            ]
+          },
+          {
+            "Range": [
+              1781,
+              1787
+            ]
+          },
+          {
+            "Range": [
+              1792,
+              1817
+            ]
+          },
+          {
+            "Range": [
+              1820,
+              1830
+            ]
+          },
+          {
+            "Range": [
+              1909,
+              1911
+            ]
+          },
+          {
+            "Range": [
+              1926,
+              1928
+            ]
+          },
+          {
+            "Range": [
+              1941,
+              1964
+            ]
+          },
+          {
+            "Range": [
+              1975,
+              1976
+            ]
+          },
+          {
+            "Range": [
+              1980,
+              1983
+            ]
+          },
+          {
+            "Range": [
+              1985,
+              2004
+            ]
+          },
+          {
+            "Range": [
+              2006,
+              2018
+            ]
+          },
+          {
+            "Range": [
+              2020,
+              2044
+            ]
+          },
+          {
+            "Range": [
+              2046,
+              2105
+            ]
+          },
+          {
+            "Range": [
+              2108,
+              2402
+            ]
+          },
+          {
+            "Range": [
+              2429,
+              2434
+            ]
+          },
+          {
+            "Range": [
+              2437,
+              2516
+            ]
+          },
+          {
+            "Range": [
+              2528,
+              2531
+            ]
+          },
+          {
+            "Range": [
+              2594,
+              2598
+            ]
+          },
+          {
+            "Range": [
+              2739,
+              2938
+            ]
+          },
+          {
+            "Range": [
+              2956,
+              2957
+            ]
+          },
+          {
+            "Range": [
+              2969,
+              2970
+            ]
+          },
+          {
+            "Range": [
+              2987,
+              2988
+            ]
+          },
+          {
+            "Single": 3043
+          },
+          {
+            "Range": [
+              3045,
+              3049
+            ]
+          },
+          {
+            "Range": [
+              3055,
+              3057
+            ]
+          },
+          {
+            "Range": [
+              3061,
+              3070
+            ]
+          },
+          {
+            "Single": 3087
+          },
+          {
+            "Single": 3089
+          },
+          {
+            "Range": [
+              3109,
+              3110
+            ]
+          },
+          {
+            "Single": 3113
+          },
+          {
+            "Range": [
+              3131,
+              3132
+            ]
+          },
+          {
+            "Range": [
+              3166,
+              3167
+            ]
+          },
+          {
+            "Single": 3245
+          },
+          {
+            "Range": [
+              3247,
+              3249
+            ]
+          },
+          {
+            "Range": [
+              3262,
+              3269
+            ]
+          },
+          {
+            "Range": [
+              3280,
+              3363
+            ]
+          },
+          {
+            "Range": [
+              3442,
+              3446
+            ]
+          },
+          {
+            "Single": 3449
+          },
+          {
+            "Range": [
+              3453,
+              3458
+            ]
+          },
+          {
+            "Range": [
+              3480,
+              3482
+            ]
+          },
+          {
+            "Range": [
+              3493,
+              3500
+            ]
+          },
+          {
+            "Range": [
+              3588,
+              3591
+            ]
+          },
+          {
+            "Range": [
+              3685,
+              3742
+            ]
+          },
+          {
+            "Range": [
+              3884,
+              3886
+            ]
+          },
+          {
+            "Single": 3892
+          },
+          {
+            "Single": 3946
+          },
+          {
+            "Range": [
+              3973,
+              3979
+            ]
+          },
+          {
+            "Range": [
+              4067,
+              4118
+            ]
+          },
+          {
+            "Single": 4261
+          },
+          {
+            "Range": [
+              4288,
+              4415
+            ]
+          },
+          {
+            "Single": 4436
+          },
+          {
+            "Single": 4480
+          },
+          {
+            "Single": 4524
+          },
+          {
+            "Single": 4569
+          },
+          {
+            "Range": [
+              4600,
+              4647
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 28
+          },
+          {
+            "Single": 88
+          },
+          {
+            "Single": 91
+          },
+          {
+            "Single": 95
+          },
+          {
+            "Single": 115
+          },
+          {
+            "Single": 918
+          },
+          {
+            "Single": 959
+          },
+          {
+            "Range": [
+              1290,
+              1294
+            ]
+          },
+          {
+            "Range": [
+              1296,
+              1298
+            ]
+          },
+          {
+            "Single": 1468
+          },
+          {
+            "Single": 1755
+          },
+          {
+            "Range": [
+              1797,
+              1799
+            ]
+          },
+          {
+            "Single": 1803
+          },
+          {
+            "Single": 1806
+          },
+          {
+            "Range": [
+              1808,
+              1811
+            ]
+          },
+          {
+            "Range": [
+              1814,
+              1815
+            ]
+          },
+          {
+            "Single": 1821
+          },
+          {
+            "Single": 1823
+          },
+          {
+            "Single": 1825
+          },
+          {
+            "Single": 1829
+          },
+          {
+            "Single": 2438
+          },
+          {
+            "Single": 2448
+          },
+          {
+            "Single": 2461
+          },
+          {
+            "Single": 2479
+          },
+          {
+            "Single": 2493
+          },
+          {
+            "Single": 2516
+          },
+          {
+            "Range": [
+              2956,
+              2957
+            ]
+          },
+          {
+            "Range": [
+              2969,
+              2970
+            ]
+          },
+          {
+            "Range": [
+              2987,
+              2988
+            ]
+          },
+          {
+            "Single": 3266
+          },
+          {
+            "Range": [
+              3287,
+              3288
+            ]
+          },
+          {
+            "Single": 3449
+          },
+          {
+            "Single": 3497
+          },
+          {
+            "Single": 3884
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  21,
+                  29
+                ]
+              },
+              {
+                "Range": [
+                  31,
+                  32
+                ]
+              },
+              {
+                "Single": 39
+              },
+              {
+                "Range": [
+                  49,
+                  50
+                ]
+              },
+              {
+                "Range": [
+                  55,
+                  59
+                ]
+              },
+              {
+                "Range": [
+                  79,
+                  80
+                ]
+              },
+              {
+                "Range": [
+                  88,
+                  119
+                ]
+              },
+              {
+                "Range": [
+                  310,
+                  315
+                ]
+              },
+              {
+                "Range": [
+                  328,
+                  352
+                ]
+              },
+              {
+                "Range": [
+                  376,
+                  395
+                ]
+              },
+              {
+                "Range": [
+                  446,
+                  448
+                ]
+              },
+              {
+                "Single": 452
+              },
+              {
+                "Single": 457
+              },
+              {
+                "Range": [
+                  459,
+                  462
+                ]
+              },
+              {
+                "Single": 474
+              },
+              {
+                "Range": [
+                  549,
+                  553
+                ]
+              },
+              {
+                "Range": [
+                  584,
+                  589
+                ]
+              },
+              {
+                "Single": 606
+              },
+              {
+                "Single": 639
+              },
+              {
+                "Single": 744
+              },
+              {
+                "Range": [
+                  748,
+                  750
+                ]
+              },
+              {
+                "Single": 755
+              },
+              {
+                "Range": [
+                  757,
+                  761
+                ]
+              },
+              {
+                "Single": 782
+              },
+              {
+                "Single": 815
+              },
+              {
+                "Single": 918
+              },
+              {
+                "Single": 924
+              },
+              {
+                "Range": [
+                  954,
+                  961
+                ]
+              },
+              {
+                "Range": [
+                  982,
+                  983
+                ]
+              },
+              {
+                "Single": 1156
+              },
+              {
+                "Range": [
+                  1210,
+                  1217
+                ]
+              },
+              {
+                "Range": [
+                  1253,
+                  1260
+                ]
+              },
+              {
+                "Range": [
+                  1287,
+                  1307
+                ]
+              },
+              {
+                "Single": 1311
+              },
+              {
+                "Range": [
+                  1314,
+                  1315
+                ]
+              },
+              {
+                "Range": [
+                  1322,
+                  1335
+                ]
+              },
+              {
+                "Range": [
+                  1371,
+                  1421
+                ]
+              },
+              {
+                "Single": 1425
+              },
+              {
+                "Single": 1428
+              },
+              {
+                "Range": [
+                  1431,
+                  1432
+                ]
+              },
+              {
+                "Range": [
+                  1447,
+                  1451
+                ]
+              },
+              {
+                "Single": 1455
+              },
+              {
+                "Range": [
+                  1457,
+                  1459
+                ]
+              },
+              {
+                "Single": 1461
+              },
+              {
+                "Range": [
+                  1467,
+                  1468
+                ]
+              },
+              {
+                "Range": [
+                  1472,
+                  1482
+                ]
+              },
+              {
+                "Single": 1486
+              },
+              {
+                "Single": 1488
+              },
+              {
+                "Single": 1502
+              },
+              {
+                "Single": 1504
+              },
+              {
+                "Range": [
+                  1513,
+                  1537
+                ]
+              },
+              {
+                "Single": 1546
+              },
+              {
+                "Range": [
+                  1569,
+                  1572
+                ]
+              },
+              {
+                "Single": 1577
+              },
+              {
+                "Range": [
+                  1589,
+                  1622
+                ]
+              },
+              {
+                "Single": 1633
+              },
+              {
+                "Range": [
+                  1635,
+                  1638
+                ]
+              },
+              {
+                "Range": [
+                  1645,
+                  1652
+                ]
+              },
+              {
+                "Single": 1678
+              },
+              {
+                "Single": 1680
+              },
+              {
+                "Range": [
+                  1685,
+                  1693
+                ]
+              },
+              {
+                "Range": [
+                  1699,
+                  1701
+                ]
+              },
+              {
+                "Single": 1703
+              },
+              {
+                "Range": [
+                  1712,
+                  1720
+                ]
+              },
+              {
+                "Range": [
+                  1752,
+                  1758
+                ]
+              },
+              {
+                "Range": [
+                  1772,
+                  1778
+                ]
+              },
+              {
+                "Range": [
+                  1781,
+                  1787
+                ]
+              },
+              {
+                "Range": [
+                  1792,
+                  1817
+                ]
+              },
+              {
+                "Range": [
+                  1820,
+                  1830
+                ]
+              },
+              {
+                "Range": [
+                  1909,
+                  1911
+                ]
+              },
+              {
+                "Range": [
+                  1926,
+                  1928
+                ]
+              },
+              {
+                "Range": [
+                  1941,
+                  1964
+                ]
+              },
+              {
+                "Range": [
+                  1975,
+                  1976
+                ]
+              },
+              {
+                "Range": [
+                  1980,
+                  1983
+                ]
+              },
+              {
+                "Range": [
+                  1985,
+                  2004
+                ]
+              },
+              {
+                "Range": [
+                  2006,
+                  2018
+                ]
+              },
+              {
+                "Range": [
+                  2020,
+                  2044
+                ]
+              },
+              {
+                "Range": [
+                  2046,
+                  2105
+                ]
+              },
+              {
+                "Range": [
+                  2108,
+                  2402
+                ]
+              },
+              {
+                "Range": [
+                  2429,
+                  2434
+                ]
+              },
+              {
+                "Range": [
+                  2437,
+                  2516
+                ]
+              },
+              {
+                "Range": [
+                  2528,
+                  2531
+                ]
+              },
+              {
+                "Range": [
+                  2594,
+                  2598
+                ]
+              },
+              {
+                "Range": [
+                  2739,
+                  2938
+                ]
+              },
+              {
+                "Range": [
+                  2956,
+                  2957
+                ]
+              },
+              {
+                "Range": [
+                  2969,
+                  2970
+                ]
+              },
+              {
+                "Range": [
+                  2987,
+                  2988
+                ]
+              },
+              {
+                "Single": 3043
+              },
+              {
+                "Range": [
+                  3045,
+                  3049
+                ]
+              },
+              {
+                "Range": [
+                  3055,
+                  3057
+                ]
+              },
+              {
+                "Range": [
+                  3061,
+                  3070
+                ]
+              },
+              {
+                "Single": 3087
+              },
+              {
+                "Single": 3089
+              },
+              {
+                "Range": [
+                  3109,
+                  3110
+                ]
+              },
+              {
+                "Single": 3113
+              },
+              {
+                "Range": [
+                  3131,
+                  3132
+                ]
+              },
+              {
+                "Range": [
+                  3166,
+                  3167
+                ]
+              },
+              {
+                "Single": 3245
+              },
+              {
+                "Range": [
+                  3247,
+                  3249
+                ]
+              },
+              {
+                "Range": [
+                  3262,
+                  3269
+                ]
+              },
+              {
+                "Range": [
+                  3280,
+                  3363
+                ]
+              },
+              {
+                "Range": [
+                  3442,
+                  3446
+                ]
+              },
+              {
+                "Single": 3449
+              },
+              {
+                "Range": [
+                  3453,
+                  3458
+                ]
+              },
+              {
+                "Range": [
+                  3480,
+                  3482
+                ]
+              },
+              {
+                "Range": [
+                  3493,
+                  3500
+                ]
+              },
+              {
+                "Range": [
+                  3588,
+                  3591
+                ]
+              },
+              {
+                "Range": [
+                  3685,
+                  3742
+                ]
+              },
+              {
+                "Range": [
+                  3884,
+                  3886
+                ]
+              },
+              {
+                "Single": 3892
+              },
+              {
+                "Single": 3946
+              },
+              {
+                "Range": [
+                  3973,
+                  3979
+                ]
+              },
+              {
+                "Range": [
+                  4067,
+                  4118
+                ]
+              },
+              {
+                "Single": 4261
+              },
+              {
+                "Range": [
+                  4288,
+                  4415
+                ]
+              },
+              {
+                "Single": 4436
+              },
+              {
+                "Single": 4480
+              },
+              {
+                "Single": 4524
+              },
+              {
+                "Single": 4569
+              },
+              {
+                "Range": [
+                  4600,
+                  4647
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 43
+          },
+          {
+            "Range": [
+              1107,
+              1122
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 43
+              },
+              {
+                "Range": [
+                  1107,
+                  1122
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 43
+          },
+          {
+            "Single": 45
+          },
+          {
+            "Range": [
+              48,
+              56
+            ]
+          },
+          {
+            "Range": [
+              104,
+              123
+            ]
+          },
+          {
+            "Range": [
+              419,
+              499
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 43
+              },
+              {
+                "Single": 45
+              },
+              {
+                "Range": [
+                  48,
+                  56
+                ]
+              },
+              {
+                "Range": [
+                  104,
+                  123
+                ]
+              },
+              {
+                "Range": [
+                  419,
+                  499
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 6
+          },
+          {
+            "Range": [
+              175,
+              261
+            ]
+          },
+          {
+            "Range": [
+              263,
+              264
+            ]
+          },
+          {
+            "Single": 266
+          },
+          {
+            "Range": [
+              271,
+              273
+            ]
+          },
+          {
+            "Range": [
+              275,
+              297
+            ]
+          },
+          {
+            "Range": [
+              302,
+              352
+            ]
+          },
+          {
+            "Range": [
+              354,
+              358
+            ]
+          },
+          {
+            "Single": 360
+          },
+          {
+            "Single": 362
+          },
+          {
+            "Range": [
+              364,
+              366
+            ]
+          },
+          {
+            "Range": [
+              369,
+              372
+            ]
+          },
+          {
+            "Range": [
+              374,
+              375
+            ]
+          },
+          {
+            "Range": [
+              378,
+              381
+            ]
+          },
+          {
+            "Range": [
+              384,
+              417
+            ]
+          },
+          {
+            "Single": 419
+          },
+          {
+            "Range": [
+              421,
+              431
+            ]
+          },
+          {
+            "Single": 433
+          },
+          {
+            "Range": [
+              436,
+              442
+            ]
+          },
+          {
+            "Single": 444
+          },
+          {
+            "Range": [
+              446,
+              449
+            ]
+          },
+          {
+            "Range": [
+              451,
+              454
+            ]
+          },
+          {
+            "Range": [
+              457,
+              458
+            ]
+          },
+          {
+            "Range": [
+              461,
+              467
+            ]
+          },
+          {
+            "Range": [
+              469,
+              470
+            ]
+          },
+          {
+            "Range": [
+              923,
+              998
+            ]
+          },
+          {
+            "Range": [
+              1080,
+              1081
+            ]
+          },
+          {
+            "Single": 1083
+          },
+          {
+            "Range": [
+              1092,
+              1097
+            ]
+          },
+          {
+            "Range": [
+              1103,
+              1104
+            ]
+          },
+          {
+            "Single": 1108
+          },
+          {
+            "Range": [
+              1116,
+              1120
+            ]
+          },
+          {
+            "Range": [
+              1130,
+              1226
+            ]
+          },
+          {
+            "Single": 1245
+          },
+          {
+            "Single": 1253
+          },
+          {
+            "Single": 1258
+          },
+          {
+            "Range": [
+              1486,
+              1938
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 387
+          },
+          {
+            "Single": 1657
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 6
+              },
+              {
+                "Range": [
+                  175,
+                  261
+                ]
+              },
+              {
+                "Range": [
+                  263,
+                  264
+                ]
+              },
+              {
+                "Single": 266
+              },
+              {
+                "Range": [
+                  271,
+                  273
+                ]
+              },
+              {
+                "Range": [
+                  275,
+                  297
+                ]
+              },
+              {
+                "Range": [
+                  302,
+                  352
+                ]
+              },
+              {
+                "Range": [
+                  354,
+                  358
+                ]
+              },
+              {
+                "Single": 360
+              },
+              {
+                "Single": 362
+              },
+              {
+                "Range": [
+                  364,
+                  366
+                ]
+              },
+              {
+                "Range": [
+                  369,
+                  372
+                ]
+              },
+              {
+                "Range": [
+                  374,
+                  375
+                ]
+              },
+              {
+                "Range": [
+                  378,
+                  381
+                ]
+              },
+              {
+                "Range": [
+                  384,
+                  417
+                ]
+              },
+              {
+                "Single": 419
+              },
+              {
+                "Range": [
+                  421,
+                  431
+                ]
+              },
+              {
+                "Single": 433
+              },
+              {
+                "Range": [
+                  436,
+                  442
+                ]
+              },
+              {
+                "Single": 444
+              },
+              {
+                "Range": [
+                  446,
+                  449
+                ]
+              },
+              {
+                "Range": [
+                  451,
+                  454
+                ]
+              },
+              {
+                "Range": [
+                  457,
+                  458
+                ]
+              },
+              {
+                "Range": [
+                  461,
+                  467
+                ]
+              },
+              {
+                "Range": [
+                  469,
+                  470
+                ]
+              },
+              {
+                "Range": [
+                  923,
+                  998
+                ]
+              },
+              {
+                "Range": [
+                  1080,
+                  1081
+                ]
+              },
+              {
+                "Single": 1083
+              },
+              {
+                "Range": [
+                  1092,
+                  1097
+                ]
+              },
+              {
+                "Range": [
+                  1103,
+                  1104
+                ]
+              },
+              {
+                "Single": 1108
+              },
+              {
+                "Range": [
+                  1116,
+                  1120
+                ]
+              },
+              {
+                "Range": [
+                  1130,
+                  1226
+                ]
+              },
+              {
+                "Single": 1245
+              },
+              {
+                "Single": 1253
+              },
+              {
+                "Single": 1258
+              },
+              {
+                "Range": [
+                  1486,
+                  1938
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/native.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              59,
+              69
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  59,
+                  69
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              650,
+              666
+            ]
+          },
+          {
+            "Range": [
+              678,
+              695
+            ]
+          },
+          {
+            "Range": [
+              697,
+              698
+            ]
+          },
+          {
+            "Single": 702
+          },
+          {
+            "Range": [
+              720,
+              729
+            ]
+          },
+          {
+            "Single": 893
+          },
+          {
+            "Range": [
+              1066,
+              1068
+            ]
+          },
+          {
+            "Single": 1296
+          },
+          {
+            "Range": [
+              1298,
+              1300
+            ]
+          },
+          {
+            "Range": [
+              1302,
+              1303
+            ]
+          },
+          {
+            "Single": 1305
+          },
+          {
+            "Range": [
+              1308,
+              1312
+            ]
+          },
+          {
+            "Single": 1321
+          },
+          {
+            "Range": [
+              1352,
+              1355
+            ]
+          },
+          {
+            "Range": [
+              1368,
+              1554
+            ]
+          },
+          {
+            "Single": 1567
+          },
+          {
+            "Range": [
+              1571,
+              1593
+            ]
+          },
+          {
+            "Range": [
+              1595,
+              1604
+            ]
+          },
+          {
+            "Range": [
+              1607,
+              1608
+            ]
+          },
+          {
+            "Single": 1613
+          },
+          {
+            "Single": 1670
+          },
+          {
+            "Range": [
+              1897,
+              1899
+            ]
+          },
+          {
+            "Single": 1902
+          },
+          {
+            "Range": [
+              1946,
+              1949
+            ]
+          },
+          {
+            "Range": [
+              1971,
+              1981
+            ]
+          },
+          {
+            "Range": [
+              1986,
+              1993
+            ]
+          },
+          {
+            "Single": 1998
+          },
+          {
+            "Range": [
+              2040,
+              2043
+            ]
+          },
+          {
+            "Range": [
+              2665,
+              2673
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 1310
+          },
+          {
+            "Single": 1403
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  650,
+                  666
+                ]
+              },
+              {
+                "Range": [
+                  678,
+                  695
+                ]
+              },
+              {
+                "Range": [
+                  697,
+                  698
+                ]
+              },
+              {
+                "Single": 702
+              },
+              {
+                "Range": [
+                  720,
+                  729
+                ]
+              },
+              {
+                "Single": 893
+              },
+              {
+                "Range": [
+                  1066,
+                  1068
+                ]
+              },
+              {
+                "Single": 1296
+              },
+              {
+                "Range": [
+                  1298,
+                  1300
+                ]
+              },
+              {
+                "Range": [
+                  1302,
+                  1303
+                ]
+              },
+              {
+                "Single": 1305
+              },
+              {
+                "Range": [
+                  1308,
+                  1312
+                ]
+              },
+              {
+                "Single": 1321
+              },
+              {
+                "Range": [
+                  1352,
+                  1355
+                ]
+              },
+              {
+                "Range": [
+                  1368,
+                  1554
+                ]
+              },
+              {
+                "Single": 1567
+              },
+              {
+                "Range": [
+                  1571,
+                  1593
+                ]
+              },
+              {
+                "Range": [
+                  1595,
+                  1604
+                ]
+              },
+              {
+                "Range": [
+                  1607,
+                  1608
+                ]
+              },
+              {
+                "Single": 1613
+              },
+              {
+                "Single": 1670
+              },
+              {
+                "Range": [
+                  1897,
+                  1899
+                ]
+              },
+              {
+                "Single": 1902
+              },
+              {
+                "Range": [
+                  1946,
+                  1949
+                ]
+              },
+              {
+                "Range": [
+                  1971,
+                  1981
+                ]
+              },
+              {
+                "Range": [
+                  1986,
+                  1993
+                ]
+              },
+              {
+                "Single": 1998
+              },
+              {
+                "Range": [
+                  2040,
+                  2043
+                ]
+              },
+              {
+                "Range": [
+                  2665,
+                  2673
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-cli/src/commands/asr.rs": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              102,
+              107
+            ]
+          },
+          {
+            "Single": 152
+          },
+          {
+            "Range": [
+              169,
+              177
+            ]
+          },
+          {
+            "Single": 185
+          },
+          {
+            "Single": 193
+          },
+          {
+            "Range": [
+              198,
+              217
+            ]
+          },
+          {
+            "Single": 261
+          },
+          {
+            "Single": 267
+          },
+          {
+            "Range": [
+              275,
+              282
+            ]
+          },
+          {
+            "Single": 353
+          },
+          {
+            "Range": [
+              426,
+              428
+            ]
+          },
+          {
+            "Range": [
+              479,
+              480
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 480
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  102,
+                  107
+                ]
+              },
+              {
+                "Single": 152
+              },
+              {
+                "Range": [
+                  169,
+                  177
+                ]
+              },
+              {
+                "Single": 185
+              },
+              {
+                "Single": 193
+              },
+              {
+                "Range": [
+                  198,
+                  217
+                ]
+              },
+              {
+                "Single": 261
+              },
+              {
+                "Single": 267
+              },
+              {
+                "Range": [
+                  275,
+                  282
+                ]
+              },
+              {
+                "Single": 353
+              },
+              {
+                "Range": [
+                  426,
+                  428
+                ]
+              },
+              {
+                "Range": [
+                  479,
+                  480
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "design/cli-status-active-rules.md": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              7,
+              8
+            ]
+          },
+          {
+            "Range": [
+              14,
+              19
+            ]
+          },
+          {
+            "Single": 22
+          },
+          {
+            "Range": [
+              47,
+              68
+            ]
+          },
+          {
+            "Single": 73
+          },
+          {
+            "Range": [
+              75,
+              77
+            ]
+          },
+          {
+            "Single": 79
+          },
+          {
+            "Range": [
+              81,
+              82
+            ]
+          },
+          {
+            "Range": [
+              85,
+              86
+            ]
+          },
+          {
+            "Range": [
+              92,
+              93
+            ]
+          },
+          {
+            "Range": [
+              95,
+              97
+            ]
+          },
+          {
+            "Single": 102
+          },
+          {
+            "Range": [
+              104,
+              114
+            ]
+          },
+          {
+            "Single": 121
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 19
+          },
+          {
+            "Single": 58
+          },
+          {
+            "Single": 60
+          },
+          {
+            "Single": 63
+          },
+          {
+            "Single": 95
+          },
+          {
+            "Single": 108
+          },
+          {
+            "Single": 121
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  7,
+                  8
+                ]
+              },
+              {
+                "Range": [
+                  14,
+                  19
+                ]
+              },
+              {
+                "Single": 22
+              },
+              {
+                "Range": [
+                  47,
+                  68
+                ]
+              },
+              {
+                "Single": 73
+              },
+              {
+                "Range": [
+                  75,
+                  77
+                ]
+              },
+              {
+                "Single": 79
+              },
+              {
+                "Range": [
+                  81,
+                  82
+                ]
+              },
+              {
+                "Range": [
+                  85,
+                  86
+                ]
+              },
+              {
+                "Range": [
+                  92,
+                  93
+                ]
+              },
+              {
+                "Range": [
+                  95,
+                  97
+                ]
+              },
+              {
+                "Single": 102
+              },
+              {
+                "Range": [
+                  104,
+                  114
+                ]
+              },
+              {
+                "Single": 121
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "design/qwen3-asr-local-server.md": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              34,
+              35
+            ]
+          },
+          {
+            "Single": 44
+          },
+          {
+            "Single": 47
+          },
+          {
+            "Single": 52
+          },
+          {
+            "Range": [
+              64,
+              71
+            ]
+          },
+          {
+            "Range": [
+              73,
+              76
+            ]
+          },
+          {
+            "Range": [
+              78,
+              79
+            ]
+          },
+          {
+            "Single": 123
+          },
+          {
+            "Range": [
+              144,
+              145
+            ]
+          },
+          {
+            "Single": 152
+          },
+          {
+            "Single": 188
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 34
+          },
+          {
+            "Single": 52
+          },
+          {
+            "Single": 74
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  34,
+                  35
+                ]
+              },
+              {
+                "Single": 44
+              },
+              {
+                "Single": 47
+              },
+              {
+                "Single": 52
+              },
+              {
+                "Range": [
+                  64,
+                  71
+                ]
+              },
+              {
+                "Range": [
+                  73,
+                  76
+                ]
+              },
+              {
+                "Range": [
+                  78,
+                  79
+                ]
+              },
+              {
+                "Single": 123
+              },
+              {
+                "Range": [
+                  144,
+                  145
+                ]
+              },
+              {
+                "Single": 152
+              },
+              {
+                "Single": 188
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "hash": "a63b754e1f9a0314",
+        "line_ranges": [
+          {
+            "Single": 72
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0aac1fcbf1061c13749c12",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 72
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "human_tests/asr-scheduled-task-plan-b.md": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              13,
+              17
+            ]
+          },
+          {
+            "Single": 163
+          },
+          {
+            "Single": 168
+          },
+          {
+            "Range": [
+              172,
+              196
+            ]
+          },
+          {
+            "Range": [
+              200,
+              222
+            ]
+          },
+          {
+            "Range": [
+              325,
+              487
+            ]
+          },
+          {
+            "Range": [
+              495,
+              510
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 14
+          },
+          {
+            "Range": [
+              509,
+              510
+            ]
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  13,
+                  17
+                ]
+              },
+              {
+                "Single": 163
+              },
+              {
+                "Single": 168
+              },
+              {
+                "Range": [
+                  172,
+                  196
+                ]
+              },
+              {
+                "Range": [
+                  200,
+                  222
+                ]
+              },
+              {
+                "Range": [
+                  325,
+                  487
+                ]
+              },
+              {
+                "Range": [
+                  495,
+                  510
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "human_tests/qwen3-asr-local-server.md": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 120
+          },
+          {
+            "Single": 138
+          },
+          {
+            "Single": 149
+          },
+          {
+            "Range": [
+              156,
+              157
+            ]
+          },
+          {
+            "Single": 195
+          },
+          {
+            "Single": 226
+          },
+          {
+            "Range": [
+              238,
+              239
+            ]
+          },
+          {
+            "Single": 463
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 120
+              },
+              {
+                "Single": 138
+              },
+              {
+                "Single": 149
+              },
+              {
+                "Range": [
+                  156,
+                  157
+                ]
+              },
+              {
+                "Single": 195
+              },
+              {
+                "Single": 226
+              },
+              {
+                "Range": [
+                  238,
+                  239
+                ]
+              },
+              {
+                "Single": 463
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "human_tests/readme.md": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 144
+          },
+          {
+            "Single": 182
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 144
+          },
+          {
+            "Single": 182
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 144
+              },
+              {
+                "Single": 182
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/api/asr.ts": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              357,
+              362
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  357,
+                  362
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 22
+          },
+          {
+            "Range": [
+              43,
+              56
+            ]
+          },
+          {
+            "Single": 69
+          },
+          {
+            "Single": 90
+          },
+          {
+            "Range": [
+              103,
+              107
+            ]
+          },
+          {
+            "Range": [
+              197,
+              207
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Range": [
+              200,
+              201
+            ]
+          },
+          {
+            "Single": 204
+          },
+          {
+            "Single": 206
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 22
+              },
+              {
+                "Range": [
+                  43,
+                  56
+                ]
+              },
+              {
+                "Single": 69
+              },
+              {
+                "Single": 90
+              },
+              {
+                "Range": [
+                  103,
+                  107
+                ]
+              },
+              {
+                "Range": [
+                  197,
+                  207
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DirectoryTasksPanel.tsx": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Range": [
+              19,
+              24
+            ]
+          },
+          {
+            "Single": 38
+          },
+          {
+            "Single": 77
+          },
+          {
+            "Range": [
+              169,
+              181
+            ]
+          },
+          {
+            "Single": 246
+          },
+          {
+            "Range": [
+              312,
+              322
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Range": [
+              313,
+              316
+            ]
+          },
+          {
+            "Range": [
+              320,
+              321
+            ]
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  19,
+                  24
+                ]
+              },
+              {
+                "Single": 38
+              },
+              {
+                "Single": 77
+              },
+              {
+                "Range": [
+                  169,
+                  181
+                ]
+              },
+              {
+                "Single": 246
+              },
+              {
+                "Range": [
+                  312,
+                  322
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/index.tsx": [
+      {
+        "hash": "a779cf5eaaaa16fa",
+        "line_ranges": [
+          {
+            "Single": 597
+          },
+          {
+            "Single": 599
+          },
+          {
+            "Single": 664
+          },
+          {
+            "Single": 702
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0b1c94dda0bf2309b0ca97",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 597
+              },
+              {
+                "Single": 599
+              },
+              {
+                "Single": 664
+              },
+              {
+                "Single": 702
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "a63b754e1f9a0314": {
+      "tool": "trae",
+      "conversation_id": "6a0aa286cbf1061c13749a9f",
+      "session_id": "6a0aa286cbf1061c13749a9f",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "a779cf5eaaaa16fa": {
+      "tool": "trae",
+      "conversation_id": "6a0a79d640f5f77bafa39919",
+      "session_id": "6a0a79d640f5f77bafa39919",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
