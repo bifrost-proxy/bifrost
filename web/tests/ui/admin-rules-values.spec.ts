@@ -88,8 +88,8 @@ test("Rules 编辑器 bp 补全使用 parser scripts，decode bp 校验不报缺
       content: [
         `bp-local.test bp://${parserScriptName} decode://bp`,
         "bp-remote.test bp://https://example.com/parser.js?sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef decode://bp",
-        "bp-file.test bp://file:///Users/eden/parser.js decode://bp",
-        "bp-abs.test bp:///Users/eden/parser.js decode://bp",
+        "bp-file.test bp://file:///tmp/parser.js decode://bp",
+        "bp-abs.test bp:///tmp/parser.js decode://bp",
       ].join("\n"),
     },
   });

@@ -1762,7 +1762,13 @@ pub async fn handle_http_request(
                 Ok(r) => r,
                 Err(e) => {
                     let error_message = e.to_string();
-                    error!("[{}] {}", ctx.id_str(), error_message);
+                    error!(
+                        "[{}] {} | host={} uri={}",
+                        ctx.id_str(),
+                        error_message,
+                        original_host,
+                        processed_uri
+                    );
                     return Ok(build_conn_error_and_record(
                         "REQUEST_PROXY_FAILED",
                         error_message,
@@ -1831,10 +1837,12 @@ pub async fn handle_http_request(
                             Err(retry_err) => {
                                 let classified = classify_request_error(&retry_err);
                                 error!(
-                                    "[{}] {} ({})",
+                                    "[{}] {} ({}) | host={} uri={}",
                                     ctx.id_str(),
                                     classified.error_message,
-                                    classified.error_type
+                                    classified.error_type,
+                                    original_host,
+                                    processed_uri
                                 );
                                 for source in &classified.source_chain {
                                     error!("[{}] Request failure source: {}", ctx.id_str(), source);
@@ -1849,10 +1857,12 @@ pub async fn handle_http_request(
                     } else {
                         let classified = classify_request_error(&e);
                         error!(
-                            "[{}] {} ({})",
+                            "[{}] {} ({}) | host={} uri={}",
                             ctx.id_str(),
                             classified.error_message,
-                            classified.error_type
+                            classified.error_type,
+                            original_host,
+                            processed_uri
                         );
                         for source in &classified.source_chain {
                             error!("[{}] Request failure source: {}", ctx.id_str(), source);
@@ -1888,7 +1898,13 @@ pub async fn handle_http_request(
                 Ok(r) => r,
                 Err(e) => {
                     let error_message = e.to_string();
-                    error!("[{}] {}", ctx.id_str(), error_message);
+                    error!(
+                        "[{}] {} | host={} uri={}",
+                        ctx.id_str(),
+                        error_message,
+                        original_host,
+                        processed_uri
+                    );
                     return Ok(build_conn_error_and_record(
                         "REQUEST_PROXY_FAILED",
                         error_message,
@@ -1913,10 +1929,12 @@ pub async fn handle_http_request(
                 Err(e) => {
                     let classified = classify_request_error(&e);
                     error!(
-                        "[{}] {} ({})",
+                        "[{}] {} ({}) | host={} uri={}",
                         ctx.id_str(),
                         classified.error_message,
-                        classified.error_type
+                        classified.error_type,
+                        original_host,
+                        processed_uri
                     );
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", ctx.id_str(), source);

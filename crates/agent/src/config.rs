@@ -27,6 +27,10 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Default IM runner. Empty means the built-in Bifrost agent runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<AgentRunnerMode>,
+
     // -- Model selection --
     /// Model name (e.g. "gpt-5.4-2026-03-05").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,6 +167,55 @@ pub struct ImMessageChannelBinding {
     pub target_id: String,
     #[serde(default = "default_message_target_mode")]
     pub target_mode: MessageTargetMode,
+}
+
+/// Runtime selected for IM agent messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRunnerMode {
+    /// Built-in Bifrost agent runtime.
+    BifrostAgent,
+    /// A custom runner ID from the Agent runner registry.
+    Custom(String),
+}
+
+impl AgentRunnerMode {
+    pub fn custom_runner_id(&self) -> Option<&str> {
+        match self {
+            Self::BifrostAgent => None,
+            Self::Custom(id) => Some(id.as_str()),
+        }
+    }
+
+    pub fn is_custom_runner(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+}
+
+impl Serialize for AgentRunnerMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::BifrostAgent => serializer.serialize_str("bifrost_agent"),
+            Self::Custom(id) => serializer.serialize_str(id),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentRunnerMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == "bifrost_agent" {
+            Ok(Self::BifrostAgent)
+        } else {
+            Ok(Self::Custom(trimmed.to_string()))
+        }
+    }
 }
 
 fn default_message_target_mode() -> MessageTargetMode {
@@ -420,6 +473,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            runner: None,
             model: Some(AgentConfig::DEFAULT_MODEL.to_string()),
             model_provider: Some("aidp_crawl".to_string()),
             model_providers: HashMap::new(),
@@ -1016,6 +1070,7 @@ fn load_toml_config(path: &Path) -> Option<AgentConfig> {
 fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
     AgentConfig {
         enabled: overlay.enabled,
+        runner: overlay.runner.or(base.runner),
         model: overlay.model.or(base.model),
         model_provider: overlay.model_provider.or(base.model_provider),
         model_providers: {

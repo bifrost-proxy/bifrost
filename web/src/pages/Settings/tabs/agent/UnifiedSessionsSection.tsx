@@ -20,7 +20,6 @@ import {
 import {
   ClearOutlined,
   DeleteOutlined,
-  EyeOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import { get, del } from "../../../../api/client";
@@ -115,6 +114,19 @@ export default function UnifiedSessionsSection({
       fetchAll();
     } catch {
       message.error("Failed to clear sessions");
+    }
+  };
+
+  const canOpenSession = (record: UnifiedSession) =>
+    record.status === "active" || Boolean(record.history_path);
+
+  const openSession = (record: UnifiedSession) => {
+    if (record.status === "active") {
+      onOpenSession?.(record.session_key, "active");
+      return;
+    }
+    if (record.history_path) {
+      onOpenSession?.(record.session_key, "history", record.history_path);
     }
   };
 
@@ -213,16 +225,27 @@ export default function UnifiedSessionsSection({
       key: "title",
       width: 180,
       ellipsis: true,
-      render: (val?: string) =>
-        val ? (
+      render: (val?: string, record?: UnifiedSession) => {
+        const openable = record ? canOpenSession(record) : false;
+        return val ? (
           <Tooltip title={val}>
-            <Text style={{ fontSize: 11 }}>{val}</Text>
+            <Text
+              data-testid="agent-session-title"
+              style={{ fontSize: 11, cursor: openable ? "pointer" : "default" }}
+            >
+              {val}
+            </Text>
           </Tooltip>
         ) : (
-          <Text type="secondary" style={{ fontSize: 10 }}>
+          <Text
+            data-testid="agent-session-title"
+            type="secondary"
+            style={{ fontSize: 10 }}
+          >
             —
           </Text>
-        ),
+        );
+      },
     },
     {
       title: "Work Dir",
@@ -304,26 +327,12 @@ export default function UnifiedSessionsSection({
     {
       title: "Actions",
       key: "actions",
-      width: 80,
+      width: 56,
       render: (_: unknown, record: UnifiedSession) => (
-        <Space size={4}>
-          <Tooltip title="View details">
-            <Button
-              size="small"
-              icon={<EyeOutlined />}
-              onClick={() => {
-                if (record.status === "active") {
-                  onOpenSession?.(record.session_key, "active");
-                } else {
-                  onOpenSession?.(
-                    record.session_key,
-                    "history",
-                    record.history_path,
-                  );
-                }
-              }}
-            />
-          </Tooltip>
+        <span
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
           {record.status === "active" ? (
             <Popconfirm
               title="Delete this active session?"
@@ -339,7 +348,7 @@ export default function UnifiedSessionsSection({
               <Button size="small" danger icon={<DeleteOutlined />} />
             </Popconfirm>
           ) : null}
-        </Space>
+        </span>
       ),
     },
   ];
@@ -395,6 +404,24 @@ export default function UnifiedSessionsSection({
         pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No sessions" /> }}
         scroll={{ x: 1250 }}
+        onRow={(record) => {
+          const openable = canOpenSession(record);
+          return {
+            "data-testid": "agent-session-row",
+            tabIndex: openable ? 0 : -1,
+            style: { cursor: openable ? "pointer" : "default" },
+            onClick: () => {
+              if (openable) openSession(record);
+            },
+            onKeyDown: (event) => {
+              if (!openable) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                openSession(record);
+              }
+            },
+          };
+        }}
       />
     </Space>
   );

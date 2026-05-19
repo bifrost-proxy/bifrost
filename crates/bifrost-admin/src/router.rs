@@ -91,6 +91,9 @@ impl AdminRouter {
         } else if admin_path.starts_with("/public/sync-login") {
             handle_sync_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/api/") {
+            // Ensure the ASR scheduled-task scheduler is running on first API
+            // request so tasks execute even if the ASR page is never visited.
+            crate::handlers::asr_jobs::ensure_scheduler_started().await;
             Self::handle_api(req, state, push_manager, &admin_path, peer_addr).await
         } else {
             serve_static_file(&admin_path, req.headers())

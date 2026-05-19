@@ -578,7 +578,7 @@ export default function AccessControlTab() {
               rowKey="ip"
               loading={loading}
               size="small"
-              pagination={{ pageSize: 10 }}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
               data-testid="settings-whitelist-table"
             />
           </Card>
@@ -624,7 +624,7 @@ export default function AccessControlTab() {
               rowKey="ip"
               loading={loading}
               size="small"
-              pagination={{ pageSize: 10 }}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
               data-testid="settings-temp-whitelist-table"
             />
           </Card>
@@ -673,7 +673,7 @@ export default function AccessControlTab() {
               rowKey="ip"
               loading={loading}
               size="small"
-              pagination={{ pageSize: 10 }}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
               data-testid="settings-session-denied-table"
             />
           </Card>

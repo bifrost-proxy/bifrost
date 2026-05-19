@@ -546,6 +546,56 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(
+        about = "Run an AI agent (external CLI runner) from the terminal",
+        long_about = concat!(
+            "Run an AI agent (external CLI runner) interactively from the terminal.\n",
+            "\n",
+            "The agent executes through the chat-gateway system, using the configured\n",
+            "runner and adapter (e.g. codex, chatgpt-web). The result is streamed back\n",
+            "and rendered as Markdown in the terminal.\n",
+            "\n",
+            "If the runner produces images, they are saved to files and their paths\n",
+            "are printed as Markdown image links.\n",
+            "\n",
+            "EXAMPLES:\n",
+            "  bifrost agent run \"What is Bifrost?\"\n",
+            "  bifrost agent run --runner chatgpt-web \"Draw a cat\"\n",
+            "  bifrost agent run --runner chatgpt-web --new \"Hello\"\n",
+            "  bifrost agent run --runner chatgpt-web --session my-session \"Continue\"\n",
+        )
+    )]
+    Agent {
+        #[command(subcommand)]
+        action: AgentCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentCommands {
+    #[command(about = "Run an agent with a message and get the response")]
+    Run {
+        #[arg(help = "Message to send to the agent")]
+        message: String,
+        #[arg(long, help = "Runner ID to use (interactive selection if omitted)")]
+        runner: Option<String>,
+        #[arg(long, help = "Session key for conversation continuity")]
+        session: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "session",
+            help = "Force a new conversation (do not reuse existing session)"
+        )]
+        new: bool,
+        #[arg(
+            long,
+            value_hint = ValueHint::DirPath,
+            help = "Directory to save generated images (default: current directory)"
+        )]
+        output_dir: Option<PathBuf>,
+        #[arg(long, help = "Output raw JSON instead of formatted Markdown")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -583,6 +633,74 @@ pub enum AiAsrCommands {
         language: String,
         #[arg(long, default_value = "jsonl", value_parser = ["jsonl"], help = "Output format")]
         format: String,
+    },
+    #[command(about = "Inspect and run ASR directory tasks")]
+    Task {
+        #[command(subcommand)]
+        action: AiAsrTaskCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiAsrTaskCommands {
+    #[command(about = "List ASR directory tasks")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Show one ASR directory task")]
+    Show {
+        #[arg(help = "ASR task ID")]
+        task_id: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "List files discovered by one ASR directory task")]
+    Files {
+        #[arg(help = "ASR task ID")]
+        task_id: String,
+        #[arg(long, value_parser = ["pending", "processing", "success", "partial_success", "failed"], help = "Filter by file status")]
+        status: Option<String>,
+        #[arg(long, default_value = "50", help = "Maximum files to print")]
+        limit: usize,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Run one ASR directory task")]
+    Run {
+        #[arg(help = "ASR task ID")]
+        task_id: String,
+        #[arg(long, help = "Wait until the task is no longer running")]
+        wait: bool,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Inspect daily merged documents for one ASR directory task")]
+    Daily {
+        #[command(subcommand)]
+        action: AiAsrTaskDailyCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiAsrTaskDailyCommands {
+    #[command(about = "List daily merged documents for one ASR task")]
+    List {
+        #[arg(help = "ASR task ID")]
+        task_id: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Show one daily merged document")]
+    Show {
+        #[arg(help = "ASR task ID")]
+        task_id: String,
+        #[arg(help = "Daily document date, formatted as YYYY-MM-DD")]
+        date: String,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Write Markdown content to a file instead of stdout")]
+        output: Option<PathBuf>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
     },
 }
 

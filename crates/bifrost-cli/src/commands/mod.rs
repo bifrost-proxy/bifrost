@@ -1,4 +1,5 @@
 mod admin;
+pub mod agent;
 mod asr;
 mod bifrost_file;
 mod ca;

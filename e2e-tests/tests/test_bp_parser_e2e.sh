@@ -554,8 +554,8 @@ import json
 content = "\n".join([
     "bp-validate-local.test bp://build_in_bp?protocol=thrift decode://bp",
     "bp-validate-remote.test bp://https://example.com/parser/build_in_bp.js?sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef decode://bp",
-    "bp-validate-file-url.test bp://file:///Users/eden/parser/build_in_bp.js decode://bp",
-    "bp-validate-abs.test bp:///Users/eden/parser/build_in_bp.js decode://bp",
+    "bp-validate-file-url.test bp://file:///tmp/parser/build_in_bp.js decode://bp",
+    "bp-validate-abs.test bp:///tmp/parser/build_in_bp.js decode://bp",
 ])
 print(json.dumps({"content": content}))
 PY

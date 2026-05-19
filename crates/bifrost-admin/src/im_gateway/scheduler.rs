@@ -263,8 +263,11 @@ mod tests {
                 id: "s1".to_string(),
                 name: "due".to_string(),
                 enabled: true,
-                target_id: "t1".to_string(),
-                message_channel: None,
+                message_channel: Some(ImMessageChannelBinding {
+                    provider_id: "p1".to_string(),
+                    target_id: "owner".to_string(),
+                    target_mode: MessageTargetMode::Owner,
+                }),
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
@@ -287,8 +290,11 @@ mod tests {
                 id: "s2".to_string(),
                 name: "not due".to_string(),
                 enabled: true,
-                target_id: "t1".to_string(),
-                message_channel: None,
+                message_channel: Some(ImMessageChannelBinding {
+                    provider_id: "p1".to_string(),
+                    target_id: "owner".to_string(),
+                    target_mode: MessageTargetMode::Owner,
+                }),
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {
@@ -311,8 +317,11 @@ mod tests {
                 id: "s3".to_string(),
                 name: "disabled".to_string(),
                 enabled: false,
-                target_id: "t1".to_string(),
-                message_channel: None,
+                message_channel: Some(ImMessageChannelBinding {
+                    provider_id: "p1".to_string(),
+                    target_id: "owner".to_string(),
+                    target_mode: MessageTargetMode::Owner,
+                }),
                 task_type: ScheduleTaskType::Script,
                 trigger: ScheduleTrigger::Interval { every_ms: 5000 },
                 script: TaskScript {

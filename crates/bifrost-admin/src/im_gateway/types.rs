@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use bifrost_agent::{ImMessageChannelBinding, MessageTargetMode};
+pub use bifrost_agent::{AgentRunnerMode, ImMessageChannelBinding, MessageTargetMode};
 use bifrost_agent::{PlanStep, ToolCallLog};
 use serde::{Deserialize, Serialize};
+
+use super::external_cli::ExternalCliDeliveryMode;
 
 // ---------------------------------------------------------------------------
 // Connection Handle (used by provider trait)
@@ -33,6 +35,9 @@ pub enum ImProviderType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImProviderAgentConfig {
+    /// Provider-specific IM runner override. Empty inherits the global Agent runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<AgentRunnerMode>,
     /// Provider-specific default working directory for agent sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
@@ -221,6 +226,21 @@ pub enum ImRouteAction {
         #[serde(default = "default_reply_target")]
         reply_target: ReplyTarget,
     },
+    /// Forward the message to an external CLI agent adapter such as Codex CLI.
+    ExternalCliAgentChat {
+        /// Optional adapter override for this route. Empty uses global/channel config.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        adapter: Option<String>,
+        /// Optional one-off instructions appended before the inbound message.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        /// Where to send the reply
+        #[serde(default = "default_reply_target")]
+        reply_target: ReplyTarget,
+        /// Optional route-level delivery override. Empty uses global/channel config.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delivery_mode: Option<ExternalCliDeliveryMode>,
+    },
 }
 
 fn default_reply_target() -> ReplyTarget {
@@ -304,6 +324,44 @@ impl TaskScript {
     }
 }
 
+pub fn script_task_input_preview(script: &TaskScript) -> String {
+    let mut parts = Vec::new();
+    if let Some(script_text) = script
+        .script_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Script Text:\n{script_text}"));
+    }
+    if let Some(script_file) = script
+        .script_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Script File:\n{script_file}"));
+    }
+    if let Some(cwd) = script
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Working Directory:\n{cwd}"));
+    }
+    if !script.env.is_empty() {
+        let env = script
+            .env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(format!("Environment:\n{env}"));
+    }
+    parts.join("\n\n")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleTaskType {
@@ -316,12 +374,30 @@ pub enum ScheduleTaskType {
 pub struct ScheduleAgentTask {
     /// Preset prompt sent to the agent when the schedule fires.
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_ref: Option<ScheduleConversationRef>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleConversationRef {
+    pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -348,10 +424,7 @@ pub struct ImSchedule {
     pub name: String,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub target_id: String,
     /// Channel used for schedule notifications and injected send_msg defaults.
-    /// `target_id` is kept as a compatibility shortcut for configured targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_channel: Option<ImMessageChannelBinding>,
     pub trigger: ScheduleTrigger,
@@ -408,8 +481,8 @@ impl ImSchedule {
 
         match self.task_type {
             ScheduleTaskType::Script => {
-                if self.target_id.trim().is_empty() {
-                    return Err("script schedules require target_id".to_string());
+                if self.message_channel.is_none() {
+                    return Err("script schedules require message_channel".to_string());
                 }
                 if self.script.is_empty() {
                     return Err(
@@ -419,6 +492,9 @@ impl ImSchedule {
                 }
             }
             ScheduleTaskType::Agent => {
+                if self.message_channel.is_none() {
+                    return Err("agent schedules require message_channel".to_string());
+                }
                 let prompt = self
                     .agent
                     .as_ref()
@@ -479,6 +555,8 @@ pub struct ImTaskRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_preview: Option<String>,
@@ -490,6 +568,8 @@ pub struct ImTaskRun {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<ScheduleTaskType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_final_response: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -796,4 +876,35 @@ pub struct ImTaskExecutionRequest {
     pub timeout_ms: u64,
     #[serde(default = "default_max_output_bytes")]
     pub max_output_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_cli_agent_chat_delivery_mode_is_optional_route_override() {
+        let action: ImRouteAction = serde_json::from_value(serde_json::json!({
+            "type": "external_cli_agent_chat"
+        }))
+        .expect("deserialize external cli action");
+        match action {
+            ImRouteAction::ExternalCliAgentChat { delivery_mode, .. } => {
+                assert_eq!(delivery_mode, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let action: ImRouteAction = serde_json::from_value(serde_json::json!({
+            "type": "external_cli_agent_chat",
+            "delivery_mode": "no_im"
+        }))
+        .expect("deserialize external cli action with override");
+        match action {
+            ImRouteAction::ExternalCliAgentChat { delivery_mode, .. } => {
+                assert_eq!(delivery_mode, Some(ExternalCliDeliveryMode::NoIm));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
 }

@@ -4294,13 +4294,13 @@ mod tests {
             &grant.grant_id,
             Some(&grant.caller_fingerprint),
             grant.ssh_key_fingerprint.as_deref(),
-            Path::new("/Users/eden"),
+            Path::new("/home/testuser"),
         );
         assert!(
             policy
                 .check(
                     Path::new("hello.txt"),
-                    Path::new("/Users/eden"),
+                    Path::new("/home/testuser"),
                     FileOp::Write
                 )
                 .is_ok(),

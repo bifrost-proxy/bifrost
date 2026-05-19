@@ -2,7 +2,7 @@
  * Agent Tab — Main configuration component
  * Sub-components are in ./agent/ directory
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Button,
@@ -42,6 +42,8 @@ import {
   type McpServerConfig,
   type ProviderInfo,
 } from "./agent/types";
+import * as imGatewayApi from "../../../api/imGateway";
+import type { ExternalCliGatewayConfig, ImProviderConfig } from "../../../api/imGateway";
 import {
   AGENT_SECTION_NAV,
   type AgentSectionId,
@@ -52,6 +54,7 @@ import UnifiedSessionsSection from "./agent/UnifiedSessionsSection";
 import SessionDetailPage from "./agent/SessionDetailPage";
 import MemoriesSection from "./agent/MemoriesSection";
 import LongTextModalField from "./agent/LongTextModalField";
+import ExternalCliPanel from "./imGateway/ExternalCliPanel";
 
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
@@ -89,6 +92,8 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [runnerConfig, setRunnerConfig] = useState<ExternalCliGatewayConfig | null>(null);
+  const [imProviders, setImProviders] = useState<ImProviderConfig[]>([]);
   const [activeSection, setActiveSection] = useState<AgentSectionId>("general");
   const updateTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingFieldValues = useRef<Record<string, unknown>>({});
@@ -117,10 +122,25 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
     }
   }, []);
 
+  const fetchRunnerConfig = useCallback(async () => {
+    try {
+      const [runnerData, providerData] = await Promise.all([
+        imGatewayApi.getExternalCliConfig(),
+        imGatewayApi.listProviders(),
+      ]);
+      setRunnerConfig(runnerData);
+      setImProviders(providerData);
+    } catch {
+      setRunnerConfig(null);
+      setImProviders([]);
+    }
+  }, []);
+
   useEffect(() => {
     fetchConfig();
     fetchProviders();
-  }, [fetchConfig, fetchProviders]);
+    fetchRunnerConfig();
+  }, [fetchConfig, fetchProviders, fetchRunnerConfig]);
 
   useEffect(() => {
     const timers = updateTimers.current;
@@ -188,6 +208,37 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
   const handleSelectChange = (field: string, value: string) => {
     setConfig((prev) => (prev ? { ...prev, [field]: value } : prev));
     patchField(field, value);
+  };
+
+  const runnerOptions = useMemo(() => {
+    const runnerIds = Object.keys(runnerConfig?.runners || {}).sort();
+    return [
+      { label: "Bifrost Agent", value: "bifrost_agent" },
+      ...runnerIds.map((id) => ({ label: id, value: id })),
+    ];
+  }, [runnerConfig?.runners]);
+
+  const selectedRunnerValue = config?.runner || "bifrost_agent";
+
+  const handleDefaultRunnerChange = async (value: string) => {
+    if (value === "bifrost_agent") {
+      setConfig((prev) => (prev ? { ...prev, runner: "bifrost_agent" } : prev));
+      await patchField("runner", "bifrost_agent");
+      return;
+    }
+    setConfig((prev) => (prev ? { ...prev, runner: value } : prev));
+    await patchField("runner", value);
+    if (runnerConfig && runnerConfig.defaultRunnerId !== value) {
+      try {
+        const saved = await imGatewayApi.updateExternalCliConfig({
+          ...runnerConfig,
+          defaultRunnerId: value,
+        });
+        setRunnerConfig(saved);
+      } catch {
+        message.error("Failed to update default runner");
+      }
+    }
   };
 
   const handleSwitchChange = (field: string, value: boolean) => {
@@ -449,6 +500,26 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 Enable or disable the agent
+              </Text>
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <Row justify="space-between" align="middle" gutter={16}>
+                <Col flex="none">
+                  <Text>Default Runner</Text>
+                </Col>
+                <Col flex="auto" style={{ textAlign: "right" }}>
+                  <Select
+                    value={selectedRunnerValue}
+                    onChange={(val) => void handleDefaultRunnerChange(val)}
+                    options={runnerOptions}
+                    style={{ minWidth: 220, maxWidth: 300 }}
+                    size="small"
+                  />
+                </Col>
+              </Row>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Selects the default runner for IM agent messages. Custom runners are managed in this Agent Runners section.
               </Text>
 
               <Divider style={{ margin: "12px 0" }} />
@@ -1376,6 +1447,22 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
           >
             <SkillsSection />
           </Card>
+        </Col>
+        )}
+
+        {/* Runners */}
+        {activeSection === "runners" && (
+        <Col
+          xs={24}
+          id="agent-settings-runners"
+          data-agent-section="runners"
+          data-testid="agent-settings-section-runners"
+        >
+          <ExternalCliPanel
+            providers={imProviders}
+            loading={loading}
+            onRefresh={fetchRunnerConfig}
+          />
         </Col>
         )}
 

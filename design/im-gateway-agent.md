@@ -403,13 +403,16 @@ WebUI：
 - Settings → Agent 不再单独展示 `Default Base Instructions (read-only)` 块；默认 Base Prompt 只作为 Base Instructions 编辑弹窗中的可复制草稿来源出现。
 - Settings → Agent 左侧提供二级卡片导航，覆盖 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions；点击导航项只在右侧独立渲染当前编辑卡片，并用 `aria-current` 标记当前卡片。
 - Agent 设置页导航必须使用 URL 查询参数 `agentSection` 记录当前二级卡片，刷新或复制链接后恢复到同一卡片；进入 Session 详情时继续使用现有 `session/view/historyPath` 参数。
+- Agent Sessions 列表的 session title 与整行都必须可点击进入详情；列表不再展示单独的查看 icon 按钮，删除按钮需要阻止行点击冒泡。
+- Agent Session 详情页必须使用 `Messages` / `Settings` 两个 Tab 替代纵向平铺布局：默认选中 `Messages`，历史事件或 active messages 在右侧内容区内形成真实滚动容器；`Settings` 承载 Session Info、AGENTS.md Instructions 和 Skills，避免长设置内容把消息区推到页面下方。
 - Agent 设置页导航必须使用主题 token / CSS 变量兼容亮色与暗色主题；桌面端左侧导航固定在自身列，只有右侧当前卡片内容区允许滚动，窄屏退化为顶部横向滚动导航，不遮挡编辑卡片内容。
 - Settings → IM Gateway → Add/Edit IM Provider 支持手动填写 Agent Working Directory、Base Instructions、Developer Instructions、User Instructions。
 - Settings → IM Gateway → Add/Edit IM Provider 的三段 Provider 级 instruction 同样使用短预览 + Edit 按钮 + 大尺寸弹窗编辑，避免在 Provider 表单里嵌入大段 textarea。
 - Provider 级 Base Instructions 继承全局默认值时，编辑弹窗必须提供将继承值复制到编辑草稿的按钮，支持按 Provider 定制后保存覆盖值。
 - Provider 卡片展示当前 Provider 是否配置了 Agent Work Dir / Base / Developer / User instructions。
 - Provider 卡片展示连接状态、连接配置摘要、Owner、启用状态和 Agent 基础配置摘要。
-- Provider 卡片提供 Edit 入口，可动态修改非连接配置（Display Name、Enabled、Owner Open ID、Agent Working Directory、Base/Developer/User Instructions）。
+- Provider 卡片的摘要详情必须使用可收缩的响应式网格：长 owner/work_dir 等代码值在单元格内省略并通过 tooltip 展示完整内容，短状态值（如 Long Connection、Global default）在桌面宽度保持单行，避免跨列遮挡或异常断行；亮色和暗色主题都需要真实浏览器验证。
+- Provider 卡片提供单一连接操作入口：已连接/连接中的 Provider 展示 Disconnect provider，未连接 Provider 展示 Connect provider；卡片右侧不再重复展示 Provider Enabled 开关，避免与连接启停操作混淆。Provider Enabled 仍在摘要中只读展示，并通过 Edit 入口动态修改非连接配置（Display Name、Enabled、Owner Open ID、Agent Working Directory、Base/Developer/User Instructions）。
 - Add/Edit Provider 表单会展示数据目录默认 Agent `work_dir` 与三层 instructions 作为继承值；字段留空表示继承默认值，用户填写后才在单个 Provider 上形成覆盖。
 - Edit 入口只读展示 Provider ID、Type、App ID、Secret 状态和连接模式；连接凭据与连接模式只能在 Add IM Provider 创建时填写，避免误改已经建立的 IM 连接。
 
@@ -809,6 +812,8 @@ tracing = "0.1"
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
+| WebUI Session 详情 Tab 与滚动回归 | `AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚动` 验证 history 深链默认进入 Messages、长事件列表在 `agent-session-messages-scroll` 内滚动、Settings Tab 展示 metadata/AGENTS/Skills |
+| WebUI Sessions 列表点击进入详情回归 | `AI Agent Sessions 列表支持点击 title 或整行进入详情` 验证列表不再展示查看 icon，history title 点击进入 history 详情，active session 整行点击进入 active 详情 |
 | Provider agent_config 进入 IM 事件链路 | `im_event_loop_uses_provider_agent_config_for_agent_chat` 创建带 Provider 级 base/developer/user instructions 的新 Provider，注入 IM inbound event，断言 Chat Completions 请求使用 Provider 配置且不泄漏全局 fallback marker |
 
 ### 真实场景测试（human_tests）
@@ -832,6 +837,8 @@ tracing = "0.1"
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
+| TC-ASP-14 | WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归 | 历史 session 深链默认显示 Messages Tab，长事件列表在右侧内容区真实滚动；Settings Tab 展示 Session Info、AGENTS.md Instructions 和 Skills |
+| TC-ASP-15 | WebUI Sessions 列表 title/整行点击进入详情回归 | Sessions 列表不再显示查看 icon；点击 history session title 进入 history 详情；点击 active session 当前行进入 active 详情；删除按钮不会触发行跳转 |
 | TC-IMA-84A | Agent 模型 reasoning 参数开关 | Settings → Agent → Model 可把 Reasoning Effort / Summary 设为 `None (disabled)`，API 持久化为 `model_reasoning_effort=none`、`model_reasoning_summary=none`，运行时不会把对应 Chat Completions 字段发给不支持的模型 |
 | TC-IMA-89 | `/stop` 停止运行中 Agent loop | 同 session 发起长模型请求后发送 `/stop`，验证 stop 请求立即返回 stopped，原 chat 返回停止提示，session 释放后后续 chat 成功 |
 | TC-IMA-53A | 新建 IM Provider 的 agent_config 经 IM 事件链路生效 | Provider 创建时配置 base/developer/user/work_dir 后，IM inbound event 进入 `run_event_loop` 时模型请求使用 Provider 级配置而非全局 fallback |

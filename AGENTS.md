@@ -569,4 +569,35 @@ python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
 
 <br />
 
+## 禁止在文档中使用绝对路径
+
+**所有文档（包括 `design/`、`human_tests/`、README 等）禁止出现本地绝对路径（如 `/Users/xxx/...`、`/home/xxx/...`、`C:\Users\...`）。** 不同开发者的设备路径不同，硬编码绝对路径会导致文档不可移植、示例无法直接复用。
+
+#### 正确做法
+
+| 场景 | 写法 |
+| --- | --- |
+| 引用项目内文件 | 使用项目根目录的相对路径，如 `crates/bifrost-admin/src/main.rs` |
+| 引用用户目录下的配置/数据 | 使用 `~/` 前缀，如 `~/.bifrost/asr/`、`~/.agents/skills/` |
+| 命令示例中引用项目产物 | 使用 `./target/debug/bifrost` 或 `$PROJECT_ROOT/...` |
+| 环境变量示例 | 使用 `$HOME/.bifrost/...` 或占位符 `<your-path>` |
+
+#### 违规示例（禁止）
+
+```
+/Users/eden/work/github/bifrost/target/debug/bifrost
+/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav
+file:///Users/eden/work/github/bifrost/crates/foo/bar.rs
+```
+
+#### 合规示例
+
+```
+./target/debug/bifrost
+~/.bifrost/asr/qwen3_asr_rs/sample3.wav
+crates/foo/bar.rs
+```
+
+> **违反此规则的文档变更不允许提交。Agent 在编写或更新任何文档时必须自查是否引入了绝对路径。**
+
 ## 测试情况下，禁止使用 9900 端口（这是正式环境的端口，避免冲突）

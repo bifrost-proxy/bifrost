@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -232,6 +233,174 @@ pub(super) fn source_modified_ms(path: &Path) -> Option<u64> {
         .map(|duration| duration.as_millis() as u64)
 }
 
+/// Generate daily summary markdown files from all successful timeline.json files
+/// under the given task output directory. Each day produces a `YYYY-MM-DD.md` file
+/// inside `<task_output_dir>/daily/`, with all segments sorted chronologically.
+pub(super) fn generate_daily_summaries(
+    task_output_dir: &Path,
+    task_name: &str,
+) -> Result<Vec<PathBuf>, String> {
+    // Collect all timeline.json files recursively, excluding the daily/ folder itself.
+    let mut timeline_files = Vec::new();
+    collect_timeline_files(task_output_dir, &mut timeline_files);
+
+    // Parse all timelines and flatten segments with source info.
+    struct FlatSegment {
+        /// Display name for the source file (relative path or filename).
+        source_label: String,
+        absolute_start_ms: u64,
+        absolute_end_ms: u64,
+        text: String,
+    }
+
+    let mut all_segments: Vec<FlatSegment> = Vec::new();
+    for timeline_path in &timeline_files {
+        let content = match std::fs::read_to_string(timeline_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(path = %timeline_path.display(), error = %e, "skipping unreadable timeline");
+                continue;
+            }
+        };
+        let timeline: TranscriptTimeline = match serde_json::from_str(&content) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(path = %timeline_path.display(), error = %e, "skipping malformed timeline");
+                continue;
+            }
+        };
+        // Derive the label from the timeline.json's own relative path within
+        // the task output directory. This preserves subdirectory context and
+        // avoids collisions between same-named files in different subdirs.
+        let source_label = timeline_path
+            .strip_prefix(task_output_dir)
+            .ok()
+            .and_then(|rel| rel.to_str())
+            .map(|s| {
+                s.trim_end_matches(".timeline.json")
+                    .trim_end_matches('.')
+                    .to_string()
+            })
+            .or_else(|| {
+                timeline
+                    .source_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        for seg in &timeline.segments {
+            // Prefer absolute timestamps for daily grouping. If unavailable
+            // (e.g., source file lacked creation metadata), fall back to the
+            // processing timestamp so that no segment is silently dropped from
+            // the daily summary.
+            let (abs_start, abs_end) = match (seg.absolute_start_ms, seg.absolute_end_ms) {
+                (Some(s), Some(e)) => (s, e),
+                _ => {
+                    // Use processing time + audio offset as best-effort fallback.
+                    let base = timeline.processed_at_ms;
+                    (base + seg.audio_start_ms, base + seg.audio_end_ms)
+                }
+            };
+            all_segments.push(FlatSegment {
+                source_label: source_label.clone(),
+                absolute_start_ms: abs_start,
+                absolute_end_ms: abs_end,
+                text: seg.text.clone(),
+            });
+        }
+    }
+
+    if all_segments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Sort all segments by absolute start time.
+    all_segments.sort_by_key(|s| s.absolute_start_ms);
+
+    // Group by local date.
+    let mut by_date: BTreeMap<NaiveDate, Vec<&FlatSegment>> = BTreeMap::new();
+    for seg in &all_segments {
+        let date = Local
+            .timestamp_millis_opt(seg.absolute_start_ms as i64)
+            .earliest()
+            .map(|dt| dt.date_naive())
+            .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+        by_date.entry(date).or_default().push(seg);
+    }
+
+    // Write daily markdown files.
+    let daily_dir = task_output_dir.join("daily");
+    std::fs::create_dir_all(&daily_dir).map_err(|e| format!("create daily dir: {e}"))?;
+
+    let mut written = Vec::new();
+    for (date, segments) in &by_date {
+        let mut md = String::new();
+        md.push_str(&format!("# {task_name} — {date}\n\n"));
+
+        // Group segments by source file, preserving the earliest-first order.
+        // This avoids interleaving headers when multiple files have overlapping
+        // time ranges. Each file gets a single ## header with all its segments
+        // listed chronologically beneath it.
+        let mut file_groups: Vec<(&str, Vec<&FlatSegment>)> = Vec::new();
+        for seg in segments {
+            if let Some(group) = file_groups
+                .last_mut()
+                .filter(|(name, _)| *name == seg.source_label.as_str())
+            {
+                group.1.push(seg);
+            } else if let Some(group) = file_groups
+                .iter_mut()
+                .find(|(name, _)| *name == seg.source_label.as_str())
+            {
+                group.1.push(seg);
+            } else {
+                file_groups.push((&seg.source_label, vec![seg]));
+            }
+        }
+
+        for (i, (filename, segs)) in file_groups.iter().enumerate() {
+            if i > 0 {
+                md.push('\n');
+            }
+            md.push_str(&format!("## {filename}\n\n"));
+            for seg in segs {
+                let start = format_wall_clock_ms(seg.absolute_start_ms);
+                let end = format_wall_clock_ms(seg.absolute_end_ms);
+                md.push_str(&format!("**[{start} → {end}]**  \n{}\n\n", seg.text.trim()));
+            }
+        }
+
+        let path = daily_dir.join(format!("{date}.md"));
+        std::fs::write(&path, md.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        written.push(path);
+    }
+
+    Ok(written)
+}
+
+fn collect_timeline_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip the daily/ output directory to avoid reading our own output.
+            if path.file_name().and_then(|n| n.to_str()) == Some("daily") {
+                continue;
+            }
+            collect_timeline_files(&path, out);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".timeline.json"))
+        {
+            out.push(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +455,96 @@ mod tests {
         let rendered = render_timeline_text(&timeline, "");
         assert!(rendered.contains("2026-05-14 11:44:34.000"));
         assert!(rendered.contains("测试内容"));
+    }
+
+    #[test]
+    fn generates_daily_summary_grouped_by_date() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_dir = temp.path().join("task1");
+        std::fs::create_dir_all(&task_dir).unwrap();
+
+        // Create two timeline.json files: same day but different times.
+        let start1 = Local
+            .with_ymd_and_hms(2026, 5, 14, 10, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let start2 = Local
+            .with_ymd_and_hms(2026, 5, 14, 14, 30, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        let t1 = TranscriptTimeline {
+            task_id: "task1".to_string(),
+            task_name: "My Task".to_string(),
+            source_path: PathBuf::from("/data/meeting_a.wav"),
+            source_size: Some(100),
+            source_modified_ms: None,
+            source_created_at_ms: Some(start1),
+            source_created_at_source: None,
+            media_duration_ms: Some(60_000),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            processed_at_ms: start1,
+            segments: vec![TimelineSegment {
+                index: 0,
+                audio_start_ms: 0,
+                audio_end_ms: 60_000,
+                absolute_start_ms: Some(start1),
+                absolute_end_ms: Some(start1 + 60_000),
+                text: "上午会议内容".to_string(),
+            }],
+        };
+        let t2 = TranscriptTimeline {
+            task_id: "task1".to_string(),
+            task_name: "My Task".to_string(),
+            source_path: PathBuf::from("/data/sub/meeting_b.wav"),
+            source_size: Some(200),
+            source_modified_ms: None,
+            source_created_at_ms: Some(start2),
+            source_created_at_source: None,
+            media_duration_ms: Some(60_000),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            processed_at_ms: start2,
+            segments: vec![TimelineSegment {
+                index: 0,
+                audio_start_ms: 0,
+                audio_end_ms: 60_000,
+                absolute_start_ms: Some(start2),
+                absolute_end_ms: Some(start2 + 60_000),
+                text: "下午讨论内容".to_string(),
+            }],
+        };
+
+        std::fs::write(
+            task_dir.join("meeting_a.timeline.json"),
+            serde_json::to_string_pretty(&t1).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(task_dir.join("sub")).unwrap();
+        std::fs::write(
+            task_dir.join("sub/meeting_b.timeline.json"),
+            serde_json::to_string_pretty(&t2).unwrap(),
+        )
+        .unwrap();
+
+        let result = generate_daily_summaries(&task_dir, "My Task").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].ends_with("2026-05-14.md"));
+
+        let content = std::fs::read_to_string(&result[0]).unwrap();
+        assert!(content.contains("# My Task — 2026-05-14"));
+        // Labels are derived from relative paths: "meeting_a" and "sub/meeting_b".
+        assert!(content.contains("## meeting_a"));
+        assert!(content.contains("## sub/meeting_b"));
+        assert!(content.contains("上午会议内容"));
+        assert!(content.contains("下午讨论内容"));
+
+        // Verify time ordering: morning content before afternoon.
+        let pos_morning = content.find("上午会议内容").unwrap();
+        let pos_afternoon = content.find("下午讨论内容").unwrap();
+        assert!(pos_morning < pos_afternoon);
     }
 }

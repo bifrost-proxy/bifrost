@@ -1914,27 +1914,31 @@ cargo test --workspace --all-features
 
 ### 问题
 
-旧的 IM Gateway Schedules 数据模型默认一个 schedule 只能执行脚本，WebUI 只能查看、暂停、恢复、手动触发和删除，不能从界面手动新增；同时 Agent 没有内置工具管理定时任务，无法在对话中按用户要求查询、创建、更新或删除 cron/interval 任务。Scheduler 模块已有 `ImScheduler` 计算能力，但服务启动时没有常驻调度循环真正消费 `next_run_at`。
+IM Gateway Schedules 需要同时支持脚本任务和 Agent/Runner 任务，WebUI 要能新增、暂停、恢复、手动触发、查看历史详情；同时 Agent 需要内置工具管理定时任务，能在对话中按用户要求查询、创建、更新或删除 cron/interval 任务。Scheduler 模块使用 `ImScheduler` 计算并由服务启动时的常驻调度循环消费 `next_run_at`。
 
 ### 实现逻辑
 
-- `ImSchedule` 增加 `task_type: script | agent`，保留 `script` 字段兼容旧数据，新增 `agent.prompt/session_key/work_dir/system_prompt` 作为 Agent preset prompt 任务配置。
+- `ImSchedule` 增加 `task_type: script | agent`，`script` 保存脚本任务输入，`agent.prompt/session_key/work_dir/system_prompt/runner_id/initial_prompt/conversation_ref` 保存 Agent preset prompt、默认执行目录、Runner 与对话引用配置。
 - Schedule 保存入口统一执行 normalize/validate：自动生成缺省 id、推断 agent 任务、校验 trigger、校验 script/agent 必填字段，并计算 `next_run_at`。
 - `ImGatewayService::start_scheduler()` 在 Bifrost 启动时开启 cron/interval loop，按 due schedule 执行任务、写入 run history、更新 `last_run_at/next_run_at`，并保留 owner 通知能力。
-- 手动 `/schedules/:id/run` 复用同一执行函数，script 任务继续走 `ImTaskExecutor`，agent 任务走 Agent turn loop 并把模型响应写入 `stdout_preview`。
-- `ImTaskRun` 对 Agent 任务额外保存 `agent_final_response`、`agent_tool_calls`、`agent_plan_steps`；Script 任务保留 `duration_ms`、`stdout_preview`、`stderr_preview`、`exit_code`、`error`。
+- 手动 `/schedules/:id/run` 复用同一执行函数，script 任务继续走 `ImTaskExecutor`，agent 任务默认走 Bifrost Agent turn loop；如果 `agent.runner_id` 指向已配置的外部 Runner，则改走 External CLI Runner。非 ChatGPT Web 外部 Runner 会把 `agent.initial_prompt` 拼入 instructions；ChatGPT Web Runner 会在该 schedule session 尚无 conversation 绑定时把 `agent.initial_prompt` 作为第一条初始化消息先发送一次，后续定时 run 复用同一 conversation，只发送 preset prompt。
+- 一个 schedule 默认对应一个长期会话。ChatGPT Web 成功执行后把 `conversationId` 回写到 `agent.conversation_ref.conversation_id`；Codex Runner 成功执行后把 `thread.started.thread_id` 回写到 `agent.conversation_ref.thread_id`。后续 run 优先从 schedule 自身的 `conversation_ref` 恢复对话；除非显式重置 schedule，否则不新开会话。
+- Schedule 必须绑定 `message_channel`，WebUI 手动创建时选择现有 Connection 作为 IM Channel，执行完成后使用该通道的默认接收者发送通知，Agent 任务通知正文优先使用 `agent_final_response`。
+- `ImTaskRun` 保存每次运行的 `input_preview`，对 Agent 任务额外保存 `agent_final_response`、`agent_tool_calls`、`agent_plan_steps`；Script 任务保留 `duration_ms`、`stdout_preview`、`stderr_preview`、`exit_code`、`error`。
 - Agent ToolRegistry 注册 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_delete`，工具直接操作 `ImScheduleStore` 并通知 scheduler 重新检查。
-- WebUI Schedules 面板新增 Add 弹窗，支持选择 Script/Agent、Interval/Cron、Target、脚本内容/文件、Agent preset prompt、session key 和 work dir。
-- WebUI Schedule 行支持点击打开详情弹窗，展示任务配置、运行历史、Script stdout/stderr/耗时/错误、Agent 最终结果与工具调用轨迹。
+- WebUI Schedules 面板新增 Add 弹窗，支持选择 Script/Agent、Interval/Cron、IM Channel、脚本内容/文件、Agent preset prompt、session key 和默认执行目录。Bifrost Agent 与 Codex Runner 都必须使用该目录作为实际执行目录；未单独配置时继承 Provider/全局 Agent 工作目录。
+- WebUI Schedule 每行支持手动 Run；点击行打开详情弹窗，展示任务配置、运行历史，以及每次 run 的输入、输出、Script stdout/stderr/耗时/错误、Agent 最终结果与工具调用轨迹。
 - WebUI History / Task Runs 行支持点击打开完整 run detail，复用 Schedule run detail 展示 run 元信息、stdout/stderr、Agent final result、tool calls 和 plan trace。
 - WebUI IM Gateway 在窄宽度下将 Connections/Routes 的固定三列详情改为自适应网格，Targets/Schedules 表格开启横向滚动，内容区域保留横向滚动兜底，避免字段逐字竖排或操作列被裁切。
+- WebUI IM Gateway Connections 的 Provider 卡片改为单列详情布局：卡片顶部展示名称、类型、连接状态、启用状态和连接模式，正文一行一个字段展示 Secret、App ID、Owner ID、Agent Runner、Agent Work Dir 等信息；App ID、Owner ID、Agent Work Dir 等非 secret 长值在悬浮时显示复制按钮，复制完整原始值，Secret 仍只显示 configured / missing。
+- WebUI Schedules 新增 Agent Runner 选择；选择 ChatGPT Web Runner 时展示 `First-round Prompt`，提交后保存到 `agent.initial_prompt`，详情页展示 Runner、对话引用和初始化 Prompt。
 - CLI `bifrost im schedule add/update` 新增 `--agent-prompt`、`--agent-prompt-file`、`--agent-session-key`、`--agent-work-dir`、`--agent-system-prompt` 参数。
 
 ### 测试方案
 
-- 单元测试：`schedule_tools_create_update_list_delete_agent_schedule` 覆盖 Agent 内置 schedule CRUD 工具；CLI parser 测试覆盖 agent prompt create 与切回 script update。
+- 单元测试：`schedule_tools_create_update_list_delete_agent_schedule` 覆盖 Agent 内置 schedule CRUD 工具；`schedule_agent_can_run_selected_external_runner_with_initial_prompt` 覆盖 Agent schedule 显式选择外部 Runner、绑定 message_channel、保存输入快照并拼入初始化 Prompt；`schedule_agent_persists_codex_thread_id_for_next_run` / `schedule_external_result_extracts_chatgpt_conversation_id` 覆盖 schedule 级对话引用；`schedule_external_runner_executes_from_configured_work_dir` 和 `schedule_agent_work_dir_prefers_schedule_then_inherited_default` 覆盖 Codex/Bifrost Agent 默认执行目录；CLI parser 测试覆盖 agent prompt create 与切回 script update。
 - E2E/API：使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，验证 API 创建 script/agent schedule、列表中 task_type 正确、手动 run 能产生 run record、Agent tools 能 CRUD agent schedule，Agent run record 保存 final response 与 tool calls。
-- 真实场景测试：更新 `human_tests/im-gateway.md`，新增 Schedules Script/Agent 手动新增、Agent 工具管理、Schedule 详情运行历史、History Task Runs 详情和窄宽度布局回归用例，并在亮色/暗色主题下验证 Schedules Add/Detail 弹窗可读可操作。
+- 真实场景测试：更新 `human_tests/im-gateway.md`，新增 Schedules Script/Agent 手动新增、Agent 工具管理、Schedule 详情运行历史、History Task Runs 详情和 Connections Provider 单列详情 / hover 复制回归用例，并在亮色/暗色主题下验证 Schedules Add/Detail 弹窗与 Provider 卡片可读可操作。
 - Review/Fix/Test 第 1 轮：复核用户目标、API/schema/WebUI/CLI/tool diff，运行 targeted Rust tests、Web build 与 API smoke。
 - Review/Fix/Test 第 2 轮：复查第 1 轮修复后的最新 diff、human_tests 索引、scheduler loop 风险和兼容性，再复跑受影响验证命令。
 
@@ -2001,11 +2005,11 @@ pub default_message_channel: Option<ImMessageChannelBinding>
 pub message_channel: Option<ImMessageChannelBinding>
 ```
 
-兼容策略：
+当前协议：
 
-- 旧 `ImSchedule.target_id` 保留，用于已有 script schedule 和旧 CLI/API 请求。
-- 保存 schedule 时 normalize：如果传入了 `message_channel`，后续发送优先使用它；如果只传入旧 `target_id`，后端按 target 所属 provider 补出 `message_channel.target_mode=ConfiguredTarget`。
-- Agent schedule 过去允许省略 `target_id`；新逻辑允许省略旧 `target_id`，但必须能从 Agent 当前来源或 `default_message_channel` 推导出 `message_channel`。
+- `ImSchedule` 只保存 `message_channel` 作为执行完成通知和 Agent `send_msg` 默认通道，不再保存 schedule 级 `target_id`。
+- WebUI 创建 schedule 时只选择 Connection/IM Channel，保存为 `message_channel.target_mode=Owner,target_id=owner`，发送时由该通道解析默认接收者。
+- API/Agent tool 创建 schedule 时必须提供 `message_channel`，或由当前 Agent turn 的 IM 来源 / `default_message_channel` 注入。
 
 ### send_msg 注入与解析
 
@@ -2041,7 +2045,7 @@ pub struct AgentMessageContext {
 手动创建 schedule：
 
 - WebUI/CLI/API 必须显式选择或传入 IM 通道。
-- 对旧请求如果只传 `target_id`，后端可根据 target 补全 provider；如果 target 不存在或无法推导 provider，创建失败。
+- 手动创建和 API 创建都不接受 schedule 级发送目标选择；需要发送到哪里由绑定通道自己的默认接收者决定。
 - UI 上应把 Provider + Target 作为一个发送通道选择器展示，而不是只展示裸 target id。
 
 Agent 创建 schedule：
@@ -2227,7 +2231,7 @@ cargo test --workspace --all-features
 
 - 单元测试：`online_notification_message_uses_provider_work_dir_override` 验证 provider 自定义 `work_dir` 优先于进程 cwd。
 - 单元测试：`online_notification_message_falls_back_to_process_work_dir` 验证 provider 未配置自定义 `work_dir` 时才回退当前 cwd。
-- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-34` / `TC-IMG-35`，断言 owner 通知 `content_preview` 包含 `工作目录：/Users/eden/work/github/bifrost`。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-34` / `TC-IMG-35`，断言 owner 通知 `content_preview` 包含 `工作目录：~/work/github/bifrost`。
 - 真实场景测试：新增并执行 `human_tests/im-gateway.md` 的 `TC-IMG-36`，创建带 Provider 自定义 Agent Working Directory 的飞书 Provider，断言 owner 上线通知和 message log 使用自定义目录而不是进程 cwd。
 
 ### 校验要求

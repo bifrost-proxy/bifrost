@@ -21,6 +21,7 @@ export interface ImProviderConfig {
   event_connection_enabled: boolean;
   event_types: string[];
   agent_config?: {
+    runner?: string;
     work_dir?: string;
     base_instructions?: string;
     developer_instructions?: string;
@@ -28,6 +29,103 @@ export interface ImProviderConfig {
   };
   created_at: number;
   updated_at: number;
+}
+
+export interface ExternalCliAdapterConfig {
+  executable?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  profile?: string;
+  model?: string;
+  sandbox?: string;
+  approvalPolicy?: string;
+  search?: boolean;
+  ephemeral?: boolean;
+  timeoutSecs?: number;
+  browser?: {
+    channel?: "edge" | "chrome" | string;
+    executable?: string;
+    profileDir?: string;
+    openOnAuthRequired?: boolean;
+    keepBrowserOpenAfterLogin?: boolean;
+    executionMode?: "headless" | "headed" | string;
+    closeTargetAfterRun?: boolean;
+  };
+  chatgpt?: {
+    baseUrl?: string;
+    pollIntervalMs?: number;
+    timeoutSecs?: number;
+  };
+  auth?: {
+    statePath?: string;
+  };
+}
+
+export interface ExternalCliAgentSettings {
+  enabled: boolean;
+  adapter: string;
+  instructions?: string;
+  adapterConfig: ExternalCliAdapterConfig;
+  injectBifrostTools: boolean;
+  skillPaths: string[];
+  deliveryMode: "no_im" | "final_reply" | "progress_card";
+}
+
+export interface ExternalCliChannelSettings {
+  enabled?: boolean;
+  runnerId?: string;
+  deliveryMode?: "no_im" | "final_reply" | "progress_card";
+}
+
+export interface ExternalCliGatewayConfig {
+  version: number;
+  defaultRunnerId: string;
+  runners: Record<string, ExternalCliAgentSettings>;
+  channels: Record<string, ExternalCliChannelSettings>;
+}
+
+export interface ExternalCliEffectiveConfig {
+  providerId?: string;
+  runnerId: string;
+  settings: ExternalCliAgentSettings;
+  sources: Record<string, string>;
+}
+
+export interface ExternalCliRunResult {
+  runId: string;
+  sessionKey?: string;
+  runtime: string;
+  adapter: string;
+  status: string;
+  exitCode?: number;
+  response: string;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  events: Array<{ eventType: string; content: string; title?: string; raw?: unknown }>;
+  metadata?: Record<string, string>;
+  artifacts: {
+    runDir: string;
+    prompt: string;
+    commandSnapshot: string;
+    stdout: string;
+    stderr: string;
+    normalizedEvents: string;
+    lastMessage: string;
+  };
+}
+
+export interface ChatGptWebAuthStatus {
+  state: string;
+  loggedIn: boolean;
+  identityComplete: boolean;
+  accountCheckOk: boolean;
+  accountStatus?: number;
+  cookieCount: number;
+  capturedHeaderNames: string[];
+  profileDir: string;
+  statePath: string;
+  message?: string;
 }
 
 export interface ImTarget {
@@ -40,6 +138,18 @@ export interface ImTarget {
   enabled: boolean;
   created_at: number;
   updated_at: number;
+}
+
+export type MessageTargetMode =
+  | "source_thread"
+  | "source_user"
+  | "owner"
+  | "configured_target";
+
+export interface ImMessageChannelBinding {
+  provider_id: string;
+  target_id: string;
+  target_mode: MessageTargetMode;
 }
 
 export interface ImProviderPolicy {
@@ -91,7 +201,7 @@ export interface ImSchedule {
   id: string;
   name: string;
   enabled: boolean;
-  target_id: string;
+  message_channel?: ImMessageChannelBinding;
   trigger: {
     type: "cron" | "interval";
     expr?: string;
@@ -107,9 +217,17 @@ export interface ImSchedule {
   };
   agent?: {
     prompt: string;
+    runner_id?: string;
+    initial_prompt?: string;
     session_key?: string;
     work_dir?: string;
     system_prompt?: string;
+    conversation_ref?: {
+      adapter: string;
+      conversationId?: string;
+      threadId?: string;
+      updatedAt?: number;
+    };
   };
   timeout_ms: number;
   max_output_bytes: number;
@@ -131,12 +249,14 @@ export interface ImTaskRun {
   ended_at?: number;
   duration_ms?: number;
   exit_code?: number;
+  input_preview?: string;
   stdout_preview?: string;
   stderr_preview?: string;
   stdout_digest?: string;
   stderr_digest?: string;
   error?: string;
   task_type?: "script" | "agent";
+  runner_id?: string;
   agent_final_response?: string;
   agent_tool_calls?: Array<{
     tool_name: string;
@@ -260,6 +380,70 @@ export async function updateProviderPolicy(
   data: Partial<ImProviderPolicy>,
 ): Promise<ImProviderPolicy> {
   return patch(`${BASE}/providers/${id}/policy`, data);
+}
+
+export async function getExternalCliConfig(): Promise<ExternalCliGatewayConfig> {
+  return get(`${BASE}/chat/config`);
+}
+
+export async function updateExternalCliConfig(
+  data: ExternalCliGatewayConfig,
+): Promise<ExternalCliGatewayConfig> {
+  return patch(`${BASE}/chat/config`, data);
+}
+
+export async function getExternalCliChannel(
+  providerId: string,
+): Promise<{
+  providerId: string;
+  override?: ExternalCliChannelSettings;
+  effective: ExternalCliEffectiveConfig;
+}> {
+  return get(`${BASE}/chat/config/channels/${encodeURIComponent(providerId)}`);
+}
+
+export async function updateExternalCliChannel(
+  providerId: string,
+  data: ExternalCliChannelSettings,
+): Promise<{
+  providerId: string;
+  override?: ExternalCliChannelSettings;
+  effective: ExternalCliEffectiveConfig;
+}> {
+  return patch(`${BASE}/chat/config/channels/${encodeURIComponent(providerId)}`, data);
+}
+
+export async function runExternalCliChat(data: {
+  message: string;
+  operation?: string;
+  params?: Record<string, unknown>;
+  providerId?: string;
+  sessionKey?: string;
+  adapter?: string;
+  workDir?: string;
+  instructions?: string;
+  adapterConfig?: ExternalCliAdapterConfig;
+}): Promise<ExternalCliRunResult> {
+  return post(`${BASE}/chat`, data);
+}
+
+export async function getChatGptWebAuthStatus(
+  runnerId?: string,
+): Promise<ChatGptWebAuthStatus> {
+  const query = runnerId ? `?runnerId=${encodeURIComponent(runnerId)}` : "";
+  return get(`${BASE}/chat/adapters/chatgpt-web/auth/status${query}`);
+}
+
+export async function openChatGptWebLogin(
+  runnerId?: string,
+): Promise<ChatGptWebAuthStatus> {
+  return post(`${BASE}/chat/adapters/chatgpt-web/auth/open`, { runnerId }, { timeout: 0 });
+}
+
+export async function stopChatGptWebLogin(
+  runnerId?: string,
+): Promise<ChatGptWebAuthStatus> {
+  return post(`${BASE}/chat/adapters/chatgpt-web/auth/stop`, { runnerId });
 }
 
 // Targets

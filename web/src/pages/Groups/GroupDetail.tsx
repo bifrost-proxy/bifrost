@@ -505,6 +505,7 @@ export default function GroupDetail() {
             total={membersTotal}
             onChange={handlePageChange}
             showQuickJumper
+            showSizeChanger={false}
             size="small"
           />
         </div>

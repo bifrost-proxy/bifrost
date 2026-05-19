@@ -188,16 +188,16 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```bash
   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/schedules \
     -H 'Content-Type: application/json' \
-    -d '{"id":"test-schedule-1","name":"测试定时任务","target_id":"eden-user","enabled":true,"trigger":{"type":"interval","every_ms":60000},"script":{"script_text":"echo Hello from schedule at $(date)"},"timeout_ms":5000,"max_output_bytes":4096}'
+    -d '{"id":"test-schedule-1","name":"测试定时任务","message_channel":{"provider_id":"feishu-bot-1","target_id":"owner","target_mode":"owner"},"enabled":true,"trigger":{"type":"interval","every_ms":60000},"script":{"script_text":"echo Hello from schedule at $(date)"},"timeout_ms":5000,"max_output_bytes":4096}'
   ```
-- **预期结果**: 返回 `{"success":true}`
+- **预期结果**: 返回完整 schedule JSON，包含 `message_channel`
 
 ### TC-IMG-24: Schedule 手动执行并发送结果给 owner
 
 - **操作步骤**: 执行 `curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/schedules/test-schedule-1/run`
 - **预期结果**: 
   - 返回 `status: "Success"`, `exit_code: 0`
-  - 飞书 owner 收到执行结果消息（包含 ✅ 和脚本输出）
+  - 绑定 Connection 的默认接收者收到执行结果消息（包含状态和脚本输出）
   - 消息记录中新增一条 direction=outbound, trigger=schedule:test-schedule-1
 
 ### TC-IMG-25: CLI messages list 命令
@@ -349,10 +349,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - WebUI 显示 `Provider created and connected`。
   - 第 5 步状态响应包含 `state=connected`。
-  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/Users/eden/work/github/bifrost`。
+  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：~/work/github/bifrost`。
   - 全流程不需要重启 Bifrost。
   - Provider 列表与消息响应不包含 App Secret 明文。
-- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。本用例后续要求上线通知同时包含 `工作目录：/Users/eden/work/github/bifrost`。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。本用例后续要求上线通知同时包含 `工作目录：~/work/github/bifrost`。
 
 ### TC-IMG-35: 同一进程内配置两个飞书机器人均可连接并通知 owner
 
@@ -390,10 +390,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - 两次创建后 WebUI 均显示 `Provider created and connected`。
   - 两个 Provider 的状态响应都包含 `state=connected`，且无需重启 Bifrost。
-  - 两个 Provider 的消息记录都各自包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/Users/eden/work/github/bifrost`。
+  - 两个 Provider 的消息记录都各自包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：~/work/github/bifrost`。
   - 两个 Provider 不会串用对方的飞书 token；第二个机器人不会因复用第一个机器人的 token 而发送失败。
   - Provider 列表、状态与消息响应不包含任何 App Secret 明文。
-- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18889` 和独立数据目录 `.bifrost-test-im-provider-two-bots` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 分别创建两个真实飞书 Provider；两个 Provider 均显示创建并连接成功，状态均为 `connected`；两个 Provider 的 message log 均包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了\n工作目录：/Users/eden/work/github/bifrost`；第二个机器人未复用第一个机器人的 token，响应中未泄露 App Secret；最后删除清理两个 Provider。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18889` 和独立数据目录 `.bifrost-test-im-provider-two-bots` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 分别创建两个真实飞书 Provider；两个 Provider 均显示创建并连接成功，状态均为 `connected`；两个 Provider 的 message log 均包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了\n工作目录：~/work/github/bifrost`；第二个机器人未复用第一个机器人的 token，响应中未泄露 App Secret；最后删除清理两个 Provider。
 
 ### TC-IMG-36: Provider 自定义 Agent Working Directory 优先用于上线通知
 
@@ -424,7 +424,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - owner 通知的 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`。
   - owner 通知不得回退为全局 Agent Working Directory 或 Bifrost 进程 cwd。
   - Provider 列表与消息响应不包含 App Secret 明文。
-- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18890` 和独立数据目录 `.bifrost-test-im-provider-custom-workdir` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 创建真实飞书 Provider，并在 `Agent Working Directory` 填写 `/tmp/bifrost-im-provider-custom-workdir`；页面显示 `Provider created and connected`，Provider 状态为 `connected`；message log 包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`，未回退到 `/Users/eden/work/github/bifrost`；响应中未泄露 App Secret；最后删除 Provider 清理成功。
+- **执行记录（2026-05-06）**: PASS — 使用临时端口 `18890` 和独立数据目录 `.bifrost-test-im-provider-custom-workdir` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 创建真实飞书 Provider，并在 `Agent Working Directory` 填写 `/tmp/bifrost-im-provider-custom-workdir`；页面显示 `Provider created and connected`，Provider 状态为 `connected`；message log 包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`，未回退到 `~/work/github/bifrost`；响应中未泄露 App Secret；最后删除 Provider 清理成功。
 
 ### TC-IMG-37: CLI IM 命令未传 provider 时选择 provider，并默认发送给 owner
 
@@ -558,10 +558,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
     ```bash
     BIFROST_DATA_DIR=./.bifrost-test-im-schedules cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check
     ```
-  - 已通过 API 创建一个 Feishu Provider 和一个 Target，Target id 为 `schedule-target`。
+  - 已通过 API 创建一个配置了 `owner_open_id` 的 Feishu Provider。
 - **操作步骤**:
-  1. 调用 `POST /_bifrost/api/im-gateway/schedules` 创建 script schedule，body 包含 `task_type=script`、`target_id=schedule-target`、`trigger.type=interval`、`script.script_text=echo script-ok`。
-  2. 调用同一 API 创建 agent schedule，body 包含 `task_type=agent`、`trigger.type=interval`、`agent.prompt=Summarize schedule state`。
+  1. 调用 `POST /_bifrost/api/im-gateway/schedules` 创建 script schedule，body 包含 `task_type=script`、`message_channel.provider_id=schedule-provider`、`message_channel.target_mode=owner`、`trigger.type=interval`、`script.script_text=echo script-ok`。
+  2. 调用同一 API 创建 agent schedule，body 包含 `task_type=agent`、`message_channel.provider_id=schedule-provider`、`message_channel.target_mode=owner`、`trigger.type=interval`、`agent.prompt=Summarize schedule state`。
   3. 调用 `GET /_bifrost/api/im-gateway/schedules` 查看列表。
   4. 调用 `POST /_bifrost/api/im-gateway/schedules/<script-id>/run` 手动触发 script schedule。
   5. 调用 `GET /_bifrost/api/im-gateway/schedules/<script-id>/runs` 查看 run history。
@@ -569,9 +569,9 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 两次创建都返回完整 schedule JSON，而不是只有 `{success:true}`。
   - Script schedule 保留 `task_type=script`、`script.script_text` 和 `next_run_at`。
   - Agent schedule 保留 `task_type=agent`、`agent.prompt` 和 `next_run_at`。
-  - Script 手动 run 返回 `status=Success`，`stdout_preview` 包含 `script-ok`。
-  - Run history 中能查到该手动执行记录。
-- **执行记录（2026-05-12）**: PASS — 使用临时数据目录 `.bifrost-test-im-schedules`、端口 `18892`、`--no-system-proxy` 启动源码版 Bifrost；通过 API 创建 `schedule-provider` 与 `schedule-target` 后，`POST /schedules` 创建 `script-schedule` 返回完整 schedule JSON，包含 `task_type=script`、`script.script_text=echo script-ok` 与 `next_run_at`；创建 `agent-schedule` 返回 `task_type=agent`、`agent.prompt=Summarize schedule state` 与 `next_run_at`；`GET /schedules` 同时列出两类任务；`POST /schedules/script-schedule/run` 返回 `status=Success`、`exit_code=0`、`stdout_preview=script-ok\n`；`GET /schedules/script-schedule/runs` 返回对应 `manual_run` 记录。
+  - Script 手动 run 返回 `status=Success`，`input_preview` 包含脚本输入，`stdout_preview` 包含 `script-ok`。
+  - Run history 中能查到该手动执行记录，并展示当次输入和输出。
+- **执行记录（2026-05-12）**: PASS — 使用临时数据目录 `.bifrost-test-im-schedules`、端口 `18892`、`--no-system-proxy` 启动源码版 Bifrost；通过 API 创建 `schedule-provider` 后，`POST /schedules` 创建 `script-schedule` 返回完整 schedule JSON，包含 `message_channel`、`task_type=script`、`script.script_text=echo script-ok` 与 `next_run_at`；创建 `agent-schedule` 返回 `task_type=agent`、`agent.prompt=Summarize schedule state` 与 `next_run_at`；`GET /schedules` 同时列出两类任务；`POST /schedules/script-schedule/run` 返回 `status=Success`、`exit_code=0`、`input_preview` 与 `stdout_preview=script-ok\n`；`GET /schedules/script-schedule/runs` 返回对应 `manual_run` 记录。
 
 ### TC-IMG-44: Agent 内置 schedule 工具支持查询、新增、更新、删除
 
@@ -630,19 +630,23 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 详情弹窗在暗色主题下仍可读，无文字或按钮遮挡。
 - **执行记录（2026-05-12）**: PASS — 重启临时服务加载最新代码后，先用 mock Chat Completions 服务手动触发 `agent-schedule`，`GET /schedules/agent-schedule/runs` 最新记录包含 `agent_final_response=agent scheduled final result`、`agent_tool_calls` 数量为 1、`stdout_preview=agent scheduled final result`；随后用 Codex in-app Browser 打开 Schedules 页面，点击 `tr[data-row-key="script-schedule"]` 打开详情，确认 Run History 中显示 `Stdout` 与 `script-ok`；关闭后点击 `tr[data-row-key="agent-schedule"]` 打开详情，确认显示 `Final Result`、`Tool Calls`、`schedule_list` 与 `agent scheduled final result`。
 
-### TC-IMG-47: WebUI IM Gateway 窄宽度布局与 Task Runs 详情回归
+### TC-IMG-47: WebUI IM Gateway Provider 单列布局、字段复制与 Task Runs 详情回归
 
 - **前置条件**:
   - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
   - 浏览器视口宽度调整到约 760px，确保至少存在一个 provider、target、route、schedule 和一条 task run 历史记录。
 - **操作步骤**:
-  1. 进入 Connections，查看 provider 卡片中的 Status、App ID、Connection Mode、Agent Work Dir、Agent Base Prompt、Agent Developer/User 等字段。
-  2. 进入 Targets，查看 targets 表格在窄宽度下的表头、Receive ID 和 Actions。
-  3. 进入 Routes，查看 route 卡片中的 Provider、Event、Matcher、Action、Timeout。
-  4. 进入 Schedules，查看 schedules 表格并横向滚动到 Actions，点击某一行打开 schedule detail。
-  5. 进入 History / Task Runs，点击一条 Task Run 行。
+  1. 进入 Connections，查看 provider 卡片顶部的名称、provider type、连接状态、Enabled/Disabled 和 Long Connection/Webhook 状态。
+  2. 查看 provider 卡片正文中的 App ID、Secret、Owner ID、Agent Runner、Agent Work Dir、Agent Base Prompt、Agent Developer/User 等字段。
+  3. 将鼠标悬浮到 App ID、Owner ID 和 Agent Work Dir 字段值上，点击出现的复制按钮。
+  4. 进入 Targets，查看 targets 表格在窄宽度下的表头、Receive ID 和 Actions。
+  5. 进入 Routes，查看 route 卡片中的 Provider、Event、Matcher、Action、Timeout。
+  6. 进入 Schedules，查看 schedules 表格并横向滚动到 Actions，点击某一行打开 schedule detail。
+  7. 进入 History / Task Runs，点击一条 Task Run 行。
 - **预期结果**:
-  - Connections 与 Routes 卡片字段自适应换行到多行网格，不出现 `Long Connection`、`Global default` 等逐字竖排。
+  - Connections provider 卡片不使用多列详情展示；卡片顶部直接展示名称、连接状态、启用状态和连接模式，正文所有字段按单列纵向排列。
+  - App ID、Owner ID、Agent Work Dir 等非 secret 长值悬浮时显示复制按钮，点击后剪贴板写入完整原始值；Secret 只显示 `Configured` 或 `Not Set`，不暴露可复制明文。
+  - Routes 卡片字段自适应换行到多行网格，不出现 `Long Connection`、`Global default` 等逐字竖排。
   - Targets 与 Schedules 表格在窄宽度下有横向滚动能力，操作按钮不会被裁掉。
   - IM Gateway 内容区域允许横向滚动兜底，顶部操作按钮可换行，不与说明文字挤压。
   - History / Task Runs 行可点击打开 `Task Run Detail` 弹窗，展示 run id、type、status、source、schedule/route/provider/target、started/ended/duration、exit code、stdout/stderr digest、error，以及 Script stdout/stderr 或 Agent final result/tool calls/plan trace。
@@ -663,11 +667,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   3. 调用 `GET /_bifrost/api/im-gateway/schedules` 查看最终任务列表。
 - **预期结果**:
   - `/agent/chat` 返回 `success=true`，且 `tool_calls` 中四个 schedule 工具调用都成功。
-  - Script 定时任务必须包含非空 `target_id`，后端对缺少 `target_id` 的 script schedule 返回结构化错误。
+  - Script 定时任务必须包含 `message_channel`；后端对缺少 `message_channel` 的 script schedule 返回结构化错误。
   - Script 定时任务被创建后可通过 `schedule_update` 修改名称、启用状态、interval、脚本文本和 timeout。
   - Agent 定时任务被创建后保留 `task_type=agent` 与 preset prompt。
   - `schedule_list` 和 schedules API 均能同时看到 script 与 agent 两类任务。
-- **执行记录（2026-05-13）**: PASS — 使用 mock Chat Completions 服务端口 `28992` 与源码版 Bifrost 端口 `18892` 完成真实 `/agent/chat` 链路验证；第一次请求故意让 script schedule 缺少 `target_id`，工具返回 `script schedules require target_id`，确认校验生效；清理后第二次请求让 mock model 依次调用 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list`，四个 `tool_calls` 均 `success=true`；最终 `GET /_bifrost/api/im-gateway/schedules` 显示 `chat-script-schedule` 已更新为 `Chat Script Schedule Updated`、`enabled=false`、`every_ms=180000`、`script.script_text=echo chat-script-v2`、`timeout_ms=60000`，同时 `chat-agent-schedule` 保留 `task_type=agent`、`agent.prompt=Run the chat-created agent schedule`、`every_ms=120000`、`timeout_ms=45000`。
+- **执行记录（2026-05-13）**: PASS — 使用 mock Chat Completions 服务端口 `28992` 与源码版 Bifrost 端口 `18892` 完成真实 `/agent/chat` 链路验证；第一次请求故意让 script schedule 缺少 `message_channel`，工具返回 `schedule requires message_channel`，确认校验生效；清理后第二次请求让 mock model 依次调用 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list`，四个 `tool_calls` 均 `success=true`；最终 `GET /_bifrost/api/im-gateway/schedules` 显示 `chat-script-schedule` 已更新为 `Chat Script Schedule Updated`、`enabled=false`、`every_ms=180000`、`script.script_text=echo chat-script-v2`、`timeout_ms=60000`，同时 `chat-agent-schedule` 保留 `task_type=agent`、`agent.prompt=Run the chat-created agent schedule`、`every_ms=120000`、`timeout_ms=45000`。
 
 ### TC-IMG-49: Handler 模块化拆分后 IM Gateway 功能回归
 
@@ -711,15 +715,15 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 技术方案已写入 `design/im-gateway.md`。
 - **操作步骤**:
   1. 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`。
-  2. 执行 `rg -n "target_id|ConfiguredTarget|default_message_channel|任务通知漂移" design/im-gateway.md`。
+  2. 执行 `rg -n "IM Channel|Connection|default_message_channel|任务通知漂移" design/im-gateway.md`。
   3. 执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`。
 - **预期结果**:
-  - 技术文档明确说明 `ImSchedule.message_channel` 和旧 `target_id` 的兼容策略。
+  - 技术文档明确说明 `ImSchedule.message_channel` 是 schedule 的唯一通道绑定。
   - 技术文档明确说明手动创建 schedule 必须显式选择或传入 IM 通道。
   - 技术文档明确说明 Agent 创建 schedule 时可从当前 IM 来源或 Agent 默认通道推导绑定通道。
   - 技术文档明确说明 schedule 执行时优先使用自身保存的 `message_channel`，避免通知漂移到错误群或错误用户。
   - `human_tests/readme.md` 索引包含本用例覆盖点。
-- **执行记录（2026-05-13）**: PASS — 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`，命中 schedule 消息通道数据模型、手动创建、Agent 创建和执行规则；执行 `rg -n "target_id|ConfiguredTarget|default_message_channel|任务通知漂移" design/im-gateway.md`，命中旧 `target_id` 兼容、`ConfiguredTarget` 补全、Agent 默认通道和通知不漂移约束；执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`，确认 human_tests 用例与索引均可检索。
+- **执行记录（2026-05-13）**: PASS — 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`，命中 schedule 消息通道数据模型、手动创建、Agent 创建和执行规则；执行 `rg -n "IM Channel|Connection|default_message_channel|任务通知漂移" design/im-gateway.md`，命中唯一通道绑定、Connection 下拉、Agent 默认通道和通知不漂移约束；执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`，确认 human_tests 用例与索引均可检索。
 
 ### TC-IMG-52: 真实 Agent Schedule 使用绑定 IM 通道发送消息
 
@@ -734,7 +738,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   4. 查询 `GET /api/im-gateway/schedules/<id>/runs`，检查 run 状态和 agent tool calls。
   5. 检查 `admin/im_gateway_message_logs.json`，确认 schedule 内部 `send_msg` 和 schedule 完成通知均发送成功。
 - **预期结果**:
-  - schedule 保存后包含 `message_channel`，旧 `target_id` 可为空。
+  - schedule 保存后包含 `message_channel`，没有 schedule 级发送目标字段。
   - 手动 run 返回 `status=Success`，`stdout_preview` 为 agent 最终回复。
   - run 记录中的 `agent_tool_calls` 包含 `send_msg` 且 `success=true`。
   - 消息日志包含一条 `trigger=agent_tool:send_msg` 的真实发送成功记录，以及一条 `trigger=schedule:<id>` 的完成通知成功记录。
@@ -743,3 +747,48 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 停止测试 Bifrost 进程。
   - 删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-05-13）**: PASS — 创建 `real-agent-schedule-20260513-124107`，保存结果包含 `message_channel.provider_id=bifrost,target_mode=owner,target_id=owner` 且 `enabled=false`。手动触发 `/run` 返回 `run_id=8864e487,status=Success,duration_ms=7638,stdout_preview=schedule send_msg succeeded`。运行历史中 `agent_tool_calls[0].tool_name=send_msg,success=true`，工具结果包含真实 `message_id=om_x100b6f74403218acc45ca19e00d32f4`。消息日志同时记录 schedule 内部 `send_msg` 成功和完成通知成功，完成通知 message_id 为 `om_x100b6f74418a5ca8c22d79d534bd554`。
+
+### TC-IMG-53: Connections Provider 单列卡片与关键字段复制
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 至少存在一个包含 `app_id`、`owner_open_id` 和 `agent_config.work_dir` 的 provider。
+- **操作步骤**:
+  1. 进入 Connections 页面，查看 provider 卡片顶部。
+  2. 查看 provider 卡片正文中 App ID、Secret、Owner ID、Agent Runner、Agent Work Dir、Agent Base Prompt、Agent Developer/User 等字段。
+  3. 将鼠标悬浮到 App ID 字段值上，点击出现的复制按钮。
+  4. 将鼠标悬浮到 Owner ID 字段值上，点击出现的复制按钮。
+  5. 将鼠标悬浮到 Agent Work Dir 字段值上，点击出现的复制按钮。
+- **预期结果**:
+  - 卡片顶部展示 provider 名称、类型、连接状态、启用状态和连接模式。
+  - 卡片正文不使用多列详情布局，所有字段按单列纵向排列。
+  - App ID、Owner ID、Agent Work Dir 悬浮后显示复制按钮，点击后剪贴板写入完整原始值。
+  - App ID 可以继续脱敏展示，但复制结果必须是完整 App ID；Secret 只显示配置状态，不暴露可复制明文。
+  - 亮色和暗色主题下字段文本、状态标签和复制按钮均可读可点击。
+- **执行记录（2026-05-15）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts --grep "卡片单列展示"`，用 API 创建 `Copyable Provider`，浏览器打开 Connections 后确认卡片顶部包含名称、连接状态、Enabled 和 Long Connection；App ID、Owner ID、Agent Work Dir 三个字段的 bounding box y 坐标递增，确认纵向单列展示；悬浮 App ID 后复制按钮 opacity 从 0 变为 1，点击后三个字段分别把完整 `cli_copyable_provider_id`、`ou_copyable_provider_owner`、`~/work/github/bifrost` 写入剪贴板。
+
+### TC-IMG-54: Schedule Agent 选择 Runner 与 ChatGPT Web 初始化 Prompt
+
+- **前置条件**:
+  - 使用当前源码构建的 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-schedules&imGatewaySection=schedules`。
+  - 已存在至少一个配置了默认接收者的 Connection；External CLI Runner 配置中存在一个 adapter 为 `chatgpt_web` 的 Runner。
+- **操作步骤**:
+  1. 点击 Schedules 页面 Add，选择 `Task Type=Agent`。
+  2. 在 `IM Channel` 中选择一个 Connection。
+  3. 在 `Runner` 中选择 `Bifrost Agent`，确认表单没有展示 ChatGPT Web 专用 `First-round Prompt`。
+  4. 将 `Runner` 切换到 ChatGPT Web Runner，填写 `First-round Prompt`、`Preset Prompt` 和 `Default Execution Directory`。
+  5. 提交创建 schedule，并查看详情页。
+  6. 点击该 schedule 行上的 Run 按钮手动触发，随后进入详情页检查 run 记录与发送结果。
+- **预期结果**:
+  - Agent schedule 创建时 `IM Channel` 必填且可选择现有 Connection，不需要选择具体发送对象。
+  - Runner 下拉包含 `Bifrost Agent` 与已配置的外部 Runner。
+  - 选择 ChatGPT Web Runner 后展示 `First-round Prompt`，提交 payload 中保存为 `agent.initial_prompt`；该 schedule session 尚无 ChatGPT Web conversation 绑定时先发送这条初始化消息，后续 run 复用同一 conversation 并只发送 `Preset Prompt`。
+  - Bifrost Agent 与 Codex Runner 都可保存 `agent.work_dir` 作为默认执行目录；实际 run 必须从该目录执行，未配置 schedule 目录时继承 Provider/全局 Agent 工作目录。
+  - ChatGPT Web run 成功后 schedule 原信息写入 `agent.conversation_ref.conversation_id`；Codex run 成功后写入 `agent.conversation_ref.thread_id`；下一次 run 复用该 schedule 自身的对话引用。
+  - run 记录包含 `runner_id`、`provider_id`、`input_preview` 和 `agent_final_response`。
+  - schedule run 完成后使用绑定 IM Channel 的默认接收者发送完成消息，消息正文优先包含 Agent 最终结果。
+  - 点击 schedule 行可查看历史运行详情；每次 run 都展示当次输入和当次输出。
+- **清理步骤**:
+  - 删除测试 schedule。
+  - 如启动了临时 Bifrost/Vite 服务，停止进程并删除临时数据目录。
+- **执行记录（2026-05-19）**: PASS — 执行 `pnpm --dir web exec tsc -b --pretty false` 通过，确认 SchedulesPanel 类型接入 `ExternalCliGatewayConfig`、Agent 表单包含 Runner、`Default Execution Directory` 与 ChatGPT Web `First-round Prompt` 条件展示，`IM Channel` 下拉直接使用 Connections；执行 `cargo test -p bifrost-admin schedule_agent_can_run_selected_external_runner_with_initial_prompt -- --nocapture` 通过，mock 外部 Runner 断言输入同时包含 `INIT_MARKER` 和 `TASK_MARKER`，run 记录为 `status=Success`、`runner_id=chatgpt-test`、`provider_id=feishu-main`、`input_preview` 包含实际发送消息、`agent_final_response=SCHEDULE_RUNNER_OK`。第二轮 review 补充 `schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only`，覆盖 ChatGPT Web 初始 Prompt 仅在没有 conversation 绑定时作为第一条消息发送，已有 conversation 后只发送 preset prompt。后续增强执行 `cargo test -p bifrost-admin schedule_agent_persists_codex_thread_id_for_next_run -- --nocapture`、`cargo test -p bifrost-admin schedule_external_result_extracts_chatgpt_conversation_id -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_work_dir_prefers_schedule_then_inherited_default -- --nocapture`、`cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir -- --nocapture` 通过，验证 schedule 持久化 ChatGPT/Codex 对话引用，并且 Bifrost Agent/Codex Runner 使用 schedule 或继承的默认执行目录。

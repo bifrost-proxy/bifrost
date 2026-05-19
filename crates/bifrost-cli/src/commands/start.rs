@@ -1519,6 +1519,10 @@ pub fn run_foreground(
             for task in metrics_tasks {
                 task.abort();
             }
+
+            // Kill all managed browser processes to prevent orphans.
+            bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
+
             Ok(())
         }
         .await;

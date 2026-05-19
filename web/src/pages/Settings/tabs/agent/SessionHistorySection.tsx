@@ -189,7 +189,7 @@ export default function SessionHistorySection({ onOpenSession }: SessionHistoryS
         rowKey="path"
         size="small"
         loading={loading}
-        pagination={{ pageSize: 10, size: "small" }}
+        pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No persisted sessions" /> }}
         scroll={{ x: 1200 }}
       />

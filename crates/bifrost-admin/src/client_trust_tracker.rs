@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -11,6 +11,11 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 const MIN_SAMPLE_FOR_INFERENCE: u32 = 3;
 const HIGH_UNTRUST_RATIO: f32 = 0.7;
 const MIN_DEFINITE_FOR_NOT_TRUSTED: u32 = 2;
+
+/// How often (in seconds) the same (client, domain, reason) combo is allowed to log.
+const LOG_DEDUP_INTERVAL_SECS: u64 = 60;
+/// Maximum entries in the log dedup map before we purge stale entries.
+const LOG_DEDUP_MAX_ENTRIES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,10 +137,19 @@ pub struct ClientTrustEvent {
     pub timestamp: u64,
 }
 
+/// Tracks per-key log dedup state.
+#[derive(Debug)]
+struct LogDedupEntry {
+    last_logged: Instant,
+    suppressed: u64,
+}
+
 pub struct ClientTlsTrustTracker {
     by_ip: RwLock<HashMap<IpAddr, ClientTrustRecord>>,
     by_app: RwLock<HashMap<String, ClientTrustRecord>>,
     event_sender: broadcast::Sender<ClientTrustEvent>,
+    /// Key: "client_identifier|domain|reason_category"
+    log_dedup: RwLock<HashMap<String, LogDedupEntry>>,
 }
 
 impl Default for ClientTlsTrustTracker {
@@ -151,6 +165,7 @@ impl ClientTlsTrustTracker {
             by_ip: RwLock::new(HashMap::new()),
             by_app: RwLock::new(HashMap::new()),
             event_sender,
+            log_dedup: RwLock::new(HashMap::new()),
         }
     }
 
@@ -258,22 +273,51 @@ impl ClientTlsTrustTracker {
             }
         }
 
+        // Rate-limited logging to avoid spam
+        let dedup_key = format!("{}|{}|{}", client_app.unwrap_or(client_ip), domain, reason);
+
         if is_definite_untrust {
-            warn!(
-                client_ip = %client_ip,
-                client_app = ?client_app,
-                domain = %domain,
-                reason = %reason,
-                "TLS trust: client sent UnknownCA alert — definitively does not trust Bifrost CA"
-            );
+            if let Some(suppressed) = self.check_log_dedup(&dedup_key) {
+                if suppressed > 0 {
+                    warn!(
+                        client_ip = %client_ip,
+                        client_app = ?client_app,
+                        domain = %domain,
+                        reason = %reason,
+                        suppressed_count = suppressed,
+                        "TLS trust: client sent UnknownCA alert — definitively does not trust Bifrost CA (repeated)"
+                    );
+                } else {
+                    warn!(
+                        client_ip = %client_ip,
+                        client_app = ?client_app,
+                        domain = %domain,
+                        reason = %reason,
+                        "TLS trust: client sent UnknownCA alert — definitively does not trust Bifrost CA"
+                    );
+                }
+            }
         } else if is_probable_untrust {
-            info!(
-                client_ip = %client_ip,
-                client_app = ?client_app,
-                domain = %domain,
-                reason = %reason,
-                "TLS trust: ambiguous certificate rejection (BadCertificate/CertificateUnknown) — may or may not be CA trust issue"
-            );
+            if let Some(suppressed) = self.check_log_dedup(&dedup_key) {
+                if suppressed > 0 {
+                    info!(
+                        client_ip = %client_ip,
+                        client_app = ?client_app,
+                        domain = %domain,
+                        reason = %reason,
+                        suppressed_count = suppressed,
+                        "TLS trust: ambiguous certificate rejection (BadCertificate/CertificateUnknown) — may or may not be CA trust issue (repeated)"
+                    );
+                } else {
+                    info!(
+                        client_ip = %client_ip,
+                        client_app = ?client_app,
+                        domain = %domain,
+                        reason = %reason,
+                        "TLS trust: ambiguous certificate rejection (BadCertificate/CertificateUnknown) — may or may not be CA trust issue"
+                    );
+                }
+            }
         } else {
             debug!(
                 client_ip = %client_ip,
@@ -361,7 +405,45 @@ impl ClientTlsTrustTracker {
     pub fn clear(&self) {
         self.by_ip.write().clear();
         self.by_app.write().clear();
+        self.log_dedup.write().clear();
         info!("Client trust tracker cleared");
+    }
+
+    /// Returns `Some(suppressed_count)` if the log should be emitted now,
+    /// or `None` if it should be suppressed (within dedup window).
+    fn check_log_dedup(&self, key: &str) -> Option<u64> {
+        let now = Instant::now();
+        let mut map = self.log_dedup.write();
+        let interval = std::time::Duration::from_secs(LOG_DEDUP_INTERVAL_SECS);
+
+        // Purge stale entries if map grows too large
+        if map.len() > LOG_DEDUP_MAX_ENTRIES {
+            map.retain(|_, entry| now.duration_since(entry.last_logged) < interval);
+        }
+
+        match map.get_mut(key) {
+            Some(entry) => {
+                if now.duration_since(entry.last_logged) >= interval {
+                    let suppressed = entry.suppressed;
+                    entry.last_logged = now;
+                    entry.suppressed = 0;
+                    Some(suppressed)
+                } else {
+                    entry.suppressed += 1;
+                    None
+                }
+            }
+            None => {
+                map.insert(
+                    key.to_string(),
+                    LogDedupEntry {
+                        last_logged: now,
+                        suppressed: 0,
+                    },
+                );
+                Some(0)
+            }
+        }
     }
 
     fn maybe_emit_event(

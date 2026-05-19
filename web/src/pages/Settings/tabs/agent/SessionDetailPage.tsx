@@ -1,6 +1,6 @@
 /**
  * Session Detail Page - Sub-page view for session details
- * Shows: session metadata, AGENTS.md, Skills, Messages/Events
+ * Shows session messages by default, with metadata, AGENTS.md, and skills behind Settings.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -15,6 +15,7 @@ import {
   Space,
   Spin,
   Tag,
+  Tabs,
   Tooltip,
   Typography,
   theme,
@@ -29,6 +30,7 @@ import {
   ReadOutlined,
   ReloadOutlined,
   RobotOutlined,
+  SettingOutlined,
   StopOutlined,
   CompressOutlined,
   CheckCircleOutlined,
@@ -220,6 +222,7 @@ export default function SessionDetailPage({
   // Skills
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
+  const [activeDetailTab, setActiveDetailTab] = useState("messages");
 
   const fetchActiveSession = useCallback(async () => {
     setSessionLoading(true);
@@ -288,6 +291,10 @@ export default function SessionDetailPage({
     fetchSkills();
   }, [view, fetchActiveSession, fetchHistoryEvents, fetchAgentsContent, fetchSkills]);
 
+  useEffect(() => {
+    setActiveDetailTab("messages");
+  }, [sessionKey, view, historyFilePath]);
+
   const formatTs = (ts?: number) => {
     if (!ts) return "-";
     return new Date(ts * 1000).toLocaleString();
@@ -310,8 +317,279 @@ export default function SessionDetailPage({
 
   const isLoading = sessionLoading || eventsLoading;
 
+  const sessionInfoCard = (
+    <Card title={<Space><RobotOutlined /><span>Session Info</span></Space>} size="small">
+      {view === "active" && sessionDetail ? (
+        <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }} bordered>
+          <Descriptions.Item label="Source">{sourceTag(sessionDetail.source)}</Descriptions.Item>
+          <Descriptions.Item label="Work Dir">
+            {sessionDetail.work_dir ? (
+              <Tooltip title={sessionDetail.work_dir}>
+                <Text code style={{ fontSize: 11 }}>{sessionDetail.work_dir}</Text>
+              </Tooltip>
+            ) : (
+              <Text type="secondary">default</Text>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="Messages">{sessionDetail.message_count}</Descriptions.Item>
+          <Descriptions.Item label="Total Tokens">
+            {sessionDetail.total_tokens_used != null ? sessionDetail.total_tokens_used.toLocaleString() : "-"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Est. Tokens">
+            {sessionDetail.estimated_tokens?.toLocaleString() ?? "-"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Compactions">{sessionDetail.compaction_count}</Descriptions.Item>
+          <Descriptions.Item label="Created">{formatTs(sessionDetail.created_at)}</Descriptions.Item>
+          <Descriptions.Item label="Last Active">{formatTs(sessionDetail.last_active_at)}</Descriptions.Item>
+          <Descriptions.Item label="Duration">
+            {formatDuration(sessionDetail.created_at, sessionDetail.last_active_at)}
+          </Descriptions.Item>
+        </Descriptions>
+      ) : view === "history" && events.length > 0 ? (
+        (() => {
+          const startEvt = events.find(e => e.event_type === "session_start");
+          const endEvt = [...events].reverse().find(e => e.event_type === "session_end");
+          const content = startEvt?.content as Record<string, unknown> | null;
+          const endContent = endEvt?.content as Record<string, unknown> | null;
+          const userMsgs = events.filter(e => e.event_type === "user_message").length;
+          const assistantMsgs = events.filter(e => e.event_type === "assistant_message").length;
+          const toolCalls = events.filter(e => e.event_type === "tool_call").length;
+          const startTime = events[0]?.timestamp;
+          const endTime = events[events.length - 1]?.timestamp;
+
+          return (
+            <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }} bordered>
+              <Descriptions.Item label="Source">
+                {sourceTag(content?.source as string | undefined)}
+              </Descriptions.Item>
+              <Descriptions.Item label="Work Dir">
+                {content?.work_dir ? (
+                  <Text code style={{ fontSize: 11 }}>{content.work_dir as string}</Text>
+                ) : (
+                  <Text type="secondary">default</Text>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="Turns">
+                <Space size={4}>
+                  <Tag color="green">{userMsgs} user</Tag>
+                  <Tag color="blue">{assistantMsgs} assistant</Tag>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="Tool Calls">{toolCalls}</Descriptions.Item>
+              <Descriptions.Item label="Total Tokens">
+                {(endContent?.total_tokens as number)?.toLocaleString() ?? "-"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Events">{events.length}</Descriptions.Item>
+              <Descriptions.Item label="Start Time">{formatTs(startTime)}</Descriptions.Item>
+              <Descriptions.Item label="End Time">{formatTs(endTime)}</Descriptions.Item>
+              <Descriptions.Item label="Duration">
+                {formatDuration(startTime, endTime)}
+              </Descriptions.Item>
+            </Descriptions>
+          );
+        })()
+      ) : (
+        <Empty description="No session data" />
+      )}
+    </Card>
+  );
+
+  const settingsContent = (
+    <div
+      data-testid="agent-session-settings-panel"
+      style={{ height: "100%", overflowY: "auto", overflowX: "hidden", paddingRight: 4 }}
+    >
+      <Row gutter={[16, 16]}>
+        <Col xs={24}>{sessionInfoCard}</Col>
+
+        <Col xs={24}>
+          <Card
+            title={<Space><FileTextOutlined /><span>AGENTS.md Instructions</span></Space>}
+            size="small"
+            extra={
+              <Button icon={<ReloadOutlined />} size="small" onClick={fetchAgentsContent} loading={agentsLoading}>
+                Refresh
+              </Button>
+            }
+          >
+            {agentsContent ? (
+              <div
+                style={{
+                  background: themeToken.colorFillQuaternary,
+                  borderRadius: 6,
+                  padding: 12,
+                  maxHeight: 300,
+                  overflowY: "auto",
+                }}
+              >
+                <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", color: themeToken.colorText }}>
+                  {agentsContent}
+                </pre>
+              </div>
+            ) : (
+              <Empty description="No AGENTS.md found" />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24}>
+          <Card
+            title={
+              <Space>
+                <ReadOutlined />
+                <span>Skills</span>
+                <Tag>{skills.length}</Tag>
+              </Space>
+            }
+            size="small"
+            extra={
+              <Button icon={<ReloadOutlined />} size="small" onClick={fetchSkills} loading={skillsLoading}>
+                Refresh
+              </Button>
+            }
+          >
+            {skills.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(["repo", "user", "system"] as const).map((scope) => {
+                  const filtered = skills.filter((s) => s.scope === scope);
+                  if (filtered.length === 0) return null;
+                  const label = scope === "repo" ? "Workspace" : scope === "user" ? "User" : "System";
+                  return (
+                    <div key={scope}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {label} ({filtered.length})
+                      </Text>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                        {filtered.map((s) => (
+                          <Tooltip key={s.name} title={`${s.short_description || s.description}\n${s.path}`}>
+                            <Tag>{s.name}</Tag>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <Empty description="No skills loaded" />
+            )}
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  );
+
+  const messagesContent = (
+    <Card
+      title={
+        <Space>
+          <ClockCircleOutlined />
+          <span>{view === "active" ? "Messages" : "Event Timeline"}</span>
+          <Tag>
+            {view === "active"
+              ? `${sessionDetail?.messages?.length ?? 0} messages`
+              : `${events.length} events`}
+          </Tag>
+        </Space>
+      }
+      size="small"
+      extra={
+        view === "active" ? (
+          <Button icon={<ReloadOutlined />} size="small" onClick={fetchActiveSession} loading={sessionLoading}>
+            Refresh
+          </Button>
+        ) : null
+      }
+      style={{ height: "100%", display: "flex", flexDirection: "column" }}
+      styles={{ body: { flex: "1 1 auto", minHeight: 0, overflow: "hidden" } }}
+    >
+      <div
+        data-testid="agent-session-messages-scroll"
+        style={{
+          height: "100%",
+          overflowY: "auto",
+          overflowX: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          paddingRight: 4,
+        }}
+      >
+        {view === "active" ? (
+          sessionDetail?.messages && sessionDetail.messages.length > 0 ? (
+            sessionDetail.messages.map((msg, idx) => {
+              const imageUrls = extractImageUrlsFromParts(msg.content_parts);
+              return (
+                <Card
+                  key={idx}
+                  size="small"
+                  style={{
+                    borderColor:
+                      msg.role === "assistant"
+                        ? themeToken.colorPrimaryBorder
+                        : msg.role === "user"
+                          ? themeToken.colorSuccessBorder
+                          : themeToken.colorBorderSecondary,
+                    background:
+                      msg.role === "assistant"
+                        ? themeToken.colorPrimaryBg
+                        : msg.role === "user"
+                          ? themeToken.colorSuccessBg
+                          : undefined,
+                  }}
+                >
+                  <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                    <Tag
+                      color={
+                        msg.role === "assistant" ? "blue"
+                          : msg.role === "user" ? "green"
+                          : msg.role === "system" ? "purple"
+                          : "default"
+                      }
+                      style={{ fontSize: 11 }}
+                    >
+                      {msg.role}
+                    </Tag>
+                    {msg.content ? (
+                      <ClampedContent title={`${msg.role} message`}>
+                        {msg.content}
+                      </ClampedContent>
+                    ) : (
+                      <Text style={{ fontSize: 12 }}>(empty)</Text>
+                    )}
+                    <MessageImages urls={imageUrls} />
+                    {msg.tool_calls && msg.tool_calls.length > 0 && (
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Tool calls:</Text>
+                        {msg.tool_calls.map((tc, i) => (
+                          <Text key={i} code style={{ fontSize: 10, display: "block", marginTop: 2 }}>
+                            {tc}
+                          </Text>
+                        ))}
+                      </div>
+                    )}
+                  </Space>
+                </Card>
+              );
+            })
+          ) : (
+            <Empty description="No messages" />
+          )
+        ) : (
+          events.length > 0 ? (
+            events.map((evt, idx) => (
+              <HistoryEventCard key={idx} event={evt} token={themeToken} />
+            ))
+          ) : (
+            <Empty description="No events" />
+          )
+        )}
+      </div>
+    </Card>
+  );
+
   return (
-    <div>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
       {/* Header with back button */}
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={onBack}>
@@ -325,270 +603,39 @@ export default function SessionDetailPage({
         {view === "history" && <Tag color="default">History</Tag>}
       </div>
 
-      {isLoading ? (
-        <Spin style={{ display: "block", margin: "60px auto" }} />
-      ) : (
-        <Row gutter={[16, 16]}>
-          {/* Session Metadata */}
-          <Col xs={24}>
-            <Card title={<Space><RobotOutlined /><span>Session Info</span></Space>} size="small">
-              {view === "active" && sessionDetail ? (
-                <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }} bordered>
-                  <Descriptions.Item label="Source">{sourceTag(sessionDetail.source)}</Descriptions.Item>
-                  <Descriptions.Item label="Work Dir">
-                    {sessionDetail.work_dir ? (
-                      <Tooltip title={sessionDetail.work_dir}>
-                        <Text code style={{ fontSize: 11 }}>{sessionDetail.work_dir}</Text>
-                      </Tooltip>
-                    ) : (
-                      <Text type="secondary">default</Text>
-                    )}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Messages">{sessionDetail.message_count}</Descriptions.Item>
-                  <Descriptions.Item label="Total Tokens">
-                    {sessionDetail.total_tokens_used != null ? sessionDetail.total_tokens_used.toLocaleString() : "-"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Est. Tokens">
-                    {sessionDetail.estimated_tokens?.toLocaleString() ?? "-"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Compactions">{sessionDetail.compaction_count}</Descriptions.Item>
-                  <Descriptions.Item label="Created">{formatTs(sessionDetail.created_at)}</Descriptions.Item>
-                  <Descriptions.Item label="Last Active">{formatTs(sessionDetail.last_active_at)}</Descriptions.Item>
-                  <Descriptions.Item label="Duration">
-                    {formatDuration(sessionDetail.created_at, sessionDetail.last_active_at)}
-                  </Descriptions.Item>
-                </Descriptions>
-              ) : view === "history" && events.length > 0 ? (
-                (() => {
-                  const startEvt = events.find(e => e.event_type === "session_start");
-                  const endEvt = [...events].reverse().find(e => e.event_type === "session_end");
-                  const content = startEvt?.content as Record<string, unknown> | null;
-                  const endContent = endEvt?.content as Record<string, unknown> | null;
-                  const userMsgs = events.filter(e => e.event_type === "user_message").length;
-                  const assistantMsgs = events.filter(e => e.event_type === "assistant_message").length;
-                  const toolCalls = events.filter(e => e.event_type === "tool_call").length;
-                  const startTime = events[0]?.timestamp;
-                  const endTime = events[events.length - 1]?.timestamp;
-
-                  return (
-                    <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }} bordered>
-                      <Descriptions.Item label="Source">
-                        {sourceTag(content?.source as string | undefined)}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Work Dir">
-                        {content?.work_dir ? (
-                          <Text code style={{ fontSize: 11 }}>{content.work_dir as string}</Text>
-                        ) : (
-                          <Text type="secondary">default</Text>
-                        )}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Turns">
-                        <Space size={4}>
-                          <Tag color="green">{userMsgs} user</Tag>
-                          <Tag color="blue">{assistantMsgs} assistant</Tag>
-                        </Space>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Tool Calls">{toolCalls}</Descriptions.Item>
-                      <Descriptions.Item label="Total Tokens">
-                        {(endContent?.total_tokens as number)?.toLocaleString() ?? "-"}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Events">{events.length}</Descriptions.Item>
-                      <Descriptions.Item label="Start Time">{formatTs(startTime)}</Descriptions.Item>
-                      <Descriptions.Item label="End Time">{formatTs(endTime)}</Descriptions.Item>
-                      <Descriptions.Item label="Duration">
-                        {formatDuration(startTime, endTime)}
-                      </Descriptions.Item>
-                    </Descriptions>
-                  );
-                })()
-              ) : (
-                <Empty description="No session data" />
-              )}
-            </Card>
-          </Col>
-
-          {/* AGENTS.md Instructions */}
-          <Col xs={24}>
-            <Card
-              title={<Space><FileTextOutlined /><span>AGENTS.md Instructions</span></Space>}
-              size="small"
-              extra={
-                <Button icon={<ReloadOutlined />} size="small" onClick={fetchAgentsContent} loading={agentsLoading}>
-                  Refresh
-                </Button>
-              }
-            >
-              {agentsContent ? (
-                <div
-                  style={{
-                    background: themeToken.colorFillQuaternary,
-                    borderRadius: 6,
-                    padding: 12,
-                    maxHeight: 300,
-                    overflowY: "auto",
-                  }}
-                >
-                  <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", color: themeToken.colorText }}>
-                    {agentsContent}
-                  </pre>
-                </div>
-              ) : (
-                <Empty description="No AGENTS.md found" />
-              )}
-            </Card>
-          </Col>
-
-          {/* Skills */}
-          <Col xs={24}>
-            <Card
-              title={
-                <Space>
-                  <ReadOutlined />
-                  <span>Skills</span>
-                  <Tag>{skills.length}</Tag>
-                </Space>
-              }
-              size="small"
-              extra={
-                <Button icon={<ReloadOutlined />} size="small" onClick={fetchSkills} loading={skillsLoading}>
-                  Refresh
-                </Button>
-              }
-            >
-              {skills.length > 0 ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {(["repo", "user", "system"] as const).map((scope) => {
-                    const filtered = skills.filter((s) => s.scope === scope);
-                    if (filtered.length === 0) return null;
-                    const label = scope === "repo" ? "Workspace" : scope === "user" ? "User" : "System";
-                    return (
-                      <div key={scope}>
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {label} ({filtered.length})
-                        </Text>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
-                          {filtered.map((s) => (
-                            <Tooltip key={s.name} title={`${s.short_description || s.description}\n${s.path}`}>
-                              <Tag>{s.name}</Tag>
-                            </Tooltip>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <Empty description="No skills loaded" />
-              )}
-            </Card>
-          </Col>
-
-          {/* Messages / Events Timeline */}
-          <Col xs={24}>
-            <Card
-              title={
-                <Space>
-                  <ClockCircleOutlined />
-                  <span>{view === "active" ? "Messages" : "Event Timeline"}</span>
-                  <Tag>
-                    {view === "active"
-                      ? `${sessionDetail?.messages?.length ?? 0} messages`
-                      : `${events.length} events`}
-                  </Tag>
-                </Space>
-              }
-              size="small"
-              extra={
-                view === "active" ? (
-                  <Button icon={<ReloadOutlined />} size="small" onClick={fetchActiveSession} loading={sessionLoading}>
-                    Refresh
-                  </Button>
-                ) : null
-              }
-            >
-              <div
-                style={{
-                  maxHeight: 600,
-                  overflowY: "auto",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
-              >
-                {view === "active" ? (
-                  sessionDetail?.messages && sessionDetail.messages.length > 0 ? (
-                    sessionDetail.messages.map((msg, idx) => {
-                      const imageUrls = extractImageUrlsFromParts(msg.content_parts);
-                      return (
-                        <Card
-                          key={idx}
-                          size="small"
-                          style={{
-                            borderColor:
-                              msg.role === "assistant"
-                                ? themeToken.colorPrimaryBorder
-                                : msg.role === "user"
-                                  ? themeToken.colorSuccessBorder
-                                  : themeToken.colorBorderSecondary,
-                            background:
-                              msg.role === "assistant"
-                                ? themeToken.colorPrimaryBg
-                                : msg.role === "user"
-                                  ? themeToken.colorSuccessBg
-                                  : undefined,
-                          }}
-                        >
-                          <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                            <Tag
-                              color={
-                                msg.role === "assistant" ? "blue"
-                                  : msg.role === "user" ? "green"
-                                  : msg.role === "system" ? "purple"
-                                  : "default"
-                              }
-                              style={{ fontSize: 11 }}
-                            >
-                              {msg.role}
-                            </Tag>
-                            {msg.content ? (
-                              <ClampedContent title={`${msg.role} message`}>
-                                {msg.content}
-                              </ClampedContent>
-                            ) : (
-                              <Text style={{ fontSize: 12 }}>(empty)</Text>
-                            )}
-                            <MessageImages urls={imageUrls} />
-                            {msg.tool_calls && msg.tool_calls.length > 0 && (
-                              <div>
-                                <Text type="secondary" style={{ fontSize: 11 }}>Tool calls:</Text>
-                                {msg.tool_calls.map((tc, i) => (
-                                  <Text key={i} code style={{ fontSize: 10, display: "block", marginTop: 2 }}>
-                                    {tc}
-                                  </Text>
-                                ))}
-                              </div>
-                            )}
-                          </Space>
-                        </Card>
-                      );
-                    })
-                  ) : (
-                    <Empty description="No messages" />
-                  )
-                ) : (
-                  events.length > 0 ? (
-                    events.map((evt, idx) => (
-                      <HistoryEventCard key={idx} event={evt} token={themeToken} />
-                    ))
-                  ) : (
-                    <Empty description="No events" />
-                  )
-                )}
-              </div>
-            </Card>
-          </Col>
-        </Row>
-      )}
+      <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}>
+        {isLoading ? (
+          <Spin style={{ display: "block", margin: "60px auto" }} />
+        ) : (
+          <Tabs
+            activeKey={activeDetailTab}
+            onChange={setActiveDetailTab}
+            className="agent-session-detail-tabs"
+            items={[
+              {
+                key: "messages",
+                label: (
+                  <Space size={6}>
+                    <ClockCircleOutlined />
+                    <span>Messages</span>
+                  </Space>
+                ),
+                children: messagesContent,
+              },
+              {
+                key: "settings",
+                label: (
+                  <Space size={6}>
+                    <SettingOutlined />
+                    <span>Settings</span>
+                  </Space>
+                ),
+                children: settingsContent,
+              },
+            ]}
+          />
+        )}
+      </div>
     </div>
   );
 }

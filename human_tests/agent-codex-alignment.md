@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 在仓库根目录 `/Users/eden/work/github/bifrost` 执行。
+- 在仓库根目录 `~/work/github/bifrost` 执行。
 - 每条命令执行前先 `source ~/.zshrc`。
 - TC-ACA-07 会启动临时 Bifrost 服务，必须使用临时 `BIFROST_DATA_DIR` 且带 `--no-system-proxy`，不修改系统代理。
 

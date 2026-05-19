@@ -110,7 +110,7 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 
 3. 终端工具形态收敛策略
    - 真实默认数据目录回归显示，用户说“启动 codex cli，新建一个任务/给 Codex 派发任务”时，模型选择 blocking `shell` 执行 `codex exec review`，导致没有 `session_id`、无法用 `write_stdin` 继续观察/输入/取消。这个问题的本质不是 Codex 特例，而是没有把命令分成短命令、长任务、交互任务、等待 stdin 的前台任务。
-   - 对照 `/Users/eden/work/github/codex` 后，关键经验是启用 unified exec 时模型可见工具收敛为 `exec_command` + `write_stdin`；在 Bifrost 当前无兼容压力的前提下，旧 shell 类 handler 应直接删除，可靠性来自单一路径，而不是并行维护 `shell_pty` 与 `exec_command` 两套模型协议。
+   - 对照 `~/work/github/codex` 后，关键经验是启用 unified exec 时模型可见工具收敛为 `exec_command` + `write_stdin`；在 Bifrost 当前无兼容压力的前提下，旧 shell 类 handler 应直接删除，可靠性来自单一路径，而不是并行维护 `shell_pty` 与 `exec_command` 两套模型协议。
    - 默认 base instructions 必须明确：凡是需要执行 shell/terminal 命令，都统一使用 `exec_command`，保存返回的 `session_id`，后续通过 `write_stdin` 观察、追加输入或 Ctrl-C 清理；TUI/readline/交互式终端程序设置 `tty=true`。
    - Bifrost 源码中历史 `shell` 与 `shell_pty` handler 已删除，`write_stdin` 与 `exec_command` 同文件实现并共享同一个 `ExecSessionManager`；模型可见终端入口只保留 `exec_command` / `write_stdin`。
 

@@ -117,7 +117,7 @@
    rm -rf /tmp/bifrost-qwen3-asr-chunks
    ffmpeg -y -hide_banner -loglevel error \
      -i ~/.bifrost/asr/qwen3_asr_rs/sample3.wav \
-     -f segment -segment_time 60 -c copy /tmp/bifrost-qwen3-asr-chunks/seg_%04d.wav
+     -f segment -segment_time 30 -c copy /tmp/bifrost-qwen3-asr-chunks/seg_%04d.wav
    ls /tmp/bifrost-qwen3-asr-chunks/seg_0000.wav
    ```
 2. 在 API server 已启动时执行：
@@ -135,7 +135,7 @@
 - `batch-transcribe` 生成 transcript 文件。
 - transcript 中包含中文 sample 关键词。
 
-### TC-QASR-05B CLI 流式转写 partial/final 输出
+### TC-QASR-05B CLI 30 秒窗口 JSON Lines 输出
 
 操作步骤：
 
@@ -146,16 +146,15 @@
      cargo run --bin bifrost -- ai asr stream-file ~/.bifrost/asr/qwen3_asr_rs/sample3.wav \
      --language chinese \
      > /tmp/bifrost-qwen3-asr-stream.jsonl
-   grep '"type": "partial"' /tmp/bifrost-qwen3-asr-stream.jsonl
+   grep '"type": "segment"' /tmp/bifrost-qwen3-asr-stream.jsonl
    grep '"type": "final"' /tmp/bifrost-qwen3-asr-stream.jsonl
    ```
 
 预期结果：
 
 - 输出为 JSON Lines。
-- 至少出现多个 `partial` 和多个 `final` 事件，事件中包含 `start_ms`、`end_ms`、`stable_start_ms`、`stable_end_ms`、`text`、`delta` 和 `committed`。
-- `stable_*` 时间按约 1 秒窗口推进，后一窗口 `start_ms` 小于 `stable_start_ms`，体现 overlap context。
-- 最终 `committed` 包含中文 sample 关键词。
+- 长音频输出多个 `segment` 事件和一个 `final` 事件，segment 事件包含 `start_ms`、`end_ms`、`text`；窗口按 30 秒最大送模、2 秒 overlap 推进。
+- 短 sample 至少输出一个 `segment` 和一个 `final`，最终 `text` 包含中文 sample 关键词。
 
 ### TC-QASR-13 Bifrost CLI ASR 服务控制与单文件流式输出
 
@@ -193,7 +192,7 @@
 
 - `status --json` 输出包含 `ready` 和 `service` 字段。
 - `start` 动态选择 loopback 端口，写入 `BIFROST_DATA_DIR/asr/service.json`，WebUI 刷新后能读取同一个服务状态。
-- `stream-file` 标准输出为 JSON Lines，包含 `partial` 和 `final`；不要求用户手工部署 qwen3_asr_rs 代码，只复用固定目录里的 runtime/weights。
+- `stream-file` 标准输出为 JSON Lines，长音频包含 30 秒窗口的 `segment` 和最终 `final`；不要求用户手工部署 qwen3_asr_rs 代码，只复用固定目录里的 runtime/weights。
 - `stop` 停止 pid 并删除 service state；停止后 WebUI 状态同步为 not ready。
 - 缺失音频路径会返回明确错误，不启动模型服务。
 
@@ -224,20 +223,20 @@
 - 页面展示外部依赖提示：GitHub runtime 与 Hugging Face 权重下载不可达时会在下载进度区和错误区显示具体异常。
 - 亮色和暗色主题下文字、进度条、错误详情均可读。
 
-### TC-QASR-07 AI Tools ASR 文件输入流式转写
+### TC-QASR-07 AI Tools ASR 文件输入 30 秒窗口转写
 
 操作步骤：
 
 1. 保持 TC-QASR-06 中 Bifrost WebUI 运行，并通过 Start Service 启动 ASR 托管服务。
 2. 在浏览器打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`。
-3. 点击 Choose File 选择 `/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav`，或将该文件拖入上传区域。
+3. 点击 Choose File 选择 `~/.bifrost/asr/qwen3_asr_rs/sample3.wav`，或将该文件拖入上传区域。
 4. 观察 `Speech to Text` 工作卡片中的 Audio Input、Transcript 和 stream events 区域。
 
 预期结果：
 
 - 页面显示单个 `Speech to Text` 工作卡片，Audio Input 输入模块位于卡片顶部，Transcript 转写模块位于同一卡片下方；顶层侧边栏不出现独立 Speech/ASR 入口。
-- 上传文件后显示 `File transcription progress` 进度条并开始变化，stream events 至少包含 preflight、upload、preprocess、partial、final、transcribe、done。
-- 对 `sample3.wav` 这类超过 1 秒的音频，partial/final 事件必须出现多次，证明不是结束后一次性输出。
+- 上传文件后显示 `File transcription progress` 进度条并开始变化，stream events 至少包含 preflight、upload、preprocess、final、transcribe、done。
+- 文件上传链路按 30 秒窗口、2 秒 overlap 顺序送模；短于 30 秒的 `sample3.wav` 可以只产生一个 final，长音频必须按多个 30 秒以内的 final segment 推进，不得 whole-file 一次性推给模型。
 - Transcript 显示中文文本，包含 `Qwen3`、`语音` 或 `测试` 等 sample 关键词。
 - ASR server 未 ready 时，页面提示在 AI -> Tools -> ASR 初始化，不吞掉错误，并展示当前 server 地址或健康检查错误。
 
@@ -289,35 +288,81 @@
    BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-qwen3-asr-task.XXXXXX)" \
      cargo run --bin bifrost -- start -p 18883 --unsafe-ssl --no-system-proxy
    ```
-2. 准备一个本地音频目录，至少包含一个可转写音频文件和一个非音频文件；真实录音验证可使用 `/Users/eden/Downloads/TX_MIC001_20260514_114433`，该目录 WAV 文件名和容器 tags 均包含录音开始时间，且包含一个 0 字节坏文件用于验证单文件失败不会中断任务。
+2. 准备一个本地音频目录，至少包含一个可转写音频文件和一个非音频文件；真实录音验证可使用 `~/Downloads/TX_MIC001_20260514_114433`，该目录 WAV 文件名和容器 tags 均包含录音开始时间，且包含一个 0 字节坏文件用于验证单文件失败不会中断任务。
 3. 打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`。
 4. 在 Directory Tasks 区域输入任务名、音频目录、递归开关；分别切换 Cycle 为 Daily、Weekly、Monthly，确认表单展示对应的时间、星期或日期控件；选择 Weekly Friday 09:15 后点击 Add。
 5. 确认任务表展示目录、`Weekly Fri 09:15`、processed/pending/failed/deleted-after-processing 总体进度、下一次运行时间，页面不再出现秒级 interval 输入或 `Every Ns` 文案。
-6. 点击任务行中的 View details，确认右侧详情面板展示 schedule、last/next run、processed/pending/failed/deleted-after-processing、逐文件 source path、status、recorded time、recorded time source、duration、finished time、output text path、timeline path 和错误信息。
-7. 点击 Run 手动运行任务。
-8. 运行完成后检查：
+6. 点击任务行中的 View details，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>` 子页面，且页面没有 `dialog` / Drawer 弹窗；子页面展示 schedule、last/next run、processed/pending/failed/deleted-after-processing、逐文件 source path、status、recorded time、recorded time source、duration、finished time、output text path、timeline path 和错误信息。
+7. 在任务详情子页面检查底部文件结果表格：页面整体不出现横向溢出，超宽文件路径和结果路径只在表格内部横向滚动；分页默认显示 8 行，切换到 `20 / page` 后表格立即显示 20 行且选择器保持 `20 / page`。
+8. 点击 Run 手动运行任务。
+9. 运行完成后检查：
    ```bash
    find "$BIFROST_DATA_DIR/asr/data/text" -type f
    ```
-9. 打开任务详情后确认 WebUI 自动展示第一个成功文件的 File Timeline 阅读区；再点击成功文件文件名旁的 Open timeline，确认可以切换/重新加载该文件时间轴。File Timeline 顶部展示文件元信息，左侧按 `audio_start_ms/audio_end_ms` 音频相对时间和录音创建时间推算出的绝对时间展示分段文本，右侧 Full Transcript 展示完整合并文本，便于快速检查识别质量。
-10. 删除一个已经处理过的源音频文件，刷新页面或等待 10 秒自动刷新。
-11. 停止 ASR 模型服务后，创建两个启用的目录定时任务，Cycle 设置为 Daily 且时间为当前本地小时和分钟，分别绑定两个只包含一个音频文件的目录。
-12. 等待 scheduler 自动触发，不点击 Run，观察两个任务都完成处理；随后查看 ASR 状态。
+10. 打开任务详情子页面后，切换到 Daily Docs tab，确认按 `YYYY-MM-DD` 展示日文档列表；点击某一天的 Open document，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>&asrDay=<YYYY-MM-DD>` 子页面，展示完整 Markdown 内容、文档路径、大小和更新时间，内容包含该日所有已转写文件的时间段文本；点击 Back to daily docs 后回到任务详情并移除 `asrDay`。
+11. 调用 API 验证按天文档：
+   ```bash
+   curl -s "http://127.0.0.1:18883/_bifrost/api/asr/tasks/<task_id>/daily"
+   curl -s "http://127.0.0.1:18883/_bifrost/api/asr/tasks/<task_id>/daily/<YYYY-MM-DD>"
+   curl -s -i "http://127.0.0.1:18883/_bifrost/api/asr/tasks/<task_id>/daily/../secret"
+   ```
+12. 打开任务详情子页面后，点击成功文件文件名旁的 Open transcript，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>&asrFile=<file_key>` 单文件详情页。单文件详情页顶部显示 Original Audio 播放器，播放器可读取 `/api/asr/tasks/<task_id>/files/<file_key>/source` 源音频；下方 File Timeline 按 `audio_start_ms/audio_end_ms` 音频相对时间和录音创建时间推算出的绝对时间展示分段文本，右侧 Full Transcript 展示完整合并文本。通过 timeline API 或页面 Segments 逐项确认 `audio_end_ms - audio_start_ms <= 30000`，不得出现几十分钟音频被合成一个 segment 的情况。点击任意 segment 的时间点，确认播放器跳转到对应音频时间；播放或拖动播放器到其它位置，确认 File Timeline 自动高亮并滚动到当前 segment；手动滚动字幕区后，确认自动滚动暂停，连续 5 秒没有新的滚动操作后恢复跟随当前播放段；暂停期间操作音频播放轴、点击播放或点击字幕时间点时，确认自动跟随立即恢复到用户指定位置。
+11. 点击子页面左上角返回按钮，确认 URL 删除 `asrTask`，页面回到 Directory Tasks 上一级列表，后续仍可点击 Run 手动运行任务。
+12. 删除一个已经处理过的源音频文件，刷新页面或等待 10 秒自动刷新。
+13. 模拟服务重启后的 stale lock：在任务目录写入旧格式锁文件 `printf '' > "$BIFROST_DATA_DIR/asr/tasks/<task_id>/run.lock"`，再点击 Run。
+14. 停止 ASR 模型服务后，创建两个启用的目录定时任务，Cycle 设置为 Daily 且时间为当前本地小时和分钟，分别绑定两个只包含一个音频文件的目录。
+15. 等待 scheduler 自动触发，不点击 Run，观察两个任务都完成处理；随后查看 ASR 状态。
 
 预期结果：
 
-- WebUI 创建任务后无需离开 ASR 页面即可看到任务详情和总体进度。
-- 点击任务详情可以查看逐文件执行结果；成功文件展示输出文本路径和 timeline 路径，Timeline 阅读区按音频相对时间和绝对时间展示分段文本，并展示完整合并文本；失败文件展示错误信息，源文件删除后已完成记录仍保留。
+- WebUI 创建任务后无需离开 AI -> Tools -> ASR 即可看到任务详情和总体进度。
+- 点击任务详情会进入 ASR 子页面而不是弹窗；URL 包含 `asrTask=<task_id>`，页面没有 `dialog` / Drawer，返回按钮可回到 Directory Tasks 上一级列表。
+- 子页面可以查看逐文件执行结果；底部文件结果表格不会撑出 ASR 页面宽度，长路径通过表格内部横向滚动查看；分页大小切换后立即按新 page size 渲染并保持选择状态；Daily Docs tab 按天展示聚合文档，点击后进入 `asrDay=<YYYY-MM-DD>` 完整内容页，返回后不影响 Files tab 和 Open transcript 路径；成功文件展示输出文本路径和 timeline 路径；点击 Open transcript 后进入单文件详情页，顶部 Original Audio 播放器加载源音频，Timeline 阅读区按音频相对时间和绝对时间展示分段文本，并展示完整合并文本；每个 timeline segment 最大跨度不超过 30 秒，既覆盖新转写结果，也覆盖旧版本遗留超长单段 timeline 的读取兼容；点击时间点可跳转播放器位置，播放或拖动播放器时当前字幕段会自动高亮并滚动到可见区域；用户手动滚动字幕区时自动滚动暂停，最后一次手动滚动 5 秒后恢复跟随当前播放段；暂停期间用户操作音频播放轴、点击播放或点击字幕时间点会立即恢复自动跟随；失败文件展示错误信息，源文件删除后已完成记录仍保留。
 - 录音创建时间优先从 `ffprobe` 的 `date + creation_time` 或 RFC3339 `creation_time` 解析，其次从文件名 `YYYYMMDD_HHMMSS`、filesystem birthtime、mtime 回退；坏文件仍记录可解析的创建时间和失败状态，不影响其它文件处理。
 - 目录任务支持 hourly/daily/weekly/monthly 墙钟周期；WebUI 和 API 均提交 `schedule` 对象，不再提交 `interval_seconds`。
 - 任务扫描音频目录时忽略非音频文件；递归开启时能发现子目录音频。
 - 运行前检查模型服务状态：若模型已运行则复用并保持运行；若未运行则临时启动，运行完成后恢复为停止状态。
 - 多个任务不会同时抢占模型服务 start/stop；竞争时显示明确错误，不覆盖其它任务状态。
-- 成功转写文本保存在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/`，同目录 `.timeline.json` 记录时间片段，`.json` 元数据记录源文件、任务 ID、模型、语言、创建时间来源和媒体时长。
+- 服务重启或崩溃后遗留的旧格式、损坏或 pid 已不存在的 `run.lock` 会在下次运行前自动清理；真实仍在运行的任务仍会被拒绝并显示任务正在运行。
+- 成功转写文本保存在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/`，同目录 `.timeline.json` 记录时间片段，`.json` 元数据记录源文件、任务 ID、模型、语言、创建时间来源和媒体时长；`daily/<YYYY-MM-DD>.md` 聚合该日完整整理内容。
 - 源音频被删除后，已转写文本和元数据仍保留；任务表 `deleted after processing` 增加，不把已删除文件重新计入 pending。
 - 如果同一路径后续出现大小或 mtime 不同的新音频文件，任务应把它视为新的 pending 文件，而不是复用旧 transcript。
 - 启用状态的定时任务到期后会由后台 scheduler 自动执行；多个到期任务通过运行锁串行处理，不会并发 start/stop 同一个模型服务。
 - 如果定时任务运行前模型服务是 stopped，任务可以临时启动模型，运行完成后恢复为 stopped；如果运行前模型服务已 ready，则任务复用服务并保持 ready。
+
+### TC-QASR-16 ASR 定时任务 CLI 与按日文档检查
+
+操作步骤：
+
+1. 使用临时数据目录和临时端口启动当前 Bifrost 二进制，必须带 `--no-system-proxy`：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-asr-task-cli.XXXXXX)" \
+     target/debug/bifrost start -p 18990 --unsafe-ssl --no-system-proxy
+   ```
+2. 通过 Admin API 创建一个绑定空音频目录、`enabled=false` 的 ASR 目录任务。
+3. 在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/daily/2026-05-17.md` 写入一份 Markdown 文档。
+4. 在同一个 `BIFROST_DATA_DIR` 下执行 CLI，不传 `-p`：
+   ```bash
+   target/debug/bifrost ai asr task list
+   target/debug/bifrost ai asr task show <task_id>
+   target/debug/bifrost ai asr task files <task_id>
+   target/debug/bifrost ai asr task daily list <task_id>
+   target/debug/bifrost ai asr task daily show <task_id> 2026-05-17
+   target/debug/bifrost ai asr task daily show <task_id> 2026-05-17 --output /tmp/asr-day.md
+   target/debug/bifrost ai asr task run <task_id> --wait
+   ```
+5. 再次执行 `target/debug/bifrost ai asr task daily list <task_id>`。
+
+预期结果：
+
+- 不传 `-p` 时，CLI 从当前 `BIFROST_DATA_DIR/runtime.json` 解析运行端口；读不到 runtime 时才回退默认 9900。
+- `task list` 展示任务 ID、名称、状态和 processed/pending 汇总。
+- `task show` 展示任务配置、summary、文件数量和 Daily documents 数量。
+- 空任务的 `task files` 输出明确的空结果提示。
+- `daily list` 展示 `2026-05-17`、文档路径、大小、字符数和更新时间。
+- `daily show` 默认向 stdout 输出完整 Markdown；带 `--output` 时写入指定文件。
+- `task run --wait` 在没有 pending 音频文件时不要求启动 ASR 模型服务，仍会触发后端刷新 daily 文档并等待任务结束。
 
 ### TC-QASR-11 API WebSocket 实时转写链路
 
@@ -327,7 +372,7 @@
 2. 准备浏览器麦克风格式音频：
    ```bash
    ffmpeg -y -hide_banner -loglevel error \
-     -i /Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav \
+     -i ~/.bifrost/asr/qwen3_asr_rs/sample3.wav \
      -c:a libopus /tmp/bifrost-qwen3-asr-ws.webm
    ```
 3. 使用 WebSocket 客户端连接：
@@ -425,17 +470,17 @@
 | 2026-05-13 | TC-QASR-02 | legacy shell initializer, now removed | PASS：下载 `asr-macos-aarch64`、`Qwen3-ASR-1.7B` 两片 safetensors 权重、tokenizer 与 sample；二次执行复用已有模型文件 |
 | 2026-05-13 | TC-QASR-03 | legacy shell initializer, now removed | PASS：CLI 输出 `Language: forced`，文本为 `<asr_text>你好，这是宽增语音合成系统的持续集成测试。`，包含中文样例关键词 |
 | 2026-05-13 | TC-QASR-04 | legacy shell initializer, now removed | PASS：`/health` 返回 `{"status":"ok"}`，`/v1/models` 返回 `qwen3-asr`，multipart 转写返回中文样例文本；退出时已清理 server |
-| 2026-05-13 | TC-QASR-05 | `chunk` + `batch-transcribe` against `/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav` on port `18082` | PASS：生成 `/tmp/bifrost-qwen3-asr-chunks/seg_0000.wav` 与 `/tmp/bifrost-qwen3-asr-transcript.txt`，transcript 包含 `语音/测试`；临时 server 已停止 |
-| 2026-05-13 | 固定目录迁移 | `rsync -a /Users/eden/ai/asr/ /Users/eden/.bifrost/asr/` | PASS：固定目录 `/Users/eden/.bifrost/asr` 已包含 qwen3_asr_rs、Qwen3-ASR-1.7B 权重、server 二进制和 sample，大小 4.6G |
+| 2026-05-13 | TC-QASR-05 | `chunk` + `batch-transcribe` against `~/.bifrost/asr/qwen3_asr_rs/sample3.wav` on port `18082` | PASS：生成 `/tmp/bifrost-qwen3-asr-chunks/seg_0000.wav` 与 `/tmp/bifrost-qwen3-asr-transcript.txt`，transcript 包含 `语音/测试`；临时 server 已停止 |
+| 2026-05-13 | 固定目录迁移 | `rsync -a ~/ai/asr/ ~/.bifrost/asr/` | PASS：固定目录 `~/.bifrost/asr` 已包含 qwen3_asr_rs、Qwen3-ASR-1.7B 权重、server 二进制和 sample，大小 4.6G |
 | 2026-05-13 | TC-QASR-06 | Playwright 清理 `bifrost.asr.connection*` 后打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`，点击 Start Service，刷新状态 | PASS：页面不显示默认端口；停止态显示 `Dynamic port, selected when service starts`；Start Service 后 Ready 且 Server 为动态端口 `http://127.0.0.1:53014`（端口每次可不同）；Managed 为 Yes |
-| 2026-05-13 | TC-QASR-07 | Playwright 打开 AI -> Tools -> ASR，不设置端口，选择 `/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：Transcript 输出 `<asr_text>你好，这是宽增语音合成系统的持续集成测试。`；stream events 包含 preflight、upload、preprocess、transcribe、done；无需用户指定端口 |
+| 2026-05-13 | TC-QASR-07 | Playwright 打开 AI -> Tools -> ASR，不设置端口，选择 `~/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：Transcript 输出 `<asr_text>你好，这是宽增语音合成系统的持续集成测试。`；stream events 包含 preflight、upload、preprocess、transcribe、done；无需用户指定端口 |
 | 2026-05-13 | TC-QASR-08 | Playwright 使用 fake microphone 权限打开 AI -> Tools -> ASR，点击 Start Mic / Stop Mic | PASS：按钮切换到 Stop Mic，停止后生成 `microphone.webm`；后台显示 `preprocess: Audio normalized to 16 kHz mono WAV.`；模型返回 `<asr_text>嗯。`；不再出现 `Failed to open WAV file` |
 | 2026-05-13 | TC-QASR-09 | `mv ~/.bifrost/asr/qwen3_asr_rs/Qwen3-ASR-1.7B/config.json /tmp/bifrost-qwen3-asr-model-backup/` 后在 AI -> Tools -> ASR 点击 Initialize | PASS：历史页面曾显示日志和 curl 进度；当前预期已改为 Rust 后台下载进度条与体积/速度/ETA 展示 |
 | 2026-05-13 | TC-QASR-01 / CI 回归 | `PATH=/usr/bin:/bin BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：离线 CI 模式下缺少 `ffmpeg` 时脚本输出 `missing required command: ffmpeg`，随后明确跳过在线模型段并以 0 退出；在线模式仍要求 preflight 成功 |
 | 2026-05-14 | TC-QASR-01 / 结构回归 | `BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：脚本语法、help、缺失音频错误、preflight 均通过；在线段按环境变量跳过 |
 | 2026-05-14 | TC-QASR-10 / CI 禁止模型下载部署 | `CI=true BIFROST_QWEN3_ASR_E2E_ONLINE=1 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：E2E 输出 `CI environment detected; online model verification skipped` 后退出 0；验证前后无 ASR server 监听端口，未触发模型下载、安装或 `asr-server` 启动 |
 | 2026-05-14 | TC-QASR-03 / TC-QASR-04 / TC-QASR-05B / TC-QASR-07 / TC-QASR-08 / 错误回归 | `BIFROST_QWEN3_ASR_E2E_ONLINE=1 BIFROST_QWEN3_ASR_E2E_PORT=18084 BIFROST_QWEN3_ASR_E2E_ADMIN_PORT=18884 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：真实模型 CLI/API 样例通过；Bifrost 托管服务动态端口 ready；`/api/asr/transcribe-stream` 对 sample3.wav 输出 3 个 partial 和 3 个 final 后输出最终文本；`stream-file` 使用托管动态端口输出多个 partial/final JSON Lines；WebM 麦克风格式归一化输出 partial/final/text；Stop Service 后未启动服务错误流可见 |
-| 2026-05-14 | TC-QASR-07 WebUI 文件输入流式转写 | Playwright 打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`，选择 `/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：页面实际渲染 `partial[` 3 次、`final[` 3 次，Transcript 匹配 `你好/语音/测试`；测试结束后调用 Stop Service 并停止临时 Bifrost 进程 |
+| 2026-05-14 | TC-QASR-07 WebUI 文件输入流式转写 | Playwright 打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`，选择 `~/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：页面实际渲染 `partial[` 3 次、`final[` 3 次，Transcript 匹配 `你好/语音/测试`；测试结束后调用 Stop Service 并停止临时 Bifrost 进程 |
 | 2026-05-14 | TC-QASR-11 API WebSocket 事件协议回归 | `cargo test -p bifrost-admin test_ws_progress_event_type_uses_visible_realtime_phases`；`BIFROST_QWEN3_ASR_E2E_ONLINE=1 BIFROST_QWEN3_ASR_E2E_PORT=18084 BIFROST_QWEN3_ASR_E2E_ADMIN_PORT=18884 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：服务端顶层 `type` 直接输出 `connected`、`stream`、`partial`、`final`、`text`、`done`，WebUI 同时兼容这些实时事件和普通 SSE progress 事件；回归覆盖浏览器 WebSocket 无法携带 Authorization header 时通过 query token 鉴权 |
 | 2026-05-14 | TC-QASR-05B / TC-QASR-08 1 秒流式延迟回归 | `cargo test -p bifrost-admin asr --lib`；`BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：默认流式窗口从 2000ms 调整为 1000ms，默认 overlap 为 300ms，WebSocket 默认 flush interval 为 800ms；结构 E2E 覆盖脚本语法、help、缺失音频错误、preflight 和 CI/离线跳过路径 |
 | 2026-05-14 | TC-QASR-08 / TC-QASR-12 WebUI 麦克风 1 秒输入与电平音轨 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts` | PASS：真实浏览器打开 AI -> Tools -> ASR，mock ASR ready、麦克风、MediaRecorder 和 WebSocket；Start Mic 后 `Live microphone level` 电平变化，MediaRecorder interval 包含 `1000`，partial 事件为 `0-800ms`，Stop Mic / Cancel 后电平回到 `0%`，暗色主题下可读 |
@@ -444,10 +489,17 @@
 | 2026-05-14 | TC-QASR-03 / TC-QASR-04 / TC-QASR-05B / TC-QASR-13 / TC-QASR-14 在线回归 | `BIFROST_QWEN3_ASR_E2E_ONLINE=1 BIFROST_QWEN3_ASR_E2E_PORT=18084 BIFROST_QWEN3_ASR_E2E_ADMIN_PORT=18884 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：复用固定 `~/.bifrost/asr` 模型目录；真实模型 CLI/API 样例通过；`bifrost ai asr` 结构路径通过；Admin ASR task API 创建 pending=1；目录任务 Run 输出 `processed_now=1`，在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/` 写入 `.txt` 和 `.json`，删除源音频后详情显示 `deleted_after_processing=1`；WebM 与 WebSocket 实时链路仍通过 |
 | 2026-05-14 | TC-QASR-13 CLI 真实服务链路 | 临时 `BIFROST_DATA_DIR` 下执行 `cargo run --quiet --bin bifrost -- ai asr start --language chinese` -> `status --json` -> `stream-file ~/.bifrost/asr/qwen3_asr_rs/sample1.wav --language chinese` -> `stop` -> `status --json` | PASS：CLI 动态端口启动真实 Qwen3-ASR 服务，`status --json` 显示 `ready: true` 与 `managed_by: cli`；`stream-file` 标准输出包含 `partial` 和 `final` JSON Lines，窗口按 1000ms 推进；`stop` 后 `status --json` 显示 `ready: false` |
 | 2026-05-14 | TC-QASR-14 定时任务自动触发与冲突恢复 | `cargo test -p bifrost-admin task_run_lock_rejects_concurrent_runs_and_releases_after_drop --lib`；`BIFROST_QWEN3_ASR_E2E_ONLINE=1 BIFROST_QWEN3_ASR_E2E_PORT=18085 BIFROST_QWEN3_ASR_E2E_ADMIN_PORT=18885 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：单测确认同一 task `run.lock` 拒绝并发运行且释放后可再次运行；online E2E 在服务 stopped 后创建两个 enabled Daily 当前分钟墙钟任务，未点击 Run，由 scheduler 自动触发并串行完成，两个任务均写入 `asr/data/text/<task_id>/`，最终 `/api/asr/status` 为 `ready:false`，证明任务完成后恢复 stopped 状态 |
-| 2026-05-14 | TC-QASR-14 / 真实录音元信息可行性 | `ffprobe` + `stat` 读取 `/Users/eden/Downloads/TX_MIC001_20260514_114433` | PASS：16 个 WAV 中 15 个可解码为 48kHz mono 24-bit PCM，多数 30 分钟分段；WAV tags 含 `date=2026-05-14` 和 `creation_time=HH:MM:SS`，文件名 `YYYYMMDD_HHMMSS` 与 filesystem birth/mtime 仅差 0-1 秒；`TX02_MIC007_20260514_124809_orig.wav` 为 0 字节坏文件，应记录 failed file record 而不阻塞其它文件 |
-| 2026-05-14 | TC-QASR-14 / 真实单文件目录任务与 WebUI 时间轴查阅 | 复制 `/Users/eden/Downloads/TX_MIC001_20260514_114433/TX02_MIC008_20260514_131410_orig.wav` 到临时目录 `/tmp/bifrost-asr-one-file.*`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-one-file-webui.* cargo run --bin bifrost -- start -p <dynamic> --unsafe-ssl --no-system-proxy`；API 创建 `real-one-file-validation` Directory Task 并 POST `/api/asr/tasks/<id>/run`；Browser 打开 `/_bifrost/ai?aiSection=tools-asr` 查看任务详情 | PASS：任务结果 `discovered=1 processed=1 pending=0 failed=0`；文件详情 `status=success`、`source_created_at_source=ffprobe.date_creation_time`、`media_duration_ms=3633`、`text_chars=2`，输出 `.txt` 和 `.timeline.json` 均在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/`；timeline API 返回 1 个 segment，`audio_start_ms=0 audio_end_ms=975 text=嗯。`，落盘文本为 `[2026-05-14 13:14:10.000 - 2026-05-14 13:14:10.975] 嗯。`；WebUI 任务详情自动展示 File Timeline 和 Full Transcript，能看到 `ffprobe.date_creation_time`、`00:00:00.000 - 00:00:00.975`、`嗯。` |
+| 2026-05-14 | TC-QASR-14 / 真实录音元信息可行性 | `ffprobe` + `stat` 读取 `~/Downloads/TX_MIC001_20260514_114433` | PASS：16 个 WAV 中 15 个可解码为 48kHz mono 24-bit PCM，多数 30 分钟分段；WAV tags 含 `date=2026-05-14` 和 `creation_time=HH:MM:SS`，文件名 `YYYYMMDD_HHMMSS` 与 filesystem birth/mtime 仅差 0-1 秒；`TX02_MIC007_20260514_124809_orig.wav` 为 0 字节坏文件，应记录 failed file record 而不阻塞其它文件 |
+| 2026-05-14 | TC-QASR-14 / 真实单文件目录任务与 WebUI 时间轴查阅 | 复制 `~/Downloads/TX_MIC001_20260514_114433/TX02_MIC008_20260514_131410_orig.wav` 到临时目录 `/tmp/bifrost-asr-one-file.*`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-one-file-webui.* cargo run --bin bifrost -- start -p <dynamic> --unsafe-ssl --no-system-proxy`；API 创建 `real-one-file-validation` Directory Task 并 POST `/api/asr/tasks/<id>/run`；Browser 打开 `/_bifrost/ai?aiSection=tools-asr` 查看任务详情 | PASS：任务结果 `discovered=1 processed=1 pending=0 failed=0`；文件详情 `status=success`、`source_created_at_source=ffprobe.date_creation_time`、`media_duration_ms=3633`、`text_chars=2`，输出 `.txt` 和 `.timeline.json` 均在 `BIFROST_DATA_DIR/asr/data/text/<task_id>/`；timeline API 返回 1 个 segment，`audio_start_ms=0 audio_end_ms=975 text=嗯。`，落盘文本为 `[2026-05-14 13:14:10.000 - 2026-05-14 13:14:10.975] 嗯。`；WebUI 任务详情自动展示 File Timeline 和 Full Transcript，能看到 `ffprobe.date_creation_time`、`00:00:00.000 - 00:00:00.975`、`嗯。` |
 | 2026-05-14 | TC-QASR-07 / TC-QASR-08 / TC-QASR-12 WebUI 单卡片输入转写布局 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts` | PASS：真实浏览器打开 AI -> Tools -> ASR，断言 Audio Input 和 Transcript 位于同一个 `Speech to Text` 工作卡片内，Audio Input 在顶部、Transcript 在下方；初始和麦克风实时输入时不显示文件进度条，选择文件后才显示 `File transcription progress`；麦克风电平、1 秒 MediaRecorder timeslice、partial/final 事件、Stop/Cancel 归零、暗色主题和 Directory Tasks 面板仍通过 |
 | 2026-05-15 | TC-QASR-01 / TC-QASR-06 / TC-QASR-15 初始化与启动自检 | 临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-real-web.* cargo run --bin bifrost -- start -p 18891 --unsafe-ssl --no-system-proxy --skip-cert-check`；`curl -N /_bifrost/api/asr/init-stream`；`curl -X POST /_bifrost/api/asr/service/start` | PASS：服务使用临时数据目录启动且系统代理保持 disabled；`/api/asr/status` 返回 `installed=true/platform_supported=true/ffmpeg_available=false` 后，初始化流执行 `Checking ASR runtime dependencies` 并通过软件内 `brew install ffmpeg` 自动安装 FFmpeg；随后 `ffmpeg version 8.1.1` 可用，Start Service 动态端口 `http://127.0.0.1:65128` ready |
-| 2026-05-15 | TC-QASR-07 WebUI 文件输入真实转写 | Browser 打开 `http://127.0.0.1:18891/_bifrost/ai?aiSection=tools-asr`；Playwright 在真实页面选择 `/Users/eden/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：页面显示 `Ready`，不显示 `Initialize`；真实文件上传经过 preflight/upload/preprocess/stream，页面出现 6 个 `partial[]` 和 6 个 `final[]`，最终 `done: Transcription completed.`；Transcript 包含 `你好/持续集成/测试`；无 console error；截图保存到 `/tmp/bifrost-asr-webui-real-transcribe-done.png` |
+| 2026-05-15 | TC-QASR-07 WebUI 文件输入真实转写 | Browser 打开 `http://127.0.0.1:18891/_bifrost/ai?aiSection=tools-asr`；Playwright 在真实页面选择 `~/.bifrost/asr/qwen3_asr_rs/sample3.wav` | PASS：页面显示 `Ready`，不显示 `Initialize`；真实文件上传经过 preflight/upload/preprocess/stream，页面出现 6 个 `partial[]` 和 6 个 `final[]`，最终 `done: Transcription completed.`；Transcript 包含 `你好/持续集成/测试`；无 console error；截图保存到 `/tmp/bifrost-asr-webui-real-transcribe-done.png` |
 | 2026-05-15 | TC-QASR-13 CLI 真实服务链路 | 临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-real-cli.* cargo run --quiet --bin bifrost -- ai asr start --language chinese` -> `status --json` -> `stream-file ~/.bifrost/asr/qwen3_asr_rs/sample3.wav --language chinese` -> `stop` -> `status --json` | PASS：CLI 动态端口 `http://127.0.0.1:49168` 启动真实 Qwen3-ASR 服务，`status --json` 显示 `ready:true/managed_by:cli`；`stream-file` 输出 partial/final JSON Lines，文本为 `你好，这是宽增语音合成系统的持续集成测试。`；`stop` 后状态为 `ready:false/service:null` |
 | 2026-05-15 | TC-QASR-15 / CI 非支持平台回归 | `CI=true BIFROST_QWEN3_ASR_E2E_ONLINE=0 e2e-tests/tests/test_qwen3_asr_local_server.sh`；GitHub CI `E2E Shell (Linux, shard 2/3)` 失败日志 | PASS：脚本在 macOS Apple Silicon 本机离线路径只验证 help、status 和缺失音频错误后跳过在线模型；CI 失败归因为 Linux 预期 unsupported 被脚本当成失败，已改为非 `Darwin-arm64` 平台断言 `only supported on Apple Silicon macOS` 后退出 0，不下载、不启动模型 |
+| 2026-05-15 | TC-QASR-14 / Directory Task 子页面回归 | `pnpm --dir web run build`；`SKIP_FRONTEND_BUILD=1 TMPDIR=/tmp/bifrost-ui-tmp.4u2OEk BIFROST_UI_TEST_TARGET_DIR=/tmp/bifrost-ui-target.zCjdVd pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：生产构建通过；Playwright 真实浏览器创建 Directory Task 后点击 View details，URL 包含 `asrTask=task-1`，页面没有 `Directory Task: Recordings` dialog，`asr-task-detail-page` 展示任务 summary、逐文件 output text path、status、File Timeline 和 Full Transcript；点击 Open timeline 后可见 `ffprobe.date_creation_time`、`00:00:00.000 - 00:00:02.000` 与 transcript；点击返回按钮后 URL 删除 `asrTask` 并回到 Directory Tasks 上一级列表，随后 Run 仍可执行 |
+| 2026-05-15 | TC-QASR-14 / 单文件转写详情与 stale lock 回归 | `pnpm --dir web run build`；`pnpm --dir web exec eslint src/pages/ASR/index.tsx src/pages/ASR/asrUtils.ts src/pages/ASR/components/SpeechWorkbench.tsx src/pages/ASR/components/DirectoryTasksPanel.tsx src/pages/ASR/components/DirectoryTaskDetailPage.tsx src/pages/ASR/components/TaskFileTranscriptPage.tsx tests/ui/asr-microphone-meter.spec.ts`；`SKIP_FRONTEND_BUILD=1 TMPDIR=/tmp/bifrost-ui-tmp.asr-split BIFROST_UI_TEST_TARGET_DIR=/tmp/bifrost-ui-target.asr-split pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"`；`SKIP_FRONTEND_BUILD=1 cargo check -p bifrost-admin --lib`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin task_run_lock --lib` | PARTIAL PASS：生产构建、定向 ESLint、`cargo check -p bifrost-admin --lib` 和 Playwright 通过；Playwright 覆盖任务详情无 dialog、Open transcript 进入 `asrFile=file-1` 单文件详情、Original Audio 播放器使用 `/source` URL、File Timeline 展示两段文本、点击 `00:00:01.000 - 00:00:02.000` 后播放器 `currentTime` 跳到 1000ms、返回任务文件列表和 Directory Tasks；`cargo test -p bifrost-admin task_run_lock --lib` 被当前工作树既有 IM Gateway 测试编译错误阻塞（`ExternalCliRunRequest` 缺 `runner_id`，另有 chatgpt_web browser dead_code warning），未能执行到新增 lock 单测 |
+| 2026-05-15 | TC-QASR-14 / 单文件转写详情双向时间轴绑定 | `pnpm --dir web exec eslint src/pages/ASR/components/TaskFileTranscriptPage.tsx tests/ui/asr-microphone-meter.spec.ts`；`pnpm --dir web exec tsc -b --pretty false`；`SKIP_FRONTEND_BUILD=1 TMPDIR=/tmp/bifrost-ui-tmp.asr-follow BIFROST_UI_TEST_TARGET_DIR=/tmp/bifrost-ui-target.asr-follow pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Playwright 真实浏览器创建 Directory Task 并进入 `asrFile=file-1` 单文件详情；点击 `00:00:01.000 - 00:00:02.000` 后播放器 `currentTime` 跳到 1000ms 且第 2 段 `aria-current=true`；模拟播放器 `timeupdate` 到 10 秒后，第 11 段 `aria-current=true` 且字幕滚动容器 `scrollTop > 0`；模拟手动滚轮和滚动字幕区后再次 `timeupdate` 到 10 秒，第 11 段继续高亮但 300ms 内 `scrollTop` 保持 0；在暂停窗口内模拟音频 `seeking/seeked` 到 5 秒，第 6 段 `aria-current=true` 且 1 秒内 `scrollTop > 0`，验证用户操作播放轴立即恢复自动跟随；再次手动滚动后等待自动恢复，`scrollTop > 0`；验证点击字幕和播放/拖动音频双向绑定、手动滚动暂停自动跟随并在 5 秒后恢复均生效 |
+| 2026-05-18 | TC-QASR-14 / 任务详情文件表格布局与分页大小回归 | 仅启动前端 dev server：`WEB_PORT=3000 BACKEND_PORT=9900 pnpm --dir web run dev`；Playwright 直连 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=76612de33e9740bc92440ce64a98a4cb`，复用现有 9900 后端，不重启 Bifrost | PASS：页面整体 `documentElement.scrollWidth == clientWidth`，任务文件表 `.ant-table-content` 为 `overflow-x: auto`，表格内部 `scrollWidth=1370 > clientWidth=823`；默认显示 8 行和 `8 / page`，切换 `20 / page` 后显示 20 行且选择器保持 `20 / page` |
+| 2026-05-18 | TC-QASR-14 / ASR timeline segment 最大 30 秒回归 | 复现：`curl -s http://127.0.0.1:3000/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/files/8dc2c4875e95b4c8aac6b131fd9e2fed5a33aef8/timeline` 显示旧服务返回 1 个 segment，`audio_end_ms - audio_start_ms = 230015`；修复后执行 `cargo test -p bifrost-admin asr_jobs --lib` 覆盖 chunk plain-text fallback 与旧 timeline 读取兼容拆分 | PASS：单测证明目录任务原生 CLI 只返回纯文本时会按 30 秒 chunk window 合成多个 timeline segments，且 timeline 读取会把旧版本遗留的超长单段拆成最大 30 秒窗口；当前运行中的 9900 服务需重启/升级后才会暴露新 API 行为，已有旧转写文件无需强制重跑即可在读取时被兼容拆分 |
+| 2026-05-18 | TC-QASR-05B / TC-QASR-07 非实时链路 30 秒窗口回归 | `cargo test -p bifrost-admin asr::tests --lib`；`cargo test -p bifrost-admin asr_streaming::tests --lib`；`cargo test -p bifrost-admin asr_ws::tests --lib`；`cargo test -p bifrost-cli commands::asr::tests --lib`；`target/debug/bifrost ai asr stream-file ~/Downloads/we/TX01_MIC007_20260514_183241_orig.wav --model Qwen3-ASR-1.7B --language chinese` | PASS：WebUI 文件上传服务端 chunk planner 对 180.015s 音频生成 30 秒窗口、2 秒 overlap，短音频保留单窗口；CLI 对 1801s 真实录音输出 `Split into 65 chunks (30s each, 2s overlap)`，总耗时 real 216.77s、RTF 0.117；WebSocket/mic 测试保持 1 秒实时窗口和 800ms flush，不纳入 30 秒批处理窗口 |
+| 2026-05-19 | TC-QASR-16 / ASR 定时任务 CLI 与按日文档检查 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli ai_asr_commands_parse --test cli_commands`；`e2e-tests/tests/test_asr_task_cli.sh`；`target/debug/bifrost ai asr task show 76612de33e9740bc92440ce64a98a4cb`；`target/debug/bifrost ai asr task daily list 76612de33e9740bc92440ce64a98a4cb`；`target/debug/bifrost ai asr task daily show 76612de33e9740bc92440ce64a98a4cb 2026-05-17` | PASS：CLI 解析覆盖 `task daily show --output`；E2E 使用临时 `BIFROST_DATA_DIR` 和 runtime port 验证不传 `-p` 的 `task list/show/files/daily list/daily show/run --wait`，且无 pending 文件时 `run --wait` 不要求 ASR 模型；真实 9900 任务显示 `Daily documents: 4`，daily list 展示 2026-05-14 到 2026-05-17 四份 Markdown，2026-05-17 完整内容可从 stdout 读取 |

@@ -269,6 +269,7 @@ print_runtime_context() {
   echo "E2E dir      : $E2E_DIR"
   echo "Report dir   : $REPORT_DIR"
   echo "Cargo bin    : $CARGO_BIN"
+  echo "Rustc bin    : ${RUSTC:-rustc}"
   echo "Runner port  : $BIFROST_UI_TEST_RUNNER_PORT"
   echo "UI target dir: $BIFROST_UI_TEST_TARGET_DIR"
   echo "Run rules    : $RUN_RULES"
@@ -996,6 +997,14 @@ trap e2e_cleanup EXIT
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export CARGO_BIN="${CARGO_BIN:-$(resolve_cargo_command)}"
+if [[ -z "${RUSTC:-}" ]] && command -v rustup >/dev/null 2>&1; then
+  RUSTC="$(rustup which rustc 2>/dev/null || true)"
+  if [[ -n "$RUSTC" ]]; then
+    export RUSTC
+  else
+    unset RUSTC
+  fi
+fi
 export NODE_BIN="${NODE_BIN:-$(resolve_non_shim_command node)}"
 export PNPM_BIN="${PNPM_BIN:-$(resolve_non_shim_command pnpm)}"
 export BIFROST_UI_TEST_TARGET_DIR="${BIFROST_UI_TEST_TARGET_DIR:-$ROOT_DIR/.bifrost-ui-target}"

@@ -1,0 +1,560 @@
+fn add_task(task: AsrDirectoryTask) -> Result<(), String> {
+    let mut store = load_tasks();
+    store.tasks.push(task);
+    save_tasks(&store)
+}
+
+fn load_tasks() -> TaskStore {
+    let path = task_store_path();
+    let content = std::fs::read_to_string(path).ok();
+    content
+        .and_then(|content| serde_json::from_str::<TaskStore>(&content).ok())
+        .filter(|store| store.version == TASK_STORE_VERSION)
+        .unwrap_or(TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: Vec::new(),
+        })
+}
+
+fn save_tasks(store: &TaskStore) -> Result<(), String> {
+    let path = task_store_path();
+    atomic_json_write(&path, store)
+}
+
+fn update_task_after_run(id: &str, error: Option<String>) -> Result<AsrDirectoryTask, String> {
+    let mut store = load_tasks();
+    let now = now_ms();
+    let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+        return Err(format!("ASR task '{id}' not found"));
+    };
+    task.last_run_at_ms = Some(now);
+    task.updated_at_ms = now;
+    task.last_error = error;
+    task.next_run_at_ms = task
+        .enabled
+        .then_some(())
+        .filter(|_| !task.paused)
+        .and_then(|_| {
+            task.schedule
+                .next_run_at_ms(now.saturating_add(60_000), false)
+        });
+    let updated = task.clone();
+    save_tasks(&store)?;
+    Ok(updated)
+}
+
+fn update_task_paused(id: &str, paused: bool) -> Result<AsrDirectoryTask, String> {
+    let mut store = load_tasks();
+    let now = now_ms();
+    let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+        return Err(format!("ASR task '{id}' not found"));
+    };
+    task.paused = paused;
+    task.paused_at_ms = paused.then_some(now);
+    task.updated_at_ms = now;
+    if paused {
+        task.next_run_at_ms = None;
+        task.last_error = None;
+    } else {
+        task.next_run_at_ms = task
+            .enabled
+            .then(|| {
+                task.schedule
+                    .next_run_at_ms(now.saturating_add(60_000), false)
+            })
+            .flatten();
+    }
+    let updated = task.clone();
+    save_tasks(&store)?;
+    Ok(updated)
+}
+
+fn task_pause_requested(id: &str) -> bool {
+    load_tasks()
+        .tasks
+        .into_iter()
+        .find(|task| task.id == id)
+        .map(|task| task.paused)
+        .unwrap_or(false)
+}
+
+fn task_force_pause_requested(id: &str) -> bool {
+    FORCE_PAUSED_TASKS.lock().unwrap().contains(id) && task_pause_requested(id)
+}
+
+fn task_store_path() -> PathBuf {
+    bifrost_storage::data_dir().join("asr/tasks.json")
+}
+
+fn file_store_path(task_id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("asr/tasks")
+        .join(task_id)
+        .join("files.json")
+}
+
+fn load_file_store(task_id: &str) -> FileStore {
+    let path = file_store_path(task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<FileStore>(&content) {
+            Ok(store) if store.version == TASK_STORE_VERSION => store,
+            Ok(store) => {
+                tracing::warn!(
+                    "ASR file store version mismatch: expected {}, got {}",
+                    TASK_STORE_VERSION,
+                    store.version
+                );
+                FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::new(),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "ASR file store deserialize failed for {}: {error}",
+                    path.display()
+                );
+                FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::new(),
+                }
+            }
+        },
+        Err(_) => FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        },
+    }
+}
+
+fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
+    let path = file_store_path(task_id);
+    atomic_json_write(&path, store)
+}
+
+/// Write a JSON file atomically: serialize → write to `<path>.tmp` → rename
+/// over `<path>`. If the process crashes mid-write only the temp file is
+/// corrupted; the original data remains intact.
+fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let content =
+        serde_json::to_string_pretty(value).map_err(|e| format!("serialize JSON: {e}"))?;
+    atomic_text_write(path, &content)
+}
+
+/// Write arbitrary text atomically: write to `<path>.tmp` → rename over
+/// `<path>`. Same crash-safety guarantee as `atomic_json_write`.
+fn atomic_text_write(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dir for {}: {e}", path.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content.as_bytes())
+        .map_err(|e| format!("write temp file {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))
+}
+
+fn task_with_summary(task: AsrDirectoryTask) -> TaskWithSummary {
+    let summary = summarize_task(&task);
+    let bulk_retry = bulk_chunk_retry_state(&task.id);
+    TaskWithSummary {
+        task,
+        summary,
+        bulk_retry,
+    }
+}
+
+fn find_task(id: &str) -> Option<AsrDirectoryTask> {
+    load_tasks().tasks.into_iter().find(|task| task.id == id)
+}
+
+fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
+    let summary = summarize_task(&task);
+    let daily_documents =
+        list_daily_documents_for_task(&bifrost_storage::data_dir(), &task.id, &task.name)
+            .unwrap_or_default();
+    let mut files = load_file_store(&task.id)
+        .files
+        .into_iter()
+        .map(|(key, record)| FileRecordWithKey { key, record })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| {
+        file_status_sort_rank(&left.record.status)
+            .cmp(&file_status_sort_rank(&right.record.status))
+            .then_with(|| left.record.source_path.cmp(&right.record.source_path))
+    });
+    TaskDetail {
+        bulk_retry: bulk_chunk_retry_state(&task.id),
+        task,
+        summary,
+        files,
+        daily_documents,
+    }
+}
+
+fn file_status_sort_rank(status: &FileStatus) -> u8 {
+    match status {
+        FileStatus::Processing => 0,
+        FileStatus::Pending => 1,
+        FileStatus::Failed => 2,
+        FileStatus::PartialSuccess => 3,
+        FileStatus::Success => 4,
+    }
+}
+
+fn repair_interrupted_processing_records_on_startup() {
+    for task in load_tasks().tasks {
+        if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+            continue;
+        }
+        let lock_path = task_run_lock_path(&task.id);
+        if lock_path.exists() && !is_task_run_lock_stale(&lock_path) {
+            continue;
+        }
+        let mut files = load_file_store(&task.id);
+        let reset_count = reset_interrupted_processing_records(&task.id, &mut files);
+        if reset_count == 0 {
+            continue;
+        }
+        match save_file_store(&task.id, &files) {
+            Ok(()) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    reset_count,
+                    "reset interrupted ASR processing records on scheduler startup"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    reset_count,
+                    error = %error,
+                    "failed to persist interrupted ASR processing record reset"
+                );
+            }
+        }
+    }
+}
+
+fn reset_interrupted_processing_records(task_id: &str, files: &mut FileStore) -> usize {
+    let mut reset_count = 0usize;
+    for record in files.files.values_mut() {
+        if record.status != FileStatus::Processing {
+            continue;
+        }
+        record.status = FileStatus::Pending;
+        record.started_at_ms = None;
+        record.finished_at_ms = None;
+        record.progress_current = None;
+        record.progress_total = None;
+        record.error = None;
+        reset_count += 1;
+    }
+    if reset_count > 0 {
+        tracing::debug!(
+            task_id = %task_id,
+            reset_count,
+            "reset interrupted ASR processing records to pending"
+        );
+    }
+    reset_count
+}
+
+fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
+    let discovered = discover_audio_files(&task.audio_dir, task.recursive).unwrap_or_default();
+    let discovered_keys = discovered
+        .iter()
+        .map(|path| source_key(path))
+        .collect::<HashSet<_>>();
+    let file_store = load_file_store(&task.id);
+    let processed = file_store
+        .files
+        .values()
+        .filter(|record| {
+            record.status == FileStatus::Success || record.status == FileStatus::PartialSuccess
+        })
+        .count();
+    let failed = file_store
+        .files
+        .values()
+        .filter(|record| record.status == FileStatus::Failed)
+        .count();
+    let partial_success = file_store
+        .files
+        .values()
+        .filter(|record| record.status == FileStatus::PartialSuccess)
+        .count();
+    let failed_chunk_count: usize = file_store
+        .files
+        .values()
+        .map(|record| record.failed_chunks.len())
+        .sum();
+    let pending = discovered
+        .iter()
+        .filter(|path| {
+            file_store
+                .files
+                .get(&source_key(path))
+                .map(|record| matches!(record.status, FileStatus::Pending | FileStatus::Processing))
+                .unwrap_or(true)
+        })
+        .count();
+    let deleted_after_processing = file_store
+        .files
+        .keys()
+        .filter(|key| !discovered_keys.contains(*key))
+        .count();
+    TaskSummary {
+        discovered: discovered.len(),
+        processed,
+        pending,
+        failed,
+        partial_success,
+        failed_chunk_count,
+        deleted_after_processing,
+        running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+    }
+}
+
+fn discover_audio_files(root: &Path, recursive: bool) -> Result<Vec<PathBuf>, String> {
+    if !root.is_dir() {
+        return Err(format!(
+            "audio directory does not exist: {}",
+            root.display()
+        ));
+    }
+    let mut files = Vec::new();
+    discover_audio_files_inner(root, recursive, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn discover_audio_files_inner(
+    root: &Path,
+    recursive: bool,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for entry in
+        std::fs::read_dir(root).map_err(|error| format!("read dir {}: {error}", root.display()))?
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(error) => {
+                tracing::warn!(dir = %root.display(), %error, "skipping unreadable directory entry");
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "skipping entry with unreadable file type");
+                continue;
+            }
+        };
+        if file_type.is_dir() && recursive {
+            // A single subdirectory failure should not abort the entire scan.
+            if let Err(error) = discover_audio_files_inner(&path, recursive, out) {
+                tracing::warn!(dir = %path.display(), %error, "skipping unreadable subdirectory");
+            }
+        } else if file_type.is_file() && is_audio_file(&path) {
+            // Skip 0-byte files — they contain no audio data and would
+            // only cause downstream ffmpeg/asr errors.
+            match entry.metadata() {
+                Ok(meta) if meta.len() == 0 => {
+                    tracing::debug!(path = %path.display(), "skipping 0-byte audio file");
+                }
+                _ => out.push(path),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| AUDIO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn pending_record(task_id: &str, path: &Path) -> FileRecord {
+    let source_info = inspect_source_audio(path);
+    file_record_from_info(task_id, path, &source_info)
+}
+
+/// Build a `FileRecord` from pre-cached `SourceAudioInfo`. Use this instead of
+/// `pending_record()` inside loops where you already have the info, to avoid
+/// spawning a redundant ffprobe subprocess per call.
+fn file_record_from_info(task_id: &str, path: &Path, source_info: &SourceAudioInfo) -> FileRecord {
+    FileRecord {
+        task_id: task_id.to_string(),
+        source_path: path.to_path_buf(),
+        source_size: source_info.source_size,
+        source_modified_ms: source_info.source_modified_ms,
+        source_created_at_ms: source_info.source_created_at_ms,
+        source_created_at_source: source_info.source_created_at_source.clone(),
+        media_duration_ms: source_info.media_duration_ms,
+        status: FileStatus::Pending,
+        output_text_path: None,
+        output_metadata_path: None,
+        output_timeline_path: None,
+        text_chars: 0,
+        error: None,
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        chunk_metrics: Vec::new(),
+        fallback_reason: None,
+        started_at_ms: None,
+        finished_at_ms: None,
+        progress_current: None,
+        progress_total: None,
+        failed_chunks: Vec::new(),
+        memory_limit_hints: Vec::new(),
+    }
+}
+
+fn source_key(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = Sha1::new();
+    hasher.update(absolute.to_string_lossy().as_bytes());
+    if let Some(size) = source_size(path) {
+        hasher.update(size.to_le_bytes());
+    }
+    if let Some(modified_ms) = source_modified_ms(path) {
+        hasher.update(modified_ms.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn output_paths(task_id: &str, source: &Path, audio_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    output_paths_in(&bifrost_storage::data_dir(), task_id, source, audio_dir)
+}
+
+fn output_paths_in(
+    data_dir: &Path,
+    task_id: &str,
+    source: &Path,
+    audio_dir: &Path,
+) -> (PathBuf, PathBuf, PathBuf) {
+    // Preserve the relative directory structure from audio_dir so that output
+    // mirrors the original folder hierarchy (important for recursive tasks).
+    let relative = source
+        .strip_prefix(audio_dir)
+        .unwrap_or(source.file_name().map(Path::new).unwrap_or(source));
+    let stem = relative.with_extension("");
+    let dir = text_output_dir(data_dir).join(task_id);
+    (
+        dir.join(format!("{}.txt", stem.display())),
+        dir.join(format!("{}.json", stem.display())),
+        dir.join(format!("{}.timeline.json", stem.display())),
+    )
+}
+
+struct TaskRunFileLock {
+    path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskRunLockFile {
+    pid: u32,
+    process_start_time: u64,
+    acquired_at_ms: u64,
+}
+
+impl TaskRunFileLock {
+    fn acquire(task_id: &str) -> Result<Self, String> {
+        let path = task_run_lock_path(task_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create task lock dir: {error}"))?;
+        }
+        match create_task_run_lock(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !is_task_run_lock_stale(&path) {
+                    return Err("ASR task is already running".to_string());
+                }
+                warn!(
+                    lock_path = %path.display(),
+                    "Removing stale ASR task run lock"
+                );
+                std::fs::remove_file(&path).map_err(|remove_error| {
+                    format!("remove stale ASR task lock: {remove_error}")
+                })?;
+                create_task_run_lock(&path)
+                    .map_err(|create_error| format!("recreate ASR task lock: {create_error}"))?;
+            }
+            Err(error) => return Err(format!("create ASR task lock: {error}")),
+        }
+        Ok(Self { path })
+    }
+}
+
+fn task_run_lock_path(task_id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("asr/tasks")
+        .join(task_id)
+        .join("run.lock")
+}
+
+impl Drop for TaskRunFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn create_task_run_lock(path: &Path) -> std::io::Result<()> {
+    let lock = TaskRunLockFile {
+        pid: std::process::id(),
+        process_start_time: current_process_start_time(),
+        acquired_at_ms: now_ms(),
+    };
+    let content = serde_json::to_vec_pretty(&lock)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(&content)
+        })
+}
+
+fn is_task_run_lock_stale(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(lock) = serde_json::from_str::<TaskRunLockFile>(&content) else {
+        return true;
+    };
+    // Safety net: treat locks older than 12 hours as stale regardless of
+    // PID liveness, to prevent permanently stuck tasks after edge-case
+    // crashes or PID recycling.
+    let age_ms = now_ms().saturating_sub(lock.acquired_at_ms);
+    if age_ms > 12 * 60 * 60 * 1000 {
+        return true;
+    }
+    !process_instance_is_alive(lock.pid, lock.process_start_time)
+}
+
+fn process_instance_is_alive(pid: u32, expected_start_time: u64) -> bool {
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    system
+        .process(pid)
+        .map(|process| process.start_time() == expected_start_time)
+        .unwrap_or(false)
+}
+
+fn current_process_start_time() -> u64 {
+    let pid = Pid::from_u32(std::process::id());
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    system
+        .process(pid)
+        .map(|process| process.start_time())
+        .unwrap_or(0)
+}

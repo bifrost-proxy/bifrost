@@ -144,10 +144,10 @@ mkdir -p ./.bifrost-test
   BIFROST_DATA_DIR=./.bifrost-test/agent-many-mcp-live cargo run --bin bifrost -- start -p 18881 --unsafe-ssl --no-system-proxy
   curl -sS -X PATCH http://127.0.0.1:18881/_bifrost/api/im-gateway/agent \
     -H 'Content-Type: application/json' \
-    -d '{"mcp_servers":{"manytools":{"command":"node","args":["/Users/eden/work/github/bifrost/e2e-tests/mock_servers/many_mcp_tools_server.js"],"startup_timeout_sec":10,"tool_timeout_sec":10}}}'
+    -d '{"mcp_servers":{"manytools":{"command":"node","args":["~/work/github/bifrost/e2e-tests/mock_servers/many_mcp_tools_server.js"],"startup_timeout_sec":10,"tool_timeout_sec":10}}}'
   curl -sS -X POST http://127.0.0.1:18881/_bifrost/api/im-gateway/agent/chat \
     -H 'Content-Type: application/json' \
-    -d '{"session_key":"agent-many-mcp-tool-search-live","work_dir":"/Users/eden/work/github/bifrost","message":"请严格验证 MCP deferred tool discovery：先用 tool_search 搜索 needle_087，然后调用搜索结果中对应的 MCP 工具，参数 marker 填 LIVE_MARKER_087。最终回答必须包含 MCP_TOOL_087_OK 和 LIVE_MARKER_087。不要使用 mock 数据，不要用 exec_command 代替 MCP 工具。"}'
+    -d '{"session_key":"agent-many-mcp-tool-search-live","work_dir":"~/work/github/bifrost","message":"请严格验证 MCP deferred tool discovery：先用 tool_search 搜索 needle_087，然后调用搜索结果中对应的 MCP 工具，参数 marker 填 LIVE_MARKER_087。最终回答必须包含 MCP_TOOL_087_OK 和 LIVE_MARKER_087。不要使用 mock 数据，不要用 exec_command 代替 MCP 工具。"}'
   ```
 - **预期结果**: 当前源码构建的 Bifrost 在非 9900 端口启动；MCP server 初始化 100 个工具；chat 返回 `success: true`；`tool_calls` 包含 `tool_search` 和 `mcp_manytools__target_tool_087`；最终响应或工具结果包含 `MCP_TOOL_087_OK` 与 `LIVE_MARKER_087`。
 - **本次执行结果**: 2026-05-06 执行通过；当前源码构建的 Bifrost 在 18881 端口以 `BIFROST_DATA_DIR=./.bifrost-test/agent-many-mcp-live` 和 `--no-system-proxy` 启动成功；通过真实 `PATCH /_bifrost/api/im-gateway/agent` 注册 stdio MCP server `manytools`，fixture 路径为 `e2e-tests/mock_servers/many_mcp_tools_server.js`，该 server 的 `tools/list` 返回 100 个工具；真实 chat 返回 `success: true`，`tool_calls` 依次包含 `set_title`、`tool_search`、`mcp_manytools__target_tool_087`；`tool_search` 结果只返回 `mcp_manytools__target_tool_087` 的可加载 `ToolDefinition`；MCP 工具调用结果为 `MCP_TOOL_087_OK marker=LIVE_MARKER_087`，最终响应包含 `MCP_TOOL_087_OK` 和 `LIVE_MARKER_087`。

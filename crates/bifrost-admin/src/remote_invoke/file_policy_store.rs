@@ -21,13 +21,13 @@
 //! [[grant]]
 //! match.ssh_fingerprint = "5f02477..."
 //! name = "my macbook via ssh key"
-//! roots = ["/Users/eden"]
+//! roots = ["/home/user"]
 //! ops = ["read", "list", "stat", "glob", "search", "hash",
 //!        "write", "edit", "mkdir", "move", "delete", "apply_patch"]
 //!
 //! [[grant]]
 //! match.grant_id = "7e5e03e0-..."       # pinning by exact grant id still works
-//! roots = ["/Users/eden/work"]
+//! roots = ["/home/user/work"]
 //! ops = ["read", "list", "stat"]
 //!
 //! [[grant]]
@@ -36,7 +36,7 @@
 //! ops = ["read"]
 //!
 //! [default]
-//! roots = ["/Users/eden"]
+//! roots = ["/home/user"]
 //! ops = ["read", "list", "stat", "glob", "search", "hash"]
 //! ```
 //!

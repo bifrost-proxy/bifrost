@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -28,6 +28,7 @@ import {
 import {
   ApiOutlined,
   CloudOutlined,
+  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   HistoryOutlined,
@@ -48,6 +49,7 @@ import type {
   ImTaskRun,
   ImEvent,
   ConnectionStatus,
+  ExternalCliGatewayConfig,
 } from "../../../api/imGateway";
 import type { AgentConfig } from "./agent/types";
 import LongTextModalField from "./agent/LongTextModalField";
@@ -59,6 +61,11 @@ import {
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
+const BUILTIN_AGENT_RUNNER_OPTIONS = [
+  { label: "Inherit global default", value: "__inherit__" },
+  { label: "Bifrost Agent", value: "bifrost_agent" },
+];
+
 function OverflowText({
   value,
   code,
@@ -66,12 +73,13 @@ function OverflowText({
 }: {
   value?: string;
   code?: boolean;
-  width?: number;
+  width?: number | string;
 }) {
   const { token } = theme.useToken();
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   const text = value?.trim() || "-";
   const canShowTip = text !== "-";
+  const maxWidth = typeof width === "number" ? `${width}px` : width;
 
   return (
     <>
@@ -87,8 +95,9 @@ function OverflowText({
         }}
         onMouseLeave={() => setTip(null)}
         style={{
-          display: "inline-block",
-          maxWidth: width,
+          display: "block",
+          width: "100%",
+          maxWidth,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -133,6 +142,118 @@ function OverflowText({
   );
 }
 
+function CopyableOverflowText({
+  value,
+  displayValue,
+  code,
+  width = "100%",
+  testId,
+}: {
+  value?: string;
+  displayValue?: string;
+  code?: boolean;
+  width?: number | string;
+  testId?: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const copyValue = value?.trim();
+  const canCopy = Boolean(copyValue);
+
+  const handleCopy = async () => {
+    if (!copyValue) return;
+    try {
+      await navigator.clipboard.writeText(copyValue);
+      message.success("Copied");
+    } catch {
+      message.error("Copy failed");
+    }
+  };
+
+  return (
+    <span
+      data-testid={testId}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        minWidth: 0,
+        maxWidth: width,
+      }}
+    >
+      <span style={{ flex: "1 1 auto", minWidth: 0 }}>
+        <OverflowText value={displayValue ?? value} code={code} width="100%" />
+      </span>
+      {canCopy && (
+        <Tooltip title="Copy">
+          <Button
+            aria-label="Copy"
+            type="text"
+            size="small"
+            icon={<CopyOutlined />}
+            onClick={handleCopy}
+            onFocus={() => setHovered(true)}
+            onBlur={() => setHovered(false)}
+            data-testid={testId ? `${testId}-copy` : undefined}
+            style={{
+              flex: "0 0 auto",
+              opacity: hovered ? 1 : 0,
+              pointerEvents: hovered ? "auto" : "none",
+              transition: "opacity 0.15s ease",
+            }}
+          />
+        </Tooltip>
+      )}
+    </span>
+  );
+}
+
+function SecondaryInline({ children }: { children: ReactNode }) {
+  return (
+    <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
+      {children}
+    </Text>
+  );
+}
+
+function ProviderFieldList({
+  items,
+}: {
+  items: Array<{
+    label: string;
+    value: ReactNode;
+  }>;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+      {items.map((item) => (
+        <div
+          key={item.label}
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: 8,
+            minWidth: 0,
+          }}
+        >
+          <Text
+            type="secondary"
+            style={{
+              flex: "0 0 150px",
+              maxWidth: "42%",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {item.label}:
+          </Text>
+          <div style={{ flex: "1 1 auto", minWidth: 0 }}>{item.value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PanelHeader({
   description,
   children,
@@ -161,18 +282,20 @@ function PanelHeader({
 
 function DetailGrid({
   items,
+  minColumnWidth = 320,
 }: {
   items: Array<{
     label: string;
     value: ReactNode;
   }>;
+  minColumnWidth?: number;
 }) {
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-        gap: "14px 18px",
+        gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${minColumnWidth}px), 1fr))`,
+        gap: "14px 24px",
         minWidth: 0,
       }}
     >
@@ -180,17 +303,19 @@ function DetailGrid({
         <div
           key={item.label}
           style={{
-            display: "grid",
-            gridTemplateColumns: "auto minmax(0, 1fr)",
+            display: "flex",
             gap: 8,
             alignItems: "baseline",
             minWidth: 0,
+            overflow: "hidden",
           }}
         >
-          <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
+          <Text type="secondary" style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>
             {item.label}:
           </Text>
-          <div style={{ minWidth: 0 }}>{item.value}</div>
+          <div style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden" }}>
+            {item.value}
+          </div>
         </div>
       ))}
     </div>
@@ -239,6 +364,8 @@ function ConnectionsPanel({
     () => new Set(),
   );
   const [agentDefaults, setAgentDefaults] = useState<AgentConfig | null>(null);
+  const [externalCliConfig, setExternalCliConfig] =
+    useState<ExternalCliGatewayConfig | null>(null);
   const [form] = Form.useForm();
   const selectedProviderType =
     (Form.useWatch("provider_type", form) as string | undefined) ||
@@ -265,6 +392,14 @@ function ConnectionsPanel({
     }
   }, []);
 
+  const fetchExternalCliConfig = useCallback(async () => {
+    try {
+      setExternalCliConfig(await imGatewayApi.getExternalCliConfig());
+    } catch {
+      setExternalCliConfig(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (providers.length === 0) return;
     const timer = window.setTimeout(() => {
@@ -276,9 +411,10 @@ function ConnectionsPanel({
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void fetchAgentDefaults();
+      void fetchExternalCliConfig();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [fetchAgentDefaults]);
+  }, [fetchAgentDefaults, fetchExternalCliConfig]);
 
   const inheritedWorkDir = agentDefaults?.work_dir || "Process working directory";
   const inheritedBaseInstructions =
@@ -289,6 +425,36 @@ function ConnectionsPanel({
     agentDefaults?.developer_instructions || "No global developer instructions";
   const inheritedUserInstructions =
     agentDefaults?.user_instructions || "No global user instructions";
+  const runnerIds = useMemo(
+    () => Object.keys(externalCliConfig?.runners || {}).sort(),
+    [externalCliConfig?.runners],
+  );
+  const agentRunnerOptions = useMemo(
+    () => [
+      ...BUILTIN_AGENT_RUNNER_OPTIONS,
+      ...runnerIds.map((id) => ({ label: id, value: id })),
+    ],
+    [runnerIds],
+  );
+  const inheritedRunner = agentDefaults?.runner || "Bifrost Agent";
+
+  const displayRunnerLabel = (provider: ImProviderConfig) => {
+    if (provider.agent_config?.runner === "bifrost_agent") return "Bifrost Agent";
+    if (provider.agent_config?.runner) return provider.agent_config.runner;
+    if (externalCliConfig?.channels[provider.id]?.runnerId) {
+      return externalCliConfig.channels[provider.id].runnerId;
+    }
+    return undefined;
+  };
+
+  const providerRunnerFormValue = (provider: ImProviderConfig) => {
+    if (provider.agent_config?.runner === "bifrost_agent") return "bifrost_agent";
+    if (provider.agent_config?.runner) return provider.agent_config.runner;
+    if (externalCliConfig?.channels[provider.id]?.runnerId) {
+      return externalCliConfig.channels[provider.id].runnerId;
+    }
+    return "__inherit__";
+  };
 
   const normalizeProviderValues = (
     values: Record<string, unknown>,
@@ -298,18 +464,22 @@ function ConnectionsPanel({
     const agentConfig = values.agent_config as
       | {
           work_dir?: string;
+          runner?: string;
           base_instructions?: string;
           developer_instructions?: string;
           user_instructions?: string;
         }
       | undefined;
     const workDir = agentConfig?.work_dir?.trim();
+    const runnerValue = agentConfig?.runner;
+    const runner = runnerValue === "__inherit__" ? undefined : runnerValue;
     const baseInstructions = agentConfig?.base_instructions?.trim();
     const developerInstructions = agentConfig?.developer_instructions?.trim();
     const userInstructions = agentConfig?.user_instructions?.trim();
     if (clearEmptyAgentConfig) {
-      if (workDir || baseInstructions || developerInstructions || userInstructions) {
+      if (runner || workDir || baseInstructions || developerInstructions || userInstructions) {
         payload.agent_config = {
+          runner: runner || null,
           work_dir: workDir || null,
           base_instructions: baseInstructions || null,
           developer_instructions: developerInstructions || null,
@@ -320,8 +490,9 @@ function ConnectionsPanel({
       }
       return payload;
     }
-    if (workDir || baseInstructions || developerInstructions || userInstructions) {
+    if (runner || workDir || baseInstructions || developerInstructions || userInstructions) {
       payload.agent_config = {
+        ...(runner ? { runner } : {}),
         ...(workDir ? { work_dir: workDir } : {}),
         ...(baseInstructions ? { base_instructions: baseInstructions } : {}),
         ...(developerInstructions ? { developer_instructions: developerInstructions } : {}),
@@ -333,6 +504,33 @@ function ConnectionsPanel({
     return payload;
   };
 
+  const syncProviderRunnerOverride = async (providerId: string, runnerValue?: string) => {
+    if (!externalCliConfig) return;
+    const channels = { ...externalCliConfig.channels };
+    const current = channels[providerId] || {};
+    if (runnerValue && runnerValue !== "__inherit__" && runnerValue !== "bifrost_agent") {
+      channels[providerId] = {
+        ...current,
+        runnerId: runnerValue,
+      };
+    } else if (channels[providerId]?.runnerId) {
+      const next = { ...channels[providerId] };
+      delete next.runnerId;
+      if (next.enabled === undefined && next.deliveryMode === undefined) {
+        delete channels[providerId];
+      } else {
+        channels[providerId] = next;
+      }
+    } else {
+      return;
+    }
+    const saved = await imGatewayApi.updateExternalCliConfig({
+      ...externalCliConfig,
+      channels,
+    });
+    setExternalCliConfig(saved);
+  };
+
   const openAddModal = () => {
     setEditingProvider(null);
     form.resetFields();
@@ -340,6 +538,9 @@ function ConnectionsPanel({
       provider_type: "weixin",
       enabled: true,
       event_connection_enabled: true,
+      agent_config: {
+        runner: "__inherit__",
+      },
     });
     setAddModalOpen(true);
   };
@@ -350,6 +551,7 @@ function ConnectionsPanel({
       ...provider,
       app_secret: undefined,
       agent_config: {
+        runner: providerRunnerFormValue(provider),
         work_dir: provider.agent_config?.work_dir,
         base_instructions: provider.agent_config?.base_instructions,
         developer_instructions: provider.agent_config?.developer_instructions,
@@ -380,6 +582,7 @@ function ConnectionsPanel({
           editingProvider.id,
           payload as Partial<ImProviderConfig>,
         );
+        await syncProviderRunnerOverride(editingProvider.id, values.agent_config?.runner);
         message.success("Provider updated");
       } else {
         const appSecret =
@@ -387,6 +590,7 @@ function ConnectionsPanel({
         await imGatewayApi.createProvider(
           normalizeProviderValues(values, false) as Partial<ImProviderConfig>,
         );
+        await syncProviderRunnerOverride(values.id, values.agent_config?.runner);
         if (values.provider_type === "weixin") {
           const result = await imGatewayApi.startWeixinLogin(values.id);
           setWeixinLogin({
@@ -409,6 +613,7 @@ function ConnectionsPanel({
       setEditingProvider(null);
       form.resetFields();
       onRefresh();
+      void fetchExternalCliConfig();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
       message.error(normalizeApiErrorMessage(err, "Failed to save provider"));
@@ -574,16 +779,6 @@ function ConnectionsPanel({
     }
   };
 
-  const handleToggle = async (id: string, enabled: boolean) => {
-    try {
-      await imGatewayApi.updateProvider(id, { enabled });
-      message.success(enabled ? "Provider enabled" : "Provider disabled");
-      onRefresh();
-    } catch {
-      message.error("Failed to update provider");
-    }
-  };
-
   const getStateBadge = (state?: string) => {
     switch (state) {
       case "connected":
@@ -623,14 +818,24 @@ function ConnectionsPanel({
               <Card
                 key={p.id}
                 size="small"
+                data-testid={`settings-im-provider-card-${p.id}`}
                 style={{
                   borderColor: token.colorBorderSecondary,
                 }}
                 title={
-                  <Space wrap style={{ minWidth: 0 }}>
-                    <ApiOutlined />
-                    <span>{p.display_name || p.id}</span>
+                  <Space wrap size={[8, 6]} style={{ minWidth: 0 }}>
+                    <ApiOutlined style={{ color: token.colorTextSecondary }} />
+                    <Text strong style={{ maxWidth: 280 }} ellipsis>
+                      {p.display_name || p.id}
+                    </Text>
                     <Tag>{p.provider_type}</Tag>
+                    {getStateBadge(status?.state)}
+                    <Tag color={p.enabled ? "green" : undefined}>
+                      {p.enabled ? "Enabled" : "Disabled"}
+                    </Tag>
+                    <Tag>
+                      {p.event_connection_enabled ? "Long Connection" : "Webhook"}
+                    </Tag>
                   </Space>
                 }
                 extra={
@@ -638,7 +843,7 @@ function ConnectionsPanel({
                     {status?.state === "connected" ||
                     status?.state === "connecting" ||
                     status?.state === "reconnecting" ? (
-                      <Tooltip title="Disconnect">
+                      <Tooltip title="Disconnect provider">
                         <Button
                           size="small"
                           icon={<PauseCircleOutlined />}
@@ -647,7 +852,7 @@ function ConnectionsPanel({
                         />
                       </Tooltip>
                     ) : (
-                      <Tooltip title="Connect">
+                      <Tooltip title="Connect provider">
                         <Button
                           size="small"
                           icon={<PlayCircleOutlined />}
@@ -676,11 +881,6 @@ function ConnectionsPanel({
                         data-testid={`settings-im-provider-edit-${p.id}`}
                       />
                     </Tooltip>
-                    <Switch
-                      size="small"
-                      checked={p.enabled}
-                      onChange={(checked) => handleToggle(p.id, checked)}
-                    />
                     <Popconfirm
                       title="Delete this provider?"
                       onConfirm={() => handleDelete(p.id)}
@@ -694,16 +894,16 @@ function ConnectionsPanel({
                   </Space>
                 }
               >
-                <DetailGrid
+                <ProviderFieldList
                   items={[
-                    { label: "Status", value: getStateBadge(status?.state) },
                     {
                       label: "App ID",
                       value: (
-                        <OverflowText
-                          value={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
+                        <CopyableOverflowText
+                          value={p.app_id}
+                          displayValue={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
                           code
-                          width={170}
+                          testId={`settings-im-provider-${p.id}-app-id`}
                         />
                       ),
                     },
@@ -716,31 +916,37 @@ function ConnectionsPanel({
                       ),
                     },
                     {
-                      label: "Owner",
+                      label: "Owner ID",
                       value: p.owner_open_id ? (
-                        <OverflowText value={p.owner_open_id} code width={170} />
+                        <CopyableOverflowText
+                          value={p.owner_open_id}
+                          code
+                          testId={`settings-im-provider-${p.id}-owner-id`}
+                        />
                       ) : (
-                        <Text type="secondary">Auto-detect on connect</Text>
+                        <SecondaryInline>Auto-detect on connect</SecondaryInline>
                       ),
                     },
                     {
-                      label: "Connection Mode",
-                      value: p.event_connection_enabled ? "Long Connection" : "Webhook",
-                    },
-                    {
-                      label: "Provider Enabled",
-                      value: p.enabled ? (
-                        <Tag color="green">Enabled</Tag>
+                      label: "Agent Runner",
+                      value: displayRunnerLabel(p) ? (
+                        <Tag color={p.agent_config?.runner === "bifrost_agent" ? "green" : "geekblue"}>
+                          {displayRunnerLabel(p)}
+                        </Tag>
                       ) : (
-                        <Tag>Disabled</Tag>
+                        <SecondaryInline>Global default</SecondaryInline>
                       ),
                     },
                     {
                       label: "Agent Work Dir",
                       value: p.agent_config?.work_dir ? (
-                        <OverflowText value={p.agent_config.work_dir} code width={180} />
+                        <CopyableOverflowText
+                          value={p.agent_config.work_dir}
+                          code
+                          testId={`settings-im-provider-${p.id}-work-dir`}
+                        />
                       ) : (
-                        <Text type="secondary">Global default</Text>
+                        <SecondaryInline>Global default</SecondaryInline>
                       ),
                     },
                     {
@@ -748,7 +954,7 @@ function ConnectionsPanel({
                       value: p.agent_config?.base_instructions ? (
                         <Tag color="blue">Configured</Tag>
                       ) : (
-                        <Text type="secondary">Global default</Text>
+                        <SecondaryInline>Global default</SecondaryInline>
                       ),
                     },
                     {
@@ -758,7 +964,7 @@ function ConnectionsPanel({
                         p.agent_config?.user_instructions ? (
                           <Tag color="purple">Configured</Tag>
                         ) : (
-                          <Text type="secondary">Global default</Text>
+                          <SecondaryInline>Global default</SecondaryInline>
                         ),
                     },
                     ...(status?.reconnect_count != null && status.reconnect_count > 0
@@ -907,6 +1113,17 @@ function ConnectionsPanel({
                   : "Application secret (stored securely)"
               }
             />
+          </Form.Item>
+          <Form.Item
+            name={["agent_config", "runner"]}
+            label="Agent Runner"
+            extra={
+              <Text type="secondary">
+                Inherits: {inheritedRunner}. Custom runners are managed under Agent Runners.
+              </Text>
+            }
+          >
+            <Select options={agentRunnerOptions} />
           </Form.Item>
           <Form.Item
             name={["agent_config", "work_dir"]}
@@ -1338,12 +1555,14 @@ function RoutesPanel({
 
 function SchedulesPanel({
   schedules,
-  targets,
+  providers,
+  externalCliConfig,
   loading,
   onRefresh,
 }: {
   schedules: ImSchedule[];
-  targets: ImTarget[];
+  providers: ImProviderConfig[];
+  externalCliConfig: ExternalCliGatewayConfig | null;
   loading: boolean;
   onRefresh: () => void;
 }) {
@@ -1355,15 +1574,64 @@ function SchedulesPanel({
   const [form] = Form.useForm();
   const taskType = Form.useWatch("task_type", form) || "script";
   const triggerType = Form.useWatch("trigger_type", form) || "interval";
+  const selectedRunnerId = Form.useWatch("agent_runner_id", form) || "bifrost_agent";
+  const scheduleRunnerOptions = useMemo(
+    () => [
+      { label: "Bifrost Agent", value: "bifrost_agent" },
+      ...Object.keys(externalCliConfig?.runners || {})
+        .sort()
+        .map((id) => ({ label: id, value: id })),
+    ],
+    [externalCliConfig?.runners],
+  );
+  const selectedRunner = externalCliConfig?.runners?.[selectedRunnerId];
+  const selectedRunnerIsChatGptWeb = selectedRunner?.adapter === "chatgpt_web";
+  const providerById = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider])),
+    [providers],
+  );
+  const channelOptions = useMemo(
+    () =>
+      providers
+        .filter((provider) => provider.owner_open_id?.trim())
+        .map((provider) => ({
+          value: provider.id,
+          label: `${provider.display_name || provider.id} (${provider.id})`,
+        })),
+    [providers],
+  );
+
+  const resolveChannelPayload = (value?: string) => {
+    if (!value) return null;
+    const provider = providerById.get(value);
+    if (!provider?.owner_open_id?.trim()) return null;
+    return {
+      messageChannel: {
+        provider_id: provider.id,
+        target_id: "owner",
+        target_mode: "owner" as const,
+      },
+    };
+  };
+
+  const renderScheduleChannel = (schedule: ImSchedule) => {
+    const channel = schedule.message_channel;
+    if (channel) {
+      const provider = providerById.get(channel.provider_id);
+      return provider?.display_name || channel.provider_id || "-";
+    }
+    return "-";
+  };
 
   const handleAdd = async () => {
     try {
       const values = await form.validateFields();
+      const channel = resolveChannelPayload(values.target_channel);
       const payload: Partial<ImSchedule> = {
         id: values.id?.trim() || undefined,
         name: values.name,
         enabled: values.enabled ?? true,
-        target_id: values.target_id || "",
+        message_channel: channel?.messageChannel,
         task_type: values.task_type,
         trigger:
           values.trigger_type === "cron"
@@ -1382,6 +1650,13 @@ function SchedulesPanel({
       if (values.task_type === "agent") {
         payload.agent = {
           prompt: values.agent_prompt,
+          runner_id:
+            values.agent_runner_id && values.agent_runner_id !== "bifrost_agent"
+              ? values.agent_runner_id
+              : undefined,
+          initial_prompt: selectedRunnerIsChatGptWeb
+            ? values.agent_initial_prompt || undefined
+            : undefined,
           session_key: values.agent_session_key || undefined,
           work_dir: values.agent_work_dir || undefined,
           system_prompt: values.agent_system_prompt || undefined,
@@ -1438,11 +1713,12 @@ function SchedulesPanel({
     }
   };
 
-  const handleRun = async (id: string) => {
+  const handleRun = async (schedule: ImSchedule) => {
     try {
-      await imGatewayApi.runSchedule(id);
+      await imGatewayApi.runSchedule(schedule.id);
       message.success("Schedule triggered");
       onRefresh();
+      await openScheduleDetail(schedule);
     } catch {
       message.error("Failed to trigger schedule");
     }
@@ -1477,10 +1753,17 @@ function SchedulesPanel({
       ),
     },
     {
-      title: "Target",
-      dataIndex: "target_id",
-      key: "target_id",
+      title: "IM Channel",
+      key: "message_channel",
       width: 140,
+      render: (_: unknown, record: ImSchedule) => renderScheduleChannel(record),
+    },
+    {
+      title: "Runner",
+      key: "runner",
+      width: 130,
+      render: (_: unknown, record: ImSchedule) =>
+        record.task_type === "agent" ? record.agent?.runner_id || "Bifrost Agent" : "-",
     },
     {
       title: "Trigger",
@@ -1522,7 +1805,7 @@ function SchedulesPanel({
             <Button
               size="small"
               icon={<PlayCircleOutlined />}
-              onClick={() => handleRun(record.id)}
+              onClick={() => handleRun(record)}
             />
           </Tooltip>
           {record.enabled ? (
@@ -1565,6 +1848,7 @@ function SchedulesPanel({
             form.setFieldsValue({
               enabled: true,
               task_type: "script",
+              agent_runner_id: "bifrost_agent",
               trigger_type: "interval",
               every_ms: 60000,
               timezone: "UTC",
@@ -1593,7 +1877,7 @@ function SchedulesPanel({
           style: { cursor: "pointer" },
         })}
         locale={{ emptyText: <Empty description="No schedules configured" /> }}
-        scroll={{ x: 890 }}
+        scroll={{ x: 1020 }}
       />
 
       <Modal
@@ -1625,14 +1909,26 @@ function SchedulesPanel({
                 ]}
               />
             </Form.Item>
-            <Form.Item name="target_id" label="Target">
+            <Form.Item
+              name="target_channel"
+              label="IM Channel"
+              rules={[
+                ({ getFieldValue }) => ({
+                  validator(_, value) {
+                    if (value) return Promise.resolve();
+                    const currentTaskType = getFieldValue("task_type");
+                    if (currentTaskType === "agent" || currentTaskType === "script") {
+                      return Promise.reject(new Error("IM channel is required"));
+                    }
+                    return Promise.resolve();
+                  },
+                }),
+              ]}
+            >
               <Select
                 allowClear
-                placeholder={taskType === "script" ? "Required for scripts" : "Optional"}
-                options={targets.map((target) => ({
-                  value: target.id,
-                  label: `${target.display_name || target.id} (${target.id})`,
-                }))}
+                placeholder="Select a connection"
+                options={channelOptions}
               />
             </Form.Item>
             <Form.Item name="trigger_type" label="Trigger" initialValue="interval">
@@ -1678,6 +1974,17 @@ function SchedulesPanel({
 
           {taskType === "agent" ? (
             <>
+              <Form.Item name="agent_runner_id" label="Runner" initialValue="bifrost_agent">
+                <Select options={scheduleRunnerOptions} />
+              </Form.Item>
+              {selectedRunnerIsChatGptWeb && (
+                <Form.Item name="agent_initial_prompt" label="First-round Prompt">
+                  <Input.TextArea
+                    rows={3}
+                    placeholder="Optional persona or initialization prompt for this ChatGPT Web Runner"
+                  />
+                </Form.Item>
+              )}
               <Form.Item
                 name="agent_prompt"
                 label="Preset Prompt"
@@ -1689,13 +1996,15 @@ function SchedulesPanel({
                 <Form.Item name="agent_session_key" label="Session Key">
                   <Input placeholder="Optional session key" />
                 </Form.Item>
-                <Form.Item name="agent_work_dir" label="Working Directory">
-                  <Input placeholder="Optional working directory" />
+                <Form.Item name="agent_work_dir" label="Default Execution Directory">
+                  <Input placeholder="Project path used for runner execution" />
                 </Form.Item>
               </div>
-              <Form.Item name="agent_system_prompt" label="System Prompt Override">
-                <Input.TextArea rows={3} placeholder="Optional" />
-              </Form.Item>
+              {selectedRunnerId === "bifrost_agent" && (
+                <Form.Item name="agent_system_prompt" label="System Prompt Override">
+                  <Input.TextArea rows={3} placeholder="Optional" />
+                </Form.Item>
+              )}
             </>
           ) : (
             <>
@@ -1729,6 +2038,7 @@ function SchedulesPanel({
       <ScheduleDetailModal
         open={detailOpen}
         schedule={selectedSchedule}
+        providers={providers}
         runs={scheduleRuns}
         loading={runsLoading}
         onClose={() => setDetailOpen(false)}
@@ -1741,6 +2051,7 @@ function SchedulesPanel({
 function ScheduleDetailModal({
   open,
   schedule,
+  providers,
   runs,
   loading,
   onClose,
@@ -1748,6 +2059,7 @@ function ScheduleDetailModal({
 }: {
   open: boolean;
   schedule: ImSchedule | null;
+  providers: ImProviderConfig[];
   runs: ImTaskRun[];
   loading: boolean;
   onClose: () => void;
@@ -1758,6 +2070,23 @@ function ScheduleDetailModal({
   const renderTime = (ts?: number) => {
     if (!ts) return "-";
     return new Date(ts).toLocaleString();
+  };
+
+  const renderTarget = () => {
+    const channel = schedule.message_channel;
+    if (channel) {
+      const provider = providers.find((item) => item.id === channel.provider_id);
+      return provider?.display_name || channel.provider_id;
+    }
+    return "-";
+  };
+
+  const renderConversationRef = () => {
+    const ref = schedule.agent?.conversation_ref;
+    if (!ref) return "-";
+    const id = ref.conversationId || ref.threadId;
+    if (!id) return "-";
+    return `${ref.adapter}: ${id}`;
   };
 
   const renderBlock = (value?: string) => (
@@ -1804,7 +2133,15 @@ function ScheduleDetailModal({
         <Descriptions.Item label="Enabled">
           {schedule.enabled ? "Yes" : "No"}
         </Descriptions.Item>
-        <Descriptions.Item label="Target">{schedule.target_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label="IM Channel">{renderTarget()}</Descriptions.Item>
+        {schedule.task_type === "agent" && (
+          <Descriptions.Item label="Runner">
+            {schedule.agent?.runner_id || "Bifrost Agent"}
+          </Descriptions.Item>
+        )}
+        {schedule.task_type === "agent" && (
+          <Descriptions.Item label="Conversation">{renderConversationRef()}</Descriptions.Item>
+        )}
         <Descriptions.Item label="Trigger">
           {schedule.trigger.type === "cron"
             ? `${schedule.trigger.expr || "-"} (${schedule.trigger.timezone || "UTC"})`
@@ -1823,6 +2160,12 @@ function ScheduleDetailModal({
             : renderBlock(schedule.script?.script_text || schedule.script?.script_file)}
         </div>
       </div>
+      {schedule.task_type === "agent" && schedule.agent?.initial_prompt && (
+        <div style={{ marginTop: 16 }}>
+          <Text strong>First-round Prompt</Text>
+          <div style={{ marginTop: 8 }}>{renderBlock(schedule.agent.initial_prompt)}</div>
+        </div>
+      )}
 
       <div style={{ marginTop: 20, marginBottom: 8 }}>
         <Text strong>Run History</Text>
@@ -1886,6 +2229,11 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
         <Descriptions.Item label="Route">{run.route_id || "-"}</Descriptions.Item>
         <Descriptions.Item label="Provider">{run.provider_id || "-"}</Descriptions.Item>
         <Descriptions.Item label="Target">{run.target_id || "-"}</Descriptions.Item>
+        {isAgent && (
+          <Descriptions.Item label="Runner">
+            {run.runner_id || "Bifrost Agent"}
+          </Descriptions.Item>
+        )}
         <Descriptions.Item label="Started">
           {formatRunTs(run.started_at)}
         </Descriptions.Item>
@@ -1909,6 +2257,10 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
 
       {isAgent ? (
         <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
+          <div>
+            <Text strong>Input</Text>
+            <div style={{ marginTop: 6 }}>{renderBlock(run.input_preview)}</div>
+          </div>
           <div>
             <Text strong>Final Result</Text>
             <div style={{ marginTop: 6 }}>{renderBlock(run.agent_final_response || run.stdout_preview)}</div>
@@ -1946,6 +2298,10 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
         </Space>
       ) : (
         <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
+          <div>
+            <Text strong>Input</Text>
+            <div style={{ marginTop: 6 }}>{renderBlock(run.input_preview)}</div>
+          </div>
           <div>
             <Text strong>Stdout</Text>
             <div style={{ marginTop: 6 }}>{renderBlock(run.stdout_preview)}</div>
@@ -2116,7 +2472,7 @@ function HistoryPanel({
           rowKey="event_id"
           size="small"
           loading={loading}
-          pagination={{ pageSize: 20, size: "small" }}
+          pagination={{ pageSize: 20, size: "small", showSizeChanger: false }}
           locale={{ emptyText: <Empty description="No events recorded" /> }}
           scroll={{ x: 1390 }}
         />
@@ -2132,7 +2488,7 @@ function HistoryPanel({
           rowKey="run_id"
           size="small"
           loading={loading}
-          pagination={{ pageSize: 20, size: "small" }}
+          pagination={{ pageSize: 20, size: "small", showSizeChanger: false }}
           locale={{ emptyText: <Empty description="No task runs recorded" /> }}
           scroll={{ x: 900 }}
           onRow={(record) => ({
@@ -2200,6 +2556,8 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
   const [schedules, setSchedules] = useState<ImSchedule[]>([]);
   const [events, setEvents] = useState<ImEvent[]>([]);
   const [runs, setRuns] = useState<ImTaskRun[]>([]);
+  const [externalCliConfig, setExternalCliConfig] =
+    useState<ExternalCliGatewayConfig | null>(null);
   const [loading, setLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
@@ -2222,12 +2580,14 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
           setRoutes(await imGatewayApi.listRoutes());
           break;
         case "schedules": {
-          const [s, t] = await Promise.all([
+          const [s, p, externalConfig] = await Promise.all([
             imGatewayApi.listSchedules(),
-            imGatewayApi.listTargets(),
+            imGatewayApi.listProviders(),
+            imGatewayApi.getExternalCliConfig().catch(() => null),
           ]);
           setSchedules(s);
-          setTargets(t);
+          setProviders(p);
+          setExternalCliConfig(externalConfig);
           break;
         }
         case "history": {
@@ -2354,7 +2714,8 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
           <div data-testid="im-gateway-section-schedules">
         <SchedulesPanel
           schedules={schedules}
-          targets={targets}
+          providers={providers}
+          externalCliConfig={externalCliConfig}
           loading={loading}
           onRefresh={fetchData}
         />

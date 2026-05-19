@@ -135,12 +135,12 @@ describe("file access policy helpers", () => {
       grant,
       "read",
       "selected",
-      ["/Users/eden/work/github/bifrost"],
+      ["/home/user/projects/bifrost"],
     );
 
     expect(policy.grant_id).toBe("grant-active-1");
     expect(policy.name).toBe("mira");
-    expect(policy.roots).toEqual(["/Users/eden/work/github/bifrost"]);
+    expect(policy.roots).toEqual(["/home/user/projects/bifrost"]);
     expect(getFileAccessPolicyAccess(policy)).toBe("read");
     expect(getFileAccessPolicyRootScope(policy)).toBe("selected");
     expect(policy.ops).toEqual(["read", "list", "stat", "glob", "search", "hash"]);

@@ -227,12 +227,17 @@ fn main() {
         }
         Some(Commands::Value { action }) => handle_value_command(action),
         Some(Commands::Admin { action }) => handle_admin_command(action),
-        Some(Commands::Ai { action }) => handle_ai_command(action),
+        Some(Commands::Ai { action }) => {
+            handle_ai_command(action, "127.0.0.1", get_effective_port(cli.port))
+        }
         Some(Commands::KeepAwake { action }) => {
             commands::keepawake::handle_local(action, get_effective_port(cli.port))
         }
         Some(Commands::Im { args }) => {
             commands::handle_im_command("127.0.0.1", get_effective_port(cli.port), &args)
+        }
+        Some(Commands::Agent { action }) => {
+            commands::agent::handle_agent_command("127.0.0.1", get_effective_port(cli.port), action)
         }
         Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes, restart }) => handle_upgrade(yes, restart),

@@ -34,6 +34,8 @@ use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 mod agent_api;
 mod agent_chat;
 mod agent_reply;
+mod chat_gateway;
+mod debug_inbound;
 mod event_loop;
 mod messages;
 mod providers;
@@ -85,6 +87,12 @@ pub async fn handle_im_gateway(
     }
     if let Some(rest) = sub.strip_prefix("/agent") {
         return agent_api::handle_agent(req, &service, rest).await;
+    }
+    if let Some(rest) = sub.strip_prefix("/chat") {
+        return chat_gateway::handle_chat_gateway(req, &service, rest).await;
+    }
+    if let Some(rest) = sub.strip_prefix("/debug") {
+        return debug_inbound::handle_debug(req, &service, rest).await;
     }
     if let Some(rest) = sub.strip_prefix("/schedules") {
         return schedules::handle_schedules(req, &service, rest).await;

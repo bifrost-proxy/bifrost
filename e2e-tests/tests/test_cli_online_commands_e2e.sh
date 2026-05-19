@@ -23,12 +23,13 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
 TEST_DATA_DIR=""
 PROXY_PORT="${PROXY_PORT:-18991}"
+TEMP_PORT="${TEMP_PORT:-18992}"
 ADMIN_PORT="$PROXY_PORT"
 PROXY_PID=""
 BIFROST_LOG_FILE=""
@@ -161,6 +162,22 @@ generate_real_traffic() {
     fi
 }
 
+setup_temporary_port_binding() {
+    header "准备临时端口绑定"
+
+    local result
+    result=$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" port bind \
+        --port "$TEMP_PORT" \
+        --name "status overview temp port" \
+        --rule e2e_rule_1 2>&1)
+
+    if echo "$result" | grep -q "Temporary port: .*:${TEMP_PORT}"; then
+        pass "已创建 status 用临时端口绑定"
+    else
+        fail "临时端口绑定创建失败: $result"
+    fi
+}
+
 # ═══════════════════════════════════════════════════════════
 # Status
 # ═══════════════════════════════════════════════════════════
@@ -176,10 +193,70 @@ test_status() {
         fail "status 未返回预期内容: $result"
     fi
 
-    if echo "$result" | grep -q "Active Rules Summary"; then
-        pass "status 追加展示活跃规则摘要"
+    if echo "$result" | grep -q "Proxy Local Address: http://127.0.0.1:${PROXY_PORT}"; then
+        pass "status 顶部展示 127.0.0.1 本机代理地址"
     else
-        fail "status 未展示活跃规则摘要: $result"
+        fail "status 未展示 127.0.0.1 本机代理地址: $result"
+    fi
+
+    if echo "$result" | grep -q "Proxy LAN Addresses:"; then
+        pass "status 顶部展示局域网代理地址状态"
+    else
+        fail "status 未展示局域网代理地址状态: $result"
+    fi
+
+    if echo "$result" | grep -q "System Proxy:"; then
+        pass "status 顶部展示系统代理配置状态"
+    else
+        fail "status 未展示系统代理配置状态: $result"
+    fi
+
+    if echo "$result" | grep -q "TLS Interception:"; then
+        pass "status 顶部展示 TLS 配置状态"
+    else
+        fail "status 未展示 TLS 配置状态: $result"
+    fi
+
+    if echo "$result" | grep -q "TLS Domain Whitelist:"; then
+        pass "status 顶部展示 TLS 域名白名单状态"
+    else
+        fail "status 未展示 TLS 域名白名单状态: $result"
+    fi
+
+    if echo "$result" | grep -q "TLS App Whitelist:"; then
+        pass "status 顶部展示 TLS 应用白名单状态"
+    else
+        fail "status 未展示 TLS 应用白名单状态: $result"
+    fi
+
+    if echo "$result" | grep -q "Temporary Port Bindings"; then
+        pass "status 底部展示临时端口绑定独立区域"
+    else
+        fail "status 未展示临时端口绑定区域: $result"
+    fi
+
+    if echo "$result" | grep -q ":${TEMP_PORT}.*status overview temp port"; then
+        pass "status 展示临时端口和绑定名称"
+    else
+        fail "status 未展示预期临时端口绑定: $result"
+    fi
+
+    if echo "$result" | grep -q "local:e2e_rule_1"; then
+        pass "status 展示临时端口绑定的规则引用"
+    else
+        fail "status 未展示临时端口绑定规则引用: $result"
+    fi
+
+    if echo "$result" | grep -q "Default Port Active Rules: ${PROXY_PORT}"; then
+        pass "status 追加展示默认端口活跃规则摘要"
+    else
+        fail "status 未展示默认端口活跃规则摘要: $result"
+    fi
+
+    if echo "$result" | grep -q "Scope: default/main proxy port ${PROXY_PORT}"; then
+        pass "status 明确默认端口规则与临时端口规则分区"
+    else
+        fail "status 未说明默认端口规则作用域: $result"
     fi
 
     if echo "$result" | grep -q "Merged Rules (in parsing order)"; then
@@ -1194,6 +1271,8 @@ main() {
     fi
 
     sleep 1
+
+    setup_temporary_port_binding
 
     test_status
 

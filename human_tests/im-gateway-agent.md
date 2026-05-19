@@ -797,6 +797,31 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - IM 长连接不需要重连；事件循环每次消息都读取 Provider store 最新配置，而不是沿用连接启动时的旧 provider snapshot。
 - **执行记录（2026-05-05）**: PASS — 运行 `cargo test -p bifrost-admin provider_switch_workdir_persists_provider_agent_override -- --nocapture` 与 `cargo test -p bifrost-admin im_event_loop_uses_provider_agent_config_for_agent_chat -- --nocapture`；前者验证 `switch_workdir` 后 Provider `agent_config.work_dir` 持久化且保留 prompt 覆盖，后者验证 IM event loop 使用 Provider store 中的最新配置进入模型请求，而不是使用连接启动时传入的旧 provider snapshot。
 
+### TC-IMA-53C: IM Provider 卡片详情布局不遮挡回归
+
+- **操作步骤**:
+  1. 使用临时 `BIFROST_DATA_DIR` 启动最新 Bifrost 管理端：`cargo run --bin bifrost -- start -p <PORT> --unsafe-ssl --no-system-proxy`。
+  2. 通过 Provider API 准备至少 3 个 IM Provider，其中包含：
+     - 长 `owner_open_id`
+     - 长 `agent_config.work_dir`
+     - 一个继承全局 Agent 配置的 Provider
+     - 一个 `agent_config.runner = "codex"` 的 Provider
+  3. 打开 `http://127.0.0.1:<PORT>/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  4. 在亮色主题下检查每张 Provider 卡片的 Status、App ID、Secret、Owner、Connection Mode、Provider Enabled、Agent Runner、Agent Work Dir、Agent Base Prompt、Agent Developer/User。
+  5. 切换到暗色主题后重复第 4 步。
+  6. 鼠标悬停在被省略的 Owner 或 Agent Work Dir 上，检查完整值 tooltip。
+  7. 检查卡片右上角只保留连接操作、Edit、Delete，以及 Weixin Provider 的二维码登录按钮；不再出现与连接操作并列的 Provider Enabled 开关。
+  8. 点击 Provider 卡片的 Edit 按钮，确认操作按钮仍可点击且弹窗正常打开。
+- **预期结果**:
+  - Provider 卡片详情字段之间没有相互遮挡。
+  - `Long Connection`、`Global default`、`codex` 等短状态文案在桌面宽度下不出现异常换行。
+  - 长 Owner / Agent Work Dir 在字段值区域内省略，不覆盖相邻字段。
+  - 悬停长值时 tooltip 展示完整内容。
+  - 亮色和暗色主题下文本、标签和操作按钮均可读可识别。
+  - Provider 卡片右上角没有重复的 Enabled 开关；Provider Enabled 只作为状态摘要展示，启用状态修改通过 Edit 弹窗完成。
+  - Edit 弹窗可正常打开，证明布局调整未破坏卡片操作入口。
+- **执行记录（2026-05-13）**: PASS — 使用 `BIFROST_DATA_DIR=./.bifrost-human-im-layout cargo run --bin bifrost -- start -p 18873 --unsafe-ssl --no-system-proxy` 启动最新代码，通过 Provider API 创建 `layout-feishu`、`layout-bifrost`、`layout-weixin` 三个包含长 Owner / 长 Agent Work Dir / 继承全局配置 / External CLI runner 的 Provider；Playwright 打开 `http://127.0.0.1:18873/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`，亮色和暗色主题截图分别保存到 `.bifrost-human-im-layout/screenshots/im-provider-layout-light.png` 与 `.bifrost-human-im-layout/screenshots/im-provider-layout-dark.png`。浏览器断言 3 张 Provider 卡片 `overlaps=[]`、`badWrapCount=0`、每张卡片 `switches=0`、`editButtons=1`、`connectButtons=1`、`deleteButtons=1`；悬停长 Work Dir 显示完整 tooltip，点击 `settings-im-provider-edit-layout-feishu` 后 Edit 弹窗可见。
+
 ### TC-IMA-54: Agent 全局指令配置与默认 Base Prompt 展示
 
 - **操作步骤**:

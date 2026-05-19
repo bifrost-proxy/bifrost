@@ -264,6 +264,15 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 
 **预期结果**：
 - 输出包含代理服务的运行状态信息
+- 输出顶部包含 `Service Overview`
+- 输出顶部包含 `Proxy Local Address: http://127.0.0.1:8800`
+- 输出顶部包含 `Proxy LAN Addresses:`；如果服务监听 `0.0.0.0` 且机器存在局域网地址，应列出 `http://<局域网IP>:8800`，如果只监听 localhost 则明确显示局域网不可用
+- 输出顶部包含 `System Proxy:`，并明确当前系统代理是否指向该 Bifrost 服务
+- 输出顶部包含 `TLS Interception:`，展示 TLS 全局开关、上游证书校验和配置变更断连状态
+- 输出顶部包含 `TLS Domain Whitelist:`，展示 TLS 域名 include 白名单状态；如果存在多个条目，必须完整列出，不用 `... +N more` 省略
+- 输出顶部包含 `TLS App Whitelist:`，展示 TLS 应用 include 白名单状态；如果存在多个条目，必须完整列出，不用 `... +N more` 省略
+- 输出顶部包含 `TLS IP Whitelist:`，展示 TLS IP include 白名单状态；如果存在多个条目，必须完整列出，不用 `... +N more` 省略
+- 输出顶部包含 `TLS Domain Passthrough:`、`TLS App Passthrough:`、`TLS IP Passthrough:`，分别展示域名、应用和 IP 的 exclude 边界；如果存在多个条目，必须完整列出，不用 `... +N more` 省略
 - 显示监听端口（如 `8800`）
 - 显示进程 PID
 - 显示运行时长或启动时间
@@ -547,11 +556,12 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
    ```
 
 **预期结果**：
-- 步骤 4 输出包含 `Active Rules Summary`
-- 步骤 4 输出包含 `Merged Rules (in parsing order)`
+- 步骤 4 输出包含 `Default Port Active Rules: 8800`
+- 步骤 4 输出包含 `Scope: default/main proxy port 8800`，明确这是默认/主代理端口规则，不是临时端口绑定规则
+- 步骤 4 输出包含 `Default Port Merged Rules (in parsing order): 8800`
 - 步骤 4 输出包含 `status-active-1.example.com statusCode://200`
 - 步骤 4 输出包含 `status-active-2.example.com reqHeaders://(X-Status-Test: 1)`
-- 步骤 5 的停止态 `status` 输出不包含 `Active Rules Summary`
+- 步骤 5 的停止态 `status` 输出不包含 `Default Port Active Rules`
 
 ---
 
@@ -640,6 +650,50 @@ PY
 - 2026-05-07 因统一代理增加 UDP relay ephemeral fallback，改为占用同端口 TCP 来覆盖主 listener readiness 失败。执行 `PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、非 9900 端口；断言 daemon 命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，脚本汇总通过。
 - 2026-05-07 同步覆盖 TCP holder 下的 Admin API 不可达探针超时保护；daemon 分支复用 `admin_unreachable`，因此同样要求探针在 2 秒内返回失败而不是挂起。`SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 已验证 daemon 分支通过。
 - 2026-05-07 CI run `25475008050` 的 Linux shard 3 显示 daemon 分支也会在非交互 auto-resolve 路径中直接输出 `Port 0.0.0.0:<port> is already in use`，而不是 readiness 等待文案。本次将 daemon 错误断言调整为同时接受 readiness 失败与端口占用提示，仍保留非零退出、无 `Daemon started with PID`、Admin API 不可达三个核心断言。随后执行 `SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本汇总 `Total: 8 / Passed: 8 / Failed: 0`。
+
+---
+
+### TC-CSS-28：status 顶部展示代理能力与 TLS 边界
+
+**前置条件**：服务未运行，端口 `18991` 未被占用。
+
+**操作步骤**：
+1. 使用临时数据目录启动一个不修改系统代理的服务：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost -p 18991 start --skip-cert-check --unsafe-ssl --no-system-proxy >"$TEST_DATA_DIR/status.log" 2>&1 &
+   BIFROST_PID=$!
+   ```
+2. 等待 Admin API ready：
+   ```bash
+   curl -fsS http://127.0.0.1:18991/_bifrost/api/system
+   ```
+3. 执行 status：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost -p 18991 status
+   ```
+4. 停止服务并删除临时目录：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost stop
+   rm -rf "$TEST_DATA_DIR"
+   ```
+
+**预期结果**：
+- 输出顶部 `Service Overview` 位于 `Runtime` 区块之前。
+- `Proxy Local Address` 显示 `http://127.0.0.1:18991`，明确本机代理地址与端口。
+- `Proxy LAN Addresses` 单独展示局域网地址列表；如果当前机器未检测到局域网地址，显示 `none detected`，如果监听 localhost only 则显示不可用原因。
+- `System Proxy` 显示当前 OS 系统代理状态；本用例使用 `--no-system-proxy`，不得因为执行 status 修改系统代理。
+- `TLS Interception` 显示 TLS 拦截开关、上游证书校验和配置变更断连状态。
+- `TLS Domain Whitelist` 显示域名 include 白名单状态，多个条目完整展示，不用 `... +N more` 省略。
+- `TLS App Whitelist` 显示应用 include 白名单状态，多个条目完整展示，不用 `... +N more` 省略。
+- `TLS IP Whitelist` 显示 IP include 白名单状态，多个条目完整展示，不用 `... +N more` 省略。
+- `TLS Domain Passthrough`、`TLS App Passthrough`、`TLS IP Passthrough` 分别显示域名、应用和 IP 的 exclude 边界状态，多个条目完整展示，不用 `... +N more` 省略。
+- 输出底部包含 `Temporary Port Bindings`；本用例未创建临时端口绑定时显示 `No temporary port bindings.`。
+
+**执行记录**：
+- 2026-05-18 执行聚焦真实 CLI 验证：使用 `mktemp -d` 临时 `BIFROST_DATA_DIR`，`target/debug/bifrost -p 18991 start --skip-cert-check --unsafe-ssl --no-system-proxy` 启动服务，创建默认规则 `status-active-1` 和临时端口绑定 `18992` 后执行 `status`。实际结果命中 14 个断言：`Service Overview`、`Proxy Local Address: http://127.0.0.1:18991`、`Proxy LAN Addresses:`、`System Proxy:`、`TLS Interception:`、`TLS Domain Whitelist:`、`TLS App Whitelist:`、`Default Port Rule Groups: 18991`、`Default Port Active Rules: 18991`、默认端口 scope 说明、`Default Port Merged Rules (in parsing order): 18991`、`Temporary Port Bindings`、`:18992 [running] (status temp port)`、`local:status-active-1`。测试结束后执行 `bifrost stop` 并删除临时目录。
+- 2026-05-18 执行脚本级 E2E：`BIFROST_BIN=~/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18991 TEMP_PORT=18992 e2e-tests/tests/test_cli_online_commands_e2e.sh`。脚本使用临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy`，status 阶段验证顶部代理地址、系统代理、TLS 域名/应用白名单、默认端口规则摘要、默认端口 scope 说明、底部临时端口绑定规则，最终汇总 `通过: 87 / 失败: 0 / 总计: 87`。
+- 2026-05-18 针对 TLS 列表完整展示追加验证：使用 `mktemp -d` 临时 `BIFROST_DATA_DIR`，`target/debug/bifrost -p 18993 start --skip-cert-check --unsafe-ssl --no-system-proxy` 启动服务后执行 `status`。实际输出 `TLS App Whitelist: 8 [Google Chrome*, Microsoft Edge*, *Safari*, *Firefox*, *Opera*, *Brave*, *Arc*, *Vivaldi*]`，没有出现 `... +N more`；`TLS Domain Whitelist`、`TLS IP Whitelist`、`TLS Domain Passthrough`、`TLS App Passthrough`、`TLS IP Passthrough` 均完整输出各自状态。测试结束后执行 `bifrost stop` 并删除临时目录。
 
 ---
 
