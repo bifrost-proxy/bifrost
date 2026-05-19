@@ -1,0 +1,885 @@
+crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+  1765db0a8e711217 9-1097 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[9,1097]}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  1765db0a8e711217 58 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":58}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/state.rs
+  1765db0a8e711217 45-46 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[45,46]}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/api.rs
+  1765db0a8e711217 7-47,224 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[7,47]},{"Single":224}]}]}
+crates/bifrost-admin/Cargo.toml
+  1765db0a8e711217 52 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":52}]}]}
+web/src/api/asr.ts
+  1765db0a8e711217 624-785 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[624,785]}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/runner.rs
+  1765db0a8e711217 223-225 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[223,225]}]}]}
+web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx
+  1765db0a8e711217 45,874-880 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":45},{"Range":[874,880]}]}]}
+design/asr-daily-agent-runner.md
+  1765db0a8e711217 473,475,477-479,481,483-487,489,491,493,495,497-510,512,514-517,519-522,524,526,528-535,537,539,541-548,550,552,554,557-566,569,571,573,575,578-579,582-591,594-596,599,601,603,605-650,653,655-682,685,687-709,711,713,715,717-753,755,757-787,789,791-815,817,819-844,846,848-868,871-954 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":473},{"Single":475},{"Range":[477,479]},{"Single":481},{"Range":[483,487]},{"Single":489},{"Single":491},{"Single":493},{"Single":495},{"Range":[497,510]},{"Single":512},{"Range":[514,517]},{"Range":[519,522]},{"Single":524},{"Single":526},{"Range":[528,535]},{"Single":537},{"Single":539},{"Range":[541,548]},{"Single":550},{"Single":552},{"Single":554},{"Range":[557,566]},{"Single":569},{"Single":571},{"Single":573},{"Single":575},{"Range":[578,579]},{"Range":[582,591]},{"Range":[594,596]},{"Single":599},{"Single":601},{"Single":603},{"Range":[605,650]},{"Single":653},{"Range":[655,682]},{"Single":685},{"Range":[687,709]},{"Single":711},{"Single":713},{"Single":715},{"Range":[717,753]},{"Single":755},{"Range":[757,787]},{"Single":789},{"Range":[791,815]},{"Single":817},{"Range":[819,844]},{"Single":846},{"Range":[848,868]},{"Range":[871,954]}]}]}
+web/src/pages/ASR/components/DailyAgentTab.tsx
+  1765db0a8e711217 122-495 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[122,495]}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/tests.rs
+  1765db0a8e711217 242,327,419,464,509,555,605,734 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":242},{"Single":327},{"Single":419},{"Single":464},{"Single":509},{"Single":555},{"Single":605},{"Single":734}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_template.md
+  1765db0a8e711217 1-254 gitai:{"mixed_line_ranges":[{"Single":43},{"Single":64},{"Single":175},{"Single":191},{"Single":200},{"Single":203},{"Single":236},{"Single":239},{"Single":241},{"Single":245}],"operations":[{"operation_id":"6a0c6feebc595087e3b4774a","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[1,254]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "60200d8c85e085dbc6fcac4ad610cba4f008c959",
+  "prompts": {
+    "1765db0a8e711217": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0c37ccdda0bf2309b0d37a",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 1071,
+      "total_deletions": 162,
+      "accepted_lines": 613,
+      "overriden_lines": 10
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/Cargo.toml": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Single": 52
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 52
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Single": 58
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 58
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/api.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              7,
+              47
+            ]
+          },
+          {
+            "Single": 224
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  7,
+                  47
+                ]
+              },
+              {
+                "Single": 224
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              9,
+              1097
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  9,
+                  1097
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_template.md": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              254
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 43
+          },
+          {
+            "Single": 64
+          },
+          {
+            "Single": 175
+          },
+          {
+            "Single": 191
+          },
+          {
+            "Single": 200
+          },
+          {
+            "Single": 203
+          },
+          {
+            "Single": 236
+          },
+          {
+            "Single": 239
+          },
+          {
+            "Single": 241
+          },
+          {
+            "Single": 245
+          }
+        ],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  254
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/runner.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              223,
+              225
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  223,
+                  225
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/state.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              45,
+              46
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  45,
+                  46
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/asr_jobs/tests.rs": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Single": 242
+          },
+          {
+            "Single": 327
+          },
+          {
+            "Single": 419
+          },
+          {
+            "Single": 464
+          },
+          {
+            "Single": 509
+          },
+          {
+            "Single": 555
+          },
+          {
+            "Single": 605
+          },
+          {
+            "Single": 734
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 242
+              },
+              {
+                "Single": 327
+              },
+              {
+                "Single": 419
+              },
+              {
+                "Single": 464
+              },
+              {
+                "Single": 509
+              },
+              {
+                "Single": 555
+              },
+              {
+                "Single": 605
+              },
+              {
+                "Single": 734
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "design/asr-daily-agent-runner.md": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Single": 473
+          },
+          {
+            "Single": 475
+          },
+          {
+            "Range": [
+              477,
+              479
+            ]
+          },
+          {
+            "Single": 481
+          },
+          {
+            "Range": [
+              483,
+              487
+            ]
+          },
+          {
+            "Single": 489
+          },
+          {
+            "Single": 491
+          },
+          {
+            "Single": 493
+          },
+          {
+            "Single": 495
+          },
+          {
+            "Range": [
+              497,
+              510
+            ]
+          },
+          {
+            "Single": 512
+          },
+          {
+            "Range": [
+              514,
+              517
+            ]
+          },
+          {
+            "Range": [
+              519,
+              522
+            ]
+          },
+          {
+            "Single": 524
+          },
+          {
+            "Single": 526
+          },
+          {
+            "Range": [
+              528,
+              535
+            ]
+          },
+          {
+            "Single": 537
+          },
+          {
+            "Single": 539
+          },
+          {
+            "Range": [
+              541,
+              548
+            ]
+          },
+          {
+            "Single": 550
+          },
+          {
+            "Single": 552
+          },
+          {
+            "Single": 554
+          },
+          {
+            "Range": [
+              557,
+              566
+            ]
+          },
+          {
+            "Single": 569
+          },
+          {
+            "Single": 571
+          },
+          {
+            "Single": 573
+          },
+          {
+            "Single": 575
+          },
+          {
+            "Range": [
+              578,
+              579
+            ]
+          },
+          {
+            "Range": [
+              582,
+              591
+            ]
+          },
+          {
+            "Range": [
+              594,
+              596
+            ]
+          },
+          {
+            "Single": 599
+          },
+          {
+            "Single": 601
+          },
+          {
+            "Single": 603
+          },
+          {
+            "Range": [
+              605,
+              650
+            ]
+          },
+          {
+            "Single": 653
+          },
+          {
+            "Range": [
+              655,
+              682
+            ]
+          },
+          {
+            "Single": 685
+          },
+          {
+            "Range": [
+              687,
+              709
+            ]
+          },
+          {
+            "Single": 711
+          },
+          {
+            "Single": 713
+          },
+          {
+            "Single": 715
+          },
+          {
+            "Range": [
+              717,
+              753
+            ]
+          },
+          {
+            "Single": 755
+          },
+          {
+            "Range": [
+              757,
+              787
+            ]
+          },
+          {
+            "Single": 789
+          },
+          {
+            "Range": [
+              791,
+              815
+            ]
+          },
+          {
+            "Single": 817
+          },
+          {
+            "Range": [
+              819,
+              844
+            ]
+          },
+          {
+            "Single": 846
+          },
+          {
+            "Range": [
+              848,
+              868
+            ]
+          },
+          {
+            "Range": [
+              871,
+              954
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 473
+              },
+              {
+                "Single": 475
+              },
+              {
+                "Range": [
+                  477,
+                  479
+                ]
+              },
+              {
+                "Single": 481
+              },
+              {
+                "Range": [
+                  483,
+                  487
+                ]
+              },
+              {
+                "Single": 489
+              },
+              {
+                "Single": 491
+              },
+              {
+                "Single": 493
+              },
+              {
+                "Single": 495
+              },
+              {
+                "Range": [
+                  497,
+                  510
+                ]
+              },
+              {
+                "Single": 512
+              },
+              {
+                "Range": [
+                  514,
+                  517
+                ]
+              },
+              {
+                "Range": [
+                  519,
+                  522
+                ]
+              },
+              {
+                "Single": 524
+              },
+              {
+                "Single": 526
+              },
+              {
+                "Range": [
+                  528,
+                  535
+                ]
+              },
+              {
+                "Single": 537
+              },
+              {
+                "Single": 539
+              },
+              {
+                "Range": [
+                  541,
+                  548
+                ]
+              },
+              {
+                "Single": 550
+              },
+              {
+                "Single": 552
+              },
+              {
+                "Single": 554
+              },
+              {
+                "Range": [
+                  557,
+                  566
+                ]
+              },
+              {
+                "Single": 569
+              },
+              {
+                "Single": 571
+              },
+              {
+                "Single": 573
+              },
+              {
+                "Single": 575
+              },
+              {
+                "Range": [
+                  578,
+                  579
+                ]
+              },
+              {
+                "Range": [
+                  582,
+                  591
+                ]
+              },
+              {
+                "Range": [
+                  594,
+                  596
+                ]
+              },
+              {
+                "Single": 599
+              },
+              {
+                "Single": 601
+              },
+              {
+                "Single": 603
+              },
+              {
+                "Range": [
+                  605,
+                  650
+                ]
+              },
+              {
+                "Single": 653
+              },
+              {
+                "Range": [
+                  655,
+                  682
+                ]
+              },
+              {
+                "Single": 685
+              },
+              {
+                "Range": [
+                  687,
+                  709
+                ]
+              },
+              {
+                "Single": 711
+              },
+              {
+                "Single": 713
+              },
+              {
+                "Single": 715
+              },
+              {
+                "Range": [
+                  717,
+                  753
+                ]
+              },
+              {
+                "Single": 755
+              },
+              {
+                "Range": [
+                  757,
+                  787
+                ]
+              },
+              {
+                "Single": 789
+              },
+              {
+                "Range": [
+                  791,
+                  815
+                ]
+              },
+              {
+                "Single": 817
+              },
+              {
+                "Range": [
+                  819,
+                  844
+                ]
+              },
+              {
+                "Single": 846
+              },
+              {
+                "Range": [
+                  848,
+                  868
+                ]
+              },
+              {
+                "Range": [
+                  871,
+                  954
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/api/asr.ts": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              624,
+              785
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  624,
+                  785
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DailyAgentTab.tsx": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Range": [
+              122,
+              495
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  122,
+                  495
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/DirectoryTaskDetailPage.tsx": [
+      {
+        "hash": "1765db0a8e711217",
+        "line_ranges": [
+          {
+            "Single": 45
+          },
+          {
+            "Range": [
+              874,
+              880
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0c6feebc595087e3b4774a",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 45
+              },
+              {
+                "Range": [
+                  874,
+                  880
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "1765db0a8e711217": {
+      "tool": "trae",
+      "conversation_id": "6a0c37ccdda0bf2309b0d37a",
+      "session_id": "6a0c37ccdda0bf2309b0d37a",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
