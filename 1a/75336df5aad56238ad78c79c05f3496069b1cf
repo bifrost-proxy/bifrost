@@ -1,0 +1,157 @@
+crates/bifrost-admin/src/lib.rs
+  d0a15825f804daae 75-81
+crates/bifrost-admin/src/remote_invoke/file_policy_store.rs
+  d4fdc57731be3af5 24,30,39
+human_tests/cli-start-stop-status.md
+  d4fdc57731be3af5 695
+human_tests/chatgpt-web-adapter.md
+  9ed8e88c2702e7ed 345-348,350-505
+  d4fdc57731be3af5 337-343,349
+design/im-gateway-codex-cli-chat-gateway.md
+  d4fdc57731be3af5 212-887
+design/bp-protocol-parser.md
+  d4fdc57731be3af5 30
+crates/bifrost-admin/src/im_gateway/chatgpt_web/images.rs
+  9ed8e88c2702e7ed 270-271
+web/tests/ui/asr-microphone-meter.spec.ts
+  d4fdc57731be3af5 561
+crates/bifrost-admin/src/im_gateway/chatgpt_web/diagnostics.rs
+  9ed8e88c2702e7ed 143-155
+human_tests/bp-protocol-parser.md
+  d4fdc57731be3af5 9,132,170,336-337
+design/im-gateway.md
+  d4fdc57731be3af5 2234
+web/src/pages/ASR/components/DirectoryTasksPanel.tsx
+  d4fdc57731be3af5 92
+e2e-tests/tests/test_bp_parser_e2e.sh
+  d4fdc57731be3af5 557-558
+e2e-tests/tests/test_long_term_memory_human_api.sh
+  d4fdc57731be3af5 111
+AGENTS.md
+  d4fdc57731be3af5 572-602
+human_tests/agent-development-review-loop.md
+  d4fdc57731be3af5 9
+crates/bifrost-admin/src/handlers/asr_streaming.rs
+  d0a15825f804daae 24-28,42,126-138,140-150,152-190,192-200,202,206-235,237-248,259,280
+crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+  d0a15825f804daae 524-528,543
+  9ed8e88c2702e7ed 3-523,529-542,544-2814
+web/src/components/BifrostEditor/snippet/hover.test.ts
+  d4fdc57731be3af5 20-21
+human_tests/agent-codex-alignment.md
+  d4fdc57731be3af5 9
+web/tests/ui/im-gateway-provider.spec.ts
+  d4fdc57731be3af5 97
+crates/bifrost-admin/src/handlers/asr_jobs.rs
+  d0a15825f804daae 1491-1924,1930,1936,1940-3022,3024-3319,3321-3502,3505-3531
+human_tests/im-gateway.md
+  d4fdc57731be3af5 352,355,393,396,427,561,563-564,572-574,633,639-645,647-649,670,674,718,721,726,741,750-768
+crates/bifrost-admin/src/remote_invoke/worker.rs
+  d4fdc57731be3af5 4297,4303
+crates/bifrost-cli/src/commands/agent.rs
+  9ed8e88c2702e7ed 81-91
+human_tests/asr-scheduled-task-plan-b.md
+  d4fdc57731be3af5 69-504
+design/agent-codex-alignment.md
+  d4fdc57731be3af5 5
+human_tests/agent-builtin-tools-completeness.md
+  d4fdc57731be3af5 147,150
+crates/bifrost-cli/src/commands/asr.rs
+  d0a15825f804daae 13-15,18-20,23,30,32,36,39,48,54,63-583,587-590,631-667,678-686,688-692,695-723,725,727-857,859-974,976-980,982-999,1001-1084,1086-1362,1860-1908
+docs/rules/scripts.md
+  d4fdc57731be3af5 156,274
+web/src/pages/Settings/tabs/RemoteInvokeTab.tsx
+  d4fdc57731be3af5 4554,4636
+design/agent-context-status-compaction.md
+  d4fdc57731be3af5 9
+design/agent-builtin-tools-completeness.md
+  d4fdc57731be3af5 113
+crates/bifrost-e2e/src/tests/im_gateway_agent.rs
+  d4fdc57731be3af5 1821
+site/src/content/docs/reference/rules/scripts.md
+  d4fdc57731be3af5 166,284
+crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
+  9ed8e88c2702e7ed 1429-1675,1677-1678,1680-1721
+  d0a15825f804daae 1676,1679
+  d4fdc57731be3af5 2212-2651
+design/qwen3-asr-local-server.md
+  d4fdc57731be3af5 113,122-125,133-134,146-147,154-155,176-178
+  a63b754e1f9a0314 73
+human_tests/docs-implementation-sync.md
+  d4fdc57731be3af5 9
+web/src/api/remoteInvoke.test.ts
+  d4fdc57731be3af5 138,143
+crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+  9ed8e88c2702e7ed 1-1625
+web/tests/ui/admin-rules-values.spec.ts
+  d4fdc57731be3af5 91-92
+human_tests/qwen3-asr-local-server.md
+  d4fdc57731be3af5 232,238-239,291,295-298,302-314,318-320,326-327,333-366,375,473-474,476,483,492-493,496,499-504
+design/qwen3-asr-runtime-fork-integration.md
+  d4fdc57731be3af5 168
+human_tests/im-gateway-external-cli-chat-gateway.md
+  d4fdc57731be3af5 259-400
+human_tests/temporary-port-rule-bindings.md
+  d4fdc57731be3af5 425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "1a75336df5aad56238ad78c79c05f3496069b1cf",
+  "prompts": {
+    "9ed8e88c2702e7ed": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0600104801bcfd51aab89e",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4573,
+      "overriden_lines": 0
+    },
+    "a63b754e1f9a0314": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0aa286cbf1061c13749a9f",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "d0a15825f804daae": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a05faad98e02da010a5142e",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1682,
+      "overriden_lines": 0
+    },
+    "d4fdc57731be3af5": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0600ff4801bcfd51aab8a0",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 166,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
